@@ -307,28 +307,14 @@ async function endRoomAfterStaffHangup(callSid, state) {
   return api.calls(callSid).update({ status: 'completed' }).then(() => 'caller_hung_up', () => 'caller_gone');
 }
 
-// The winning staff leg ended. A hold in the way (star-key hold, GATE_CALL_HOLD): the caller goes to voicemail
-// instead of being hung up, and one that cannot start yet stays open for the hold script's next fetch to retry. A hold already sent to voicemail is left alone: the caller may be leaving a message,
-// and endRoomAfterStaffHangup hangs the caller up when no room is open.
+// The winning staff leg ended. A hold in the way (star-key hold, GATE_CALL_HOLD), or a press 1 still taking the caller
+// off hold: the hold's one decision point (call-hold.js staffLeft) sends the caller to voicemail instead of hanging
+// the caller up, and the hold's sender finishes it (the room end that lets /call-complete take the message). With no
+// hold in the way the ordinary room end runs. No open room, or it will not end: hang up the caller, so no one is
+// left alone in it.
 async function onWinnerLegEnded(callSid, state) {
-  if (state.hold?.voicemail_at) return 'hold_voicemail';
-  if (!state.hold?.open) return endRoomAfterStaffHangup(callSid, state);
-  const started = await require('./call-hold').startHoldVoicemail(callSid, 'staff_left'); // lazy: call-hold requires this module
-  if (started === 'started' || started === 'caller_gone') return 'hold_voicemail';
-  const latest = await loadState(callSid);
-  if (latest?.hold?.voicemail_at) return 'hold_voicemail';
-  if (!latest?.hold?.open) return endRoomAfterStaffHangup(callSid, latest || state);
-  // The hold is still open (the room would not end and the hold was restored, or a press 1 holds the return claim):
-  // ending the room here would drop the caller with no message and no bell. Stamp the staff_left voicemail as
-  // pending, in a write that only lands while the hold is open with no voicemail. A press 1 whose unhold is in
-  // flight closes its claim only while no stamp is there, so exactly one wins: the stamp (that press 1 runs the
-  // voicemail itself, or the caller's hold script fetch does) or the close (the staff rejoined, so the ordinary room
-  // end below runs for this hang-up).
-  const stamped = await updateState(callSid, [[['hold', 'voicemail_pending'], 'staff_left']],
-    ["(metadata -> 'conference_path') IS NOT NULL", "(metadata #>> '{conference_path,hold,open}') = 'true'", "(metadata #>> '{conference_path,hold,voicemail_at}') IS NULL"]);
-  if (stamped) return 'hold_voicemail_pending';
-  const after = await loadState(callSid);
-  return after?.hold?.voicemail_at ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, after || state);
+  const answer = await require('./call-hold').staffLeft(callSid); // lazy: call-hold requires this module
+  return answer === 'voicemail' ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, state);
 }
 
 async function onStaffLegStatus({ callSid, index, legSid, status }) {
@@ -381,6 +367,7 @@ module.exports = {
   startCallerRecording,
   endLegs,
   loadState,
+  readState,
   updateState,
   scheduleNoAnswerBackstop,
   sendCallerToVoicemail,

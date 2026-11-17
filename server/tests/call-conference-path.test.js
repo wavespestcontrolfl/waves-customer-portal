@@ -7,7 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ callConferencePathMode: jest.fn(() => 'off') }));
-jest.mock('../services/call-hold', () => ({ startHoldVoicemail: jest.fn() }));
+jest.mock('../services/call-hold', () => ({ staffLeft: jest.fn() }));
 
 const mockTw = { api: null };
 jest.mock('twilio', () => {
@@ -35,8 +35,6 @@ function fakeCallLog(metadata = {}, { exists = true, status = 'in-progress' } = 
     if (m) return (row.metadata?.conference_path != null) === Boolean(m[1]);
     m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) IS (NOT )?NULL$/);
     if (m) return (at(row.metadata, m[1].split(',')) != null) === Boolean(m[2]);
-    m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) = '([^']*)'$/);
-    if (m) return String(at(row.metadata, m[1].split(','))) === m[2];
     m = sql.match(/^\(status IS NULL OR status NOT IN \((.*)\)\)$/);
     if (m) return row.status == null || !m[1].split(', ').map((s) => s.replace(/'/g, '')).includes(row.status);
     throw new Error(`unknown condition: ${sql}`);
@@ -324,83 +322,43 @@ describe('the winning staff call ends during a star-key hold', () => {
   const ended = () => cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' });
   const rooms = [{ sid: 'CF1', status: 'in-progress' }];
 
-  beforeEach(() => callHold.startHoldVoicemail.mockReset());
+  beforeEach(() => callHold.staffLeft.mockReset());
 
-  test('hold open: the caller goes to voicemail, and the room is not ended here', async () => {
-    fakeCallLog(held({ open: true, open_at: '2026-11-17T15:00:00Z' }));
+  test('the hold decides the caller goes to voicemail: no room end and no hang-up here (the hold\'s sender does the room end)', async () => {
+    fakeCallLog(held({ phase: 'held' }));
+    callHold.staffLeft.mockResolvedValue('voicemail');
     const log = fakeTwilio({ rooms });
-    for (const result of ['started', 'caller_gone']) {
-      callHold.startHoldVoicemail.mockResolvedValue(result);
-      expect(await ended()).toBe('hold_voicemail');
-    }
-    expect(callHold.startHoldVoicemail).toHaveBeenCalledWith(SID, 'staff_left');
-    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
-    expect(log.roomUpdates).toEqual([]);
-    expect(log.updates).toEqual([]);
-  });
-
-  test('the voicemail did not start (failed) and the hold is still open: the room is NOT ended and the caller is not hung up', async () => {
-    fakeCallLog(held({ open: true, voicemail_pending: 'staff_left' }));
-    callHold.startHoldVoicemail.mockResolvedValue('failed');
-    const log = fakeTwilio({ rooms });
-    expect(await ended()).toBe('hold_voicemail_pending');
+    expect(await ended()).toBe('hold_voicemail');
+    expect(callHold.staffLeft).toHaveBeenCalledWith(SID);
     expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(mockTw.api.calls).not.toHaveBeenCalled();
     expect(log.roomUpdates).toEqual([]);
     expect(log.updates).toEqual([]);
   });
 
-  test('not_needed while a press 1 holds the return claim (hold still open): the staff_left stamp is written and nothing else is touched', async () => {
-    const row = fakeCallLog(held({ open: true, return_at: '2026-11-17T15:00:00Z' }));
-    callHold.startHoldVoicemail.mockResolvedValue('not_needed');
-    const log = fakeTwilio({ rooms });
-    expect(await ended()).toBe('hold_voicemail_pending');
-    expect(row.metadata.conference_path.hold).toMatchObject({ open: true, voicemail_pending: 'staff_left' });
-    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
-    expect(log.roomUpdates).toEqual([]);
-    expect(log.updates).toEqual([]);
-  });
-
-  test('not_needed with another request holding the voicemail claim: nothing is touched', async () => {
-    const row = fakeCallLog(held({ open: true }));
-    callHold.startHoldVoicemail.mockImplementation(async () => {
-      row.metadata.conference_path.hold = { open: false, voicemail_at: '2026-11-17T15:05:00Z' };
-      return 'not_needed';
-    });
-    const log = fakeTwilio({ rooms });
-    expect(await ended()).toBe('hold_voicemail');
-    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
-    expect(log.roomUpdates).toEqual([]);
-    expect(log.updates).toEqual([]);
-  });
-
-  test('not_needed with the hold closed some other way (press 1 won): today\'s room end', async () => {
-    const row = fakeCallLog(held({ open: true }));
-    callHold.startHoldVoicemail.mockImplementation(async () => {
-      row.metadata.conference_path.hold = { open: false };
-      return 'not_needed';
-    });
-    fakeTwilio({ rooms });
-    expect(await ended()).toBe('room_ended');
-  });
-
-  test('a hold already sent to voicemail: no Twilio call at all, and no startHoldVoicemail', async () => {
-    fakeCallLog(held({ open: false, voicemail_at: '2026-11-17T15:05:00Z' }));
-    const log = fakeTwilio({ rooms });
-    expect(await ended()).toBe('hold_voicemail');
-    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
-    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
-    expect(mockTw.api.calls).not.toHaveBeenCalled();
-    expect(log.roomUpdates).toEqual([]);
-    expect(log.updates).toEqual([]);
-  });
-
-  test('no hold open (a closed hold, or none): today\'s behavior', async () => {
-    fakeCallLog(held({ open: false, count: 1, total_sec: 20 }));
+  test('no hold in the way (none, a hold that is over, or a closed call): today\'s room end, in every shape', async () => {
+    fakeCallLog(held({ phase: 'returned', applied: 'returned' }));
+    callHold.staffLeft.mockResolvedValue('ordinary');
     const log = fakeTwilio({ rooms });
     expect(await ended()).toBe('room_ended');
-    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
     expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+
+  test('no open room and an ordinary hang-up: the caller is hung up, as today', async () => {
+    fakeCallLog(held(undefined));
+    callHold.staffLeft.mockResolvedValue('ordinary');
+    const log = fakeTwilio({ rooms: [] });
+    expect(await ended()).toBe('caller_hung_up');
+    expect(log.updates).toEqual([{ sid: SID, status: 'completed' }]);
+  });
+
+  test('the hold cannot decide (a database error): the status callback fails rather than end the room blind', async () => {
+    fakeCallLog(held({ phase: 'held' }));
+    callHold.staffLeft.mockRejectedValue(new Error('db down'));
+    const log = fakeTwilio({ rooms });
+    await expect(ended()).rejects.toThrow('db down');
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
   });
 });
 

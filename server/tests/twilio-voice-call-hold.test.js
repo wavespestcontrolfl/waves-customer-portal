@@ -14,12 +14,9 @@ jest.mock('../services/call-hold', () => ({
   isEnabled: jest.fn(() => false),
   startHold: jest.fn(),
   endHold: jest.fn(),
+  checkHold: jest.fn(),
   holdState: jest.fn(),
   roomIsOpen: jest.fn(async () => true),
-  HOLD_REMINDER_SEC: 180,
-  HOLD_LIMIT_SEC: 300,
-  heldSeconds: jest.fn(() => 0),
-  startHoldVoicemail: jest.fn(),
   resumeRecording: jest.fn(async () => true),
 }));
 
@@ -64,10 +61,9 @@ beforeEach(() => {
   callHold.isEnabled.mockReset().mockReturnValue(false);
   callHold.startHold.mockReset();
   callHold.endHold.mockReset();
-  callHold.holdState.mockReset().mockResolvedValue({ found: true, open: true, closed: false });
+  callHold.checkHold.mockReset().mockResolvedValue({ found: true, closed: false, phase: 'held', applied: 'held', remind: false });
+  callHold.holdState.mockReset().mockResolvedValue({ found: true, closed: false, phase: 'held', applied: 'held' });
   callHold.roomIsOpen.mockReset().mockResolvedValue(true);
-  callHold.heldSeconds.mockReset().mockReturnValue(0);
-  callHold.startHoldVoicemail.mockReset();
   callHold.resumeRecording.mockReset().mockResolvedValue(true);
 });
 
@@ -131,99 +127,87 @@ describe('/conference-staff-left', () => {
   });
 });
 
+const HELD = { found: true, closed: false, phase: 'held', applied: 'held', remind: false };
+
 describe('/conference-staff-menu', () => {
   const GATHER = `<Gather numDigits="1" timeout="15" action="${CHOICE_URL}" method="POST">`;
+  const MENU_LOOP = `<Redirect method="POST">${MENU_URL}</Redirect>`;
+  const VOICEMAIL_GOODBYE = response(`${say(STAFF_VOICEMAIL)}<Hangup/>`);
 
   test('first entry says the menu line, then loops back to the menu', async () => {
     expect((await post('/conference-staff-menu', { query: { first: '1' } })).body)
-      .toBe(response(`${GATHER}${say(MENU_LINE)}</Gather><Redirect method="POST">${MENU_URL}</Redirect>`));
+      .toBe(response(`${GATHER}${say(MENU_LINE)}</Gather>${MENU_LOOP}`));
   });
 
-  test('a later loop is silent', async () => {
-    expect((await post('/conference-staff-menu')).body)
-      .toBe(response(`${GATHER.replace(/>$/, '/>')}<Redirect method="POST">${MENU_URL}</Redirect>`));
+  test('a later loop is silent, and the loop records its event with the reminder asked for', async () => {
+    expect((await post('/conference-staff-menu')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${MENU_LOOP}`));
+    expect(callHold.checkHold).toHaveBeenCalledWith(SID, { remind: true });
   });
 
   describe('hold timer', () => {
-    const REMINDED_GATHER = `<Gather numDigits="1" timeout="15" action="${CHOICE_URL}&amp;reminded=1" method="POST">`;
-    const REMINDED_MENU = `<Redirect method="POST">${MENU_URL}&amp;reminded=1</Redirect>`;
-    const VOICEMAIL_GOODBYE = response(`${say(STAFF_VOICEMAIL)}<Hangup/>`);
-
     test('the words are the owner-approved ones', () => {
       expect(STAFF_REMINDER).toBe('Your caller has been on hold for 3 minutes.');
       expect(STAFF_VOICEMAIL).toBe('Your caller went to voicemail.');
       expect(CALLER_VOICEMAIL).toBe('Sorry for the wait. Please leave a message after the tone, and we will call you right back.');
     });
 
-    test('before 3 minutes the loop is today\'s, byte for byte, with no reminded flag', async () => {
-      callHold.heldSeconds.mockReturnValue(179);
-      expect((await post('/conference-staff-menu')).body)
-        .toBe(response(`${GATHER.replace(/>$/, '/>')}<Redirect method="POST">${MENU_URL}</Redirect>`));
-      expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
-    });
-
-    test('at 3 minutes the gather says the reminder once, in the computer voice, and the URLs carry reminded=1', async () => {
-      callHold.heldSeconds.mockReturnValue(180);
-      expect((await post('/conference-staff-menu')).body)
-        .toBe(response(`${REMINDED_GATHER}${say(STAFF_REMINDER)}</Gather>${REMINDED_MENU}`));
-    });
-
-    test('the reminded loop is silent from then on', async () => {
-      callHold.heldSeconds.mockReturnValue(250);
-      expect((await post('/conference-staff-menu', { query: { reminded: '1' } })).body)
-        .toBe(response(`${REMINDED_GATHER.replace(/>$/, '/>')}${REMINDED_MENU}`));
-      expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
+    test('the decision point answers remind once: the gather says the reminder in the computer voice, and no URL carries a flag', async () => {
+      callHold.checkHold.mockResolvedValueOnce({ ...HELD, remind: true });
+      const body = (await post('/conference-staff-menu')).body;
+      expect(body).toBe(response(`${GATHER}${say(STAFF_REMINDER)}</Gather>${MENU_LOOP}`));
+      expect(body).not.toContain('reminded');
+      // The next loop (a redelivery included) is told remind:false, so it stays silent.
+      expect((await post('/conference-staff-menu')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${MENU_LOOP}`));
     });
 
     test('first=1 keeps the menu line, and the reminder follows it when the hold is already old', async () => {
-      callHold.heldSeconds.mockReturnValue(200);
+      callHold.checkHold.mockResolvedValueOnce({ ...HELD, remind: true });
       expect((await post('/conference-staff-menu', { query: { first: '1' } })).body)
-        .toBe(response(`${REMINDED_GATHER}${say(MENU_LINE)}${say(STAFF_REMINDER)}</Gather>${REMINDED_MENU}`));
+        .toBe(response(`${GATHER}${say(MENU_LINE)}${say(STAFF_REMINDER)}</Gather>${MENU_LOOP}`));
     });
 
-    test('at 5 minutes the caller goes to voicemail and the staff hear it, then Hangup', async () => {
-      callHold.heldSeconds.mockReturnValue(300);
-      callHold.startHoldVoicemail.mockResolvedValue('started');
-      expect((await post('/conference-staff-menu', { query: { reminded: '1' } })).body).toBe(VOICEMAIL_GOODBYE);
-      expect(callHold.startHoldVoicemail).toHaveBeenCalledWith(SID, 'timeout');
-      callHold.startHoldVoicemail.mockResolvedValue('caller_gone');
+    test('the voicemail decided (the 5 minute limit, or the staff phone hung up): the staff hear it, then Hangup, even after the caller left', async () => {
+      callHold.checkHold.mockResolvedValue({ found: true, closed: false, phase: 'voicemail', applied: 'held', voicemailAt: '2026-11-17T15:05:00Z' });
+      expect((await post('/conference-staff-menu')).body).toBe(VOICEMAIL_GOODBYE);
+      callHold.checkHold.mockResolvedValue({ found: true, closed: true, phase: 'voicemail', applied: 'voicemail', voicemailAt: '2026-11-17T15:05:00Z' });
       expect((await post('/conference-staff-menu')).body).toBe(VOICEMAIL_GOODBYE);
     });
+  });
 
-    test('a voicemail that did not start (failed, or another request holds the claim) keeps the menu; the next loop decides', async () => {
-      callHold.heldSeconds.mockReturnValue(300);
-      for (const result of ['failed', 'not_needed']) {
-        callHold.startHoldVoicemail.mockResolvedValue(result);
-        expect((await post('/conference-staff-menu', { query: { reminded: '1' } })).body)
-          .toBe(response(`${REMINDED_GATHER.replace(/>$/, '/>')}${REMINDED_MENU}`));
-      }
-    });
+  test('a return the press 1 could not confirm keeps the staff on the menu loop (silent); the loop finishes it', async () => {
+    callHold.checkHold.mockResolvedValue({ found: true, closed: false, phase: 'returned', applied: 'held', remind: false });
+    expect((await post('/conference-staff-menu')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${MENU_LOOP}`));
+  });
 
-    test('a hold already sent to voicemail: the staff hear it and Hangup, even after the caller left', async () => {
-      callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false, voicemailAt: '2026-11-17T15:05:00Z' });
-      expect((await post('/conference-staff-menu')).body).toBe(VOICEMAIL_GOODBYE);
-      callHold.holdState.mockResolvedValue({ found: true, open: false, closed: true, voicemailAt: '2026-11-17T15:05:00Z' });
-      expect((await post('/conference-staff-menu')).body).toBe(VOICEMAIL_GOODBYE);
-      expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
-    });
+  test('the caller is confirmed back (or no hold): the staff rejoin; room gone: Hangup', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    for (const state of [{ phase: 'returned', applied: 'returned' }, { phase: null, applied: null }]) {
+      callHold.checkHold.mockResolvedValue({ found: true, closed: false, remind: false, ...state });
+      callHold.roomIsOpen.mockResolvedValue(true);
+      expect((await post('/conference-staff-menu')).body).toBe(response(STAFF_ROOM_ON));
+      callHold.roomIsOpen.mockResolvedValue(false);
+      expect((await post('/conference-staff-menu')).body).toBe(response('<Hangup/>'));
+    }
   });
 
   test('a closed call: the caller hung up, then Hangup', async () => {
-    callHold.holdState.mockResolvedValue({ found: true, open: false, closed: true });
+    callHold.checkHold.mockResolvedValue({ found: true, closed: true, phase: 'held', applied: 'held' });
     expect((await post('/conference-staff-menu')).body).toBe(response(`${say('The caller hung up.')}<Hangup/>`));
   });
 
-  test('a hold closed with the room still open: the staff rejoin; room gone: Hangup', async () => {
-    callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false });
-    callHold.isEnabled.mockReturnValue(true);
-    expect((await post('/conference-staff-menu')).body).toBe(response(STAFF_ROOM_ON));
-    callHold.roomIsOpen.mockResolvedValue(false);
+  test('a state read error keeps the staff on the menu: the caller keeps the script', async () => {
+    callHold.checkHold.mockResolvedValue({ found: false, closed: false, error: true, phase: 'held', applied: 'held', remind: false });
+    expect((await post('/conference-staff-menu')).body).toBe(response(`${GATHER.replace(/>$/, '/>')}${MENU_LOOP}`));
+  });
+
+  test('a thrown error hangs up rather than a 500', async () => {
+    callHold.checkHold.mockRejectedValue(new Error('boom'));
     expect((await post('/conference-staff-menu')).body).toBe(response('<Hangup/>'));
   });
 });
 
 describe('/conference-staff-menu-choice', () => {
-  test('1: caller returned, the staff rejoin with star enabled', async () => {
+  test('1: caller returned (confirmed), the staff rejoin with star enabled', async () => {
     callHold.isEnabled.mockReturnValue(true);
     callHold.endHold.mockResolvedValue('returned');
     const res = await post('/conference-staff-menu-choice', { body: { Digits: '1' } });
@@ -237,14 +221,7 @@ describe('/conference-staff-menu-choice', () => {
       .toBe(response(`${say('The caller hung up.')}<Hangup/>`));
   });
 
-  test('1: the caller went to voicemail (hold timer) -> the staff hear that, not "The caller hung up."', async () => {
-    callHold.endHold.mockResolvedValue('no_room');
-    callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false, voicemailAt: '2026-11-17T15:05:00Z' });
-    expect((await post('/conference-staff-menu-choice', { body: { Digits: '1' } })).body)
-      .toBe(response(`${say(STAFF_VOICEMAIL)}<Hangup/>`));
-  });
-
-  test('1: the hold timer sent the caller to voicemail first -> "Your caller went to voicemail." + Hangup, never the room', async () => {
+  test('1: the voicemail was decided first (the limit, or the staff phone hanging up) -> "Your caller went to voicemail." + Hangup, never the room', async () => {
     callHold.isEnabled.mockReturnValue(true);
     callHold.endHold.mockResolvedValue('voicemail');
     const res = await post('/conference-staff-menu-choice', { body: { Digits: '1' } });
@@ -252,12 +229,7 @@ describe('/conference-staff-menu-choice', () => {
     expect(res.body).not.toContain('<Conference');
   });
 
-  test('another key after the reminder goes back to the menu with reminded=1, so it is not said again', async () => {
-    expect((await post('/conference-staff-menu-choice', { body: { Digits: '5' }, query: { reminded: '1' } })).body)
-      .toBe(response(`<Redirect method="POST">${MENU_URL}&amp;reminded=1</Redirect>`));
-  });
-
-  test('1: failed -> a short apology and back to the menu', async () => {
+  test('1: not confirmed in time -> a short apology and back to the menu, whose loop finishes the return', async () => {
     callHold.endHold.mockResolvedValue('failed');
     expect((await post('/conference-staff-menu-choice', { body: { Digits: '1' } })).body)
       .toBe(response(`${say('Sorry, that did not work.')}<Redirect method="POST">${MENU_URL}</Redirect>`));
@@ -278,24 +250,19 @@ describe('/conference-staff-menu-choice', () => {
 describe('/conference-hold-facts (holdUrl)', () => {
   const factsUrl = (n) => `/api/webhooks/twilio/conference-hold-facts?parent=${SID}&amp;step=${n}`;
   const stepBody = async (n) => (await post('/conference-hold-facts', { query: { step: String(n) } })).body;
+  const REDIRECT = (n) => `<Redirect method="POST">${factsUrl(n)}</Redirect>`;
 
   test('step 0: the opening, then the first fact, then step 1', async () => {
-    expect(await stepBody(0)).toBe(response([
-      say(OPENING), '<Pause length="2"/>', say(FACTS[0]), `<Redirect method="POST">${factsUrl(1)}</Redirect>`,
-    ].join('')));
+    expect(await stepBody(0)).toBe(response([say(OPENING), '<Pause length="2"/>', say(FACTS[0]), REDIRECT(1)].join('')));
+    expect(callHold.checkHold).toHaveBeenCalledWith(SID);
   });
 
   test('a later step: a pause, the next fact in order, then the next step; no opening', async () => {
-    expect(await stepBody(1)).toBe(response([
-      '<Pause length="3"/>', say(FACTS[1]), `<Redirect method="POST">${factsUrl(2)}</Redirect>`,
-    ].join('')));
+    expect(await stepBody(1)).toBe(response(['<Pause length="3"/>', say(FACTS[1]), REDIRECT(2)].join('')));
   });
 
   test('the reminder plays before every fifth fact, about once a minute, and never on other steps', async () => {
-    expect(await stepBody(5)).toBe(response([
-      '<Pause length="3"/>', say(REMINDER), '<Pause length="2"/>', say(FACTS[5]),
-      `<Redirect method="POST">${factsUrl(6)}</Redirect>`,
-    ].join('')));
+    expect(await stepBody(5)).toBe(response(['<Pause length="3"/>', say(REMINDER), '<Pause length="2"/>', say(FACTS[5]), REDIRECT(6)].join('')));
     expect(await stepBody(10)).toContain(esc(REMINDER));
     for (const n of [0, 1, 4, 6, 9, 11]) expect(await stepBody(n)).not.toContain(esc(REMINDER));
   });
@@ -324,44 +291,42 @@ describe('/conference-hold-facts (holdUrl)', () => {
     }
   });
 
-  test('at 5 minutes the caller goes to voicemail: one second of silence is the answer', async () => {
-    callHold.heldSeconds.mockReturnValue(300);
-    callHold.startHoldVoicemail.mockResolvedValue('started');
-    expect(await stepBody(7)).toBe(response('<Pause length="1"/>'));
-    expect(callHold.startHoldVoicemail).toHaveBeenCalledWith(SID, 'timeout');
-  });
+  // Every answer while the hold is held, or a step is still wanted, ends with a <Redirect> to a next fetch, so a
+  // failed voicemail handoff, a restored state and an error all keep the loop that retries them.
+  describe('always a next fetch while anything is still wanted', () => {
+    const SCRIPT = (n) => response(['<Pause length="3"/>', say(FACTS[n % FACTS.length]), REDIRECT(n + 1)].join(''));
+    const RETRY = (n) => response(`<Pause length="2"/>${REDIRECT(n)}`);
+    test.each([
+      ['held and confirmed', { phase: 'held', applied: 'held' }, SCRIPT(3)],
+      ['held, the hold request not confirmed yet', { phase: 'held', applied: null }, SCRIPT(3)],
+      ['voicemail decided and the room end failed (retryable)', { phase: 'voicemail', applied: 'held' }, RETRY(3)],
+      ['voicemail decided, the caller re-held after a failed room end', { phase: 'voicemail', applied: 'returned' }, RETRY(3)],
+      ['a return the press 1 could not confirm', { phase: 'returned', applied: 'held' }, RETRY(3)],
+      ['a state read error', { error: true, phase: 'held', applied: 'held' }, SCRIPT(3)],
+    ])('%s', async (_name, state, expected) => {
+      callHold.checkHold.mockResolvedValue({ found: true, closed: false, remind: false, ...state });
+      expect(await stepBody(3)).toBe(expected);
+    });
 
-  test('a voicemail that failed to start answers silence too; the next fetch tries again', async () => {
-    callHold.heldSeconds.mockReturnValue(450);
-    callHold.startHoldVoicemail.mockResolvedValue('failed');
-    expect(await stepBody(8)).toBe(response('<Pause length="1"/>'));
-  });
+    test('a thrown error answers a pause and a redirect to the same step, never a bare pause', async () => {
+      callHold.checkHold.mockRejectedValue(new Error('boom'));
+      expect(await stepBody(4)).toBe(RETRY(4));
+    });
 
-  test('a pending voicemail (the staff phone hung up and the room would not end) starts at once with its reason', async () => {
-    callHold.holdState.mockResolvedValue({ found: true, open: true, closed: false, voicemailPending: 'staff_left' });
-    callHold.heldSeconds.mockReturnValue(40);
-    callHold.startHoldVoicemail.mockResolvedValue('started');
-    expect(await stepBody(3)).toBe(response('<Pause length="1"/>'));
-    expect(callHold.startHoldVoicemail).toHaveBeenCalledWith(SID, 'staff_left');
-    callHold.startHoldVoicemail.mockResolvedValue('failed');
-    expect(await stepBody(4)).toBe(response('<Pause length="1"/>')); // a failed try: silence, the next fetch tries again
-  });
+    test.each([
+      ['the voicemail is done (the room ended)', { phase: 'voicemail', applied: 'voicemail' }],
+      ['the caller is confirmed back', { phase: 'returned', applied: 'returned' }],
+      ['no hold', { phase: null, applied: null }],
+      ['the call is closed', { closed: true, phase: 'held', applied: 'held' }],
+    ])('over: %s -> one second of silence and no redirect', async (_name, state) => {
+      callHold.checkHold.mockResolvedValue({ found: true, closed: false, remind: false, ...state });
+      expect(await stepBody(2)).toBe(response('<Pause length="1"/>'));
+    });
 
-  test('just under 5 minutes still speaks the script and starts nothing', async () => {
-    callHold.heldSeconds.mockReturnValue(299);
-    expect(await stepBody(1)).toContain(esc(FACTS[1]));
-    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
-  });
-
-  test('a closed hold answers one second of silence', async () => {
-    callHold.holdState.mockResolvedValue({ found: true, open: false, closed: false });
-    expect(await stepBody(2)).toBe(response('<Pause length="1"/>'));
-  });
-
-  test('a bad parent answers silence; a state error still speaks the script', async () => {
-    expect((await post('/conference-hold-facts', { query: { parent: 'nope', step: '0' } })).body).toBe(response('<Pause length="1"/>'));
-    callHold.holdState.mockResolvedValue({ found: false, open: true, closed: false, error: true });
-    expect(await stepBody(0)).toContain(esc(OPENING));
+    test('a bad parent answers silence and never reads the hold', async () => {
+      expect((await post('/conference-hold-facts', { query: { parent: 'nope', step: '0' } })).body).toBe(response('<Pause length="1"/>'));
+      expect(callHold.checkHold).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -428,7 +393,7 @@ describe('/call-complete?conf=1 after a hold voicemail', () => {
     expect(res.body).not.toContain('voicemail-tone');
     expect(res.body).not.toContain('<Pause');
     expect(res.body).not.toContain('<Record');
-    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled(); // the route raises no second bell: the claim's one bell stands
+    expect(callHold.checkHold).not.toHaveBeenCalled(); // the route decides and raises nothing here: the voicemail's one bell stands
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' })); // still an answered call
   });
 
