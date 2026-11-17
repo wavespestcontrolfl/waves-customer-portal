@@ -849,7 +849,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             `but may be unsurfaced in the admin feed.`
         );
       }
-      // GATE_PORTAL_ASK_PUSH: a customer's own submission (this route is customer-authenticated; the office makes
+      // A customer's own submission (this route is customer-authenticated; the office makes
       // its requests through the admin routes) rings the admin phones once its bell row exists. A withheld bell
       // (demo account, policy) or a failed write rings nothing. The service-request insert is committed long before
       // this point. Not awaited: a slow push provider must not hold the customer's submission, and pushPortalAsk

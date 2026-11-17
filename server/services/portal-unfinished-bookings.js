@@ -1,5 +1,5 @@
 /**
- * Unfinished bookings reach a person (GATE_PORTAL_BOOKING_ITEMS, owner 2026-11-02, unworked-leads audit).
+ * Unfinished bookings reach a person (owner 2026-11-02, unworked-leads audit).
  *
  * A customer opened the card step of an estimate our office sent (an estimate_checkout_events row, kind
  * recurring_card or card_hold) and left without accepting. Nothing followed and nobody was told. This raises ONE
@@ -13,7 +13,7 @@
  * recovery text and email until the booking page can check phone numbers.
  *
  * - Drop-off time: the newest checkout event's updated_at of the estimate. It counts after QUIET_MINUTES with no
- *   new touch, and only if it is not older than WINDOW_DAYS, so turning the gate on cannot burst old rows.
+ *   new touch, and only if it is not older than WINDOW_DAYS, so old rows cannot burst.
  * - Skipped: an estimate accepted, declined or archived; a customer with a live visit booked (any way) after the
  *   drop-off; a drop-off a PERSON already followed up (the shared witnesses in admin-alert-contact-witnesses.js:
  *   a person's text, a call a person placed or answered, a person's Gmail send, after the drop-off); an estimate
@@ -26,10 +26,10 @@
  *   again.
  * - The bell is closed by admin-alert-relevance.js (class portal_unfinished_booking) and listed on the
  *   Communications Portal tab by portal-inbox.js.
- * - A new bell also pages the admin phones once (GATE_PORTAL_ASK_PUSH, portal-ask-push.js), like the app's other asks.
+ * - A new bell also pages the admin phones once (portal-ask-push.js), like the app's other asks.
  * - Sends nothing to a customer: no text, email, call or app notice. Admin bell rows and admin phone pages only.
  *
- * Runs inside the alert-relevance sweep (every 10 minutes), only while the gate is on. Read-only apart from the
+ * Runs inside the alert-relevance sweep (every 10 minutes). Read-only apart from the
  * bell writes. Never throws into the sweep.
  */
 
@@ -248,12 +248,11 @@ async function raiseBell(item) {
   return { id: result.id, isNew: result.deduped === false, why, action };
 }
 
-// GATE_PORTAL_ASK_PUSH: a new bell also pages the admin phones, once (a dedupe never pages). This waits for the
+// A new bell also pages the admin phones, once (a dedupe never pages). This waits for the
 // name read only; the page goes out from portal-ask-push.js's queue, never awaited, so it cannot hold the sweep.
 // First name and last initial, no phone: a push shows on a lock screen. Never throws.
 async function pushNewBell(item) {
   try {
-    if (!require('../config/feature-gates').portalAskPushLive?.()) return;
     const { pushPortalAsk, customerShortName, shortName } = require('./portal-ask-push');
     const [first, ...rest] = require('./admin-alert-names').tidyName(item.name).split(' ');
     const name = item.customerId ? await customerShortName(item.customerId) : shortName(first, rest.pop());
@@ -288,7 +287,6 @@ async function raiseAll(items) {
 // Every page, up to MAX_PAGES: each page's unanswered drop-offs ring before the next page is read. A witness read
 // that fails is no verdict: it throws, nothing more rings this run, and the next sweep reads again.
 async function runPortalUnfinishedBookings({ now = new Date(), conn = db, pageSize = PAGE_SIZE } = {}) {
-  if (!require('../config/feature-gates').portalBookingItemsLive?.()) return { skipped: true, reason: 'gate_off' };
   let found = 0;
   let raised = 0;
   try {

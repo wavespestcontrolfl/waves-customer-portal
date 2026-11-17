@@ -190,12 +190,11 @@ async function runPage(rows, now) {
   return { due: due.length, rung };
 }
 
-// GATE_PORTAL_ASK_PUSH: the "Still waiting" ring also pages the admin phones. The bell was a row nobody had
+// The "Still waiting" ring also pages the admin phones. The bell was a row nobody had
 // looked at for an hour; this is the one nudge that reaches a pocket. Never throws.
 async function pushStillWaiting({ row, meta }) {
   try {
     const { pushPortalAsk, customerShortName } = require('./portal-ask-push');
-    if (!require('../config/feature-gates').portalAskPushLive?.()) return;
     const name = await customerShortName(meta.customerId);
     void pushPortalAsk({
       itemKey: `late:${row.id}`,

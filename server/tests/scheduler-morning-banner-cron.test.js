@@ -1,6 +1,6 @@
 /**
- * Morning banner in its own daily 8:00 AM ET cron (server/services/scheduler.js, '0 8 * * *', GATE_MORNING_BANNER):
- * gate off reads nothing; on, the job runs under runExclusive (the per-ET-day claim inside it stops a second banner),
+ * Morning banner in its own daily 8:00 AM ET cron (server/services/scheduler.js, '0 8 * * *'):
+ * the job runs under runExclusive (the per-ET-day claim inside it stops a second banner),
  * a failed run is logged, never thrown out of the tick, and the schedule is 8:00 in America/New_York on every date,
  * the clock-change days included.
  *
@@ -19,7 +19,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), morningBannerLive: jest.fn(() => false),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -36,7 +36,7 @@ jest.mock('../services/morning-banner', () => ({ runMorningBanner: jest.fn(async
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, morningBannerLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runMorningBanner } = require('../services/morning-banner');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const logger = require('../services/logger');
@@ -53,7 +53,6 @@ const bannerTick = () => bannerRegistration()[1]();
 
 beforeEach(() => {
   jest.clearAllMocks();
-  morningBannerLive.mockReturnValue(false);
 });
 
 test('registered once, at 8:00 every day, on the Eastern clock', () => {
@@ -72,21 +71,13 @@ test('8:00 AM Eastern is a real, single instant on the clock-change days, and th
   }
 });
 
-test('gate off: the tick returns before the lock or any read', async () => {
-  await bannerTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('morning-banner', expect.any(Function));
-  expect(runMorningBanner).not.toHaveBeenCalled();
-});
-
-test('gate on: the job runs once inside runExclusive', async () => {
-  morningBannerLive.mockReturnValue(true);
+test('the job runs once inside runExclusive', async () => {
   await bannerTick();
   expect(runExclusive).toHaveBeenCalledWith('morning-banner', expect.any(Function));
   expect(runMorningBanner).toHaveBeenCalledTimes(1);
 });
 
 test('a failed run is logged, never thrown out of the tick', async () => {
-  morningBannerLive.mockReturnValue(true);
   runMorningBanner.mockRejectedValueOnce(new Error('connection reset'));
   await expect(bannerTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Morning banner failed: connection reset');

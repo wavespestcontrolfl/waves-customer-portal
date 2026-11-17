@@ -1,6 +1,6 @@
 'use strict';
 
-// The 8:00 AM banner (GATE_MORNING_BANNER, owner 2026-11-03, "ok add", choice C: "At 8 AM, one banner tells you how
+// The 8:00 AM banner (owner 2026-11-03, "ok add", choice C: "At 8 AM, one banner tells you how
 // many items wait for you, and it opens your alert list. This takes the place of a banner for each of your other
 // action items").
 //
@@ -25,11 +25,10 @@
 // happen (a thrown error, an error result, preferences unreadable); after any other outcome it stays, because a missed
 // banner beats a doubled one. A day missed because the server was down at 8:00 is not made up.
 //
-// Sends nothing to a customer and calls no paid API. Off (the gate) = returns before any read.
+// Sends nothing to a customer and calls no paid API.
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { morningBannerLive } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { AREAS } = require('./admin-alert-compose');
 
@@ -115,7 +114,6 @@ async function claimAndSend(day, { count, total, areas }) {
 
 // Never throws. { skipped } | { count, sent: false, skipped | error } | { count, sent: true, result }.
 async function runMorningBanner({ now = new Date() } = {}) {
-  if (!morningBannerLive()) return { skipped: 'gate_off' };
   const day = etDateString(now);
   let summary;
   try {

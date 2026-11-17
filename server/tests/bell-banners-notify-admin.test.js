@@ -1,5 +1,5 @@
 /**
- * notifyAdmin and the phone banner (GATE_BELL_BANNERS): the one hook in notifyAdmin covers a write on its own
+ * notifyAdmin and the phone banner: the one hook in notifyAdmin covers a write on its own
  * transaction and a write on the caller's. The db is a small in-memory stand-in (as in
  * notification-admin-dedupe-refresh.test.js); the banner itself is the mocked triggerNotification.
  */
@@ -72,11 +72,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'], now: NOON_ET });
   mockRows = { notifications: [] };
-  process.env.GATE_BELL_BANNERS = 'true';
 });
 afterEach(() => {
   jest.useRealTimers();
-  delete process.env.GATE_BELL_BANNERS;
 });
 
 test('a fresh keyed row sends one pushOnly banner with the row\'s own words, and the caller still gets the row', async () => {
@@ -135,15 +133,6 @@ test('the call-commitment backlog summary (Activity-only) never sends', async ()
     metadata: { triggerKey: 'call_commitment_overdue', overdue_count: 12, feed: 'activity' },
   });
   await flush();
-  expect(triggerNotification).not.toHaveBeenCalled();
-});
-
-test('gate off: nothing is sent and the row is written exactly as before', async () => {
-  delete process.env.GATE_BELL_BANNERS;
-  const result = await bell();
-  await flush();
-  expect(result).toMatchObject({ id: 'n-1', deduped: false });
-  expect(mockRows.notifications).toHaveLength(1);
   expect(triggerNotification).not.toHaveBeenCalled();
 });
 
@@ -254,7 +243,6 @@ describe('new-lead email banner (GATE_RING_NEW_CONTACTS)', () => {
     dedupeKey: 'email-lead:lead:e-1', bannerKind: 'new_lead_email', ...opts,
   });
   beforeEach(() => {
-    delete process.env.GATE_BELL_BANNERS;
     process.env.GATE_RING_NEW_CONTACTS = 'true';
   });
   afterEach(() => { delete process.env.GATE_RING_NEW_CONTACTS; });
@@ -289,7 +277,6 @@ describe('new-lead email banner (GATE_RING_NEW_CONTACTS)', () => {
 
   test('gate off: no banner and the row is the plain write', async () => {
     delete process.env.GATE_RING_NEW_CONTACTS;
-    process.env.GATE_BELL_BANNERS = 'true'; // the other gate does not turn this kind on
     await lead();
     await flush();
     expect(mockRows.notifications).toHaveLength(1);
