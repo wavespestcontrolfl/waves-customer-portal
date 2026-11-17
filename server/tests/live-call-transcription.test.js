@@ -12,6 +12,9 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 
+const mockUpset = jest.fn();
+jest.mock('../services/live-call-upset-alert', () => ({ afterCallerUtterance: (...args) => mockUpset(...args) }));
+
 const mockRequest = jest.fn();
 jest.mock('twilio', () => jest.fn(() => ({ request: mockRequest })));
 
@@ -216,6 +219,19 @@ describe('recordLiveTranscriptionEvent', () => {
       ['caller', 'I have ants in the kitchen'],
       ['staff', 'We can help with that'],
     ]);
+  });
+
+  test('a stored caller utterance hands the call to the upset check; staff, duplicates and gate off do not', async () => {
+    await live.recordLiveTranscriptionEvent(content(1, 'outbound_track', 'Thanks for calling', 1));
+    expect(mockUpset).not.toHaveBeenCalled();
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'I am very unhappy', 2));
+    expect(mockUpset).toHaveBeenCalledWith(CALL);
+    mockUpset.mockClear();
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'I am very unhappy', 2));
+    expect(mockUpset).not.toHaveBeenCalled();
+    isEnabled.mockImplementation((gate) => gate !== 'liveCallUpsetAlert');
+    await live.recordLiveTranscriptionEvent(content(3, 'inbound_track', 'Hello?', 3));
+    expect(mockUpset).not.toHaveBeenCalled();
   });
 
   test('a redelivered event inserts nothing', async () => {

@@ -77,6 +77,8 @@ test('the banner kinds: two reminders and the stuck-booking alert keep the night
     new_lead_email: { nightQuiet: false, gate: 'ringNewContactsLive' },
     // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05).
     estimate_stuck: { nightQuiet: true },
+    // An upset caller on a live call, at any hour, its own gate GATE_LIVE_CALL_UPSET_ALERT (owner 2026-11-16).
+    live_call_upset: { nightQuiet: false, gate: 'liveCallUpsetAlertLive' },
   });
   expect(Object.isFrozen(BELL_BANNER_KINDS)).toBe(true);
 });

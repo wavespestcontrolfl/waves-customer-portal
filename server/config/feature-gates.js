@@ -8,6 +8,7 @@
  * Set these as environment variables on Railway:
  *   GATE_TECH_ESTIMATES=true (owner 2026-11-09, "GO, FOR ALL": a technician prices and, in later steps, sends an estimate from the phone. It has a gate because the later steps text and email customers and because the price preview runs the paid property lookup. Off, every /api/tech/estimates route answers 404 {enabled:false} before any customer read. On, a route also needs the technician's own Can create estimates switch (technicians.can_create_estimates, off by default); an admin login always passes. Steps 1 and 2a price and save a draft estimate (sold by = the creator) and read his own; nothing is sent. Pest lines only (general pest, mosquito, rodent, termite), each open to a technician only when his job type for it is Qualified. Strict `=== 'true'`, read at call time via techEstimatesLive(); dark by default. Kill: unset.)
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
+ *   GATE_LIVE_CALL_UPSET_ALERT=true (owner 2026-11-16 "ok build all", live-call suite: while a call is live, when the caller sounds upset and the owner is not the one on the call, one bell row and one phone banner tell him so he can step in. After a caller utterance is saved, a Claude Haiku 5.5 read of the last two minutes runs when the caller has 3 or more new utterances, at most once per 45 seconds and 8 times per call; mood upset or angry raises one alert per call. Needs GATE_LIVE_CALL_TRANSCRIPTION data. Read via isEnabled('liveCallUpsetAlert') at boot, strict 'true', dark by default; off = no model call, no new read, behavior byte-identical. Spends money when on (a Haiku call per check): owner flip only. Kill: delete the variable.)
  *   GATE_CALL_SCREEN_EXCHANGE_HISTORY=true (owner 2026-11-16 "build", spam-call audit: robodialers moved to STIR attestation A, so the press-1 screen also challenges an unknown caller when 2+ other unknown numbers from its 6-digit exchange hung up with no message or failed the screen in 14 days; a caller who fails the screen keeps the missed-call alert row but no push. Off = shadow stamps only. Kill: unset)
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_CARD_DETAILS_SYNC=true (owner 2026-11-05, Stripe audit: Stripe's card account updater renews saved cards and the portal never heard, so Auto Pay skipped a renewed card it read as expired. On, the payment_method.automatically_updated webhook and a daily 8:31 AM ET job re-read the card from Stripe and refresh the stored expiry, last four, brand and funding (services/card-details-sync.js). Sends nothing to a customer. Read at boot; dark by default in production; off = nothing is read or written. Kill switch: unset.)
@@ -2070,6 +2071,9 @@ const gates = {
   // press 1, Twilio Real-Time Transcription runs on the caller's call and posts each final utterance to
   // /api/webhooks/twilio/live-transcription (services/live-call-transcription.js). Twilio spend: owner flip.
   liveCallTranscription: process.env.GATE_LIVE_CALL_TRANSCRIPTION === 'true',
+
+  // Live-call upset-caller alert (owner 2026-11-16 "ok build all"): services/live-call-upset-alert.js. Haiku spend: owner flip.
+  liveCallUpsetAlert: process.env.GATE_LIVE_CALL_UPSET_ALERT === 'true',
 
   // Payment-step-abandonment follow-up EMAIL — emails customers who reached
   // the save-a-card step of accepting an estimate (Auto Pay card on a
@@ -7260,6 +7264,12 @@ function homeLineLive() {
 function bellBannersLive() {
   return process.env.GATE_BELL_BANNERS === 'true';
 }
+
+// GATE_LIVE_CALL_UPSET_ALERT reader for bell-banners.js (kind live_call_upset); strict `=== 'true'`, dark.
+function liveCallUpsetAlertLive() {
+  return process.env.GATE_LIVE_CALL_UPSET_ALERT === 'true';
+}
+module.exports.liveCallUpsetAlertLive = liveCallUpsetAlertLive;
 
 // GATE_IN_PERSON_CARD read at CALL time — strict `=== 'true'`, dark in every
 // environment. The canonical reader for the in-person card route and the

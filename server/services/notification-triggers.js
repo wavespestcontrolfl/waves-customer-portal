@@ -520,6 +520,23 @@ const TRIGGER_REGISTRY = {
       link: p.alertLink || '/admin/email',
     }),
   },
+  // The phone banner for an upset caller on a live call (GATE_LIVE_CALL_UPSET_ALERT, bell-banners.js kind live_call_upset,
+  // owner 2026-11-16). live-call-upset-alert.js writes the bell row (category live_call_upset, one per call) and names
+  // this kind with notifyAdmin's bannerKind; `build` takes the row's own words. The call ends within the hour, so the
+  // rule is the retention expiry. Admin-only.
+  live_call_upset: {
+    label: 'Upset caller on a live call',
+    category: 'live_call_upset',
+    priority: 'high',
+    group: 'Communication',
+    rule: { area: 'Comms', severity: 'needs-you', who: 'person', expiryDays: 30 },
+    adminRoleOnly: true,
+    build: (p) => ({
+      title: p.alertTitle || 'Comms — step in on an upset caller',
+      body: p.alertBody || 'The caller on a live call sounds upset.',
+      link: p.alertLink || '/admin/communications#tab=calls',
+    }),
+  },
   // The reminder banner for a lead's call request (GATE_LEAD_CALL_REMINDER, owner 2026-11-05, "remind"). A missed
   // press-1 ring ("Missed call request") and a night call-back bell reach only the portal bell; one still open after
   // one business hour, with nobody reaching the lead since, sends this ONE banner (services/lead-call-reminder.js,
