@@ -14,7 +14,6 @@ const { runExclusive } = require('../utils/cron-lock');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
 const { etParts } = require('../utils/datetime-et');
-const { socialStudioSkipMetaLive } = require('../config/feature-gates');
 const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
 
 const FASTEST_RISER_PROFILES = [
@@ -205,13 +204,11 @@ const DEFAULT_COMPETITOR_PATTERNS = [
 const CHANNELS = ['facebook', 'instagram', 'linkedin', 'gbp'];
 const AUTONOMOUS_SOURCE = 'autonomous_studio';
 
-// GATE_SOCIAL_STUDIO_SKIP_META ("studio trim", owner 2026-11-01): the AUTONOMOUS
-// studio stops drafting and posting to these two. Manual Studio / Campaign
-// Builder / Publish All paths call normalizeChannels directly and never pass
-// through this filter.
+// Studio trim (owner 2026-11-01): the AUTONOMOUS studio never drafts or posts to
+// these two. Manual Studio / Campaign Builder / Publish All paths call
+// normalizeChannels directly and never pass through this filter.
 const META_CHANNELS = ['facebook', 'instagram'];
-function withoutMetaWhenTrimmed(channels) {
-  if (!socialStudioSkipMetaLive()) return channels;
+function withoutMetaChannels(channels) {
   return channels.filter((c) => !META_CHANNELS.includes(c));
 }
 
@@ -803,7 +800,7 @@ const AUTONOMOUS_FLAGS = {
       ? 'gbp,facebook,instagram'
       : String(process.env.SOCIAL_AUTONOMOUS_CHANNELS);
     const selected = raw.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean);
-    return withoutMetaWhenTrimmed(normalizeChannels(selected));
+    return withoutMetaChannels(normalizeChannels(selected));
   },
 };
 
@@ -1435,29 +1432,6 @@ async function recentCreativeConceptKeys(limit = 6) {
   }
 }
 
-// AI-scene photo card variants for an autonomous run (creative engine). Returns
-// [] when the engine is disabled or every variant fails, so callers keep the
-// legacy SVG-card path as the fallback. Draft runs get the multi-variant batch
-// for the approval queue; publish runs render exactly one.
-// A Veo clip only ever publishes to Facebook/Instagram — publishToAll routes
-// video to Meta while GBP keeps the still — so don't spend on a clip unless a
-// REQUESTED channel can actually take it. E.g. SOCIAL_AUTONOMOUS_CHANNELS=gbp,
-// or FB/IG disabled/missing credentials, would otherwise buy a clip that can
-// never publish and put a misleading video option in the approval queue.
-// Mirrors publishToAll's fbReady/igReady env checks.
-function hasVideoCapableChannel(channels) {
-  const list = Array.isArray(channels) ? channels : [];
-  // Mirror publishToAll's readiness SPLIT exactly: its fbReady is CREDENTIALS-
-  // only (page token + page id — IG Graph publishing rides those even with
-  // Facebook posting off), while the SOCIAL_FACEBOOK_ENABLED / _INSTAGRAM_
-  // flags each gate only their own platform entry. So an IG-only config with
-  // Facebook disabled still earns a video, and one missing the page id doesn't.
-  const pageCreds = !!process.env.FACEBOOK_ACCESS_TOKEN && !!process.env.FACEBOOK_PAGE_ID;
-  const fbReady = SOCIAL_FLAGS.facebookEnabled && pageCreds;
-  const igReady = SOCIAL_FLAGS.instagramEnabled && pageCreds && !!process.env.INSTAGRAM_ACCOUNT_ID;
-  return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
-}
-
 // Is a fixed (deterministic) card that reached a network a FIX: alert?
 // Always for a campaign: a hero photo or a scene was expected, and its GBP
 // card beside a successful scene is still the fallback for the hero. For the
@@ -1524,6 +1498,10 @@ function runKindFor(plan = {}) {
   return RUN_KINDS.campaign;
 }
 
+// AI-scene photo card variants for an autonomous run (creative engine). Returns
+// [] when the engine is disabled or every variant fails, so callers keep the
+// legacy SVG-card path as the fallback. Draft runs get the multi-variant batch
+// for the approval queue; publish runs render exactly one.
 async function creativeVariantsForRun(plan, preview, { kind, wantsGbp, effectiveMode, now }) {
   if (!CreativeEngine.CREATIVE_FLAGS.enabled) return [];
   try {
@@ -1540,31 +1518,6 @@ async function creativeVariantsForRun(plan, preview, { kind, wantsGbp, effective
       wantGbp: wantsGbp,
       now,
     });
-
-    // Veo Reel option — DRAFT campaign runs only (approval required for video:
-    // real cost per clip and the most public artifact the brand ships), on
-    // every Nth ET day, and only when at least one image variant succeeded (a
-    // video-only queue entry would leave GBP with no media and the runs list
-    // with no thumbnail). Appended LAST so variants[0] — the run's primary
-    // visual — stays a still.
-    if (
-      variants.length
-      && variant === 'campaign'
-      && effectiveMode === 'draft'
-      && CreativeEngine.VIDEO_FLAGS.enabled
-      && CreativeEngine.isVideoDay(now)
-      && hasVideoCapableChannel(plan.channels)
-    ) {
-      const video = await CreativeEngine.generateVideoVariant({
-        topic: plan.topic,
-        service: plan.service,
-        city: plan.city,
-        excludeConcepts: [...excludeConcepts, ...variants.map((v) => v.conceptKey).filter(Boolean)],
-        now,
-      });
-      if (video) variants.push(video);
-    }
-
     return variants;
   } catch {
     return [];
@@ -2636,11 +2589,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     return { skipped: true, reason: 'social automation is paused by admin' };
   }
 
-  // Studio trim: when the gate removed every requested channel (e.g.
+  // Studio trim: when the trim removed every requested channel (e.g.
   // SOCIAL_AUTONOMOUS_CHANNELS=facebook,instagram), there is nothing to post —
   // skip before any plan, copy or image work is spent.
-  if (socialStudioSkipMetaLive() && !AUTONOMOUS_FLAGS.channels.length) {
-    const reason = 'GATE_SOCIAL_STUDIO_SKIP_META removed every autonomous channel';
+  if (!AUTONOMOUS_FLAGS.channels.length) {
+    const reason = 'the studio trim removed every autonomous channel';
     await logAutonomousSkip(reason);
     return { skipped: true, reason };
   }
@@ -3433,13 +3386,13 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       return { ok: false, status: 400, error: 'selected variant has no hosted image' };
     }
 
-    // Studio trim: a draft queued before the gate flipped must not reach
+    // Studio trim: a draft queued before the trim must not reach
     // Facebook or Instagram when it is approved afterwards.
-    const channels = withoutMetaWhenTrimmed(normalizeChannels(
+    const channels = withoutMetaChannels(normalizeChannels(
       toJson(run.channels, null) ?? input.channels ?? preview.inputs?.channels
     ));
     if (!channels.length) return { ok: false, status: 400, error: 'run has no publishable channels' };
-    if (isVideoVariant && socialStudioSkipMetaLive()) {
+    if (isVideoVariant) {
       return { ok: false, status: 409, error: 'a video variant posts to Facebook and Instagram only, which the studio trim turned off — pick an image variant' };
     }
 

@@ -286,10 +286,9 @@ customer's message by this rule.
    the bell (`read_at` is not evidence). Two more rules close by themselves: a voicemail
    closes once the customer's own visit completed after it the same Eastern day, and a Leads bell
    with `doneWhen: 'lead_contacted'` and a lead id closes once the lead was texted or called back,
-   booked or quoted after the bell. One rule carries its own gate (off / `shadow` / `true`,
-   rollback = unset): a portal chat hand-off bell (`doneWhen: 'customer_answered'`)
+   booked or quoted after the bell. A portal chat hand-off bell (`doneWhen: 'customer_answered'`)
    closes once a person called back, answered the customer's call, texted or emailed that
-   customer after the bell (`GATE_PORTAL_CHAT_ANSWERED_CLOSE`; never the email-change bell).
+   customer after the bell (never the email-change bell).
    Details in `docs/gates-and-env.md`.
    A complaint-call bell (`Comms — call <name> about a complaint`, `doneWhen: 'complaint_answered'`, dedupe key
    `call-complaint:<call id>`) rings once per call, right after the call gets the final label `complaint_escalated`,

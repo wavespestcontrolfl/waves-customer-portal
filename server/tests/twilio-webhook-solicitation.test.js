@@ -24,7 +24,7 @@ const mockOutboundHistoryCalls = [];
 // to simulate a matched customer for the sender (null/[] = no match).
 let mockCustomersRows = null;
 const mockOptoutReceipts = new Map();
-// GATE_SMS_SPAM_TAG: the sms_spam_senders row the tag lookup finds (null = untagged),
+// The sms_spam_senders row the tag lookup finds (null = untagged),
 // whether that lookup throws, and how many times it ran.
 let mockTaggedRow = null;
 // When non-empty, each tag lookup takes the next row from here instead.
@@ -93,7 +93,6 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvValue: (gate) => process.env[gate] === 'true',
   smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
-  smsSpamTagLive: () => process.env.GATE_SMS_SPAM_TAG === 'true',
 }));
 // The bare-YES decision's own reads are covered in sms-bare-yes-reply.test.js.
 jest.mock('../services/messaging/bare-yes-reply', () => ({ bareYesIsReply: jest.fn(async () => true) }));
@@ -192,7 +191,6 @@ beforeEach(() => {
   mockTaggedRowQueue.length = 0;
   mockTagLookupFails = false;
   mockTagLookups = 0;
-  delete process.env.GATE_SMS_SPAM_TAG;
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
   delete process.env.GATE_SMS_BARE_YES_REPLY;
@@ -200,7 +198,6 @@ beforeEach(() => {
   findKnownCallerCustomer.mockResolvedValue(null);
 });
 afterAll(() => {
-  delete process.env.GATE_SMS_SPAM_TAG;
   if (savedGate === undefined) delete process.env.GATE_SMS_SPAM_CLASSIFIER;
   else process.env.GATE_SMS_SPAM_CLASSIFIER = savedGate;
   if (savedOwner === undefined) delete process.env.ADAM_PHONE;
@@ -845,13 +842,12 @@ test.each(['suppression', 'recipient'])('a swallowed %s STOP write failure canno
   expect(require('../services/messaging/inbound-dedupe').releaseInboundWebhook).toHaveBeenCalledTimes(1);
 });
 
-// GATE_SMS_SPAM_TAG (owner 2026-11-02): a sender the office tagged is silenced
+// Spam tag (owner 2026-11-02): a sender the office tagged is silenced
 // through the same enforced-verdict path as the auto screen, with a manual
 // verdict and no model call. Customers, open leads and carrier commands win.
-describe('GATE_SMS_SPAM_TAG=true', () => {
+describe('spam tag', () => {
   const TAG_ROW = { phone: '+12025550101', marked_by: '00000000-0000-4000-8000-0000000000aa', marked_at: new Date('2026-11-02T12:00:00Z') };
   beforeEach(() => {
-    process.env.GATE_SMS_SPAM_TAG = 'true';
     mockTaggedRow = TAG_ROW;
     // The auto screen is off: the tag must work on its own.
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'off';
@@ -931,12 +927,6 @@ describe('GATE_SMS_SPAM_TAG=true', () => {
     expect(row.is_read).not.toBe(true);
   });
 
-  test('the gate off keeps ordinary handling and never reads the tag table', async () => {
-    delete process.env.GATE_SMS_SPAM_TAG;
-    await receive('Can I interest you in a business loan today?');
-    expect(mockTagLookups).toBe(0);
-    expectOrdinary();
-  });
 
   test('a photo text keeps ordinary handling', async () => {
     uploadTwilioMedia.mockResolvedValueOnce([{ url: 'https://example.com/photo.jpg', contentType: 'image/jpeg' }]);

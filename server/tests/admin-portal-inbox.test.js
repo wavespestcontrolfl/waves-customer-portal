@@ -1,5 +1,5 @@
 /**
- * Admin portal inbox routes (GATE_PORTAL_INBOX): owner-only, dark by default.
+ * Admin portal inbox routes: owner-only.
  * The list rules and close-older SQL are pinned against Postgres in
  * portal-inbox-postgres.test.js; here the route contract is pinned with the
  * service stubbed.
@@ -61,11 +61,10 @@ const auth = (who) => ({ Authorization: `Bearer ${who}`, 'Content-Type': 'applic
 const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
 describe('admin portal inbox routes', () => {
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; delete process.env.GATE_PORTAL_MESSAGES; });
-  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; delete process.env.GATE_PORTAL_MESSAGES; });
+  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_MESSAGES; });
+  afterAll(() => { delete process.env.GATE_PORTAL_MESSAGES; });
 
   test('refuse a signed-out caller and a technician login', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
     await withServer(async (base) => {
       expect((await fetch(`${base}/summary`)).status).toBe(401);
       expect((await fetch(`${base}/summary`, { headers: auth('tech') })).status).toBe(403);
@@ -75,25 +74,7 @@ describe('admin portal inbox routes', () => {
     expect(mockService.summary).not.toHaveBeenCalled();
   });
 
-  test('gate off: summary says enabled:false; every other endpoint is 404 enabled:false and reads nothing', async () => {
-    await withServer(async (base) => {
-      const summary = await fetch(`${base}/summary`, { headers: auth('admin') });
-      expect(summary.status).toBe(200);
-      expect(await summary.json()).toEqual({ enabled: false });
-      const list = await fetch(base, { headers: auth('admin') });
-      expect(list.status).toBe(404);
-      expect(await list.json()).toEqual({ enabled: false });
-      const close = await fetch(`${base}/close-older`, { method: 'POST', headers: auth('admin'), body: JSON.stringify({ cutoff: daysAgo(20) }) });
-      expect(close.status).toBe(404);
-      expect(await close.json()).toEqual({ enabled: false });
-    });
-    expect(mockService.summary).not.toHaveBeenCalled();
-    expect(mockService.list).not.toHaveBeenCalled();
-    expect(mockService.closeOlder).not.toHaveBeenCalled();
-  });
-
-  test('gate on: summary and list return the service answer', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('summary and list return the service answer', async () => {
     mockService.summary.mockResolvedValue({ count: 5 });
     const olderItems = [{ kind: 'chat', id: 'esc-old', createdAt: daysAgo(20) }];
     mockService.list.mockResolvedValue({ cutoff: daysAgo(14), items: [], olderItems, older: { chats: 2, requests: 3 } });
@@ -104,8 +85,7 @@ describe('admin portal inbox routes', () => {
     });
   });
 
-  test('gate on: close-older refuses a missing, bad or too recent cutoff and closes nothing', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('close-older refuses a missing, bad or too recent cutoff and closes nothing', async () => {
     await withServer(async (base) => {
       for (const cutoff of [undefined, 'not a date', daysAgo(13), new Date().toISOString()]) {
         const res = await fetch(`${base}/close-older`, { method: 'POST', headers: auth('admin'), body: JSON.stringify({ cutoff }) });
@@ -115,8 +95,7 @@ describe('admin portal inbox routes', () => {
     expect(mockService.closeOlder).not.toHaveBeenCalled();
   });
 
-  test('gate on: close-older passes the cutoff and the actor and answers the counts', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('close-older passes the cutoff and the actor and answers the counts', async () => {
     mockService.closeOlder.mockResolvedValue({ chats: 4, requests: 2 });
     const cutoff = daysAgo(14.5);
     await withServer(async (base) => {
@@ -135,22 +114,18 @@ describe('admin portal inbox routes', () => {
     const REQ = '55555555-5555-4555-8555-555555555555';
     const post = (base, who, body) => fetch(`${base}/reply`, { method: 'POST', headers: auth(who), body: JSON.stringify(body) });
 
-    test('answers 404 while either gate is off, refuses a technician, and calls nothing', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
+    test('answers 404 while GATE_PORTAL_MESSAGES is off, refuses a technician, and calls nothing', async () => {
       await withServer(async (base) => {
         const off = await post(base, 'admin', { kind: 'chat', id: ITEM, body: 'Hi' });
         expect(off.status).toBe(404);
         expect(await off.json()).toEqual({ enabled: false });
         process.env.GATE_PORTAL_MESSAGES = 'true';
         expect((await post(base, 'tech', { kind: 'chat', id: ITEM, body: 'Hi' })).status).toBe(403);
-        delete process.env.GATE_PORTAL_INBOX;
-        expect((await post(base, 'admin', { kind: 'chat', id: ITEM, body: 'Hi' })).status).toBe(404);
       });
       expect(mockStaffReply).not.toHaveBeenCalled();
     });
 
     test('refuses an unknown kind, a bad id or a missing body', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
       await withServer(async (base) => {
         for (const body of [{ kind: 'booking', id: ITEM, body: 'Hi' }, { kind: 'chat', id: 'nope', body: 'Hi' }, { kind: 'chat', id: ITEM }, { kind: 'chat', id: ITEM, body: 'Hi', requestId: 'x' }]) {
@@ -161,7 +136,6 @@ describe('admin portal inbox routes', () => {
     });
 
     test('passes the item, the words, the retry id and the actor, and answers the result; a service refusal keeps its status', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
       const { PortalMessageError } = jest.requireActual('../services/portal-messages');
       mockStaffReply.mockResolvedValueOnce({ message: { id: 'm-1' }, closed: true, notice: { bell: true, pushAccepted: 0, email: 'sent' } });
@@ -186,7 +160,6 @@ describe('admin portal inbox routes', () => {
     const post = (base, who, id, body = { throughId: THROUGH }) => fetch(`${base}/messages/${id}/handled`, { method: 'POST', headers: auth(who), body: JSON.stringify(body) });
 
     test('404 while GATE_PORTAL_MESSAGES is off, 403 for a technician, 400 for a bad id or no throughId', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
       await withServer(async (base) => {
         expect((await post(base, 'admin', THREAD)).status).toBe(404);
         process.env.GATE_PORTAL_MESSAGES = 'true';
@@ -199,7 +172,6 @@ describe('admin portal inbox routes', () => {
     });
 
     test('passes the thread, the message it covers and the actor; answers the outcome, or 404 for an unknown message', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
       mockService.markMessageHandled.mockResolvedValueOnce({ handled: true, open: true }).mockResolvedValueOnce(null);
       await withServer(async (base) => {
@@ -217,7 +189,6 @@ describe('admin portal inbox routes', () => {
     const get = (base, who, path) => fetch(`${base}/messages/${path}`, { headers: auth(who) });
 
     test('404 while GATE_PORTAL_MESSAGES is off, 403 for a technician, 400 for a bad id or page time', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
       await withServer(async (base) => {
         expect((await get(base, 'admin', THREAD)).status).toBe(404);
         process.env.GATE_PORTAL_MESSAGES = 'true';
@@ -229,7 +200,6 @@ describe('admin portal inbox routes', () => {
     });
 
     test('returns the whole thread page, passes a page time as ISO, and keeps a service 404', async () => {
-      process.env.GATE_PORTAL_INBOX = 'true';
       process.env.GATE_PORTAL_MESSAGES = 'true';
       const page = { messages: [{ id: 'm1', direction: 'inbound', body: 'x'.repeat(1900), createdAt: '2026-11-04T20:00:00.000Z', adminUserId: null }], hasMore: false };
       mockStaffThread.mockResolvedValueOnce(page)

@@ -120,17 +120,17 @@
  *     the bell.
  *   - A staff action (a visit a person booked in the admin, a payment a person
  *     recorded, for the text's customer within 24 hours) answers a text.
- * One more carries its OWN three-state gate, so it can run in shadow: a class (`gate`)
- * is not offered at all while its gate is off, except to the re-arm pass, so turning
- * a gate off puts back what it closed; a single reason (a contact rule answering
- * `{ reason, mode }`) is silent while its mode is off and only recorded while it is
- * `shadow`.
- *   - GATE_PORTAL_CHAT_ANSWERED_CLOSE: a portal chat hand-off bell (dedupeKey
+ *   - Portal chat answered (owner 2026-10-31): a portal chat hand-off bell (dedupeKey
  *     `portal-chat-escalation:`, `doneWhen: 'customer_answered'`, a customer id) closes once a
  *     person called back, answered the customer's call, texted or emailed that customer after the
  *     bell's latest event (bellEventAt: a re-rung bell's `rungAt`). The add-a-service chat keeps its
  *     estimate rule, and also closes on this contact. The confirmed-email-change bell
  *     (`portal-chat-email-change:`) is never judged: its answer is the account change.
+ * One more carries its OWN three-state gate, so it can run in shadow: a class (`gate`)
+ * is not offered at all while its gate is off, except to the re-arm pass, so turning
+ * a gate off puts back what it closed; a single reason (a contact rule answering
+ * `{ reason, mode }`) is silent while its mode is off and only recorded while it is
+ * `shadow`.
  *   - Two more portal classes (owner 2026-11-01). A portal request
  *     bell (category `service`, `doneWhen: 'request_answered'`, a request id and a customer id) closes on the
  *     same person contact after the bell as the chat hand-off. An add-service request bell (trigger
@@ -157,7 +157,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { adminAlertRelevanceLive, portalChatAnsweredCloseMode } = require('../config/feature-gates');
+const { adminAlertRelevanceLive } = require('../config/feature-gates');
 // GATE_PROMISE_PHONE_MATCH_CLOSE, read at call time and guarded like the other late-added readers: a test that mocks
 // feature-gates without it reads off.
 const promisePhoneMatchCloseMode = () => require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off';
@@ -335,8 +335,6 @@ function askedAtOf(row, meta = parseMeta(row.metadata)) {
   return stamped && !Number.isNaN(stamped.getTime()) ? stamped : row.created_at;
 }
 
-// The portal chat hand-off classes: the only customer-kind classes behind GATE_PORTAL_CHAT_ANSWERED_CLOSE.
-const PORTAL_CHAT_CLASSES = new Set(['portal_chat_add_service', 'portal_chat_answered']);
 const TEXT_NOTE_CLASS = 'text_note_checked';
 const UNKNOWN_SMS_CLASS = 'unknown_sms';
 const BELL_EVENT_CLASSES = new Set(['lead_contacted', 'portal_chat_add_service', 'portal_chat_answered', 'portal_request_answered', 'customer_quote_form']);
@@ -393,11 +391,6 @@ async function loadContact(rows, data, conn) {
   for (const row of rows) {
     const cls = classify(row);
     if (!cls) continue;
-    // The portal chat contact witnesses (customer kind) are read only while their own gate is on.
-    // (The portal item classes read them under their own gates, GATE_PORTAL_BOOKING_ITEMS for the booking class,
-    // checked above.)
-    // (The text-note class and the portal item classes are not chat classes: they ride on their own gates.)
-    if (PORTAL_CHAT_CLASSES.has(cls.key) && portalChatAnsweredCloseMode() === 'off') continue;
     const refs = cls.contact ? contactRefs(cls.contact, row, data, cls) : null;
     if (!refs) continue;
     // A lead_contacted or portal chat bell can be refreshed and rung again: its boundary is its latest event. An
@@ -1155,19 +1148,11 @@ function personContactReason(c) {
   if (contactAfter(c, c.replyAt)) return 'Answered by email';
   return null;
 }
-// A portal chat hand-off (GATE_PORTAL_CHAT_ANSWERED_CLOSE; owner 2026-10-31: "a chat item closes itself
+// A portal chat hand-off (owner 2026-10-31: "a chat item closes itself
 // when someone texts, calls or emails that customer after the request"): a person called back, answered
 // the customer's call, texted or emailed that customer after the bell's latest event (the witnesses'
-// anchor, bellEventAt). Answered with the gate's own mode (judge). No visit or estimate reason here: the add-a-service chat keeps its
-// estimate rule beside it.
-function portalChatAnswered(s) {
-  const c = s.contact;
-  if (!c) return null;
-  const mode = portalChatAnsweredCloseMode();
-  if (mode === 'off') return null;
-  const reason = personContactReason(c);
-  return reason ? { reason, mode } : null;
-}
+// anchor, bellEventAt). It is portalItemAnswered below. No visit or estimate reason here: the add-a-service
+// chat keeps its estimate rule beside it.
 // A current or past customer's quote-form bell (lead-webhook.js ringCustomerQuoteFormAlert,
 // GATE_CURRENT_CUSTOMER_QUOTE_TEXT): closed once a person reached that customer after the latest form, by the shared
 // customer-kind witnesses (personContactReason). A booked visit or a quote alone never closes it: a customer's own plan
@@ -1296,12 +1281,12 @@ const CLASSES = [
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
-    // Also closed by a person's contact after the bell (GATE_PORTAL_CHAT_ANSWERED_CLOSE, own mode).
-    contact: 'customer', contactRule: portalChatAnswered,
+    // Also closed by a person's contact after the bell.
+    contact: 'customer', contactRule: portalItemAnswered,
   },
   { // the same hand-off for every other topic: closed only by a person's contact (add_service matched above)
     key: 'portal_chat_answered', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAnswerableChat,
-    gate: portalChatAnsweredCloseMode, contact: 'customer', contactRule: portalChatAnswered,
+    contact: 'customer', contactRule: portalItemAnswered,
   },
   { // requests.js POST /api/requests — a customer's request from the app. Closed by a
     // person's contact with that customer after the bell, like a chat hand-off; its request row is resolved quietly.
@@ -1733,7 +1718,7 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   if (retired) logger.info(`[alert-relevance] retired ${retired} of ${scanned} unread alert(s): ${JSON.stringify(byClass)}`);
   if (rearmed) logger.info(`[alert-relevance] put back ${rearmed} alert(s) whose subject is relevant again`);
   if (wouldClose) logger.info(`[alert-relevance] shadow: recorded ${wouldClose} alert(s) the customer-contact rules would close`);
-  const anyShadow = [portalChatAnsweredCloseMode, promisePhoneMatchCloseMode].some((mode) => mode() === 'shadow');
+  const anyShadow = promisePhoneMatchCloseMode() === 'shadow';
   const lateReRung = await lateReRingPass(now);
   const estimateReRung = await estimateReRingPass(now);
   const bookingsRaised = await unfinishedBookingsPass(now);

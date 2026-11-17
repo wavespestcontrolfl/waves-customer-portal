@@ -1143,10 +1143,9 @@ function senderOwnsCustomerFacts(email, customer) {
   return hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address), { strict: true });
 }
 
-// GATE_EMAIL_DRAFT_FACTS (owner 2026-11-02): two SYSTEM entries, or none. The facts are computed from our records for
-// the address-matched customer; the rules tell the model to use them. Empty facts or a dark gate add nothing.
+// Draft facts (owner 2026-11-02): two SYSTEM entries, or none. The facts are computed from our records for
+// the address-matched customer; the rules tell the model to use them. Empty facts add nothing.
 async function draftFactsSystemEntries(email, customer) {
-  if (!require('../../config/feature-gates').emailDraftFactsLive()) return [];
   if (!customer || !senderOwnsCustomerFacts(email, customer)) return [];
   const facts = await require('./email-draft-facts').buildEmailDraftFacts({ customer, receivedAt: email.received_at });
   if (!facts) return [];
@@ -1257,8 +1256,8 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     // in the SYSTEM channel. Sanitized to name characters either way.
     const firstName = String(customer?.first_name || '')
       .replace(/[^A-Za-z' -]/g, '').trim().slice(0, 40) || 'there';
-    // GATE_EMAIL_DRAFT_FACTS: facts from our own records (address-matched customer only) ride the SYSTEM
-    // channel, so the model writes sentences around them instead of leaving blanks. Off = prompt unchanged.
+    // Facts from our own records (address-matched customer only) ride the SYSTEM
+    // channel, so the model writes sentences around them instead of leaving blanks.
     const factsSystem = await draftFactsSystemEntries(email, customer);
     // Constraints ride the SYSTEM channel; the attacker-controlled message
     // rides user-priority text only — inbound email must never be able to

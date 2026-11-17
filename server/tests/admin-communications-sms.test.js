@@ -187,15 +187,13 @@ jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => fa
   gates: {},
   logGateStatus: jest.fn(),
 }));
-// GATE_SMS_LIKE: the like route's database steps are stubbed (their SQL has
+// The like route's database steps are stubbed (their SQL has
 // its own Postgres suite, sms-office-like-postgres.test.js); its rules
-// (likeRefusal, the client fields) stay real. Off by default.
-const mockLikes = { live: false };
+// (likeRefusal, the client fields) stay real.
 jest.mock('../services/sms-office-like', () => {
   const real = jest.requireActual('../services/sms-office-like');
   return {
     ...real,
-    likesLive: jest.fn(() => mockLikes.live),
     loadLikeTarget: jest.fn(async () => null),
     newerThreadMessageExists: jest.fn(async () => false),
     claimOfficeLike: jest.fn(async () => null),
@@ -2555,10 +2553,8 @@ describe('admin communications SMS route', () => {
       });
       expect(body.messages[0]).not.toHaveProperty('metadata');
       expect(body.messages[0]).not.toHaveProperty('responseNeedsResponse');
-      // GATE_SMS_LIKE off: byte-identical, no like fields.
-      expect(body.messages[0]).not.toHaveProperty('officeLike');
-      expect(body.messages[0]).not.toHaveProperty('customerReaction');
-      expect(body).not.toHaveProperty('smsLike');
+      // An inbound text carries the like fields, empty here.
+      expect(body.messages[0]).toMatchObject({ officeLike: null, customerReaction: null });
       expect(body).toMatchObject({
         page: 1,
         limit: 500,
@@ -4330,9 +4326,9 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
   });
 });
 
-// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button" option B): the office's
+// Owner 2026-11-02, "SMS Like Button" option B: the office's
 // like texts a thumbs-up back through the composer's own send handler.
-describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
+describe('POST /messages/:id/like', () => {
   const officeLike = require('../services/sms-office-like');
   const MESSAGE_ID = 'bbbbbbbb-2222-4222-8222-222222222222';
   const target = (overrides = {}) => ({
@@ -4359,24 +4355,10 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
     jest.clearAllMocks();
     db.mockReset();
     db.mockImplementation(() => makeUniversalBuilder());
-    mockLikes.live = true;
     officeLike.loadLikeTarget.mockResolvedValue(target());
     officeLike.newerThreadMessageExists.mockResolvedValue(false);
     officeLike.claimOfficeLike.mockResolvedValue(claim);
   });
-  afterAll(() => { mockLikes.live = false; });
-
-  test('gate off: 404 before any read or write', async () => {
-    mockLikes.live = false;
-    await withServer(async (baseUrl) => {
-      const res = await like(baseUrl);
-      expect(res.status).toBe(404);
-    });
-    expect(officeLike.loadLikeTarget).not.toHaveBeenCalled();
-    expect(officeLike.claimOfficeLike).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  });
-
   test('a like sends one thumbs-up through the composer send, then marks the text sent', async () => {
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-like' });
     await withServer(async (baseUrl) => {
@@ -4539,7 +4521,7 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('gate on: the log carries the office like and customer likes, without the claim token', async () => {
+  test('the log carries the office like and customer likes, without the claim token', async () => {
     db.mockReturnValue(makeQueryBuilder([
       smsMessageRow({ id: 'in-1', body: 'Thanks!', metadata: { office_like: { ...claim, status: 'sent' } } }),
       smsMessageRow({ id: 'in-2', body: 'Liked \u201cSee you Tuesday\u201d', message_type: 'sms_reaction' }),
@@ -4549,7 +4531,6 @@ describe('POST /messages/:id/like (GATE_SMS_LIKE)', () => {
       const res = await fetch(`${baseUrl}/admin/communications/log`, { headers: { Authorization: 'Bearer admin' } });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(body.smsLike).toBe(true);
       expect(body.messages[0].officeLike).toEqual({ status: 'sent', by: 'Adam', at: claim.at });
       expect(JSON.stringify(body)).not.toContain('tok-1');
       expect(body.messages[1].customerReaction).toEqual({ emoji: '\u{1F44D}', removed: false, target: 'See you Tuesday' });

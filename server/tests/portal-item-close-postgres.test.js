@@ -31,9 +31,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
     relevance = require('../services/admin-alert-relevance');
     portalInbox = require('../services/portal-inbox');
   });
-  afterEach(() => {
-    for (const key of ['GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'GATE_PORTAL_INBOX']) delete process.env[key];
-  });
   afterAll(async () => {
     for (const table of ['notifications', 'sms_log', 'call_log', 'emails', 'estimates', 'service_requests', 'customers']) {
       if (made[table].length) await db(table).whereIn('id', made[table]).del();
@@ -150,8 +147,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       expect([row.status, row.admin_notes]).toEqual(['resolved', 'Estimate sent']);
       expect(await state(nested)).toBeNull();
 
-      // Mark handled (GATE_PORTAL_INBOX) finds the bell by metadata->>'requestId' once it is on top, and not before.
-      process.env.GATE_PORTAL_INBOX = 'true';
+      // Mark handled finds the bell by metadata->>'requestId' once it is on top, and not before.
       const second = await requestRow(customer, { category: 'add_service', requested_service: 'lawn', source: 'service_report' });
       const fresh = await bundleBell(customer, second, mins(now, -10));
       const stale = await bell({ category: 'estimate', created_at: mins(now, -10),
@@ -379,7 +375,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await staffText(customer, mins(ASK, 20));
       await staffText(other, mins(ASK, 25));
       await insert('estimates', { status: 'accepted', customer_id: addCustomer.id, estimate_data: deliveredFor(mins(ASK, 30)) });
-      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
       const result = await sweep(mins(AFTER_DUE, 30));
       expect(result.lateReRung).toBeUndefined();
       expect(await state(asked)).toEqual(['relevance', 'Answered by text']);
@@ -389,7 +384,7 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       expect((await getRequest(addRequest.id)).status).toBe('resolved');
     }, 60000);
 
-    test('a reply AFTER the ask but before the re-ring does not block closing later; one before the ask never does (chat bell, close gates on, re-ring first)', async () => {
+    test('a reply AFTER the ask but before the re-ring does not block closing later; one before the ask never does (chat bell, re-ring first)', async () => {
       const customer = await customerWith();
       const early = await customerWith();
       const replied = await chatBell(customer, ASK);
@@ -397,7 +392,6 @@ maybeDescribe('portal item close and late re-ring (live Postgres)', () => {
       await sweep(AFTER_DUE);
       await staffText(customer, mins(ASK, 40));
       await staffText(early, mins(ASK, -40));
-      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
       await sweep(mins(AFTER_DUE, 30));
       expect(await state(replied)).toEqual(['relevance', 'Answered by text']);
       expect(await state(before)).toBeNull();

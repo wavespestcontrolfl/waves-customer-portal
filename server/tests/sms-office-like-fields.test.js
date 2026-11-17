@@ -1,9 +1,9 @@
 const { likeFieldsForClient } = require('../services/sms-office-like');
 
-// GATE_SMS_LIKE: only a quiet reaction (stored as 'sms_reaction', no alert) is
+// Only a quiet reaction (stored as 'sms_reaction', no alert) is
 // folded into a line on our text. A loud one stays a normal bubble.
 const LOVED = 'Loved “See you Tuesday”';
-const base = { on: true, direction: 'inbound', body: LOVED, metadata: {} };
+const base = { direction: 'inbound', body: LOVED, metadata: {} };
 
 describe('likeFieldsForClient customerReaction', () => {
   test('a quiet reaction row carries the reaction', () => {
@@ -23,10 +23,9 @@ describe('likeFieldsForClient customerReaction', () => {
     expect(likeFieldsForClient({ ...base, messageType: null }).customerReaction).toBeNull();
   });
 
-  test('officeLike and likeable are unchanged, and the gate, channel and direction rules hold', () => {
+  test('officeLike and likeable are unchanged, and the channel and direction rules hold', () => {
     const loud = likeFieldsForClient({ ...base, body: 'Thanks!', messageType: undefined });
     expect(loud).toEqual({ officeLike: null, customerReaction: null, likeable: true });
-    expect(likeFieldsForClient({ ...base, on: false, messageType: 'sms_reaction' })).toEqual({});
     expect(likeFieldsForClient({ ...base, channel: 'voice', messageType: 'sms_reaction' })).toEqual({});
     expect(likeFieldsForClient({ ...base, direction: 'outbound', messageType: 'sms_reaction' }))
       .toEqual({ officeLike: null, customerReaction: null, likeable: false });

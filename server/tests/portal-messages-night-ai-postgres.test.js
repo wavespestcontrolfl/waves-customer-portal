@@ -49,7 +49,7 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
   const ids = { customers: [], visits: [] };
   const NIGHT = 23;
   const DAY = 10;
-  const GATES = ['GATE_PORTAL_MESSAGES', 'GATE_PORTAL_INBOX', 'GATE_PORTAL_MESSAGES_NIGHT_AI'];
+  const GATES = ['GATE_PORTAL_MESSAGES', 'GATE_PORTAL_MESSAGES_NIGHT_AI'];
   let db;
   let PortalMessages;
   let PortalInbox;
@@ -233,11 +233,10 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
     expect(staff.map((m) => [m.direction, m.ai === true])).toEqual([['inbound', false], ['outbound', true], ['outbound', false]]);
   }, 60000);
 
-  test('between 8 AM and 8 PM, with the gate off, or with an input gate off, nothing changes: no model call, no extra row, no session', async () => {
+  test('between 8 AM and 8 PM, or with the gate off, nothing changes: no model call, no extra row, no session', async () => {
     const cases = [
       ['daytime', () => {}, DAY],
       ['gate off', () => { delete process.env.GATE_PORTAL_MESSAGES_NIGHT_AI; }, NIGHT],
-      ['portal inbox off', () => { process.env.GATE_PORTAL_INBOX = 'false'; }, NIGHT],
     ];
     for (const [label, arrange, hour] of cases) {
       arrange();

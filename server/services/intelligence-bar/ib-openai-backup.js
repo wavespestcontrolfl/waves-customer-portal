@@ -103,7 +103,7 @@ function withoutThinking(messages) {
 }
 
 function backupRequestState({ tools: liveTools, messages: liveMessages, pendingTools = [], context, actionScope }) {
-  // The backup knows no tool_addition (GATE_IB_TOOL_ADDITIONS): the tools those
+  // The backup knows no tool_addition: the tools those
   // messages offered, and the ones still waiting for the next round, go back
   // into `tools`, and the messages leave the history (tool-additions.js).
   const { tools, messages } = ToolAdditions.foldAdditions({ tools: liveTools, messages: liveMessages, pending: pendingTools });

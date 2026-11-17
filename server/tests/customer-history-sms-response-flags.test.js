@@ -23,12 +23,11 @@ test('customer comms exposes narrow SMS response flags without raw metadata', ()
     responseIsAnswer: false,
   });
   expect(mapped).not.toHaveProperty('metadata');
-  // GATE_SMS_LIKE off (the default): no like fields.
-  expect(mapped).not.toHaveProperty('officeLike');
-  expect(mapped).not.toHaveProperty('customerReaction');
+  // An inbound text carries the like fields, empty here.
+  expect(mapped).toMatchObject({ officeLike: null });
 });
 
-test('GATE_SMS_LIKE on: an SMS carries the office like and a customer like, never the claim token', () => {
+test('an SMS carries the office like and a customer like, never the claim token', () => {
   const row = (overrides) => ({
     conversation_id: 'conversation-1', channel: 'sms', direction: 'inbound', media: [],
     created_at: new Date('2026-11-02T16:15:00Z'), ...overrides,
@@ -36,20 +35,20 @@ test('GATE_SMS_LIKE on: an SMS carries the office like and a customer like, neve
   const liked = mapCommsMessage(row({
     id: 'message-liked', body: 'Thanks, see you Tuesday!',
     metadata: { office_like: { status: 'sent', token: 'secret-token', by_name: 'Adam', at: '2026-11-02T16:16:00.000Z' } },
-  }), { phone: '+19415550100' }, null, true);
+  }), { phone: '+19415550100' }, null);
   expect(liked.officeLike).toEqual({ status: 'sent', by: 'Adam', at: '2026-11-02T16:16:00.000Z' });
   expect(JSON.stringify(liked)).not.toContain('secret-token');
 
-  const reaction = mapCommsMessage(row({ id: 'message-reaction', body: 'Loved \u201cSee you Tuesday\u201d', message_type: 'sms_reaction', metadata: {} }), { phone: '+19415550100' }, null, true);
+  const reaction = mapCommsMessage(row({ id: 'message-reaction', body: 'Loved \u201cSee you Tuesday\u201d', message_type: 'sms_reaction', metadata: {} }), { phone: '+19415550100' }, null);
   expect(reaction).toMatchObject({ officeLike: null, customerReaction: { emoji: '\u2764\uFE0F', removed: false, target: 'See you Tuesday' } });
 
   // A like that raised an alert (an ordinary inbound text) or a row with no type stays a bubble.
-  const loud = mapCommsMessage(row({ id: 'message-loud', body: 'Liked \u201cCan we move Tuesday?\u201d', message_type: 'inbound', metadata: {} }), { phone: '+19415550100' }, null, true);
+  const loud = mapCommsMessage(row({ id: 'message-loud', body: 'Liked \u201cCan we move Tuesday?\u201d', message_type: 'inbound', metadata: {} }), { phone: '+19415550100' }, null);
   expect(loud.customerReaction).toBeNull();
-  const untyped = mapCommsMessage(row({ id: 'message-untyped', body: 'Loved \u201cSee you Tuesday\u201d', metadata: {} }), { phone: '+19415550100' }, null, true);
+  const untyped = mapCommsMessage(row({ id: 'message-untyped', body: 'Loved \u201cSee you Tuesday\u201d', metadata: {} }), { phone: '+19415550100' }, null);
   expect(untyped.customerReaction).toBeNull();
 
-  const call = mapCommsMessage(row({ id: 'call-1', channel: 'voice', body: 'Liked \u201cx\u201d', metadata: {} }), { phone: '+19415550100' }, null, true);
+  const call = mapCommsMessage(row({ id: 'call-1', channel: 'voice', body: 'Liked \u201cx\u201d', metadata: {} }), { phone: '+19415550100' }, null);
   expect(call).not.toHaveProperty('customerReaction');
 });
 

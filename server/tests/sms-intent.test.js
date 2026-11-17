@@ -287,7 +287,7 @@ describe('courtesy tail (owner 2026-10-29): closer + short sign-off', () => {
   });
 });
 
-// GATE_SMS_LIKE badge extra (owner 2026-11-02): only the like family becomes a
+// SMS like badge extra (owner 2026-11-02): only the like family becomes a
 // badge on our quoted text; every other reaction stays a bubble (null).
 describe('customerLikeReaction — the like family, with the text it quotes', () => {
   const THUMB = '\u{1F44D}';

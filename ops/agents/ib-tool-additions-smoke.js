@@ -3,7 +3,7 @@
  * ib-tool-additions-smoke.js — READ-ONLY, FREE
  *
  * One live check of the Intelligence Bar's tool-addition request shape
- * (GATE_IB_TOOL_ADDITIONS, server/services/intelligence-bar/tool-additions.js).
+ * (server/services/intelligence-bar/tool-additions.js).
  * It uses Anthropic's token counting endpoint only (messages.countTokens),
  * which is free and runs no model, so nothing is generated and nothing is
  * billed. It writes nothing: no database, no customer data, no gate flips.

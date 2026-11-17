@@ -1,5 +1,5 @@
 /**
- * GATE_IB_TOOL_ADDITIONS helpers (tool-additions.js) and the OpenAI backup's
+ * Tool additions helpers (tool-additions.js) and the OpenAI backup's
  * fold of them (ib-openai-backup.js backupRequestState). The route-level
  * request shapes are in admin-intelligence-bar-tool-additions.test.js.
  */
@@ -12,12 +12,8 @@ const call = { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', n
 const question = { role: 'user', content: [{ type: 'text', text: 'q' }] };
 
 describe('toolAdditionsWanted', () => {
-  afterEach(() => { delete process.env.GATE_IB_TOOL_ADDITIONS; });
-
-  test('needs the gate, the platform path, no tool search and a model that takes additions', () => {
+  test('needs the platform path, no tool search and a model that takes additions', () => {
     const base = { platformEnabled: true, toolSearch: false, model: 'claude-opus-5-5' };
-    expect(ToolAdditions.toolAdditionsWanted(base)).toBe(false);
-    process.env.GATE_IB_TOOL_ADDITIONS = 'true';
     expect(ToolAdditions.toolAdditionsWanted(base)).toBe(true);
     expect(ToolAdditions.toolAdditionsWanted({ ...base, platformEnabled: false })).toBe(false);
     expect(ToolAdditions.toolAdditionsWanted({ ...base, toolSearch: true })).toBe(false);
@@ -25,16 +21,6 @@ describe('toolAdditionsWanted', () => {
     for (const model of ['claude-sonnet-5', 'claude-mythos-preview', 'test-model', 'claude-opus-5-5-20260101', undefined]) {
       expect(ToolAdditions.toolAdditionsWanted({ ...base, model })).toBe(false);
     }
-    process.env.GATE_IB_TOOL_ADDITIONS = 'TRUE';
-    expect(ToolAdditions.toolAdditionsWanted(base)).toBe(false);
-  });
-
-  test('a resume whose saved history holds an addition keeps the path with the gate off, on a model that takes it', () => {
-    const saved = [question, call, results, ToolAdditions.additionMessage([tool('cancel_plan')])];
-    const base = { platformEnabled: true, toolSearch: false, model: 'claude-opus-5-5' };
-    expect(ToolAdditions.toolAdditionsWanted({ ...base, saved })).toBe(true);
-    expect(ToolAdditions.toolAdditionsWanted({ ...base, saved: [question, call, results] })).toBe(false);
-    expect(ToolAdditions.toolAdditionsWanted({ ...base, saved, model: 'claude-sonnet-5' })).toBe(false);
   });
 });
 

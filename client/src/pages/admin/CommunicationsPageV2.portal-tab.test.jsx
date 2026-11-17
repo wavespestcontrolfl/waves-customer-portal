@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Portal tab (GATE_PORTAL_INBOX, owner 2026-10-31): the tab shows only when the
-// owner's one-time summary read says enabled, with the open count in its label.
+// Portal tab (owner 2026-10-31): the tab always shows for the owner, with the
+// open count from the one-time summary read in its label.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -49,22 +49,14 @@ function mount(role, entry = "/admin/communications") {
 const summaryCalls = () => fetch.mock.calls.filter(([url]) => String(url).includes("/admin/portal-inbox/summary"));
 
 describe("Communications Portal tab", () => {
-  it("is hidden when the summary says the gate is off", async () => {
-    summary = { enabled: false };
-    mount("admin");
-    await screen.findByText("Synthetic customer text");
-    await waitFor(() => expect(summaryCalls()).toHaveLength(1));
-    expect(screen.queryByRole("button", { name: /^Portal/ })).not.toBeInTheDocument();
-  });
-
-  it("shows with the open count in its label, right after Triage, when the gate is on", async () => {
+  it("shows with the open count in its label, right after Triage", async () => {
     mount("admin");
     const tab = await screen.findByRole("button", { name: "Portal (5)" });
     expect(tab.previousElementSibling).toHaveTextContent("Triage");
     expect(summaryCalls()).toHaveLength(1);
   });
 
-  it("lands on the Portal tab from a #tab=portal deep link once the summary arrives, and the label follows the list", async () => {
+  it("lands on the Portal tab from a #tab=portal deep link, and the label follows the list", async () => {
     // MemoryRouter does not write window.location, which the page's hash sync reads.
     window.location.hash = "#tab=portal";
     mount("admin", "/admin/communications#tab=portal");
@@ -99,7 +91,7 @@ describe("Communications Portal tab", () => {
     expect(screen.queryByRole("button", { name: /^Portal/ })).not.toBeInTheDocument();
   });
 
-  it("stays hidden when the summary cannot be read", async () => {
+  it("shows with no count when the summary cannot be read", async () => {
     fetch.mockImplementation(async (url) => {
       const path = new URL(String(url), "http://localhost").pathname;
       if (path.endsWith("/admin/portal-inbox/summary")) return new Response("{}", { status: 500 });
@@ -107,6 +99,6 @@ describe("Communications Portal tab", () => {
     });
     mount("admin");
     await waitFor(() => expect(summaryCalls()).toHaveLength(1));
-    expect(screen.queryByRole("button", { name: /^Portal/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Portal" })).toBeInTheDocument();
   });
 });

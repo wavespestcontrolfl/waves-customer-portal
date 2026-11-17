@@ -7,7 +7,7 @@
  * witnesses as SQL: the Messages reader, a person's text and call, a visit, a
  * quote, a person's email reply), the voicemail rule (a visit that ran after a
  * voicemail), the lead_contacted Leads bells, a portal chat hand-off bell answered by
- * a person (GATE_PORTAL_CHAT_ANSWERED_CLOSE, its own gate), and a staff action (a visit a
+ * a person, and a staff action (a visit a
  * person booked, or a payment a person recorded) answering a text: the alert witness
  * and the Messages reader. The rules themselves are covered by admin-alert-relevance.test.js.
  */
@@ -26,9 +26,6 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
   beforeAll(() => {
     db = require('../models/db');
     relevance = require('../services/admin-alert-relevance');
-  });
-  afterEach(() => {
-    delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
   });
   afterAll(async () => {
     if (made.notifications.length) await db('audit_log').where({ resource_type: 'notification' }).whereIn('resource_id', made.notifications).del();
@@ -950,7 +947,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect(await state(never)).toEqual(['relevance', 'Lead was contacted']);
     }, 30000);
 
-    test('portal chat hand-off bells (GATE_PORTAL_CHAT_ANSWERED_CLOSE): a person\'s text, call or Gmail send to that customer AFTER the bell (or its re-ring) closes it; contact before, a send to someone else, the email-change bell, and the gate off do not', async () => {
+    test('portal chat hand-off bells: a person\'s text, call or Gmail send to that customer AFTER the bell (or its re-ring) closes it; contact before, a send to someone else, and the email-change bell do not', async () => {
       const now = new Date();
       const bellAt = mins(now, -300);
       const rungAt = mins(now, -120);
@@ -985,30 +982,13 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       await staffText(reRung.customer, reRung.phone, mins(bellAt, 20)); // between the first ring and the re-ring
       await staffText(emailChange.customer, emailChange.phone, mins(bellAt, 20));
       const state = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
-      const all = [texted, called, addService, emailed, emailedBefore, emailedElsewhere, textedBefore, reRung, emailChange, untouched];
 
-      // The new gate off (the contact gate true): not judged, and the add-a-service chat keeps only its estimate rule.
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
-      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'shadow';
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
-      expect((await wouldClose(texted.row.id))[0].metadata).toMatchObject({ class: 'portal_chat_answered', reason: 'Answered by text' });
-      expect((await wouldClose(addService.row.id))[0].metadata).toMatchObject({ class: 'portal_chat_add_service', reason: 'A person called back' });
-      expect(await wouldClose(emailChange.row.id)).toHaveLength(0);
-
-      process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = 'true';
       await sweep();
       expect(await state(texted)).toEqual(['relevance', 'Answered by text']);
       expect(await state(called)).toEqual(['relevance', 'A person called back']);
       expect(await state(addService)).toEqual(['relevance', 'A person called back']);
       expect(await state(emailed)).toEqual(['relevance', 'Answered by email']);
       for (const open of [emailedBefore, emailedElsewhere, textedBefore, reRung, emailChange, untouched]) expect(await state(open)).toBeNull();
-
-      // Rollback: the gate off puts back, unread, what it closed.
-      delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
-      await sweep();
-      for (const c of all) expect(await state(c)).toBeNull();
     }, 30000);
 
     test('current-customer quote-form bells (GATE_CURRENT_CUSTOMER_QUOTE_TEXT): a person\'s text or call back to that customer after the latest form closes it; contact before that form and no contact do not', async () => {

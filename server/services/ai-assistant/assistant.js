@@ -459,14 +459,13 @@ RULES:
 - If the customer is frustrated, acknowledge it before solving
 - End with an offer to help with anything else`;
 
-// How the team's answer reaches a portal chat customer. With the Portal tab and portal messages both on
-// (GATE_PORTAL_INBOX, GATE_PORTAL_MESSAGES) the office can answer a hand-off inside the portal and the
-// customer reads it on their Messages page, so the reply names that page first (owner 2026-11-12). Either
-// one off: text or email, as before. Read at call time. Every portal chat session is an account holder's
+// How the team's answer reaches a portal chat customer. With portal messages on (GATE_PORTAL_MESSAGES) the
+// office can answer a hand-off inside the portal and the customer reads it on their Messages page, so the
+// reply names that page first (owner 2026-11-12). Off: text or email, as before. Read at call time. Every portal chat session is an account holder's
 // (a contact session cannot reach the chat), and those are the sessions that have the Messages page.
 function teamReplyChannels() {
   const gates = require('../../config/feature-gates');
-  return gates.portalInboxLive?.() && gates.portalMessagesLive?.()
+  return gates.portalMessagesLive?.()
     ? 'on your Messages page here, or by text or email'
     : 'by text or email';
 }

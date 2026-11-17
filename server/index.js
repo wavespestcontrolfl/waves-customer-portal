@@ -264,16 +264,6 @@ app.use('/api/public/watering-plan', (req, res, next) => {
   }
   next();
 });
-// Public Pest Pressure Index (routes/public-pest-pressure-index.js): same dark-gate
-// shape as the watering plan above. While GATE_PUBLIC_PEST_PRESSURE_INDEX is dark
-// EVERY request to the path, any method, gets the generic 404 here, BEFORE the
-// wildcard CORS handler, the global /api/ limiter and the route's own limiter.
-app.use('/api/public/pest-pressure-index', (req, res, next) => {
-  if (!require('./config/feature-gates').publicPestPressureIndexLive()) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  next();
-});
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an

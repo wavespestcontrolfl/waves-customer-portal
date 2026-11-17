@@ -214,8 +214,8 @@ router.patch('/:id', async (req, res, next) => {
       return res.json({ request: current, statusChanged: false });
     }
 
-    // GATE_PORTAL_INBOX: the writer that won the move to resolved also closes
-    // this request's open admin bell alerts (a no-op while the gate is off).
+    // The writer that won the move to resolved also closes this request's
+    // open admin bell alerts.
     await closeRequestAlertsOnResolve(updated, statusChanged, { technicianId: req.technicianId, role: req.techRole });
 
     // measurement_review rows (the estimate "does the lawn size look off?"

@@ -5,7 +5,7 @@ import { Badge, Button } from "../ui";
 import { formatETTime } from "../../lib/timezone";
 import { sendOfficeLike } from "../../lib/smsLikes";
 
-// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button"): the like button under a
+// Owner 2026-11-02, "SMS Like Button": the like button under a
 // customer's newest text, the badge that shows who liked it, and the lines for
 // customer likes on our texts. Used by Messages and the Customer 360 thread.
 
