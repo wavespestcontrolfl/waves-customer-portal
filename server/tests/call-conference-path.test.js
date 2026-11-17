@@ -35,6 +35,8 @@ function fakeCallLog(metadata = {}, { exists = true, status = 'in-progress' } = 
     if (m) return (row.metadata?.conference_path != null) === Boolean(m[1]);
     m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) IS (NOT )?NULL$/);
     if (m) return (at(row.metadata, m[1].split(',')) != null) === Boolean(m[2]);
+    m = sql.match(/^\(metadata #>> '\{([^}]*)\}'\) = '([^']*)'$/);
+    if (m) return String(at(row.metadata, m[1].split(','))) === m[2];
     m = sql.match(/^\(status IS NULL OR status NOT IN \((.*)\)\)$/);
     if (m) return row.status == null || !m[1].split(', ').map((s) => s.replace(/'/g, '')).includes(row.status);
     throw new Error(`unknown condition: ${sql}`);
@@ -344,6 +346,17 @@ describe('the winning staff call ends during a star-key hold', () => {
     expect(await ended()).toBe('hold_voicemail_pending');
     expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('not_needed while a press 1 holds the return claim (hold still open): the staff_left stamp is written and nothing else is touched', async () => {
+    const row = fakeCallLog(held({ open: true, return_at: '2026-11-17T15:00:00Z' }));
+    callHold.startHoldVoicemail.mockResolvedValue('not_needed');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('hold_voicemail_pending');
+    expect(row.metadata.conference_path.hold).toMatchObject({ open: true, voicemail_pending: 'staff_left' });
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(log.roomUpdates).toEqual([]);
     expect(log.updates).toEqual([]);
   });

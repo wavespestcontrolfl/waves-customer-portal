@@ -22,6 +22,12 @@
  * (the Twilio call failed and its release write failed too) and no longer blocks either transition. A star
  * that finds an open claim WITH a return_at knows the unhold went through (the staff are back in the room)
  * and only the close write was lost: it closes that claim and starts a fresh hold.
+ * The staff phone hanging up (call-conference-path onWinnerLegEnded) while a press 1 holds the return claim stamps
+ * hold.voicemail_pending = 'staff_left' in a write conditional on the hold still being open. The press 1 then
+ * closes its claim only while voicemail_pending is null, so exactly one of two things happens: the close wins (the
+ * staff rejoined, today's room end runs when they hang up) or the stamp wins (the staff are gone, the caller was
+ * unheld, and endHold runs the staff_left voicemail itself; if that fails it puts the caller back on hold so the
+ * hold script's next fetch retries).
  * No function here throws to the route; logs carry masked SIDs and error codes only.
  */
 
@@ -38,6 +44,8 @@ const HOLD_OPEN_SQL = "(metadata #>> '{conference_path,hold,open}') = 'true'";
 const HOLD_NOT_OPEN_SQL = "COALESCE(metadata #>> '{conference_path,hold,open}', 'false') <> 'true'";
 const HOLD_NO_VOICEMAIL_SQL = "(metadata #>> '{conference_path,hold,voicemail_at}') IS NULL";
 const RETURN_AT_PATH = "metadata #>> '{conference_path,hold,return_at}'";
+const PENDING_PATH = "metadata #>> '{conference_path,hold,voicemail_pending}'";
+const HOLD_NO_PENDING_SQL = `(${PENDING_PATH}) IS NULL`;
 // A hold open this long is told to the staff phone (reminder) and sent to voicemail (limit). Owner-approved.
 const HOLD_REMINDER_SEC = 180;
 const HOLD_LIMIT_SEC = 300;
@@ -102,8 +110,10 @@ const secondsSince = (iso) => Math.max(0, Math.round((Date.now() - Date.parse(is
 // A return claim another request is still working on. A stale one (its request is gone) blocks nothing.
 const returnInFlight = (hold) => Boolean(hold.return_at) && secondsSince(hold.return_at) < RETURN_CLAIM_STALE_SEC;
 // SQL twin of returnInFlight: no return_at, or one older than the stale limit (ISO strings sort by time).
-const returnFreeCondition = () => ({
-  sql: `COALESCE(${RETURN_AT_PATH}, '') < ?`,
+// `orStaffLeft` (the voicemail claim): a pending staff_left reason means the staff phone is gone, so a press 1 still
+// in flight is moot and no longer blocks the voicemail (see claimReturn and the close in endHold).
+const returnFreeCondition = ({ orStaffLeft = false } = {}) => ({
+  sql: orStaffLeft ? `(COALESCE(${RETURN_AT_PATH}, '') < ? OR (${PENDING_PATH}) IS NOT NULL)` : `COALESCE(${RETURN_AT_PATH}, '') < ?`,
   bindings: [new Date(Date.now() - RETURN_CLAIM_STALE_SEC * 1000).toISOString()],
 });
 
@@ -141,6 +151,12 @@ async function claimHold(callSid, { by, legSid }) {
 const releaseClaim = (callSid, prev) => writeHold(callSid, { ...prev, open: false }, [HAS_STATE_SQL, HOLD_OPEN_SQL])
   .catch((err) => logger.warn(`[call-hold] claim not released for ${masked(callSid)} (${errorCode(err)})`));
 
+const holdParticipant = (callSid, roomSid) => client().conferences(roomSid).participants(callSid).update({
+  hold: true,
+  holdUrl: publicUrl(`${WEBHOOK_BASE}/conference-hold-facts?parent=${encodeURIComponent(callSid)}&step=0`),
+  holdMethod: 'POST',
+});
+
 // A star that finds an open claim with a return_at: the earlier press 1 took the caller off hold (the staff
 // are in the room again) and only its close write was lost, or the unhold failed and the release write was
 // lost. Either way that claim is not a hold applied now: close it so this star can start a fresh one. (A REST
@@ -169,11 +185,7 @@ async function startHold(callSid, { by = 'star', legSid = null } = {}) {
       await releaseClaim(callSid, claim.prev);
       return 'no_room';
     }
-    await client().conferences(roomSid).participants(callSid).update({
-      hold: true,
-      holdUrl: publicUrl(`${WEBHOOK_BASE}/conference-hold-facts?parent=${encodeURIComponent(callSid)}&step=0`),
-      holdMethod: 'POST',
-    });
+    await holdParticipant(callSid, roomSid);
     await pauseRecording(callSid);
     logger.info(`[call-hold] caller ${masked(callSid)} on hold (${by})`);
     return 'held';
@@ -186,23 +198,26 @@ async function startHold(callSid, { by = 'star', legSid = null } = {}) {
 
 // Close the open claim and add its seconds to total_sec (up to the return, when one was claimed). 0 = nothing
 // was open (another request closed it).
-async function closeClaim(callSid) {
+async function closeClaim(callSid, { unlessStaffLeft = false } = {}) {
   const hold = holdFrom(await conferencePath.loadState(callSid));
   if (!hold.open) return 0;
   const seconds = secondsSince(hold.open_at) - (hold.return_at ? secondsSince(hold.return_at) : 0);
-  return writeHold(callSid, { ...withoutReturn(hold), open: false, total_sec: (Number(hold.total_sec) || 0) + Math.max(0, seconds) }, [HAS_STATE_SQL, HOLD_OPEN_SQL]);
+  return writeHold(callSid, { ...withoutReturn(hold), open: false, total_sec: (Number(hold.total_sec) || 0) + Math.max(0, seconds) },
+    unlessStaffLeft ? [HAS_STATE_SQL, HOLD_OPEN_SQL, HOLD_NO_PENDING_SQL] : [HAS_STATE_SQL, HOLD_OPEN_SQL]);
 }
 
 // closeClaim that never throws: -1 when the write failed (unknown whether another request closed it).
-const closeClaimSafely = (callSid) => closeClaim(callSid).catch((err) => {
+// `unlessStaffLeft`: do not close while a staff_left voicemail is pending (0 then).
+const closeClaimSafely = (callSid, options) => closeClaim(callSid, options).catch((err) => {
   logger.error(`[call-hold] hold claim not closed for ${masked(callSid)} (${errorCode(err)})`);
   return -1;
 });
 
-// Why a return cannot be claimed: 'voicemail' (the caller went to voicemail), 'idle' (no hold is open: a
+// Why a return cannot be claimed: 'voicemail' (the caller went to voicemail, or the staff phone hung up and that
+// voicemail is pending), 'idle' (no hold is open: a
 // duplicate press 1, nothing to claim), 'busy' (another press 1 is working), or null (free to claim).
 function returnBlockedBy(hold) {
-  if (hold.voicemail_at) return 'voicemail';
+  if (hold.voicemail_at || hold.voicemail_pending) return 'voicemail';
   if (!hold.open) return 'idle';
   return returnInFlight(hold) ? 'busy' : null;
 }
@@ -214,7 +229,7 @@ async function claimReturn(callSid) {
   let blocked = returnBlockedBy(hold);
   if (!blocked) {
     const stamp = new Date().toISOString();
-    const won = await writeHold(callSid, { ...hold, return_at: stamp }, [HAS_STATE_SQL, HOLD_OPEN_SQL, HOLD_NO_VOICEMAIL_SQL, returnFreeCondition()]);
+    const won = await writeHold(callSid, { ...hold, return_at: stamp }, [HAS_STATE_SQL, HOLD_OPEN_SQL, HOLD_NO_VOICEMAIL_SQL, HOLD_NO_PENDING_SQL, returnFreeCondition()]);
     if (won > 0) return { stamp, hold };
     blocked = returnBlockedBy(holdFrom(await conferencePath.loadState(callSid))) || 'busy';
   }
@@ -230,9 +245,11 @@ const claimReturnSafely = (callSid) => claimReturn(callSid).catch((err) => {
 });
 
 // The unhold did not happen: lift our own return claim so the next press 1 or the 5 minute limit can act.
-// If this write fails too, the claim goes stale after RETURN_CLAIM_STALE_SEC and blocks nothing.
+// If this write fails too, the claim goes stale after RETURN_CLAIM_STALE_SEC and blocks nothing. A staff_left
+// stamp that landed meanwhile is never overwritten (the write then does nothing; the pending voicemail ignores
+// a return claim anyway).
 const releaseReturn = (callSid, claim) => (claim.stamp
-  ? writeHold(callSid, withoutReturn(claim.hold), [HAS_STATE_SQL, HOLD_OPEN_SQL, { sql: `(${RETURN_AT_PATH}) = ?`, bindings: [claim.stamp] }])
+  ? writeHold(callSid, withoutReturn(claim.hold), [HAS_STATE_SQL, HOLD_OPEN_SQL, HOLD_NO_PENDING_SQL, { sql: `(${RETURN_AT_PATH}) = ?`, bindings: [claim.stamp] }])
     .catch((err) => logger.warn(`[call-hold] return claim not released for ${masked(callSid)} (${errorCode(err)})`))
   : Promise.resolve());
 
@@ -259,10 +276,38 @@ async function endHold(callSid) {
     await releaseReturn(callSid, claim);
     return 'failed';
   }
-  // 0 = the claim was already closed (a duplicate press 1, or no claim was open): nothing to resume here.
-  if ((await closeClaimSafely(callSid)) !== 0) await resumeRecording(callSid);
+  // 0 = the claim was already closed (a duplicate press 1, or no claim was open) or a staff_left stamp blocked the
+  // close: nothing to resume here.
+  const closed = await closeClaimSafely(callSid, { unlessStaffLeft: Boolean(claim.stamp) });
+  if (closed === 0 && claim.stamp) {
+    const gone = await staffLeftDuringReturn(callSid);
+    if (gone) return gone;
+  }
+  if (closed !== 0) await resumeRecording(callSid);
   logger.info(`[call-hold] caller ${masked(callSid)} back from hold`);
   return 'returned';
+}
+
+// Our close found the hold changed under us. The voicemail won the claim ('voicemail'), or the staff phone hung up
+// while our unhold was in flight (voicemail_pending): the staff are gone and the caller is unheld and alone, so
+// run the staff_left voicemail here. If it cannot start (the hold was restored) put the caller back on hold, so
+// the hold script's next fetch retries it. null = nothing of that kind (the hold was just closed already).
+async function staffLeftDuringReturn(callSid) {
+  const state = await holdState(callSid);
+  if (state.voicemailAt) return 'voicemail';
+  if (!state.open || !state.voicemailPending) return null;
+  if ((await startHoldVoicemail(callSid, state.voicemailPending)) === 'failed') await holdAgain(callSid);
+  return 'voicemail';
+}
+
+async function holdAgain(callSid) {
+  try {
+    const roomSid = await findRoomSid(callSid);
+    if (roomSid) await holdParticipant(callSid, roomSid);
+    await pauseRecording(callSid);
+  } catch (err) {
+    logger.error(`[call-hold] caller ${masked(callSid)} not put back on hold (${errorCode(err)})`);
+  }
 }
 
 // Seconds the open hold has lasted, or 0 when none is open.
@@ -273,7 +318,7 @@ const heldSeconds = (state) => (state?.open && state.openAt ? secondsSince(state
 // return claim: another request won).
 async function claimHoldVoicemail(callSid, reason) {
   const prev = holdFrom(await conferencePath.loadState(callSid));
-  if (!prev.open || prev.voicemail_at || returnInFlight(prev)) return null;
+  if (!prev.open || prev.voicemail_at || (returnInFlight(prev) && !prev.voicemail_pending)) return null;
   const hold = {
     ...withoutReturn(prev),
     open: false,
@@ -281,7 +326,7 @@ async function claimHoldVoicemail(callSid, reason) {
     voicemail_reason: reason,
     total_sec: (Number(prev.total_sec) || 0) + secondsSince(prev.open_at),
   };
-  const won = await writeHold(callSid, hold, [HAS_STATE_SQL, NOT_CLOSED_SQL, HOLD_OPEN_SQL, HOLD_NO_VOICEMAIL_SQL, returnFreeCondition()]);
+  const won = await writeHold(callSid, hold, [HAS_STATE_SQL, NOT_CLOSED_SQL, HOLD_OPEN_SQL, HOLD_NO_VOICEMAIL_SQL, returnFreeCondition({ orStaffLeft: true })]);
   return won > 0 ? { hold, prev } : null;
 }
 
