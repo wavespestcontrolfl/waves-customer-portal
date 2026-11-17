@@ -1415,6 +1415,28 @@ describe('customer-contact classes', () => {
     expect(mockLoadContactBundles.mock.calls[0][0][0].refs).toMatchObject({ callLogId: null, customerId: null });
   });
 
+  // GATE_CALL_HOLD (call-hold.js raiseVoicemailAlert): the star-key hold sent the caller to voicemail.
+  test('a hold voicemail bell (call-hold-voicemail:<CallSid>) is its own voice class, read by the caller\'s number from the bell\'s time, and closes like a voicemail callback', async () => {
+    const holdVoicemail = (over = {}) => note({ category: 'voicemail_callback', link: `/admin/communications#tab=calls&call=${CALL}`,
+      metadata: { dedupeKey: 'call-hold-voicemail:CA0123456789abcdef0123456789abcdef', doneWhen: 'caller_reached', callLogId: CALL, reason: 'timeout',
+        payload: { customerId: CUST, phone: '+15555550101' }, ...over } });
+    expect(classify(holdVoicemail()).key).toBe('hold_voicemail');
+    // The emitter's voicemail bell keeps its own class, and a voicemail bell with neither marker has none.
+    expect(classify(voicemail()).key).toBe('voicemail_callback');
+    expect(classify(note({ category: 'voicemail_callback', metadata: { dedupeKey: 'something-else:1' } }))).toBeNull();
+    mockBundles = new Map();
+    await loadSubjects([holdVoicemail()]);
+    // No call id reaches the witnesses: the bell's own time is the anchor (the held call was answered by a person).
+    expect(mockLoadContactBundles.mock.calls.at(-1)[0].map((i) => [i.kind, i.refs]))
+      .toEqual([['voice', { callLogId: null, customerId: CUST, phone: '+15555550101' }]]);
+    expect((await verdictFor(holdVoicemail(), { backAt: at(10) })).reason).toBe('A person called back');
+    expect((await verdictFor(holdVoicemail(), { inAt: at(10) })).reason).toBe('A person answered their call');
+    expect((await verdictFor(holdVoicemail(), { textAt: at(10) })).reason).toBe('Answered by text');
+    // Contact from before the bell, or nothing at all, leaves it open.
+    expect((await verdictFor(holdVoicemail(), { backAt: at(-10), inAt: at(-10) })).reason).toBeNull();
+    expect((await verdictFor(holdVoicemail(), {})).reason).toBeNull();
+  });
+
   test('a complaint-call bell (call-complaint:<call id>) is its own contact-only class, read by its customer id, and closes only on a person reaching that customer after the bell', async () => {
     const complaint = (over = {}) => note({ category: 'customer', link: `/admin/communications#tab=calls&call=${CALL}`,
       metadata: { dedupeKey: `call-complaint:${CALL}`, doneWhen: 'complaint_answered', customerId: CUST, callLogId: CALL, source: 'call_complaint', ...over } });

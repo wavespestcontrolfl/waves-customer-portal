@@ -540,6 +540,36 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
       expect((await get(chaser.id)).done_at).toBeNull();
     });
 
+    // GATE_CALL_HOLD: the star-key hold sent the caller to voicemail (call-hold.js raiseVoicemailAlert). The held call was
+    // answered by a person and ends after the bell (the caller leaves a message): it counts only up to its voicemail
+    // time, so it never closes its own bell.
+    test('a hold voicemail bell closes on a person reaching the caller after the bell, never on the held call itself', async () => {
+      const t0 = mins(new Date(), -300);
+      const held = async (phone) => {
+        const customer = await customerWith(phone);
+        const voicemailAt = mins(t0, 7);
+        const call = await insert('call_log', { direction: 'inbound', from_phone: phone, to_phone: BIZ, customer_id: customer.id, status: 'completed',
+          answered_by: 'human', twilio_call_sid: sid('CAH'), created_at: t0, duration_seconds: 600,
+          metadata: JSON.stringify({ conference_path: { hold: { open: false, voicemail_at: voicemailAt.toISOString(), voicemail_reason: 'timeout' } } }) });
+        const row = await bell({ category: 'voicemail_callback', created_at: new Date(voicemailAt.getTime() + 1000),
+          metadata: { dedupeKey: `call-hold-voicemail:${call.twilio_call_sid}`, doneWhen: 'caller_reached', callLogId: call.id, reason: 'timeout',
+            payload: { customerId: customer.id, phone } } });
+        return { customer, phone, row };
+      };
+      const self = await held('+15555558090');
+      const callBack = await held('+15555558091');
+      const inbound = await held('+15555558092');
+      await staffCall(callBack.customer, callBack.phone, mins(t0, 20));
+      await insert('call_log', { direction: 'inbound', from_phone: inbound.phone, to_phone: BIZ, customer_id: inbound.customer.id, status: 'completed',
+        answered_by: 'human', twilio_call_sid: sid('CAI'), created_at: mins(t0, 30), duration_seconds: 90 });
+
+      await sweep();
+      const reason = async (c) => { const r = await get(c.row.id); return r.done_at ? [r.done_by, r.resolution] : null; };
+      expect(await reason(self)).toBeNull();
+      expect(await reason(callBack)).toEqual(['relevance', 'A person called back']);
+      expect(await reason(inbound)).toEqual(['relevance', 'A person answered their call']);
+    });
+
     test('a call witness counts by when the call ENDED: a delayed insert of an earlier call, or a post-call row with no end stamp, never closes; a call that began before the event and ended after it does', async () => {
       const t0 = mins(new Date(), -300);
       const stamp = (extra) => JSON.stringify(extra);

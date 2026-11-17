@@ -473,8 +473,13 @@ describe('startHoldVoicemail', () => {
       doneWhen: 'caller_reached',
       who: 'person',
     });
-    expect(opts).toMatchObject({ bell: true, dedupeKey: `call-hold-voicemail:${SID}`, metadata: { callLogId: 77, reason: 'timeout' } });
-    expect(JSON.stringify(raiseAdminAlert.mock.calls)).not.toMatch(/\+1\d{10}/);
+    // The sweep's payload (class hold_voicemail) names the caller's number and no call id: the bell is judged from its
+    // own time and closes once a person reaches the caller after it.
+    expect(opts).toMatchObject({ bell: true, dedupeKey: `call-hold-voicemail:${SID}`,
+      metadata: { callLogId: 77, reason: 'timeout', payload: { customerId: 'cust-1', phone: '+19415550100' } } });
+    expect(opts.metadata.payload).not.toHaveProperty('callLogId');
+    // The words never carry the number.
+    expect(JSON.stringify([category, spec])).not.toMatch(/\+1\d{10}/);
   });
 
   test('staff_left why; no customer on the call uses the name on file for the number, else a plain wording', async () => {
