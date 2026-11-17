@@ -1665,6 +1665,27 @@ describe('the Hold button: holdForPanel and requestHold', () => {
     expect(events[0].url).toBe(`https://staging.example.com/api/webhooks/twilio/conference-staff-left?parent=${SID}&by=button`);
   });
 
+  test("by 'voice' (the spoken \"please hold\") is accepted too: the leg moves with by=voice in the URL", async () => {
+    seed(null);
+    const events = fakeTwilio();
+    await expect(hold.requestHold(SID, { by: 'voice' })).resolves.toBe('requested');
+    expect(events).toEqual([{ name: 'call', sid: LEG, url: MOVED_TO.replace('by=button', 'by=voice'), method: 'POST' }]);
+    expect(holdOf()).toBeUndefined();
+    expect(db.__state.writes).toEqual([]);
+  });
+
+  test("the voice trigger's speech from before the newest hold opened is stale: a late transcript after a star and a press 1 moves nothing", async () => {
+    const events = fakeTwilio();
+    seed(heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1' })); // that hold opened at iso(-10)
+    await expect(hold.requestHold(SID, { by: 'voice', spokenAt: new Date(iso(-12)) })).resolves.toBe('stale');
+    await expect(hold.requestHold(SID, { by: 'voice', spokenAt: new Date(iso(-10)) })).resolves.toBe('stale');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+    // Said after that hold opened (after the return): the leg moves.
+    await expect(hold.requestHold(SID, { by: 'voice', spokenAt: new Date(iso(-2)) })).resolves.toBe('requested');
+    expect(events).toEqual([{ name: 'call', sid: LEG, url: MOVED_TO.replace('by=button', 'by=voice'), method: 'POST' }]);
+  });
+
   test('a hold already open, or a return in flight: on_hold, and nothing is moved', async () => {
     const events = fakeTwilio();
     for (const h of [heldHold(), heldHold({ applied: null }), heldHold({ phase: 'returned', applied: 'held', ret_by: 'press1' })]) {
