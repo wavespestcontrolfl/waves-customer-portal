@@ -3245,18 +3245,27 @@ async function pickContext(service, now) {
   return { ok: true, templateBody, previewUrl: placeholderOfLength(built.url) };
 }
 
+// The pick text's rain lead (owner 2026-11-17). The same-day rain lead says
+// the rain is already here and names the part of the day from the moment of
+// the hand-off ("rain is moving through your area this morning" for a 9 AM
+// hand-off ahead of 2 PM rain), so the pick text says only that rain is in
+// today's forecast. The moved text keeps its own lead.
+const PICK_RAIN_LEAD = "rain is in today's forecast";
+
 // The hand-off text for one reason, rendered from the template snapshot (base
 // row, noVariants; requiredVars from the shared map) with the given link and
 // the renderer's own GSM normalization and scheme strip. service_type is the
 // stored service name in the reminders' label form, catalog casing, never
-// lower-cased (owner ruling). The lead is the same-day wording: the weather or
-// the operational cause is today's.
+// lower-cased (owner ruling). The lead is today's cause: PICK_RAIN_LEAD for
+// rain, the same-day wording for every other reason.
 async function renderPickBody({ service, reasonCode, url, templateBody, now, pickBy }) {
   const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   const { smsServiceLabelStored } = require('./appointment-reminders');
   return renderSmsTemplate(PICK_TEMPLATE_KEY, {
     first_name: service.first_name || 'there',
-    reason_lead: composeWeatherLead({ reasonCode, isSameDay: true, hour: etParts(now).hour }),
+    reason_lead: reasonCode === 'weather_rain'
+      ? PICK_RAIN_LEAD
+      : composeWeatherLead({ reasonCode, isSameDay: true, hour: etParts(now).hour }),
     service_type: smsServiceLabelStored(service.service_type),
     pick_url: url,
     pick_by: pickByLabel(pickBy),

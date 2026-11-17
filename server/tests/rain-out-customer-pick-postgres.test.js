@@ -164,7 +164,7 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     expect(await trx('job_status_history').where({ job_id: serviceId })).toEqual([]);
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Maria - rain is moving through your area this (morning|afternoon|evening), so we need to move your Quarterly Pest Control Service\.\n\nPick a new time by \w{3} \d{1,2}(:\d{2})? [AP]M: portal\.wavespestcontrol\.com\/l\/k3j9m2x7qp\n\nIf you don't, we'll book one and text you\.$/);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Maria - rain is in today's forecast, so we need to move your Quarterly Pest Control Service\.\n\nPick a new time by \w{3} \d{1,2}(:\d{2})? [AP]M: portal\.wavespestcontrol\.com\/l\/k3j9m2x7qp\n\nIf you don't, we'll book one and text you\.$/);
   });
 
   test('a "customer not home" hand-off counts once toward the 2-in-90 missed-visit outreach, like a no-show Quick Move', async () => {
