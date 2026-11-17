@@ -59,7 +59,8 @@ const FACT_KEYS = [
   'service', 'when', 'address_line1', 'city', 'zip', 'home_sqft', 'lot_sqft', 'property_type', ...PLAN_KEYS,
 ];
 // "address" in the withdrawn list means the whole spoken place.
-const WITHDRAWN_GROUPS = { address: ['address_line1', 'city', 'zip'] };
+const ADDRESS_KEYS = ['address_line1', 'city', 'zip'];
+const WITHDRAWN_GROUPS = { address: ADDRESS_KEYS };
 
 const SYSTEM_PROMPT = `You read the last few minutes of a live phone call to a pest control and lawn care company. "Caller:" is the customer or prospect. "Agent:" is the Waves staff member.
 Reply with ONLY this JSON: {"intent": "<one plain line, 90 characters or fewer: what the caller wants>", "service": "pest_control" | "lawn_care" | "mosquito" | "tree_shrub" | "termite_bait" | null, "when": "<the caller's own words about timing, or null>", "address_line1": "<street address the caller said, or null>", "city": "<or null>", "zip": "<5 digits or null>", "home_sqft": <number the caller said for the home's square feet, or null>, "lot_sqft": <number the caller said for the lot, or null>, "property_type": "single_family" | "townhome_end" | "townhome_interior" | "duplex" | "condo_ground" | "condo_upper" | "commercial" | null, "frequency": "quarterly" | "bimonthly" | "monthly" | null, "lawn_track": "st_augustine" | "bermuda" | "zoysia" | "bahia" | null, "lawn_tier": "enhanced" | "premium" | null, "mosquito_tier": "seasonal9" | "monthly12" | null, "withdrawn": [<fact names the caller took back>]}
@@ -132,7 +133,9 @@ function mergeFacts(previous, next, withdrawn = []) {
   const carried = (k) => (withdrawn.includes(k) ? null : previous?.[k] ?? null);
   const service = next.service ?? carried('service');
   const serviceChanged = !!previous?.service && service !== previous.service;
-  const moved = switchedProperty(previous, next);
+  // A withdrawn street, city or zip moves the caller off the old place too: its sizes and type must not price the next
+  // address (switchedProperty has no old street left to compare once the withdrawal cleared it).
+  const moved = switchedProperty(previous, next) || withdrawn.some((k) => ADDRESS_KEYS.includes(k));
   const stale = (k) => (serviceChanged && PLAN_KEYS.includes(k)) || (moved && PLACE_KEYS.includes(k));
   const merged = {};
   for (const k of FACT_KEYS) {

@@ -439,6 +439,26 @@ describe('live call assist withdrawn facts', () => {
     expect(_test.mergeFacts(prev, { ...NO_FACTS, when: 'Monday' }, ['when']).when).toBe('Monday');
   });
 
+  test('a withdrawn address drops the old property\'s sizes and type too, except what the same read says again', () => {
+    const prev = { ...NO_FACTS, service: 'pest_control', address_line1: '12 Example St', city: 'Bradenton', zip: '34202', home_sqft: 2400, lot_sqft: 9000, property_type: 'condo' };
+    const address = ['address_line1', 'city', 'zip'];
+    expect(_test.mergeFacts(prev, NO_FACTS, address)).toMatchObject({ service: 'pest_control', address_line1: null, home_sqft: null, lot_sqft: null, property_type: null });
+    expect(_test.mergeFacts(prev, { ...NO_FACTS, home_sqft: 1800 }, address)).toMatchObject({ home_sqft: 1800, lot_sqft: null, property_type: null });
+    // A withdrawn plan detail is not a move: the place keeps its sizes.
+    expect(_test.mergeFacts(prev, NO_FACTS, ['when'])).toMatchObject({ home_sqft: 2400, lot_sqft: 9000, property_type: 'condo' });
+  });
+
+  test('address taken back, then a new one said: the new property is priced without the old sizes and type', async () => {
+    mockCreate.mockResolvedValue(reply({ ...PEST, address_line1: '12 Example St', city: 'Bradenton', zip: '34202', home_sqft: 2400, lot_sqft: 9000, property_type: 'condo' }));
+    await run();
+    await next({ intent: 'Not that house', service: 'pest_control', withdrawn: ['address'] });
+    expect(assist().facts).toMatchObject({ address_line1: null, home_sqft: null, lot_sqft: null, property_type: null });
+    mockPricing.mockClear();
+    await next({ intent: 'Wants quarterly pest control', service: 'pest_control', address_line1: '9 Other Rd', city: 'Venice', zip: '34285' });
+    expect(assist().facts).toMatchObject({ address_line1: '9 Other Rd', home_sqft: null, lot_sqft: null, property_type: null });
+    expect(mockPricing).toHaveBeenCalledWith({ service: 'pest_control', home_sqft: undefined, lot_sqft: undefined });
+  });
+
   test('withdrawn: only known names, "address" means street, city and zip', () => {
     const v = _test.validate({ intent: 'x', withdrawn: ['address', 'service', 'service', 'call_summary', 7, 'zip'] });
     expect([...v.withdrawn].sort()).toEqual(['address_line1', 'city', 'service', 'zip']);
