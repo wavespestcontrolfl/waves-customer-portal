@@ -7,6 +7,9 @@
  * while paused only moves the end out; the resume fires once at 90 s, or on a later stored
  * utterance when the timer was lost; a masked card number triggers; two racing triggers give one
  * Twilio pause; a Twilio error is stamped and never thrown; a bare "card" and pest talk never pause.
+ * Ordering and recovery: a resume still in flight when a new card trigger arrives never lands after
+ * the pause that replaces it; a decision committed before a crash is finished by the next utterance
+ * or the timer; a pause whose response is lost keeps its window and still resumes at the end.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -96,6 +99,7 @@ beforeEach(() => {
 afterEach(() => {
   cardPause._test.timers.forEach((t) => clearTimeout(t));
   cardPause._test.timers.clear();
+  cardPause._test.sendChains.clear();
   jest.useRealTimers();
 });
 
@@ -256,5 +260,139 @@ describe('live call card pause', () => {
     mockUpdate.mockResolvedValue({});
     await expect(trigger('hello')).resolves.toMatchObject({ action: 'resumed' });
     expect(resumeCalls()).toHaveLength(2);
+  });
+});
+
+describe('live call card pause: ordering and recovery', () => {
+  const lastStatuses = () => mockUpdate.mock.calls.map(([arg]) => arg.status);
+  const flush = async () => { for (let i = 0; i < 30; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  // A committed state as a crashed process would have left it.
+  const seed = (extra) => {
+    db.__state.cardPause = {
+      paused_at: '2026-11-16T15:00:00.000Z', resume_due_at: '2026-11-16T15:01:30.000Z', resumed_at: null, pauses: 1, ...extra,
+    };
+  };
+
+  test('a resume in flight when a new card trigger arrives is followed by the pause, never the other way round', async () => {
+    await trigger();
+    expect(lastStatuses()).toEqual(['paused']);
+    // The resume request hangs on its way to Twilio.
+    let landResume;
+    mockUpdate.mockImplementation((arg) => (arg.status === 'in-progress'
+      ? new Promise((resolve) => { landResume = () => resolve({ status: 'in-progress' }); })
+      : Promise.resolve({ status: 'paused' })));
+    await advance(91 * 1000);
+    expect(lastStatuses()).toEqual(['paused', 'in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ pending: 'resume', resumed_at: null });
+
+    // The card trigger commits a new window while the old resume is still in flight.
+    const second = trigger('and the cvv');
+    await flush();
+    expect(db.__state.cardPause).toMatchObject({ pending: 'pause', resumed_at: null, resume_due_at: '2026-11-16T15:03:01.000Z' });
+    // Nothing is sent over the resume: the requests of one call go out one at a time.
+    expect(lastStatuses()).toEqual(['paused', 'in-progress']);
+
+    landResume();
+    mockUpdate.mockResolvedValue({});
+    await expect(second).resolves.toMatchObject({ action: 'extend' });
+    await flush();
+    // The last request Twilio received is the pause; the resume it replaced was not recorded as the end.
+    expect(lastStatuses()).toEqual(['paused', 'in-progress', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, resume_due_at: '2026-11-16T15:03:01.000Z' });
+
+    // The new window ends on its own end, with its own resume.
+    await advance(60 * 1000);
+    expect(lastStatuses()).toHaveLength(3);
+    await advance(31 * 1000);
+    expect(lastStatuses()).toEqual(['paused', 'in-progress', 'paused', 'in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('a resume claimed but not sent (crash) is finished by the next stored utterance', async () => {
+    seed({ pending: 'resume', pause_sent: true });
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await expect(trigger('Tuesday works')).resolves.toMatchObject({ action: 'resumed' });
+    expect(lastStatuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null });
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    await trigger('thanks');
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pause claimed but not sent (crash) is sent by the next stored utterance, then resumed at the end', async () => {
+    seed({ pending: 'pause', pause_sent: false });
+    jest.setSystemTime(new Date('2026-11-16T15:00:20Z'));
+    await expect(trigger('and the expiration')).resolves.toMatchObject({ action: 'paused' });
+    expect(mockUpdate).toHaveBeenCalledWith({ status: 'paused', pauseBehavior: 'silence' });
+    expect(db.__state.cardPause).toMatchObject({ pending: null, pause_sent: true, resumed_at: null });
+    // The restart lost the timer: the utterance armed a new one for the stored end.
+    await advance(71 * 1000);
+    expect(lastStatuses()).toEqual(['paused', 'in-progress']);
+  });
+
+  test('a pause claimed but never sent, found after its window, sends nothing and closes', async () => {
+    seed({ pending: 'pause', pause_sent: false });
+    jest.setSystemTime(new Date('2026-11-16T15:05:00Z'));
+    await trigger('Tuesday works');
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    expect(db.__state.cardPause.pending).toBeNull();
+  });
+
+  test('a pause request sent before a crash is resumed at the end even if no timer survived', async () => {
+    seed({ pending: 'pause', pause_sent: true });
+    jest.setSystemTime(new Date('2026-11-16T15:02:00Z'));
+    await trigger('Tuesday works');
+    expect(lastStatuses()).toEqual(['in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('a pause whose response is lost (applied remotely, network error) still resumes at the window end', async () => {
+    mockUpdate.mockRejectedValueOnce(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
+    await expect(trigger("what's the card number")).resolves.toMatchObject({ action: 'pause_failed', error_code: 'ECONNRESET' });
+    // The window and the pending pause stay: nothing says the recording is unpaused.
+    expect(db.__state.cardPause).toMatchObject({
+      paused_at: '2026-11-16T15:00:00.000Z', resume_due_at: '2026-11-16T15:01:30.000Z', pending: 'pause', pause_sent: true, last_error_code: 'ECONNRESET',
+    });
+    await advance(89 * 1000);
+    expect(lastStatuses()).toEqual(['paused']);
+    await advance(2 * 1000);
+    expect(lastStatuses()).toEqual(['paused', 'in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test.each([
+    ['a 5xx with a Twilio code', Object.assign(new Error('server error'), { code: 20500, status: 503 })],
+    ['a timeout without a code', new Error('timeout of 30000ms exceeded')],
+  ])('%s on the pause is an unknown outcome: the window stays and the end resumes', async (_name, err) => {
+    mockUpdate.mockRejectedValueOnce(err);
+    await expect(trigger()).resolves.toMatchObject({ action: 'pause_failed' });
+    expect(db.__state.cardPause).toMatchObject({ paused_at: '2026-11-16T15:00:00.000Z', pending: 'pause' });
+    await advance(91 * 1000);
+    expect(lastStatuses()).toEqual(['paused', 'in-progress']);
+  });
+
+  test('after a lost pause response a later utterance tries the pause again; a definite refusal then keeps the window', async () => {
+    mockUpdate.mockRejectedValueOnce(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+    await trigger();
+    // The retry is refused for good: the first request may have landed, so the window stays.
+    mockUpdate.mockRejectedValueOnce(Object.assign(new Error('already paused'), { code: 16108 }));
+    await advance(20 * 1000);
+    await expect(trigger('Tuesday works')).resolves.toMatchObject({ action: 'pause_failed', error_code: '16108' });
+    expect(db.__state.cardPause).toMatchObject({ paused_at: '2026-11-16T15:00:00.000Z', resume_due_at: '2026-11-16T15:01:30.000Z', pending: null });
+    // No further pause attempts, and the end still resumes.
+    await trigger('Tuesday works');
+    expect(pauseCalls()).toHaveLength(2);
+    await advance(71 * 1000);
+    expect(lastStatuses()).toEqual(['paused', 'paused', 'in-progress']);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('gate off with a pause that was never sent starts nothing', async () => {
+    seed({ pending: 'pause', pause_sent: false });
+    isEnabled.mockReturnValue(false);
+    jest.setSystemTime(new Date('2026-11-16T15:00:20Z'));
+    await expect(trigger('Tuesday works', { pauseOpen: true })).resolves.toMatchObject({ action: 'not_due' });
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
