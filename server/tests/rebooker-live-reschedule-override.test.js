@@ -288,7 +288,7 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(mockIoEmit).not.toHaveBeenCalled();
   });
 
-  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): a staff or customer
+  // Quick Move "let the customer pick a day": a staff or customer
   // move ends the hand-off; an Auto-Dispatch placement keeps the marker (the 72-hour reminder
   // wording needs it); a row without the marker adds no column to the write.
   test.each([

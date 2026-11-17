@@ -1,4 +1,4 @@
-// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK):
+// Quick Move "let the customer pick a day":
 // RainOut.handOffToCustomer's transaction on PostgreSQL. CI's DB-gated step
 // discovers this suite. Temporary tables copy the migrated column types,
 // hold synthetic records only, and roll back. The real rebooker stamps,
@@ -76,7 +76,6 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
   let today;
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_QUICKMOVE_CUSTOMER_PICK = 'true';
     await trx.raw('TRUNCATE scheduled_services, customers, appointment_reminders, reschedule_log, job_status_history, sms_templates, notification_prefs, messaging_suppression');
     today = etDateString();
     customerId = randomUUID();
@@ -91,7 +90,6 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     jest.spyOn(SmartRebooker, 'applyLiveMovePostCommitEffects').mockResolvedValue({ techCleared: true });
   });
   afterEach(() => {
-    delete process.env.GATE_QUICKMOVE_CUSTOMER_PICK;
     jest.restoreAllMocks();
   });
 

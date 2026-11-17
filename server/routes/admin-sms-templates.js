@@ -115,7 +115,7 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // Custom Quick Move: the dispatcher's message, the new time, and the
   // link/reply clause are the three promises the flow makes.
   rain_out_moved_custom_v1: Object.freeze(['custom_message', 'new_option', 'link_clause']),
-  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK):
+  // Quick Move "let the customer pick a day":
   // the reschedule link and the pick-by deadline ARE the hand-off. A body
   // without either would take the visit off the route and tell the customer
   // nothing they can act on; rain-out.js renders with this same list.

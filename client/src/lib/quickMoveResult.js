@@ -69,7 +69,7 @@ export function summarizeQuickMoveResult(data, { notify, display, stopName } = {
 }
 
 // ---------------------------------------------------------------------------
-// "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK). Both Quick Move
+// "Let the customer pick a day". Both Quick Move
 // sheets hand the visit to the customer with POST .../customer-pick instead of
 // booking a time. These helpers hold what the two sheets share: who the
 // customer is, whether the option shows, and how the answer reads.

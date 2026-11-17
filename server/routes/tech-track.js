@@ -657,7 +657,7 @@ router.get('/:id/rain-out-options', async (req, res, next) => {
     }
     // A technician whose Team tab switch is off sees
     // why, not move choices the commit would refuse (plus the customer-pick
-    // offer while GATE_QUICKMOVE_CUSTOMER_PICK is on).
+    // offer).
     {
       const refusal = await techMoveRefusal(req);
       if (refusal) return res.status(refusal.status).json(await moveRefusalBody(refusal, req.params.id));
@@ -824,16 +824,13 @@ router.post('/:id/rain-out', async (req, res, next) => {
 
 // POST /api/tech/services/:id/customer-pick
 // body: { reasonCode }
-// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK, owner
+// Quick Move "let the customer pick a day" (owner
 // 2026-11-01): the visit leaves today's route and the customer gets one text
 // with their reschedule link (services/rain-out.js handOffToCustomer). Same
 // ownership and stale-tap checks as POST /:id/rain-out; a technician whose
 // "Can move visits" switch is off may use this option only.
 router.post('/:id/customer-pick', async (req, res, next) => {
   try {
-    if (require('../config/feature-gates').quickMoveCustomerPickLive?.() !== true) {
-      return res.status(404).json({ error: 'disabled' });
-    }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
       .first('id', 'technician_id', 'status', 'scheduled_date');

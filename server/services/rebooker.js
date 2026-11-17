@@ -781,7 +781,7 @@ async function recordFailedSeriesMove(fields, err) {
   }
 }
 
-// Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): a
+// Quick Move "let the customer pick a day": a
 // staff or customer move that GIVES a handed-off visit a time ends the hand-off.
 // A move that leaves it with no window (a date-only move, or a series sweep that
 // keeps a sibling windowless) chose no time: the hand-off stands, so its texted

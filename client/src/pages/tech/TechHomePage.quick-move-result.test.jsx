@@ -248,7 +248,7 @@ describe('Tech Home Quick Move: rest of route waits for the list of the new reas
   });
 });
 
-// "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): the one MOVE TO
+// "Let the customer pick a day": the one MOVE TO
 // row, the swap back to day rows, the text preview, the hand-off POST and the
 // Today card it leaves behind.
 const customerPick = {

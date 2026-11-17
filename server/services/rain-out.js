@@ -1769,9 +1769,7 @@ async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
     extraReasonsEnabled: extraReasonsEnabled(),
     customReasonEnabled: customReasonEnabled(),
     customCompose,
-    // "Let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK): undefined
-    // while the gate is off, so the JSON payload carries no key and stays
-    // exactly as it was.
+    // "Let the customer pick a day".
     customerPick: await customerPickOffer(service),
   };
 }
@@ -3052,7 +3050,7 @@ function summarizeCommitResults(results) {
   };
 }
 
-// ── Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK) ──
+// ── Quick Move "let the customer pick a day" ──
 //
 // Owner approved 2026-11-01. Instead of a new time, the technician or the
 // office hands a recurring plan visit to its customer: the visit leaves
@@ -3092,10 +3090,6 @@ const PICK_OPTIONAL_TAIL = ' Questions? Reply here.';
 // The hand-off's reschedule_log marker (in notes; reason_code is why the visit moved).
 const PICK_LOG_MARKER = 'customer_pick';
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-function customerPickLive() {
-  return require('../config/feature-gates').quickMoveCustomerPickLive?.() === true;
-}
 
 // The preset reasons a hand-off may name: weather, or an extra reason while
 // GATE_QUICKMOVE_EXTRA_REASONS is on. Never 'custom' (the text has no slot for
@@ -3501,7 +3495,6 @@ function handOffResult({ locked, dueDate, pickBy, text }) {
 // written): the sheet shows `error`; `reason` stays the machine code.
 const PICK_REFUSAL_COPY = {
   not_found: 'Visit not found.',
-  disabled: 'disabled',
   bad_reason: 'Pick a weather or schedule reason to hand this visit off.',
   not_recurring_plan_visit: 'Only recurring plan visits can be handed to the customer.',
   grouped_stop: 'This stop is grouped with another visit, so the customer cannot pick a day for it.',
@@ -3529,12 +3522,11 @@ const PICK_REFUSAL_COPY = {
 };
 
 function pickRefusalResponse(reason) {
-  const status = ['not_found', 'disabled'].includes(reason) ? 404 : reason === 'bad_reason' ? 400 : 409;
+  const status = reason === 'not_found' ? 404 : reason === 'bad_reason' ? 400 : 409;
   return { status, body: { error: PICK_REFUSAL_COPY[reason] || 'This visit cannot be handed off.', reason } };
 }
 
 async function handOffToCustomer({ serviceId, reasonCode, initiatedBy = 'tech', actorUserId = null, requireAssignedTechnicianId = null, operatorInitiated = false } = {}) {
-  if (!customerPickLive()) return { ok: false, reason: 'disabled' };
   if (!pickReasonCodes().includes(reasonCode)) return { ok: false, reason: 'bad_reason' };
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
@@ -3560,10 +3552,9 @@ async function handOffToCustomer({ serviceId, reasonCode, initiatedBy = 'tech', 
 // The sheets' offer (getOptions, and the options refusal of a technician
 // whose switch is off): whether this visit can be handed to its customer, the
 // deadline, and the exact text per preset reason with the link the hand-off
-// measures. undefined while the gate is off. Never throws: a failed check
+// measures. Never throws: a failed check
 // reads as unavailable.
 async function customerPickOffer(serviceOrId, now = new Date()) {
-  if (!customerPickLive()) return undefined;
   const { pickBy } = pickDates(now);
   const offer = {
     available: false, unavailableReason: null, pickBy: pickBy.toISOString(), pickByLabel: pickByLabel(pickBy),
@@ -3595,7 +3586,7 @@ async function customerPickOffer(serviceOrId, now = new Date()) {
 module.exports = {
   getOptions,
   commit,
-  // Quick Move "let the customer pick a day" (GATE_QUICKMOVE_CUSTOMER_PICK).
+  // Quick Move "let the customer pick a day".
   handOffToCustomer,
   pickRefusalResponse,
   customerPickOffer,

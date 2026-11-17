@@ -93,7 +93,6 @@
  *   GATE_SPRAY_RAIN_RULES=shadow|true (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A and D2 = A: the visit-day spray check judges each product's label rain rule (server/config/label-rain-rules.js: "Do not make applications during rain" on the start hour, a label's dry-before-rain advice (a caution above 60%, the Warning level above 80%), water-in products not judged) and, for a tank spray whose label has no rain rule, the Waves rule for its service (reschedule-rules.js serviceSensitivity). One odds table for every rain number: caution above reschedule-rules caution_if_rain_prob_above (60%). Owner 2026-10-29 ("i just want to warn techs"): at `true` no weather reading withholds a dose anywhere (tech card, tank search, Tree & Shrub guide); a reading past reschedule_if_rain_prob_above (80%) or a wind or temperature limit is a caution that names it, the guide shows its mix when only the forecast is missing (an open label review still withholds it), and the Dispatch chip names the caution and the product ("Rain warning · Celsius WG", "Wind caution · Celsius WG") ahead of "Weather unknown" and is never red. Step 2: rain past 80% is the Warning level; wind and temperature are judged at the start hour and the next one; a tank spray whose label gives no dry time gets the Waves hours; a label heat line (Celsius: no adjuvant above 90°F) is a caution; each caution carries one action. Owner 2026-10-30: a label wind line is a caution at each label's own number (Cyper TC's on-grade line on termite visits only), and a fertilizer's "Do not apply if heavy rain is expected" is a caution when the start hour's forecast words say heavy rain or thunderstorms, on the same odds tiers. `shadow` = the live check is unchanged and the new verdict of each visit-day readiness / card build is upserted to spray_rain_rule_shadow (peak per visit per day); `true` keeps upserting the same row, which then counts the real rain odds. Off = byte-identical to today. Canonical CALL-TIME reader sprayRainRulesMode(). Kill switch: unset.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
  *   GATE_TRIP_LINK=true (trip link, owner "TRIP LINK" and "BOTH" 2026-10-26: a nightly job (01:40 ET, yesterday) and a backfill script link each Bouncie trip and truck stop to the completed visit it served, and store per-visit GPS arrival and departure, GPS minutes on site, drive minutes and drive miles in visit_gps_legs, plus where each trip ended and a business / personal SUGGESTION in trip_links. Shadow data only: it never writes mileage_log, scheduled_services, job_costs, pins or alerts and sends nothing. Read at call time via tripLinkLive(), strict 'true', dark by default; off = the job reads nothing and writes nothing and the summary route answers 404.)
- *   GATE_ARRIVAL_ENGINE_OFF=true (GPS arrival tied to the truck's engine turning off, owner 2026-11-01: the Bouncie GPS arrival triggers early, so tie it to the truck turning off. On, the immediate-radius rule (55 m) keeps marking (October 2026: a median 12 s before the truck parked), a sample only the slow-radius rule (175 m) would have marked no longer marks and is recorded as the not-marked reason awaiting_engine_off (it fired a median 1 min early), and a Bouncie trip-end marks the arrival when the engine-off position is within the arrival radius (gps_arrival.radius_meters, 175 m default) of the visit destination; the position is the trip-end's own GPS, else the truck's last known location when it was reported at most 10 minutes before the engine-off and not after it. Outside the radius or with no usable position nothing is marked and the not-marked reason engine_off_outside_radius or engine_off_no_position is recorded once per visit attempt. Read at call time via arrivalEngineOffLive(), strict 'true', dark by default; off = the old speed and radius rules, unchanged.)
  *   GATE_CALL_APPLICANT_HANDLING=true (a phone call whose caller is a JOB APPLICANT or a vendor/partner is handled as that third party, not as a customer call: the call is labeled vendor_logged even when the model recommended no_action_needed; no customer-only review card is raised on it (service address, email, name, consent capture); a promise the office made on it is stored as kind other, so the customer follow-up watchdog does not page on it; and a job applicant call with a valid extraction files ONE Careers application (role technician, status new, source phone_call) unless an open application with the same phone already exists. Sends nothing to the applicant: no text, no email, no invite, no AI screen. Read at call time via callApplicantHandlingLive(), strict 'true', dark by default; off = every call is handled exactly as before.)
  *   GATE_CALL_PREPAY_CHOICE=true (a caller who chose annual prepay on a call, when the call extraction carries service_request.billing_choice = annual_prepay: (1) the scheduling payload of a not-booked call and its held-visit row on Dispatch say "Caller chose annual prepay", and Book it opens the New appointment form with Annual prepay preselected when the customer's linked estimate is prepay-eligible; (2) for a call the pipeline DID book, one admin-only Needs Review card (reason call_prepay_choice) per call, filed every 10 minutes while the customer's newest open estimate is prepay-eligible, whose one tap "Accept as annual prepay" runs the same accept the New appointment form runs (a DRAFT annual prepay invoice that is NOT sent, plus a payment-pending term). The office decides every accept; nothing is accepted, invoiced or texted by the sweep. Read at call time via callPrepayChoiceLive(), strict 'true', dark by default; off = no field is carried, no card is filed, the card's route answers 404, and the form opens as before.)
  *   GATE_CALL_CANCEL_GUARD=true (the New Appointment form shows "Canceled on a call" with the call's summary under the
@@ -454,7 +453,6 @@
  *   GATE_PAYROLL_MERCURY_STATUS=true (basic payroll option A, owner plan 2026-10-30: Waves works out each W-2 paycheck and Mercury sends it only after the owner approves it in the Mercury app. Needs GATE_PAYROLL. This is the read-only half: the 15-minute poller that reads each payment's approval request and transaction from Mercury, the recipient check when a Mercury recipient id is saved on a technician, the warnings before a send, and the payment chips on the pay run. Needs the env MERCURY_API_TOKEN (a custom token with read scopes and Send Money with Approval) and MERCURY_ACCOUNT_ID; MERCURY_API_BASE defaults to https://api.mercury.com/api/v1. The token, account number, routing number and any Mercury answer are never logged or stored. Read at call time via payrollMercuryStatusLive(), strict 'true', dark by default; off = no Mercury call at all and every payroll output and route is byte for byte today's; rollback = unset. Sends nothing to a customer or staff member.)
  *   GATE_PAYROLL_MERCURY_PAY=true (basic payroll option A, owner plan 2026-10-30. Needs GATE_PAYROLL and GATE_PAYROLL_MERCURY_STATUS. Turns on Send to Mercury and Send again on a finalized pay run: for each bank-transfer paycheck with a Mercury recipient id the portal asks Mercury for an APPROVAL REQUEST (POST request-send-money); no money moves until a different Mercury user approves it in the Mercury app, and the portal never calls Mercury's direct send. A request is never sent twice by code: a lost answer becomes an 'unknown' payment the owner resolves. Read at call time via payrollMercuryPayLive(), strict 'true', dark by default; off = no request is ever made; rollback = unset (existing payment rows stay and still block a void).)
  *   GATE_BUG_ID_EXTENSION=true (owner 2026-10-31, "Let's do the insect identification": the Chrome extension's bug identifier, POST /api/public/bug-id-extension/identify. Anonymous and worldwide, so no lead capture, no pricing, no row and no stored photo; 1–3 photos go to the v2 species-catalog pest engine (identifyPestV2, Gemini-only ladder, as the customer app) and only its customer-facing v2 answer comes back. Paid vision per request, bounded by 6/hour and 15/day per IP plus one worldwide daily cap of its own (PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION, default 100, bucket bug-id-extension) that counts whatever GATE_PUBLIC_LLM_SHARED_CAP says and fails closed. Read at call time via bugIdExtensionLive(), strict 'true', dark by default; off = the whole /api/public/bug-id-extension surface answers 404 before cors(), any limiter or body parser. Sends nothing to anyone. Kill switch: unset.)
- *   GATE_QUICKMOVE_CUSTOMER_PICK=true (owner 2026-11-01: Quick Move gets a "let the customer pick a day" option for a recurring plan visit. The visit leaves its route, the customer gets one text with their reschedule link and picks a route-fit time within 24 hours of the text (rounded up to the quarter hour; owner 2026-11-02), and Auto-Dispatch books it if they do not. A technician whose Can move visits switch is off may use this option only. Nothing is sent until a person taps the option; off = the option does not appear and the routes answer disabled)
  *   GATE_RAINOUT_KEEP_RAIN_OK=true (owner 2026-11-01 "build both", after the wider rain-OK list in #7381: a Rain-out Move on "this + rest of route" for a RAIN reason (weather_rain only; every other reason, and a request with no reason yet, keeps the full route) leaves a stop OUT of the rest-of-route list when every service at that stop is rain-OK by rain-fit rainClassOf (a grouped stop moves as one: if any live member is outdoor, every member stays in), so that stop is neither moved nor texted; the tapped stop and its own visit group are never filtered. The moved-visit text also drops its "Why the move? Treatments need a few rain-free hours..." sentence (GATE_RAINOUT_EFFICACY_NOTE) when the moved service is rain-OK. Strict opt-in (exactly 'true'), read at call time by server/services/rain-out.js via rainoutKeepRainOkLive(); ships DARK; off = byte-identical list, queries and text. Customer-facing (it decides who gets a move text), so the owner flips it; unset = kill switch. The tech-facing storm-watch nudge skips all-rain-OK stops with no gate.)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -7590,17 +7588,6 @@ function tripLinkLive() {
   return process.env.GATE_TRIP_LINK === 'true';
 }
 
-// GATE_ARRIVAL_ENGINE_OFF read at CALL time — strict `=== 'true'`, dark by default
-// (owner 2026-11-01: "triggers early; tie it to the truck turning off"). The
-// canonical reader for services/gps-arrival-detector.js and
-// routes/webhooks-bouncie.js. On: a trip-end (engine off) inside the arrival
-// radius marks the arrival and the immediate-radius rule keeps marking; a sample
-// only the slow-radius rule would mark records awaiting_engine_off. Off: the old
-// speed and radius rules, unchanged. Kill: unset.
-function arrivalEngineOffLive() {
-  return process.env.GATE_ARRIVAL_ENGINE_OFF === 'true';
-}
-
 // Auto lunch (services/time-tracking.js), read at CALL time. Strict
 // `=== 'true'`, dark in every environment; unsetting it is the kill switch.
 function autoLunchLive() {
@@ -8436,12 +8423,6 @@ function movingAutoSendLive() {
 module.exports.movingAutoSendLive = movingAutoSendLive;
 // GATE_APP_RATING_PROMPT reader, on its own line so gate PRs never conflict.
 module.exports.appRatingPromptMode = appRatingPromptMode;
-// GATE_QUICKMOVE_CUSTOMER_PICK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
-// Kept off the end-of-file append point, where gate PRs keep colliding.
-function quickMoveCustomerPickLive() {
-  return process.env.GATE_QUICKMOVE_CUSTOMER_PICK === 'true';
-}
-module.exports.quickMoveCustomerPickLive = quickMoveCustomerPickLive;
 // GATE_RAINOUT_KEEP_RAIN_OK read at CALL time (so a flip needs no redeploy); strict 'true', dark.
 function rainoutKeepRainOkLive() {
   return process.env.GATE_RAINOUT_KEEP_RAIN_OK === 'true';
@@ -8864,8 +8845,6 @@ module.exports.callLastNameLookupLive = callLastNameLookupLive;
 module.exports.pinParkedCheckLive = pinParkedCheckLive;
 // GATE_TRIP_LINK reader, on its own line so gate PRs never conflict.
 module.exports.tripLinkLive = tripLinkLive;
-// GATE_ARRIVAL_ENGINE_OFF reader, on its own line so gate PRs never conflict.
-module.exports.arrivalEngineOffLive = arrivalEngineOffLive;
 // GATE_AUTO_LUNCH reader, on its own line so gate PRs never conflict.
 module.exports.autoLunchLive = autoLunchLive;
 // GATE_LAWN_REPORT_CLARITY reader, on its own line so gate PRs never conflict.
@@ -9177,13 +9156,6 @@ function techVoiceLineLive() {
 function payerPacketAutosendLive() {
   return process.env.GATE_PAYER_PACKET_AUTOSEND === 'true';
 }
-// GATE_TECH_INSTANT_ANSWERS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the tech Intelligence Bar
-// shows three one-tap answers (next stop, access notes, last treatment) served by GET /api/tech/answers from the
-// technician's own visits today (services/tech-instant-answers.js). No model call, no write, no cost. Off = the routes
-// answer 404 and the bar shows no chips. Kill = unset.
-function techInstantAnswersLive() {
-  return process.env.GATE_TECH_INSTANT_ANSWERS === 'true';
-}
 // GATE_RECAP_GLASSES_CLIPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-01). On, the visit recap accepts
 // clips from the phone's photo library (camera glasses): a video may run up to 60 s and 200 MB, a clip over 20 s is
 // stored as `processing` (the renderer skips it until it is cut), and a clip added after the recap rendered, but
@@ -9353,8 +9325,6 @@ module.exports.techVoiceLineLive = techVoiceLineLive;
 module.exports.schedulingPlanMinutesOnly = schedulingPlanMinutesOnly;
 // GATE_AUTO_DISPATCH_DRY_TIME_ORDER reader, on its own line so gate PRs never conflict.
 module.exports.autoDispatchDryTimeOrderMode = autoDispatchDryTimeOrderMode;
-// GATE_TECH_INSTANT_ANSWERS reader, on its own line so gate PRs never conflict.
-module.exports.techInstantAnswersLive = techInstantAnswersLive;
 // GATE_RECAP_GLASSES_CLIPS reader, on its own line so gate PRs never conflict.
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.

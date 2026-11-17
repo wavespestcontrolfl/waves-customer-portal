@@ -1,5 +1,5 @@
 /**
- * /api/tech/answers — dark behind GATE_TECH_INSTANT_ANSWERS. The visit filter
+ * /api/tech/answers. The visit filter
  * is always the signed-in technician's id, for an admin login too.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -8,12 +8,10 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
-jest.mock('../config/feature-gates', () => ({ techInstantAnswersLive: jest.fn(() => true) }));
 jest.mock('../services/previsit-brief', () => ({ deterministicVisitFacts: jest.fn() }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { techInstantAnswersLive } = require('../config/feature-gates');
 const { deterministicVisitFacts } = require('../services/previsit-brief');
 const router = require('../routes/tech-answers');
 
@@ -55,24 +53,10 @@ function primeDb(rows) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  techInstantAnswersLive.mockReturnValue(true);
   primeDb([]);
 });
 
-describe('gate off', () => {
-  test('both routes answer 404 and touch nothing', async () => {
-    techInstantAnswersLive.mockReturnValue(false);
-    const index = await get('/');
-    expect(index.r.statusCode).toBe(404);
-    expect(index.r.body).toEqual({ error: 'Not found' });
-    const one = await get('/:kind', { params: { kind: 'next_stop' } });
-    expect(one.r.statusCode).toBe(404);
-    expect(one.r.body).toEqual({ error: 'Not found' });
-    expect(db).not.toHaveBeenCalled();
-  });
-});
-
-describe('gate on', () => {
+describe('answers', () => {
   test('GET / lists the three kinds with labels', async () => {
     const { r } = await get('/');
     expect(r.body).toEqual({
