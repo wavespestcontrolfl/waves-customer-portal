@@ -142,28 +142,35 @@ async function closeClaim(callSid) {
   return writeHold(callSid, { ...hold, open: false, total_sec: (Number(hold.total_sec) || 0) + seconds }, [HAS_STATE_SQL, HOLD_OPEN_SQL]);
 }
 
+// closeClaim that never throws: -1 when the write failed (unknown whether another request closed it).
+const closeClaimSafely = (callSid) => closeClaim(callSid).catch((err) => {
+  logger.error(`[call-hold] hold claim not closed for ${masked(callSid)} (${errorCode(err)})`);
+  return -1;
+});
+
 // 'returned' | 'no_room' | 'failed'. Takes the caller off hold FIRST, then closes the claim, then
-// resumes the recording. Never throws.
+// resumes the recording. Once the caller is off hold the answer is 'returned' even when the claim
+// write fails, so the staff always go back to a caller who is waiting in the room. Never throws.
 async function endHold(callSid) {
   try {
     const roomSid = await findRoomSid(callSid);
     if (!roomSid) {
-      await closeClaim(callSid);
+      await closeClaimSafely(callSid);
       return 'no_room';
     }
     await client().conferences(roomSid).participants(callSid).update({ hold: false });
-    const closed = await closeClaim(callSid);
-    if (closed > 0) await resumeRecording(callSid);
-    logger.info(`[call-hold] caller ${masked(callSid)} back from hold`);
-    return 'returned';
   } catch (err) {
     if (isGone(err)) {
-      await closeClaim(callSid).catch(() => {});
+      await closeClaimSafely(callSid);
       return 'no_room';
     }
     logger.warn(`[call-hold] hold not ended for ${masked(callSid)} (${errorCode(err)})`);
     return 'failed';
   }
+  // 0 = a duplicate press 1 closed it first and resumes the recording itself.
+  if ((await closeClaimSafely(callSid)) !== 0) await resumeRecording(callSid);
+  logger.info(`[call-hold] caller ${masked(callSid)} back from hold`);
+  return 'returned';
 }
 
 module.exports = { isEnabled, startHold, endHold, holdState, roomIsOpen };

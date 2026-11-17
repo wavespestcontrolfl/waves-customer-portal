@@ -185,31 +185,38 @@ describe('/conference-hold-facts (holdUrl)', () => {
   const factsUrl = (n) => `/api/webhooks/twilio/conference-hold-facts?parent=${SID}&amp;step=${n}`;
   const stepBody = async (n) => (await post('/conference-hold-facts', { query: { step: String(n) } })).body;
 
-  test('step 0 starts with the opening, speaks four facts in order, the reminder, then step 1', async () => {
-    const body = await stepBody(0);
-    expect(body).toBe(response([
-      say(OPENING), '<Pause length="2"/>', say(FACTS[0]), '<Pause length="2"/>', say(FACTS[1]),
-      '<Pause length="2"/>', say(FACTS[2]), '<Pause length="2"/>', say(FACTS[3]),
-      '<Pause length="2"/>', say(REMINDER), `<Redirect method="POST">${factsUrl(1)}</Redirect>`,
+  test('step 0: the opening, then the first fact, then step 1', async () => {
+    expect(await stepBody(0)).toBe(response([
+      say(OPENING), '<Pause length="2"/>', say(FACTS[0]), `<Redirect method="POST">${factsUrl(1)}</Redirect>`,
     ].join('')));
-    expect(body.indexOf(esc(OPENING))).toBeLessThan(body.indexOf(esc(FACTS[0])));
   });
 
-  test('later steps carry the next facts, cycle through all twelve, and have no opening', async () => {
-    const body1 = await stepBody(1);
-    expect(body1).toContain(esc(FACTS[4]));
-    expect(body1).toContain(esc(FACTS[7]));
-    expect(body1).not.toContain(esc(OPENING));
-    expect(body1).toContain(esc(REMINDER));
-    expect(await stepBody(2)).toContain(esc(FACTS[8]));
-    // Step 3 wraps to the first fact again.
-    const body3 = await stepBody(3);
-    expect(body3).toContain(esc(FACTS[0]));
-    expect(body3.endsWith(`<Redirect method="POST">${factsUrl(4)}</Redirect></Response>`)).toBe(true);
+  test('a later step: a pause, the next fact in order, then the next step; no opening', async () => {
+    expect(await stepBody(1)).toBe(response([
+      '<Pause length="3"/>', say(FACTS[1]), `<Redirect method="POST">${factsUrl(2)}</Redirect>`,
+    ].join('')));
+  });
+
+  test('the reminder plays before every fifth fact, about once a minute, and never on other steps', async () => {
+    expect(await stepBody(5)).toBe(response([
+      '<Pause length="3"/>', say(REMINDER), '<Pause length="2"/>', say(FACTS[5]),
+      `<Redirect method="POST">${factsUrl(6)}</Redirect>`,
+    ].join('')));
+    expect(await stepBody(10)).toContain(esc(REMINDER));
+    for (const n of [0, 1, 4, 6, 9, 11]) expect(await stepBody(n)).not.toContain(esc(REMINDER));
+  });
+
+  test('the facts cycle through all twelve in order', async () => {
+    const spoken = [];
+    for (let n = 0; n < 24; n += 1) {
+      const body = await stepBody(n);
+      spoken.push(FACTS.findIndex((fact) => body.includes(esc(fact))));
+    }
+    expect(spoken).toEqual([...FACTS.keys(), ...FACTS.keys()]);
   });
 
   test('uses only Say, Pause and Redirect, and no customer data', async () => {
-    for (const n of [0, 1, 2, 3]) {
+    for (const n of [0, 1, 5, 12]) {
       const body = await stepBody(n);
       const tags = [...body.matchAll(/<([A-Za-z]+)[ />]/g)].map((m) => m[1]).filter((t) => t !== 'Response');
       expect(new Set(tags)).toEqual(new Set(['Say', 'Pause', 'Redirect']));
