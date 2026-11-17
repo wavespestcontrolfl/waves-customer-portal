@@ -82,7 +82,7 @@ const DUE = '2026-11-11';
 const PICK_BY = new Date('2026-11-04T14:00:00Z'); // Wed 9:00 AM EST: 24 hours after NOW
 const LINK = 'https://portal.wavespestcontrol.com/l/k3j9m2x7qp';
 const SID = `SM${'a'.repeat(32)}`;
-const REFERENCE_TEXT = "Hi Maria - rain is moving through your area this morning, so we need to move your Quarterly Pest Control Service.\n\nPick a new time by Wed 9 AM: portal.wavespestcontrol.com/l/k3j9m2x7qp\n\nIf you don't, we'll book one and text you.";
+const REFERENCE_TEXT = "Hi Maria - rain is in today's forecast, so we need to move your Quarterly Pest Control Service.\n\nPick a new time by Wed 9 AM: portal.wavespestcontrol.com/l/k3j9m2x7qp\n\nIf you don't, we'll book one and text you.";
 
 // The visit columns (what the locked read returns) and the joined customer columns.
 const VISIT = {
@@ -219,11 +219,11 @@ describe('rain_out_customer_pick_v1 template', () => {
     expect(rows.map((r) => r.body)).toEqual([BODY, 'An office edit: {pick_url} by {pick_by}', SEEDED_BODY]);
   });
 
-  test('the reference render is the exact text sent: 228 characters, GSM-7, 2 segments', async () => {
+  test('the reference render is the exact text sent: 210 characters, GSM-7, 2 segments', async () => {
     const r = await handOff();
     expect(r.ok).toBe(true);
     expect(sentBody()).toBe(REFERENCE_TEXT);
-    expect(REFERENCE_TEXT).toHaveLength(228);
+    expect(REFERENCE_TEXT).toHaveLength(210);
     expect(countSegments(REFERENCE_TEXT)).toEqual(expect.objectContaining({ encoding: 'GSM_7', segmentCount: 2 }));
   });
 
@@ -367,7 +367,7 @@ describe('handOffToCustomer refusals write nothing', () => {
   });
 
   test('a text that cannot fit two segments even without its closing sentence: pick_text_too_long', async () => {
-    state.service.service_type = `Quarterly Pest Control Service ${'and Perimeter Barrier Treatment '.repeat(3)}`.trim();
+    state.service.service_type = `Quarterly Pest Control Service ${'and Perimeter Barrier Treatment '.repeat(4)}`.trim();
     expect(await handOff()).toEqual({ ok: false, reason: 'pick_text_too_long' });
     expectNothingWritten();
   });
@@ -553,7 +553,7 @@ describe('handOffToCustomer writes and texts', () => {
   test('a row that kept the 2026-11-01 wording: a long name sends without its closing "Questions? Reply here."', async () => {
     state.template = { body: SEEDED_BODY, is_active: true };
     state.service.first_name = 'Maximiliana-Josephine';
-    state.service.service_type = 'Quarterly Pest Control Service Plus';
+    state.service.service_type = 'Quarterly Pest Control Service Plus Interior Add-On';
     const r = await handOff();
 
     expect(r.textSent).toBe(true);
@@ -594,7 +594,7 @@ describe('handOffToCustomer writes and texts', () => {
 
     test('a landed link long enough to bill a third segment even trimmed: not sent', async () => {
       buildRescheduleLink.mockResolvedValueOnce({ url: LINK })
-        .mockResolvedValueOnce({ url: `https://portal.wavespestcontrol.com/reschedule/${'t'.repeat(90)}` });
+        .mockResolvedValueOnce({ url: `https://portal.wavespestcontrol.com/reschedule/${'t'.repeat(110)}` });
       const r = await handOff();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(r).toEqual(expect.objectContaining(notTexted('text_unavailable')));
