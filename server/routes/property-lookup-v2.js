@@ -1436,6 +1436,10 @@ router.post('/property-lookup', async (req, res) => {
     }
     const campusParcel = campusParcelMeta(result.propertyRecord);
     if (campusParcel) result.meta.campusParcel = campusParcel;
+    // GATE_CAGE_START_MEDIUM: meta.poolCageStartSize, the size the estimate
+    // tool's first fill starts a county-measured cage of 601-2,000 sq ft at.
+    // Beside the profile, never in it. Absent while the gate is off.
+    require('../services/property-lookup/office-cage-start').stampEstimateToolCageStart(result);
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
     // later stops being an association. Absent while the gate is off.

@@ -2913,7 +2913,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // Feature modifiers resolved by the lookup of the QUOTED address
         // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
         // water adjacency feed real pricing adjustments.
-        lookupEnriched: effectiveSignals.enriched,
+        // GATE_CAGE_START_MEDIUM: the office cage start for THIS draft only
+        // (a county cage of 601-2,000 sq ft starts at Medium; a cage with no
+        // decided pool is dropped, as the estimate tool does). Gate off =
+        // the same object.
+        lookupEnriched: require('../property-lookup/office-cage-start').agentDraftCageProfile(effectiveSignals.enriched),
         unitBandPricing,
       });
       // Stamp what ACTUALLY fed pricing (gate ON only — the kill switch

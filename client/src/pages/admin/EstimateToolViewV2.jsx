@@ -3978,8 +3978,14 @@ export default function EstimateToolViewV2({
       // as a POSSIBLE pool carries the same "may be neighbor" doubt (r1 P1).
       upd.hasPool = ep.pool === "YES" ? "YES" : "NO";
       upd.hasPoolCage = ep.poolCage === "YES" && ep.pool === "YES" ? "YES" : "NO";
-      if (ep.poolCageSize && ep.poolCageSize !== "NONE")
-        upd.poolCageSize = ep.poolCageSize;
+      // GATE_CAGE_START_MEDIUM: while the gate is on the lookup names the
+      // office starting size for a county cage of 601-2,000 sq ft
+      // (meta.poolCageStartSize). Absent = the lookup's own size, as before.
+      // The other sizes stay in the list, and a hand-set size is restored
+      // after the merge below (_manualFields).
+      const cageStartSize = data.meta?.poolCageStartSize || ep.poolCageSize;
+      if (cageStartSize && cageStartSize !== "NONE")
+        upd.poolCageSize = cageStartSize;
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
       if (ep.landscapeComplexity)

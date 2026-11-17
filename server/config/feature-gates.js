@@ -35,6 +35,7 @@
  *   GATE_NEWSLETTER_CLICK_BOUND=true (security audit run 2, 2026-10-22: the newsletter event link /api/public/newsletter/e/:token/:eventId redirects to the event's URL only when the token is a real delivery and the event is in that send's lineup (locked or alternate ids); any other pair goes to the homepage, so the portal host is not an open redirect; the target is the URL the send carried (newsletter_sends.event_url_snapshot, written at send time). Read at call time via newsletterClickBoundLive(), strict 'true', dark by default; off = redirect exactly as before. Sends nothing.)
  *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
+ *   GATE_CAGE_START_MEDIUM=true (owner 2026-11-17 "both", draft price study: the two office tools start a county-measured pool cage of 601 to 2,000 sq ft at Medium instead of the lookup's Large or Oversized. It covers the call-agent draft and the estimate tool's first fill after a property lookup. With it on, the call-agent draft also drops a cage on a home with no decided pool, as the estimate tool already does. Small, Large and Oversized stay in the estimate tool's list for hand use; a cage over 2,000 sq ft stays Oversized. Not changed: the lookup's own cage size, so the website quote, the website-lead draft and the customer price assistant are as before; the price of each size; any saved estimate. It has a gate because it changes a starting price in the estimate tool. Read at call time via cageStartMediumLive(), strict 'true', dark by default; off or unset = both tools start exactly as before.)
  *   GATE_ACH_FAILURE_EMAIL=true (owner 2026-11-16: a customer whose bank (ACH) payment fails gets one email for the stage the failure reached: the retry notice, the switch to the card on file, or the bank suspension with a link to update the bank account. The three bank-failure texts stay off (owner 2026-09-28) and get no text fallback. One email per payment intent and Stripe event; a replayed event sends it only when it is missing. Strict `=== 'true'`, read at call time via achFailureEmailLive(); dark by default. Off = no email, nothing else changes. Kill: unset)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
@@ -518,6 +519,9 @@ const gates = {
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   propertyServiceAreas: gateEnvValue('GATE_PROPERTY_SERVICE_AREAS'),
   lawnCostPlusList: gateEnvValue('GATE_LAWN_COST_PLUS_LIST'),
+  // GATE_CAGE_START_MEDIUM: read at CALL time via cageStartMediumLive(); this entry is for logGateStatus, so the
+  // boot log shows the flip.
+  cageStartMedium: process.env.GATE_CAGE_START_MEDIUM === 'true',
   mosquitoMisting: gateEnvValue('GATE_MOSQUITO_MISTING'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
@@ -6049,6 +6053,16 @@ function estimateLawnLimitsLive() {
   return process.env.GATE_ESTIMATE_LAWN_LIMITS === 'true';
 }
 
+// GATE_CAGE_START_MEDIUM read at CALL time — strict `=== 'true'`, dark by
+// default (owner 2026-11-17, "both"). services/property-lookup/office-cage-start.js:
+// the call-agent draft and the estimate tool's first fill start a county-measured
+// pool cage of 601 to 2,000 sq ft at Medium, and the call-agent draft drops a cage
+// on a home with no decided pool. It has a gate because it changes a starting
+// price in the estimate tool. Off = both tools start exactly as before. Kill = unset.
+function cageStartMediumLive() {
+  return process.env.GATE_CAGE_START_MEDIUM === 'true';
+}
+
 // GATE_MOSQUITO_MISTING read at CALL time (gateEnvValue: '1'/'true'/'on'), dark by
 // default. The mosquito misting system pricer in the estimate engine, the
 // legacy mapper's plan and install rows, and the two public price-range rows.
@@ -9241,6 +9255,8 @@ module.exports.newsletterAutoSendLive = newsletterAutoSendLive;
 module.exports.invoiceNotOnSparkLive = invoiceNotOnSparkLive;
 // GATE_ESTIMATE_LAWN_LIMITS reader, on its own line so gate PRs never conflict.
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
+// GATE_CAGE_START_MEDIUM reader, on its own line so gate PRs never conflict.
+module.exports.cageStartMediumLive = cageStartMediumLive;
 // GATE_LAWN_RECLAIMED_HALF_N reader, on its own line so gate PRs never conflict.
 module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 // GATE_MOSQUITO_MISTING reader, on its own line so gate PRs never conflict.

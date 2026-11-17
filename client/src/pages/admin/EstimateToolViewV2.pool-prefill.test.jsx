@@ -27,14 +27,18 @@ function jsonResponse(body) {
 let fetchMock;
 let pool;
 let poolCage;
+let cageSize;
+let lookupMeta;
 beforeEach(() => {
+  cageSize = 'MEDIUM';
+  lookupMeta = undefined;
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(window, 'alert').mockImplementation(() => {});
   fetchMock = vi.fn((url) => {
     const path = String(url);
     if (path.endsWith('/estimator/property-lookup')) {
-      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 1800, lotSqFt: 9000, stories: 1, pool, poolCage, poolCageSize: 'MEDIUM' }, errors: [] }));
+      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 1800, lotSqFt: 9000, stories: 1, pool, poolCage, poolCageSize: cageSize }, meta: lookupMeta, errors: [] }));
     }
     if (path.endsWith('/calculate-estimate')) return Promise.resolve(jsonResponse(structuredClone(RESULT)));
     if (path.includes('/discounts')) return Promise.resolve(jsonResponse([]));
@@ -95,5 +99,51 @@ describe('lookup pool prefill', () => {
     pool = 'YES';
     poolCage = 'YES';
     expect(await pricedPool()).toEqual({ pool: 'YES', poolCage: 'YES' });
+  });
+});
+
+// GATE_CAGE_START_MEDIUM (owner 2026-11-17): while the gate is on the lookup
+// names the office starting size beside the profile (meta.poolCageStartSize).
+describe('lookup cage size prefill', () => {
+  const lookUp = async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Property Lookup', exact: true }));
+    await screen.findByRole('region', { name: 'Property lookup results' });
+  };
+  const pricedProfile = async () => {
+    const calls = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/calculate-estimate'));
+    const before = calls().length;
+    fireEvent.click(screen.getByRole('button', { name: 'Generate Estimate', exact: true }));
+    await waitFor(() => expect(calls().length).toBe(before + 1));
+    return JSON.parse(calls()[before][1].body).profile;
+  };
+
+  beforeEach(() => {
+    pool = 'YES';
+    poolCage = 'YES';
+    cageSize = 'LARGE';
+  });
+
+  it('with no start size from the lookup, the lookup\'s own size fills and prices (gate off)', async () => {
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+    await lookUp();
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE');
+    expect(await pricedProfile()).toMatchObject({ poolCage: 'YES', poolCageSize: 'LARGE' });
+  });
+
+  it('the lookup\'s start size fills the box and prices; the other sizes stay; a hand-set size survives the next lookup', async () => {
+    lookupMeta = { poolCageStartSize: 'MEDIUM' };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+    await lookUp();
+    const sizeBox = () => screen.getByLabelText('Pool Cage Size');
+    expect(sizeBox()).toHaveValue('MEDIUM');
+    expect([...sizeBox().options].map((o) => o.value)).toEqual(['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED']);
+    expect(await pricedProfile()).toMatchObject({ poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageSizeInferred: false });
+
+    fireEvent.change(sizeBox(), { target: { value: 'OVERSIZED' } });
+    await lookUp();
+    await waitFor(() => expect(sizeBox()).toHaveValue('OVERSIZED'));
+    expect(await pricedProfile()).toMatchObject({ poolCageSize: 'OVERSIZED' });
   });
 });
