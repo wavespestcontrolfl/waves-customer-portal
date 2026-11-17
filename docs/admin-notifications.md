@@ -260,6 +260,27 @@ customer's message by this rule.
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
+   A customer's overdue text follow-ups are one subject too (owner 2026-11-16, "one alert for each
+   customer"): they share ONE bell row (`dedupeKey` `sms-commitment-customer:<customerId>`,
+   `ringSmsCustomerBell` in `server/services/sms-operational-actions.js`). The row lists its promises
+   in `metadata.commitment_ids` (and `itemKeys`), the promises of the text that rang last first. A promise joins
+   when its own overdue check rings, together with the other open promises from its text. The row
+   rings exactly when the row of one text rang before the fold (`GATE_ALERT_RING_ONCE` on): when it
+   first appears and again, unread and moved to the top, when a promise joins from a text that has
+   no promise on the row. A text with a promise on the open row never rings it again (owner
+   2026-10-22: one text, one ring). A promise that is done, dismissed, expired or held by a booked
+   visit leaves the row without a ring, and the row closes when no promise is left on it.
+   `metadata.spoke_for` keeps the id of every text the row has listed a promise from: a promise
+   whose text is there does not ring "kept late" (a row keyed on that text kept its key after it
+   closed, and stopped that ring the same way).
+   Done on the row, and Called back, settle the promises it lists. Rows an older build keyed on one text
+   (`sms-commitment-source:<text id>`) or on one promise (`sms-commitment:<promise id>`) fold into
+   the customer's row the first time one of their promises is checked or settled: a row whose open
+   promises all belong to the customer takes the customer's key (an unread row first) and the others
+   close as "Replaced by one alert for this customer", with no ring. A merge moves the listed
+   promises to the surviving customer's row the same way. Every writer takes the alert service's
+   lock for the customer's key before it reads or locks the row. An email follow-up keeps one row
+   per promise (`email-commitment:<promise id>`).
    A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
    `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
    30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,
@@ -357,7 +378,9 @@ customer's message by this rule.
    prints what a run would dismiss; `server/scripts/reopen-promise-age-out.js` lists the runs, and with
    `--run <id> [--apply]` reopens one: its promises, each with the suggested proof it carried (kept as
    `fulfillment.prior`), and the alerts it closed for them (open again, and unread again when the close is what
-   marked them read).
+   marked them read). A text promise the run only took off a customer's alert that stayed open goes back on that
+   alert without a ring (`restoreSmsCommitmentAlerts`); when a person has closed that alert since, the promise's
+   next overdue check rings a fresh one.
    Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
    `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`

@@ -112,6 +112,51 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(opts.metadata.commitment_ids).toEqual(['commit-1', 'commit-2']);
   });
 
+  // Owner 2026-11-16, "one alert for each customer": a customer's text follow-ups share one alert.
+  const GATE_AT = new Date('2026-10-02T15:00:00Z'); // Oct 2, 11:00 AM ET
+  const gateAsk = (extra = {}) => row({ id: 'commit-2', kind: 'callback', description: 'call me back about the gate', sms_log_id: 'sms-2',
+    source_created_at: GATE_AT, evidence: [{ quote: 'Please call me back about the gate', matched: true }], ...extra });
+  const customerAlert = (lead, promises) => ring({ row: lead, args: { dedupeKey: `sms-commitment-customer:${CUSTOMER_ID}`, promises,
+    spokeFor: ['sms-1', 'sms-2'], message: { id: lead.sms_log_id, customer_id: CUSTOMER_ID, created_at: lead.source_created_at, message_body: '' } } });
+
+  test('follow-ups from two texts: the lead is quoted with its day, the rest are counted, each line names its own day', async () => {
+    const lead = gateAsk();
+    await customerAlert(lead, [lead, row({ sms_log_id: 'sms-1', source_created_at: sourceAt })]);
+    const [, title, body, opts] = lastCall();
+    expect(title).toBe('Comms — follow up with Albert Clark');
+    expect(body).toBe('“call me back about the gate” (Oct 2) and 1 more — nothing on record shows them done.');
+    expect(opts.detail.split('\n')).toEqual([
+      'Albert Clark: asked in 2 texts.',
+      '• “call me back about the gate” (Oct 2)',
+      '• “Swarming termites mobile home tenting free estimate” (Sep 29)',
+      '2 follow-ups from 2 texts are still open. The available follow-up records do not establish completion. Open the customer profile to take the next step.',
+    ]);
+    // The list keeps the alert's order; itemKeys is the same set sorted, so only a change of members rewrites the row.
+    expect(opts.metadata).toMatchObject({ commitment_id: 'commit-2', sms_log_id: 'sms-2', commitment_ids: ['commit-2', 'commit-1'],
+      itemKeys: ['commit-1', 'commit-2'], spoke_for: ['sms-1', 'sms-2'] });
+  });
+
+  test('two texts that hold a customer ask and our own promise say both; our promise in the lead reads "We said"', async () => {
+    const ours = gateAsk({ kind: 'other', description: 'will be out there', evidence: [{ quote: 'Adam will be out there Friday', matched: true }],
+      sms_context: { basis: 'promise' } });
+    await customerAlert(ours, [ours, row({ sms_log_id: 'sms-1', source_created_at: sourceAt })]);
+    const [, , body, opts] = lastCall();
+    expect(body).toBe('We said “will be out there” (Oct 2) and 1 more — nothing on record shows them done.');
+    expect(opts.detail.split('\n')[0]).toBe('Albert Clark: asked or promised in 2 texts.');
+  });
+
+  test('two texts of our own promises say we promised them, and two follow-ups of one kind keep that kind\'s headline', async () => {
+    const promise = (extra) => gateAsk({ kind: 'other', sms_context: { basis: 'promise' }, ...extra });
+    const lead = promise({ description: 'will be out there', evidence: [{ quote: 'Adam will be out there Friday', matched: true }] });
+    await customerAlert(lead, [lead, promise({ id: 'commit-1', sms_log_id: 'sms-1', source_created_at: sourceAt, description: 'send the invoice',
+      evidence: [{ quote: 'We will send the invoice today', matched: true }] })]);
+    expect(lastCall()[3].detail.split('\n')[0]).toBe('Albert Clark: we promised these in 2 texts.');
+    const report = (extra) => row({ kind: 'send_estimate', ...extra });
+    const first = report({ id: 'commit-2', sms_log_id: 'sms-2', source_created_at: GATE_AT });
+    await customerAlert(first, [first, report({ sms_log_id: 'sms-1', source_created_at: sourceAt })]);
+    expect(lastCall()[1]).toBe('Comms — send Albert Clark the estimate');
+  });
+
   test('a suppressed ring has no row to keep, so nothing is closed', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
     await ring();
@@ -418,6 +463,15 @@ describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => 
     expect(opts).toMatchObject({ bell: true, dedupeOpenOnly: true, link: `/admin/customers?customerId=${CUSTOMER_ID}&tab=comms` });
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', commitment_id: 'commit-1', doneWhen: 'promise_fulfilled' });
     expect(sentUpdates[0].bindings).toContain('n-fresh');
+  });
+
+  test('gate on: an open row rings again, and rises, only when the checked promise brings a text the row does not show (a customer alert)', async () => {
+    await ring({ args: { joins: true } });
+    expect(lastCall()[3]).toMatchObject({ dedupeOpenOnly: true, refreshOnDedupe: true, bumpOnRefresh: true });
+    expect(lastCall()[3].ringOnRefresh()).toBe(true);
+    // The closer's rewrite of the open row never rings.
+    await ring({ args: { joins: true, refreshOnly: true } });
+    expect(lastCall()[3].ringOnRefresh()).toBe(false);
   });
 
   test('gate on, email promise: same rule through the shared bell', async () => {
