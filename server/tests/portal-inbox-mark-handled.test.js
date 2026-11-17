@@ -1,11 +1,10 @@
 /**
- * GATE_PORTAL_INBOX mark-handled hooks on the two EXISTING update routes:
+ * Mark-handled hooks on the two EXISTING update routes:
  *   PUT   /api/ai/admin/escalations/:id  (chat hand-off)
  *   PATCH /api/admin/requests/:id        (service request)
- * Gate on: finishing the item also closes its open admin bell alerts.
- * Gate off: the routes behave as before (no alert lookup, no close).
+ * Finishing the item also closes its open admin bell alerts.
  * Also pins the escalation route's hardening: 404 for a missing row and 400 for
- * an unknown status (both gate on or off).
+ * an unknown status.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -91,8 +90,7 @@ const send = (baseUrl, method, path, body) => fetch(`${baseUrl}${path}`, {
 });
 
 describe('PUT /ai/admin/escalations/:id', () => {
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; });
-  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; });
+  beforeEach(() => { jest.clearAllMocks(); });
 
   test('answers 400 for a status the table does not use, before any write', async () => {
     await withServer(async (baseUrl) => {
@@ -111,22 +109,7 @@ describe('PUT /ai/admin/escalations/:id', () => {
     expect(mockMarkAdminDone).not.toHaveBeenCalled();
   });
 
-  test('gate off: resolving closes the session as before and touches no alert', async () => {
-    setDb({
-      ai_escalations: [chain({ returning: [{ id: ESC_ID, conversation_id: 'conv-1', status: 'resolved' }] })],
-      agent_sessions: [chain()],
-    });
-    await withServer(async (baseUrl) => {
-      const res = await send(baseUrl, 'PUT', `/ai/admin/escalations/${ESC_ID}`, { status: 'resolved', resolution_notes: 'done' });
-      expect(res.status).toBe(200);
-      expect((await res.json()).escalation.id).toBe(ESC_ID);
-    });
-    expect(db.mock.calls.map(([t]) => t)).toEqual(['ai_escalations', 'agent_sessions']);
-    expect(mockMarkAdminDone).not.toHaveBeenCalled();
-  });
-
-  test.each(['resolved', 'dismissed'])('gate on: %s closes the escalation\'s open admin alerts', async (status) => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test.each(['resolved', 'dismissed'])('%s closes the escalation\'s open admin alerts', async (status) => {
     const alerts = chain({ pluck: ['alert-1', 'alert-2'] });
     setDb({
       ai_escalations: [chain({ returning: [{ id: ESC_ID, conversation_id: 'conv-1', status }] })],
@@ -145,8 +128,7 @@ describe('PUT /ai/admin/escalations/:id', () => {
     );
   });
 
-  test('gate on: claiming (not finishing) closes no alert', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('claiming (not finishing) closes no alert', async () => {
     setDb({ ai_escalations: [chain({ returning: [{ id: ESC_ID, conversation_id: 'conv-1', status: 'claimed' }] })] });
     await withServer(async (baseUrl) => {
       const res = await send(baseUrl, 'PUT', `/ai/admin/escalations/${ESC_ID}`, { status: 'claimed', claimed_by: 'tech-admin-1' });
@@ -157,25 +139,12 @@ describe('PUT /ai/admin/escalations/:id', () => {
 });
 
 describe('PATCH /requests/:id', () => {
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_PORTAL_INBOX; });
-  afterAll(() => { delete process.env.GATE_PORTAL_INBOX; });
+  beforeEach(() => { jest.clearAllMocks(); });
 
   const existing = { id: REQ_ID, status: 'new', customer_id: 'cust-1', category: 'general', resolved_at: null };
   const resolved = { ...existing, status: 'resolved' };
 
-  test('gate off: resolving still emails the customer and closes no alert', async () => {
-    setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })] });
-    await withServer(async (baseUrl) => {
-      const res = await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved' });
-      expect(res.status).toBe(200);
-    });
-    expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
-    expect(mockMarkAdminDone).not.toHaveBeenCalled();
-    expect(db.mock.calls.map(([t]) => t)).toEqual(['service_requests', 'service_requests']);
-  });
-
-  test('gate on: the writer that won the move to resolved closes the request\'s alerts and the email still goes', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('the writer that won the move to resolved closes the request\'s alerts and the email still goes', async () => {
     const alerts = chain({ pluck: ['alert-9'] });
     setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })], notifications: [alerts] });
     await withServer(async (baseUrl) => {
@@ -187,8 +156,7 @@ describe('PATCH /requests/:id', () => {
     expect(AccountMembershipEmail.sendRequestUpdated).toHaveBeenCalledTimes(1);
   });
 
-  test('gate on: the loser of a concurrent transition closes nothing', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('the loser of a concurrent transition closes nothing', async () => {
     setDb({ service_requests: [chain({ first: existing }), chain({ returning: [] }), chain({ first: resolved })] });
     await withServer(async (baseUrl) => {
       const res = await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'resolved' });
@@ -198,8 +166,7 @@ describe('PATCH /requests/:id', () => {
     expect(AccountMembershipEmail.sendRequestUpdated).not.toHaveBeenCalled();
   });
 
-  test('gate on: a move that is not to resolved closes nothing', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('a move that is not to resolved closes nothing', async () => {
     setDb({ service_requests: [chain({ first: existing }), chain({ returning: [{ ...existing, status: 'acknowledged' }] })] });
     await withServer(async (baseUrl) => {
       const res = await send(baseUrl, 'PATCH', `/requests/${REQ_ID}`, { status: 'acknowledged' });
@@ -208,8 +175,7 @@ describe('PATCH /requests/:id', () => {
     expect(mockMarkAdminDone).not.toHaveBeenCalled();
   });
 
-  test('gate on: a failed alert close never fails the staff action', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
+  test('a failed alert close never fails the staff action', async () => {
     mockMarkAdminDone.mockRejectedValueOnce(new Error('boom'));
     setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })], notifications: [chain({ pluck: ['alert-9'] })] });
     await withServer(async (baseUrl) => {
@@ -221,7 +187,6 @@ describe('PATCH /requests/:id', () => {
   // The Portal tab's Mark handled says `quiet: true` and the customer gets no
   // "Your Waves request was updated" email. Customer 360 sends no `quiet`, so its email is unchanged.
   test('quiet: the request resolves, its alerts still close, and no customer email goes', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
     const alerts = chain({ pluck: ['alert-9'] });
     setDb({ service_requests: [chain({ first: existing }), chain({ returning: [resolved] })], notifications: [alerts] });
     await withServer(async (baseUrl) => {

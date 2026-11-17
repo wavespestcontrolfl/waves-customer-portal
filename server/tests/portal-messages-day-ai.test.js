@@ -49,7 +49,7 @@ jest.mock('../services/followup-sla-watcher', () => ({
 const gates = require('../config/feature-gates');
 const DayAi = require('../services/portal-messages-day-ai');
 
-const GATE_KEYS = ['GATE_PORTAL_MESSAGES_DAY_AI', 'GATE_PORTAL_MESSAGES', 'GATE_PORTAL_INBOX', 'PORTAL_CHAT_SELF_SERVE'];
+const GATE_KEYS = ['GATE_PORTAL_MESSAGES_DAY_AI', 'GATE_PORTAL_MESSAGES', 'PORTAL_CHAT_SELF_SERVE'];
 const kept = {};
 beforeAll(() => { for (const key of GATE_KEYS) kept[key] = process.env[key]; });
 afterAll(() => { for (const key of GATE_KEYS) { if (kept[key] === undefined) delete process.env[key]; else process.env[key] = kept[key]; } });
@@ -68,7 +68,6 @@ beforeEach(() => {
   mockRows = [row()];
   process.env.GATE_PORTAL_MESSAGES_DAY_AI = 'true';
   process.env.GATE_PORTAL_MESSAGES = 'true';
-  process.env.GATE_PORTAL_INBOX = 'true';
   delete process.env.PORTAL_CHAT_SELF_SERVE;
   mockSave.mockResolvedValue({ id: 'ai-1' });
 });
@@ -85,12 +84,9 @@ describe('GATE_PORTAL_MESSAGES_DAY_AI', () => {
     expect(gates.portalMessagesDayAiLive()).toBe(true);
   });
 
-  it('needs the portal messages, the Portal tab and Ask Waves on, and not the night gate', () => {
+  it('needs the portal messages and Ask Waves on, and not the night gate', () => {
     delete process.env.GATE_PORTAL_MESSAGES_NIGHT_AI;
     expect(DayAi.enabled()).toBe(true);
-    process.env.GATE_PORTAL_INBOX = 'false';
-    expect(DayAi.enabled()).toBe(false);
-    process.env.GATE_PORTAL_INBOX = 'true';
     process.env.GATE_PORTAL_MESSAGES = 'false';
     expect(DayAi.enabled()).toBe(false);
     process.env.GATE_PORTAL_MESSAGES = 'true';

@@ -189,7 +189,7 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     expect((await listed()).names).not.toContain('Juliet');
   });
 
-  describe('a portal chat hand-off that a reminder re-rang (GATE_PORTAL_CHAT_ANSWERED_CLOSE)', () => {
+  describe('a portal chat hand-off that a reminder re-rang', () => {
     // portal-late-rering.js bumps created_at for the reminder and keeps the original ask in metadata.askedAt, so a reply
     // between the two still counts. The sweep's boundary rule, not a second one here, decides.
     const chatAlert = (customer, name) => insertAlert({
@@ -201,7 +201,6 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
     });
 
     test('a reply between the original ask and the reminder answers it; one from before the ask does not', async () => {
-      setEnv('GATE_PORTAL_CHAT_ANSWERED_CLOSE', 'true');
       const between = await addCustomer('Whiskey');
       await chatAlert(between, 'Whiskey');
       await staffText(between, ago(4)); // after askedAt (5 days ago), before the re-rung created_at (3 days ago)
@@ -218,15 +217,6 @@ maybeDescribe('monday review fell-off list (live Postgres)', () => {
       expect(mine(out).filter((e) => /Xray|Yankee/.test(e.title)).every((e) => e.unchecked === false)).toBe(true);
       // The date shown is the day the customer asked, not the reminder's.
       expect(out.entries.find((e) => e.title.includes('Yankee')).at.getTime()).toBe(ago(5).getTime());
-    });
-
-    test('with the class\'s own gate off the sweep does not judge it: listed, unchecked', async () => {
-      setEnv('GATE_PORTAL_CHAT_ANSWERED_CLOSE', '');
-      const customer = await addCustomer('Zulu');
-      await chatAlert(customer, 'Zulu');
-      await staffText(customer, ago(4));
-      const entry = mine((await listed()).out).find((e) => e.title.includes('Zulu'));
-      expect(entry).toMatchObject({ unchecked: true });
     });
   });
 

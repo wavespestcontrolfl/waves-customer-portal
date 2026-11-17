@@ -1,9 +1,8 @@
 import { adminFetch } from "../utils/admin-fetch";
 
-// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button"): the office's like on a
+// (Owner 2026-11-02, "SMS Like Button"): the office's like on a
 // customer text, and customer likes shown as short lines on our texts. The server
-// sends `smsLike` and the per-message like fields (officeLike,
-// customerReaction, likeable) only while the gate is on.
+// sends the per-message like fields (officeLike, customerReaction, likeable).
 
 // The office's like. The server texts a thumbs-up back through the composer's
 // own send and marks the text; it answers { success, officeLike }.
@@ -11,11 +10,9 @@ export function sendOfficeLike(messageId) {
   return adminFetch(`/admin/communications/messages/${encodeURIComponent(messageId)}/like`, { method: "POST" });
 }
 
-// A thread (oldest to newest) as the inbox shows it: with the gate on,
-// customer likes folded into lines and the one text that gets the button;
-// off, unchanged.
-export function smsLikeThread(messages, on) {
-  if (!on) return { visible: messages, badges: null, likeMessageId: null };
+// A thread (oldest to newest) as the inbox shows it: customer likes folded
+// into lines and the one text that gets the button.
+export function smsLikeThread(messages) {
   return { ...collapseCustomerReactions(messages), likeMessageId: likeableMessageId(messages) };
 }
 
@@ -36,7 +33,7 @@ export function likeableMessageId(messages) {
 // customer number and the same line of ours, whose body is exactly the quoted
 // text; a removal takes back that text's matching badge.
 // A matched reaction leaves the list. Anything unmatched stays a bubble, as
-// before the gate. Returns { visible, badges } with badges keyed by our text's
+// before the likes. Returns { visible, badges } with badges keyed by our text's
 // id: [{ id, emoji, createdAt }].
 export function collapseCustomerReactions(messages) {
   const visible = [];

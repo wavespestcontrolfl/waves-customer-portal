@@ -1,6 +1,6 @@
 /**
- * GATE_SMS_SPAM_TAG routes (owner 2026-11-02): Mark spam TAGS a sender.
- * Admin-only, 404 while the gate is off, the same 409 shapes as the block
+ * Spam tag routes (owner 2026-11-02): Mark spam TAGS a sender.
+ * Admin-only, the same 409 shapes as the block
  * route for a customer or an open lead. The service is mocked here; its SQL is
  * proven in sms-spam-tag-postgres.test.js.
  */
@@ -32,7 +32,6 @@ jest.mock('../services/sms-media', () => ({
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/sms-spam-tag', () => ({
-  spamTagLive: jest.fn(() => true),
   tagSpamSender: jest.fn(),
   untagSpamSender: jest.fn(),
 }));
@@ -65,22 +64,6 @@ function coded(code, message, details) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  spamTag.spamTagLive.mockReturnValue(true);
-});
-
-describe('gate off', () => {
-  test.each([
-    ['POST', '/spam-senders', { number: '+19415550100' }],
-    ['DELETE', '/spam-senders/%2B19415550100', null],
-  ])('%s %s answers 404 and touches nothing', async (method, path, body) => {
-    spamTag.spamTagLive.mockReturnValue(false);
-    await withServer(async (base) => {
-      const res = await call(base, 'admin', method, path, body);
-      expect(res.status).toBe(404);
-    });
-    expect(spamTag.tagSpamSender).not.toHaveBeenCalled();
-    expect(spamTag.untagSpamSender).not.toHaveBeenCalled();
-  });
 });
 
 describe('admin only', () => {

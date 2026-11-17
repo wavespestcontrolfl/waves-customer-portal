@@ -6,7 +6,7 @@ import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { uuid } from "../../utils/ibSession";
 import { formatETDateTime } from "../../lib/timezone";
 
-// Communications -> Portal tab (GATE_PORTAL_INBOX). Lists what customers asked
+// Communications -> Portal tab. Lists what customers asked
 // for inside the customer portal and nobody answered: portal chat hand-offs and
 // customer service requests, plus (GATE_PORTAL_BOOKING_ITEMS) visitors who started to book and left. The last 14 days come first; open items older than
 // that are listed one by one under the "Older than 14 days" line. Mark handled

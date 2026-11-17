@@ -457,7 +457,6 @@ maybeDescribe('portal messages (live Postgres)', () => {
   });
 
   test('the Portal tab lists an unanswered portal message; an answer, Mark handled or Close all older closes it', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
     const portalInbox = require('../services/portal-inbox');
     const pat = await customer();
     await PortalMessages.customerPost({ customer: pat, body: 'First question' });
@@ -499,11 +498,9 @@ maybeDescribe('portal messages (live Postgres)', () => {
     await PortalMessages.customerPost({ customer: pat, body: 'Newest' });
     process.env.GATE_PORTAL_MESSAGES = 'false';
     expect(mineOf((await portalInbox.list()).items)).toEqual([]);
-    delete process.env.GATE_PORTAL_INBOX;
   });
 
   test('a thread\'s bell follows the thread: no close over a newer customer message, no late ring after an answer', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
     const portalInbox = require('../services/portal-inbox');
     const { closeItemBells, ringOffice } = PortalMessages.__private;
     const pat = await customer();
@@ -613,7 +610,6 @@ maybeDescribe('portal messages (live Postgres)', () => {
   }, 60000);
 
   test('the office reads the whole thread behind a message item, every body whole', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
     const pat = await customer();
     const long = `${'We have ants in the kitchen. '.repeat(60)}End.`.slice(0, 1990);
     await PortalMessages.customerPost({ customer: pat, body: long });

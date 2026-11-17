@@ -364,7 +364,7 @@ router.put('/admin/escalations/:id', adminAuthenticate, requireTechOrAdmin, asyn
       });
     }
 
-    // GATE_PORTAL_INBOX: a finished hand-off also closes its bell alerts.
+    // A finished hand-off also closes its bell alerts.
     if (status === 'resolved' || status === 'dismissed') {
       await closePortalInboxAlerts('escalationId', esc.id, { technicianId: req.technicianId, role: req.techRole });
     }

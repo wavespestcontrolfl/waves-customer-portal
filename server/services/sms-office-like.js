@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * The office's like on a customer's text (GATE_SMS_LIKE; owner 2026-11-02,
+ * The office's like on a customer's text (owner 2026-11-02,
  * decision page "SMS Like Button", option B).
  *
  * Texting has no real reaction: Twilio cannot attach one to a customer's
@@ -34,14 +34,6 @@ const OFFICE_LIKE_KEY = 'office_like';
 // The message_type the Twilio webhook stores a quiet reaction under.
 const QUIET_REACTION_MESSAGE_TYPE = 'sms_reaction';
 const NEWER_MESSAGE_REFUSAL = 'A newer text is in this thread. Only the newest customer text can get a like.';
-
-// GATE_SMS_LIKE at call time, read through the module object: suites that
-// replace feature-gates with a bare mock lack the reader, and the inbox must
-// keep loading for them (the gate reads as off).
-function likesLive() {
-  const gates = require('../config/feature-gates');
-  return typeof gates.smsLikeLive === 'function' && gates.smsLikeLive() === true;
-}
 
 function parseMetadata(value) {
   if (value && typeof value === 'object') return value;
@@ -189,17 +181,16 @@ function officeLikeForClient(metadata) {
   };
 }
 
-// The like fields the Messages log and the customer's thread carry: none while
-// GATE_SMS_LIKE is off (on: likesLive(), read once per request) or for a call.
-// On, a text carries the office's like on a customer text, a customer's like
+// The like fields the Messages log and the customer's thread carry: none for a
+// call. A text carries the office's like on a customer text, a customer's like
 // (customerLikeReaction) on one of our texts, and whether it can get a like at
 // all (likeRefusal's per-text half; the inbox adds "newest in the thread").
 // Only a quiet reaction (stored as 'sms_reaction': it raised no alert) is sent
 // as a customerReaction, so the thread folds it into a line on our text. A loud
 // one (an answer, a dislike; stored as an ordinary inbound text and alerted)
 // and a row with no message type stay a normal bubble.
-function likeFieldsForClient({ on, channel = 'sms', direction, body, metadata, messageType }) {
-  if (!on || channel !== 'sms') return {};
+function likeFieldsForClient({ channel = 'sms', direction, body, metadata, messageType }) {
+  if (channel !== 'sms') return {};
   if (direction !== 'inbound') return { officeLike: null, customerReaction: null, likeable: false };
   return {
     officeLike: officeLikeForClient(metadata),
@@ -210,7 +201,6 @@ function likeFieldsForClient({ on, channel = 'sms', direction, body, metadata, m
 
 module.exports = {
   OFFICE_LIKE_BODY,
-  likesLive,
   NEWER_MESSAGE_REFUSAL,
   loadLikeTarget,
   likeRefusal,

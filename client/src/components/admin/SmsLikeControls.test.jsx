@@ -5,7 +5,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import { OfficeLikeButton, CustomerReactionLines, SmsLikeBadges, reactionVerb } from "./SmsLikeControls";
 
-// GATE_SMS_LIKE: a customer's like is one short labeled line on our text.
+// A customer's like is one short labeled line on our text.
 const THUMB = "\u{1F44D}";
 const HEART = "❤️";
 afterEach(cleanup);

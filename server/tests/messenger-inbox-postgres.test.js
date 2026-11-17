@@ -1,5 +1,5 @@
 /**
- * Messenger inbox against live Postgres (GATE_MESSENGER_INBOX): the poll's
+ * Messenger inbox against live Postgres: the poll's
  * mapping, paging, cursor, dedupe, first-run rules and bell lifecycle, and the
  * thread routes with a reply through a mocked Facebook Send API. Facebook is a
  * fake fetch; nothing here calls Meta. Every name and id is synthetic and tagged
@@ -138,7 +138,6 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
   }, 60000);
 
   afterAll(async () => {
-    delete process.env.GATE_MESSENGER_INBOX;
     global.fetch = realFetch;
     if (server) await new Promise((resolve) => server.close(resolve));
     if (db) await wipe();
@@ -147,7 +146,6 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     messenger._private.resetPageIdentity();
-    process.env.GATE_MESSENGER_INBOX = 'true';
     process.env.FACEBOOK_ACCESS_TOKEN = 'synthetic-page-token';
     process.env.FACEBOOK_PAGE_ID = PAGE;
     await wipe();
@@ -956,16 +954,6 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect((await get(`/threads/${open.id}`, 'technician')).status).toBe(404);
       expect((await post(`/threads/${open.id}/reply`, { text: 'hi' }, 'technician')).status).toBe(404);
       expect(sends).toEqual([]);
-    });
-
-    test('gate off: the routes answer enabled:false / 404 and the poll reads nothing', async () => {
-      await seed();
-      process.env.GATE_MESSENGER_INBOX = 'false';
-      expect(await (await get('/summary')).json()).toEqual({ enabled: false });
-      expect((await get('/threads')).status).toBe(404);
-      fb.calls.length = 0;
-      expect(await messenger.pollMessenger()).toEqual({ skipped: 'gate_off' });
-      expect(fb.calls).toEqual([]);
     });
   });
 });

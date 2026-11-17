@@ -322,7 +322,7 @@ function isSmsReaction(body) {
     || ANDROID_EMOJI_SMS_REACTION_RE.test(text);
 }
 
-// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button" page, the extra): a
+// (owner 2026-11-02, "SMS Like Button" page, the extra): a
 // customer's like on one of OUR texts, so the inbox can show it as a small
 // badge on that text instead of a bubble of its own. Only the like family:
 // Liked / Loved, a removed like or heart, and an acknowledgement-emoji
