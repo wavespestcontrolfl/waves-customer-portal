@@ -1351,6 +1351,12 @@ const CLASSES = [
   { // call-recording-processor.js — one bell per voicemail, no dedupe key
     key: 'voicemail_callback', categories: ['voicemail_callback'], triggerKey: 'customer_voicemail_callback', contact: 'voice', contactRule: voicemailAnswered,
   },
+  { // call-hold.js raiseVoicemailAlert (GATE_CALL_HOLD): the star-key hold sent the caller to voicemail (dedupeKey
+    // call-hold-voicemail:<CallSid>, one bell per call, never refreshed). Judged like a voicemail callback, by the
+    // caller's number from the bell's time. Its payload names no call: the held call was answered by a person, and the
+    // witnesses count it only until its hold went to voicemail (admin-alert-contact-witnesses.js).
+    key: 'hold_voicemail', categories: ['voicemail_callback'], prefix: 'call-hold-voicemail:', contact: 'voice', contactRule: voicemailAnswered,
+  },
   { // call-recording-processor.js keepComplaintCallAlert: a known customer's call got the final label complaint_escalated
     // (dedupeKey call-complaint:<call id>, one bell per call, never refreshed, so created_at is its boundary). Closes once a
     // person reached that customer after the bell (customerQuoteFormAnswered: personContactReason, the customer kind's

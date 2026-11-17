@@ -58,6 +58,10 @@ const { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses } = re
 const staffActionDef = require('./sms-staff-action-answers');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// When the star-key hold sent a call in to voicemail (call_log.metadata.conference_path.hold.voicemail_at, an ISO
+// stamp); null for any other call. Same shape check as callEndedAtSql, so a bad value never breaks the cast.
+const HOLD_VOICEMAIL_AT_SQL = `CASE WHEN cl.metadata #>> '{conference_path,hold,voicemail_at}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+    THEN CAST(cl.metadata #>> '{conference_path,hold,voicemail_at}' AS timestamptz) END`;
 const asDate = (v) => {
   const d = v ? new Date(v) : null;
   return d && !Number.isNaN(d.getTime()) ? d : null;
@@ -253,18 +257,22 @@ async function personWitnesses(conn, { customerIds, peers, since }) {
   // bound is only a prefilter for the index (no call runs a day).
   const { callEndedAtSql } = require('./sms-pending-conversations');
   const endedAt = callEndedAtSql('cl');
-  const callQuery = (direction, peerColumn) => {
+  const callQuery = (direction, peerColumn, atSql = endedAt) => {
     const peerSql = phoneIdentitySql(peerColumn);
     return whereIdentity(
       conn('call_log as cl').where('cl.direction', direction).where('cl.status', 'completed')
         .modify((q) => whereNotSandboxCall(q, 'cl.source'))
         .where('cl.created_at', '>', new Date(since.getTime() - DAY_MS))
-        .whereRaw(`${endedAt} > ?`, [since]),
+        .whereRaw(`${atSql} > ?`, [since]),
       'cl.customer_id', peerSql, customerIds, peers,
-    ).select('cl.customer_id', conn.raw(`${peerSql} as peer`), conn.raw(`MAX(${endedAt}) as at`)).groupByRaw('1, 2');
+    ).select('cl.customer_id', conn.raw(`${peerSql} as peer`), conn.raw(`MAX(${atSql}) as at`)).groupByRaw('1, 2');
   };
   const backRows = await callQuery('outbound', 'cl.to_phone').whereRaw(personCallBackSql('cl'));
-  const inRows = await callQuery('inbound', 'cl.from_phone').where('cl.answered_by', 'human');
+  // A call in that the star-key hold sent to voicemail (GATE_CALL_HOLD, call-hold.js): a person talked with the
+  // caller only until the hold went to voicemail, so the call answers a bell only up to that moment. It never
+  // answers the callback bell its own hold raised (call-hold-voicemail:<CallSid>, rung at the voicemail).
+  const inRows = await callQuery('inbound', 'cl.from_phone', `COALESCE(${HOLD_VOICEMAIL_AT_SQL}, ${endedAt})`)
+    .where('cl.answered_by', 'human');
   return { textRows, backRows, inRows };
 }
 

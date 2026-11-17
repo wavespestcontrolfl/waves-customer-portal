@@ -317,6 +317,11 @@ customer's message by this rule.
    It closes by itself once a person reached that customer after the bell: a call
    back, an answered call, a text or an email. A booked visit or a sent estimate alone leaves it open. A reprocess of the
    same call never rings it again or re-opens it, and only the pass that still owns the call's generation may ring it.
+   A hold voicemail bell (`Comms — call <name> back`, `doneWhen: 'caller_reached'`, dedupe key
+   `call-hold-voicemail:<CallSid>`, `GATE_CALL_HOLD`) rings once when the star-key hold sends the caller to voicemail
+   (5 minutes on hold, or the staff phone hung up during the hold). It closes by itself like a voicemail callback, judged
+   by the caller's number from the bell's time: a call back, a call a person answered or a person's text after the
+   bell. The held call itself counts only until its hold went to voicemail, so it never closes its own bell.
    A staff action also answers a text: a visit a person booked in the admin, or a payment a person recorded,
    for the text's customer (by customer id) within 24 hours after the text. The Messages
    reader counts the text as answered too, so the Unanswered filter and the evening digest agree.

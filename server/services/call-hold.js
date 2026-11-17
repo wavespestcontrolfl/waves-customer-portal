@@ -269,7 +269,9 @@ async function raiseVoicemailAlert(callSid, reason) {
     }, {
       bell: true,
       dedupeKey: `call-hold-voicemail:${callSid}`,
-      metadata: { callLogId: call.id, reason },
+      // payload = what the relevance sweep reads (class hold_voicemail): the caller's number, and no call id, so the
+      // bell is judged from its own time and closes once a person reaches the caller after it.
+      metadata: { callLogId: call.id, reason, payload: { customerId: call.customer_id || null, phone: call.from_phone || null } },
     });
   } catch (err) {
     logger.error(`[call-hold] voicemail alert not raised for ${masked(callSid)} (${errorCode(err)})`);
