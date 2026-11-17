@@ -130,6 +130,8 @@ const LANE_RUNTIME = {
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // One FLAGSHIP pass per processed call, after finalization (dark behind GATE_CALL_COMMITMENTS);
   // no cross-provider answer — a miss records no commitment rows.
+  // Live-call upset check (GATE_LIVE_CALL_UPSET_ALERT): one Haiku read of the last two minutes, at most 8 per call; a miss is no alert.
+  live_call_upset: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_duration_ms: 5_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
   call_commitments: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // Shadow only (GATE_DAY_AGREEMENT_SHADOW): one model call per call or quiet text thread that agreed a day; writes day_agreement_decisions rows, no visit, no text.
   day_agreement: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0', workflow_id: 'day-agreement-shadow', ...LONG_BATCH },

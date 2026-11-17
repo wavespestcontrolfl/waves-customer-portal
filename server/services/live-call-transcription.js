@@ -302,7 +302,14 @@ async function recordLiveTranscriptionEvent(body = {}) {
   const callSid = String(body.CallSid || '');
   if (!CALL_SID_RE.test(callSid)) return { stored: false, reason: 'bad_call_sid' };
   const event = String(body.TranscriptionEvent || '');
-  if (event === 'transcription-content') return storeUtterance(callSid, body);
+  if (event === 'transcription-content') {
+    const result = await storeUtterance(callSid, body);
+    // After the store committed. Gate off: nothing is required, read or called.
+    if (result.stored && SPEAKER_BY_TRACK[body.Track] === 'caller' && isEnabled('liveCallUpsetAlert')) {
+      require('./live-call-upset-alert').afterCallerUtterance(callSid);
+    }
+    return result;
+  }
   const at = eventTime(body).toISOString();
   if (event === 'transcription-started') await stampLiveState(db, callSid, { live_at: at });
   else if (event === 'transcription-stopped') await stampLiveState(db, callSid, { stopped_at: at });

@@ -78,6 +78,7 @@ const SELECTORS = [
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
+  { key: 'LIVE_CALL', env: 'MODEL_LIVE_CALL', description: 'Live-call upset-caller check (owner 2026-11-16: Haiku 5.5; dark behind GATE_LIVE_CALL_UPSET_ALERT)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
   // llm/call.js, whose wire cap gives always-thinking models (Opus 5.5, Fable)
@@ -581,6 +582,7 @@ const LANES = [
   L('csr_coach', 'CSR call coaching', 'csr/csr-coach.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('inventory_research', 'Inventory vendor mapping + price research', 'routes/admin-inventory.js', 'reason', T('FLAGSHIP'), null, { note: 'Anthropic web_search tool' }),
   L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('ROUTINE'), null, { inbound: true }),
+  L('live_call_upset', 'Live call · upset caller check', 'live-call-upset-alert.js', 'fastText', T('LIVE_CALL'), null, { inbound: true }),
   L('call_commitments', 'Call commitments from transcript', 'call-commitments.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('day_agreement', 'Day-only agreement judge (shadow)', 'day-agreement-shadow.js', 'deep', P('deepAnalysis', 'primary'), P('deepAnalysis', 'fallback'), { inbound: true }),
   L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('CONTENT')),
@@ -704,6 +706,7 @@ const LANE_AREA = {
   typed_decisions_clef: 'calls',
   lead_synopsis: 'calls',
   call_commitments: 'calls',
+  live_call_upset: 'calls',
   day_agreement: 'calls',
   csr_coach: 'calls',
   contact_dictation: 'calls',
@@ -869,6 +872,7 @@ const LANE_DESCRIBE = {
   call_self_audit: 'Audits the extraction against the transcript',
   call_incidents: 'Second opinion that confirms a self-audit disagreement',
   lead_synopsis: 'Summarises a new lead from the call',
+  live_call_upset: 'Reads the last two minutes of a live call and alerts the owner when the caller sounds upset (dark: GATE_LIVE_CALL_UPSET_ALERT)',
   call_commitments: 'Records what Waves promised on the call (dark: GATE_CALL_COMMITMENTS)',
   day_agreement: 'Judges whether a call or text agreed only a day for a visit; records what the agent would do (shadow, dark: GATE_DAY_AGREEMENT_SHADOW)',
   csr_coach: 'Coaches the office on how the call went',

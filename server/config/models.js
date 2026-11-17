@@ -218,6 +218,8 @@ const DEFAULTS = Object.freeze({
   DEEP: 'claude-opus-4-8',
   EXTREME: 'claude-fable-5',
   LAWN_CHALLENGE: 'claude-opus-4-8',
+  // Live-call upset-caller check (owner 2026-11-16 "use haiku"): a tiny classifier read, Haiku 5.5.
+  LIVE_CALL: 'claude-haiku-5-5',
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
@@ -352,6 +354,10 @@ const EXTREME = process.env.MODEL_EXTREME || DEFAULTS.EXTREME;
 // app. Lives here (not in the service) so every Anthropic ID stays in the central
 // registry. Override via MODEL_LAWN_CHALLENGE (registry convention) or LAWN_CHALLENGE_MODEL.
 const LAWN_CHALLENGE = process.env.MODEL_LAWN_CHALLENGE || process.env.LAWN_CHALLENGE_MODEL || DEFAULTS.LAWN_CHALLENGE;
+
+// Live-call upset-caller check (services/live-call-upset-alert.js, GATE_LIVE_CALL_UPSET_ALERT). Pinned here, not on a tier:
+// the owner chose Haiku 5.5 for it (2026-11-16). Override via MODEL_LIVE_CALL.
+const LIVE_CALL = process.env.MODEL_LIVE_CALL || DEFAULTS.LIVE_CALL;
 
 // Call-research miner's Anthropic leg (fallback by default). Pinned here per
 // the registry convention rather than riding FLAGSHIP: extraction-model
@@ -896,6 +902,7 @@ module.exports = {
   VOICE,
   VISION,
   LAWN_CHALLENGE,
+  LIVE_CALL,
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,

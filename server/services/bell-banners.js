@@ -29,6 +29,9 @@ const BELL_BANNER_KINDS = Object.freeze({
   call_commitment_overdue: Object.freeze({ nightQuiet: true }),
   messenger_reply: Object.freeze({ nightQuiet: false }),
   new_lead_email: Object.freeze({ nightQuiet: false, gate: 'ringNewContactsLive' }),
+  // The owner steps in on a live call whose caller sounds upset (live-call-upset-alert.js, GATE_LIVE_CALL_UPSET_ALERT,
+  // owner 2026-11-16): any hour, the call is live now. Its own gate, like new_lead_email.
+  live_call_upset: Object.freeze({ nightQuiet: false, gate: 'liveCallUpsetAlertLive' }),
   // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05 "1, 2 and 3").
   estimate_stuck: Object.freeze({ nightQuiet: true }),
 });
