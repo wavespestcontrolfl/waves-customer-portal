@@ -83,7 +83,7 @@ jest.mock('../models/db', () => {
     q.where = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.limit = jest.fn(() => q);
-    q.select = jest.fn(async () => state.utterances.map((u) => ({ speaker: u.speaker, text: u.text })));
+    q.select = jest.fn(async () => state.utterances.map((u) => ({ speaker: u.speaker, text: u.text, spoken_at: u.spoken_at })));
     return q;
   }
   const db = jest.fn((table) => {
@@ -177,14 +177,14 @@ describe('extract', () => {
     expect(saved().reminders).toEqual([]);
   });
 
-  it('sends the matching staff line with one line of context each side, plus the ET weekday, date and time', async () => {
+  it('sends the matching staff line with one line of context each side, each tagged with the ET weekday, date and time it was said', async () => {
     setCall({
       lines: [
-        { speaker: 'caller', text: 'Line one far away.' },
-        { speaker: 'caller', text: 'Before the note.' },
-        { speaker: 'staff', text: 'Please make a note that the dog is friendly.' },
-        { speaker: 'caller', text: 'After the note.' },
-        { speaker: 'caller', text: 'Line five far away.' },
+        { speaker: 'caller', text: 'Line one far away.', spoken_at: '2026-11-17T18:45:00.000Z' },
+        { speaker: 'caller', text: 'Before the note.', spoken_at: '2026-11-17T18:46:00.000Z' },
+        { speaker: 'staff', text: 'Please make a note that the dog is friendly.', spoken_at: '2026-11-17T18:47:00.000Z' },
+        { speaker: 'caller', text: 'After the note.', spoken_at: '2026-11-17T18:48:00.000Z' },
+        { speaker: 'caller', text: 'Line five far away.', spoken_at: '2026-11-17T18:49:00.000Z' },
       ],
     });
     await spokenNotes.run(NOW);
@@ -193,9 +193,31 @@ describe('extract', () => {
     expect(req.model).toBe(MODELS.LIVE_CALL);
     expect(mockLedger).toHaveBeenCalledWith('anthropic', MODELS.LIVE_CALL, expect.any(Function), { laneId: 'live_call_spoken_notes' });
     const body = req.messages[0].content;
-    expect(body).toContain('Now: Tuesday 2026-11-17 14:00 Eastern time.');
-    expect(body).toContain('Caller: Before the note.\nAgent: Please make a note that the dog is friendly.\nCaller: After the note.');
+    expect(body).toBe([
+      '[Tuesday 2026-11-17 13:46] Caller: Before the note.',
+      '[Tuesday 2026-11-17 13:47] Agent: Please make a note that the dog is friendly.',
+      '[Tuesday 2026-11-17 13:48] Caller: After the note.',
+    ].join('\n'));
     expect(body).not.toContain('far away');
+    expect(body).not.toContain('Now:');
+  });
+
+  it('counts a relative time from when the line was said, not from when the job runs (a call just before midnight, read hours later)', async () => {
+    setCall({
+      stoppedAt: '2026-11-17T04:58:00.000Z',
+      lines: [
+        { speaker: 'caller', text: 'Can someone call me tomorrow morning?', spoken_at: '2026-11-17T04:56:30.000Z' },
+        { speaker: 'staff', text: 'Sure, remind me tomorrow at 9 to call you back.', spoken_at: '2026-11-17T04:57:00.000Z' }, // Monday 11:57 PM ET
+      ],
+    });
+    mockCreate.mockResolvedValue(reply({ notes: [], reminders: [{ text: 'Call the caller back', due_local: '2026-11-17T09:00' }] }));
+    const out = await spokenNotes.run(new Date('2026-11-17T10:00:00.000Z')); // Tuesday 5:00 AM ET, five hours later
+    const req = mockCreate.mock.calls[0][0];
+    expect(req.messages[0].content).toContain('[Monday 2026-11-16 23:57] Agent: Sure, remind me tomorrow at 9 to call you back.');
+    expect(req.messages[0].content).not.toContain('Tuesday');
+    expect(req.system).toContain('worked out from the date and time of the Agent line that asks for the reminder');
+    expect(saved().reminders[0]).toMatchObject({ due_at: '2026-11-17T14:00:00.000Z', raised_at: null }); // Tuesday 9:00 AM ET
+    expect(out.raised).toBe(0);
   });
 
   it('saves the notes and reminders on the call with the shape the Calls tab reads, and touches nothing else', async () => {
@@ -348,6 +370,27 @@ describe('ring', () => {
     expect(out).toMatchObject({ saved: 1, raised: 2 });
     expect(mockRaise.mock.calls.map((c) => c[2].dedupeKey)).toEqual(['spoken-reminder:call-1:0', 'spoken-reminder:call-1:1']);
     expect(saved().reminders.every((r) => r.raised_at)).toBe(true);
+  });
+
+  it('leaves a reminder unstamped when the bell was not written (notifyAdmin resolved null), so the next run tries again', async () => {
+    setCall({ spoken: reminderState() });
+    mockRaise.mockResolvedValueOnce(null);
+    const first = await spokenNotes.run(NOW);
+    expect(first.raised).toBe(0);
+    expect(saved().reminders[0].raised_at).toBeNull();
+    await spokenNotes.run(NOW);
+    expect(saved().reminders[0].raised_at).toBe(NOW.toISOString());
+    expect(mockRaise).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts an intentional suppression as delivered, and a result with no id and no suppression as not', async () => {
+    setCall({ spoken: reminderState() });
+    mockRaise.mockResolvedValueOnce({ id: null });
+    await spokenNotes.run(NOW);
+    expect(saved().reminders[0].raised_at).toBeNull();
+    mockRaise.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'fyi' });
+    await spokenNotes.run(NOW);
+    expect(saved().reminders[0].raised_at).toBe(NOW.toISOString());
   });
 
   it('leaves a reminder unstamped when the bell fails, so the next run tries again', async () => {

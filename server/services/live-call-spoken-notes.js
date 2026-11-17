@@ -10,10 +10,13 @@
  *   1. EXTRACT: a call whose live text stopped in the last 24 h and has no spoken_notes.checked_at is claimed
  *      with a compare-and-swap UPDATE that stamps checked_at FIRST (at most once per call, across instances and
  *      crashes). Only the STAFF side of the live text is searched for a trigger phrase. No phrase = done, no model
- *      call. A hit sends Claude Haiku 5.5 the matching staff lines with one line of context on each side.
+ *      call. A hit sends Claude Haiku 5.5 the matching staff lines with one line of context on each side. Each
+ *      line carries the Eastern time it was said, so "tomorrow" or "in an hour" counts from when the staff said
+ *      it, not from when this job runs (a call can be read up to 24 h after it ended, and a call just before
+ *      midnight is read after it).
  *      Bad JSON, a refusal or an API error saves nothing and the call stays checked.
  *   2. RING: a saved reminder whose due time has come and has no raised_at raises ONE admin bell, then stamps
- *      raised_at with a compare-and-swap.
+ *      raised_at with a compare-and-swap. A bell that was not written leaves it unstamped for the next run.
  *
  * Saved on call_log.metadata.live_transcription.spoken_notes:
  *   { checked_at, notes: [text], reminders: [{ text, due_at (UTC ISO), raised_at: ISO | null }] }
@@ -53,7 +56,8 @@ const TRIGGER = /\b(?:make (?:a )?note|note that|add (?:a )?note|take (?:a )?not
 const SYSTEM_PROMPT = `You read short excerpts of a phone call at a pest control company. "Agent:" is a Waves staff member. "Caller:" is the customer or prospect.
 Find what the AGENT asked to have written down or to be reminded of, as in "make a note that ..." or "remind me to ...". Only an Agent instruction counts. A Caller who says "remind me" or "note that" is not a staff request: ignore it.
 Reply with ONLY this JSON: {"notes": [{"text": "<the note, one plain sentence>"}], "reminders": [{"text": "<what to do, an instruction that starts with a verb, one plain sentence>", "due_local": "YYYY-MM-DDTHH:mm" or null}]}
-Rules: due_local is Eastern time (America/New_York) as a 24-hour wall clock, worked out from the current date and time you are given ("tomorrow at 2" means tomorrow 14:00 when the agent is clearly asking for the afternoon). Use null when the agent gave no time. Do not invent a time. Write numbers and names as the agent said them. Do not write card numbers. Use empty lists when there is nothing. At most 5 notes and 3 reminders.`;
+Each line starts with the Eastern weekday, date and time it was said, in brackets.
+Rules: due_local is Eastern time (America/New_York) as a 24-hour wall clock, worked out from the date and time of the Agent line that asks for the reminder, never from any other time ("tomorrow at 2" said on a Monday means Tuesday 14:00 when the agent is clearly asking for the afternoon; "in an hour" said at 16:10 means 17:10). Use null when the agent gave no time. Do not invent a time. Write numbers and names as the agent said them. Do not write card numbers. Use empty lists when there is nothing. At most 5 notes and 3 reminders.`;
 
 const gateOn = () => require('../config/feature-gates').isEnabled('callSpokenNotes');
 
@@ -72,8 +76,25 @@ function plain(value, max) {
   return scrubPans(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max).trim();
 }
 
-/** The staff lines that name a note or a reminder, each with one line of context on both sides. '' when none. */
-function excerptFor(utterances) {
+// "Tuesday 2026-11-17 14:00": the Eastern weekday, date and wall-clock time of one moment.
+function etStamp(at) {
+  const p = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][p.dayOfWeek];
+  return `${weekday} ${p.year}-${pad(p.month)}-${pad(p.day)} ${pad(p.hour)}:${pad(p.minute)}`;
+}
+
+// When a line was said. spoken_at is NOT NULL in the table; an unreadable value falls back to the run's time.
+function spokenAt(u, now) {
+  const at = u?.spoken_at ? new Date(u.spoken_at) : null;
+  return at && Number.isFinite(at.getTime()) ? at : now;
+}
+
+/**
+ * The staff lines that name a note or a reminder, each with one line of context on both sides, and each tagged
+ * with the Eastern time it was said (the model works relative times out from it). '' when none.
+ */
+function excerptFor(utterances, now = new Date()) {
   const rows = utterances.filter((u) => u && typeof u.text === 'string' && u.text.trim());
   const keep = new Set();
   rows.forEach((u, i) => {
@@ -83,16 +104,9 @@ function excerptFor(utterances) {
   if (!keep.size) return '';
   const lines = [...keep].sort((a, b) => a - b).map((i, n, all) => {
     const gap = n > 0 && i - all[n - 1] > 1 ? '...\n' : '';
-    return `${gap}${rows[i].speaker === 'caller' ? 'Caller' : 'Agent'}: ${rows[i].text.trim()}`;
+    return `${gap}[${etStamp(spokenAt(rows[i], now))}] ${rows[i].speaker === 'caller' ? 'Caller' : 'Agent'}: ${rows[i].text.trim()}`;
   });
   return lines.join('\n').slice(0, MAX_INPUT_CHARS);
-}
-
-function nowLine(now) {
-  const p = etParts(now);
-  const pad = (n) => String(n).padStart(2, '0');
-  const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][p.dayOfWeek];
-  return `Now: ${weekday} ${p.year}-${pad(p.month)}-${pad(p.day)} ${pad(p.hour)}:${pad(p.minute)} Eastern time.`;
 }
 
 /** The model's JSON -> { notes: [text], reminders: [{ text, due_local }] }, or null when it is not usable. */
@@ -109,7 +123,7 @@ function validate(parsed) {
 }
 
 /** { notes, reminders } or null (no key, refusal, bad JSON, API error). Never throws. */
-async function extract(excerpt, now) {
+async function extract(excerpt) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   try {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: 30 * 1000, maxRetries: 0 });
@@ -119,7 +133,7 @@ async function extract(excerpt, now) {
       // Haiku 5.5 thinks by default and the thinking spends from this cap, so it is not sized to the reply alone.
       max_tokens: anthropicMaxTokens(MODELS.LIVE_CALL, 2048),
       system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: `${nowLine(now)}\n\n${excerpt}` }],
+      messages: [{ role: 'user', content: excerpt }],
     }), { laneId: 'live_call_spoken_notes' });
     if (response?.stop_reason === 'refusal') return null;
     const text = anthropicText(response);
@@ -184,10 +198,10 @@ async function extractOne(call, now) {
     .where('call_sid', call.twilio_call_sid)
     .orderBy([{ column: 'spoken_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .limit(MAX_UTTERANCES)
-    .select('speaker', 'text');
-  const excerpt = excerptFor(utterances);
+    .select('speaker', 'text', 'spoken_at');
+  const excerpt = excerptFor(utterances, now);
   if (!excerpt) return { claimed: true, asked: false };
-  const found = await extract(excerpt, now);
+  const found = await extract(excerpt);
   if (!found || (!found.notes.length && !found.reminders.length)) return { claimed: true, asked: true, saved: false };
   await saveResult(call.id, checkedAt, {
     notes: found.notes,
@@ -254,6 +268,32 @@ async function stampRaised(callId, index, raisedAt) {
   return won > 0;
 }
 
+// A saved reminder whose due time has come and that has not rung yet.
+function dueUnrung(r, nowMs) {
+  const due = Date.parse(r?.due_at);
+  return Boolean(r && !r.raised_at && r.text && Number.isFinite(due) && due <= nowMs);
+}
+
+// Raises one reminder's bell, then stamps its raised_at. 1 = this run stamped it. Throws when the bell was not
+// written, so the caller leaves it unstamped for the next run.
+async function ringOne(call, r, index, now) {
+  const written = await raiseAdminAlert('live_call_reminder', {
+    area: 'Comms',
+    action: actionFrom(r.text),
+    why: whyFrom(call.created_at),
+    severity: 'needs-you',
+    link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
+    subject: { type: 'call', id: String(call.id) },
+    doneWhen: 'reminder_done',
+    who: 'person',
+  }, { bell: true, dedupeKey: `spoken-reminder:${call.id}:${index}` });
+  // notifyAdmin swallows a database failure and resolves null (live-call-upset-alert.js reads it the same way). A
+  // row (also a dedupe hit: the standing bell) or an intentional suppression (bell policy, internal test customer:
+  // id null, suppressed true) is delivered. Anything else is not.
+  if (!written || (!written.id && !written.suppressed)) throw Object.assign(new Error('admin alert was not written'), { code: 'not_written' });
+  return (await stampRaised(call.id, index, now.toISOString())) ? 1 : 0;
+}
+
 // Only calls that hold a reminder that is due now and not rung: a call whose reminders are all still in the future
 // never takes one of the 50 places, so it cannot hold back a due reminder on a newer call. due_at and now are both
 // toISOString() output, so the string compare is a time compare.
@@ -274,21 +314,9 @@ async function ringDue(now) {
     const reminders = meta(call.metadata).live_transcription?.spoken_notes?.reminders;
     if (!Array.isArray(reminders)) continue;
     for (let i = 0; i < reminders.length; i += 1) {
-      const r = reminders[i];
-      const due = Date.parse(r?.due_at);
-      if (!r || r.raised_at || !r.text || !Number.isFinite(due) || due > now.getTime()) continue;
+      if (!dueUnrung(reminders[i], now.getTime())) continue;
       try {
-        await raiseAdminAlert('live_call_reminder', {
-          area: 'Comms',
-          action: actionFrom(r.text),
-          why: whyFrom(call.created_at),
-          severity: 'needs-you',
-          link: `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`,
-          subject: { type: 'call', id: String(call.id) },
-          doneWhen: 'reminder_done',
-          who: 'person',
-        }, { bell: true, dedupeKey: `spoken-reminder:${call.id}:${i}` });
-        if (await stampRaised(call.id, i, now.toISOString())) raised += 1;
+        raised += await ringOne(call, reminders[i], i, now);
       } catch (err) {
         // Not stamped: the next run tries again, and the dedupe key keeps it to one row.
         logger.warn(`[live-call-spoken-notes] reminder bell failed: ${err?.code || err?.name || 'error'}`);
@@ -311,4 +339,4 @@ async function run(now = new Date()) {
   return out;
 }
 
-module.exports = { run, _test: { excerptFor, validate, dueAt, TRIGGER, actionFrom, whyFrom } };
+module.exports = { run, _test: { excerptFor, validate, dueAt, TRIGGER, actionFrom, whyFrom, SYSTEM_PROMPT } };
