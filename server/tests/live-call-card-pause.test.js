@@ -27,7 +27,7 @@ jest.mock('twilio', () => jest.fn(() => ({ calls: mockCalls })));
 // ends. Reads and writes yield a tick so two unlocked transactions would interleave.
 jest.mock('../models/db', () => {
   const newPool = () => ({ max: Infinity, inUse: 0, peak: 0, queue: [] });
-  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool() };
+  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0 };
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   // A bounded connection pool: acquire waits while it is full (FIFO), like knex's.
   async function acquire() {
@@ -54,7 +54,10 @@ jest.mock('../models/db', () => {
     q.whereRaw = jest.fn(() => q);
     q.first = jest.fn(pooled(inTx, async () => {
       await tick();
-      return state.claimed ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null } : undefined;
+      if (state.failReads > 0) { state.failReads -= 1; throw new Error('connection terminated'); }
+      return state.claimed
+        ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null, status: state.callStatus, ended_at: state.endedAt }
+        : undefined;
     }));
     q.update = jest.fn(pooled(inTx, async (patch) => {
       await tick();
@@ -128,6 +131,9 @@ beforeEach(() => {
   s.writes = [];
   s.locks = new Map();
   s.pool = db.__newPool();
+  s.callStatus = 'in-progress';
+  s.endedAt = null;
+  s.failReads = 0;
   isEnabled.mockReturnValue(true);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
@@ -644,5 +650,110 @@ describe('live call card pause: two server processes sharing one database', () =
     await expect(utter(a, 'Tuesday works')).resolves.toMatchObject({ action: 'not_due', dueAtMs: new Date('2026-11-16T15:01:30Z').getTime() });
     expect(db.transaction).not.toHaveBeenCalled();
     expect(statuses()).toEqual(['paused']);
+  });
+});
+
+describe('live call card pause: resume retries without an utterance', () => {
+  const flush = async () => { for (let i = 0; i < 60; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  // Fake time in small steps, the database fake catching up after each (a lease is judged on that clock).
+  async function run(ms, step = 1000) {
+    for (let t = 0; t < ms; t += step) {
+      await jest.advanceTimersByTimeAsync(step);
+      await flush();
+    }
+  }
+  const timeout = () => new Error('timeout of 5000ms exceeded');
+  const resumeFor = () => resumeCalls().length;
+
+  test('a resume timeout, then a 503, then a success resumes with no utterance in between', async () => {
+    await trigger();
+    mockUpdate.mockRejectedValueOnce(timeout());
+    mockUpdate.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 20503, status: 503 }));
+    mockUpdate.mockResolvedValue({});
+    await run(91 * 1000);
+    expect(resumeFor()).toBe(1);
+    expect(db.__state.cardPause).toMatchObject({ pending: 'resume', resumed_at: null });
+    // The retries run at 2 s and then 4 s after the failure.
+    await run(2 * 1000);
+    expect(resumeFor()).toBe(2);
+    await run(4 * 1000);
+    expect(resumeFor()).toBe(3);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null });
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    // Confirmed: nothing more is sent and no retry stays armed.
+    await run(60 * 1000);
+    expect(resumeFor()).toBe(3);
+    expect(cardPause._test.retries.size).toBe(0);
+  });
+
+  test('a database error on the timer pass is retried', async () => {
+    await trigger();
+    await run(89 * 1000);
+    db.__state.failReads = 1;
+    await run(2 * 1000);
+    // The pass at the window end died before it sent anything.
+    expect(resumeFor()).toBe(0);
+    expect(cardPause._test.retries.size).toBe(1);
+    await run(3 * 1000);
+    expect(resumeFor()).toBe(1);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+    expect(cardPause._test.retries.size).toBe(0);
+  });
+
+  test('retries stop at the bound', async () => {
+    await trigger();
+    mockUpdate.mockRejectedValue(timeout());
+    await run(90 * 1000 + 11 * 60 * 1000, 2000);
+    const sent = resumeFor();
+    // 2, 4, 8, 16 s and then every 30 s for ten minutes: bounded, and more than a handful.
+    expect(sent).toBeGreaterThan(10);
+    expect(sent).toBeLessThan(30);
+    expect(cardPause._test.retries.size).toBe(0);
+    await run(5 * 60 * 1000, 5000);
+    expect(resumeFor()).toBe(sent);
+    // The state still says pending: a later stored utterance can still finish it.
+    expect(db.__state.cardPause).toMatchObject({ pending: 'resume', resumed_at: null });
+    mockUpdate.mockResolvedValue({});
+    await expect(trigger('hello')).resolves.toMatchObject({ action: 'resumed' });
+  });
+
+  test.each([
+    ['a terminal status', () => { db.__state.callStatus = 'completed'; }],
+    ['an ended_at stamp', () => { db.__state.endedAt = '2026-11-16T15:01:40.000Z'; }],
+  ])('retries stop once the call has ended (%s)', async (_name, endCall) => {
+    await trigger();
+    mockUpdate.mockRejectedValue(timeout());
+    await run(91 * 1000);
+    expect(resumeFor()).toBe(1);
+    endCall();
+    await run(5 * 60 * 1000, 5000);
+    expect(resumeFor()).toBe(1);
+    expect(cardPause._test.retries.size).toBe(0);
+  });
+
+  test('a terminal resume code stops at once', async () => {
+    await trigger();
+    mockUpdate.mockRejectedValue(Object.assign(new Error('Call is not in-progress'), { code: 21220 }));
+    await run(91 * 1000);
+    expect(resumeFor()).toBe(1);
+    expect(cardPause._test.retries.size).toBe(0);
+    await run(2 * 60 * 1000, 5000);
+    expect(resumeFor()).toBe(1);
+    expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+
+  test('a retry goes through the lease: it waits while another sender holds it', async () => {
+    await trigger();
+    mockUpdate.mockRejectedValueOnce(timeout());
+    await run(91 * 1000);
+    expect(resumeFor()).toBe(1);
+    // Another process claimed the resume and is sending it: its lease is live for 5 more seconds.
+    db.__state.cardPause = { ...db.__state.cardPause, sender: { token: 'other', until: Date.now() + 5000 } };
+    mockUpdate.mockResolvedValue({});
+    await run(4 * 1000);
+    expect(resumeFor()).toBe(1);
+    await run(8 * 1000);
+    expect(resumeFor()).toBe(2);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, sender: null });
   });
 });

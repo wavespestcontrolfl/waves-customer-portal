@@ -39,6 +39,12 @@
  * it busy skips. LEASE_MS is above the Twilio request timeout, so a crashed sender blocks the others
  * for seconds only.
  *
+ * A resume that failed in a way a retry can fix (a timeout, a 5xx, a thrown database error) does not
+ * wait for another utterance: a backoff retry (2 s, 4, 8, 16, then every 30 s, for 10 minutes after the
+ * first failure) runs through the same lease and claim path, one timer per call. It stops on a
+ * confirmed resume, a terminal resume code, or a call that has ended (a terminal status or ended_at;
+ * not live_transcription.stopped_at, which a hold or a stream fault sets while the recording runs on).
+ *
  * Risk: if a resume fails, the rest of that call's recording is silent and the post-call transcript
  * loses it. The gate is the instant off switch: off starts no new pause, and a running pause still
  * ends on time. Never throws, never on the webhook's response path.
@@ -50,6 +56,7 @@ const RequestClient = require('twilio/lib/base/RequestClient');
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 
 const PAUSE_MS = 90 * 1000;
 // A timer can fire a few ms before the stored end; the timer path treats an end this close as due.
@@ -65,12 +72,17 @@ const REQUEST_TIMEOUT_MS = 5 * 1000;
 const LEASE_MS = 8 * 1000;
 const RETRY_MS = 250;
 const RETRY_MARGIN_MS = 2 * 1000;
+// After a failed resume (or a thrown error) a retry runs without waiting for an utterance: 2 s, 4, 8,
+// 16, then every 30 s, until this long after the first failure.
+const BACKOFF_MS = [2000, 4000, 8000, 16000, 30000];
+const RESUME_RETRY_WINDOW_MS = 10 * 60 * 1000;
 
 const CARD_INTENT_RE = /\b(?:card\s+numbers?|credit\s+card|debit\s+card|card\s+ending|expir(?:ation|y)\s+date|security\s+code|cvv|cvc|code\s+on\s+the\s+back)\b/i;
 
 const timers = new Map();
-// One busy-retry timer per call.
+// One retry timer per call (a busy lease, or a failed pass), and how long its delay is.
 const retries = new Map();
+const retryDelays = new Map();
 let requestClient = null;
 
 function maskSid(sid) {
@@ -280,34 +292,71 @@ async function drain(callSid, opts) {
   }
 }
 
-// A decision maker that finds the lease busy retries on a short timer, never stacked per call, until
-// the lease would have expired plus a margin. It holds no connection between attempts.
-function scheduleRetry(callSid, stopAtMs) {
-  if (retries.has(callSid)) return;
-  const stopAt = stopAtMs || Date.now() + LEASE_MS + RETRY_MARGIN_MS;
-  const timer = setTimeout(async () => {
+// The recording is gone once the call is over: Twilio reported a terminal status, or the status callback
+// stamped metadata.ended_at. live_transcription.stopped_at is NOT such a sign: a hold, a transfer or a
+// stream fault stops the live text while the Dial recording keeps running, and a pause that began
+// before it must still be resumed.
+async function callEnded(callSid) {
+  const row = await db('call_log')
+    .where('twilio_call_sid', callSid)
+    .first('status', db.raw("metadata ->> 'ended_at' AS ended_at"));
+  return !!row && (TERMINAL_CALL_STATUSES.has(String(row.status || '')) || !!row.ended_at);
+}
+
+// A retry plan from the chain it continues (or a new one): a busy lease retries quickly until the lease
+// would have expired plus a margin; a failed pass backs off, until RESUME_RETRY_WINDOW_MS after its first
+// failure.
+function retryPlan(chain) {
+  if (chain.kind === 'busy') return { delayMs: RETRY_MS, stopAt: chain.startedAt + LEASE_MS + RETRY_MARGIN_MS };
+  return { delayMs: BACKOFF_MS[Math.min(chain.attempt, BACKOFF_MS.length - 1)], stopAt: chain.startedAt + RESUME_RETRY_WINDOW_MS };
+}
+
+const nextChain = (chain, kind) => (chain?.kind === kind
+  ? { ...chain, attempt: chain.attempt + 1 }
+  : { kind, startedAt: Date.now(), attempt: 0 });
+
+// One timer per call, never stacked: a sooner retry replaces a later one. It holds no connection while
+// it waits, and goes through the lease and claim path like any other pass.
+function scheduleRetry(callSid, chain) {
+  const { delayMs, stopAt } = retryPlan(chain);
+  if (Date.now() + delayMs > stopAt) return;
+  const live = retries.get(callSid);
+  if (live) {
+    if (retryDelays.get(callSid) <= delayMs) return;
+    clearTimeout(live);
+  }
+  const timer = setTimeout(() => {
     retries.delete(callSid);
-    try {
-      const out = await drain(callSid, { slackMs: TIMER_SLACK_MS, allowPause: isEnabled('callRecordingCardPause') });
-      if (out.action === 'send_busy') {
-        if (Date.now() < stopAt) scheduleRetry(callSid, stopAt);
-      } else if (out.dueAtMs && !timers.has(callSid)) {
-        armTimer(callSid, out.dueAtMs);
-      }
-    } catch (err) {
-      warn('retry failed', callSid, err);
-    }
-  }, RETRY_MS);
+    retryDelays.delete(callSid);
+    pass(callSid, { slackMs: TIMER_SLACK_MS, allowPause: isEnabled('callRecordingCardPause') }, { decisionMaker: true, chain }).then((out) => {
+      if (out?.dueAtMs && out.action !== 'send_busy' && !timers.has(callSid)) armTimer(callSid, out.dueAtMs);
+    });
+  }, delayMs);
   if (typeof timer.unref === 'function') timer.unref();
   retries.set(callSid, timer);
+  retryDelays.set(callSid, delayMs);
+}
+
+// One drain, then what must follow it. Never rejects. A resume that failed in a way a retry can fix, or
+// a thrown error (the database), schedules a backoff retry, so the resume does not wait for an
+// utterance; a decision maker that found the lease busy retries quickly. A retry stops on a confirmed
+// resume (nothing pending), a terminal resume code (the state is closed), or a call that has ended.
+async function pass(callSid, opts, { decisionMaker = false, chain = null } = {}) {
+  try {
+    if (chain && await callEnded(callSid)) return { action: 'call_ended' };
+    const out = await drain(callSid, opts);
+    if (out.action === 'resume_failed' && !TERMINAL_RESUME_CODES.has(out.error_code)) scheduleRetry(callSid, nextChain(chain, 'backoff'));
+    else if (out.action === 'send_busy' && decisionMaker) scheduleRetry(callSid, nextChain(chain, 'busy'));
+    return out;
+  } catch (err) {
+    warn('pass failed', callSid, err);
+    scheduleRetry(callSid, nextChain(chain, 'backoff'));
+    return { action: 'error' };
+  }
 }
 
 // A decision maker (a card trigger, the timer) drains, and retries if another sender holds the lease.
-async function reconcile(callSid, opts) {
-  const out = await drain(callSid, opts);
-  if (out.action === 'send_busy') scheduleRetry(callSid);
-  return out;
-}
+const reconcile = (callSid, opts) => pass(callSid, opts, { decisionMaker: true });
 
 // The ordinary stored-utterance path. A call with no open pause costs one plain read and no
 // transaction; a pause not yet due with nothing pending costs the same. Otherwise it drains, but a busy
@@ -319,7 +368,7 @@ async function selfHeal(callSid, opts) {
   if (!isPaused(state)) return { action: 'none' };
   const dueAtMs = new Date(state.resume_due_at).getTime();
   if (!state.pending && dueAtMs > Date.now()) return { action: 'not_due', dueAtMs };
-  return drain(callSid, opts);
+  return pass(callSid, opts);
 }
 
 function armTimer(callSid, dueAtMs) {
@@ -358,7 +407,7 @@ async function pauseOrExtend(callSid) {
   armTimer(callSid, claim.dueAtMs);
   if (!claim.pending) return claim;
   const out = await reconcile(callSid, { allowPause: true });
-  return out?.action === 'pause_failed' ? out : claim;
+  return out?.action === 'pause_failed' || out?.action === 'error' ? out : claim;
 }
 
 /**
@@ -388,5 +437,5 @@ module.exports = {
   onUtteranceStored,
   isCardIntent,
   PAUSE_MS,
-  _test: { timers, retries, LEASE_MS, REQUEST_TIMEOUT_MS },
+  _test: { timers, retries, LEASE_MS, REQUEST_TIMEOUT_MS, RESUME_RETRY_WINDOW_MS },
 };
