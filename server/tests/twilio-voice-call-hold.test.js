@@ -122,6 +122,15 @@ describe('/conference-staff-left', () => {
     expect((await post('/conference-staff-left', { body })).body).toBe(response('<Hangup/>'));
   });
 
+  test('second_staff (a late star from the staff who pressed 2, after the owner took the call): no hold, and they join as staff-2', async () => {
+    callHold.isEnabled.mockReturnValue(true);
+    callHold.startHold.mockResolvedValue('second_staff');
+    const said = say('Your call is transferred. Stay on to introduce the caller, or hang up.');
+    expect((await post('/conference-staff-left', { body })).body).toBe(response(`${said}${SECOND_STAFF}`));
+    callHold.roomIsOpen.mockResolvedValue(false);
+    expect((await post('/conference-staff-left', { body })).body).toBe(response(`${said}<Hangup/>`));
+  });
+
   test('failed: the staff go straight back into the room, star enabled', async () => {
     callHold.isEnabled.mockReturnValue(true);
     callHold.startHold.mockResolvedValue('failed');

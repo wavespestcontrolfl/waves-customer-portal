@@ -4267,6 +4267,9 @@ router.post('/conference-staff-left', async (req, res) => {
       const held = await callHold.startHold(parentSid, { by, legSid: req.body?.CallSid || null });
       if (held === 'held') twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid, '&first=1'));
       else if (held === 'no_room') twiml.hangup();
+      // A star from a leg that is no longer the winner (a late or redelivered request from the staff who pressed 2, after
+      // the owner took the call): no hold starts, and they join as staff-2.
+      else if (held === 'second_staff') await appendSecondStaff(twiml, parentSid);
       else appendStaffConference(twiml, parentSid);
     }
     return sendTwiml(res, twiml);

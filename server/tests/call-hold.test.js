@@ -1911,16 +1911,23 @@ describe('planner: the warm transfer (pure)', () => {
       expect(planEvent(heldHold(), { type: 'staff_left', legSid: LEG }, T, false, null).answer).toBe('voicemail');
     });
 
-    test('only a leg\'s own events are checked: the loops\' check, a star and a step decide as before for any leg', () => {
+    test('only a leg\'s own events are checked: the loops\' check and the owner\'s accept decide as before for any leg', () => {
       expect(planEvent(heldHold(), { type: 'check', legSid: LEG }, T, false, TLEG).answer).not.toBe('not_winner');
-      expect(planEvent(heldHold(), { type: 'star', legSid: LEG }, T, false, TLEG).answer).not.toBe('not_winner');
       expect(planEvent(heldHold(), { type: 'transfer_accept', n: 1, legSid: LEG }, T, false, TLEG).answer).not.toBe('not_winner');
     });
 
-    test('a menu key (press 1, press 2) from a leg that is no longer the winner: not_winner, nothing written, also in his own hold', () => {
+    test('a star from the winner, with no leg named, or with no winner stored: decided as before', () => {
+      const over = heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', transfers: 1 });
+      expect(planEvent(over, { type: 'star', legSid: TLEG }, T, false, TLEG).answer).toBe('start');
+      expect(planEvent(over, { type: 'star' }, T, false, TLEG).answer).toBe('start');
+      expect(planEvent(over, { type: 'star', legSid: LEG }, T, false, null).answer).toBe('start');
+    });
+
+    test('a star or a menu key (press 1, press 2) from a leg that is no longer the winner: not_winner, nothing written, also in his own hold', () => {
       const his = heldHold({ transfers: 1 }); // he took the call, then pressed star: a new hold, with no transfer
-      for (const before of [taken(), his]) {
-        for (const type of ['press1', 'transfer_start']) {
+      const over = heldHold({ phase: 'returned', applied: 'returned', ret_by: 'press1', transfers: 1 }); // his hold ended
+      for (const before of [taken(), his, over]) {
+        for (const type of ['star', 'press1', 'transfer_start']) {
           expect(planEvent(before, { type, legSid: LEG }, T, false, TLEG)).toEqual({ next: before, answer: 'not_winner' });
         }
       }
@@ -2390,6 +2397,15 @@ describe('the warm transfer: acceptTransfer', () => {
     expect(events).toEqual([]);
     expect(db.__state.writes).toEqual([]);
     expect(holdOf()).toMatchObject({ phase: 'returned', ret_by: 'transfer', voicemail_at: null });
+  });
+
+  test('a late star from the staff who pressed 2, after he took the call: second_staff under the lock, no hold, nothing sent', async () => {
+    seed(ringingHold({ status: 'accepted', leg_sid: TLEG }, { phase: 'returned', applied: 'returned', ret_by: 'transfer' }), { accepted_leg_sid: TLEG });
+    const events = fakeTwilio();
+    expect(await hold.startHold(SID, { by: 'star', legSid: LEG })).toBe('second_staff');
+    expect(events).toEqual([]);
+    expect(db.__state.writes).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', ret_by: 'transfer' });
   });
 
   test('a press 1 or 2 from the staff who pressed 2, in a later hold of his: second_staff under the lock, nothing written or sent', async () => {

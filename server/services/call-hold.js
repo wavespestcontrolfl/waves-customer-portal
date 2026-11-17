@@ -376,12 +376,12 @@ function planVoicemailAnswered(hold, nowMs) {
 
 // `winner` is the call's winning leg (conference_path.accepted_leg_sid) as read under the lock: a warm transfer the owner
 // takes moves it in the same write as his accept, so a leg end or a placement decided after that sees the new one.
-// The events a staff leg sends about itself: a menu key (press 1, press 2) and its own end. From a leg that is no longer
-// the call's winner (the staff who pressed 2, after the owner took the call: a key in their wait loop, also during a later
-// hold of his, or their leg's end read as the winner's just before his accept) it changes nothing: they can neither return
-// nor transfer his hold, nor end the room. The routes join them as staff-2. No leg named, or no winner stored, decides as
-// before.
-const LEG_EVENTS = new Set(['press1', 'transfer_start', 'staff_left']);
+// The events a staff leg sends about itself: a star, a menu key (press 1, press 2) and its own end. From a leg that is no
+// longer the call's winner (the staff who pressed 2, after the owner took the call: a key in their wait loop, also during a
+// later hold of his, a late or redelivered /conference-staff-left from their old <Dial>, or their leg's end read as the
+// winner's just before his accept) it changes nothing: they can neither hold, return nor transfer his caller, nor end the
+// room. The routes join them as staff-2. No leg named, or no winner stored, decides as before.
+const LEG_EVENTS = new Set(['star', 'press1', 'transfer_start', 'staff_left']);
 const notWinner = (ev, winner) => Boolean(LEG_EVENTS.has(ev.type) && ev.legSid && winner && ev.legSid !== winner);
 
 function planEvent(hold, ev, nowMs, closed, winner = null) {
@@ -806,11 +806,13 @@ async function settle(callSid, done) {
 // What the routes call. Each records ONE event, then lets the sender finish; none throws.
 // ---------------------------------------------------------------------------------------------------------
 
-// 'held' | 'no_room' | 'failed'. A star. A duplicate or redelivered star while a hold or a return is open is a
-// no-op ('held'): it never closes, replaces or restarts anything.
+// 'held' | 'no_room' | 'failed' | 'second_staff'. A star. A duplicate or redelivered star while a hold or a return is open
+// is a no-op ('held'): it never closes, replaces or restarts anything. 'second_staff': a star from a leg that is no longer
+// the call's winner (`legSid`, read under the lock) starts no hold, and the route joins that leg as staff-2.
 async function startHold(callSid, { by = 'star', legSid = null } = {}) {
   try {
     const decision = await decide(callSid, { type: 'star', by, legSid });
+    if (decision.answer === 'not_winner') return 'second_staff';
     if (decision.answer === 'no_state') return 'failed';
     if (decision.answer === 'no_room') return 'no_room';
     if (decision.answer === 'held') return 'held';
