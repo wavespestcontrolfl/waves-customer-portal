@@ -252,6 +252,17 @@ describe('recordLiveTranscriptionEvent', () => {
     expect(db.__state.utterances[2].text).toBe('4 5 6');
   });
 
+  test('a mask stays on the line it came from: other lines keep their own text, speaker and time', async () => {
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', 'I need service at 10 tomorrow', 1));
+    await live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'Sure, what card?', 3));
+    await live.recordLiveTranscriptionEvent(content(4, 'inbound_track', '4242 4242 4242 4242', 5));
+    expect(db.__state.utterances.map((u) => [u.speaker, u.text, u.pan_masked])).toEqual([
+      ['caller', 'I need service at 10 tomorrow', false],
+      ['staff', 'Sure, what card?', false],
+      ['caller', '[card ending 4242]', true],
+    ]);
+  });
+
   test('a card number half that arrives late is scrubbed with its own neighbors, not the newest rows', async () => {
     await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', '4242 4242', 1));
     for (let i = 0; i < 6; i += 1) {

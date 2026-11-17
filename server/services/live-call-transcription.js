@@ -23,7 +23,7 @@ const twilio = require('twilio');
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { scrubSegments } = require('../utils/pan-scrub');
+const { createEditTracker, scrubPansTracked, trackedEditList } = require('../utils/pan-scrub');
 
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
 const WEBHOOK_PATH = '/api/webhooks/twilio/live-transcription';
@@ -31,7 +31,7 @@ const WEBHOOK_PATH = '/api/webhooks/twilio/live-transcription';
 const SPEAKER_BY_TRACK = { inbound_track: 'caller', outbound_track: 'staff' };
 // Each new utterance is scrubbed together with the ones spoken just before and after it, so a card
 // number read across utterances ("4242 4242" … "4242 4242") is caught, even when a line arrives
-// late. The post-call scrub uses the same rule on diarized segments (utils/pan-scrub scrubSegments).
+// late. The scrub is utils/pan-scrub's, the one the post-call transcript uses (scrubLines below).
 const SCRUB_WINDOW = 6;
 // A short code-shaped utterance (an expiry or a CVV) soon after a masked card number is masked
 // too: the masked text no longer shows the card to the window scrub. The link is the same speaker's
@@ -163,21 +163,47 @@ async function startLiveTranscription({ parentCallSid, language = null } = {}) {
   return { started: true, status: outcome.status };
 }
 
+// The window's lines joined and scrubbed once, each mask put back on the line it came from: a mask
+// that spans two lines (a card number read in two pieces) goes on the first of them and the covered
+// part of the next is removed. Every other character stays on its own line, so each line keeps its
+// speaker and time (utils/pan-scrub scrubSegments would move a cross-line hit into the first line).
+function scrubLines(texts) {
+  const starts = [];
+  let joined = '';
+  texts.forEach((text, i) => { joined += (i ? '\n' : ''); starts.push(joined.length); joined += text; });
+  const edits = trackedEditList(scrubPansTracked(createEditTracker(joined)).tracker);
+  const overlaps = (e, i) => e.start < starts[i] + texts[i].length && e.end > starts[i];
+  const owners = edits.map((e) => texts.findIndex((_, i) => overlaps(e, i)));
+  return texts.map((text, i) => {
+    let out = '';
+    let cursor = 0;
+    let masked = false;
+    edits.forEach((e, k) => {
+      if (!overlaps(e, i)) return;
+      const from = Math.max(e.start - starts[i], 0);
+      out += text.slice(cursor, from) + (owners[k] === i ? e.text : '');
+      cursor = Math.min(e.end - starts[i], text.length);
+      masked = true;
+    });
+    return masked ? { text: (out + text.slice(cursor)).replace(/\s+/g, ' ').trim(), masked } : { text, masked };
+  });
+}
+
 // The window scrub for one new utterance, oldest first. Returns the scrubbed text of every segment
 // (the new one included) and whether each one had something masked.
 function scrubWindow(recent, incoming) {
   // Spoken order; the new utterance (id null) sorts after a stored one spoken at the same instant.
   const byId = (a, b) => (a.id === null ? 1 : b.id === null ? -1 : Number(a.id) - Number(b.id));
   const segments = [...recent, incoming].sort((a, b) => (a.spokenAt - b.spokenAt) || byId(a, b));
-  const { segments: scrubbed } = scrubSegments(segments.map((s) => ({ text: s.text })));
+  const scrubbed = scrubLines(segments.map((s) => s.text));
   const out = [];
   for (let i = 0; i < segments.length; i += 1) {
     const seg = segments[i];
-    const text = typeof scrubbed?.[i]?.text === 'string' ? scrubbed[i].text : seg.text;
+    const { text } = scrubbed[i];
     const anchor = out.slice(0, i).reverse().find((p) => p.speaker === seg.speaker && p.panMasked);
     const codeTail = !!anchor && seg.spokenAt - anchor.spokenAt <= CODE_TAIL_GAP_MS
       && /\S/.test(text) && CODE_TAIL_RE.test(text);
-    out.push({ ...seg, text: codeTail ? '[code removed]' : text, panMasked: seg.panMasked || codeTail || text !== seg.text });
+    out.push({ ...seg, text: codeTail ? '[code removed]' : text, panMasked: seg.panMasked || codeTail || scrubbed[i].masked });
   }
   return out;
 }
@@ -321,5 +347,5 @@ module.exports = {
   purgeLiveUtterances,
   purgeQuarantinedLiveText,
   WEBHOOK_PATH,
-  _test: { scrubWindow, startParams, CODE_TAIL_RE },
+  _test: { scrubWindow, scrubLines, startParams, CODE_TAIL_RE },
 };
