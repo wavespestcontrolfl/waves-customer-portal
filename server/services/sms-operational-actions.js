@@ -988,18 +988,15 @@ async function settleCommitmentAlert(trx, initial, id, { action, reviewedBy }) {
 // reviewed_at, audit event). Returns the number of commitments settled.
 // Best effort per commitment: one that changed since (already closed, source
 // moved) is skipped and logged, never a failure for the Done click.
-const SMS_ALERT_KEY = /^sms-commitment(?:-source)?:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const SMS_ALERT_KEY = /^sms-commitment(-customer|-source)?:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 async function settleCommitmentsForDoneAlert(conn, notificationId, { reviewedBy }) {
   if (!reviewedBy) return 0;
-  const alert = await conn('notifications').where({ id: notificationId, recipient_type: 'admin' }).first('metadata');
-  let metadata = alert?.metadata;
-  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch (_) { metadata = null; } }
-  const key = String(metadata?.dedupeKey || '');
-  const match = SMS_ALERT_KEY.exec(key);
-  if (!match || !metadata.customerId) return 0;
-  const ids = key.startsWith('sms-commitment-source:')
-    ? await openSourceCommitments(conn, match[1]).pluck('id')
-    : [match[1]];
+  const metadata = alertMeta(await conn('notifications').where({ id: notificationId, recipient_type: 'admin' }).first('metadata'));
+  const scope = alertScope(metadata);
+  if (!scope || !metadata.customerId) return 0;
+  // A customer's alert lists its promises: Done settles the ones the person saw on it. An alert an older build
+  // keyed on one text speaks for that text's open promises, and one keyed on one promise for that promise.
+  const ids = scope.text ? await openSourceCommitments(conn, scope.text).pluck('id') : scope.ids;
   let settled = 0;
   for (const id of ids) {
     try {
@@ -1129,12 +1126,16 @@ async function lockLiveCommitment(trx, row, message) {
 }
 
 // The explanation behind the bell, kept in `detail` (the why carries the customer's
-// words instead). `when` is the ET time the message arrived; `channel` is sms or email.
+// words instead): where it was said, then what the records show. `when` is the ET time
+// the message arrived; `word` is text or email. An alert for promises from several
+// texts keeps only `records`: each quoted line names its own text.
 const OVERDUE_BELL_DETAIL = {
-  uncertain: (when, word) => `The ${when} ET ${word} needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`,
-  open: (when, word) => `Requested or promised in the ${when} ET ${word}. The available follow-up records do not establish completion. Open the customer profile to take the next step.`,
-  late: (when, word) => `Promised in the ${when} ET ${word}. The records show it done only after the promised deadline. Open the customer profile to follow up.`,
+  uncertain: { said: (when, word) => `The ${when} ET ${word} needs a completion check.`, records: 'Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.' },
+  open: { said: (when, word) => `Requested or promised in the ${when} ET ${word}.`, records: 'The available follow-up records do not establish completion. Open the customer profile to take the next step.' },
+  late: { said: (when, word) => `Promised in the ${when} ET ${word}.`, records: 'The records show it done only after the promised deadline. Open the customer profile to follow up.' },
 };
+// When a promise's text was sent (a scheduled text's actual delivery): read with the promise, else the message at hand.
+const textAt = (item, message) => item.source_created_at || message.created_at;
 
 // The words that created the obligation: the extraction's grounded quote, else its
 // description, else (a text only) the message itself.
@@ -1210,58 +1211,187 @@ function keptLate(row, verdict) {
     && new Date(verdict.matched_at) > new Date(row.due_at);
 }
 
-// One open admin alert per source text (owner 2026-10-22): a single staff
-// text such as "Adam will be out there and he'll look into it" yields several
-// commitments, and each used to ring its own alert. The alert is keyed on the
-// source sms_log row and lists every open promise from that text. Alerts an
-// older build keyed on one commitment (`sms-commitment:<id>`) are still found
-// and closed by every path below.
+// One open admin alert per customer (owner 2026-11-16, "one alert for each customer"): every text follow-up of a
+// customer that needs the office sits on one alert, keyed on the customer. The alert lists those promises
+// (metadata.commitment_ids, the promise that joined last first). A promise joins when its own overdue check rings,
+// together with the other open promises from its text (owner 2026-10-22: one staff text such as "Adam will be out
+// there and he'll look into it" yields several promises, and they are one alert). The alert rings when it first
+// appears, and again only when a promise it has not spoken for joins it (metadata.spoke_for: every promise the open
+// alert has listed). Alerts an older build keyed on one text (`sms-commitment-source:<text>`) or on one promise
+// (`sms-commitment:<promise>`) are still found: they fold into the customer's alert without a ring, and every path
+// below still closes them.
+const smsCustomerAlertKey = (customerId) => `sms-commitment-customer:${customerId}`;
 const smsSourceAlertKey = (smsLogId) => `sms-commitment-source:${smsLogId}`;
 const legacyCommitmentAlertKey = (commitmentId) => `sms-commitment:${commitmentId}`;
 const openSourceCommitments = (conn, smsLogId) => conn('call_commitments')
   .where({ sms_log_id: smsLogId, status: 'open', party: 'waves' }).whereNull('human_state')
   .orderBy('created_at').orderBy('id');
 
-// Close the alert for a finished commitment. The shared source alert stays
-// open while another promise from the same text still needs it (notOnTrack:
-// rule 3 of GATE_PROMISE_RECORD_EVIDENCE holds one with a visit booked ahead).
-// `openOnly` touches open rows only: a temporary close (rule 3, on track until
-// a visit) never takes over a row a person marked done.
-async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false, now = new Date() }, update) {
-  // A non-settling update (edit, snooze) marks both alerts read; a settling
-  // one finishes the shared alert only when no other promise from the text needs it.
-  const others = settled ? await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId) : [];
-  const remaining = others.length ? await refreshSharedSmsAlert(trx, smsLogId, others, now) : [];
-  const keys = [legacyCommitmentAlertKey(commitmentId), ...(remaining.length ? [] : [smsSourceAlertKey(smsLogId)])];
-  await trx('notifications').where({ recipient_type: 'admin' }).modify((q) => { if (openOnly) q.whereNull('done_at'); })
-    .whereIn(trx.raw("metadata->>'dedupeKey'"), keys).update(update);
+function alertMeta(row) {
+  const value = row?.metadata;
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value || '{}') || {}; } catch { return {}; }
+}
+// The promises an alert lists, in its order.
+const listedOn = (meta) => [...new Set([...(Array.isArray(meta.commitment_ids) ? meta.commitment_ids : []), meta.commitment_id]
+  .filter(Boolean).map(String))];
+// Two bindings, the same list of promise ids twice: the row lists one of them.
+const LISTS_ANY_SQL = "(metadata->>'commitment_id' = ANY(?::text[]) OR jsonb_exists_any(COALESCE(metadata->'commitment_ids', '[]'::jsonb), ?::text[]))";
+// A customer's alert that lists one of the promises. Any customer's key: after a merge a closed row keeps the
+// former owner's key.
+const CUSTOMER_ALERT_LISTS_SQL = `(metadata->>'dedupeKey' LIKE 'sms-commitment-customer:%' AND ${LISTS_ANY_SQL})`;
+// An alert, open or closed, has spoken for the promise. Four bindings: the older builds' keys for the promise and
+// its text, then the promise's id three times. metadata.spoke_for keeps a promise that left a customer's alert
+// while the alert stayed open for others (rule 3 held it), so neither its return nor its late record rings again.
+const SPOKE_FOR_SQL = `(metadata->>'dedupeKey' = ANY(?::text[]) OR (metadata->>'dedupeKey' LIKE 'sms-commitment-customer:%'
+  AND (${LISTS_ANY_SQL} OR jsonb_exists_any(COALESCE(metadata->'spoke_for', '[]'::jsonb), ?::text[]))))`;
+
+// What an alert row speaks for, read from its key: a customer's alert lists its promises; an alert an older build
+// keyed on one text speaks for that text's open promises, and one keyed on one promise for that promise.
+function alertScope(meta) {
+  const [, family, id] = SMS_ALERT_KEY.exec(String(meta.dedupeKey || '')) || [];
+  if (!id) return null;
+  if (family === '-customer') return { ids: listedOn(meta) };
+  return family === '-source' ? { ids: [], text: id } : { ids: [id] };
 }
 
-// The shared alert keeps naming a promise that has since settled. Rewrite its
-// copy and commitment list to the text's other open promises that still need
-// it; it stays open and does not ring again (refresh of an OPEN row only;
-// nothing is created). Returns those promises: none means the caller closes it.
-async function refreshSharedSmsAlert(trx, smsLogId, others, now) {
-  const dedupeKey = smsSourceAlertKey(smsLogId);
-  const queued = await trx('sms_log').where({ id: smsLogId }).first(...SOURCE_COLUMNS);
-  // The same source the ring used: a scheduled text reads as its actual delivery.
-  const source = queued && await scheduledSourceMessage(trx, queued);
-  if (!source) return others;
-  const remaining = await notOnTrack(trx, others, source, now);
-  const shared = remaining.length && await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).forUpdate().first('id');
-  if (!shared) return remaining;
+// When the text behind a promise was sent. A scheduled text reads as its actual delivery, the rule of
+// scheduledSourceMessage, but without its row lock: the alert's lock is held here, and a lock on another text's
+// rows after it could deadlock with that text's own check.
+const SOURCE_SENT_AT_SQL = `COALESCE((SELECT d.created_at FROM sms_log d
+    WHERE s.direction = 'outbound' AND d.direction = 'outbound' AND d.customer_id = s.customer_id
+      AND d.metadata->>'scheduled_sms_log_id' = s.id::text
+    ORDER BY d.created_at DESC, d.id DESC LIMIT 1), s.created_at)`;
+// Open text promises that can sit on an alert (Waves', untouched by a person), by id or by source text, oldest
+// first. owner_id is the customer the text belongs to now (it follows a merge); source_created_at is the text's time.
+const alertPromises = (conn, { ids = [], texts = [] }) => conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
+  .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
+  .whereRaw('(cc.id::text = ANY(?::text[]) OR cc.sms_log_id::text = ANY(?::text[]))', [ids, texts])
+  .orderBy('cc.created_at').orderBy('cc.id')
+  .select('cc.*', 's.customer_id as owner_id', conn.raw(`${SOURCE_SENT_AT_SQL} AS source_created_at`));
+const customerCommsLink = (customerId) => `/admin/customers?customerId=${encodeURIComponent(customerId)}&tab=comms`;
+
+// One lock per customer's alert, taken before its promise list is read, so a ring and a close for one customer
+// never work from the same list. It is the alert service's own lock for the customer's key (notifyAdmin, and the
+// bell's "Send to Claude", take it before they touch the row), so every writer locks the key first and the row
+// second. Always taken after the customer, text and promise row locks.
+const lockCustomerAlert = (trx, customerId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${smsCustomerAlertKey(customerId)}`]);
+
+// The promises of `candidates` that still need an alert: every one rule 3 does not hold (notOnTrack).
+async function needingAlert(trx, candidates, customerId, now) {
+  const kept = [];
+  for (const item of candidates) {
+    if ((await notOnTrack(trx, [item], { customer_id: customerId, created_at: item.source_created_at }, now)).length) kept.push(item);
+  }
+  return kept;
+}
+
+// Fold the open alert rows that speak for this customer's text promises into one. The rows: the customer's own,
+// rows with an older build's key for `textId` or one of `ids`, rows written for the customer, and rows that list
+// one of `ids` (a row still keyed on the former owner after a merge moved the text). The customer's own row stands.
+// Without one, a row whose open promises all belong to this customer takes the customer's key (an unread one
+// first), so the fold itself never rings. Every other such row closes as replaced. A row that still holds another
+// customer's open promise is left to that customer. Returns the row that stands (or null) and the customer's
+// promises that are on an open alert already, the standing row's first.
+async function foldCustomerAlerts(trx, { customerId, textId, ids }) {
+  const key = smsCustomerAlertKey(customerId);
+  const { doneColumns, DONE_CLEARED } = require('./notification-service')._private;
+  const found = (await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE 'sms-commitment%'")
+    .whereRaw(`(metadata->>'customerId' = ? OR metadata->>'dedupeKey' = ANY(?::text[]) OR ${LISTS_ANY_SQL})`,
+      [customerId, [key, smsSourceAlertKey(textId), ...ids.map(legacyCommitmentAlertKey)], ids, ids])
+    .orderBy('created_at', 'desc').orderBy('id', 'desc').forUpdate().select('id', 'read_at', 'metadata'))
+    .map((row) => [row, alertMeta(row)])
+    .map(([row, meta]) => ({ id: row.id, unread: !row.read_at, key: meta.dedupeKey, scope: alertScope(meta),
+      spoke: [...(Array.isArray(meta.spoke_for) ? meta.spoke_for : []), ...listedOn(meta)].map(String) }))
+    .filter((row) => row.scope);
+  const open = await alertPromises(trx, { ids: found.flatMap((row) => row.scope.ids), texts: found.map((row) => row.scope.text).filter(Boolean) });
+  const byId = new Map(open.map((item) => [item.id, item]));
+  for (const row of found) {
+    row.promises = row.scope.text ? open.filter((item) => item.sms_log_id === row.scope.text) : row.scope.ids.map((id) => byId.get(id)).filter(Boolean);
+    row.spoke = [...new Set([...row.spoke, ...row.promises.map((item) => item.id)])];
+  }
+  const own = found.find((row) => row.key === key) || null;
+  const folded = found.filter((row) => row !== own
+    && (row.key === key || (row.promises.length > 0 && row.promises.every((item) => item.owner_id === customerId))));
+  const stands = own || folded.find((row) => row.unread) || folded[0] || null;
+  const replaced = folded.filter((row) => row !== stands);
+  if (stands) stands.spoke = [...new Set([stands, ...replaced].flatMap((row) => row.spoke))];
+  // A folded row follows its promises to this customer (a merge moved them): its link opens this profile.
+  const owned = (extra = {}) => ({ link: customerCommsLink(customerId),
+    metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customerId, ...extra })]) });
+  if (replaced.length) {
+    await trx('notifications').whereIn('id', replaced.map((row) => row.id)).update({ ...owned(),
+      ...doneColumns({ by: 'supersede', resolution: 'Replaced by one alert for this customer', keepExisting: true, conn: trx }) });
+  }
+  // A folded row that was unread keeps the alert unread: the person has not seen that promise.
+  const unread = Boolean(stands) && !stands.unread && replaced.some((row) => row.unread);
+  if (stands && (stands.key !== key || unread)) {
+    await trx('notifications').where({ id: stands.id }).update({ ...owned({ dedupeKey: key }), ...(unread ? { read_at: null, ...DONE_CLEARED } : {}) });
+  }
+  const known = [...new Set([stands, ...found.filter((row) => row !== stands)].filter(Boolean).flatMap((row) => row.promises))]
+    .filter((item) => item.owner_id === customerId);
+  return { stands, known };
+}
+
+// Write the customer's alert for `members`, the lead first. `message` is the text behind the promise being checked,
+// when there is one; a lead from another text is worded from its own stored text time.
+function writeCustomerAlert(trx, { customerId, members, stands, verdict, scannedId = null, message = null, joins = false, refreshOnly = false }) {
+  const [lead] = members;
+  const source = message && lead.sms_log_id === message.id ? message
+    : { id: lead.sms_log_id, customer_id: customerId, created_at: lead.source_created_at, message_body: '' };
+  // Every promise the open alert has listed: SPOKE_FOR_SQL reads it.
+  const spokeFor = [...new Set([...(stands?.spoke || []), ...members.map((item) => String(item.id))])];
+  return ringOverdueBell(trx, { row: lead, message: source, verdict: sourceAlertVerdict(verdict, members, scannedId),
+    dedupeKey: smsCustomerAlertKey(customerId), promises: members, spokeFor, joins, refreshOnly });
+}
+
+// The customer's alert after `commitmentId` left it. While another promise still needs the alert, the open row is
+// rewritten to those promises and does not ring (a refresh of an OPEN row only; nothing is created). Returns the ids
+// of the customer's alert rows to close: the open row when no promise is left on it and, unless `openOnly`, a row a
+// person marked done once no promise it lists is open (their Reopen would bring back an alert with nothing behind it).
+async function customerAlertsToClose(trx, { customerId, commitmentId, smsLogId, openOnly, now }) {
+  await lockCustomerAlert(trx, customerId);
+  const { stands, known } = await foldCustomerAlerts(trx, { customerId, textId: smsLogId, ids: [commitmentId] });
   // The state comes from the promises still open, never from the one that just
   // settled (a settled promise's "kept late" must not stay on the alert).
-  await ringOverdueBell(trx, { row: remaining[0], message: source, verdict: sourceAlertVerdict({ verdict: 'open' }, remaining),
-    dedupeKey, promises: remaining, refreshOnly: true });
-  return remaining;
+  const remaining = await needingAlert(trx, known.filter((item) => item.id !== commitmentId), customerId, now);
+  if (stands && remaining.length) await writeCustomerAlert(trx, { customerId, members: remaining, stands, verdict: { verdict: 'open' }, refreshOnly: true });
+  const closing = stands && !remaining.length ? [stands.id] : [];
+  if (openOnly) return closing;
+  const done = await trx('notifications').where({ recipient_type: 'admin' }).whereNotNull('done_at')
+    .whereRaw(CUSTOMER_ALERT_LISTS_SQL, [[commitmentId], [commitmentId]]).select('id', 'metadata');
+  const stillOpen = new Set((await alertPromises(trx, { ids: done.flatMap((row) => listedOn(alertMeta(row))) })).map((item) => item.id));
+  return [...closing, ...done.filter((row) => !listedOn(alertMeta(row)).some((id) => stillOpen.has(id))).map((row) => row.id)];
+}
+
+// Close the alerts for a promise that no longer needs one: done, dismissed, expired, or held by a booked visit.
+// The customer's alert stays open while another promise still needs it (notOnTrack: rule 3 of
+// GATE_PROMISE_RECORD_EVIDENCE holds one with a visit booked ahead). `openOnly` touches open rows only: a temporary
+// close (rule 3, on track until a visit) never takes over a row a person marked done.
+async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled = true, openOnly = false, now = new Date() }, update) {
+  const rows = () => trx('notifications').where({ recipient_type: 'admin' }).modify((q) => { if (openOnly) q.whereNull('done_at'); });
+  // The text's owner now, and when it was sent (a scheduled text reads as its delivery).
+  const text = await trx('sms_log as s').where({ 's.id': smsLogId }).first('s.customer_id', trx.raw(`${SOURCE_SENT_AT_SQL} AS created_at`));
+  const legacyKeys = [legacyCommitmentAlertKey(commitmentId)];
+  // A non-settling update (edit, snooze) marks the alerts that speak for the promise read, not done.
+  if (!settled) {
+    return rows().whereRaw(`(metadata->>'dedupeKey' = ANY(?::text[]) OR ${CUSTOMER_ALERT_LISTS_SQL})`,
+      [[...legacyKeys, smsSourceAlertKey(smsLogId)], [commitmentId], [commitmentId]]).update(update);
+  }
+  // An older build's alert for the text closes when no other promise from the text still needs it.
+  const others = await notOnTrack(trx, await openSourceCommitments(trx, smsLogId).whereNot('id', commitmentId),
+    { customer_id: text?.customer_id, created_at: text?.created_at }, now);
+  if (!others.length) legacyKeys.push(smsSourceAlertKey(smsLogId));
+  const closing = text?.customer_id ? await customerAlertsToClose(trx, { customerId: text.customer_id, commitmentId, smsLogId, openOnly, now }) : [];
+  return rows().where((q) => q.whereIn(trx.raw("metadata->>'dedupeKey'"), legacyKeys).orWhereIn('id', closing)).update(update);
 }
 
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
 // headline, their quoted words in the why, the whole story in `detail`.
-// The parts of the bell that differ between one promise and several from one
-// text: the kind's wording, the quoted lines, the headline words and the status.
+// The parts of the bell that differ between one promise, several from one text and
+// several from more than one text: the kind's wording, the quoted lines, the headline
+// words and the status.
 function bellParts({ row, message, group, names, closing, state }) {
   const rawQuote = obligationWords(row, message);
   const quote = names.redactedWords(rawQuote);
@@ -1270,17 +1400,36 @@ function bellParts({ row, message, group, names, closing, state }) {
     return { alert, promised: row.sms_context?.basis === 'promise', quoteLine: quote ? `“${quote.slice(0, 600)}”` : null,
       closingLine: closing, openStatus: alert.open, headline: quote && headlineWords(quote, rawQuote, row.description, names.redactedWords) };
   }
-  // The words each promise is quoted by; promises that quote alike show once.
-  const words = [...new Set(group.map((item) => {
-    const raw = obligationWords(item, message);
+  // The words each promise is quoted by. A promise from another text never falls back to this text's body.
+  const wordsOf = (item) => {
+    const raw = obligationWords(item, item.sms_log_id && item.sms_log_id !== message.id ? {} : message);
     return headlineWords(names.redactedWords(raw), raw, item.description, names.redactedWords);
-  }).filter(Boolean))];
+  };
   const kinds = new Set(group.map((item) => item.kind));
-  return { alert: KIND_ALERT[kinds.size === 1 ? row.kind : 'other'] || KIND_ALERT.other,
-    promised: group.every((item) => item.sms_context?.basis === 'promise'),
-    quoteLine: words.map((w) => `• “${w.slice(0, 300)}”`).join('\n'),
+  const shared = { alert: KIND_ALERT[kinds.size === 1 ? row.kind : 'other'] || KIND_ALERT.other,
+    promised: group.every((item) => item.sms_context?.basis === 'promise'), openStatus: 'nothing on record shows them done' };
+  if (state.texts > 1) {
+    // Each line names the day of its own text; the why quotes the lead promise and counts the rest.
+    const lines = [...new Set(group.map((item) => {
+      const words = wordsOf(item);
+      return words && `• “${words.slice(0, 300)}” (${names.shortDateET(textAt(item, message))})`;
+    }).filter(Boolean))];
+    return { ...shared, quoteLine: lines.join('\n'),
+      closingLine: `${group.length} follow-ups from ${state.texts} ${state.channelWord}s are still open. ${closing}`,
+      headline: wordsOf(row), said: row.sms_context?.basis === 'promise', day: names.shortDateET(textAt(row, message)), more: group.length - 1,
+      mixed: !shared.promised && group.some((item) => item.sms_context?.basis === 'promise') };
+  }
+  // Promises that quote alike show once.
+  const words = [...new Set(group.map(wordsOf).filter(Boolean))];
+  return { ...shared, quoteLine: words.map((w) => `• “${w.slice(0, 300)}”`).join('\n'),
     closingLine: `${group.length} follow-ups from this one ${state.channelWord} are still open. ${closing}`,
-    openStatus: 'nothing on record shows them done', headline: words.join('” and “') };
+    headline: words.join('” and “') };
+}
+
+// The detail's opening words: promised or asked, and where it was said. Several texts can hold both.
+function saidWhere({ promised, mixed, group, texts, channelWord, when }) {
+  if (texts > 1) return `${promised ? 'we promised these' : (mixed ? 'asked or promised' : 'asked')} in ${texts} ${channelWord}s`;
+  return `${promised ? `we promised ${group ? 'these' : 'this'}` : 'asked'} by ${channelWord} on ${when} ET`;
 }
 
 function overdueBellCopy({ row, message, verdict, customerName, channelWord, promises = null }) {
@@ -1289,16 +1438,19 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
   const state = verdict.late ? 'late' : verdict.verdict;
-  // One text with several promises: one alert that names all of them. Same
-  // kind keeps the kind's wording; mixed kinds fall back to a general follow-up.
+  // Several promises: one alert that names all of them. Same kind keeps the
+  // kind's wording; mixed kinds fall back to a general follow-up.
   const group = Array.isArray(promises) && promises.length > 1 ? promises : null;
-  const closing = (OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open)(when, channelWord);
-  const parts = bellParts({ row, message, group, names, closing, state: { channelWord } });
+  // Promises from more than one text (a customer's alert) name each text's day on its own line.
+  const texts = group ? new Set(group.map((item) => item.sms_log_id)).size : 1;
+  const wording = OVERDUE_BELL_DETAIL[state] || OVERDUE_BELL_DETAIL.open;
+  const closing = texts > 1 ? wording.records : `${wording.said(when, channelWord)} ${wording.records}`;
+  const parts = bellParts({ row, message, group, names, closing, state: { channelWord, texts } });
   const status = state === 'late' ? 'done only after the promised time'
     : (state === 'uncertain' ? "can't tell if it was done" : parts.openStatus);
-  const day = names.shortDateET(message.created_at);
+  const day = parts.day ?? names.shortDateET(message.created_at);
   const detail = [
-    `${customerName || 'A customer'}: ${parts.promised ? `we promised ${group ? 'these' : 'this'} by ${channelWord}` : `asked by ${channelWord}`} on ${when} ET.`,
+    `${customerName || 'A customer'}: ${saidWhere({ promised: parts.promised, mixed: parts.mixed, group, texts, channelWord, when })}.`,
     parts.quoteLine, parts.closingLine,
   ].filter(Boolean).join('\n');
   return {
@@ -1306,10 +1458,10 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
     spec: {
       area: parts.alert.area,
       action: names.fitAction(parts.alert.area, customerName || 'the customer', [parts.alert.action]),
-      why: names.whyWithQuote({ lead: parts.promised ? 'We said ' : '', quote: parts.headline,
-        tail: `${day ? ` (${day})` : ''} — ${status}.` }),
+      why: names.whyWithQuote({ lead: (parts.said ?? parts.promised) ? 'We said ' : '', quote: parts.headline,
+        tail: `${day ? ` (${day})` : ''}${parts.more ? ` and ${parts.more} more` : ''} — ${status}.` }),
       severity: 'needs-you',
-      link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
+      link: customerCommsLink(message.customer_id),
       subject: { type: 'customer', id: message.customer_id },
       doneWhen: 'promise_fulfilled',
       who: 'person',
@@ -1333,14 +1485,18 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord, pro
 // the title is not the dedupe key (dedupeKey is), so the wording may change.
 // Every existing SMS caller omits the overrides, so the SMS bell keeps its
 // dedupe, link and metadata shape.
-async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup', promises = null, refreshOnly = false }) {
+// `joins` (a customer's text alert): the open alert has not spoken for the promise being checked, so it rings again
+// and rises to the top of the bell when it takes the promise in. Without it an open alert is refreshed quietly.
+async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceIdField = 'sms_log_id', triggerKey = 'sms_operational_followup', promises = null, spokeFor, refreshOnly = false, joins = false }) {
   const customerName = await require('./admin-alert-names').lookupCustomerName(trx, message.customer_id);
   const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text', promises });
   const ringOpts = {
     trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict,
-      ...(promises ? { commitment_ids: promises.map((item) => item.id) } : {}),
+      // itemKeys: the alert service's ring-on-change stamp, so a change of promises always rewrites the open row.
+      // spoke_for (a customer's alert): every promise the open alert has listed, for SPOKE_FOR_SQL.
+      ...(promises ? { commitment_ids: promises.map((item) => item.id), itemKeys: promises.map((item) => String(item.id)).sort(), spoke_for: spokeFor } : {}),
       // A refresh merges over the standing row: a row that is no longer call-back only must drop Called back,
       // or a tap would settle promises that are not call-backs.
       ...(spec.buttons ? {} : { buttons: null }) } };
@@ -1349,10 +1505,11 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // ring (read state, done state and push stay), so a later check never makes
   // a new row. With no open row (first time, or a person marked it done and
   // the promise is still overdue) the insert is fresh: one new row, one bell.
+  // The one ring an open row can get: a promise it has not spoken for joins it (`joins`).
   const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
   // promise: a follow-up we owe the customer (it already rings through bell: true).
   const notification = await raiseAdminAlert('alert', { ...spec, promise: true }, ringOnce || refreshOnly
-    ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => false }
+    ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => joins && !refreshOnly, bumpOnRefresh: true }
     : ringOpts);
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   // The 24h window rolls from created_at, so a promise still overdue after a
@@ -1373,7 +1530,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   return notification;
 }
 
-// One alert speaks for every promise from the text, so its state is read from
+// One alert speaks for every promise it lists, so its state is read from
 // all of them, not from whichever row the scan reached first. Precedence:
 // uncertain > kept late > open. "Can't tell if it was done" is the strongest
 // claim to make the office look (a person must check), so it wins; a promise
@@ -1395,22 +1552,28 @@ function sourceAlertVerdict(verdict, promises, scannedId = null) {
   return top === 'late' ? { ...verdict, late: true } : verdict;
 }
 
-// The overdue alert for a text commitment: one open alert per source text,
-// listing every open promise from it. An alert an older build keyed on one
-// commitment is closed in its favor. `row` is the commitment that triggered the
-// ring; it leads the list.
-async function ringSmsSourceBell(trx, { row, message, verdict, now }) {
-  const siblings = (await openSourceCommitments(trx, message.id)).filter((item) => item.id !== row.id);
-  const promises = [row, ...await notOnTrack(trx, siblings, message, now)];
-  const notification = await ringOverdueBell(trx, { row, message, verdict: sourceAlertVerdict(verdict, promises, row.id),
-    dedupeKey: smsSourceAlertKey(message.id), promises });
-  if (notification?.id) {
-    const { doneColumns, openToCloser } = require('./notification-service')._private;
-    await openToCloser(trx('notifications').where({ recipient_type: 'admin' })
-      .whereIn(trx.raw("metadata->>'dedupeKey'"), promises.map((item) => legacyCommitmentAlertKey(item.id))), 'supersede')
-      .update(doneColumns({ by: 'supersede', resolution: 'Replaced by one alert for this text', keepExisting: true, conn: trx }));
-  }
-  return notification;
+// The overdue alert for a text commitment: one open alert per customer. `row` is the commitment whose check
+// rang. It joins the alert with the other open promises from its text, and leads the list when it is new there.
+// Promises already on the alert keep their order, so a later check of one of them changes nothing a person sees.
+async function ringSmsCustomerBell(trx, { row, message, verdict, now }) {
+  const customerId = message.customer_id;
+  await lockCustomerAlert(trx, customerId);
+  const ofText = (item) => ({ ...item, owner_id: customerId, source_created_at: message.created_at });
+  const siblings = (await openSourceCommitments(trx, message.id)).filter((item) => item.id !== row.id).map(ofText);
+  const { stands, known } = await foldCustomerAlerts(trx, { customerId, textId: message.id, ids: [row.id, ...siblings.map((item) => item.id)] });
+  const seen = new Set(known.map((item) => item.id));
+  // The open alert rings again only for a promise it has not spoken for: one that left it and comes back (a
+  // booked visit held it for a time) returns without a ring, after the promises the alert already shows.
+  const back = !seen.has(row.id);
+  const joins = back && !stands?.spoke.includes(row.id);
+  const scanned = ofText(row);
+  const fresh = siblings.filter((item) => !seen.has(item.id));
+  // Rule 3 may hold any promise but the one that rang: its own hold was checked before the ring.
+  const kept = new Set((await needingAlert(trx, [...fresh, ...known.filter((item) => item.id !== row.id)], customerId, now)).map((item) => item.id));
+  const order = joins ? [scanned, ...fresh, ...known]
+    : [...known.map((item) => (item.id === row.id ? scanned : item)), ...(back ? [scanned] : []), ...fresh];
+  const members = order.filter((item) => item === scanned || kept.has(item.id));
+  return writeCustomerAlert(trx, { customerId, members, stands, verdict, scannedId: row.id, message, joins });
 }
 
 // Close-only reconciliation with the later text thread. A row the records have
@@ -1651,10 +1814,13 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     const alertKeys = [legacyCommitmentAlertKey(row.id), smsSourceAlertKey(source.id)];
     if (live.sms_context.customer_id !== source.customer_id) {
       // Rolling dedupe only refreshes recent rows. Older bells must also
-      // follow a merge or undo instead of opening the retired account.
+      // follow a merge or undo instead of opening the retired account: the
+      // older builds' rows by key, a customer's alert (open or closed) by the
+      // promise it lists. The alert's lock comes before its rows.
+      await lockCustomerAlert(trx, source.customer_id);
       await trx('notifications').where({ recipient_type: 'admin' })
-        .whereIn(trx.raw("metadata->>'dedupeKey'"), alertKeys).update({
-          link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
+        .whereRaw(`(metadata->>'dedupeKey' = ANY(?::text[]) OR ${CUSTOMER_ALERT_LISTS_SQL})`, [alertKeys, [row.id], [row.id]]).update({
+          link: customerCommsLink(source.customer_id),
           metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
         });
     }
@@ -1662,10 +1828,11 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
     persisted = true;
+    // No alert, open or closed, has spoken for this promise yet.
     if (keptLate(live, verdict) && !holdBell && !await trx('notifications').where({ recipient_type: 'admin' })
-      .whereIn(trx.raw("metadata->>'dedupeKey'"), alertKeys).first('id')) {
+      .whereRaw(SPOKE_FOR_SQL, [alertKeys, [row.id], [row.id], [row.id]]).first('id')) {
       // A suppressed bell leaves no row to find next tick: close now instead.
-      const bell = await ringSmsSourceBell(trx, { row, message, verdict: { ...verdict, late: true }, now });
+      const bell = await ringSmsCustomerBell(trx, { row, message, verdict: { ...verdict, late: true }, now });
       rang = true;
       if (!bell.suppressed) return;
     }
@@ -1686,7 +1853,7 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // pass with new evidence does not repeat the same model call for free.
     // Rule 3 ('true'): an overdue alert that rang before the visit was booked
     // closes while the visit is ahead, through the usual closer (open rows
-    // only; a shared alert keeps the text's other promises that still need
+    // only; the customer's alert keeps the other promises that still need
     // it). Only with
     // GATE_ALERT_RING_ONCE on: its open-only probe lets the ring after the
     // window raise a fresh alert, and the ring's supersede step leaves a system
@@ -1700,7 +1867,7 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
       return;
     }
     if (deadlinePassed) {
-      await ringSmsSourceBell(trx, { row, message, verdict, now });
+      await ringSmsCustomerBell(trx, { row, message, verdict, now });
       rang = true;
     }
   });

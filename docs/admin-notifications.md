@@ -260,6 +260,24 @@ customer's message by this rule.
    Activity row is skipped when the ring lands (kept when it fails). The AI line, tech lines,
    staff senders, reactions and courtesy closers are not rung. The `tracking_text` sweep class
    closes these rows once a person answers, like a tracking-line row.
+   A customer's overdue text follow-ups are one subject too (owner 2026-11-16, "one alert for each
+   customer"): they share ONE bell row (`dedupeKey` `sms-commitment-customer:<customerId>`,
+   `ringSmsCustomerBell` in `server/services/sms-operational-actions.js`). The row lists its promises
+   in `metadata.commitment_ids` (and `itemKeys`), the promise that joined last first. A promise joins
+   when its own overdue check rings, together with the other open promises from its text. The row
+   rings when it first appears and again, unread and moved to the top, only when a promise it has
+   not listed before joins it (`GATE_ALERT_RING_ONCE` on). A promise that is done, dismissed, expired
+   or held by a booked visit leaves the row without a ring, and the row closes when no promise is
+   left on it. `metadata.spoke_for` keeps every promise the open row has listed, so a promise that
+   left it (a booked visit held it) comes back without a ring and does not ring "kept late" a second
+   time. Done on the row, and Called back, settle the promises it lists. Rows an older build keyed on one text
+   (`sms-commitment-source:<text id>`) or on one promise (`sms-commitment:<promise id>`) fold into
+   the customer's row the first time one of their promises is checked or settled: a row whose open
+   promises all belong to the customer takes the customer's key (an unread row first) and the others
+   close as "Replaced by one alert for this customer", with no ring. A merge moves the listed
+   promises to the surviving customer's row the same way. Every writer takes the alert service's
+   lock for the customer's key before it reads or locks the row. An email follow-up keeps one row
+   per promise (`email-commitment:<promise id>`).
    A customer's number that keeps failing texts is one subject too (owner 2026-11-04, "fix check",
    `GATE_DEAD_NUMBER_ALERT`, `server/services/dead-number-alert.js`): the second failed text in a row (Twilio 30003 or
    30005; no delivered text in between, ordered by send time) to the same number in 180 days raises ONE row,

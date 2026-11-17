@@ -141,7 +141,7 @@ const RERING = [
     decision: 'expire, capped: a canary that still fails raises one fresh row (and the owner text it sends)' },
   { emitter: 'booking-funnel-canary', files: ['services/booking-funnel-canary.js'], prefixes: ['booking-funnel-canary:'], kind: 'periodic',
     decision: 'expire, capped: a funnel that is still dead raises one fresh row (and the owner text it sends)' },
-  { emitter: 'promise-overdue', files: ['services/sms-operational-actions.js', 'services/email-operational-actions.js'], prefixes: ['sms-commitment-source:', 'sms-commitment:', 'email-commitment:'], kind: 'periodic', live: 'promiseOpen',
+  { emitter: 'promise-overdue', files: ['services/sms-operational-actions.js', 'services/email-operational-actions.js'], prefixes: ['sms-commitment-customer:', 'sms-commitment-source:', 'sms-commitment:', 'email-commitment:'], kind: 'periodic', live: 'promiseOpen',
     decision: 'skip while a promise it covers is still open; expire once none is' },
   { emitter: 'truck-kit', files: ['services/truck-kit.js'], prefixes: ['truck-kit:'], kind: 'event',
     decision: 'expire: only a new truck check that still finds tools missing raises it again' },
@@ -225,14 +225,27 @@ const LIVE_CHECKS = {
   async promiseOpen(conn, rows) {
     const bySource = new Map();
     const byCommitment = new Map();
+    // A customer's alert (one per customer for text promises) lists the promises it speaks for.
+    const byListed = new Map();
+    const note = (map, ref, rowId) => map.set(ref, [...(map.get(ref) || []), rowId]);
     for (const row of rows) {
-      const key = String(parseMeta(row.metadata).dedupeKey || '');
+      const meta = parseMeta(row.metadata);
+      const key = String(meta.dedupeKey || '');
       const [prefix, id] = [key.slice(0, key.indexOf(':') + 1), key.slice(key.indexOf(':') + 1)];
       if (!id) continue;
-      const map = prefix === 'sms-commitment-source:' ? bySource : byCommitment;
-      map.set(id, [...(map.get(id) || []), row.id]);
+      if (prefix === 'sms-commitment-customer:') {
+        [...(Array.isArray(meta.commitment_ids) ? meta.commitment_ids : []), meta.commitment_id].filter(Boolean)
+          .forEach((listed) => note(byListed, String(listed), row.id));
+      } else note(prefix === 'sms-commitment-source:' ? bySource : byCommitment, id, row.id);
     }
     const live = new Set();
+    if (byListed.size) {
+      const open = await conn('call_commitments')
+        .whereRaw('id::text = ANY(?::text[])', [[...byListed.keys()]])
+        .where({ status: 'open', party: 'waves' }).whereNull('human_state')
+        .select(conn.raw('id::text AS ref'));
+      for (const { ref } of open) (byListed.get(ref) || []).forEach((id) => live.add(id));
+    }
     if (bySource.size) {
       const open = await conn('call_commitments')
         .whereRaw('sms_log_id::text = ANY(?::text[])', [[...bySource.keys()]])
@@ -704,6 +717,7 @@ module.exports = {
   lastActivityMs,
   ACTIVITY_STAMP_KEYS,
   ringRiskFor,
+  LIVE_CHECKS,
   expireBatch,
   loadPage,
   RERING,
