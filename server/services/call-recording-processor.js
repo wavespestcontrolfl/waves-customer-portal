@@ -1111,7 +1111,7 @@ function callMetadataObject(call) {
   }
 }
 // The voicemail channel: the model's flag, or the voice webhook's answered_by / call_outcome stamp. A conference
-// call the star-key hold sent to voicemail (GATE_CALL_HOLD, services/call-hold.js startHoldVoicemail) is an
+// call the star-key hold sent to voicemail (GATE_CALL_HOLD, services/call-hold.js: the voicemail step) is an
 // ANSWERED call: the staff talked with the caller first, and the message sits at the end of the same recording.
 // The hold timer already rang the callback bell, so such a call never takes the voicemail lanes (the quote-link
 // text to a new prospect, a second callback bell). Returns { voicemailChannel, holdVoicemail }.

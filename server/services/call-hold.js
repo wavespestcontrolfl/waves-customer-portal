@@ -32,7 +32,9 @@
  * recorded from the state as it is NOW and the state is read again, so a newer decision gets its own step
  * before the lease is released. Twilio therefore sees the steps in decision order and the last step matches the
  * newest decision: a pause can never land after a resume, and a voicemail can never end a room a return is
- * working on. A crashed sender's lease expires (LEASE_MS) and the next fetch of a loop finishes the step.
+ * working on. A crashed sender's lease expires (LEASE_MS) and the next fetch of a loop finishes the step. Right
+ * before each Twilio request that changes the call, fenceLease re-checks and extends the lease in one short
+ * transaction: a sender that stalled past its lease, and was taken over, sends nothing more.
  *
  * WHAT FINISHES A WANTED STATE (no wanted state is left without an actor):
  *   held, not confirmed    the star request itself (it waits for the step, then aborts the hold on a failure or
@@ -40,8 +42,9 @@
  *   returned, not confirmed  the press 1 request (waits up to WAIT_MS); then the staff menu loop (every ~15 s,
  *                          the staff are still on it); if the staff hung up instead, that is a voicemail event;
  *   voicemail, not confirmed the caller on hold: the facts loop (every ~10 s); the caller not on hold (a return
- *                          finished first, or a voicemail step failed): the sender re-holds the caller so the
- *                          facts loop exists again, and the staff-left handler tries once itself.
+ *                          finished first): a failed voicemail step is followed, in the same pass, by a re-hold of
+ *                          the caller, so the facts loop exists again (nothing else runs for a caller alone in the
+ *                          room); the staff-left handler tries once itself.
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
  *
@@ -60,8 +63,9 @@ const WEBHOOK_BASE = '/api/webhooks/twilio';
 // A hold open this long is told to the staff phone (reminder) and sent to voicemail (limit). Owner-approved.
 const HOLD_REMINDER_SEC = 180;
 const HOLD_LIMIT_SEC = 300;
-// A request that takes longer is abandoned (an unknown outcome). A step is up to 3 requests, so the 8 s lease
-// is longer than a whole step: 3 x 2.5 s, plus the claim and record transactions around it.
+// A request that takes longer is abandoned (an unknown outcome). Each request is fenced (the lease re-checked and
+// extended right before it), so a request never outlives the lease it went out under; a whole step (up to 3
+// requests) also fits in one lease.
 const REQUEST_TIMEOUT_MS = 2500;
 const LEASE_MS = 8 * 1000;
 // One pass sends at most this many steps (a hold, the return that replaced it, the voicemail that replaced that).
@@ -174,10 +178,12 @@ function planStepFailed(hold, ev) {
   return { next: base, answer: null };
 }
 
-// A star that waited too long for its hold request: abort it (the same as a failed request).
+// A star that waited too long for its hold request: abort it (the same as a failed request). A hold another sender
+// confirmed after the star's last read is not aborted: 'held' (the caller is on hold, the staff go to the menu).
 function planAbort(hold, ev) {
-  if (!hold || hold.gen !== ev.gen || hold.phase !== 'held' || hold.applied === 'held') return { next: hold, answer: null };
-  return { next: { ...hold, phase: 'returned', ret_by: 'abort' }, answer: null };
+  if (!hold || hold.gen !== ev.gen || hold.phase !== 'held') return { next: hold, answer: null };
+  if (hold.applied === 'held') return { next: hold, answer: 'held' };
+  return { next: { ...hold, phase: 'returned', ret_by: 'abort' }, answer: 'aborted' };
 }
 
 function planEvent(hold, ev, nowMs, closed) {
@@ -323,11 +329,12 @@ const holdParticipant = (callSid, roomSid) => client().conferences(roomSid).part
 });
 
 // Ends every open room of the call. A room that is already gone (404) does not count. Throws on any other error.
-async function endOpenRooms(callSid) {
+async function endOpenRooms(callSid, fence) {
   const api = client();
   const rooms = await api.conferences.list({ friendlyName: conferencePath.roomFor(callSid), status: 'in-progress', limit: 5 });
   let ended = 0;
   for (const room of rooms || []) {
+    await fence();
     try {
       await api.conferences(room.sid).update({ status: 'completed' });
       ended += 1;
@@ -338,18 +345,24 @@ async function endOpenRooms(callSid) {
   return ended;
 }
 
-// One Twilio step. { ok, gone } or throws a REST error. `gone`: the caller's room is already gone.
-async function runStep(callSid, step) {
-  if (step === 'voicemail') return { ok: true, gone: (await endOpenRooms(callSid)) === 0 };
+// One Twilio step. { ok, gone } or throws a REST error (or LeaseLost). `gone`: the caller's room is already gone.
+// fence() runs right before each request that changes the call.
+async function runStep(callSid, step, fence) {
+  if (step === 'voicemail') return { ok: true, gone: (await endOpenRooms(callSid, fence)) === 0 };
   const roomSid = await findRoomSid(callSid);
   if (!roomSid) return { ok: false, gone: true };
   try {
+    await fence();
     if (step === 'return') {
       await client().conferences(roomSid).participants(callSid).update({ hold: false });
+      await fence();
       await resumeRecording(callSid);
     } else {
       await holdParticipant(callSid, roomSid);
-      if (step === 'hold') await pauseRecording(callSid);
+      if (step === 'hold') {
+        await fence();
+        await pauseRecording(callSid);
+      }
     }
   } catch (err) {
     if (isGone(err)) return { ok: false, gone: true };
@@ -373,6 +386,19 @@ async function releaseLease(callSid, token) {
   }
 }
 
+// This pass's lease was taken over by another sender (the pass stalled past LEASE_MS): it sends nothing more.
+class LeaseLost extends Error {}
+
+// Right before each Twilio request that changes the call: one short transaction under the lock checks that this pass
+// still holds the lease and extends it. A lease another sender took over throws LeaseLost, so a stalled sender never
+// lands a step after the newer one (the same fence as live-call-card-pause.js).
+async function fenceLease(callSid, token) {
+  const out = await withHoldLock(callSid, (hold) => (hold?.sender?.token === token
+    ? { next: { ...hold, sender: { token, until: Date.now() + LEASE_MS } }, kept: true }
+    : { next: hold, kept: false }));
+  if (!out.kept) throw new LeaseLost('lease lost');
+}
+
 // Record the outcome of one step from the state as it is now (a newer decision may have replaced it meanwhile).
 async function recordOutcome(callSid, ev) {
   try {
@@ -383,13 +409,18 @@ async function recordOutcome(callSid, ev) {
   }
 }
 
-// { failed } when the step failed (the pass stops: the loops and the waiters retry it later).
-async function sendStep(callSid, claim) {
+// { failed } when the step failed (the loops and the waiters retry it later); { lost } when another sender took the
+// lease over (it records nothing: the new lease holder owns the state now).
+async function sendStep(callSid, claim, fence) {
   const { gen, send: step } = claim;
   let out;
   try {
-    out = await runStep(callSid, step);
+    out = await runStep(callSid, step, fence);
   } catch (err) {
+    if (err instanceof LeaseLost) {
+      logger.warn(`[call-hold] ${step} step stopped for ${masked(callSid)}: another sender took the lease`);
+      return { lost: true };
+    }
     logger.warn(`[call-hold] ${step} step failed for ${masked(callSid)} (${errorCode(err)})`);
     await recordOutcome(callSid, { type: 'step_failed', gen, step, code: errorCode(err) });
     return { failed: true };
@@ -412,22 +443,31 @@ async function sendStep(callSid, claim) {
 }
 
 // Send what the wanted state needs, then read it again and send again if a newer decision replaced it. One
-// token owns the lease for the whole pass. { busy } when another sender holds it: nothing is sent and nothing waits.
+// token owns the lease for the whole pass. { busy } when another sender holds it (or took it over): this pass sends
+// nothing more and nothing waits. A failed step ends the pass, with one exception: a failed voicemail step that left
+// the caller unheld and alone in the room is followed by the re-hold (no loop would run for that caller otherwise).
+// A re-hold ends the pass too: the facts loop's next fetch retries the voicemail.
 async function drain(callSid) {
   const token = crypto.randomUUID();
+  const fence = () => fenceLease(callSid, token);
   let holding = false;
   let sent = 0;
+  let failed = false;
   try {
     for (let i = 0; i < MAX_SENDS_PER_PASS; i += 1) {
       const claim = await claimStep(callSid, token);
       holding = Boolean(claim.send);
-      if (!claim.send) return { busy: Boolean(claim.busy), sent };
-      const out = await sendStep(callSid, claim);
+      if (!claim.send || (failed && claim.send !== 'rehold')) return { busy: Boolean(claim.busy), failed, sent };
+      const out = await sendStep(callSid, claim, fence);
       sent += 1;
-      // A failed step stops the pass; so does a re-hold (the next fetch of the facts loop retries the voicemail).
-      if (out.failed || claim.send === 'rehold') return { failed: out.failed, sent };
+      if (out.lost) {
+        holding = false;
+        return { busy: true, failed, sent };
+      }
+      if (claim.send === 'rehold' || (out.failed && claim.send !== 'voicemail')) return { failed: Boolean(out.failed), sent };
+      failed = Boolean(out.failed);
     }
-    return { sent };
+    return { failed, sent };
   } catch (err) {
     logger.warn(`[call-hold] send pass failed for ${masked(callSid)} (${errorCode(err)})`);
     return { failed: true, sent };
@@ -472,7 +512,12 @@ async function startHold(callSid, { by = 'star', legSid = null } = {}) {
       if (result === 'held') logger.info(`[call-hold] caller ${masked(callSid)} on hold (${by})`);
       return result;
     }
-    await recordOutcome(callSid, { type: 'abort', gen });
+    // The wait ran out: abort the hold, unless another sender confirmed it after this star's last read.
+    const abort = await decide(callSid, { type: 'abort', gen });
+    if (abort.answer === 'held') {
+      logger.info(`[call-hold] caller ${masked(callSid)} on hold (${by})`);
+      return 'held';
+    }
     return 'failed';
   } catch (err) {
     logger.warn(`[call-hold] hold not started for ${masked(callSid)} (${errorCode(err)})`);

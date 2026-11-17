@@ -4,7 +4,8 @@
  * Planner table: every event against every state (pure). Service: the Twilio steps and their order, the
  * failure answers, the alert. Scenarios: every interleaving the audit rounds found (press 1 against the
  * voicemail, the staff hanging up during a press 1 or while the hold is placed, a late pause after the
- * voicemail's resume, a redelivered star during a return in flight, a stale step landing after a newer hold).
+ * voicemail's resume, a redelivered star during a return in flight, a stale step landing after a newer hold, a
+ * star whose wait ends as another sender confirms its hold, a sender that stalled past its lease).
  * Two server processes sharing one database: the decisions and the sender lease.
  *
  * The call_log fake holds one row, applies the service's own jsonb_set write, and takes a real per-key advisory
@@ -266,6 +267,13 @@ describe('planner: every event against every state (pure)', () => {
     expect(planEvent(current, { type: 'step_failed', gen: 1, step: 'hold' }, T, false).next).toBe(current);
     expect(planEvent(current, { type: 'abort', gen: 1 }, T, false).next).toBe(current);
     expect(planEvent(current, { type: 'step_done', gen: 2, step: 'hold' }, T, false).next).toMatchObject({ applied: 'held' });
+  });
+
+  test('an abort of a hold another sender already confirmed changes nothing and answers held; an unconfirmed one aborts', () => {
+    const confirmed = STATES.held();
+    expect(planEvent(confirmed, { type: 'abort', gen: 1 }, T, false)).toEqual({ next: confirmed, answer: 'held' });
+    expect(planEvent(STATES.heldUnconfirmed(), { type: 'abort', gen: 1 }, T, false))
+      .toMatchObject({ next: { phase: 'returned', ret_by: 'abort' }, answer: 'aborted' });
   });
 
   test('a failed hold step aborts the hold; a failed voicemail step marks vm_failed only when the caller is not held', () => {
@@ -585,8 +593,9 @@ describe('voicemail: the room end, the alert, and what a failure leaves', () => 
 
   test('a REST error leaves the voicemail wanted and the caller held: no alert, and the next loop fetch ends the room', async () => {
     limit();
-    fakeTwilio({ fail: { room: (n) => (n === 1 ? err(500, 51000) : null) } });
+    const first = fakeTwilio({ fail: { room: (n) => (n === 1 ? err(500, 51000) : null) } });
     expect(await hold.checkHold(SID)).toMatchObject({ phase: 'voicemail', applied: 'held' });
+    expect(names(first)).toEqual(['list', 'room']); // one try per pass: the caller is held, so the facts loop retries it
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     const logged = JSON.stringify(logger.warn.mock.calls);
     expect(logged).toContain('51000');
@@ -719,20 +728,19 @@ describe('scenarios: every earlier finding', () => {
     expect(holdOf().voicemail_at).toBeNull();
   });
 
-  test('2c. the voicemail step fails after the return went through: the caller is re-held so a loop exists, and the next fetch ends the room', async () => {
+  test('2c. the voicemail step fails after the return went through: the same pass re-holds the caller so a loop exists, and the next fetch ends the room', async () => {
     seed(heldHold());
     const events = fakeTwilio({
       during: { participant: once(async () => { await staffGone(); }) },
       fail: { room: (n) => (n === 1 ? err500() : null) },
     });
     expect(await hold.endHold(SID)).toBe('voicemail');
-    expect(holdOf()).toMatchObject({ phase: 'voicemail', applied: 'returned', vm_failed: true });
-    // Nothing runs the facts loop for an unheld caller: the next try (any loop, or the staff-left handler) re-holds first.
-    const retry = fakeTwilio();
-    expect(await hold.checkHold(SID)).toMatchObject({ phase: 'voicemail', applied: 'held' });
-    expect(names(retry)).toEqual(['list', 'participant']);
-    expect(retry[1]).toMatchObject({ hold: true, holdMethod: 'POST' });
-    expect(statuses(retry)).toEqual([]); // no new recording pause: the voicemail resumes it
+    // The staff are gone and the caller is unheld and alone in the room, so no loop would run: the pass that failed
+    // the room end re-holds the caller at once, and the facts loop exists again.
+    expect(names(events)).toEqual(['list', 'participant', 'recording', 'list', 'room', 'list', 'participant']);
+    expect(events[events.length - 1]).toMatchObject({ hold: true, holdMethod: 'POST' });
+    expect(statuses(events)).toEqual(['in-progress']); // no new recording pause: the voicemail resumes it
+    expect(holdOf()).toMatchObject({ phase: 'voicemail', applied: 'held', vm_failed: false });
     const last = fakeTwilio();
     expect(await hold.checkHold(SID)).toMatchObject({ applied: 'voicemail' });
     expect(names(last)).toEqual(['list', 'room']);
@@ -815,6 +823,61 @@ describe('scenarios: every earlier finding', () => {
     expect(await star).toBe('failed');
     expect(events).toHaveLength(0); // the other sender's lease was live the whole time
     expect(holdOf()).toMatchObject({ gen: 2, phase: 'returned', ret_by: 'abort' });
+  });
+
+  test('5d. a star whose wait ends just as another sender confirms the hold answers held, and the hold is not aborted', async () => {
+    seed(heldHold({ phase: 'returned', ret_by: 'abort', applied: null, sender: { token: 'other', until: NOW.getTime() + 60 * 1000 } }));
+    const events = fakeTwilio();
+    const star = hold.startHold(SID, { legSid: LEG });
+    await flush();
+    expect(holdOf()).toMatchObject({ gen: 2, phase: 'held', applied: null });
+    // The other sender's hold request lands; this star's next claim and read fail, so its wait ends without seeing it.
+    await hold._test.decide(SID, { type: 'step_done', gen: 2, step: 'hold' });
+    db.__state.failReads = 2;
+    await advance(300);
+    expect(await star).toBe('held');
+    expect(holdOf()).toMatchObject({ gen: 2, phase: 'held', applied: 'held', ret_by: null });
+    expect(events).toHaveLength(0);
+  });
+
+  test('6a. a sender that stalled past its lease and was taken over sends nothing more and records nothing', async () => {
+    seed(heldHold({ applied: null }));
+    // While its hold request is in flight, another sender takes the lease over (this one stalled past LEASE_MS).
+    const events = fakeTwilio({
+      during: { participant: once(async () => { holdOf().sender = { token: 'other', until: Date.now() + 60 * 1000 }; }) },
+    });
+    expect(await hold.checkHold(SID)).toMatchObject({ phase: 'held', applied: null });
+    expect(names(events)).toEqual(['list', 'participant']); // the recording pause never went out
+    expect(holdOf()).toMatchObject({ applied: null, sender: { token: 'other' } });
+  });
+
+  test('6b. the fence extends the lease right before each request', async () => {
+    seed(heldHold({ applied: null }));
+    const seen = [];
+    const events = fakeTwilio({
+      during: {
+        participant: once(async () => { jest.setSystemTime(new Date(NOW.getTime() + 3000)); }),
+        recording: once(async () => { seen.push(holdOf().sender.until); }),
+      },
+    });
+    await hold.checkHold(SID);
+    expect(names(events)).toEqual(['list', 'participant', 'recording']);
+    expect(seen).toEqual([NOW.getTime() + 3000 + hold.LEASE_MS]);
+  });
+
+  test('6c. a voicemail step is fenced too: a sender taken over before the room end ends no room', async () => {
+    seed(heldHold({ phase: 'voicemail', voicemail_reason: 'timeout', voicemail_at: iso(-1) }));
+    const events = fakeTwilio();
+    const list = mockTw.api.conferences.list;
+    mockTw.api.conferences.list = jest.fn(async (params) => {
+      const rooms = await list(params);
+      holdOf().sender = { token: 'other', until: Date.now() + 60 * 1000 };
+      return rooms;
+    });
+    await hold.checkHold(SID);
+    expect(names(events)).toEqual(['list']);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(holdOf()).toMatchObject({ phase: 'voicemail', applied: 'held' });
   });
 });
 
