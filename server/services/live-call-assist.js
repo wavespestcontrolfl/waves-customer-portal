@@ -280,6 +280,9 @@ async function lookupTimes(facts, customer, useAccount) {
   if (useAccount && customer) {
     const located = await require('./voice-agent/relay-booking').resolveAccountBookingLocation(db, customer);
     if (located.status === 'ok') account = { kind: 'account', customerId: customer.id, coords: located.coords };
+    // A failed lookup (toolFailed: a property count or geocode error) is not an answer: it throws, so the key is
+    // dropped and the next due run tries again instead of keeping "no times" for the rest of the call.
+    else if (located.toolFailed) throw Object.assign(new Error('account location lookup failed'), { code: located.status || 'tool_failed' });
   }
   if (!account && !facts.address_line1 && !facts.city && !facts.zip) return null;
   const res = await tools.resolveAvailability({

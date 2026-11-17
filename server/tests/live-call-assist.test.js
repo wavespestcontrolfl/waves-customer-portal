@@ -342,6 +342,35 @@ describe('live call assist price and times', () => {
     expect(assist().key).toEqual(expect.any(String));
   });
 
+  // resolveAccountBookingLocation reports a property-count or geocode failure as toolFailed, never a throw.
+  test('a matched caller whose account location lookup fails is retried next run, not kept as no times', async () => {
+    db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way', lot_sqft: 8000 } };
+    mockLocate.mockResolvedValueOnce({ status: 'count_failed', toolFailed: true });
+    mockCreate.mockResolvedValue(reply({ ...PEST, when: 'next week' }));
+    await run({ customerId: 'cust-1' });
+    expect(assist()).toMatchObject({ times: null, key: null });
+    expect(mockAvailability).not.toHaveBeenCalled();
+    speak(1);
+    advance(50 * 1000);
+    await run({ customerId: 'cust-1' });
+    expect(mockLocate).toHaveBeenCalledTimes(2);
+    expect(mockAvailability).toHaveBeenCalledWith(expect.objectContaining({ account: { kind: 'account', customerId: 'cust-1', coords: { lat: 27.5, lng: -82.5 } } }));
+    expect(assist().times).toContain('9:00 AM');
+    expect(assist().key).toEqual(expect.any(String));
+  });
+
+  test('a real "no location" answer (not a failure) is kept: no retry while the facts stay the same', async () => {
+    db.__state.customers = { 'cust-1': { id: 'cust-1', address_line1: '1 Sample Way', lot_sqft: 8000 } };
+    mockLocate.mockResolvedValue({ status: 'multi_property', toolFailed: false });
+    mockCreate.mockResolvedValue(reply({ ...PEST, when: 'next week' }));
+    await run({ customerId: 'cust-1' });
+    expect(assist()).toMatchObject({ times: null, key: expect.any(String) });
+    speak(1);
+    advance(50 * 1000);
+    await run({ customerId: 'cust-1' });
+    expect(mockLocate).toHaveBeenCalledTimes(1);
+  });
+
   test('a price lookup error leaves the times in place', async () => {
     mockCreate.mockResolvedValue(reply({ ...PEST, address_line1: '12 Example St', city: 'Bradenton', zip: '34202' }));
     mockPricing.mockRejectedValue(new Error('db down'));
