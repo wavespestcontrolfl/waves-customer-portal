@@ -5,6 +5,7 @@ const logger = require('../services/logger');
 const { callStartedAt } = require('../utils/call-timeline');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { ringTargetForLine } = require('../services/tech-line');
+const conferencePath = require('../services/call-conference-path');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -206,6 +207,63 @@ function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language =
     }, number);
   }
   return dial;
+}
+
+// The press-1 screen every staff leg hears, word for word: today's <Dial> legs (action
+// /inbound-forward-accept) and the conference ring's REST legs (action /conference-staff-accept).
+// Nothing about the caller is spoken before press 1: carrier voicemail may be listening.
+function appendForwardScreen(twiml, action) {
+  const gather = twiml.gather({ numDigits: 1, action, method: 'POST', timeout: 7 });
+  gather.say({ voice: SAY_VOICE }, 'Waves call. Press 1 to connect.');
+  twiml.say({ voice: SAY_VOICE }, 'No input received. Goodbye.');
+  twiml.hangup();
+}
+
+// Conference ring (GATE_CALL_CONFERENCE_PATH; state + REST calls in services/call-conference-path.js).
+// The caller waits muted in room waves-<CallSid> and hears the ringback tone
+// (client/public/audio/ringback-us.wav, scripts/generate-ringback-wav.js) until the winning staff leg
+// joins and starts the room. The caller ends the room on exit; the staff do not, so a later star-key
+// hold can step out without ending it. The staff <Dial> has no action: the room's end ends the call.
+const CONFERENCE_RINGBACK_URL = '/audio/ringback-us.wav';
+
+function appendCallerConference(twiml, callSid) {
+  const dial = twiml.dial({ action: '/api/webhooks/twilio/call-complete?conf=1' });
+  dial.conference({
+    startConferenceOnEnter: false,
+    endConferenceOnExit: true,
+    beep: 'false',
+    waitUrl: CONFERENCE_RINGBACK_URL,
+    waitMethod: 'GET',
+    participantLabel: 'caller',
+  }, conferencePath.roomFor(callSid));
+  return dial;
+}
+
+function appendStaffConference(twiml, callSid) {
+  const dial = twiml.dial();
+  dial.conference({
+    startConferenceOnEnter: true,
+    endConferenceOnExit: false,
+    beep: 'false',
+    participantLabel: 'staff',
+  }, conferencePath.roomFor(callSid));
+  return dial;
+}
+
+// The main office ring (/voice). GATE_CALL_CONFERENCE_PATH admits a call to the conference ring: the
+// greeting already in `twiml` plays as today, then /conference-enter rings the staff. Gate off, or any
+// admission error, is today's <Dial>, byte for byte.
+function appendMainStaffRing(twiml, forwardNumbers, ringTimeoutSec, { callSid = null, from = null, callToken = null } = {}) {
+  let admitted = false;
+  try {
+    admitted = Boolean(callSid) && conferencePath.admitsConferencePath({ from });
+  } catch (err) {
+    logger.warn(`[voice] conference admission failed for ${maskSid(callSid)}; classic ring (${conferencePath.errorCode(err)})`);
+  }
+  if (!admitted) return appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec);
+  conferencePath.stashCallToken(callSid, callToken);
+  logger.info(`[voice] conference ring for ${maskSid(callSid)}`);
+  return twiml.redirect({ method: 'POST' }, `/api/webhooks/twilio/conference-enter?ring=${ringTimeoutSec}`);
 }
 
 async function fetchTwilioCall(callSid) {
@@ -1631,7 +1689,7 @@ router.post('/voice', async (req, res) => {
       return res.type('text/xml').send(twiml.toString());
     }
 
-    appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec);
+    appendMainStaffRing(twiml, forwardNumbers, ringTimeoutSec, { callSid: CallSid, from: From, callToken: req.body.CallToken });
 
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
@@ -1663,9 +1721,13 @@ router.post('/call-complete', async (req, res) => {
   try {
     const { CallSid, CallDuration, DialCallSid, DialCallStatus, DialCallDuration } = req.body;
 
-    const duration = parseInt(DialCallDuration || CallDuration || 0);
-    const status = DialCallStatus || 'completed';
-    const forwardAccepted = await wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
+    let duration = parseInt(DialCallDuration || CallDuration || 0);
+    let status = DialCallStatus || 'completed';
+    let claimAccepted = false;
+    // The conference ring's caller leg (GATE_CALL_CONFERENCE_PATH): the claim decides the outcome, and
+    // its durable press-1 claim counts as accepted even when the forward_acceptance stamp failed.
+    if (req.query.conf === '1') ({ status, duration, accepted: claimAccepted } = await conferencePath.conferenceDialOutcome(CallSid, req.query.conf_status));
+    const forwardAccepted = claimAccepted || await wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
     const { shouldRecordVoicemail, answeredBy } = resolveInboundDialCompletion({
       status,
       duration,
@@ -2541,17 +2603,7 @@ router.post('/inbound-forward-screen', (req, res) => {
     // signals a business call vs a personal one. No DB lookup here, so a database
     // hiccup can never stop the screening prompt from playing.
     const twiml = new VoiceResponse();
-    const gather = twiml.gather({
-      numDigits: 1,
-      action: '/api/webhooks/twilio/inbound-forward-accept',
-      method: 'POST',
-      timeout: 7,
-    });
-
-    gather.say({ voice: SAY_VOICE }, 'Waves call. Press 1 to connect.');
-    twiml.say({ voice: SAY_VOICE }, 'No input received. Goodbye.');
-    twiml.hangup();
-
+    appendForwardScreen(twiml, '/api/webhooks/twilio/inbound-forward-accept');
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Inbound forward screen error: ${err.message}`);
@@ -3689,6 +3741,7 @@ router.post('/call-status', async (req, res) => {
     // The matched row's source, read after the save: a lead call-reply ring
     // reports its own miss (below) instead of the generic failure bell.
     let matchedSource = null;
+    let conferenceRing = false;
 
     await db.transaction(async (trx) => {
       // Serialize per-CallSid so overlapping Twilio retries can't both
@@ -3711,6 +3764,7 @@ router.post('/call-status', async (req, res) => {
 
       if (existing) {
         matchedSource = existing.source || null;
+        conferenceRing = Boolean(parseJsonObject(existing.metadata).conference_path);
         // Never roll a finished call back to an in-flight status on a late
         // or retried non-terminal event (see nextCallStatus) — and when the
         // status is retained, keep its duration too: a delayed busy/failed/
@@ -3842,6 +3896,13 @@ router.post('/call-status', async (req, res) => {
     if (!isOutbound && CallStatus === 'completed' && !internalLine(req)) {
       scheduleRecordingRecovery(CallSid);
     }
+    // The caller's call ended during a conference ring: no staff leg may keep ringing for it. With the
+    // gate on this runs after the commit even when the row read above had no ring yet: a ring claimed
+    // in between is closed here, and the claim itself refuses a call whose terminal status landed first.
+    if (!isOutbound && TERMINAL_CALL_STATUSES.has(CallStatus) && (conferenceRing || conferencePath.conferenceRingOn())) {
+      void conferencePath.closeForCallerEnd(CallSid)
+        .catch((err) => logger.warn(`[conference] leg clean-up failed for ${maskSid(CallSid)} (${conferencePath.errorCode(err)})`));
+    }
 
     const { LEAD_CALL_REPLY_RING_SOURCE, noteRingEnded } = require('../services/lead-call-reply-ring');
     const leadCallReplyRing = isOutbound && matchedSource === LEAD_CALL_REPLY_RING_SOURCE;
@@ -3886,6 +3947,136 @@ router.post('/call-status', async (req, res) => {
   }
 });
 
+// =========================================================================
+// Conference ring (GATE_CALL_CONFERENCE_PATH) — services/call-conference-path.js has the whole flow.
+// =========================================================================
+
+// POST /conference-enter — the caller leg, after the greeting (/voice <Redirect>). Rings every staff
+// number by REST and puts the caller in the room. Any failure before a leg rings = today's <Dial>.
+router.post('/conference-enter', async (req, res) => {
+  const { CallSid, From, To } = req.body || {};
+  const ringTimeoutSec = Math.min(60, Math.max(5, parseInt(req.query.ring, 10) || 30));
+  const forwardNumbers = getFallbackForwardNumbers();
+  const stashedToken = conferencePath.takeCallToken(CallSid);
+  const twiml = new VoiceResponse();
+  try {
+    if (!forwardNumbers.length) {
+      twiml.redirect({ method: 'POST' }, '/api/webhooks/twilio/call-complete?conf=1&conf_status=failed');
+      return res.type('text/xml').send(twiml.toString());
+    }
+    // The gate is read again: a call still in its greeting when the gate goes off takes today's ring.
+    if (!conferencePath.admitsConferencePath({ from: From })) throw Object.assign(new Error('gate off'), { code: 'gate_off' });
+    const { claim, state } = await conferencePath.claimStart(CallSid, { legCount: forwardNumbers.length, ringTimeoutSec });
+    if (claim === 'retry' && state?.fallback !== 'classic_ring') {
+      // A redelivered request: the legs already ring. The backstop is one claim, so a second is safe.
+      conferencePath.scheduleNoAnswerBackstop(CallSid, ringTimeoutSec);
+      appendCallerConference(twiml, CallSid);
+      return res.type('text/xml').send(twiml.toString());
+    }
+    if (claim !== 'claimed') throw Object.assign(new Error('no claim'), { code: `claim_${claim}` });
+    const placed = await conferencePath.placeStaffLegs({
+      callSid: CallSid,
+      numbers: forwardNumbers,
+      ringTimeoutSec,
+      callerFrom: toE164(From),
+      wavesLine: toE164(To),
+      callToken: req.body?.CallToken || stashedToken,
+    });
+    if (!placed.length) {
+      await conferencePath.updateState(CallSid, [[['fallback'], 'classic_ring']]).catch(() => {});
+      throw Object.assign(new Error('no leg'), { code: 'no_leg_placed' });
+    }
+    conferencePath.scheduleNoAnswerBackstop(CallSid, ringTimeoutSec);
+    appendCallerConference(twiml, CallSid);
+    return res.type('text/xml').send(twiml.toString());
+  } catch (err) {
+    logger.error(`[conference] ${maskSid(CallSid)} takes the classic ring (${conferencePath.errorCode(err)})`);
+    const classic = new VoiceResponse();
+    appendStaffRingDial(classic, forwardNumbers, ringTimeoutSec);
+    return res.type('text/xml').send(classic.toString());
+  }
+});
+
+// POST /conference-staff-screen — a staff leg answered: the same press-1 screen as today's legs.
+router.post('/conference-staff-screen', (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const twiml = new VoiceResponse();
+  if (conferencePath.CALL_SID_RE.test(parentSid)) {
+    appendForwardScreen(twiml, `/api/webhooks/twilio/conference-staff-accept?parent=${encodeURIComponent(parentSid)}`);
+  } else {
+    twiml.hangup();
+  }
+  return res.type('text/xml').send(twiml.toString());
+});
+
+// POST /conference-staff-accept — press 1 on a staff leg. The first press 1 wins the call: the
+// recording starts on the caller's call, forward_acceptance is written as today, the other legs end
+// and this leg joins the room. A later press 1, or one after the caller left, hears Goodbye.
+router.post('/conference-staff-accept', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const legSid = req.body?.CallSid || null;
+  const goodbye = () => {
+    const twiml = new VoiceResponse();
+    twiml.say({ voice: SAY_VOICE }, 'Goodbye.');
+    twiml.hangup();
+    return res.type('text/xml').send(twiml.toString());
+  };
+  try {
+    if (String(req.body?.Digits || '').trim() !== '1' || !conferencePath.CALL_SID_RE.test(parentSid) || !legSid) return goodbye();
+    // A claim the database cannot decide is an error (<Hangup/>, as today's accept): a leg that joined
+    // without the claim would be ended by the no-answer clean-up mid-conversation.
+    const claim = await conferencePath.claimAccept(parentSid, legSid);
+    if (!claim.won) return goodbye();
+    if (claim.first) {
+      const recording = await conferencePath.startCallerRecording(parentSid);
+      if (recording === 'caller_gone') {
+        await conferencePath.closeForCallerEnd(parentSid).catch(() => {});
+        return goodbye();
+      }
+      await conferencePath.updateState(parentSid, [[['recording'], recording]])
+        .catch((err) => logger.warn(`[conference] recording stamp failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`));
+      await rememberForwardAccept({ parentCallSid: parentSid, dialCallSid: legSid, answeredByNumber: req.body?.To || req.body?.Called })
+        .catch((err) => logger.warn(`[conference] forward acceptance failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`));
+      void conferencePath.loadState(parentSid).then((state) => conferencePath.endLegs(state, { except: legSid }))
+        .catch((err) => logger.warn(`[conference] other legs not ended for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`));
+    }
+    let callRow = null;
+    try {
+      callRow = await db('call_log').where('twilio_call_sid', parentSid).select('metadata', 'from_phone', 'call_outcome').first();
+    } catch (lookupErr) {
+      logger.warn(`[conference] caller lookup failed for ${maskSid(parentSid)} (${conferencePath.errorCode(lookupErr)})`);
+    }
+    const twiml = new VoiceResponse();
+    twiml.say({ voice: SAY_VOICE }, connectingAnnouncement(callRow));
+    appendStaffConference(twiml, parentSid);
+    return res.type('text/xml').send(twiml.toString());
+  } catch (err) {
+    logger.error(`[conference] staff accept error for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
+    return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  }
+});
+
+// POST /conference-staff-status — a staff leg ended (completed, busy, no-answer, failed, canceled).
+// Every leg over without a press 1 sends the caller to today's voicemail path; the winning leg's end
+// ends the room, so the caller's <Dial> action runs /call-complete (Twilio requests no <Dial> action
+// when the call that runs it hangs up, so this callback is the signal).
+router.post('/conference-staff-status', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  try {
+    if (conferencePath.CALL_SID_RE.test(parentSid)) {
+      await conferencePath.onStaffLegStatus({
+        callSid: parentSid,
+        index: Number.parseInt(req.query.leg, 10),
+        legSid: req.body?.CallSid || null,
+        status: req.body?.CallStatus,
+      });
+    }
+  } catch (err) {
+    logger.error(`[conference] staff leg status failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
+  }
+  res.sendStatus(200);
+});
+
 router._test = {
   stampRelayProfile,
   outboundVoicemailTextDialOptions,
@@ -3915,6 +4106,10 @@ router._test = {
   screenCandidate,
   connectingAnnouncement,
   appendStaffRingDial,
+  appendMainStaffRing,
+  appendForwardScreen,
+  appendCallerConference,
+  appendStaffConference,
   parseHandoffData,
   isTransferredRow,
   customerPhoneLookupKey,
