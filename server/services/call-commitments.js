@@ -3689,11 +3689,12 @@ async function listOpenCommitments(conn, { party = null, kind = null, kinds = nu
   return rows.map((r) => ({ ...normalizeRow(r), overdue: isOverdue(r, now) }));
 }
 
-// The Waves promises the portal closed on its own (PROMISE_EVIDENCE_CLOSE)
-// in the last `days` days, newest first: kept on association proof, or
-// dismissed because the customer left. The Owed tab lists them with the
-// stored proof and a Reopen; a promise reopened (open again) or dismissed
-// by a person drops out. Call rows only (an inner join on call_log).
+// The Waves promises the portal closed on its own in the last `days` days,
+// newest first: kept on association proof or dismissed because the customer
+// left (PROMISE_EVIDENCE_CLOSE), or expired by the nightly age-out
+// (promise-age-out.js). The Owed tab lists them with the stored proof and a
+// Reopen; a promise reopened (open again) or dismissed by a person drops
+// out. Call rows only (an inner join on call_log).
 // Pages of `limit` (at most 100) walk back from `before` ({ at, id }, the
 // last row of the page before — a position, not an offset, so a Reopen or a
 // new close between pages never skips or repeats a row); `next` is the
@@ -3713,10 +3714,11 @@ async function listAutoClosedCommitments(conn, { days = 7, limit = AUTO_CLOSED_L
     .whereRaw(`${position} >= ?`, [since.toISOString()])
     .whereRaw("cc.human_state IS DISTINCT FROM 'dismissed'")
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
-    // Closed by this file on its own (the CLOSED_BY_EVIDENCE marker): an
-    // association close or a customer-left dismissal — never another writer's.
+    // Closed by the portal on its own: this file's association close or
+    // customer-left dismissal (the CLOSED_BY_EVIDENCE marker), or the nightly
+    // age-out's dismissal (its own marker) — never another writer's.
     .whereIn('cc.status', ['fulfilled', 'dismissed'])
-    .whereRaw("cc.fulfillment ->> 'closed_by' = ?", [CLOSED_BY_EVIDENCE])
+    .whereRaw("cc.fulfillment ->> 'closed_by' IN (?, ?)", [CLOSED_BY_EVIDENCE, require('./promise-age-out').CLOSED_BY_AGE_OUT])
     .modify((q) => { if (customerScope) q.whereIn('cl.customer_id', customerScope); })
     .modify((q) => { if (before) q.whereRaw(`(${position}, cc.id) < (?, ?::uuid)`, [new Date(before.at).toISOString(), before.id]); })
     .orderByRaw(`${position} DESC, cc.id DESC`)

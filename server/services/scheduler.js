@@ -9633,6 +9633,32 @@ function initScheduledJobs() {
   registerDeployKillRetry('admin-alert-retention', runAdminAlertRetentionTick);
 
   // =========================================================================
+  // DAILY 1:44AM — Promise age-out (owner 2026-11-16, "do these"). Dismisses,
+  // never deletes, an open promise nobody touched whose last date is 30 days
+  // old (promise-age-out.js), with one audit_log summary row per run that
+  // closed something. Minute 44 of the 1am hour has no other job (#3208 rule).
+  // runExclusive: a deploy overlap must not run two passes over the same
+  // promises. A deploy that kills the run re-runs it: a second run finds
+  // nothing left to dismiss.
+  // =========================================================================
+  const runPromiseAgeOutTick = async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('promise-age-out', async () => {
+        await require('./promise-age-out').runPromiseAgeOut();
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('promise-age-out', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`promise age-out tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[promise-age-out] tick failed: ${err.message}`);
+    }
+  };
+  cron.schedule('44 1 * * *', runPromiseAgeOutTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('promise-age-out', runPromiseAgeOutTick);
+
+  // =========================================================================
   // DAILY 6:55AM — Lead-to-cash invariants sweep (read-only registry over
   // existing detectors; emails contact@ only on a violation or an unrunnable
   // check). 6:55 is deliberately AFTER the 6:00 estimate conversion guard and
