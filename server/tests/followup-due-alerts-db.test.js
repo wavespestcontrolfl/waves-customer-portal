@@ -76,7 +76,7 @@ maybeDescribe('follow-up due alerts (live Postgres)', () => {
 
   const ownRows = (cardId) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [`followup-due:${cardId}`]);
   const catchUp = () => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = 'followup-due-older'").first();
-  const run = (now = NOW) => FollowupDue.runFollowupDueAlerts({ now, gateEnabled: true });
+  const run = (now = NOW) => FollowupDue.runFollowupDueAlerts({ now });
 
   test('one own alert per uncovered due card, none for covered ones, one catch-up for the old card, closed when booked', async () => {
     const due = await flagged({ due: '2026-11-02' });

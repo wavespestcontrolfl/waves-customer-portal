@@ -18,7 +18,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), followupDueAlertLive: jest.fn(() => false),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -35,7 +35,7 @@ jest.mock('../services/followup-due-alerts', () => ({ runFollowupDueAlerts: jest
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, followupDueAlertLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runFollowupDueAlerts } = require('../services/followup-due-alerts');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -51,17 +51,9 @@ function followupTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  followupDueAlertLive.mockReturnValue(false);
 });
 
-test('gate off: the tick returns before the lock or any read', async () => {
-  await followupTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('followup-due-alerts', expect.any(Function));
-  expect(runFollowupDueAlerts).not.toHaveBeenCalled();
-});
-
-test('gate on: the list runs once inside runExclusive and its outcome is logged', async () => {
-  followupDueAlertLive.mockReturnValue(true);
+test('the list runs once inside runExclusive and its outcome is logged', async () => {
   await followupTick();
   expect(runExclusive).toHaveBeenCalledWith('followup-due-alerts', expect.any(Function));
   expect(runFollowupDueAlerts).toHaveBeenCalledTimes(1);
@@ -69,7 +61,6 @@ test('gate on: the list runs once inside runExclusive and its outcome is logged'
 });
 
 test('a failed run is logged, never thrown out of the tick', async () => {
-  followupDueAlertLive.mockReturnValue(true);
   runFollowupDueAlerts.mockRejectedValueOnce(new Error('connection reset'));
   await expect(followupTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Follow-up due alerts failed: connection reset');

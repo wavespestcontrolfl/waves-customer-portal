@@ -1347,22 +1347,20 @@ function toCoordinate(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-// GATE_CUSTOMER_LAST_TOUCH, read at call time. The newest person touch (contactTouchSql) replaces the stored
-// customers.last_contact_date, which only web forms and quotes write. Read-only; off = null / the stored column.
-function lastTouchSqlWhenLive() {
-  if (require('../config/feature-gates').customerLastTouchLive?.() !== true) return null;
+// The newest person touch (contactTouchSql) replaces the stored customers.last_contact_date, which only web forms
+// and quotes write. Read-only.
+function lastTouchSql() {
   return require('../services/customer-intelligence/quiet-customers').contactTouchSql('customers');
 }
 
-// The directory's last_contact ORDER BY: the person touch with NULLS LAST both ways, else the stored column as before.
+// The directory's last_contact ORDER BY: the person touch with NULLS LAST both ways.
 function lastContactOrderSql(touchSql, dir) {
-  return touchSql ? `${touchSql} ${dir} NULLS LAST` : `last_contact_date ${dir}`;
+  return `${touchSql} ${dir} NULLS LAST`;
 }
 
 // The detail screen's last contact. A failed read keeps the stored value.
 async function servedLastContactDate(c) {
-  const touchSql = lastTouchSqlWhenLive();
-  if (!touchSql) return c.last_contact_date;
+  const touchSql = lastTouchSql();
   try {
     const touch = await db('customers').where('customers.id', c.id).first(db.raw(`${touchSql} as last_touch_at`));
     return touch ? touch.last_touch_at : null;
@@ -1404,7 +1402,7 @@ function mapCustomerListRow(c) {
     leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
     landingPageUrl: c.landing_page_url, companyName: c.company_name,
     propertyType: c.property_type,
-    // GATE_CUSTOMER_LAST_TOUCH: the list query selects last_touch_at (newest person touch) when the gate is on.
+    // The list query selects last_touch_at (newest person touch); a row from a query that does not falls back to the stored column.
     lastContactDate: 'last_touch_at' in c ? c.last_touch_at : c.last_contact_date, lastContactType: c.last_contact_type,
     nextFollowUp: c.next_follow_up_date,
     // lifetime_revenue_net is the payments-derived net computed by the list
@@ -2750,11 +2748,11 @@ router.get('/', async (req, res, next) => {
     const healthColumns = await getHealthScoreColumns();
 
     // The directory columns, shared by the exact rows and the approximate (sound-alike) rows below.
-    // GATE_CUSTOMER_LAST_TOUCH, read at call time: the directory serves (and sorts by) the newest person touch.
-    const lastTouchSql = lastTouchSqlWhenLive();
+    // The directory serves (and sorts by) the newest person touch.
+    const touchSql = lastTouchSql();
     const withListColumns = (base) => base.select(
       'customers.*',
-      ...(lastTouchSql ? [db.raw(`${lastTouchSql} as last_touch_at`)] : []),
+      db.raw(`${touchSql} as last_touch_at`),
       // Completed visits (days) only, like the customer-detail visitStats: an
       // incomplete record is not a visit and not the customer's last visit.
       db.raw("(SELECT COUNT(DISTINCT service_date) FROM service_records WHERE service_records.customer_id = customers.id AND COALESCE(service_records.status, 'completed') = 'completed') as services_count"),
@@ -2793,7 +2791,7 @@ router.get('/', async (req, res, next) => {
       ['revenue', `lifetime_revenue_net ${dir}`],
       ['lead_score', `lead_score ${dir}`],
       ['rate', `monthly_rate ${dir}`],
-      ['last_contact', lastContactOrderSql(lastTouchSql, dir)],
+      ['last_contact', lastContactOrderSql(touchSql, dir)],
     ]).get(effectiveSort);
     query = sortSql
       ? applyStableCustomerOrder(query.orderByRaw(sortSql))
@@ -3806,7 +3804,7 @@ router.get('/:id', async (req, res, next) => {
         .catch(e => { logger.warn(`[customers:${c.id}] visit_stats: ${e.message}`); return null; }),
     ]);
 
-    // GATE_CUSTOMER_LAST_TOUCH: the newest person touch when the gate is on (servedLastContactDate).
+    // The newest person touch (servedLastContactDate).
     const lastContactDate = await servedLastContactDate(c);
 
     // The invoices table stores the billed amount as `total`; the frontend reads

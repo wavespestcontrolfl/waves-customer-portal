@@ -65,7 +65,7 @@ function fakeDb({ cards = [], visits = [], raised = [] } = {}) {
   return database;
 }
 
-const run = (state, opts = {}) => runFollowupDueAlerts({ now: NOW, gateEnabled: true, database: fakeDb(state), ...opts });
+const run = (state, opts = {}) => runFollowupDueAlerts({ now: NOW, database: fakeDb(state), ...opts });
 // Own alerts and the catch-up alert both go through the episodes helper; split its calls by dedupe key.
 const ownCalls = () => episodes.raiseAdminAlertWithReopen.mock.calls.filter((c) => String(c[3]?.dedupeKey).startsWith('followup-due:'));
 const catchUpCalls = () => episodes.raiseAdminAlertWithReopen.mock.calls.filter((c) => c[3]?.dedupeKey === 'followup-due-older');
@@ -241,21 +241,11 @@ describe('catch-up membership', () => {
 });
 
 describe('runFollowupDueAlerts', () => {
-  test('gate off: nothing is read and nothing is written', async () => {
-    const database = fakeDb({ cards: [dueOn('2026-11-02')] });
-    await expect(runFollowupDueAlerts({ now: NOW, gateEnabled: false, database })).resolves.toEqual({ skipped: 'disabled' });
-    expect(database).not.toHaveBeenCalled();
-    expect(episodes.openAdminAlertKeys).not.toHaveBeenCalled();
-    expect(raiseAdminAlert).not.toHaveBeenCalled();
-    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-  });
-
   test('ALERT_EPISODES off: the job stands down before any read', async () => {
     process.env.ALERT_EPISODES = 'off';
     try {
       const database = fakeDb({ cards: [dueOn('2026-11-02')] });
-      await expect(runFollowupDueAlerts({ now: NOW, gateEnabled: true, database })).resolves.toEqual({ skipped: 'episodes_off' });
+      await expect(runFollowupDueAlerts({ now: NOW, database })).resolves.toEqual({ skipped: 'episodes_off' });
       expect(database).not.toHaveBeenCalled();
       expect(episodes.openAdminAlertKeys).not.toHaveBeenCalled();
       expect(raiseAdminAlert).not.toHaveBeenCalled();
@@ -263,13 +253,6 @@ describe('runFollowupDueAlerts', () => {
     } finally {
       delete process.env.ALERT_EPISODES;
     }
-  });
-
-  test('gate unset in the environment is off', async () => {
-    delete process.env.GATE_FOLLOWUP_DUE_ALERT;
-    const database = fakeDb({ cards: [dueOn('2026-11-02')] });
-    await expect(runFollowupDueAlerts({ now: NOW, database })).resolves.toEqual({ skipped: 'disabled' });
-    expect(database).not.toHaveBeenCalled();
   });
 
   test('a card due today raises its own alert, once, with the ring flag and the customer link', async () => {
@@ -423,7 +406,7 @@ describe('runFollowupDueAlerts', () => {
     const database = fakeDb({ cards: [dueOn('2026-11-02')] });
     database.mockImplementationOnce(() => { throw new Error('connection reset'); });
     episodes.openAdminAlertKeys.mockResolvedValue(['followup-due:gone']);
-    await expect(runFollowupDueAlerts({ now: NOW, gateEnabled: true, database })).rejects.toThrow('connection reset');
+    await expect(runFollowupDueAlerts({ now: NOW, database })).rejects.toThrow('connection reset');
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });

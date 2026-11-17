@@ -175,7 +175,7 @@ describe('which loader the gate picks for list 1', () => {
   test('on: the fell-off reader runs, and its list is what the Monday row names', async () => {
     process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
     fellOff.loadFellOffAlerts.mockResolvedValue(fellOffOf(2));
-    const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), gateEnabled: true, loaders: rest });
+    const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
     expect(fellOff.loadFellOffAlerts).toHaveBeenCalledTimes(1);
     expect(out).toMatchObject({ count: 1, outcome: 'raised', counts: { fellOff: 2 } });
     const [, , body, opts] = notifyAdmin.mock.calls[0];
@@ -186,7 +186,7 @@ describe('which loader the gate picks for list 1', () => {
   test('off, unset or not exactly true: the 14-day reader runs and the fell-off reader never does', async () => {
     for (const value of [undefined, 'false', '1', 'TRUE', 'yes']) {
       if (value === undefined) delete process.env.GATE_MONDAY_FELL_OFF_LINE; else process.env.GATE_MONDAY_FELL_OFF_LINE = value;
-      const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), gateEnabled: true, loaders: rest });
+      const out = await review.runMondayReview({ now: MONDAY, database: emptyDatabase(), loaders: rest });
       expect(out).toEqual({ count: 0, outcome: 'clear' });
     }
     expect(fellOff.loadFellOffAlerts).not.toHaveBeenCalled();
@@ -196,7 +196,7 @@ describe('which loader the gate picks for list 1', () => {
     process.env.GATE_MONDAY_FELL_OFF_LINE = 'true';
     fellOff.loadFellOffAlerts.mockRejectedValue(new Error('connection reset'));
     const out = await review.runMondayReview({
-      now: MONDAY, database: emptyDatabase(), gateEnabled: true, loaders: { ...rest, promises: async () => PROMISES },
+      now: MONDAY, database: emptyDatabase(), loaders: { ...rest, promises: async () => PROMISES },
     });
     expect(out).toMatchObject({ count: 1, outcome: 'raised', counts: { promises: 2 } });
     expect(notifyAdmin.mock.calls[0][2]).toBe('Waiting for you: 2 late promises.');
@@ -206,7 +206,7 @@ describe('which loader the gate picks for list 1', () => {
 
   test('a test that mocks feature-gates without the reader reads the gate as off', () => {
     jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({ mondayReviewBellLive: () => true }));
+      jest.doMock('../config/feature-gates', () => ({}));
       const isolated = require('../services/monday-review-bell');
       expect(isolated.runMondayReview).toBeDefined();
     });
