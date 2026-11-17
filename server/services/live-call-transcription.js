@@ -334,8 +334,11 @@ async function storeUtterance(callSid, body) {
 
 // A stored staff line may be the staff putting the caller on hold (GATE_CALL_HOLD_VOICE). Gate off: nothing is
 // required, read or called. Fire and forget: a failure is logged by code only and the webhook's answer never changes.
+// Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
+const holdVoiceLive = () => typeof featureGates.callHoldVoiceLive === 'function' && featureGates.callHoldVoiceLive();
+
 function handStaffLineToHoldVoice(callSid, body) {
-  if (SPEAKER_BY_TRACK[body.Track] !== 'staff' || !featureGates.callHoldVoiceLive()) return;
+  if (SPEAKER_BY_TRACK[body.Track] !== 'staff' || !holdVoiceLive()) return;
   const failed = (err) => logger.warn(`[live-transcription] hold voice hook failed for ${maskSid(callSid)} (${err?.code || err?.name || 'error'})`);
   try {
     Promise.resolve(require('./call-hold-voice').afterStaffUtterance(callSid, utteranceText(parseJson(body.TranscriptionData)))).catch(failed);

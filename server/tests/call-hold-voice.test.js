@@ -19,34 +19,75 @@ const SID = 'CA' + 'd'.repeat(26) + '123456';
 
 describe('isHoldPhrase', () => {
   test.each([
+    // The owner's own examples.
     'Please hold.',
-    'Okay, please hold while I check.',
-    'Hold, please.',
-    'Could you hold please',
     'Let me put you on hold.',
+    // The same asks in the words staff use.
+    'Okay, please hold while I check.',
+    'Please hold for one moment.',
+    'Thank you, please hold.',
+    "Please hold, I'm transferring you.",
+    'Do not hang up, please hold.',
+    'Hold, please.',
+    'Okay, hold please.',
+    'Let me check. Hold, please.',
+    'Can I get your address? Please hold while I look it up.',
     'let me place you on a quick hold',
+    'Let me just put you on hold real quick.',
     "I'm going to put you on hold for one moment",
+    "I'm going to go ahead and put you on a brief hold.",
     "I'll put you on hold",
     'I’ll put you on a brief hold',
+    "I'm putting you on hold now.",
+    "Give me one second, I'll put you on hold.",
+    'Let me put you on hold, okay?',
     'PLEASE   HOLD',
   ])('starts a hold: %j', (text) => {
     expect(isHoldPhrase(text)).toBe(true);
   });
 
   test.each([
+    // The owner: "'Hold on a second' does not start a hold."
     'Hold on a second.',
     "Please hold on, I'm looking.",
+    // The staff waiting for the caller.
     "Sure, I'll hold, please take your time",
     'We can hold please',
+    // A question: the caller has not said yes.
     'Can I put you on hold?',
     'May I put you on hold?',
+    'Could you hold please',
+    'Can you please hold?',
+    'Okay, can you hold, please?',
+    'Is it okay if I put you on hold?',
+    // Lawn and pest instructions, and account holds.
+    'Please hold off on watering for 24 hours.',
+    'Please hold off on mowing until Friday.',
+    'Please hold onto your receipt.',
+    'Please hold the dog inside during the visit.',
+    "Your service is on hold, please call us when you're ready.",
+    'We put your account on hold.',
     'Hold off on that',
+    // Not the staff's own announcement.
+    "I'm not going to put you on hold.",
+    "If I put you on hold, you'll hear a few pest facts.",
+    // Words from two sentences never make one phrase.
+    'The tech can hold. Please give me a moment.',
     'one moment',
     '',
     null,
     undefined,
   ])('does not start a hold: %j', (text) => {
     expect(isHoldPhrase(text)).toBe(false);
+  });
+
+  // The tail of a script line cut off by the press 1 can be stored as a staff line after the return. No line the
+  // hold or the ring plays may read as a hold phrase, or the return would start a new hold.
+  test('no line of the hold script or the ring fact reads as a hold phrase', () => {
+    const script = jest.requireActual('../services/call-hold-script');
+    const lines = [script.OPENING, script.REMINDER, script.STAFF_REMINDER, script.STAFF_VOICEMAIL, script.CALLER_VOICEMAIL, ...script.FACTS];
+    expect(lines.length).toBeGreaterThan(5);
+    for (const line of lines) expect([line, isHoldPhrase(line)]).toEqual([line, false]);
   });
 });
 
@@ -64,6 +105,19 @@ describe('afterStaffUtterance', () => {
     expect(logger.info).not.toHaveBeenCalled();
   });
 
+  test('a feature-gates without the reader reads off: nothing is asked and nothing is logged', async () => {
+    const reader = featureGates.callHoldVoiceLive;
+    delete featureGates.callHoldVoiceLive;
+    try {
+      await afterStaffUtterance(SID, 'Please hold.');
+    } finally {
+      featureGates.callHoldVoiceLive = reader;
+    }
+    expect(mockRequestHold).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
   test('not a hold phrase: nothing is asked', async () => {
     await afterStaffUtterance(SID, 'Hold on a second.');
     expect(mockRequestHold).not.toHaveBeenCalled();
@@ -77,7 +131,7 @@ describe('afterStaffUtterance', () => {
   });
 
   test('a rejected or throwing request is swallowed and logged by code only', async () => {
-    const TEXT = 'Please hold, my secret words';
+    const TEXT = 'Please hold while I read my secret words';
     mockRequestHold.mockRejectedValueOnce(Object.assign(new Error(`failed for ${TEXT}`), { code: 20404 }));
     await expect(afterStaffUtterance(SID, TEXT)).resolves.toBeUndefined();
     mockRequestHold.mockImplementationOnce(() => { throw new Error(`sync ${TEXT}`); });
@@ -88,7 +142,7 @@ describe('afterStaffUtterance', () => {
   });
 
   test('no log line holds the text or the full SID', async () => {
-    const TEXT = 'Please hold, my secret words';
+    const TEXT = 'Please hold while I read my secret words';
     await afterStaffUtterance(SID, TEXT);
     mockRequestHold.mockRejectedValueOnce(new Error(TEXT));
     await afterStaffUtterance(SID, TEXT);

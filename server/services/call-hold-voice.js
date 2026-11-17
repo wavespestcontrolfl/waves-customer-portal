@@ -18,32 +18,53 @@ const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 
 // Owner 2026-11-16: "Hold please. Staff say 'please hold' or 'let me put you on hold', and the hold starts as with
-// star. 'Hold on a second' does not start a hold." Rules run on the normalized text (see normalize). One row per
-// rule; a phrase starts a hold when any row matches.
-//   please hold      not "please hold on": that reads as "hold on".
-//   hold please      not after "I'll", "we can", "I'd" ...: "Sure, I'll hold, please take your time" is the staff
-//                    waiting for the caller, never a hold.
-//   put you on hold  only the staff's own announcement ("let me", "I'm going to", "I'll" ...). "Can I put you on
-//                    hold" is a question: the caller has not said yes.
+// star. 'Hold on a second' does not start a hold."
+//
+// A false match puts a caller on hold, and a miss costs little (star and the Hold button still work), so each rule
+// is narrow. The live text has punctuation (Google, EnableAutomaticPunctuation), so it is cut into sentences at
+// . ? ! ; : and each sentence is matched on its own: words from two sentences never make one phrase.
+//   A question never starts a hold ("Can you hold, please?", "May I put you on hold?"): the caller has not said yes.
+//   please hold      only at the end of the sentence or before a word that keeps it a phone hold ("please hold while
+//                    I check", "please hold for one moment"). Never "please hold on" (= "hold on"), "please hold off
+//                    on watering", "please hold onto that receipt" or "please hold the service".
+//   hold please      only as the sentence's own ask ("Hold, please.", "Okay, hold please"). Never "I'll hold, please
+//                    take your time" (the staff wait) or "your service is on hold, please call us" (an account hold).
+//   put you on hold  only the staff's own announcement ("let me just put you on hold", "I'm going to put you on a
+//                    quick hold"). Never "if I put you on hold" or "put your account on hold".
+// Words a sentence may start with before its ask: "Okay, please hold", "Alright, so let me put you on hold".
+const LEAD = '^(?:(?:okay|ok|alright|all right|so|sure|um|uh|great|perfect|yes|yeah|got it|thank you|thanks'
+  + '|one moment|one second|just a moment|just a second) )*';
+const QUESTION = new RegExp(`${LEAD}(?:can|could|would|will|may|might|mind|do|does|did|is|are|shall|should) (?!not\\b)`);
+// What may follow "please hold" in the same sentence and keep it a phone hold.
+const AFTER_PLEASE_HOLD = "(?:while|for (?:a|one|just|me|the next)|one|just|a (?:moment|minute|second|sec)"
+  + "|and (?:i|i'll|let)|thank|thanks|i|i'll|i'm|we'll|we're|let|real quick|briefly|momentarily|the line"
+  + "|sir|ma'am|maam|okay|ok|please)";
+const ON_HOLD = 'on (?:a )?(?:(?:quick|brief|short) )?hold\\b';
 const HOLD_RULES = [
-  /\bplease hold(?! on\b)/,
-  /(?<!\b(?:i'll|i will|i can|we'll|we will|we can|i'd|i would) )\bhold please\b/,
-  /\b(?:let me|i'm going to|i am going to|i'm gonna|i'll|i will) (?:put|place) you on (?:a )?(?:(?:quick|brief|short) )?hold\b/,
+  new RegExp(`\\bplease hold(?:$| ${AFTER_PLEASE_HOLD}\\b)`),
+  new RegExp(`${LEAD}hold please\\b`),
+  new RegExp(`\\b(?:let me|i'll|i will)(?: just| quickly| go ahead and)? (?:put|place) you ${ON_HOLD}`),
+  new RegExp(`\\b(?:i'm|i am)(?: just)? (?:going to|gonna)(?: go ahead and)? (?:put|place) you ${ON_HOLD}`),
+  new RegExp(`\\b(?:i'm|i am)(?: just)? (?:putting|placing) you ${ON_HOLD}`),
 ];
 
-function normalize(text) {
+// The sentences of an utterance: lower case, curly apostrophes made straight, a quote mark at a word's edge dropped,
+// anything but a-z, 0-9, ' and space made a space, spaces collapsed.
+function sentences(text) {
   return String(text ?? '')
     .toLowerCase()
     .replace(/[‘’ʼ]/g, "'")
-    .replace(/[^a-z0-9' ]/g, ' ')
-    .replace(/ +/g, ' ')
-    .trim();
+    .split(/[.?!;:\n]+/)
+    .map((sentence) => sentence.replace(/[^a-z0-9' ]/g, ' ').replace(/\B'|'\B/g, '').replace(/ +/g, ' ').trim())
+    .filter(Boolean);
 }
 
 function isHoldPhrase(text) {
-  const normalized = normalize(text);
-  return normalized !== '' && HOLD_RULES.some((rule) => rule.test(normalized));
+  return sentences(text).some((sentence) => !QUESTION.test(sentence) && HOLD_RULES.some((rule) => rule.test(sentence)));
 }
+
+// Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
+const live = () => typeof featureGates.callHoldVoiceLive === 'function' && featureGates.callHoldVoiceLive();
 
 const masked = (callSid) => `…${String(callSid || '').slice(-6)}`;
 const errorCode = (err) => String(err?.code || err?.name || 'error').slice(0, 40);
@@ -51,7 +72,7 @@ const errorCode = (err) => String(err?.code || err?.name || 'error').slice(0, 40
 // Fire and forget; the returned promise is for tests. Never throws, never logs the text.
 async function afterStaffUtterance(callSid, text) {
   try {
-    if (!featureGates.callHoldVoiceLive()) return;
+    if (!live()) return;
     if (!isHoldPhrase(text)) return;
     const answer = await require('./call-hold').requestHold(callSid, { by: 'voice' });
     logger.info(`[call-hold-voice] hold asked for ${masked(callSid)} (${answer})`);

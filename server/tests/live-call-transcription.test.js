@@ -291,6 +291,18 @@ describe('recordLiveTranscriptionEvent', () => {
     expect(mockHoldVoice).not.toHaveBeenCalled();
   });
 
+  test('a feature-gates without the hold voice reader reads off: nothing is required or called, and nothing throws', async () => {
+    const gates = require('../config/feature-gates');
+    const reader = gates.callHoldVoiceLive;
+    delete gates.callHoldVoiceLive;
+    try {
+      await expect(live.recordLiveTranscriptionEvent(content(1, 'outbound_track', 'Please hold.', 1))).resolves.toEqual({ stored: true, panMasked: false });
+      expect(mockHoldVoice).not.toHaveBeenCalled();
+    } finally {
+      gates.callHoldVoiceLive = reader;
+    }
+  });
+
   test('a hold trigger that throws or rejects never changes the webhook answer; the log has the code only', async () => {
     const logger = require('../services/logger');
     callHoldVoiceLive.mockReturnValue(true);
