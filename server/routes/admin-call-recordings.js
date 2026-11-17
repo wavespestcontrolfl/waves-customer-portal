@@ -452,7 +452,8 @@ router.get('/commitments/open', async (req, res, next) => {
 
 // GET /commitments/auto-closed — the Waves promises the portal closed on its
 // own in the last `days` days (default 7, max 30): kept on the proof it
-// stored, or dismissed because the customer left. The Owed tab lists them
+// stored, dismissed because the customer left, or expired by the nightly
+// age-out (promise-age-out.js). The Owed tab lists them
 // with a one-click Reopen (the PATCH below). Same staff-wide auth as the
 // open feed; reads stay open whatever the switch says. Pages of 100:
 // has_more, and the next page is asked for with the before_at / before_id

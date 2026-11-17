@@ -127,6 +127,8 @@ const AI_CHECK_RECORD = { sms_log: "staff text", call_log: "staff call", email: 
 export function proofLabel(row) {
   const proof = row.fulfillment || {};
   if (proof.kind === "customer_left") return `Customer left ${fmtWhen(proof.matched_at, false) || ""}`.trim();
+  // The nightly age-out dismissed it (server/services/promise-age-out.js): nothing kept it.
+  if (proof.kind === "aged_out") return `Expired: no action in ${proof.days || 30} days`;
   // A model judged that a person's text or call back delivered the promise.
   if (proof.kind === "person_contact") {
     const how = proof.record_type === "call_log" ? "staff call back" : "staff text";
@@ -180,8 +182,9 @@ export function dueLabel(row, now = Date.now()) {
   return { text: "No due time", tone: "neutral" };
 }
 
-// What the portal closed on its own in the last week: who, what was promised,
-// the proof it stored, and a one-click Reopen; pages of 100 with Load more.
+// What the portal closed on its own in the last week (kept on a record, the
+// customer left, or expired after 30 days): who, what was promised, the
+// proof it stored, and a one-click Reopen; pages of 100 with Load more.
 // Waves promises only, so the customer-party view has none.
 function AutoClosedList({ party, rows, canReopen, busyId, onReopen, hasMore, loadingMore, onLoadMore }) {
   if (party === "customer" || !rows.length) return null;
