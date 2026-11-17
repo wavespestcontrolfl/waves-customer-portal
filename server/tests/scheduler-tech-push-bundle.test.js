@@ -29,12 +29,14 @@ jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() })
 jest.mock('../services/tech-visit-notifications', () => ({ flushBundledPushes: jest.fn(async () => ({ pushed: 0 })) }));
 jest.mock('../services/live-call-card-pause', () => ({ recoverOpenPauses: jest.fn(async () => ({ action: 'swept' })) }));
 jest.mock('../services/call-hold', () => ({ recoverPendingHolds: jest.fn(async () => ({ action: 'swept' })) }));
+jest.mock('../services/call-conference-path', () => ({ recoverStaffEnds: jest.fn(async () => ({ action: 'swept' })) }));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
 const { flushBundledPushes } = require('../services/tech-visit-notifications');
 const { recoverOpenPauses } = require('../services/live-call-card-pause');
 const { recoverPendingHolds } = require('../services/call-hold');
+const { recoverStaffEnds } = require('../services/call-conference-path');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -87,4 +89,15 @@ test('the star-key hold recovery sweep is registered every minute even with ever
   expect(recoverPendingHolds).toHaveBeenCalledTimes(1);
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[call-hold] recovery tick failed: db down'));
   expect(flushBundledPushes).toHaveBeenCalledTimes(1);
+  // The same tick still runs the conference staff-end sweep.
+  expect(recoverStaffEnds).toHaveBeenCalledTimes(1);
+});
+
+test('the conference staff-end sweep runs on the hold tick even with every gate off, and a throw is only logged', async () => {
+  isEnabled.mockImplementation(() => false);
+  recoverStaffEnds.mockRejectedValueOnce(new Error('db down'));
+  await expect(runEveryMinuteHandlers()).resolves.toBeDefined();
+  expect(recoverStaffEnds).toHaveBeenCalledTimes(1);
+  expect(recoverPendingHolds).toHaveBeenCalledTimes(1);
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[conference] staff-end recovery tick failed: db down'));
 });

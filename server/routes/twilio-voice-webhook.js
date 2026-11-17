@@ -4128,7 +4128,8 @@ router.post('/conference-staff-accept', async (req, res) => {
 // POST /conference-staff-status — a staff leg ended (completed, busy, no-answer, failed, canceled).
 // Every leg over without a press 1 sends the caller to today's voicemail path; the winning leg's end
 // ends the room, so the caller's <Dial> action runs /call-complete (Twilio requests no <Dial> action
-// when the call that runs it hangs up, so this callback is the signal).
+// when the call that runs it hangs up, so this callback is the signal). Answered 200 either way: an
+// end whose handling throws is retried by the service, and its minute sweep finishes a lost one.
 router.post('/conference-staff-status', async (req, res) => {
   const parentSid = String(req.query.parent || '');
   try {

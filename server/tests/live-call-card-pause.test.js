@@ -1098,32 +1098,61 @@ describe('the star-key hold resumes through this lease (resumeOutsideCardWindow)
     expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null, sender: null });
   });
 
-  test('a due window: a confirmed resume closes it, an unconfirmed one leaves the end to the card pause', async () => {
-    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-1000), resumed_at: null, pending: null, pause_sent: true, sender: null };
-    expect(await cardPause.resumeOutsideCardWindow(CALL, jest.fn(async () => ({ ok: false, code: '20500' })))).toEqual({ sent: true, ok: false, code: '20500' });
-    expect(db.__state.cardPause).toMatchObject({ resumed_at: null, pending: null, sender: null });
+  const dueWindow = () => ({ paused_at: iso(-100000), resume_due_at: iso(-1000), resumed_at: null, pending: null, pause_sent: true, sender: null });
+
+  test('a due window is committed as a pending resume first: an unconfirmed resume gets the card pause\'s own retry; a terminal code or a confirmed one closes it', async () => {
+    db.__state.cardPause = dueWindow();
+    const pendingDuringSend = [];
+    const failing = jest.fn(async () => { pendingDuringSend.push(db.__state.cardPause.pending); return { ok: false, code: '20500' }; });
+    expect(await cardPause.resumeOutsideCardWindow(CALL, failing)).toEqual({ sent: true, ok: false, code: '20500' });
+    expect(pendingDuringSend).toEqual(['resume']);
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: null, pending: 'resume', last_error_code: '20500', sender: null });
+    expect(order()).toEqual([]);
+    await advance(2000);
+    expect(order()).toEqual(['in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: expect.any(String), pending: null });
+    db.__state.cardPause = dueWindow();
+    expect(await cardPause.resumeOutsideCardWindow(CALL, jest.fn(async () => ({ ok: false, code: '21220' })))).toEqual({ sent: true, ok: false, code: '21220' });
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: expect.any(String), pending: null });
+    db.__state.cardPause = dueWindow();
     expect(await cardPause.resumeOutsideCardWindow(CALL, holdResume())).toEqual({ sent: true, ok: true });
     expect(db.__state.cardPause).toMatchObject({ resumed_at: expect.any(String), pending: null, pause_sent: false, sender: null });
-    await advance(10);
-    expect(order()).toEqual(['in-progress']);
+    await advance(30000);
+    expect(order()).toEqual(['in-progress', 'in-progress']);
   });
 
-  test('a card trigger that extends a due window while the hold resume is in flight: the pause goes out again after it', async () => {
-    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-1000), resumed_at: null, pending: null, pause_sent: true, sender: null };
+  // The hold's resume is in flight on a due window; a card trigger arrives. resumeHeld lets the test release it.
+  async function dueWindowResumeInFlight(afterSend = () => {}) {
+    db.__state.cardPause = dueWindow();
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
-    const resume = jest.fn(async () => { await gate; await mockUpdate({ status: 'in-progress' }); return { ok: true }; });
+    const resume = jest.fn(async () => { await gate; await mockUpdate({ status: 'in-progress' }); afterSend(); return { ok: true }; });
     const sending = cardPause.resumeOutsideCardWindow(CALL, resume);
     await advance(0);
     expect(resume).toHaveBeenCalledTimes(1);
-    // The card pause still reads the recording as paused, so it only moves the end out and sends nothing.
+    // The window is committed as a pending resume, so the trigger turns it into a pause; that pause waits for the lease.
     await trigger();
-    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null });
+    expect(db.__state.cardPause).toMatchObject({ pending: 'pause', resumed_at: null });
     expect(pauseCalls()).toHaveLength(0);
     release();
     expect(await sending).toEqual({ sent: true, ok: true });
+  }
+
+  test('a card trigger that extends a due window while the hold resume is in flight: the pause goes out again after it', async () => {
+    await dueWindowResumeInFlight();
     await advance(10);
     expect(order()).toEqual(['in-progress', 'paused']);
+  });
+
+  test('the same, with the resume outcome and the lease release never written (the database): the trigger\'s committed pause still goes out after it', async () => {
+    await dueWindowResumeInFlight(() => { db.__state.failReads = 2; });
+    expect(db.__state.cardPause).toMatchObject({ pending: 'pause', sender: expect.objectContaining({ token: expect.any(String) }) });
+    await advance(1000);
+    expect(order()).toEqual(['in-progress']);
+    // The lease runs out by itself; the trigger's retry takes it over and sends the pause.
+    await advance(8500);
+    expect(order()).toEqual(['in-progress', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ pending: null, resumed_at: null });
   });
 
   test('a hold resume whose lease ran out before its fence sends nothing: the card pause took over and paused', async () => {

@@ -44,7 +44,9 @@
  *   held, not confirmed    the star request itself (it waits for the step, then aborts the hold on a failure or
  *                          a timeout: the staff go back in the room and a later sender unholds the caller);
  *   returned, not confirmed  the press 1 request (waits up to WAIT_MS); then the staff menu loop (every ~15 s,
- *                          the staff are still on it); if the staff hung up instead, that is a voicemail event;
+ *                          the staff are still on it); if the staff hung up instead, that is a voicemail event
+ *                          (call-conference-path.js retries it when its handling throws, and its minute sweep
+ *                          ends the room of a winning leg that is over, so no caller is left alone in the room);
  *   voicemail, not confirmed the caller on hold: the facts loop (every ~10 s); the caller not on hold (a return
  *                          finished first): a failed voicemail step is followed, in the same pass, by a re-hold of
  *                          the caller, so the facts loop exists again (nothing else runs for a caller alone in the

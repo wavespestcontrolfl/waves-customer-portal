@@ -21,6 +21,9 @@
  *      that runs the <Dial> hangs up): the room is ended, so the caller's <Dial> action runs
  *      /call-complete as it does when a bridged staff leg hangs up today. Staff join with
  *      endConferenceOnExit=false, so a later star-key hold can leave the room without ending it.
+ *      So this callback is the only thing that ends the room: its handling is tried again when it
+ *      throws (a database error), and a minute sweep (recoverStaffEnds) ends the room of a call whose
+ *      winning leg is over while the room is still open (an end that a restart lost).
  *      The caller's call ends: the room ends by itself (caller endConferenceOnExit=true) and
  *      /call-status ends every staff leg still up.
  *
@@ -47,6 +50,11 @@ const VOICEMAIL_ATTEMPTS = 3;
 const CALL_TOKEN_TTL_MS = 2 * 60 * 1000;
 const CALL_TOKEN_MAX = 500;
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
+// A staff leg end whose handling threw is tried again after each of these delays.
+const STAFF_END_RETRY_MS = [2000, 5000, 15000, 30000, 60000];
+// The minute staff-end sweep reads answered calls started in this long, at most this many at a time.
+const STAFF_END_SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000;
+const STAFF_END_SWEEP_LIMIT = 25;
 const OPEN_SQL = [
   "(metadata -> 'conference_path') IS NOT NULL",
   "(metadata #>> '{conference_path,voicemail_at}') IS NULL",
@@ -317,7 +325,7 @@ async function onWinnerLegEnded(callSid, state) {
   return answer === 'voicemail' ? 'hold_voicemail' : endRoomAfterStaffHangup(callSid, state);
 }
 
-async function onStaffLegStatus({ callSid, index, legSid, status }) {
+async function handleStaffLegStatus({ callSid, index, legSid, status }) {
   if (!TERMINAL_LEG_STATUSES.has(status) || !Number.isInteger(index) || index < 0) return 'ignored';
   await stampLeg(callSid, index, legSid ? { sid: legSid, status } : { status });
   const state = await loadState(callSid);
@@ -327,6 +335,82 @@ async function onStaffLegStatus({ callSid, index, legSid, status }) {
   }
   if (!everyLegEnded(state)) return 'waiting';
   return (await sendCallerToVoicemail(callSid, noAnswerStatus(state))) === 'redirected' ? 'voicemail' : 'settled';
+}
+
+// A staff leg end whose handling threw (a database error) is tried again in this process, 2, 5, 15, 30 and 60 s later;
+// recoverStaffEnds (the minute sweep) finishes a winner's end that a restart or a longer outage lost. Running it again
+// is safe: the leg stamp writes the same status, the hold's decision and its sender are idempotent, the voicemail claim
+// admits one redirect, and the ordinary room end ends only a room still open (with none, its hang-up ends a caller
+// whose /call-complete answer ends the call anyway). Never rejects.
+async function onStaffLegStatus(args, attempt = 0) {
+  try {
+    return await handleStaffLegStatus(args);
+  } catch (err) {
+    const delayMs = STAFF_END_RETRY_MS[attempt];
+    if (!delayMs) {
+      logger.error(`[conference] staff leg end for ${masked(args?.callSid)} not handled after ${attempt + 1} tries (${errorCode(err)})`);
+      return 'failed';
+    }
+    logger.warn(`[conference] staff leg end for ${masked(args?.callSid)} not handled (${errorCode(err)}); try ${attempt + 2} in ${delayMs / 1000} s`);
+    const timer = setTimeout(() => { void onStaffLegStatus(args, attempt + 1); }, delayMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    return 'retry';
+  }
+}
+
+// One answered call of the sweep: true when its winning staff leg is over (Twilio's status) while its room is still
+// open, which is then handled the same way as the leg's status callback. The staff still on the call (in the room, or
+// on the hold menu) or no open room (the end was handled, and the caller is past it) leave it alone.
+async function recoverStaffEnd(row) {
+  const callSid = row.twilio_call_sid;
+  const state = readState(row);
+  if (!CALL_SID_RE.test(String(callSid || '')) || !state?.accepted_leg_sid || state.closed_at) return false;
+  const api = client();
+  const leg = await api.calls(state.accepted_leg_sid).fetch();
+  if (!TERMINAL_LEG_STATUSES.has(String(leg?.status || ''))) return false;
+  const rooms = await api.conferences.list({ friendlyName: roomFor(callSid), limit: 5 });
+  if (!(rooms || []).some((room) => room.status !== 'completed')) return false;
+  logger.warn(`[conference] the staff leg of ${masked(callSid)} is over and its room is still open: the sweep ends it`);
+  await onWinnerLegEnded(callSid, state);
+  return true;
+}
+
+let sweepingStaffEnds = false;
+
+// Every minute (scheduler.js, whatever the gates say): a call whose winning staff leg is over while its room is still
+// open and its caller is still on the line. Its end was never handled (a restart during the retries above, or a
+// database down for all of them), and nothing else ends that room: staff join with endConferenceOnExit=false. Reads
+// only recent answered calls that are not closed (created_at is indexed; an idle server finds none) and asks Twilio for
+// each winning leg's status and for an open room (REST reads only).
+async function recoverStaffEnds() {
+  if (sweepingStaffEnds) return { action: 'busy' };
+  sweepingStaffEnds = true;
+  try {
+    const rows = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+      .where('created_at', '>', new Date(Date.now() - STAFF_END_SWEEP_LOOKBACK_MS))
+      .whereRaw("(metadata #>> '{conference_path,accepted_leg_sid}') IS NOT NULL")
+      .whereRaw("(metadata #>> '{conference_path,closed_at}') IS NULL")
+      .whereRaw("(metadata #>> '{ended_at}') IS NULL")
+      .whereRaw(CALLER_LIVE_SQL)
+      .orderBy('created_at', 'desc')
+      .limit(STAFF_END_SWEEP_LIMIT)
+      .select('twilio_call_sid', 'metadata');
+    let handled = 0;
+    for (const row of rows) {
+      try {
+        if (await recoverStaffEnd(row)) handled += 1;
+      } catch (err) {
+        logger.warn(`[conference] staff-end sweep failed for ${masked(row.twilio_call_sid)} (${errorCode(err)})`);
+      }
+    }
+    return { action: 'swept', open: rows.length, handled };
+  } catch (err) {
+    logger.warn(`[conference] staff-end sweep read failed (${errorCode(err)})`);
+    return { action: 'error' };
+  } finally {
+    sweepingStaffEnds = false;
+  }
 }
 
 // The caller's call ended (/call-status): close the claim and end every leg still ringing.
@@ -372,7 +456,8 @@ module.exports = {
   scheduleNoAnswerBackstop,
   sendCallerToVoicemail,
   onStaffLegStatus,
+  recoverStaffEnds,
   closeForCallerEnd,
   conferenceDialOutcome,
-  _test: { callTokens },
+  _test: { callTokens, STAFF_END_RETRY_MS },
 };

@@ -987,6 +987,13 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`[call-hold] recovery tick failed: ${err.message}`);
     }
+    // The same tick, also whatever the gates say: a conference call whose winning staff leg is over while its room is
+    // still open (a staff-end event a restart lost) gets its room ended (call-conference-path.js recoverStaffEnds).
+    try {
+      await require('./call-conference-path').recoverStaffEnds();
+    } catch (err) {
+      logger.error(`[conference] staff-end recovery tick failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
