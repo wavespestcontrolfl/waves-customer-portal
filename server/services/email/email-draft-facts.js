@@ -1,5 +1,5 @@
 /**
- * Facts for the Gmail auto-draft reply (GATE_EMAIL_DRAFT_FACTS).
+ * Facts for the Gmail auto-draft reply.
  *
  * The draft model only sees the customer's email, so it wrote blanks such as
  * [STATUS UPDATE] and [PHONE NUMBER] and quoted a visit date that had moved.

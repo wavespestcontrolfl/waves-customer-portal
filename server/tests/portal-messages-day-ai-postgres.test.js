@@ -39,7 +39,7 @@ afterAll(async () => { if (!SKIP) await require('../models/db').destroy(); });
 maybeDescribe('portal messages: office-hours Waves AI step-in (live Postgres)', () => {
   const RUN = randomUUID().slice(0, 8);
   const ids = { customers: [], visits: [] };
-  const GATES = ['GATE_PORTAL_MESSAGES', 'GATE_PORTAL_INBOX', 'GATE_PORTAL_MESSAGES_DAY_AI'];
+  const GATES = ['GATE_PORTAL_MESSAGES', 'GATE_PORTAL_MESSAGES_DAY_AI'];
   // 2026-11-12 is a Thursday in EST (UTC-5). A message written at 10:00 AM ET is due at 12:00 PM ET.
   const WRITTEN = new Date('2026-11-12T15:00:00Z');
   const DUE = new Date('2026-11-12T17:30:00Z');
@@ -171,7 +171,7 @@ maybeDescribe('portal messages: office-hours Waves AI step-in (live Postgres)', 
     await DayAi.answerWaitingMessages({ now: NOT_YET });
     expect((await metaOf(sent.id)).dayAi).toBeUndefined();
 
-    for (const arrange of [() => { delete process.env.GATE_PORTAL_MESSAGES_DAY_AI; }, () => { process.env.GATE_PORTAL_INBOX = 'false'; }]) {
+    for (const arrange of [() => { delete process.env.GATE_PORTAL_MESSAGES_DAY_AI; }, () => { process.env.GATE_PORTAL_MESSAGES = 'false'; }]) {
       arrange();
       expect(await DayAi.answerWaitingMessages({ now: DUE })).toEqual({ scanned: 0, answered: 0, silent: 0, leftForTeam: 0, capped: 0, superseded: 0, failed: 0 });
       for (const gate of GATES) process.env[gate] = 'true';

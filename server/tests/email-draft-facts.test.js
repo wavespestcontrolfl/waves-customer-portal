@@ -1,5 +1,5 @@
 /**
- * GATE_EMAIL_DRAFT_FACTS (owner 2026-11-02): the facts block the Gmail auto-draft
+ * Email draft facts (owner 2026-11-02): the facts block the Gmail auto-draft
  * reply gets from our own records, so the draft stops leaving blanks such as
  * [STATUS UPDATE] and [PHONE NUMBER]. Synthetic data only.
  */

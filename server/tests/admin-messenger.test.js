@@ -1,5 +1,5 @@
 /**
- * Admin Messenger routes (GATE_MESSENGER_INBOX): staff roles, dark by default.
+ * Admin Messenger routes: staff roles.
  * The store, poll and bell rules run against Postgres in
  * messenger-inbox-postgres.test.js; here the route contract is pinned with the
  * service stubbed, and the poll's two no-op exits are pinned with fetch spied.
@@ -62,11 +62,9 @@ const ID = '3f1c2a9e-5b7d-4c8e-9a10-0123456789ab';
 const reply = (base, body, who = 'admin') => fetch(`${base}/threads/${ID}/reply`, { method: 'POST', headers: auth(who), body: JSON.stringify(body) });
 
 describe('admin messenger routes', () => {
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_MESSENGER_INBOX; });
-  afterAll(() => { delete process.env.GATE_MESSENGER_INBOX; });
+  beforeEach(() => { jest.clearAllMocks(); });
 
   test('refuse a signed-out caller and a non-staff login; a technician login is staff', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
     mockService.summary.mockResolvedValue({ unanswered: 0 });
     await withServer(async (base) => {
       expect((await fetch(`${base}/summary`)).status).toBe(401);
@@ -75,22 +73,7 @@ describe('admin messenger routes', () => {
     });
   });
 
-  test('gate off: summary says enabled:false; every other endpoint is 404 enabled:false and reads nothing', async () => {
-    await withServer(async (base) => {
-      const summary = await fetch(`${base}/summary`, { headers: auth('admin') });
-      expect(summary.status).toBe(200);
-      expect(await summary.json()).toEqual({ enabled: false });
-      for (const [path, method] of [['/threads', 'GET'], [`/threads/${ID}`, 'GET'], [`/threads/${ID}/read`, 'POST'], [`/threads/${ID}/reply`, 'POST']]) {
-        const res = await fetch(`${base}${path}`, { method, headers: auth('admin'), ...(method === 'POST' ? { body: JSON.stringify({ text: 'hi' }) } : {}) });
-        expect(res.status).toBe(404);
-        expect(await res.json()).toEqual({ enabled: false });
-      }
-    });
-    for (const fn of Object.values(mockService)) expect(fn).not.toHaveBeenCalled();
-  });
-
-  test('gate on: summary, list and thread answer the service shapes; an unknown thread is 404', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
+  test('summary, list and thread answer the service shapes; an unknown thread is 404', async () => {
     const thread = { id: ID, name: 'Pat Synthetic', lastMessageAt: '2026-10-31T15:00:00.000Z', lastInboundAt: '2026-10-31T15:00:00.000Z', snippet: 'Hello', unread: 1, answered: false, canReply: true };
     mockService.summary.mockResolvedValue({ unanswered: 2 });
     mockService.listThreads.mockResolvedValue({ threads: [thread], hasMore: true, unanswered: 7 });
@@ -106,7 +89,6 @@ describe('admin messenger routes', () => {
   });
 
   test('list passes the keyset to the service and refuses a bad one', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
     mockService.listThreads.mockResolvedValue({ threads: [], hasMore: false, unanswered: 0 });
     await withServer(async (base) => {
       const before = '2026-10-31T15:00:00.000Z';
@@ -119,7 +101,6 @@ describe('admin messenger routes', () => {
   });
 
   test('mark read needs readBefore and passes it to the service as a date', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
     mockService.markThreadRead.mockResolvedValue({ updated: 2 });
     const read = (base, body) => fetch(`${base}/threads/${ID}/read`, { method: 'POST', headers: auth('admin'), body: JSON.stringify(body) });
     await withServer(async (base) => {
@@ -134,7 +115,6 @@ describe('admin messenger routes', () => {
   });
 
   test('reply refuses an empty or over-long text before calling Facebook', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
     await withServer(async (base) => {
       for (const body of [{}, { text: '   ' }, { text: 7 }, { text: 'x'.repeat(2001) }]) expect((await reply(base, body)).status).toBe(400);
     });
@@ -142,7 +122,6 @@ describe('admin messenger routes', () => {
   });
 
   test('reply maps the service answer: 409 outside_window, 502 send_failed, 404, and 200 with the actor passed on', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
     mockService.sendReply
       .mockResolvedValueOnce({ ok: false, status: 409, error: 'outside_window' })
       .mockResolvedValueOnce({ ok: false, status: 502, error: 'send_failed' })
@@ -167,26 +146,16 @@ describe('admin messenger routes', () => {
   });
 });
 
-describe('pollMessenger exits', () => {
+describe('pollMessenger exit', () => {
   const saved = { token: process.env.FACEBOOK_ACCESS_TOKEN, page: process.env.FACEBOOK_PAGE_ID };
-  beforeEach(() => { jest.clearAllMocks(); delete process.env.GATE_MESSENGER_INBOX; global.fetch = jest.fn(); });
+  beforeEach(() => { jest.clearAllMocks(); global.fetch = jest.fn(); });
   afterEach(() => {
-    delete process.env.GATE_MESSENGER_INBOX;
     for (const [key, value] of [['FACEBOOK_ACCESS_TOKEN', saved.token], ['FACEBOOK_PAGE_ID', saved.page]]) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   });
 
-  test('gate off: no Facebook call and no store read', async () => {
-    process.env.FACEBOOK_ACCESS_TOKEN = 'synthetic-token';
-    process.env.FACEBOOK_PAGE_ID = '1000';
-    expect(await messenger.pollMessenger()).toEqual({ skipped: 'gate_off' });
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(require('../models/db')).not.toHaveBeenCalled();
-  });
-
-  test('gate on but no token or page: does nothing', async () => {
-    process.env.GATE_MESSENGER_INBOX = 'true';
+  test('no token or page: does nothing', async () => {
     delete process.env.FACEBOOK_ACCESS_TOKEN;
     process.env.FACEBOOK_PAGE_ID = '1000';
     expect(await messenger.pollMessenger()).toEqual({ skipped: 'not_configured' });

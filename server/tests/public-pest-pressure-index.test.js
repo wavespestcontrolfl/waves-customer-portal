@@ -1,8 +1,8 @@
 /**
- * Public Pest Pressure Index service (GET /api/public/pest-pressure-index,
- * GATE_PUBLIC_PEST_PRESSURE_INDEX): the pure grouping / rounding / suppression
+ * Public Pest Pressure Index service (GET /api/public/pest-pressure-index):
+ * the pure grouping / rounding / suppression
  * function, the window, the CSV, the query text and the 1-hour cache. The route
- * (gate, CORS, status codes, headers) is pinned in
+ * (CORS, status codes, headers) is pinned in
  * public-pest-pressure-index-route.test.js. All rows are synthetic.
  */
 jest.mock('../models/db', () => { const m = jest.fn(); m.fn = { now: () => 'now()' }; return m; });

@@ -166,9 +166,7 @@ const db = require('../models/db');
 const {
   runAdminAlertRelevanceSweep, classify, loadSubjects, subjectFor, refsFromRow, judge,
 } = require('../services/admin-alert-relevance');
-const {
-  adminAlertRelevanceLive, portalChatAnsweredCloseMode,
-} = require('../config/feature-gates');
+const { adminAlertRelevanceLive } = require('../config/feature-gates');
 
 const TODAY = '2026-09-28';
 const NOW = new Date('2026-09-28T16:00:00Z');
@@ -192,7 +190,6 @@ const visit = (over = {}) => ({ id: VISIT, customer_id: CUST, status: 'pending',
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.ADMIN_ALERT_RELEVANCE;
-  delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE;
   delete process.env.GATE_PORTAL_BOOKING_ITEMS;
   mockBundles = new Map();
   mockNoteVisits = new Map();
@@ -1845,8 +1842,7 @@ describe('customer-contact classes', () => {
       });
     });
 
-    describe('portal chat hand-off bells answered by a person (GATE_PORTAL_CHAT_ANSWERED_CLOSE)', () => {
-      const pc = (mode) => { if (mode === undefined) delete process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE; else process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE = mode; };
+    describe('portal chat hand-off bells answered by a person', () => {
       const CONVERSATION = uid(55);
       // The bell notifyTeamOfEscalation raises (assistant.js): dedupeKey portal-chat-escalation:<id>, doneWhen
       // customer_answered, customerId in metadata. `topic` is set only for a known topic.
@@ -1859,33 +1855,20 @@ describe('customer-contact classes', () => {
         metadata: { dedupeKey: `portal-chat-email-change:${CONVERSATION}:pat@example.invalid`, doneWhen: 'email_changed', customerId: CUST, escalationId: 'esc-9', conversationId: CONVERSATION },
       });
 
-      test.each([
-        [undefined, 'off'], ['', 'off'], ['on', 'off'], ['1', 'off'], ['false', 'off'], [' Shadow', 'shadow'], ['TRUE ', 'true'], ['true', 'true'],
-      ])('GATE_PORTAL_CHAT_ANSWERED_CLOSE = %j -> %s', (value, mode) => {
-        pc(value);
-        expect(portalChatAnsweredCloseMode()).toBe(mode);
-      });
-
-      test('the new class exists only while its gate is shadow or true; add_service chats stay in the first class; the email-change bell, a bell with no customer id and one that promises no answer never match', () => {
+      test('a portal chat bell is in its own class; add_service chats stay in the first class; the email-change bell, a bell with no customer id and one that promises no answer never match', () => {
         const row = chatBell();
-        expect(classify(row)).toBeNull();
-        expect(classify(row, { anyMode: true }).key).toBe('portal_chat_answered');
-        for (const mode of ['shadow', 'true']) {
-          pc(mode);
-          expect(classify(row).key).toBe('portal_chat_answered');
-          // first match wins: an add-a-service chat keeps its own class, whatever the new gate says
-          expect(classify(chatBell({ topic: 'add_service' })).key).toBe('portal_chat_add_service');
-          expect(classify(chatBell({ topic: 'cancellation' })).key).toBe('portal_chat_answered');
-          expect(classify(emailChangeBell(), { anyMode: true })).toBeNull();
-          expect(classify(chatBell({ customerId: undefined }))).toBeNull();
-          expect(classify(chatBell({ customerId: 'not-an-id' }))).toBeNull();
-          expect(classify(chatBell({ doneWhen: 'email_changed' }))).toBeNull();
-          expect(classify(chatBell({ doneWhen: undefined }))).toBeNull();
-        }
+        expect(classify(row).key).toBe('portal_chat_answered');
+        // first match wins: an add-a-service chat keeps its own class
+        expect(classify(chatBell({ topic: 'add_service' })).key).toBe('portal_chat_add_service');
+        expect(classify(chatBell({ topic: 'cancellation' })).key).toBe('portal_chat_answered');
+        expect(classify(emailChangeBell())).toBeNull();
+        expect(classify(chatBell({ customerId: undefined }))).toBeNull();
+        expect(classify(chatBell({ customerId: 'not-an-id' }))).toBeNull();
+        expect(classify(chatBell({ doneWhen: 'email_changed' }))).toBeNull();
+        expect(classify(chatBell({ doneWhen: undefined }))).toBeNull();
       });
 
       test('the four reasons, in order, each only from a fact after the bell; booking a visit or an estimate is no reason here', async () => {
-        pc('true');
         const row = () => chatBell();
         expect((await judged(row(), { backAt: at(20), inAt: at(20), textAt: at(20), replyAt: at(20) })).reason).toBe('A person called back');
         expect((await judged(row(), { inAt: at(20), textAt: at(20), replyAt: at(20) })).reason).toBe('A person answered their call');
@@ -1898,19 +1881,11 @@ describe('customer-contact classes', () => {
         expect(await judged(row(), null)).toMatchObject({ cls: 'portal_chat_answered', reason: null, would: null });
       });
 
-      test('off = not judged, nothing read; shadow = would only; true = closes', async () => {
-        const reach = { textAt: at(20) };
-        expect(await judged(chatBell(), reach)).toMatchObject({ cls: null, reason: null, would: null });
-        expect(await judged(chatBell(), reach, { anyMode: true })).toMatchObject({ cls: 'portal_chat_answered', reason: null, would: null });
-        expect(mockLoadContactBundles).not.toHaveBeenCalled();
-        pc('shadow');
-        expect(await judged(chatBell(), reach)).toMatchObject({ reason: null, would: 'Answered by text' });
-        pc('true');
-        expect(await judged(chatBell(), reach)).toMatchObject({ reason: 'Answered by text', would: null });
+      test('a person\'s text after the bell closes it', async () => {
+        expect(await judged(chatBell(), { textAt: at(20) })).toMatchObject({ reason: 'Answered by text', would: null });
       });
 
       test('the witnesses are asked about the customer from the bell\'s LATEST event (created_at or the re-ring\'s rungAt); contact before the re-ring never settles it', async () => {
-        pc('true');
         const rung = () => chatBell({ rungAt: at(60).toISOString() });
         const asked = async (row, over) => {
           mockBundles = new Map([[String(row.id), bundle({ anchor: at(60), ...over })]]);
@@ -1927,53 +1902,26 @@ describe('customer-contact classes', () => {
         expect((await asked(chatBell(), { anchor: T0, textAt: at(30) })).reason).toBe('Answered by text');
       });
 
-      test('the add-a-service chat keeps its estimate rule with the new gate off, and also closes on a person\'s contact when the gate is true', async () => {
+      test('the add-a-service chat keeps its estimate rule, and also closes on a person\'s contact', async () => {
         const addService = () => chatBell({ topic: 'add_service' });
-        // gate off: only the estimate rule, and no portal chat witness is read
-        expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ cls: 'portal_chat_add_service', reason: null, would: null });
-        expect(mockLoadContactBundles).not.toHaveBeenCalled();
         mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
         expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ reason: 'Estimate was sent', would: null });
         mockTables.estimates = [];
-        pc('true');
         expect(await judged(addService(), { backAt: at(20) })).toMatchObject({ cls: 'portal_chat_add_service', reason: 'A person called back', would: null });
         expect(await judged(addService(), { backAt: at(-20) })).toMatchObject({ reason: null, would: null });
-        pc('shadow');
-        expect(await judged(addService(), { inAt: at(20) })).toMatchObject({ reason: null, would: 'A person answered their call' });
       });
 
-      test('the sweep: shadow records and closes nothing; true closes; the gate switched off puts the bell back; the email-change bell is never touched', async () => {
+      test('the sweep closes a portal chat bell a person answered; the email-change bell is never touched', async () => {
         const row = chatBell();
         const other = emailChangeBell();
         mockTables.notifications = [row, other];
         mockBundles = new Map([[String(row.id), bundle({ textAt: at(20) })], [String(other.id), bundle({ textAt: at(20) })]]);
-        pc('shadow');
-        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 0, wouldClose: 1 });
-        expect(mockAuditWouldClose.mock.calls[0][0].items).toEqual([
-          { notification_id: row.id, alert_class: 'portal_chat_answered', reason: 'Answered by text', judged_at: NOW_AFTER.toISOString() },
-        ]);
-        expect(row.done_at ?? null).toBeNull();
-        pc('true');
         expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 1, byClass: { portal_chat_answered: 1 } });
         expect(row).toMatchObject({ done_by: 'relevance', resolution: 'Answered by text' });
         expect(other.done_at ?? null).toBeNull();
-        pc(undefined);
-        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ rearmed: 1, retired: 0 });
-        expect(row.done_at ?? null).toBeNull();
       });
 
-      test('shadow: a failing audit write is logged and never fails the sweep', async () => {
-        pc('shadow');
-        const row = chatBell();
-        mockTables.notifications = [row];
-        mockBundles = new Map([[String(row.id), bundle({ textAt: at(20) })]]);
-        mockAuditWouldClose.mockRejectedValueOnce(new Error('audit down'));
-        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ skipped: false, scanned: 1, retired: 0, wouldClose: 0 });
-        expect(row.done_at ?? null).toBeNull();
-      });
-
-      test('re-arm: while the gate is true a close holds only while a fact after the bell does', async () => {
-        pc('true');
+      test('re-arm: a close holds only while a fact after the bell does', async () => {
         const row = closedRow(chatBell(), 'Answered by email');
         mockTables.notifications = [row];
         mockBundles = new Map([[String(row.id), bundle({ replyAt: at(20) })]]);
@@ -2361,7 +2309,7 @@ describe('customer-contact classes', () => {
         expect(source).toContain('dedupeKey: `sms-property-instructions:${message.id}`');
       });
 
-      test('the loader reads the customer\'s witnesses (bell time as the boundary) with the portal chat gate OFF, and the visit witness for this class only', async () => {
+      test('the loader reads the customer\'s witnesses (bell time as the boundary), and the visit witness for this class only', async () => {
         const row = textNote();
         const other = { ...failureBell(), id: uid(97) };
         await loadSubjects([row, other]);
@@ -2374,16 +2322,6 @@ describe('customer-contact classes', () => {
         await loadSubjects([textNote({ customerId: undefined })]);
         expect(mockLoadContactBundles).not.toHaveBeenCalled();
         expect(mockVisitsCompletedAfterBell).not.toHaveBeenCalled();
-      });
-
-      test('every other customer-kind class still needs its own gate (the portal chat classes need the chat gate)', async () => {
-        // a portal chat bell with the chat gate off: no witness read for it
-        const chat = note({
-          category: 'alert', link: `/admin/customers?customerId=${CUST}`,
-          metadata: { dedupeKey: 'portal-chat-escalation:esc-9', doneWhen: 'customer_answered', customerId: CUST, escalationId: 'esc-9' },
-        });
-        await loadSubjects([chat]);
-        expect(mockLoadContactBundles).not.toHaveBeenCalled();
       });
 
       test('closes only with a person\'s answer AND a visit done, both after the bell', async () => {

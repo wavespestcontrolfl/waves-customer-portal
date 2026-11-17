@@ -1,10 +1,9 @@
 /**
- * Admin portal inbox (GATE_PORTAL_INBOX, owner 2026-10-31, option A).
+ * Admin portal inbox (owner 2026-10-31, option A).
  *
  * Communications -> Portal tab: what customers asked for inside the customer
  * portal (chat hand-offs, service requests) and nobody answered. Owner-only,
- * like the Email / Calls / Triage tabs. Dark gate: every endpoint answers
- * `{ enabled: false }` (summary) or 404 `{ enabled: false }` (the rest).
+ * like the Email / Calls / Triage tabs.
  *
  * Marking one item handled uses the existing routes
  * (PUT /api/ai/admin/escalations/:id, PATCH /api/admin/requests/:id).
@@ -18,7 +17,6 @@ const Joi = require('joi');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const featureGates = require('../config/feature-gates');
 
-const { portalInboxLive } = featureGates;
 // GATE_PORTAL_MESSAGES, read at call time; a test that mocks feature-gates without the reader reads off.
 const portalMessagesLive = () => Boolean(featureGates.portalMessagesLive?.());
 const portalInbox = require('../services/portal-inbox');
@@ -26,17 +24,9 @@ const PortalMessages = require('../services/portal-messages');
 
 router.use(adminAuthenticate, requireAdmin);
 
-function requireLive(req, res, next) {
-  if (!portalInboxLive()) {
-    return res.status(404).json({ enabled: false });
-  }
-  return next();
-}
-
 // GET /api/admin/portal-inbox/summary -> { enabled, count } (open items, last 14 days)
 router.get('/summary', async (req, res, next) => {
   try {
-    if (!portalInboxLive()) return res.json({ enabled: false });
     res.set('Cache-Control', 'private, no-store');
     res.json({ enabled: true, replies: portalMessagesLive(), ...(await portalInbox.summary()) });
   } catch (err) { next(err); }
@@ -45,7 +35,7 @@ router.get('/summary', async (req, res, next) => {
 // GET /api/admin/portal-inbox -> { enabled, cutoff, items, olderItems, total, older: { chats, requests } }
 // `items` = open, last 14 days; `olderItems` = open at or before the cutoff, listed one by one;
 // `older` = their true totals.
-router.get('/', requireLive, async (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'private, no-store');
     res.json({ enabled: true, replies: portalMessagesLive(), ...(await portalInbox.list()) });
@@ -54,7 +44,7 @@ router.get('/', requireLive, async (req, res, next) => {
 
 // POST /api/admin/portal-inbox/close-older  { cutoff } -> { closed: { chats, requests } }
 // One transaction. No email, no text. Alerts for the closed items are marked Done.
-router.post('/close-older', requireLive, async (req, res, next) => {
+router.post('/close-older', async (req, res, next) => {
   try {
     const parsed = portalInbox.parseCloseCutoff((req.body || {}).cutoff);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
@@ -77,7 +67,7 @@ const replySchema = Joi.object({
   requestId: Joi.string().uuid().optional(),
 });
 
-router.post('/reply', requireLive, async (req, res, next) => {
+router.post('/reply', async (req, res, next) => {
   if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
   const { value, error } = replySchema.validate(req.body || {});
   if (error) return res.status(400).json({ error: error.details[0].message });
@@ -100,7 +90,7 @@ router.post('/reply', requireLive, async (req, res, next) => {
 // The whole portal thread behind a message item (the item's text is a cut preview): the newest 50 messages,
 // oldest first, every body whole. Read only.
 const threadSchema = Joi.object({ before: Joi.date().iso().optional() });
-router.get('/messages/:id', requireLive, async (req, res, next) => {
+router.get('/messages/:id', async (req, res, next) => {
   if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
   if (Joi.string().uuid().validate(req.params.id).error) return res.status(400).json({ error: 'id must be a UUID' });
   const { value, error } = threadSchema.validate(req.query, { stripUnknown: true });
@@ -120,7 +110,7 @@ router.get('/messages/:id', requireLive, async (req, res, next) => {
 // Sends nothing. handled:false = an answer or another Mark handled got there first; open:true = the customer
 // wrote again after throughId, so the item stays.
 const handledSchema = Joi.object({ throughId: Joi.string().uuid().required() });
-router.post('/messages/:id/handled', requireLive, async (req, res, next) => {
+router.post('/messages/:id/handled', async (req, res, next) => {
   if (!portalMessagesLive()) return res.status(404).json({ enabled: false });
   if (Joi.string().uuid().validate(req.params.id).error) return res.status(400).json({ error: 'id must be a UUID' });
   const { error, value } = handledSchema.validate(req.body || {});

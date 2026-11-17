@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { collapseCustomerReactions, likeableMessageId } from "./smsLikes";
 
-// GATE_SMS_LIKE (owner 2026-11-02, "SMS Like Button").
+// Owner 2026-11-02, "SMS Like Button".
 const THUMB = "\u{1F44D}";
 const CUSTOMER = "+19415550100";
 const LINE = "+19413187612";

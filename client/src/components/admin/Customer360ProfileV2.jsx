@@ -9921,7 +9921,6 @@ function CustomerConversation({
   loadOlderComms,
   retryComms,
   comms,
-  commsSmsLike,
   commsLoading,
   commsErr,
   embedded,
@@ -9944,9 +9943,9 @@ function CustomerConversation({
   data,
 }) {
   const interactions = data.interactions || [];
-  // GATE_SMS_LIKE: customer likes become badges on our quoted text, and the
-  // customer's newest text gets the like button. Off: the thread is unchanged.
-  const likeView = smsLikeThread([...comms].reverse(), commsSmsLike);
+  // Customer likes become badges on our quoted text, and the
+  // customer's newest text gets the like button.
+  const likeView = smsLikeThread([...comms].reverse());
   return (
     <div className="c360-conversation flex flex-col">
       {" "}
@@ -10899,11 +10898,11 @@ function technicianThreadMessage(m) {
 function useTechnicianCustomerThread({ customerId, enabled, revision }) {
   const key = `${customerId}#${revision}`;
   const sequence = useRef(0);
-  const [state, setState] = useState({ key, items: [], loaded: false, loading: false, error: "", nextPage: null, smsLike: false });
+  const [state, setState] = useState({ key, items: [], loaded: false, loading: false, error: "", nextPage: null });
   const load = useCallback(async (page = 1) => {
     if (!enabled) return;
     const current = ++sequence.current;
-    setState((previous) => ({ ...(page > 1 && previous.key === key ? previous : { items: [], loaded: false, nextPage: null, smsLike: false }), key, loading: true, error: "" }));
+    setState((previous) => ({ ...(page > 1 && previous.key === key ? previous : { items: [], loaded: false, nextPage: null }), key, loading: true, error: "" }));
     try {
       const result = await adminFetch(`/admin/communications/log?customerId=${encodeURIComponent(customerId)}&limit=${TECHNICIAN_THREAD_PAGE}&page=${page}`);
       if (current !== sequence.current) return;
@@ -10911,7 +10910,7 @@ function useTechnicianCustomerThread({ customerId, enabled, revision }) {
       setState((previous) => {
         const existing = page > 1 && previous.key === key ? previous.items : [];
         const ids = new Set(existing.map((item) => item.id));
-        return { key, items: [...existing, ...incoming.filter((item) => !ids.has(item.id))], loaded: true, loading: false, error: "", nextPage: result?.hasMore ? result.nextPage : null, smsLike: result?.smsLike === true };
+        return { key, items: [...existing, ...incoming.filter((item) => !ids.has(item.id))], loaded: true, loading: false, error: "", nextPage: result?.hasMore ? result.nextPage : null };
       });
     } catch (err) {
       if (current === sequence.current) setState((previous) => ({ ...previous, loaded: true, loading: false, error: err.message || "Could not load the conversation." }));
@@ -10921,10 +10920,10 @@ function useTechnicianCustomerThread({ customerId, enabled, revision }) {
     void load(1);
     return () => { sequence.current += 1; };
   }, [load]);
-  const visible = state.key === key && enabled ? state : { items: [], loaded: false, loading: false, error: "", nextPage: null, smsLike: false };
+  const visible = state.key === key && enabled ? state : { items: [], loaded: false, loading: false, error: "", nextPage: null };
   return {
     items: visible.items,
-    meta: { composerComms: visible.items, readScope: null, smsLike: visible.smsLike },
+    meta: { composerComms: visible.items, readScope: null },
     loaded: visible.loaded,
     loading: visible.loading || (enabled && !visible.loaded),
     error: visible.error,
@@ -11045,8 +11044,6 @@ function useCustomerMessages({
     loadOlderComms: history.loadOlder,
     retryComms: history.retry,
     comms,
-    // GATE_SMS_LIKE: the server says whether the like button and badges are on.
-    commsSmsLike: history.meta?.smsLike === true,
     commsLoading,
     commsErr,
     commsLoaded,
@@ -11669,8 +11666,7 @@ export default function Customer360ProfileV2({
     loadOlderComms,
     retryComms,
     comms,
-    commsSmsLike,
-    commsLoading,
+      commsLoading,
     commsErr,
     commsLoaded,
     commsComposerReady,
@@ -11811,7 +11807,6 @@ export default function Customer360ProfileV2({
       loadOlderComms={loadOlderComms}
       retryComms={retryComms}
       comms={comms}
-      commsSmsLike={commsSmsLike}
       commsLoading={commsLoading}
       commsErr={commsErr}
       embedded={embedded}

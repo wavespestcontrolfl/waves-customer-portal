@@ -1,5 +1,5 @@
 /**
- * Portal inbox (GATE_PORTAL_INBOX, owner 2026-10-31, option A).
+ * Portal inbox (owner 2026-10-31, option A).
  *
  * What customers asked for inside the customer portal and nobody answered:
  *   1. portal chat hand-offs: ai_escalations rows still `pending` whose
@@ -20,12 +20,11 @@
  * (`older`); `closeOlder` still closes them and sends NOTHING to a customer.
  *
  * This module never sends an email, text or call. The route files pass in the
- * actor and call these helpers; the gate is read at call time.
+ * actor and call these helpers.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { portalInboxLive } = require('../config/feature-gates');
 const featureGates = require('../config/feature-gates');
 const { requestProperty } = require('./service-request-property');
 
@@ -381,10 +380,9 @@ async function closeAlerts(key, ids, { by, role, technicianId = null, resolution
   return NotificationService.markAdminDone(alertIds, { by, resolution, role, technicianId }, conn);
 }
 
-// Mark-handled hook for the two existing update routes. Gate off: nothing.
+// Mark-handled hook for the two existing update routes.
 // Never throws: closing a bell must not fail the staff action.
 async function closeAlertsWhenHandled(key, id, actor) {
-  if (!portalInboxLive()) return 0;
   try {
     return await closeAlerts(key, [id], {
       by: String(actor.technicianId),

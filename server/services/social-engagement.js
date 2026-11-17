@@ -8,10 +8,10 @@ const logger = require('./logger');
 // before this existed) so formats can be judged on what actually gets
 // engagement, not on delivery.
 //
-// Metrics are likes / comments / shares. Reach and views are stored too, but
-// only while GATE_SOCIAL_REACH_INGEST is on (owner 2026-11-01, for the weekly
-// series job's Sunday numbers) and only for Facebook page posts and Instagram
-// media, from the per-post insights endpoints (free Graph reads):
+// Metrics are likes / comments / shares. Reach and views are stored too (owner
+// 2026-11-01, for the weekly series job's Sunday numbers), only for Facebook
+// page posts and Instagram media, from the per-post insights endpoints (free
+// Graph reads):
 //   Facebook  /{post-id}/insights?metric=post_total_media_view_unique,post_media_view
 //             reach = post_total_media_view_unique, views = post_media_view
 //             (post_impressions* were removed by Meta in 2025). A Facebook
@@ -22,8 +22,7 @@ const logger = require('./logger');
 // (read_insights / pages_read_engagement, instagram_manage_insights) or any
 // provider error on the insights call leaves reach / views NULL (the prior
 // measured value is kept), never fails the likes / comments fetch, and is
-// reported as ONE warning per sweep. Gate off = no insights calls for reach
-// and no reach / views columns touched.
+// reported as ONE warning per sweep.
 //
 // Sources: Facebook Graph (page posts + videos), Instagram Graph (media +
 // shares insight), LinkedIn socialActions (likes/comments on the page's own
@@ -182,7 +181,7 @@ async function fetchReachViews(target, { fetchFn }) {
 async function fetchEngagement(target, { fetchFn = fetch } = {}) {
   if (target.platform === 'facebook' || target.platform === 'instagram') {
     const counts = await fetchFacebookFamily(target, { fetchFn });
-    if (require('../config/feature-gates').socialReachIngestLive()) Object.assign(counts, await fetchReachViews(target, { fetchFn }));
+    Object.assign(counts, await fetchReachViews(target, { fetchFn }));
     return counts;
   }
   if (target.platform === 'linkedin') {
@@ -277,7 +276,7 @@ async function upsertEngagement(postId, target, counts, error = null) {
 }
 
 // reach / views columns for the upsert. Only present when this fetch tried
-// them (GATE_SOCIAL_REACH_INGEST on): with the gate off the insert carries no
+// them (Facebook and Instagram targets): a LinkedIn insert carries no
 // reach / views at all, so a stored value is never touched. A metric Meta did
 // not give (null) keeps the prior measured value, else stays NULL.
 async function reachColumns(postId, target, counts) {
@@ -306,11 +305,7 @@ async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchF
   // instagram_manage_insights scope — the sweep still succeeds, but the
   // count is logged so a missing scope is never invisible.
   const summary = { posts: 0, targets: 0, synced: 0, failed: 0, skippedTargets: 0, sharesPermissionDenied: 0 };
-  // Reach / views counters exist only while GATE_SOCIAL_REACH_INGEST is on
-  // (read once per sweep), so a gate-off summary is unchanged.
-  if (require('../config/feature-gates').socialReachIngestLive()) {
-    summary.reachNotMeasured = { permission: { facebook: 0, instagram: 0 }, unsupported: 0, error: 0 };
-  }
+  summary.reachNotMeasured = { permission: { facebook: 0, instagram: 0 }, unsupported: 0, error: 0 };
   if (!(await db.schema.hasTable('social_post_engagement'))) {
     throw new Error('social_post_engagement table missing — run migrations');
   }

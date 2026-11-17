@@ -148,7 +148,7 @@ describe('replay safety', () => {
   });
 
   test('--set accepts bar settings only', () => {
-    expect(replay.overrides(['GATE_IB_TOOL_ADDITIONS=true', 'MODEL_FLAGSHIP=claude-sonnet-5-5'])).toEqual({ GATE_IB_TOOL_ADDITIONS: 'true', MODEL_FLAGSHIP: 'claude-sonnet-5-5' });
+    expect(replay.overrides(['GATE_IB_TOOL_SEARCH=true', 'MODEL_FLAGSHIP=claude-sonnet-5-5'])).toEqual({ GATE_IB_TOOL_SEARCH: 'true', MODEL_FLAGSHIP: 'claude-sonnet-5-5' });
     expect(() => replay.overrides(['ANTHROPIC_API_KEY=x'])).toThrow(/bar setting/);
     expect(() => replay.overrides(['GATE_X'])).toThrow(/bar setting/);
   });

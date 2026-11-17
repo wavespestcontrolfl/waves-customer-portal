@@ -1,7 +1,6 @@
-// GET /api/public/pest-pressure-index (GATE_PUBLIC_PEST_PRESSURE_INDEX): the
-// route's own behavior — dark gate before any limiter or query, the per-IP
+// GET /api/public/pest-pressure-index: the route's own behavior — the per-IP
 // limit, JSON and CSV answers, cache headers, the 503 on a database failure —
-// plus the server/index.js pieces the route tests cannot mount (gate order,
+// plus the server/index.js pieces the route tests cannot mount (mount order,
 // wildcard CORS). Grouping and rounding are pinned in
 // public-pest-pressure-index.test.js. All rows are synthetic.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'pest-pressure-index-test-secret';
@@ -25,7 +24,7 @@ const CONTRACT_KEYS = [
 const NOW = new Date('2026-11-02T15:00:00Z');
 const ONLY_DATE = { doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] };
 
-const saved = { gate: process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX, nodeEnv: process.env.NODE_ENV };
+const saved = { nodeEnv: process.env.NODE_ENV };
 
 let seq = 0;
 function rows(count, overrides = {}) {
@@ -61,49 +60,16 @@ beforeEach(() => {
   jest.clearAllMocks();
   _clearCache();
   seq = 0;
-  process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX = 'true';
   process.env.NODE_ENV = 'test';
   db.raw.mockResolvedValue({ rows: [...rows(25), ...rows(21, { zip: '34236', service_line: 'lawn', tap_rating: 3 }), ...rows(4, { service_line: 'mosquito' })] });
   jest.useFakeTimers({ ...ONLY_DATE, now: NOW });
 });
 afterEach(() => jest.useRealTimers());
 afterAll(() => {
-  for (const [key, name] of [['gate', 'GATE_PUBLIC_PEST_PRESSURE_INDEX'], ['nodeEnv', 'NODE_ENV']]) {
+  for (const [key, name] of [['nodeEnv', 'NODE_ENV']]) {
     if (saved[key] === undefined) delete process.env[name];
     else process.env[name] = saved[key];
   }
-});
-
-describe('gate', () => {
-  test('dark: the generic 404 for JSON, CSV and junk, no database query', async () => {
-    delete process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX;
-    await withServer(async (base) => {
-      for (const query of ['', '?format=csv', '?format=nope']) {
-        const res = await get(base, query);
-        expect(res.status).toBe(404);
-        expect(await res.json()).toEqual({ error: 'Not found' });
-      }
-    });
-    expect(db.raw).not.toHaveBeenCalled();
-  });
-
-  test('anything but exactly "true" is dark', async () => {
-    await withServer(async (base) => {
-      for (const value of ['1', 'TRUE', 'on', '']) {
-        process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX = value;
-        expect((await get(base)).status).toBe(404);
-      }
-    });
-    expect(db.raw).not.toHaveBeenCalled();
-  });
-
-  test('dark: the per-IP limiter never answers, even in production and past its budget', async () => {
-    process.env.NODE_ENV = 'production';
-    delete process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX;
-    await withServer(async (base) => {
-      for (let i = 0; i < 125; i += 1) expect((await get(base)).status).toBe(404);
-    });
-  });
 });
 
 describe('per-IP limit', () => {
@@ -125,7 +91,7 @@ describe('per-IP limit', () => {
 });
 
 describe('GET /', () => {
-  test('gate on: 200 JSON with the contract shape, published groups only, hidden groups counted', async () => {
+  test('200 JSON with the contract shape, published groups only, hidden groups counted', async () => {
     await withServer(async (base) => {
       const res = await get(base);
       expect(res.status).toBe(200);
@@ -234,31 +200,11 @@ describe('server/index.js wiring', () => {
     return res;
   }
 
-  test('the dark gate precedes the wildcard CORS handler, the credentialed cors(), the /api/ limiter and the router', () => {
-    const gate = at("app.use('/api/public/pest-pressure-index', (req, res, next) => {");
-    expect(src.slice(gate, gate + 300)).toContain('publicPestPressureIndexLive()');
+  test('the wildcard CORS handler precedes the credentialed cors(), the /api/ limiter and the router', () => {
     const corsStar = at("app.use(['/api/public/pest-forecast', '/api/public/yard-calendar', '/api/public/watering-plan', '/api/public/pest-pressure-index'], (req, res, next) => {");
-    expect(gate).toBeLessThan(corsStar);
     expect(corsStar).toBeLessThan(at('app.use(cors({'));
-    expect(gate).toBeLessThan(at("app.use('/api/', limiter);"));
-    expect(gate).toBeLessThan(at("app.use('/api/public/pest-pressure-index', require('./routes/public-pest-pressure-index'));"));
-  });
-
-  test('dark: the index.js gate answers every method, including an OPTIONS preflight, with the generic 404', () => {
-    const { handler } = mountedHandler(at("app.use('/api/public/pest-pressure-index', (req, res, next) => {"));
-    delete process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX;
-    for (const method of ['GET', 'OPTIONS', 'POST']) {
-      const res = fakeRes();
-      const next = jest.fn();
-      handler({ method }, res, next);
-      expect(res.statusCode).toBe(404);
-      expect(res.body).toEqual({ error: 'Not found' });
-      expect(next).not.toHaveBeenCalled();
-    }
-    process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX = 'true';
-    const next = jest.fn();
-    handler({ method: 'GET' }, fakeRes(), next);
-    expect(next).toHaveBeenCalledTimes(1);
+    expect(corsStar).toBeLessThan(at("app.use('/api/', limiter);"));
+    expect(corsStar).toBeLessThan(at("app.use('/api/public/pest-pressure-index', require('./routes/public-pest-pressure-index'));"));
   });
 
   test('wildcard CORS: Access-Control-Allow-Origin * on the path, GET and OPTIONS only, no credentials, preflight answered 204', () => {

@@ -18,7 +18,6 @@
  *   GATE_VOICEMAIL_TEXT_CALLER_ONLY=true (security audit run 3, 2026-11-05, fix C2: the voicemail quote-link text (GATE_VOICEMAIL_LEAD_SMS) goes only to the number that called, the inbound leg's caller ID, never to a different number the caller speaks on the recording. A spoken callback number that differs stays on the lead for staff, with a timeline note, and is not texted. The first name in the text is used only when it is a plain name (letters, space, apostrophe or hyphen, at most 30 characters), else the greeting says "there"; the service words come from a fixed list of Waves service names (the same names the booking-abandon text uses), picked by keyword, else the existing fallback "pest control". A text queued for later while the gate was off is not sent once it is on (its replay is refused). The send window, consent, one-text-per-number and hold checks are unchanged. Strict `=== 'true'`, read at call time via voicemailTextCallerOnlyLive(); dark by default; off = byte-identical to today. It governs customer texts, so the owner flips it.)
  *   GATE_FOLLOWUP_DUE_ALERT=true (owner 2026-11-02, "build all", B1: a visit finished with the outcome "follow-up needed" parks a card on the dispatch board that no bell ever shows, so a follow-up nobody books just sits there. On, a daily 8:20 AM ET job (followup-due-alerts) raises one admin bell per card on its due date (the card's suggested follow-up date, else its Eastern created date + 14 days), titled "Schedule — book <First L.>'s follow-up (due <date>)" and linked to the customer page, where the owner books. A card more than 3 days past due with no alert of its own goes on ONE catch-up bell that rings when it is first raised or when a card joins it, and closes itself when empty. Each run closes the open bells whose card is covered: resolved, customer inactive, or any later live visit (created after the card, dated after it up to due + 7 days, or booked from it). Admin notifications only: books nothing, sends nothing to a customer, calls no paid API, never resolves or edits a card. Read at call time via followupDueAlertLive(), strict 'true', dark by default; off = the job returns before any read.)
  *   GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE=true (owner 2026-11-02, option A: an email reply pauses the estimate follow-up emails the way a text already does. On, hasRepliedRecently also returns true when the customer emailed Waves inside the same 14 days: an inbound row in the Gmail sync table linked to the estimate's customer_id, or whose from_address equals the estimate's email (leads have no customer_id). Gmail SENT rows never count, and the address match is skipped when the estimate's email is one of ours. A failed read fails open on the cron path and holds the replay, same as the text check. Strict `=== 'true'`, read at call time via estimateFollowupEmailReplyPauseLive(); dark by default; off = the emails table is never queried and nothing changes. Sends nothing; it only holds back follow-up emails.)
- *   GATE_SOCIAL_STUDIO_SKIP_META=true (owner 2026-11-01, social audit "studio trim": from Sep 1 to Nov 1 the autonomous Social Studio's Instagram stills reached about 1.5 to 3 people each and gained no followers, so the autonomous studio stops posting to Facebook and Instagram and keeps LinkedIn and Google Business. On, an autonomous run (the 6:30 AM ET cron, the admin Run Draft and Run Publish buttons, and the approval of a queued autonomous draft) drops facebook and instagram from its channel list: no copy or image is made for them, no Veo clip is made, and an old queued draft publishes to its other channels only. A run whose channels were only facebook and instagram is skipped and logged. The manual Social Studio, Campaign Builder, Publish All, blog and RSS shares, testimonial graphics and scheduled posts are NOT touched. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialStudioSkipMetaLive().)
  *   GATE_GEOCODE_COUNTY_FALLBACK=true (owner 2026-11-02, "build pins": when Google only half-matches a customer address (partial_match, no_result, coarse_result) and the review queue would hold it as needs_pin, ask the free Manatee or Sarasota county roll for the lot instead and use the polygon center as the pin (review source county_parcel). Also retries rows already waiting on the list, pins active customer_properties rows that have no pin from the customer's pin or the county lot, and gives their upcoming unpinned visits that pin through the service-location recovery write. No Google calls, no customer message. Strict `=== 'true'`, read at call time via geocodeCountyFallbackLive(); dark by default; off = no county calls and no new sweep work.)
  *   GATE_MOVE_NOTICE_EMAIL=true (owner 2026-10-24 "reschedule email": the email version of a reschedule or cancellation text that reached nobody. A customer whose line cannot take texts (a landline, a carrier bounce) otherwise hears nothing when a visit moves or is cancelled. On, when the reschedule text (handleReschedule, sendRescheduleNoticeForVisit) or the cancellation text (handleCancellation) reached no recipient and was not held (send window, visit move, unreadable settings), or a carrier later bounced it (handleUndeliveredSms), the customer gets the same notice by email (appointment.rescheduled / appointment.cancelled, transactional). No usable email raises the no-channel admin alert. One email per notice. Off = today's behavior: no reschedule or cancellation email. Kill: unset)
  *   GATE_PUBLIC_LLM_SHARED_CAP=true (security audit run 2, 2026-10-22 #13: the public paid-LLM routes (Ask Waves chat, lawn-assessment and pest-identifier photo analysis) also share one daily ceiling across all IPs and processes, counted in Postgres (public_llm_daily_usage, Eastern calendar day), on top of the per-IP in-memory limiters. Each route counts once, right before the paid call, after its own limiter, honeypot, Turnstile and validation; 1500/day Ask Waves (PUBLIC_LLM_DAILY_CAP_ASK_WAVES), 300/day photo (PUBLIC_LLM_DAILY_CAP_PHOTO); over the cap = the same 429 message. A database error fails open. Read at call time via publicLlmSharedCapLive(), strict 'true', dark by default; off = unchanged, no database call. Sends nothing to a customer.)
@@ -44,7 +43,6 @@
  *   GATE_RESCHEDULE_CAP_ALL=true (security audit run 3, owner 2026-11-05 "ALL": the public reschedule link had no daily limit for a customer with a completed visit, texted the customer on every move, and re-geocoded an unpinned visit address on every page view. On: one reschedule link commits at most 3 moves of a visit per ET day, for every customer (the 4th gets the same text-or-call-us answer a first visit gets after 2 moves, 409 MOVE_LIMIT); a repeat move of a visit within 15 minutes of an earlier customer move sends no notice of its own, the visit's texts wait 15 minutes from the latest move and the stranded-confirmation sweep then sends one text with the latest time; the page geocodes an unpinned visit address through the memoized services/geocoder.js (no repeat Google call) and saves the pin through persistServicePin (the service-location backstop's write, needs GATE_ROUTE_REORDER and GATE_ROUTE_REORDER_REPAIR). The refusal and the fewer texts are customer-visible, so the owner flips it. Read at call time via rescheduleCapAllLive(), strict 'true', dark by default; off = the page behaves exactly as before.)
  *   GATE_CALLER_CALLBACK_PROMISE_CLOSE=true (owner plan 2026-11-04, option A: "the bell AND THE PROMISE close themselves when they call or text, a visit is booked, or staff reach them" and "also closes the stale 'open' promises". Only consulted inside the caller-callback-bell job (which still needs GATE_CALLER_CALLBACK_BELL). On, when the caller called back, texted, or a person followed up (a staff call that reached them, a person's delivered text, a booked visit) after the call, the job closes that customer call_back promise as kept (status fulfilled, fulfillment closed_by caller_callback_bell, naming the inbound call or text it rests on), for every untouched AI-heard candidate in the 30-day window whether or not its bell rang, and for the promises of bells already raised; written only while the row is still open, untouched by a person and unchanged since it was read. A closed lead, a closed promise or a gone row never writes the promise. Internal records only: sends nothing to a customer, calls no paid API. Read at call time via callerCallbackPromiseCloseLive(), strict 'true', dark by default; off = the job behaves exactly as before.)
  *   GATE_SMS_VOICE_PROFILE_PIN=<voice_profiles.version integer> (owner 2026-10-24 "do all": the texting AI's drafter uses THAT voice profile version instead of the newest approved one. Only a version that was once approved (status approved, or superseded with an approval row in activity_log) counts; a missing, pending or rejected version, or a value that is not a whole number, falls back to the newest approved profile and logs once, with no customer data. The nightly distiller keeps running and approving as before: only the drafter's reading is pinned. The same pin is what graduation, the sealed exam and auto-send read as the effective profile. The phone agent keeps reading the newest approved profile. Each draft's intended_actions.voice_profile_version already carries the version used. Read at call time by server/services/sms-shadow-drafter.js via smsVoiceProfilePinVersion(); dark by default (unset = byte-identical); a set pin adds the prompt-version tag v. Sends nothing to a customer.)
- *   GATE_SOCIAL_REACH_INGEST=true (owner 2026-11-01, "add a portal read of Facebook and Instagram reach for the Sunday numbers, at no cost": the daily social engagement sweep also reads each Facebook post's reach and views (Graph post_total_media_view_unique and post_media_view) and each Instagram media's reach and views (insights metrics reach and views) into social_post_engagement.reach and .views, and GET /api/social/series/numbers hands them to the weekly series job. Off = likes, comments and shares only, no extra Graph calls. A metric Meta refuses or a missing scope (read_insights, pages_read_engagement, instagram_manage_insights) leaves reach and views NULL (not measured), never zero, with one warning per sweep; the sweep never fails on it. Free Graph reads only. Unset = today's behavior, read at call time (rollback = unset, no redeploy); strict 'true'. Reader: socialReachIngestLive().)
  *   GATE_SMS_PROMPT_B1=true (owner 2026-10-24 "go b1", "yes all": the texting AI's suggestion drafter stops stalling and stops making false promises, in one prompt change. A missed-visit text gets 2-3 real open times to rebook (with no times it keeps the apology and the follow-up wording); a covered pest re-service text gets 2-3 of the re-service booking page's own openings; a reply never says a link, text, email, report, quote, proposal or photo "is being sent" unless the reply carries it, never promises that the office or a teammate will confirm, cancel, add, move, call or email something, never lets the follow-up timing promise more than a reply, and never opens a reply in an ongoing thread with Hi, Hello or Hey and a name; the latest finished visit's customer-safe notes (up to about 1,200 characters) and its findings reach the facts. Needs GATE_SMS_REAL_ANSWERS. Strict opt-in via gateEnvValue, read at call time by server/services/sms-shadow-drafter.js and server/services/context-aggregator.js via smsPromptB1Live(); dark by default (off = byte-identical prompt, facts and checks); on stamps a fresh prompt version (real_answers27_n, 28_n with GATE_SMS_OFFERS_SCHEDULER). Drafts are suggestion cards only: staff send them; sends, schedules and books nothing.)
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
@@ -106,14 +104,12 @@
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / flat / no_data on the content_optimization_impact row. A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
  *   GATE_SAME_QUESTION_CHECK=true (content engine, owner 2026-10-30 "all": before a NEW supporting blog is drafted, topic-targeting-gate looks for a live post whose title, slug or primary keyword already holds every topic word of the brief's keyword (geo and framing words dropped, singular/plural folded; a one-word topic blocks only when at most 3 live posts hold it and it is not a broad pest or service word like termite or lawn). Off = the rule runs in shadow: it records run.topic_targeting_result.same_question and logs, and never blocks. On = the row is skipped by design (topic_targeting:TOPIC_SAME_QUESTION_LIVE) and one same_question_refresh row is queued against the owner page, which adds the candidate question as an answer block (ANSWER-GAP MODE) through the normal refresh chain: protected pages, in-flight page edit and the 28-day page cooldown still apply. Strict opt-in: exactly 'true', read at call time via sameQuestionCheckLive(). Ships DARK. Off also stops same_question_refresh rows already queued from being claimed (opportunity-queue lane fence); they wait and expire unclaimed after 60 days.)
  *   GATE_CONTENT_PII_ALL_LANES=true (security audit run 3, 2026-11-05, fix E: the autonomous content engine's deterministic body privacy check (phones, emails, names, street addresses; `redaction_passed` in services/content/content-quality-gate.js) ran only on city-service and customer-question drafts. On, it also runs on supporting-blog and refresh drafts; a draft that fails holds for review through the existing hard-failure path and never publishes. On also stops the brief (`customer_signal`) and the get_customer_questions tool from passing `example_phrasing_anonymized` and `redaction_confidence` (a customer's own words with regex redaction only) to the writer and refresher agents; the topic (`normalized_question`) still goes. Sends nothing to a customer. Strict 'true', read at call time via contentPiiAllLanesLive(); dark by default; off = byte-identical to before. Kill switch: unset.)
- *   GATE_PORTAL_INBOX=true (owner 2026-10-31, option A: a Portal tab in Admin > Communications lists what customers asked for inside the customer portal and nobody answered: portal chat hand-offs (ai_escalations from a portal_chat session still pending) and customer service requests not yet resolved, closed or cancelled and not made by staff. Shows the last 14 days; older open items sit under one Older line with a Close all older button that closes them and sends nothing to customers. Mark handled on a row closes the item and the admin bell alerts raised for it. Admin only. Read at call time via portalInboxLive(), strict 'true', dark by default; off = the tab is hidden, the new routes answer enabled:false/404, and the escalation and request update routes close no alerts. Sends nothing to a customer.)
  *   GATE_PORTAL_BOOKING_ITEMS=true (owner 2026-11-02, after the unworked-leads audit; scope ruling "A": a customer who opened the card step of an estimate our office sent and left got nothing and no person was told. With the gate on, the alert-relevance sweep (every 10 minutes) raises ONE admin bell per such estimate (made by staff, or drafted by the call and text estimator; 60 quiet minutes, last 14 days only, no person's contact and no visit booked since, not accepted, declined or archived), and the Communications Portal tab lists the open bells as a third kind, Booking not finished. Booking-page starts and website estimates are left out until the booking page can check phone numbers. The bell closes when a person contacts the customer, a visit is booked or the estimate ends. Sends nothing to a customer: admin rows only. Read at call time via portalBookingItemsLive(), strict 'true', dark by default; off = the sweep and the Portal tab do nothing extra.)
  *   GATE_PORTAL_ASK_PUSH=true (owner 2026-11-02: a customer's ask inside the app now rings the admin phones, the way a customer text does. Today an app chat hand-off, a service-request form and the late "Still waiting" re-ring write an admin bell row and nothing else, so three new leads asked 10 times in the app and the bells sat unread for weeks. On: after the bell row really exists and the ask is new or rang again (never for a silent dedupe, a withheld or demo-account bell, or a rolled-back transaction), the portal sends ONE push through the portal_ask trigger, pushOnly so the bell keeps its single row, to every admin phone and the web admin that has push on. Callers: portal chat hand-offs (ai-assistant/assistant.js, pushed after the turn commits), customer service requests (routes/requests.js), the late re-ring (portal-late-rering.js), and an estimate page's change or call request (estimate-measurement-review.js sendOfficeNotification). The push names the customer by first name and last initial and the ask in a few words, with no phone or email. Sends nothing to a customer. Read at call time via portalAskPushLive(), strict 'true', dark by default; off = no push, byte-identical to today.)
- *   GATE_PORTAL_MESSAGES=true (owner 2026-11-04, "lets build it out" after "do we now have the ability to answer clients in the portal?": the office answers a customer's portal ask INSIDE the portal. Admin > Communications > Portal gets "Reply in portal" on chat hand-offs, service requests and the customer's own portal messages. The answer is saved in the customer's portal thread (the unified comms tables, channel 'portal'), closes the item it answers and that item's bells, and the customer gets ONE notice: the in-app bell plus a push to the Waves app, or, when no app device took the push, an email with the whole answer (template portal_reply). The customer reads the thread and writes back on the portal's Messages page; a customer message is a Portal-tab item (kind message) with its own admin bell and phone page. Nothing is sent unless a staff member presses Send. Needs GATE_PORTAL_INBOX on: the Portal tab is where the office reads and answers, and every office route sits behind it. With both on, the Ask Waves AI hand-off reply tells the customer the team will reply on their Messages page, or by text or email (owner 2026-11-12). Read at call time via portalMessagesLive(), strict 'true', dark by default; off = no Reply in portal, no Messages page, every new route answers 404.)
- *   GATE_PORTAL_MESSAGES_NIGHT_AI=true (owner 2026-11-05, "we first respond with a human, after hours Waves AI", build ok 2026-11-12: a customer's message on the portal Messages page written outside 8 AM to 8 PM Eastern, any day, is read by the Ask Waves assistant on the thread's own short prompt and four tools (ai-assistant/thread-lane.js; owner 2026-11-12 "A" after a replay of 82 night texts), text only: no buttons or cards. It sends nothing for a thank-you, an acknowledgment or a reaction. It answers inside the same thread, labelled Waves AI, only from a schedule tool's result: the next visit's date and arrival window, or a pointer to the Reschedule button on the Visits tab. The office bell and phone page ring as today and the Portal-tab item stays open until a staff answer or Mark handled; the AI answer never closes it. A hand-off (every other message, text the model wrote with no tool result, a failed turn) saves one fixed reply, the thread's own item is the hand-off and no second item, bell or page is made. The customer gets the in-app bell plus an app push, never the reply email. Needs GATE_PORTAL_MESSAGES and GATE_PORTAL_INBOX on, and PORTAL_CHAT_SELF_SERVE on (default on). Calls the paid model: the owner flips it. Read at call time via portalMessagesNightAiLive(), strict 'true', dark by default; off = no AI answer, Messages behaves as before. Kill: unset or false, no redeploy.)
- *   GATE_PORTAL_MESSAGES_DAY_AI=true (owner 2026-11-13, "Let Waves AI answer during office hours when no person answers in time": a customer's message on the portal Messages page that has waited 120 open minutes (8 AM to 8 PM Eastern, the owner's 2026-10-02 rule for texts) with no answer from a person gets the same Waves AI turn as the night step (GATE_PORTAL_MESSAGES_NIGHT_AI): the thread's own short prompt and four tools, text only, an answer only from a schedule tool's result. A thank-you or a reaction gets nothing. A hand-off sends NOTHING in the day: the message stays the office's open item, as it was. A five-minute sweep (portal-messages-day-ai.js) acts only inside office hours, on the thread's newest customer message of the last 72 hours that the night step has not taken. The customer gets the in-app bell plus an app push. Needs GATE_PORTAL_MESSAGES and GATE_PORTAL_INBOX on, and PORTAL_CHAT_SELF_SERVE on (default on); does not need the night gate. Calls the paid model and writes to customers: the owner flips it. Read at call time via portalMessagesDayAiLive(), strict 'true', dark by default; off = the sweep returns at once. Kill: unset or false, no redeploy.)
+ *   GATE_PORTAL_MESSAGES=true (owner 2026-11-04, "lets build it out" after "do we now have the ability to answer clients in the portal?": the office answers a customer's portal ask INSIDE the portal. Admin > Communications > Portal gets "Reply in portal" on chat hand-offs, service requests and the customer's own portal messages. The answer is saved in the customer's portal thread (the unified comms tables, channel 'portal'), closes the item it answers and that item's bells, and the customer gets ONE notice: the in-app bell plus a push to the Waves app, or, when no app device took the push, an email with the whole answer (template portal_reply). The customer reads the thread and writes back on the portal's Messages page; a customer message is a Portal-tab item (kind message) with its own admin bell and phone page. Nothing is sent unless a staff member presses Send. With it on, the Ask Waves AI hand-off reply tells the customer the team will reply on their Messages page, or by text or email (owner 2026-11-12). Read at call time via portalMessagesLive(), strict 'true', dark by default; off = no Reply in portal, no Messages page, every new route answers 404.)
+ *   GATE_PORTAL_MESSAGES_NIGHT_AI=true (owner 2026-11-05, "we first respond with a human, after hours Waves AI", build ok 2026-11-12: a customer's message on the portal Messages page written outside 8 AM to 8 PM Eastern, any day, is read by the Ask Waves assistant on the thread's own short prompt and four tools (ai-assistant/thread-lane.js; owner 2026-11-12 "A" after a replay of 82 night texts), text only: no buttons or cards. It sends nothing for a thank-you, an acknowledgment or a reaction. It answers inside the same thread, labelled Waves AI, only from a schedule tool's result: the next visit's date and arrival window, or a pointer to the Reschedule button on the Visits tab. The office bell and phone page ring as today and the Portal-tab item stays open until a staff answer or Mark handled; the AI answer never closes it. A hand-off (every other message, text the model wrote with no tool result, a failed turn) saves one fixed reply, the thread's own item is the hand-off and no second item, bell or page is made. The customer gets the in-app bell plus an app push, never the reply email. Needs GATE_PORTAL_MESSAGES on, and PORTAL_CHAT_SELF_SERVE on (default on). Calls the paid model: the owner flips it. Read at call time via portalMessagesNightAiLive(), strict 'true', dark by default; off = no AI answer, Messages behaves as before. Kill: unset or false, no redeploy.)
+ *   GATE_PORTAL_MESSAGES_DAY_AI=true (owner 2026-11-13, "Let Waves AI answer during office hours when no person answers in time": a customer's message on the portal Messages page that has waited 120 open minutes (8 AM to 8 PM Eastern, the owner's 2026-10-02 rule for texts) with no answer from a person gets the same Waves AI turn as the night step (GATE_PORTAL_MESSAGES_NIGHT_AI): the thread's own short prompt and four tools, text only, an answer only from a schedule tool's result. A thank-you or a reaction gets nothing. A hand-off sends NOTHING in the day: the message stays the office's open item, as it was. A five-minute sweep (portal-messages-day-ai.js) acts only inside office hours, on the thread's newest customer message of the last 72 hours that the night step has not taken. The customer gets the in-app bell plus an app push. Needs GATE_PORTAL_MESSAGES on, and PORTAL_CHAT_SELF_SERVE on (default on); does not need the night gate. Calls the paid model and writes to customers: the owner flips it. Read at call time via portalMessagesDayAiLive(), strict 'true', dark by default; off = the sweep returns at once. Kill: unset or false, no redeploy.)
  *   GATE_PEST_FREQUENCY_CHANGE=true (owner 2026-11-12, decision "A A": in the customer portal, My Plan gains "Change how often we visit" on a general pest plan. A customer billed for each visit picks every two months or monthly; the price of each visit is their own price along the estimate frequency curve (12% less every two months, 22% less monthly, counted from the quarterly price). Confirm charges nothing: the plan takes the new frequency, service and price, the pending visits the new schedule replaces are cancelled with no customer text, and the new visits are booked; a first visit within 7 days, confirmed or moved on purpose stays as booked at its own price. The office gets one notice. Same account limits as GATE_ONE_TAP_PURCHASE, and never an account with an annual prepay term or a price-change notice still to apply. Needs GATE_EDIT_APPT_PRICE_SERVICE_SCOPE. It changes prices, so the owner flips it. Off = no button and the /api/pest-frequency routes answer not available; a change a customer already made stays.)
- *   GATE_MESSENGER_INBOX=true (owner 2026-10-31: a Messenger tab in Admin > Communications for the Facebook page's Messenger messages. Every 3 minutes the portal reads new messages from the Facebook page into the unified messages store (first run: last 6 months), rings one admin bell per thread with a new customer message, and closes it when someone replies. Staff reply from the tab through Facebook's Send API inside Meta's 24-hour window; past it the tab links to Facebook. Free API. Read at call time via messengerInboxLive(), strict 'true', dark by default; off = the poller does nothing, the routes answer enabled:false / 404 and the tab is hidden. The owner turns it on: it adds a customer-message path.)
  *   GATE_ROUTE_ENGINE_SUMMARY=true (owner 2026-10-31: the admin Day Scorecard payload also carries an `engine` block, a plain summary of the nightly auto-dispatch run over the last 7 ET nights: moves made, visits the per-run cap held back and how many of those moved later, and nights that failed or finished with errors; counts only, no drive-time estimate. Read-only over auto_dispatch_runs and auto_dispatch_audit_logs; sends nothing. Strict opt-in: exactly 'true', read at call time via routeEngineSummaryLive() by server/routes/admin-route-scorecard.js; dark by default; off = the scorecard payload is unchanged, with no engine key.)
  *   GATE_INSPECTION_REUSE_LEAD_SHELL=true (owner 2026-10-31: the public consultation page (routes/inspection-public.js) reuses the customer row the web form created for the lead, instead of minting a second customer row for the same person. Reused only when that row is still the lead's own untouched intake shell: stage new_lead, active, created at most 10 minutes before the lead, the lead is the first on it, no billing, login, visit, invoice or merge history, same phone and email as the lead, and no other lead's consultation provenance names it; a stored address that clearly differs falls back to a new prospect. A reused shell is booked as an outright prospect; the reuse changes nothing on its profile except to fill missing map coordinates. Read at call time via inspectionReuseLeadShellLive(), strict 'true', dark by default; off = the page creates the new prospect row exactly as before. Kill switch = unset the variable. Sends nothing to a customer.)
  *   GATE_QUOTE_SAME_PERSON_MATCH=true (owner 2026-10-31: the public quote wizard no longer adds a new customer row on every rerun when the typed phone already matches 2 to 10 customer rows that are all one person at one address. The wizard links the lead and estimate to the strongest of those rows, picked by the same winner rule the nightly duplicate sweep uses. Every matched row must be live, must have a name that fits the typed first and last name and each other, and must share one street address, unit, ZIP or city with the typed address and with each other row. Any mismatch or more than 10 rows keeps today's behavior: a new row. A single phone match, the email match, and the pre-pricing rodent lookup are unchanged. Strict opt-in: exactly 'true', read at call time via quoteSamePersonMatchLive() by server/routes/public-quote.js; dark by default; off = a phone that matches 2 or more rows adds a new customer row, as before. Kill switch = unset it.)
@@ -173,7 +169,6 @@
  *   GATE_ALERT_CATALOG=watch (owner 2026-10-29, "ok go" on admin bell rebuild step D1: every notification-registry type declares how it closes, and an admin alert the 08-28 bell policy silences is counted. `watch` = when NotificationService.create silences an admin row it writes ONE audit_log row (notification.bell_policy.muted) per Eastern day per distinct alert, category + trigger key + digit-free title stem only; the bell, pushes and create()'s return are unchanged. Anything else = off, byte-identical: no read, no write. Read at call time via alertCatalogMode(). See docs/gates-and-env.md.)
  *   GATE_ALERT_REGISTRY_LABELS=true (owner 2026-11-05, admin-alert plan step S1, "go": each trigger-registry bell row stores the labels its registry rule already declares (area, severity, who, doneWhen, and contact or promise when declared), the way a composed alert does, so the needs-me list, the morning banner counts, the Monday review, the FYI 7-day expiry and the plain-words explainer read stored labels instead of guessing. The alert's own fields always win; no subject is invented. Read at call time via alertRegistryLabelsLive(), strict 'true', dark by default; off = byte-identical rows. Sends nothing to a customer.)
  *   GATE_LEAD_STATUS_FOLLOWS_CONTACT=shadow|true (owner 2026-11-04, "WHY ARENT THESE UPDATED ... FOR ALL COMUNNICATION LINES": a 'new' lead moves to 'contacted' once a person reached it on any Waves line after its first contact: a delivered staff text, a connected call, a staff email, or a visit booked for its customer. A gated sweep every 10 minutes (services/lead-contact-sync.js); shadow logs what would move and writes nothing, true writes; read at call time via leadStatusFollowsContactMode(), unset = off. Never sets won. See docs/gates-and-env.md.)
- *   GATE_PORTAL_CHAT_ANSWERED_CLOSE=shadow|true (owner 2026-10-31, approved Portal inbox plan: a portal chat hand-off bell closes once a person texted, called or emailed that customer after the hand-off; its own gate, read at call time via portalChatAnsweredCloseMode(); shadow records, true closes, unset = off. See docs/gates-and-env.md.)
  *   GATE_AUTOPAY_HOLD_TIMEOUT=shadow|true|charge (owner 2026-10-26, "OK FIX": an invoice reminder sequence held for Auto Pay (status autopay_hold) is released into the normal reminder ladder when Auto Pay never charged it. Only a charge failure used to release a hold, so an invoice Auto Pay never charges (for example an annual-prepay invoice staff created after a visit) got no reminder and no charge, forever. A hold older than 3 days with no stripe_invoice_charge_attempts row for the invoice at all, no payments row for the customer since the hold began and no failed payment still on the Auto Pay retry ladder is released through releaseFromAutopayHold(); terminal, payer-billed and payment-plan invoices, an invoice whose linked visit is still open, and a customer the customer-level reminder engine owns or covers are left alone. `shadow` = write one audit_log row per would-release invoice a day (invoice_followup.autopay_hold_timeout_shadow), change nothing; `true` = release; `charge` (owner 2026-10-28, "Charge the saved card"; narrowed 2026-10-29, option B) = charge the customer's saved Auto Pay card or bank for a held VISIT bill only, and only inside the visit-completion rail's own authorization (completion-charge-verdict.js: the visit's agreed price cap, the same lanes; an issued-invoice closeout counts as a performed visit for this charge only). Keep the hold when the charge went through or its outcome is unclear (an office alert says check Stripe). Over the agreed price, no agreed price, a visit that was not performed, a payer, or any guard refusal = the hold is kept, nothing is charged or texted, one office alert asks for a review (it is looked at again only after the bill or visit price changes). Release the hold only when the card was really declined or there is no Auto Pay method; an invoice bound to no visit, an annual-prepay term rail invoice, or a bill no completion lane admits is released as `true` releases it, never charged (one office alert, one audit_log row per attempt, invoice_followup.autopay_hold_timeout_charge). `charge` MOVES MONEY: the owner flips it. Anything else = off, no query. Read at call time via autopayHoldTimeoutMode(). Runs inside the invoice follow-up job. See docs/gates-and-env.md.)
  *   GATE_AUTO_DISPATCH_DRY_TIME_ORDER=shadow|true (owner 2026-11-01, rain backtest of 440 outdoor stops + D5, ruling "forget the pest-early rule": auto-dispatch orders the day by product dry time. The service-family default time window (pest 8-10 AM, lawn 10 AM-12 PM) is replaced by a dry-time window from the products the visit uses: 4 h or more dry time 8-10 AM, 1-3 h 8 AM-12 PM, rain-proof (granular, bait, gel, dust, water-in, rain-OK services) 1-5 PM. DRY_TIME_ORDER_SEASON ('MM-DD..MM-DD', wrap-around allowed) narrows the dates; default all year. Customer-set times, blackouts and the flex-tier freeze are unchanged. Values: shadow = live windows unchanged, each pass-1 audit row logs constraints_checked.dry_time (class, hours, source, the slot today's window picked and the slot the dry window would pick); true = the dry window replaces the family default as the soft default time window, and for the rain-sensitive classes (4 h or more, 1-3 h) the credit also counts in a placed visit's move gain on its CURRENT date only: a timed visit is re-timed into its dry window on the same date, never moved to another date (owner 2026-10-24: no automatic day moves for rain). A rain-proof visit never gains from its afternoon window (a soft default only), and the flex-tier freeze, the score bar, the drive floor and the road check are unchanged. When the dry window opens after the day's first hour (rain-proof 1-5 PM) the search also asks the same slot finder for starts at or after the window start (not in capacity or arrival-search mode; no new paid calls): true adds them to the live candidates after the route options, shadow scores them for shadow_best only. shadow_best is the slot true would pick under these move rules; would_move says it differs from the current slot. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchDryTimeOrderMode(). Ships DARK; off = byte-identical, no extra database read. Sends nothing to a customer. Kill switch: unset.)
  *   GATE_AUTO_DISPATCH_MOWING_DAYS=shadow|true (owner 2026-11-02: keep Lawn Care Service visits off the customer's mowing day and one day on each side. The blocked weekdays are each saved property_preferences.mowing_days day, the day before and the day after; a weekday the customer chose as their preferred day is never blocked. Scope: a service_type matching /lawn/i and not /aerat|thatch/i (auto-dispatch/mowing-days.js isLawnCareService), and a grouped unit with such a member. Values: shadow = live decisions unchanged, each evaluated Lawn Care Service visit's audit row logs constraints_checked.mowing_days (mowing_days, blocked_weekdays, current_blocked, chosen_blocked, shadow_best = the slot true would pick, would_move), pure ranking only, no road check, no proofreader; true = a HARD filter drops every candidate on a blocked weekday (drops.mowing_day; the schedule gap tool too), and with GATE_AUTO_DISPATCH_CONFLICT_MOVES on a visit already on a blocked weekday is in conflict (kind mowing_day, after closed_day and overlap) and moves to the best legal slot without the score bar, inside every other guard. A mowing_day conflict raises no needs-a-person notice. Strict: exactly 'shadow' or 'true', read at call time via autoDispatchMowingDaysMode(). Ships DARK; off = byte-identical, no extra database read. Auto-dispatch sends no move text. true also turns on the mowing-days line of the Monday watering email (irrigation-weekly-email.js mowingAskLive: a customer on a recurring lawn program with nothing saved under Mowing, first 3 sends, then once every 4 weeks); shadow and off never show it. Kill switch: unset.)
@@ -186,9 +181,7 @@
  *   GATE_SMS_LINE_ADDRESS_FALLBACK=true (customer location line: blank/unmapped city falls through ZIP → geocode instead of the Bradenton default; mapped cities unchanged)
  *   GATE_HOME_LINE=true (each customer's outbound texts and staff-placed calls use their stored home line — config/locations.js homeLineLocationId — over any per-call office; read at call time via homeLineLive(); the daily sweep stamps it)
  *   GATE_IN_PERSON_CARD=true (Book at the Table, owner 2026-11-02: when staff book a visit from an estimate at the customer's table, the booking window offers "Customer saves it here, now". After the booking saves, a Booked sheet lets staff hand the phone to the customer (the secure card page), show a QR code of it, text the link, or skip. POST /:id/card-request/in-person runs the normal card ask with the first-time-customers-only rule lifted for this trigger only; every other card rule stays. Card or wallet only, nothing is charged, no new texts, the booking stays if no card is saved. Read at call time via inPersonCardLive(); ships DARK; off = today's booking window, byte-identical, and the route answers 404)
- *   GATE_SMS_SPAM_TAG=true (owner 2026-11-02, "mark spam, no alerts, never remove customer texts": the Messages inbox "Mark spam" button TAGS the sender instead of blocking it. A tagged sender's later texts are still saved and shown, marked read with a Spam tag, and raise no bell, badge, lead, quote or auto-reply; a customer or an open lead on that number always wins. "Not spam" undoes it and brings the texts back as needing a reply. Calls are not blocked. Read at call time via smsSpamTagLive(); ships DARK; off = today's block button, byte-identical, and the spam-senders routes answer 404)
  *   GATE_TAP_SAVE_CARD=true (owner ruling 2026-11-02, "Book at the Table", PR 2: a technician saves a customer's card for Auto Pay with Tap to Pay on iPhone and NO charge. On, an admin can POST /api/stripe/terminal/save-card-handoff with a texted secure-card token, the consent version the app showed and agreed=true; that creates a card_present SetupIntent for the request's Stripe customer, mints the 60-second wavespay://save-card handoff, and /validate-save-card-handoff and /complete-setup finish it through the same completion tail as the /secure page (card saved, consent recorded under admin_tap_to_pay, Auto Pay enrolled). A save-card terminal token can never reach /payment-intent or /apply-surcharge. Read via isEnabled('tapSaveCard') at boot, strict 'true', dark by default; off = the mint route answers 404 and nothing changes today. Costs no card charge and no extra service.)
- *   GATE_SMS_LIKE=true (owner 2026-11-02, "SMS Like Button" option B: Messages and the customer thread show a like button under the customer's newest text when nothing came after it; a click texts a thumbs-up back through the composer's own send (every consent, opt-out and line check) and marks the text with who liked it and when; customer likes on our texts show as a badge on that text instead of their own bubble. It texts customers, so the owner flips it. Read at call time via smsLikeLive(); off = no button, no badges, POST /messages/:id/like answers 404)
  *   GATE_BELL_BANNERS=true (owner 2026-11-03, "ok add", choices A and B: two kinds of admin alert that reach only the portal bell also send a phone banner. A: the text follow-up due and the promise to a caller overdue push only between 7:00 AM and 9:00 PM Eastern (outside those hours the bell row stays and no banner is sent). B: the Facebook message bell (new Messenger trigger messenger_reply) pushes at any hour, like a text. Read at call time via bellBannersLive(); ships DARK; off = no banner, today's behavior byte-identical)
  *   GATE_LEAD_CALL_REMINDER=true (owner 2026-11-05, "remind": a lead who replies CALL rings the owner's cell with press 1; a ring nobody answers raises one "Missed call request" bell, and a night call request that needs a person raises a "call them back" bell. Both reach only the portal bell, and nothing prompts the owner again. On: the alert-relevance sweep (every 10 minutes, after its closes) sends ONE phone banner for such a bell still open after one business hour (8 AM to 8 PM ET) when nobody has reached the lead since (services/lead-call-reminder.js, trigger lead_call_reminder, pushOnly, admin users only, 8 AM to 8 PM only). The bell row is only stamped metadata.leadCallReminderAt, never rewritten. Sends nothing to a lead. Free. Off = no reads, no banner. Kill: unset, no redeploy.)
  *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
@@ -199,7 +192,6 @@
  *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_MISSED_CALL_TEXT_SKIP_FAILED_SCREEN=true (text-back lane only: no text to a caller who failed the press-1 pre-connect screen, call_log.metadata.preconnect_screen 'failed'; settles skipped:screen_failed; the missed-call bell is unchanged; dark by default)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
- *   GATE_SMS_MAC_DRAFTS=true (the owner's Mac drafts the silent shadow reply for a customer text a few minutes late, through the Max plan, while GATE_SMS_SHADOW_DRAFTS stays off; strict opt-in, read at call time via smsMacDraftsLive(), dark by default; refuses unless GATE_SMS_SUGGEST_MODE, GATE_SMS_AUTO_SEND and GATE_SMS_UNANSWERED_REPLY all read off in the calling process; no customer-facing effect)
  *   GATE_SMS_UNANSWERED_REPLY=true (a suggested house-voice reply nobody acted on goes out on its own after 2 open hours, ordinary questions only; strict opt-in, read at call time via smsUnansweredReplyLive(), dark by default; customer-facing)
  *   GATE_VOICE_CORPUS_MINER=true (nightly brand-voice corpus mining)
  *   GATE_CALL_RESEARCH_MINER=true (nightly voice-of-customer call-research mining)
@@ -218,7 +210,6 @@
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_PUBLIC_WATERING_PLAN=true (owner 2026-10-31, backlink tools plan step 2, 'ok go, approved'): public lawn watering calculator API + embed; dark until flipped; no paid AI; weather from the existing Open-Meteo plan, MRMS and NWS. GET /api/public/watering-plan answers one JSON plan for a curated Florida location or ZIP: last 7 days of observed rain (NOAA MRMS merged with Open-Meteo), the plan-week forecast, the turf's weekly need (ET0 x crop coefficient, seasonal fallback) and the week's run/hold decision from the same engine as the Monday irrigation email. The legal ceiling is the county's restriction policy (config/irrigation-restrictions.js) and it fails closed: outside established coverage the answer is need_only (inches, no event count, no legal maximum). No customer row, no database write, nothing sent to anyone. 120 requests per 15 minutes per IP. Read at call time via publicWateringPlanLive(), strict 'true', dark by default; off = every request to /api/public/watering-plan, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
- *   GATE_PUBLIC_PEST_PRESSURE_INDEX=true (owner 2026-11-02, backlink plan step 5, 'Pest Pressure Index'): public county averages of technician pest-activity ratings; dark until flipped; no paid AI. GET /api/public/pest-pressure-index answers one JSON document (or CSV with ?format=csv) of county x service line averages and medians of the technician's on-site 0-5 tap ratings from completed service visits in a rolling 90-day window (never before the 2026-09-24 tap cutover), a group published only at 20 or more visits. No customer name, address or ZIP leaves the server; internal test customers are excluded; visits whose ZIP does not map to one county are dropped. Read-only database query, cached in memory for 1 hour; 120 requests per 15 minutes per IP. Read at call time via publicPestPressureIndexLive(), strict 'true', dark by default; off = every request to /api/public/pest-pressure-index, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
  *   GATE_AGENT_ACTIVITY=true    (Activity tab in /admin/agents — read-only feed over existing ledgers; dark in dev AND prod)
  *   GATE_OPS_DIGESTS_IN_APP=true (owner ops digests become ops_digest bell rows in the Activity feed instead of contact@ emails; dark in dev AND prod)
  *   GATE_CLOSEOUT_MONEY_COMMS_ALERTS=true (closeout alerts also map the comms / invoice / invoiceDelivery facts — failed completion notice, invoice owed but not minted, invoice or receipt delivery incomplete — as per-visit cards + closeout_gaps_today members; their outage holds the floor; read-only, no comms; dark in dev AND prod)
@@ -3261,11 +3252,6 @@ const gates = {
   // publicWateringPlanLive(). Kill switch: unset GATE_PUBLIC_WATERING_PLAN.
   publicWateringPlan: process.env.GATE_PUBLIC_WATERING_PLAN === 'true',
 
-  // Public Pest Pressure Index API (owner 2026-11-02, backlink plan step 5): GET /api/public/pest-pressure-index. OFF in
-  // every environment; boot-log entry only, the call-time reader is publicPestPressureIndexLive(). Kill switch: unset
-  // GATE_PUBLIC_PEST_PRESSURE_INDEX.
-  publicPestPressureIndex: process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX === 'true',
-
   // Payroll layer 3a (owner 2026-10-25): the line-by-line figures for Form 941,
   // RT-6, Form 940 and W-2/W-3 in the Payroll tab. OFF in every environment;
   // read at call time via payrollFormFiguresLive(). Kill switch: unset
@@ -4387,8 +4373,6 @@ const gates = {
   // byte-identical to before. Read at CALL time via homeLineLive(); this
   // entry is for logGateStatus.
   homeLine: process.env.GATE_HOME_LINE === 'true',
-  // GATE_SMS_LIKE: read at CALL time via smsLikeLive(); this entry is for logGateStatus.
-  smsLike: process.env.GATE_SMS_LIKE === 'true',
   // GATE_NIGHT_LOCK_24H: read at CALL time via nightLock24hLive(); this entry is for logGateStatus.
   nightLock24h: process.env.GATE_NIGHT_LOCK_24H === 'true',
   // GATE_BELL_BANNERS: read at CALL time via bellBannersLive(); this entry is for logGateStatus.
@@ -4406,8 +4390,6 @@ const gates = {
   pestFrequencyChange: process.env.GATE_PEST_FREQUENCY_CHANGE === 'true',
   // GATE_IN_PERSON_CARD: read at CALL time via inPersonCardLive(); this entry is for logGateStatus.
   inPersonCard: process.env.GATE_IN_PERSON_CARD === 'true',
-  // GATE_SMS_SPAM_TAG: read at CALL time via smsSpamTagLive(); this entry is for logGateStatus.
-  smsSpamTag: process.env.GATE_SMS_SPAM_TAG === 'true',
   // GATE_TAP_SAVE_CARD: dark by default (owner ruling 2026-11-02). Gates POST /api/stripe/terminal/save-card-handoff only; a minted token finishes even if the gate is turned off mid-flow.
   tapSaveCard: process.env.GATE_TAP_SAVE_CARD === 'true',
 
@@ -4814,11 +4796,6 @@ const gates = {
   // A 'new' lead moves to 'contacted' once a person reached it (owner 2026-11-04). Tri-state, its own gate.
   // Registered for logGateStatus only; the sweep reads leadStatusFollowsContactMode() at CALL time. Kill switch: unset.
   leadStatusFollowsContact: ['shadow', 'true'].includes(String(process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT || '').trim().toLowerCase()),
-
-  // A portal chat hand-off bell closes once a person answered that customer after it (owner 2026-10-31,
-  // approved Portal inbox plan). Tri-state, own gate. Registered for
-  // logGateStatus only; consumers read portalChatAnsweredCloseMode() at CALL time. Kill switch: unset.
-  portalChatAnsweredClose: ['shadow', 'true'].includes(String(process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE || '').trim().toLowerCase()),
 
   // Unassigned-visit guard (owner 2026-10-25). Ships DARK: exactly 'true'. Registered for
   // logGateStatus only; consumers read unassignedVisitGuardLive() at CALL time. Kill switch: unset.
@@ -5379,11 +5356,6 @@ function gateEnvValue(envName) {
 function publicWateringPlanLive() {
   return process.env.GATE_PUBLIC_WATERING_PLAN === 'true';
 }
-// GATE_PUBLIC_PEST_PRESSURE_INDEX read at CALL time, strict `=== 'true'`, dark in every environment. Off = every
-// /api/public/pest-pressure-index request answers the generic 404. Kill switch = unset.
-function publicPestPressureIndexLive() {
-  return process.env.GATE_PUBLIC_PEST_PRESSURE_INDEX === 'true';
-}
 function portalActivityLive() {
   return process.env.GATE_PORTAL_ACTIVITY === 'true';
 }
@@ -5468,13 +5440,6 @@ function kbSpeciesQaLive() {
 // the sweep does nothing and every claim in flight refuses at its next check.
 function smsUnansweredReplyLive() {
   return process.env.GATE_SMS_UNANSWERED_REPLY === 'true';
-}
-
-// GATE_SMS_MAC_DRAFTS read at CALL time (server/services/sms-late-drafter.js):
-// strict `=== 'true'`, dark in every environment. Unset = draftPendingInbound
-// returns { skipped: 'gate_off' } before it reads anything.
-function smsMacDraftsLive() {
-  return process.env.GATE_SMS_MAC_DRAFTS === 'true';
 }
 
 // GATE_SHORTLINK_LEGACY_EXPIRE read at CALL time — strict `=== 'true'`, dark.
@@ -5882,20 +5847,6 @@ function ibGeneralEditLive() {
 // keeps the ordinary list. Kill: unset.
 function ibToolSearchLive() {
   return process.env.GATE_IB_TOOL_SEARCH === 'true';
-}
-
-// GATE_IB_TOOL_ADDITIONS read at CALL time — strict `=== 'true'`, dark. Off
-// the tool search path (a model that thinks by default, or a login without
-// tool search), a discover_capabilities result no longer adds its tools to the
-// request's `tools` array, which the API renders first and which therefore
-// voided the whole prompt cache on every such round. The bar keeps `tools` as
-// sent and offers the found tools in a `role: "system"` message of
-// `tool_addition` blocks before the next round (tool-additions.js; beta header
-// inline-tools-2026-09-15). Has effect only on a model that accepts
-// mid-conversation tool changes (models.anthropicSupportsMidConversationTools).
-// Off = the found tools are merged into `tools`, as before. Kill: unset.
-function ibToolAdditionsLive() {
-  return process.env.GATE_IB_TOOL_ADDITIONS === 'true';
 }
 
 // GATE_IB_OPENAI_BACKUP read at CALL time — strict `=== 'true'`, dark. When the
@@ -7293,13 +7244,6 @@ function homeLineLive() {
   return process.env.GATE_HOME_LINE === 'true';
 }
 
-// GATE_SMS_LIKE read at CALL time — strict `=== 'true'`. The office's like on
-// a customer text and customer-like badges (services/sms-office-like.js); the
-// `smsLike` gates-map entry above is for logGateStatus only.
-function smsLikeLive() {
-  return process.env.GATE_SMS_LIKE === 'true';
-}
-
 // GATE_BELL_BANNERS read at CALL time — strict `=== 'true'`, dark in every environment. The canonical reader for
 // services/bell-banners.js (phone banners for bell-only alerts); the `bellBanners` gates-map entry above is for
 // logGateStatus only.
@@ -7312,11 +7256,6 @@ function bellBannersLive() {
 // booking window's "Customer saves it here, now" choice.
 function inPersonCardLive() {
   return process.env.GATE_IN_PERSON_CARD === 'true';
-}
-
-// GATE_SMS_SPAM_TAG read at CALL time (so a flip needs no redeploy); strict 'true', dark.
-function smsSpamTagLive() {
-  return process.env.GATE_SMS_SPAM_TAG === 'true';
 }
 
 // GATE_SMS_LINK_WRAP read at CALL time — strict `=== 'true'`, same convention
@@ -7436,17 +7375,6 @@ function adminAlertRelevanceLive() {
 // contact. 'shadow' logs what would move and writes nothing; 'true' writes. Anything else, unset included, is off.
 function leadStatusFollowsContactMode() {
   const value = String(process.env.GATE_LEAD_STATUS_FOLLOWS_CONTACT || '').trim().toLowerCase();
-  return value === 'shadow' || value === 'true' ? value : 'off';
-}
-
-// GATE_PORTAL_CHAT_ANSWERED_CLOSE read at CALL time: 'shadow', 'true' or 'off'. A portal chat hand-off bell
-// (portal-chat-escalation:<id>, doneWhen 'customer_answered') as a class of admin-alert-relevance.js: closed
-// once a person called back, answered the customer's call, texted or emailed that customer after the bell's
-// latest event. 'shadow' records the
-// would-close in audit_log and changes no bell; 'true' closes. Anything else, unset included, is off: the
-// class is not judged, and a bell it closed is put back.
-function portalChatAnsweredCloseMode() {
-  const value = String(process.env.GATE_PORTAL_CHAT_ANSWERED_CLOSE || '').trim().toLowerCase();
   return value === 'shadow' || value === 'true' ? value : 'off';
 }
 
@@ -8580,27 +8508,14 @@ module.exports.callerCallbackPromiseCloseLive = callerCallbackPromiseCloseLive;
 module.exports.autoDispatchMowingDaysMode = autoDispatchMowingDaysMode;
 // GATE_ESTIMATE_FOLLOWUP_EMAIL_REPLY_PAUSE reader, on its own line so gate PRs never conflict.
 module.exports.estimateFollowupEmailReplyPauseLive = estimateFollowupEmailReplyPauseLive;
-module.exports.smsLikeLive = smsLikeLive;
 // GATE_NIGHT_LOCK_24H reader, on its own line so gate PRs never conflict.
 module.exports.nightLock24hLive = nightLock24hLive;
 
-// GATE_SOCIAL_STUDIO_SKIP_META read at CALL time (so a flip needs no redeploy); strict 'true'.
-// Owner 2026-11-01 "studio trim": the autonomous Social Studio stops drafting and posting to
-// Facebook and Instagram; LinkedIn and Google Business stay. Manual paths are not touched.
-function socialStudioSkipMetaLive() {
-  return process.env.GATE_SOCIAL_STUDIO_SKIP_META === 'true';
-}
-// GATE_SOCIAL_STUDIO_SKIP_META reader, on its own line so gate PRs never conflict.
-module.exports.socialStudioSkipMetaLive = socialStudioSkipMetaLive;
 module.exports.leadNoResponseReasonLive = leadNoResponseReasonLive;
-// GATE_SMS_MAC_DRAFTS reader, on its own line so gate PRs never conflict.
-module.exports.smsMacDraftsLive = smsMacDraftsLive;
 // GATE_SMS_LEDGER_STALL_FEED reader, on its own line so gate PRs never conflict.
 module.exports.smsLedgerStallFeedLive = smsLedgerStallFeedLive;
 // GATE_PUBLIC_WATERING_PLAN reader, on its own line so gate PRs never conflict.
 module.exports.publicWateringPlanLive = publicWateringPlanLive;
-// GATE_PUBLIC_PEST_PRESSURE_INDEX reader, on its own line so gate PRs never conflict.
-module.exports.publicPestPressureIndexLive = publicPestPressureIndexLive;
 // GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
 module.exports.undoManualPaymentLive = undoManualPaymentLive;
 // GATE_PARTIAL_PAYMENTS reader, on its own line so gate PRs never conflict.
@@ -8868,8 +8783,6 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.sprayRainRulesMode = sprayRainRulesMode;
 // GATE_LEAD_STATUS_FOLLOWS_CONTACT reader, on its own line so gate PRs never conflict.
 module.exports.leadStatusFollowsContactMode = leadStatusFollowsContactMode;
-// GATE_PORTAL_CHAT_ANSWERED_CLOSE reader, on its own line so gate PRs never conflict.
-module.exports.portalChatAnsweredCloseMode = portalChatAnsweredCloseMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_ESTIMATE_DUE_FIRST_VISIT reader, on its own line so gate PRs never conflict.
@@ -8903,13 +8816,6 @@ module.exports.multiTechTextTimesLive = multiTechTextTimesLive;
 // GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
 module.exports.serverDictationLive = serverDictationLive;
 module.exports.dictationEveryBoxLive = dictationEveryBoxLive;
-// GATE_SOCIAL_REACH_INGEST read at CALL time (so a flip needs no redeploy); strict 'true'.
-// Owner 2026-11-01: the daily engagement sweep also stores Facebook and Instagram reach and views.
-function socialReachIngestLive() {
-  return process.env.GATE_SOCIAL_REACH_INGEST === 'true';
-}
-// GATE_SOCIAL_REACH_INGEST reader, on its own line so gate PRs never conflict.
-module.exports.socialReachIngestLive = socialReachIngestLive;
 // GATE_REPORT_PLAN_RESCHEDULE reader, on its own line so gate PRs never conflict.
 module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
 // GATE_IB_INVOICE_ACTIONS reader, on its own line so gate PRs never conflict.
@@ -8944,8 +8850,6 @@ module.exports.ibGeneralReadLive = ibGeneralReadLive;
 module.exports.ibGeneralEditLive = ibGeneralEditLive;
 // GATE_IB_TOOL_SEARCH reader, on its own line so gate PRs never conflict.
 module.exports.ibToolSearchLive = ibToolSearchLive;
-// GATE_IB_TOOL_ADDITIONS reader, on its own line so gate PRs never conflict.
-module.exports.ibToolAdditionsLive = ibToolAdditionsLive;
 // GATE_IB_OPENAI_BACKUP reader, on its own line so gate PRs never conflict.
 module.exports.ibOpenaiBackupLive = ibOpenaiBackupLive;
 // GATE_IB_FAST_MODE reader, on its own line so gate PRs never conflict.
@@ -9261,11 +9165,6 @@ function sameQuestionCheckLive() {
   return process.env.GATE_SAME_QUESTION_CHECK === 'true';
 }
 
-// GATE_PORTAL_INBOX read at CALL time, strict `=== 'true'`, dark in every environment.
-// Off, the Portal tab in Communications is hidden and the portal-inbox routes answer enabled:false / 404.
-function portalInboxLive() {
-  return process.env.GATE_PORTAL_INBOX === 'true';
-}
 // GATE_PORTAL_ASK_PUSH read at CALL time, strict `=== 'true'`, dark in every environment.
 // Off, a customer's ask inside the app (chat hand-off, service request, late re-ring, estimate change or call request)
 // writes its admin bell row and sends no push, as before.
@@ -9283,11 +9182,6 @@ function portalMessagesLive() {
 // (portal-inbox.js) lists no booking items.
 function portalBookingItemsLive() {
   return process.env.GATE_PORTAL_BOOKING_ITEMS === 'true';
-}
-// GATE_MESSENGER_INBOX read at CALL time, strict `=== 'true'`, dark in every environment.
-// Off, the Messenger poller does nothing and the Messenger tab and routes answer enabled:false / 404.
-function messengerInboxLive() {
-  return process.env.GATE_MESSENGER_INBOX === 'true';
 }
 // GATE_ROUTE_ENGINE_SUMMARY read at CALL time, strict `=== 'true'`, dark in every environment. Off = the route scorecard payload has no
 // engine key. Read-only over the auto-dispatch run and audit tables; sends nothing.
@@ -9350,15 +9244,6 @@ function recapGlassesClipsLive() {
 function techSetTextsLive() {
   return process.env.GATE_TECH_SET_TEXTS === 'true';
 }
-// GATE_EMAIL_DRAFT_FACTS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02). On, the Gmail auto-draft reply
-// (services/email/email-actions.js draftReplyForEmail) gets a FACTS block from our own records for an address-matched
-// customer: upcoming and just-passed visits (exact service name, ET date, arrival window, status, technician first name),
-// the Waves line to call or text, the live-tracking text note, and the texts Waves sent in the last 72 hours
-// (services/email/email-draft-facts.js). Off = the prompt is byte-identical. Drafts never send. Kill = unset.
-function emailDraftFactsLive() {
-  return process.env.GATE_EMAIL_DRAFT_FACTS === 'true';
-}
-
 // GATE_MONDAY_REVIEW_BELL read at CALL time (so a flip needs no redeploy); strict 'true'.
 function mondayReviewBellLive() {
   return process.env.GATE_MONDAY_REVIEW_BELL === 'true';
@@ -9499,14 +9384,10 @@ module.exports.callCancelGuardLive = callCancelGuardLive;
 module.exports.aiChangeCheckLive = aiChangeCheckLive;
 // GATE_SAME_QUESTION_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.sameQuestionCheckLive = sameQuestionCheckLive;
-// GATE_PORTAL_INBOX reader, on its own line so gate PRs never conflict.
-module.exports.portalInboxLive = portalInboxLive;
 // GATE_PORTAL_ASK_PUSH reader, on its own line so gate PRs never conflict.
 module.exports.portalAskPushLive = portalAskPushLive;
 // GATE_PORTAL_BOOKING_ITEMS reader, on its own line so gate PRs never conflict.
 module.exports.portalBookingItemsLive = portalBookingItemsLive;
-// GATE_MESSENGER_INBOX reader, on its own line so gate PRs never conflict.
-module.exports.messengerInboxLive = messengerInboxLive;
 // GATE_ROUTE_ENGINE_SUMMARY reader, on its own line so gate PRs never conflict.
 module.exports.routeEngineSummaryLive = routeEngineSummaryLive;
 // GATE_INSPECTION_REUSE_LEAD_SHELL reader, on its own line so gate PRs never conflict.
@@ -9526,8 +9407,6 @@ module.exports.techInstantAnswersLive = techInstantAnswersLive;
 module.exports.recapGlassesClipsLive = recapGlassesClipsLive;
 // GATE_TECH_SET_TEXTS reader, on its own line so gate PRs never conflict.
 module.exports.techSetTextsLive = techSetTextsLive;
-// GATE_EMAIL_DRAFT_FACTS reader, on its own line so gate PRs never conflict.
-module.exports.emailDraftFactsLive = emailDraftFactsLive;
 // GATE_CONTENT_PII_ALL_LANES reader, on its own line so gate PRs never conflict.
 module.exports.contentPiiAllLanesLive = contentPiiAllLanesLive;
 // GATE_FOLLOWUP_DUE_ALERT reader, on its own line so gate PRs never conflict.
@@ -9536,8 +9415,6 @@ module.exports.followupDueAlertLive = followupDueAlertLive;
 module.exports.mondayReviewBellLive = mondayReviewBellLive;
 // GATE_RESERVICE_ASKS reader, on its own line so gate PRs never conflict.
 module.exports.reserviceAsksLive = reserviceAsksLive;
-// GATE_SMS_SPAM_TAG reader, on its own line so gate PRs never conflict.
-module.exports.smsSpamTagLive = smsSpamTagLive;
 // GATE_IN_PERSON_CARD reader, on its own line so gate PRs never conflict.
 module.exports.inPersonCardLive = inPersonCardLive;
 

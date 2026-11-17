@@ -1,5 +1,5 @@
 /**
- * Portal inbox against live Postgres (GATE_PORTAL_INBOX): the list rules, the
+ * Portal inbox against live Postgres: the list rules, the
  * 14-day split, the staff-made exclusion, the "alert marked Done" hiding rule,
  * and Close all older (one transaction, only rows at or before the cutoff,
  * alerts closed, an audit row, and NO customer email). Every row is synthetic
@@ -102,7 +102,6 @@ maybeDescribe('portal inbox (live Postgres)', () => {
   }, 60000);
 
   afterAll(async () => {
-    delete process.env.GATE_PORTAL_INBOX;
     if (server) await new Promise((resolve) => server.close(resolve));
     if (!db) return;
     await db('notifications').whereIn('id', ids.alerts).del();
@@ -111,7 +110,7 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     await db('customers').whereIn('id', ids.customers).del();
   });
 
-  beforeEach(() => { jest.clearAllMocks(); process.env.GATE_PORTAL_INBOX = 'true'; });
+  beforeEach(() => { jest.clearAllMocks(); });
 
   test('the list holds the last 14 days of open portal chat hand-offs and customer requests, newest first', async () => {
     const recentChat = await chat({ daysOld: 1 });
@@ -224,7 +223,7 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     expect(audit.metadata).toMatchObject({ chats: closed.chats, requests: closed.requests });
   });
 
-  test('the routes answer the same through HTTP: gate on lists, gate off is dark, a recent cutoff is refused', async () => {
+  test('the routes answer through HTTP: the list, the count, and a recent cutoff is refused', async () => {
     const recent = await request({ daysOld: 1 });
     const res = await fetch(base);
     expect(res.status).toBe(200);
@@ -236,9 +235,5 @@ maybeDescribe('portal inbox (live Postgres)', () => {
     const refused = await fetch(`${base}/close-older`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cutoff: ago(10).toISOString() }) });
     expect(refused.status).toBe(400);
     expect((await db('service_requests').where({ id: recent }).first()).status).toBe('new');
-
-    process.env.GATE_PORTAL_INBOX = 'false';
-    expect(await (await fetch(`${base}/summary`)).json()).toEqual({ enabled: false });
-    expect((await fetch(base)).status).toBe(404);
   });
 });

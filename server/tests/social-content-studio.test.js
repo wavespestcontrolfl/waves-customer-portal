@@ -242,11 +242,11 @@ describe('social content studio', () => {
     const orig = process.env.SOCIAL_AUTONOMOUS_CHANNELS;
     try {
       delete process.env.SOCIAL_AUTONOMOUS_CHANNELS;
-      expect(Studio.AUTONOMOUS_FLAGS.channels.slice().sort()).toEqual(['facebook', 'gbp', 'instagram']);
+      expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp']); // the studio trim drops Facebook and Instagram
       process.env.SOCIAL_AUTONOMOUS_CHANNELS = '   ';        // blanked to stop output
       expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual([]);
       process.env.SOCIAL_AUTONOMOUS_CHANNELS = 'gbp, facebook';
-      expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp', 'facebook']);
+      expect(Studio.AUTONOMOUS_FLAGS.channels).toEqual(['gbp']);
     } finally {
       if (orig === undefined) delete process.env.SOCIAL_AUTONOMOUS_CHANNELS;
       else process.env.SOCIAL_AUTONOMOUS_CHANNELS = orig;

@@ -65,7 +65,7 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
   };
   beforeEach(() => { process.env.GATE_PORTAL_BOOKING_ITEMS = 'true'; });
   afterEach(async () => {
-    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_INBOX', 'GATE_PORTAL_ASK_PUSH']) delete process.env[key];
+    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_ASK_PUSH']) delete process.env[key];
     if (db) await cleanUp();
   }, 120000);
   afterAll(async () => { if (db) await cleanUp(); }, 120000);
@@ -260,7 +260,6 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
   });
 
   test('the Portal tab lists the bell as a booking item whose version the bell\'s Done accepts', async () => {
-    process.env.GATE_PORTAL_INBOX = 'true';
     const c = await customer();
     const e = await officeEstimate(c);
     await cardStep(e, ago(90));

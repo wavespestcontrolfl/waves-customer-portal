@@ -1,6 +1,6 @@
 /**
  * Spam TAG for SMS senders (owner 2026-11-02, "mark spam, no alerts, never
- * remove customer texts"), dark behind GATE_SMS_SPAM_TAG.
+ * remove customer texts").
  *
  * The inbox "Mark spam" button used to BLOCK a sender (blocked_numbers, read
  * by middleware/spam-block.js): the webhook then dropped that number's later
@@ -35,13 +35,6 @@ const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { detectHelp } = require('./messaging/opt-out-detector');
 
 const VERDICT_VERSION = 'sms-spam-tag-v1';
-
-// Gate read at call time; a test that replaces feature-gates with a bare mock
-// reads as off, so the inbox keeps working for them.
-function spamTagLive() {
-  const gates = require('../config/feature-gates');
-  return typeof gates.smsSpamTagLive === 'function' && gates.smsSpamTagLive() === true;
-}
 
 function tagError(code, message, details = {}) {
   return Object.assign(new Error(message), { code, details });
@@ -121,7 +114,6 @@ function canTagInbound({
 // keywords and a sender with a customer record; this adds the open-lead check.
 // Throws on a lookup error; the webhook treats that as not tagged.
 async function taggedVerdictForInbound({ phone }) {
-  if (!spamTagLive()) return null;
   const row = await findTaggedSender(phone);
   if (!row) return null;
   if (await findOpenLeadByPhone(phone)) return null;
@@ -332,7 +324,6 @@ async function untagSpamSender({ number, adminUserId = null } = {}) {
 
 module.exports = {
   VERDICT_VERSION,
-  spamTagLive,
   manualVerdict,
   findTaggedSender,
   taggedSenderKeys,

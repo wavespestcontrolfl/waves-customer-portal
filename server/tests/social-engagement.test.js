@@ -82,11 +82,12 @@ describe('fetchEngagement', () => {
   test('facebook: requests the summary fields and parses the counts; token never appears in errors', async () => {
     process.env.FACEBOOK_ACCESS_TOKEN = 'secret-token';
     const fetchFn = jest.fn(async (url) => {
+      if (url.includes('/insights')) return { ok: true, json: async () => ({ data: [] }) };
       expect(url).toContain('https://graph.facebook.com/v25.0/123_456?fields=likes.summary(true),comments.summary(true),shares');
       return { ok: true, json: async () => ({ likes: { summary: { total_count: 8 } }, comments: { summary: { total_count: 1 } } }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '123_456' }, { fetchFn }))
-      .resolves.toEqual({ likes: 8, comments: 1, shares: 0 });
+      .resolves.toEqual({ likes: 8, comments: 1, shares: 0, reach: null, views: null, reachUnavailable: null });
 
     const failing = jest.fn(async () => ({ ok: false, status: 400, json: async () => ({ error: { message: 'Unsupported get request' } }) }));
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '1' }, { fetchFn: failing }))
@@ -110,7 +111,7 @@ describe('fetchEngagement', () => {
       return { ok: true, status: 200, json: async () => ({ likes: { summary: { total_count: 5 } }, comments: { summary: { total_count: 2 } } }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '987', mediaType: 'video' }, { fetchFn }))
-      .resolves.toEqual({ likes: 5, comments: 2, shares: null });
+      .resolves.toEqual({ likes: 5, comments: 2, shares: null, reach: null, views: null, reachUnavailable: null });
   });
 
   test('instagram: media fields + insights shares; an unavailable insight leaves shares null', async () => {
@@ -120,14 +121,14 @@ describe('fetchEngagement', () => {
       return { ok: true, status: 200, json: async () => ({ like_count: 19, comments_count: 3 }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: ok }))
-      .resolves.toEqual({ likes: 19, comments: 3, shares: 4 });
+      .resolves.toEqual({ likes: 19, comments: 3, shares: 4, reach: null, views: null, reachUnavailable: null });
 
     const noInsight = jest.fn(async (url) => {
       if (url.includes('/insights')) return { ok: false, status: 400, json: async () => ({ error: { message: 'Unsupported metric' } }) };
       return { ok: true, status: 200, json: async () => ({ like_count: 1, comments_count: 0 }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: noInsight }))
-      .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'unsupported' });
+      .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'unsupported', reach: null, views: null, reachUnavailable: 'unsupported' });
 
     // A missing instagram_manage_insights scope is reported distinctly so the
     // sweep can surface it (the token procedure lists the scope).
@@ -136,7 +137,7 @@ describe('fetchEngagement', () => {
       return { ok: true, status: 200, json: async () => ({ like_count: 1, comments_count: 0 }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: denied }))
-      .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'permission' });
+      .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'permission', reach: null, views: null, reachUnavailable: 'permission' });
 
     // A TRANSIENT insights failure (5xx / timeout / malformed body) is NOT
     // "unsupported" — the whole target fails so last_error and job health see it.
@@ -175,9 +176,8 @@ describe('fetchEngagement', () => {
   });
 });
 
-describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
+describe('reach and views', () => {
   const prevToken = process.env.FACEBOOK_ACCESS_TOKEN;
-  const prevGate = process.env.GATE_SOCIAL_REACH_INGEST;
   const logger = require('../services/logger');
   const ok = (body) => ({ ok: true, status: 200, json: async () => body });
   const refuse = (status, message) => ({ ok: false, status, json: async () => ({ error: { message } }) });
@@ -202,14 +202,11 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
 
   beforeEach(() => {
     process.env.FACEBOOK_ACCESS_TOKEN = 'secret-token';
-    delete process.env.GATE_SOCIAL_REACH_INGEST;
     logger.warn.mockClear();
   });
   afterEach(() => {
     if (prevToken === undefined) delete process.env.FACEBOOK_ACCESS_TOKEN;
     else process.env.FACEBOOK_ACCESS_TOKEN = prevToken;
-    if (prevGate === undefined) delete process.env.GATE_SOCIAL_REACH_INGEST;
-    else process.env.GATE_SOCIAL_REACH_INGEST = prevGate;
   });
 
   test('parsers read the Meta metric names and treat a missing metric as not measured (null), a measured zero as 0', () => {
@@ -227,17 +224,7 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
     expect(Engagement.parseFacebookReach({ data: [{ name: 'post_impressions_unique', values: [{ value: 9 }] }] })).toEqual({ reach: null, views: null });
   });
 
-  test('gate off: no reach insights call and the same result shape as before', async () => {
-    const { fetchFn, urls } = graph();
-    await expect(Engagement.fetchEngagement(fbTarget, { fetchFn })).resolves.toEqual({ likes: 8, comments: 1, shares: 2 });
-    await expect(Engagement.fetchEngagement(igTarget, { fetchFn })).resolves.toEqual({ likes: 19, comments: 3, shares: 4 });
-    // Facebook: the one counts call. Instagram: the media call + the shares insight. Nothing else.
-    expect(urls).toHaveLength(3);
-    expect(urls.some((u) => /reach|post_total_media_view_unique|post_media_view|views/.test(u))).toBe(false);
-  });
-
-  test('gate on: Facebook reach = post_total_media_view_unique, views = post_media_view; no removed impressions metric', async () => {
-    process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+  test('Facebook reach = post_total_media_view_unique, views = post_media_view; no removed impressions metric', async () => {
     const { fetchFn, urls } = graph({ fbInsights: () => ok({ data: [
       { name: 'post_total_media_view_unique', period: 'lifetime', values: [{ value: 940 }] },
       { name: 'post_media_view', period: 'lifetime', values: [{ value: 1310 }] },
@@ -250,8 +237,7 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
     expect(insights[0]).not.toContain('impressions');
   });
 
-  test('gate on: Instagram reach and views come from reach,views insights; the shares path is unchanged', async () => {
-    process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+  test('Instagram reach and views come from reach,views insights; the shares path is unchanged', async () => {
     const { fetchFn, urls } = graph({ igInsights: () => ok({ data: [
       { name: 'reach', values: [{ value: 55 }] },
       { name: 'views', values: [{ value: 70 }] },
@@ -262,16 +248,14 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
     expect(urls.join(' ')).not.toMatch(/impressions|plays|video_views/);
   });
 
-  test('gate on: a Facebook video target is not measured and asks Graph nothing for reach', async () => {
-    process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+  test('a Facebook video target is not measured and asks Graph nothing for reach', async () => {
     const { fetchFn, urls } = graph();
     const counts = await Engagement.fetchEngagement({ ...fbTarget, mediaType: 'video' }, { fetchFn });
     expect(counts).toMatchObject({ reach: null, views: null, reachUnavailable: null });
     expect(urls.some((u) => u.includes('/insights'))).toBe(false);
   });
 
-  test('gate on: an unsupported metric or a permission error leaves reach and views null; likes and shares still sync', async () => {
-    process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+  test('an unsupported metric or a permission error leaves reach and views null; likes and shares still sync', async () => {
     const unsupported = graph({ fbInsights: () => refuse(400, '(#100) The value must be a valid insights metric'), igInsights: () => refuse(400, 'Unsupported metric') });
     await expect(Engagement.fetchEngagement(fbTarget, { fetchFn: unsupported.fetchFn }))
       .resolves.toEqual({ likes: 8, comments: 1, shares: 2, reach: null, views: null, reachUnavailable: 'unsupported' });
@@ -285,8 +269,7 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
       .resolves.toMatchObject({ likes: 19, reach: null, views: null, reachUnavailable: 'permission' });
   });
 
-  test('gate on: a transient reach error (5xx, malformed body) never fails the likes and comments fetch', async () => {
-    process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+  test('a transient reach error (5xx, malformed body) never fails the likes and comments fetch', async () => {
     const flaky = graph({
       fbInsights: () => refuse(503, 'Service temporarily unavailable'),
       igInsights: () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } }),
@@ -298,7 +281,6 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
   });
 
   describe('sweep and upsert', () => {
-    const feature = require('../config/feature-gates');
     const db = require('../models/db');
     const linkedin = require('../services/linkedin');
     let stored; let inserts; let selects;
@@ -343,9 +325,7 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
 
     const reachWarnings = () => logger.warn.mock.calls.map((c) => c[0]).filter((m) => /reach\/views/.test(m));
 
-    test('gate on: reach and views are upserted for Facebook and Instagram, and the readers agree with the gate', async () => {
-      process.env.GATE_SOCIAL_REACH_INGEST = 'true';
-      expect(feature.socialReachIngestLive()).toBe(true);
+    test('reach and views are upserted for Facebook and Instagram', async () => {
       fakeDb(postsRow);
       const { fetchFn } = graph({
         fbInsights: () => ok({ data: [{ name: 'post_total_media_view_unique', values: [{ value: 940 }] }, { name: 'post_media_view', values: [{ value: 1310 }] }] }),
@@ -358,23 +338,7 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
       expect(reachWarnings()).toHaveLength(0);
     });
 
-    test('gate off: the insert has no reach or views column and the prior values are never read', async () => {
-      expect(feature.socialReachIngestLive()).toBe(false);
-      fakeDb(postsRow);
-      const { fetchFn, urls } = graph();
-      const summary = await Engagement.syncRecentEngagement({ fetchFn });
-      expect(summary).toEqual({ posts: 1, targets: 2, synced: 2, failed: 0, skippedTargets: 0, sharesPermissionDenied: 0 });
-      expect(inserts).toHaveLength(2);
-      for (const row of inserts) {
-        expect(Object.keys(row)).not.toContain('reach');
-        expect(Object.keys(row)).not.toContain('views');
-      }
-      expect(selects).toHaveLength(0);
-      expect(urls.some((u) => /post_total_media_view_unique|metric=reach/.test(u))).toBe(false);
-    });
-
-    test('gate on: not measured is NULL, a later not-measured fetch keeps the prior value, and a permission error warns once per sweep naming the scope', async () => {
-      process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+    test('not measured is NULL, a later not-measured fetch keeps the prior value, and a permission error warns once per sweep naming the scope', async () => {
       fakeDb(postsRow);
       const denied = graph({
         fbInsights: () => refuse(403, '(#10) This endpoint requires the read_insights permission'),
@@ -403,8 +367,7 @@ describe('reach and views (GATE_SOCIAL_REACH_INGEST)', () => {
       expect(reachWarnings()).toHaveLength(1);
     });
 
-    test('gate on: a measured zero is stored as 0, not null', async () => {
-      process.env.GATE_SOCIAL_REACH_INGEST = 'true';
+    test('a measured zero is stored as 0, not null', async () => {
       fakeDb(postsRow);
       const { fetchFn } = graph({
         fbInsights: () => ok({ data: [{ name: 'post_total_media_view_unique', values: [{ value: 0 }] }, { name: 'post_media_view', values: [{ value: 0 }] }] }),

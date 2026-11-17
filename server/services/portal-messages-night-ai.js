@@ -57,13 +57,11 @@ const HAND_OFF_REPLY = 'Thanks for your message. A member of our team will answe
 const OFFICE_OPEN_HOUR = 8;
 const OFFICE_CLOSE_HOUR = 20;
 
-// Needs the portal messages and the Portal tab on (the thread is the office's item), and Ask Waves on (the
-// portal assistant's own switch), as well as the gate. Read at call time. The office-hours step-in
+// Needs the portal messages on, and Ask Waves on (the portal assistant's own switch), as well as the gate. Read at call time. The office-hours step-in
 // (portal-messages-day-ai.js) asks the same question of its own gate.
 function enabled(gate = featureGates.portalMessagesNightAiLive) {
   return Boolean(gate?.())
     && Boolean(featureGates.portalMessagesLive?.())
-    && Boolean(featureGates.portalInboxLive?.())
     && Boolean(featureGates.portalChatSelfServeLive?.());
 }
 
