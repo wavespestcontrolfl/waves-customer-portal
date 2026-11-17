@@ -33,14 +33,13 @@
  * not asked again. An "I left a review" text is not read here: one misread text would stop asks for
  * good, so it only counts inside the matcher, next to a real review with a related name.
  *
- * Tap pause (GATE_REVIEW_TAP_PAUSE, owner 2026-11-02): tapPauseActive says a tap in the last 180 days
+ * Tap pause (owner 2026-11-02): tapPauseActive says a tap in the last 180 days
  * pauses AUTOMATIC asks whatever visit it answered. review-request.js reads it where a visit enrolls
  * an ask, where an automatic cadence sends, where a queued automatic ask sends (tapPauseForRequest)
  * and before a Day-3 follow-up; staff sends by hand and a link the customer asked for are untouched.
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
-const { reviewTapPauseLive } = require('../config/feature-gates');
 
 // A date-only visit column is that ET calendar day, so the fallback anchor is
 // ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -108,11 +107,11 @@ async function reviewLinkClickedSince(customerId, since, database = db) {
   return Boolean(row);
 }
 
-// GATE_REVIEW_TAP_PAUSE (owner 2026-11-02, D3): a tracked review-link tap in the last
+// Tap pause (owner 2026-11-02, D3): a tracked review-link tap in the last
 // REVIEW_TAP_PAUSE_DAYS pauses automatic review asks, whatever visit the tap answered.
 const REVIEW_TAP_PAUSE_DAYS = 180;
 async function tapPauseActive(customerId, database = db) {
-  if (!customerId || !reviewTapPauseLive()) return false;
+  if (!customerId) return false;
   return reviewLinkClickedSince(customerId, new Date(Date.now() - REVIEW_TAP_PAUSE_DAYS * 24 * 60 * 60 * 1000), database);
 }
 // A queued ask row the pause covers: an automatic one (review_requests.triggered_by, default
@@ -125,9 +124,9 @@ async function tapPauseForRequest(request, database = db) {
 }
 // The pause for an ask known only by its id: a completion text's bundled ask, judged at send time
 // (review-ask-dispatch.js clickGate), where the visit-anchored click guard lets a tap from before
-// this visit through. Off: false before any read.
+// this visit through.
 async function tapPauseForRequestId(reviewRequestId, database = db) {
-  if (!reviewRequestId || !reviewTapPauseLive()) return false;
+  if (!reviewRequestId) return false;
   const request = await database('review_requests').where({ id: reviewRequestId })
     .first('id', 'customer_id', 'service_record_id', 'sequence_id', 'triggered_by');
   return tapPauseForRequest(request, database);

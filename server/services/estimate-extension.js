@@ -297,7 +297,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       err.statusCode = 409;
       throw err;
     }
-    // …and a staff loss reason (the Pick reason on an expired offer, GATE_ESTIMATE_CALL_LIST) goes
+    // …and a staff loss reason (the Pick reason on an expired offer) goes
     // too, with the competitor fields and the legacy decline_reason label that path wrote beside it.
     // Judged on the LOCKED row, never the caller's snapshot (codex pre-push P1): a reason saved
     // after the snapshot was read is cleared as well, and one saved after this lock waits for it and

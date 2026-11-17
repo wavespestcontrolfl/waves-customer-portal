@@ -92,7 +92,7 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
   );
 }
 
-// `reasonOnly` (GATE_ESTIMATE_CALL_LIST, "Pick reason"): the same reasons and fields, but it PATCHes
+// `reasonOnly` (the call list's "Pick reason"): the same reasons and fields, but it PATCHes
 // only { disposition, competitorName, competitorPrice, dispositionNote } with no status, so an
 // expired offer keeps its status and gains the staff loss reason.
 export function reasonOnlyPayload(fields) {

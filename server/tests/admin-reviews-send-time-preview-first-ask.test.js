@@ -80,23 +80,6 @@ describe('GET /admin/reviews/send-time-preview, first review ask', () => {
   });
 });
 
-// GATE_REVIEW_ASK_AT_VISIT (owner 2026-11-01): the preview names the switch, so the completion panel stops saying
-// that an unpaid invoice's review text waits for the payment. Gate off: the key is absent.
-describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ASK_AT_VISIT', () => {
-  const askAtVisitWas = process.env.GATE_REVIEW_ASK_AT_VISIT;
-  afterEach(() => { if (askAtVisitWas === undefined) delete process.env.GATE_REVIEW_ASK_AT_VISIT; else process.env.GATE_REVIEW_ASK_AT_VISIT = askAtVisitWas; });
-
-  test('gate off: no askAtVisit key', async () => {
-    delete process.env.GATE_REVIEW_ASK_AT_VISIT;
-    expect(await preview({ serviceType: 'Pest' })).not.toHaveProperty('askAtVisit');
-  });
-
-  test('gate on: askAtVisit true', async () => {
-    process.env.GATE_REVIEW_ASK_AT_VISIT = 'true';
-    expect((await preview({ serviceType: 'Pest' })).askAtVisit).toBe(true);
-  });
-});
-
 // GATE_REVIEW_ALREADY_REVIEWED (owner 2026-11-04): with a visit named, the preview also says whether the customer is
 // marked as already reviewed and which off reasons a first ask may carry. Gate off, or no visit named: both keys absent.
 describe('GET /admin/reviews/send-time-preview with GATE_REVIEW_ALREADY_REVIEWED', () => {
