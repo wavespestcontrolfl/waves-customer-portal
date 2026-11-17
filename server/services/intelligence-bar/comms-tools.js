@@ -1192,6 +1192,26 @@ function searchExcerpt(transcript, search) {
   return transcript.slice(start, start + 300);
 }
 
+// Structured facts from the call's V2 extraction and forwarding metadata: codes
+// and flags only, no text a caller or the model wrote. The extraction is read
+// only from a row that passed its schema (v2_extraction_status 'valid'), so each
+// code is one of the schema's own enum values; every other row reads null.
+function callStructuredFacts(c) {
+  const en = (c.v2_extraction_status === 'valid' && safeJson(c.ai_extraction_enriched)) || {};
+  const meta = safeJson(c.metadata) || {};
+  const pick = (value) => (value === undefined ? null : value);
+  return {
+    answered_by: pick(meta.forward_acceptance?.csr_name),
+    call_nature: pick(en.call_nature),
+    disposition: pick(en.recommended_disposition),
+    visit_status: pick(en.scheduling?.status),
+    quote_promised: pick(en.service_request?.quote_promised),
+    service_category: pick(en.service_request?.primary_service_category),
+    voicemail: pick(en.meta?.is_voicemail),
+    spam: pick(en.meta?.is_spam),
+  };
+}
+
 async function getCallLog(input) {
   const { direction, has_recording, has_transcript, customer_name, days_back = 7, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 50);
@@ -1253,6 +1273,7 @@ async function getCallLog(input) {
       duration_seconds: c.duration_seconds,
       has_recording: !!(c.recording_url),
       has_transcript: !!(c.transcription),
+      ...callStructuredFacts(c),
       transcript_excerpt: c.transcription ? c.transcription.substring(0, 200) : null,
       ...(input.search && c.transcription ? { match_excerpt: searchExcerpt(c.transcription, input.search) } : {}),
       ...(input.call_id ? {
