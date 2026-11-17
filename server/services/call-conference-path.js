@@ -331,15 +331,15 @@ async function closeForCallerEnd(callSid) {
 // 'answered', so the outcome comes from the claim. Talk time counts from the press 1, as a bridged
 // <Dial>'s DialCallDuration does today.
 async function conferenceDialOutcome(callSid, confStatus) {
-  if (VOICEMAIL_STATUSES.has(confStatus)) return { status: confStatus, duration: 0 };
+  if (VOICEMAIL_STATUSES.has(confStatus)) return { status: confStatus, duration: 0, accepted: false };
   const acceptedAt = Date.parse((await loadState(callSid))?.accepted_at || '');
   if (Number.isFinite(acceptedAt)) {
-    return { status: 'completed', duration: Math.max(0, Math.round((Date.now() - acceptedAt) / 1000)) };
+    return { status: 'completed', duration: Math.max(0, Math.round((Date.now() - acceptedAt) / 1000)), accepted: true };
   }
   // The caller left the room with no press 1 and no redirect (a join error): stop the ring first.
   await claimVoicemail(callSid)
     .catch((err) => logger.warn(`[conference] ring not stopped for ${masked(callSid)} (${errorCode(err)})`));
-  return { status: 'no-answer', duration: 0 };
+  return { status: 'no-answer', duration: 0, accepted: false };
 }
 
 module.exports = {

@@ -273,8 +273,9 @@ describe('/conference-staff-status', () => {
 
 describe('/call-complete?conf=1', () => {
   test('an answered conference call: completed, human, talk time from the claim, no voicemail', async () => {
-    const { update } = primeDb({ row: { metadata: { forward_acceptance: { accepted: true, parent_call_sid: SID } } } });
-    cp.conferenceDialOutcome.mockResolvedValue({ status: 'completed', duration: 42 });
+    // No forward_acceptance on the row (its stamp failed): the press-1 claim alone marks the call answered.
+    const { update } = primeDb({ row: { metadata: {} } });
+    cp.conferenceDialOutcome.mockResolvedValue({ status: 'completed', duration: 42, accepted: true });
     const res = await post('/call-complete', { body: { CallSid: SID, DialCallStatus: 'answered' }, query: { conf: '1' } });
     expect(cp.conferenceDialOutcome).toHaveBeenCalledWith(SID, undefined);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', answered_by: 'human' }));
@@ -284,7 +285,7 @@ describe('/call-complete?conf=1', () => {
 
   test('the no-answer redirect: today\'s voicemail path', async () => {
     const { update } = primeDb();
-    cp.conferenceDialOutcome.mockResolvedValue({ status: 'no-answer', duration: 0 });
+    cp.conferenceDialOutcome.mockResolvedValue({ status: 'no-answer', duration: 0, accepted: false });
     const res = await post('/call-complete', { body: { CallSid: SID }, query: { conf: '1', conf_status: 'no-answer' } });
     expect(cp.conferenceDialOutcome).toHaveBeenCalledWith(SID, 'no-answer');
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'no-answer', answered_by: 'voicemail', call_outcome: 'voicemail' }));

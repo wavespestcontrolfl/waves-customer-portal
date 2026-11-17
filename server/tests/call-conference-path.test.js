@@ -346,15 +346,15 @@ describe('/call-complete outcome', () => {
   test('answered: completed, talk time from the press 1; a voicemail redirect keeps its status', async () => {
     jest.useFakeTimers({ now: Date.parse('2026-11-17T15:00:42Z') });
     fakeCallLog({ conference_path: { accepted_at: '2026-11-17T15:00:00Z' } });
-    expect(await cp.conferenceDialOutcome(SID, undefined)).toEqual({ status: 'completed', duration: 42 });
-    expect(await cp.conferenceDialOutcome(SID, 'no-answer')).toEqual({ status: 'no-answer', duration: 0 });
-    expect(await cp.conferenceDialOutcome(SID, 'canceled')).toEqual({ status: 'completed', duration: 42 });
+    expect(await cp.conferenceDialOutcome(SID, undefined)).toEqual({ status: 'completed', duration: 42, accepted: true });
+    expect(await cp.conferenceDialOutcome(SID, 'no-answer')).toEqual({ status: 'no-answer', duration: 0, accepted: false });
+    expect(await cp.conferenceDialOutcome(SID, 'canceled')).toEqual({ status: 'completed', duration: 42, accepted: true });
   });
 
   test('no press 1 and no redirect (a join error): no-answer, and the ring stops', async () => {
     const row = fakeCallLog(ringing());
     const log = fakeTwilio();
-    expect(await cp.conferenceDialOutcome(SID, undefined)).toEqual({ status: 'no-answer', duration: 0 });
+    expect(await cp.conferenceDialOutcome(SID, undefined)).toEqual({ status: 'no-answer', duration: 0, accepted: false });
     expect(row.metadata.conference_path.voicemail_at).toEqual(expect.any(String));
     expect(log.updates).toEqual([{ sid: LEG0, status: 'completed' }, { sid: LEG1, status: 'completed' }]);
   });

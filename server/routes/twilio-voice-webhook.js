@@ -1723,9 +1723,11 @@ router.post('/call-complete', async (req, res) => {
 
     let duration = parseInt(DialCallDuration || CallDuration || 0);
     let status = DialCallStatus || 'completed';
-    // The conference ring's caller leg (GATE_CALL_CONFERENCE_PATH): the claim decides the outcome.
-    if (req.query.conf === '1') ({ status, duration } = await conferencePath.conferenceDialOutcome(CallSid, req.query.conf_status));
-    const forwardAccepted = await wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
+    let claimAccepted = false;
+    // The conference ring's caller leg (GATE_CALL_CONFERENCE_PATH): the claim decides the outcome, and
+    // its durable press-1 claim counts as accepted even when the forward_acceptance stamp failed.
+    if (req.query.conf === '1') ({ status, duration, accepted: claimAccepted } = await conferencePath.conferenceDialOutcome(CallSid, req.query.conf_status));
+    const forwardAccepted = claimAccepted || await wasForwardAccepted({ parentCallSid: CallSid, dialCallSid: DialCallSid });
     const { shouldRecordVoicemail, answeredBy } = resolveInboundDialCompletion({
       status,
       duration,
