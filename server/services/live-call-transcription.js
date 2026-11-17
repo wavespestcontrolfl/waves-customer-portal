@@ -327,6 +327,12 @@ async function recordLiveTranscriptionEvent(body = {}) {
   return { stored: false, reason: event };
 }
 
+// QUARANTINED_SQL's predicate without its column alias, for a WHERE clause. Readers of a call's live text outside
+// this file (live-call-early-summary.js) check it, so the quarantine rule stays in one place: the purge stamped
+// quarantined_at, or the recording's own scrub flagged a card number (transcription_metadata.pan_detected), which
+// can land before its purge has run.
+const QUARANTINE_WHERE_SQL = QUARANTINED_SQL.replace(/ AS quarantined$/, '');
+
 /**
  * The post-call card-number quarantine found a card number on this call: drop its live text too.
  * The live scrub ran on a different transcript, so it may have missed what the post-call scrub saw.
@@ -376,6 +382,7 @@ async function purgeQuarantinedLiveText({ limit = 25 } = {}) {
 
 module.exports = {
   startLiveTranscription,
+  QUARANTINE_WHERE_SQL,
   recordLiveTranscriptionEvent,
   purgeLiveUtterances,
   purgeQuarantinedLiveText,

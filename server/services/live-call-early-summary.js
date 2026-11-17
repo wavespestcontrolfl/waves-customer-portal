@@ -52,13 +52,19 @@ function mergeLiveState(patch) {
   );
 }
 
+// The call's live text is in card-number quarantine: the live-text module's one rule (quarantined_at, or the
+// recording scrub's transcription_metadata.pan_detected, which can land before its purge runs). Required lazily:
+// that module requires this one from its stopped-event hook.
+const notQuarantinedSql = () => `NOT ${require('./live-call-transcription').QUARANTINE_WHERE_SQL}`;
+
 // Claims the call's one run: of two stopped events, one UPDATE matches. A call the recording pipeline already
-// processed (ai_extraction set) is skipped: its own summary is there.
+// processed (ai_extraction set) is skipped: its own summary is there. A quarantined call is never claimed.
 async function claim(callSid, now) {
   const won = await db('call_log')
     .where('twilio_call_sid', callSid)
     .whereNull('ai_extraction')
     .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
+    .whereRaw(notQuarantinedSql())
     .whereRaw("(metadata -> 'live_transcription' ->> 'early_summary_claimed_at') IS NULL")
     .update({ metadata: mergeLiveState({ early_summary_claimed_at: now.toISOString() }) });
   return won > 0;
@@ -114,14 +120,22 @@ async function summarize(transcript) {
   }
 }
 
+// Re-read right before the model call: a card number the recording scrub flagged after the claim keeps the text
+// from the model. true = quarantined (or the row is gone).
+async function quarantinedNow(callSid) {
+  const row = await db('call_log').where('twilio_call_sid', callSid).whereRaw(notQuarantinedSql()).first('id');
+  return !row;
+}
+
 // Saved only while the call is not quarantined and its live text still exists. A quarantine stamps quarantined_at,
 // deletes the text and drops the summary in one transaction; a save waiting on that row lock is re-checked against
-// the stamped row, so a summary that finishes during or after a quarantine is never saved.
+// the stamped row, so a summary that finishes during or after a quarantine is never saved. The recording scrub's
+// pan_detected flag, which can land before that purge runs, blocks the save too.
 async function saveSummary(callSid, summary, now) {
   const saved = await db('call_log')
     .where('twilio_call_sid', callSid)
     .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-    .whereRaw("(metadata -> 'live_transcription' ->> 'quarantined_at') IS NULL")
+    .whereRaw(notQuarantinedSql())
     .whereRaw('EXISTS (SELECT 1 FROM call_live_utterances WHERE call_sid = ?)', [callSid])
     .update({ metadata: mergeLiveState({ early_summary: { text: summary, at: now.toISOString(), model: MODELS.LIVE_CALL } }) });
   return saved > 0;
@@ -137,6 +151,7 @@ async function writeEarlySummary(callSid, { now = () => new Date() } = {}) {
     if (!(await claim(callSid, now()))) return { written: false, reason: 'not_claimed' };
     const { text, utterances } = await transcriptFor(callSid);
     if (utterances < MIN_UTTERANCES) return { written: false, reason: 'too_short' };
+    if (await quarantinedNow(callSid)) return { written: false, reason: 'quarantined' };
     const summary = await summarize(text);
     if (!summary) return { written: false, reason: 'no_summary' };
     return { written: await saveSummary(callSid, summary, now()), reason: null };

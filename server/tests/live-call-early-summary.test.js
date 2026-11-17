@@ -37,17 +37,25 @@ jest.mock('../models/db', () => {
       if (q.nulls.includes('ai_extraction') && state.call.ai_extraction != null) return 0;
       if (q.raws.some((r) => r.sql.includes('early_summary_claimed_at') && r.sql.includes('IS NULL')) && live().early_summary_claimed_at) return 0;
       if (q.raws.some((r) => r.sql.includes('EXISTS (SELECT 1 FROM call_live_utterances')) && state.utterances.length === 0) return 0;
-      if (q.raws.some((r) => r.sql.includes("->> 'quarantined_at') IS NULL")) && live().quarantined_at) return 0;
+      if (blockedByQuarantine(q)) return 0;
       Object.assign(live(), JSON.parse(bindings[0]));
       return 1;
     });
+    q.first = jest.fn(async () => (state.call && !blockedByQuarantine(q) ? { id: state.call.id } : undefined));
     return q;
   }
+  // The shared predicate (live-call-transcription QUARANTINE_WHERE_SQL): quarantined_at, or the recording scrub's
+  // transcription_metadata.pan_detected.
+  const quarantined = () => Boolean(live().quarantined_at) || String(state.call.transcription_metadata?.pan_detected) === 'true';
+  const blockedByQuarantine = (q) => q.raws.some((r) => r.sql.startsWith('NOT ') && r.sql.includes('pan_detected')) && quarantined();
   function utterances() {
     const q = {};
     q.where = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
-    q.select = jest.fn(async () => [...state.utterances].sort((a, b) => a.spoken_at - b.spoken_at || a.id - b.id));
+    q.select = jest.fn(async () => {
+      if (state.onTranscriptRead) state.onTranscriptRead();
+      return [...state.utterances].sort((a, b) => a.spoken_at - b.spoken_at || a.id - b.id);
+    });
     q.del = jest.fn(async () => { const n = state.utterances.length; state.utterances = []; return n; });
     return q;
   }
@@ -69,11 +77,13 @@ const SID = 'CA' + 'c'.repeat(32);
 const T0 = Date.UTC(2026, 10, 17, 15, 0, 0);
 const NOW = () => new Date(T0 + 60 * 1000);
 
-function setCall({ aiExtraction = null, liveState = {} } = {}) {
+function setCall({ aiExtraction = null, liveState = {}, transcriptionMetadata = null } = {}) {
+  db.__state.onTranscriptRead = null;
   db.__state.call = {
     id: 'log-1',
     twilio_call_sid: SID,
     ai_extraction: aiExtraction,
+    transcription_metadata: transcriptionMetadata,
     metadata: { live_transcription: { live_at: new Date(T0).toISOString(), stopped_at: new Date(T0 + 50000).toISOString(), ...liveState } },
   };
 }
@@ -172,8 +182,42 @@ describe('writeEarlySummary', () => {
   // The race the quarantine stamp closes: a save whose EXISTS check ran on a snapshot taken before the purge
   // committed still sees the text, so the stamped row itself must refuse it.
   test('a save on a quarantined call is refused even while its text is still visible', async () => {
+    mockCreate.mockImplementationOnce(async () => {
+      db.__state.call.metadata.live_transcription.quarantined_at = new Date(T0 + 55000).toISOString();
+      return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'The caller has ants again.' }] };
+    });
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: null });
+    expect(db.__state.utterances.length).toBeGreaterThan(0);
+    expect(saved()).toBeUndefined();
+  });
+
+  test('a call quarantined before its run is never claimed and never sent to the model', async () => {
     setCall({ liveState: { quarantined_at: new Date(T0).toISOString() } });
-    reply('The caller has ants again.');
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: 'not_claimed' });
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  // The recording pipeline stamps transcription_metadata.pan_detected before it tries the purge, and a failed
+  // purge waits for the 5-minute retry: in that gap quarantined_at is absent and the live text is still there.
+  test('a call the recording scrub flagged, before its purge ran, is never claimed and never sent to the model', async () => {
+    setCall({ transcriptionMetadata: { pan_detected: true } });
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: 'not_claimed' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(saved()).toBeUndefined();
+  });
+
+  test('a pan_detected flag that lands after the claim keeps the text from the model', async () => {
+    db.__state.onTranscriptRead = () => { db.__state.call.transcription_metadata = { pan_detected: 'true' }; };
+    expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: 'quarantined' });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(saved()).toBeUndefined();
+  });
+
+  test('a pan_detected flag that lands during the model call blocks the save', async () => {
+    mockCreate.mockImplementationOnce(async () => {
+      db.__state.call.transcription_metadata = { pan_detected: true };
+      return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'The caller read a card number.' }] };
+    });
     expect(await early.writeEarlySummary(SID, { now: NOW })).toEqual({ written: false, reason: null });
     expect(saved()).toBeUndefined();
   });
