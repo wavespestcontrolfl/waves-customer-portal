@@ -60,6 +60,11 @@
  * resumeOutsideCardWindow, as this module's lease holder, and never inside a window whose pause was sent.
  * A window past its end is committed as this module's own pending resume before that request is sent, so
  * a card trigger while it is in flight turns it into a pause, and a lost outcome is finished here.
+ * The hold pauses this recording too (its star). Every decision here reads the hold's wanted phase from
+ * the same row, under this lock. While the hold holds the caller ('held'): a window end sends no resume
+ * (the hold's return resumes the recording), a resume decided before the hold becomes a pause, a resume
+ * that lands as a hold starts is followed by a pause, and the hold's own resume is not sent. So the
+ * recording runs again only once both the card window and the hold are over.
  *
  * Risk: if a resume fails, the rest of that call's recording is silent and the post-call transcript
  * loses it. The gate is the instant off switch: off starts no new pause, and a running pause still
@@ -144,20 +149,25 @@ function cardPauseOf(row) {
   return value && typeof value === 'object' ? value : {};
 }
 
+// The card pause, and the star-key hold's wanted phase (call-hold.js) from the same row.
 function readCardPauseRow(conn, callSid) {
   return conn('call_log')
     .where('twilio_call_sid', callSid)
     .whereRaw("(metadata -> 'live_transcription') IS NOT NULL")
-    .first(conn.raw("metadata -> 'live_transcription' -> 'card_pause' AS card_pause"));
+    .first(
+      conn.raw("metadata -> 'live_transcription' -> 'card_pause' AS card_pause"),
+      conn.raw("metadata #>> '{conference_path,hold,phase}' AS hold_phase"),
+    );
 }
 
-// Run one decision under the per-call advisory lock; commit before any Twilio request is sent.
+// Run one decision under the per-call advisory lock; commit before any Twilio request is sent. fn also gets
+// { holdHeld }: the star-key hold holds the caller, so the recording must stay paused.
 async function withCallLock(callSid, fn) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`live_card_pause:${callSid}`]);
     const row = await readCardPauseRow(trx, callSid);
     if (!row) return { action: 'none', reason: 'not_started_here' };
-    return fn(trx, cardPauseOf(row));
+    return fn(trx, cardPauseOf(row), { holdHeld: row.hold_phase === 'held' });
   });
 }
 
@@ -177,39 +187,54 @@ async function stampCardPause(conn, callSid, next) {
 // Open = the recording is, or may still be, paused: no resume has been confirmed yet.
 const isPaused = (state) => !!state.paused_at && !state.resumed_at;
 
+// The request the window needs now, from the state and the time (the same split as call-hold.js nextStep): { kind:
+// 'pause' | 'resume' | null, next, dueAtMs } with the state to commit with it, or { done, next } when nothing is sent (a
+// window closed with nothing to undo, or one the hold keeps paused). forHold: a pause the hold wants too.
+function wantedStep(state, nowMs, slackMs, holdHeld) {
+  const dueAtMs = new Date(state.resume_due_at).getTime();
+  const kind = state.pending || null;
+  if (dueAtMs - slackMs > nowMs) return { kind, next: state, dueAtMs };
+  if (holdHeld) {
+    // The star-key hold holds the caller: whatever this window's end says, the recording stays paused, and the hold's
+    // return resumes it (resumeOutsideCardWindow). A resume decided before the hold is replaced by a pause, and a pause
+    // still wanted goes out even with the gate off (it is the hold's too). Nothing is re-armed (no dueAtMs): the hold's
+    // return, a later pass or the sweep moves the window on.
+    if (kind === 'resume') return { kind: 'pause', next: { ...state, pending: 'pause' }, dueAtMs, forHold: true };
+    if (kind === 'pause') return { kind, next: state, dueAtMs, forHold: true };
+    return { done: { action: 'hold_keeps_paused' }, next: state };
+  }
+  if (kind === 'resume') return { kind, next: state, dueAtMs };
+  // No pause request was ever sent and the window is over: there is nothing to undo.
+  if (kind === 'pause' && !state.pause_sent) {
+    return { done: { action: 'none', reason: 'pause_not_sent' }, next: { ...state, resumed_at: new Date(nowMs).toISOString(), pending: null } };
+  }
+  // Whatever the recording is doing, it must run again now (a resume of a running one is harmless).
+  return { kind: 'resume', next: { ...state, pending: 'resume' }, dueAtMs };
+}
+
 // Decide what request this call needs next (if any), from the state as it is now. Returns the answer
 // and the state to commit with it: a send also takes or renews this pass's lease; any answer that
 // sends nothing clears this pass's own lease.
-function planClaim(state, token, { slackMs = 0, allowPause = true }) {
+function planClaim(state, token, { slackMs = 0, allowPause = true }, holdHeld = false) {
   const now = Date.now();
   const mine = state.sender?.token === token;
   const clearMine = (st) => (mine ? { ...st, sender: null } : st);
   if (!isPaused(state)) return { res: { action: 'none' }, next: clearMine(state) };
-  const dueAtMs = new Date(state.resume_due_at).getTime();
-  let kind = state.pending || null;
-  let next = state;
-  if (dueAtMs - slackMs <= now && kind !== 'resume') {
-    if (kind === 'pause' && !state.pause_sent) {
-      // No pause request was ever sent and the window is over: there is nothing to undo.
-      const closed = { ...state, resumed_at: new Date(now).toISOString(), pending: null };
-      return { res: { action: 'none', reason: 'pause_not_sent' }, next: clearMine(closed) };
-    }
-    // Whatever the recording is doing, it must run again now (a resume of a running one is harmless).
-    kind = 'resume';
-    next = { ...state, pending: 'resume' };
-  }
-  // Gate off starts no pause of its own; the window end still resumes.
-  if (!kind || (kind === 'pause' && !allowPause)) return { res: { action: 'not_due', dueAtMs }, next: clearMine(next) };
+  const want = wantedStep(state, now, slackMs, holdHeld);
+  if (want.done) return { res: want.done, next: clearMine(want.next) };
+  const { kind, dueAtMs } = want;
+  // Gate off starts no pause of its own; the window end still resumes, and a pause the hold wants still goes out.
+  if (!kind || (kind === 'pause' && !allowPause && !want.forHold)) return { res: { action: 'not_due', dueAtMs }, next: clearMine(want.next) };
   const lease = state.sender;
-  if (lease && lease.token !== token && Number(lease.until) > now) return { res: { action: 'send_busy', dueAtMs }, next };
-  next = { ...next, sender: { token, until: now + LEASE_MS }, ...(kind === 'pause' ? { pause_sent: true } : {}) };
+  if (lease && lease.token !== token && Number(lease.until) > now) return { res: { action: 'send_busy', dueAtMs }, next: want.next };
+  const next = { ...want.next, sender: { token, until: now + LEASE_MS }, ...(kind === 'pause' ? { pause_sent: true } : {}) };
   return { res: { send: kind, dueAtMs, first: !state.pause_sent }, next };
 }
 
 // Commit the decision (and the lease with it) before any Twilio request is sent.
 async function claimStep(callSid, token, opts) {
-  return withCallLock(callSid, async (trx, state) => {
-    const { res, next } = planClaim(state, token, opts || {});
+  return withCallLock(callSid, async (trx, state, { holdHeld }) => {
+    const { res, next } = planClaim(state, token, opts || {}, holdHeld);
     if (next !== state) await stampCardPause(trx, callSid, next);
     return res;
   });
@@ -246,7 +271,19 @@ async function releaseLease(callSid, token) {
 //   - a pause that landed on a closed state: the recording is silent, a resume is wanted again;
 //   - a resume that landed while a newer window is open with nothing pending: the recording runs, a pause
 //     is wanted again.
-function stateAfterSuccess(current, step) {
+// A resume that landed while the star-key hold holds the caller (holdHeld): the recording runs during the hold, so a
+// pause is wanted again, in a window that stays open until the hold's return resumes it.
+function stateAfterSuccess(current, step, holdHeld = false) {
+  const next = successState(current, step);
+  if (step.send !== 'resume' || !holdHeld || (isPaused(next) && next.pending === 'pause')) return next;
+  const iso = new Date().toISOString();
+  const open = isPaused(next);
+  return {
+    ...next, paused_at: open ? next.paused_at : iso, resume_due_at: open ? next.resume_due_at : iso, resumed_at: null, pending: 'pause', pause_sent: false,
+  };
+}
+
+function successState(current, step) {
   const nowMs = Date.now();
   if (!isPaused(current)) {
     if (step.send !== 'pause') return current;
@@ -290,8 +327,8 @@ function stateAfterFailure(current, step, err, code) {
 // read before the request: a decision may have been committed while it was in flight).
 async function recordOutcome(callSid, nextState) {
   try {
-    await withCallLock(callSid, async (trx, current) => {
-      const next = nextState(current);
+    await withCallLock(callSid, async (trx, current, ctx) => {
+      const next = nextState(current, ctx);
       if (next !== current) await stampCardPause(trx, callSid, next);
       return { action: 'none' };
     });
@@ -311,7 +348,7 @@ async function sendStep(callSid, step) {
     await recordOutcome(callSid, (current) => stateAfterFailure(current, step, err, code));
     return { action: pausing ? 'pause_failed' : 'resume_failed', error_code: code, ...(pausing ? { dueAtMs: step.dueAtMs } : {}) };
   }
-  await recordOutcome(callSid, (current) => stateAfterSuccess(current, step));
+  await recordOutcome(callSid, (current, { holdHeld }) => stateAfterSuccess(current, step, holdHeld));
   return { action: pausing ? 'paused' : 'resumed' };
 }
 
@@ -431,12 +468,13 @@ const OUTSIDE_RESUME = { send: 'resume' };
 // into a pause (pauseOrExtend), and the work the outcome leaves (a pause wanted again, a resume to retry) is in the
 // state even when the outcome is never recorded: this module's own pass, retry, timer or sweep finishes it. The
 // outcome is recorded like this module's own resume. Answers { sent: true, ...await resume() }, { sent: false, reason:
-// 'card_window' }, or { sent: false, reason: 'busy' } (a card-pause request is in flight: the hold retries). A call
-// with no live text has no card pause: the resume goes straight out. A database error is thrown before anything is
-// sent.
+// 'card_window' }, { sent: false, reason: 'hold_held' } (a newer hold holds the caller: its own return resumes the
+// recording), or { sent: false, reason: 'busy' } (a card-pause request is in flight: the hold retries). A call with no
+// live text has no card pause: the resume goes straight out. A database error is thrown before anything is sent.
 async function resumeOutsideCardWindow(callSid, resume) {
   const token = crypto.randomUUID();
-  const claim = await withCallLock(callSid, async (trx, state) => {
+  const claim = await withCallLock(callSid, async (trx, state, { holdHeld }) => {
+    if (holdHeld) return { action: 'hold_held' };
     const now = Date.now();
     const paused = isPaused(state);
     const unsentPause = state.pending === 'pause' && !state.pause_sent;
@@ -454,9 +492,9 @@ async function resumeOutsideCardWindow(callSid, resume) {
   try {
     if (!(await fenceLease(callSid, token))) return { sent: false, reason: 'busy' };
     out = await resume();
-    await recordOutcome(callSid, (current) => {
+    await recordOutcome(callSid, (current, { holdHeld }) => {
       const next = out?.ok === true
-        ? stateAfterSuccess(current, OUTSIDE_RESUME)
+        ? stateAfterSuccess(current, OUTSIDE_RESUME, holdHeld)
         : stateAfterFailure(current, OUTSIDE_RESUME, null, String(out?.code ?? 'unknown').slice(0, 16));
       follow = isPaused(next) ? next.pending || null : null;
       return next;

@@ -65,7 +65,9 @@
  * the hold (press 1, its retries, the voicemail) goes out through resumeOutsideCardWindow, as the card pause's lease
  * holder: never inside a card window whose pause was sent (that window's own end resumes the recording, and the hold
  * counts its resume as done; the voicemail counts it as not resumed and invites no message), and always before a card
- * pause decided while it is in flight.
+ * pause decided while it is in flight. The card pause reads this hold's phase in every decision: a card window that ends
+ * while the caller is held sends no resume (the return resumes the recording), and a card resume that lands as a hold
+ * starts is followed by a pause. So the recording runs again only once both are over.
  *
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
@@ -401,7 +403,8 @@ async function sendResume(callSid) {
 }
 
 // { ok: true } when Twilio accepted the resume; { ok: true, deferred: true } when a card-pause window holds the
-// recording (live-call-card-pause.js: the hold sends nothing inside one, and the window's own end resumes it); else
+// recording (live-call-card-pause.js: the hold sends nothing inside one, and the window's own end resumes it) or a
+// newer hold holds the caller (a star decided while this resume was on its way: that hold's return resumes it); else
 // { ok: false, code }. The resume goes out as the card pause's lease holder, so a card pause decided meanwhile lands
 // after it. A card-pause request in flight ('card_busy') or a failed check ('card_check') is a failure the pending
 // resume retries. Never throws.
@@ -416,6 +419,10 @@ async function resumeOutcome(callSid) {
   if (out.sent) return out.ok ? { ok: true } : { ok: false, code: out.code };
   if (out.reason === 'card_window') {
     logger.info(`[call-hold] recording resume for ${masked(callSid)} left to the card pause: its window is open`);
+    return { ok: true, deferred: true };
+  }
+  if (out.reason === 'hold_held') {
+    logger.info(`[call-hold] recording resume for ${masked(callSid)} not sent: a newer hold holds the caller, and its return resumes it`);
     return { ok: true, deferred: true };
   }
   logger.warn(`[call-hold] recording resume for ${masked(callSid)} waits: a card-pause request is in flight`);

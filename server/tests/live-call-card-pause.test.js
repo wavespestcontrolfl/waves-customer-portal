@@ -27,7 +27,7 @@ jest.mock('twilio', () => jest.fn(() => ({ calls: mockCalls })));
 // ends. Reads and writes yield a tick so two unlocked transactions would interleave.
 jest.mock('../models/db', () => {
   const newPool = () => ({ max: Infinity, inUse: 0, peak: 0, queue: [] });
-  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0, source: 'twilio_inbound', sweepReads: [], failSweep: false, txCount: 0, stall: null };
+  const state = { claimed: true, cardPause: undefined, writes: [], locks: new Map(), pool: newPool(), callStatus: 'in-progress', endedAt: null, failReads: 0, source: 'twilio_inbound', sweepReads: [], failSweep: false, txCount: 0, stall: null, holdPhase: null };
   const CALL_SID = 'CA' + 'a'.repeat(32);
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   // A bounded connection pool: acquire waits while it is full (FIFO), like knex's.
@@ -77,7 +77,7 @@ jest.mock('../models/db', () => {
       await tick();
       if (state.failReads > 0) { state.failReads -= 1; throw new Error('connection terminated'); }
       return state.claimed
-        ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null, status: state.callStatus, ended_at: state.endedAt }
+        ? { card_pause: state.cardPause ? JSON.parse(JSON.stringify(state.cardPause)) : null, status: state.callStatus, ended_at: state.endedAt, hold_phase: state.holdPhase }
         : undefined;
     }));
     q.update = jest.fn(pooled(inTx, async (patch) => {
@@ -163,6 +163,7 @@ beforeEach(() => {
   s.failSweep = false;
   s.txCount = 0;
   s.stall = null;
+  s.holdPhase = null;
   isEnabled.mockReturnValue(true);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
@@ -1040,6 +1041,84 @@ describe('live call card pause: a sender that stalls past its lease', () => {
     await run(100 * 1000);
     expect(statuses().slice(-1)).toEqual(['in-progress']);
     expect(db.__state.cardPause.resumed_at).toBeTruthy();
+  });
+});
+
+describe('the star-key hold keeps the recording paused: it runs again only once the card window and the hold are over', () => {
+  const holdResume = () => jest.fn(async () => { await mockUpdate({ status: 'in-progress' }); return { ok: true }; });
+  const order = () => mockUpdate.mock.calls.map(([arg]) => arg.status);
+  const iso = (ms) => new Date(Date.now() + ms).toISOString();
+
+  test('a card window that ends while the hold holds the caller sends no resume and arms nothing; the hold\'s return resumes it', async () => {
+    await trigger();
+    expect(pauseCalls()).toHaveLength(1);
+    db.__state.holdPhase = 'held';
+    await advance(cardPause.PAUSE_MS);
+    expect(resumeCalls()).toHaveLength(0);
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: null, pending: null, sender: null });
+    expect(cardPause._test.timers.has(CALL)).toBe(false);
+    // The minute sweep and a later utterance leave it paused too.
+    expect(await cardPause.recoverOpenPauses()).toMatchObject({ action: 'swept', handled: 1 });
+    await trigger('ok, thank you');
+    await advance(60000);
+    expect(resumeCalls()).toHaveLength(0);
+    db.__state.holdPhase = 'returned';
+    expect(await cardPause.resumeOutsideCardWindow(CALL, holdResume())).toEqual({ sent: true, ok: true });
+    expect(order()).toEqual(['paused', 'in-progress']);
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: expect.any(String), pending: null });
+  });
+
+  test('a window that ends after the hold returned (or with no hold) resumes as usual', async () => {
+    await trigger();
+    db.__state.holdPhase = 'returned';
+    await advance(cardPause.PAUSE_MS);
+    expect(order()).toEqual(['paused', 'in-progress']);
+  });
+
+  test('a card resume that lands as a hold starts is followed by a pause, and the window then waits for the hold\'s return', async () => {
+    await trigger();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    mockUpdate.mockImplementation(async (arg) => { if (arg.status === 'in-progress') await gate; return {}; });
+    await advance(cardPause.PAUSE_MS);
+    expect(resumeCalls()).toHaveLength(1);
+    // The star is decided while that resume is on its way.
+    db.__state.holdPhase = 'held';
+    release();
+    await advance(10);
+    expect(order()).toEqual(['paused', 'in-progress', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ paused_at: expect.any(String), resumed_at: null, pending: null, sender: null });
+    await advance(120000);
+    expect(order()).toEqual(['paused', 'in-progress', 'paused']);
+  });
+
+  test('a resume decided before the hold (one that failed at the window end) becomes a pause while the hold holds the caller, also with the gate off', async () => {
+    db.__state.cardPause = { paused_at: iso(-100000), resume_due_at: iso(-1000), resumed_at: null, pending: 'resume', pause_sent: true, sender: null };
+    db.__state.holdPhase = 'held';
+    isEnabled.mockReturnValue(false);
+    await cardPause.recoverOpenPauses();
+    expect(order()).toEqual(['paused']);
+    expect(db.__state.cardPause).toMatchObject({ resumed_at: null, pending: null, sender: null });
+  });
+
+  test('the hold\'s own resume is not sent while a newer hold holds the caller; one that lands as a newer hold starts is followed by a pause', async () => {
+    db.__state.holdPhase = 'held';
+    const refused = holdResume();
+    expect(await cardPause.resumeOutsideCardWindow(CALL, refused)).toEqual({ sent: false, reason: 'hold_held' });
+    expect(refused).not.toHaveBeenCalled();
+    expect(db.__state.writes).toEqual([]);
+    db.__state.holdPhase = 'returned';
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const resume = jest.fn(async () => { await gate; await mockUpdate({ status: 'in-progress' }); return { ok: true }; });
+    const sending = cardPause.resumeOutsideCardWindow(CALL, resume);
+    await advance(0);
+    db.__state.holdPhase = 'held';
+    release();
+    expect(await sending).toEqual({ sent: true, ok: true });
+    await advance(10);
+    expect(order()).toEqual(['in-progress', 'paused']);
+    expect(db.__state.cardPause).toMatchObject({ paused_at: expect.any(String), resumed_at: null, pending: null });
   });
 });
 

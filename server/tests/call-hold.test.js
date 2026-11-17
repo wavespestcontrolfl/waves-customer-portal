@@ -1408,6 +1408,17 @@ describe('a card-pause window holds the recording (live-call-card-pause.js)', ()
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('the card-pause check failed (ECONNRESET)'));
   });
 
+  test('a resume the card pause refuses because a newer hold holds the caller (hold_held) counts as done: that hold\'s return resumes it', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    mockCard.answer = { sent: false, reason: 'hold_held' };
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(statuses(events)).toEqual([]);
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', rec_pending: false });
+    expect(hold._test.resumeRetries.size).toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('a newer hold holds the caller'));
+  });
+
   test('the voicemail resume inside an open card-pause window answers false and sends nothing, so no message is invited', async () => {
     seed(null);
     const events = fakeTwilio();
