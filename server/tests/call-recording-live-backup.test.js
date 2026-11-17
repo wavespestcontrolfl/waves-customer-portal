@@ -23,9 +23,10 @@ const SID = 'CA00000000000000000000000000000456';
 const liveText = 'Caller: I need a termite inspection.\nAgent: Sure, what is the address?';
 
 // Rows + patches the fixture db holds. liveSweepRows feeds recoverMissingRecentRecordings.
-// callStatus / metadata / createdAt: the call itself (a finished inbound call whose live text stopped, unless a test says otherwise).
+// callStatus / createdAt: the call itself (by default an inbound call that completed 40 minutes ago, past the
+// unrecorded-call watchdog's 30-minute grace, so no recording is still coming).
 function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0, transcription = null, provider = null,
-  callStatus = 'completed', metadata = { live_transcription: { stopped_at: new Date().toISOString() } }, createdAt = new Date() } = {}) {
+  callStatus = 'completed', metadata = {}, createdAt = new Date(Date.now() - 40 * 60 * 1000) } = {}) {
   const row = {
     id: 'live-backup-fixture', twilio_call_sid: SID, direction: 'inbound',
     from_phone: '+19415550123', to_phone: '+19415550124', recording_url: recordingUrl, recording_sid: recordingSid,
@@ -87,18 +88,22 @@ describe('live-text backup transcript in processRecording', () => {
     else process.env.GEMINI_API_KEY = geminiKey;
   });
 
-  // Local pre-push audit P1: a pass while the call is live (the admin process button) never extracts half a call.
-  test('a call still live, or done but not settled, never uses the live text; a lost stopped event settles 2 minutes after the end', async () => {
+  // Local pre-push audit P1s: a pass while the call is live (the admin process button) never extracts half a call,
+  // and the live text never stands in while Twilio may still post a late recording (the watchdog's 30-minute grace).
+  test('the live text stands in only once the call ended 30 minutes ago: never while live, never inside the grace', async () => {
     primeDb({ callStatus: 'in-progress' });
     await processor.processRecording(SID);
     expect(liveTranscriptFor).not.toHaveBeenCalled();
 
-    const justEnded = primeDb({ metadata: {}, createdAt: new Date(Date.now() - 100 * 1000) });
+    // Ended 10 s ago (90 s call), and ended 28 minutes ago even with the transcription stopped: a recording may still come.
+    const justEnded = primeDb({ createdAt: new Date(Date.now() - 100 * 1000) });
+    await processor.processRecording(SID);
+    expect(justEnded.row.processing_status).toBe('no_transcription');
+    primeDb({ createdAt: new Date(Date.now() - (28 * 60 + 90) * 1000), metadata: { live_transcription: { stopped_at: new Date().toISOString() } } });
     await processor.processRecording(SID);
     expect(liveTranscriptFor).not.toHaveBeenCalled();
-    expect(justEnded.row.processing_status).toBe('no_transcription');
 
-    const settled = primeDb({ metadata: {}, createdAt: new Date(Date.now() - 4 * 60 * 1000) });
+    const settled = primeDb({ createdAt: new Date(Date.now() - (31 * 60 + 90) * 1000) });
     await processor.processRecording(SID);
     expect(liveTranscriptFor).toHaveBeenCalledWith(SID);
     expect(settled.row.transcription).toBe(liveText);
@@ -231,12 +236,15 @@ describe('missing-recording sweep with live text', () => {
   let procSpy;
   let recoverSpy;
   // The sweep reads candidates, then per no_completed_recording result the live row and the call state.
-  function primeSweep({ liveRow = { id: 1 }, state = { processing_status: null, extraction_attempts: 0 } } = {}) {
+  // state: the call's row as the sweep reads it, over an inbound call that completed 40 minutes ago (past the grace).
+  function primeSweep({ liveRow = { id: 1 }, state = {} } = {}) {
+    const callState = { direction: 'inbound', status: 'completed', created_at: new Date(Date.now() - 40 * 60 * 1000), duration_seconds: 120,
+      processing_status: null, extraction_attempts: 0, ...state };
     db.mockImplementation((table) => {
       const builder = {};
       const chain = (...args) => { for (const arg of args) if (typeof arg === 'function') arg.call(builder, builder); return builder; };
       for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'orWhere', 'orWhereRaw', 'select', 'orderBy', 'orderByRaw', 'limit', 'modify']) builder[method] = chain;
-      builder.first = async () => (table === 'call_live_utterances' ? (liveRow || undefined) : table === 'call_log' ? state : null);
+      builder.first = async () => (table === 'call_live_utterances' ? (liveRow || undefined) : table === 'call_log' ? callState : null);
       builder.then = (resolve, reject) => Promise.resolve(table === 'call_log'
         ? [{ twilio_call_sid: SID, direction: 'inbound', duration_seconds: 120 }] : []).then(resolve, reject);
       return builder;
@@ -256,6 +264,12 @@ describe('missing-recording sweep with live text', () => {
     await processor.recoverMissingRecentRecordings();
     expect(procSpy).toHaveBeenCalledTimes(1);
     expect(procSpy).toHaveBeenCalledWith(SID);
+  });
+
+  test('a call inside the unrecorded-call grace gets no pass yet: its recording may still come', async () => {
+    primeSweep({ state: { created_at: new Date(Date.now() - 5 * 60 * 1000) } });
+    await processor.recoverMissingRecentRecordings();
+    expect(procSpy).not.toHaveBeenCalled();
   });
 
   test('gate off: no processRecording call', async () => {

@@ -42,15 +42,15 @@ const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 // Stored on call_log.transcription_provider when the live text is the transcript (no recording).
 const LIVE_TRANSCRIPTION_PROVIDER = 'twilio_realtime';
-// The live text is whole only once the call is over and its transcription settled: an inbound call Twilio reported
-// completed, whose transcription-stopped event landed, or that ended 2 minutes ago (a lost stopped event). A pass
-// while the call is live (the admin process button, a sweep) never extracts from half a conversation.
-const LIVE_TEXT_SETTLE_MS = 2 * 60 * 1000;
+// The live text stands in only once no recording is coming: an inbound call Twilio reported completed that ended at
+// least the unrecorded-call watchdog's grace ago (Twilio posts recording-status shortly after the call ends, and the
+// watchdog calls a call unrecorded at the same point). Before that a pass (the admin process button, the sweep) leaves
+// the call to its own recording, so a late recording is never shadowed by the live text and half a live call is
+// never extracted; the live transcription has long stopped by then.
 function liveTextSettled(call, now = Date.now()) {
   if (call?.direction !== 'inbound' || call?.status !== 'completed') return false;
-  if (callMetadataObject(call).live_transcription?.stopped_at) return true;
   const ended = callEndOf(call);
-  return ended != null && now - ended >= LIVE_TEXT_SETTLE_MS;
+  return ended != null && now - ended >= require('./unrecorded-call-watchdog').GRACE_MINUTES * 60 * 1000;
 }
 
 // The processing_status values that mean THIS call's own pipeline pass has
@@ -11890,7 +11890,7 @@ const CallRecordingProcessor = {
       if (!row || !isUsableFallback(row.transcription)) return null;
       if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
       // The live-text backup is not recorded evidence: a retry re-reads the live text through its own
-      // branch (provenance kept), and a recording that arrives later gets its own transcription.
+      // branch (provenance kept), and a recording attached before the backup ran gets its own transcription.
       if (row.transcription_provider === LIVE_TRANSCRIPTION_PROVIDER) return null;
       // The sentinel check runs on the RECORDED part: a composite whose
       // recorded leg was already rejected carries the sentinel there.
@@ -25938,7 +25938,10 @@ const CallRecordingProcessor = {
         // reclaimableClaim rule processRecording's own claim uses, so a live claim is never touched
         // and the claim's atomic ownership guard still decides the takeover.
         const state = await db('call_log').where('twilio_call_sid', r.callSid)
-          .first('processing_status', 'extraction_attempts', db.raw(`${reclaimableClaim(LEGACY_CLAIM_QUIET_MINUTES)} AS claim_stale`));
+          .first('processing_status', 'extraction_attempts', 'direction', 'status', 'created_at', 'duration_seconds',
+            db.raw(`${reclaimableClaim(LEGACY_CLAIM_QUIET_MINUTES)} AS claim_stale`));
+        // Not before a recording could still come: processRecording would only fall through to no_transcription.
+        if (!liveTextSettled(state)) continue;
         const status = state?.processing_status || null;
         const owed = !status || status === 'pending' || status === 'no_transcription' || status === 'extraction_failed'
           || (status === 'processing' && state?.claim_stale === true);
