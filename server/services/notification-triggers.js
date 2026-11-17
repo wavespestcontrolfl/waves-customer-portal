@@ -488,7 +488,7 @@ const TRIGGER_REGISTRY = {
   },
   // Written directly by messenger-inbox.js ringBell (raiseAdminAlert with a per-thread dedupeKey and bell: true):
   // one standing bell per Facebook thread. Registered so the row carries a known trigger key and the phone banner
-  // (bell-banners.js, GATE_BELL_BANNERS) has a type to send under. `build` takes the written row's own words as
+  // (bell-banners.js) has a type to send under. `build` takes the written row's own words as
   // alertTitle/alertBody/alertLink. Admin-only (not techVisible), as the bell row already is.
   messenger_reply: {
     label: 'Facebook message',
@@ -795,7 +795,7 @@ const TRIGGER_REGISTRY = {
       link: p.link || '/admin/customers',
     }),
   },
-  // The phone page for a customer's ask inside the app (GATE_PORTAL_ASK_PUSH, owner 2026-11-02): a portal chat
+  // The phone page for a customer's ask inside the app (owner 2026-11-02): a portal chat
   // hand-off, a service-request form, the late "Still waiting" re-ring, an estimate page's change or call request.
   // Each of those writes its own admin bell row (raiseAdminAlert, bell:true) and, until now, never rang a phone,
   // so a customer could ask ten times and nobody saw it. services/portal-ask-push.js sends this one pushOnly:
@@ -1297,7 +1297,7 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
-  // The 8:00 AM ET banner (GATE_MORNING_BANNER, owner 2026-11-03 "ok add", choice C): one phone banner that says how many
+  // The 8:00 AM ET banner (owner 2026-11-03 "ok add", choice C): one phone banner that says how many
   // items wait for the owner and opens his alert list. services/morning-banner.js sends it pushOnly, so it writes no bell
   // row (rule: fyi, only the retention sweep would ever close one) and the owner can switch it off in Push Settings. It
   // takes the place of a banner for each of his other action items. p = { count, areas: [{ area, count }], day }.

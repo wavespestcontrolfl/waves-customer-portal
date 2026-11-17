@@ -17,7 +17,7 @@ describe('alert sounds map', () => {
     expect(soundForTrigger(undefined)).toBeNull();
   });
 
-  test('the 8 AM count banner plays the soft reminder sound (GATE_MORNING_BANNER)', () => {
+  test('the 8 AM count banner plays the soft reminder sound', () => {
     expect(soundForTrigger('waiting_summary')).toBe('waves-reminder.caf');
   });
 

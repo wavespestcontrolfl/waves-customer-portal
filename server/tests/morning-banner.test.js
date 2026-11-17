@@ -1,6 +1,6 @@
-// The 8 AM banner job (server/services/morning-banner.js, GATE_MORNING_BANNER, owner 2026-11-03 "ok add", choice C):
+// The 8 AM banner job (server/services/morning-banner.js, owner 2026-11-03 "ok add", choice C):
 // what counts as waiting for the owner (judged by needs-me's own mapAlertRow), the area summary, nothing waiting = no
-// banner, gate off = no read, and the once-per-ET-day claim. Rows are synthetic; no database.
+// banner, and the once-per-ET-day claim. Rows are synthetic; no database.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
@@ -10,7 +10,6 @@ jest.mock('../services/notification-service', () => ({
 const mockDb = jest.fn();
 mockDb.raw = jest.fn();
 jest.mock('../models/db', () => mockDb);
-jest.mock('../config/feature-gates', () => ({ morningBannerLive: jest.fn(() => true) }));
 const mockTrigger = jest.fn();
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: (...args) => mockTrigger(...args),
@@ -24,7 +23,6 @@ jest.mock('../services/needs-me', () => ({
 }));
 
 const logger = require('../services/logger');
-const { morningBannerLive } = require('../config/feature-gates');
 const { runMorningBanner, summarize } = require('../services/morning-banner');
 
 let rowSeq = 0;
@@ -45,7 +43,6 @@ let claimed;
 beforeEach(() => {
   jest.clearAllMocks();
   rowSeq = 0;
-  morningBannerLive.mockReturnValue(true);
   claimed = new Set();
   mockDb.raw.mockImplementation(async (_sql, [key]) => {
     if (claimed.has(key)) return { rows: [] };
@@ -134,15 +131,6 @@ describe('when it sends nothing', () => {
     expect(mockTrigger).not.toHaveBeenCalled();
     expect(mockDb.raw).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 0 unread of 2 waiting, no banner');
-  });
-
-  test('gate off: returns before any read', async () => {
-    morningBannerLive.mockReturnValue(false);
-    mockOpenRows.mockResolvedValue(many(3));
-    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ skipped: 'gate_off' });
-    expect(mockOpenRows).not.toHaveBeenCalled();
-    expect(mockDb.raw).not.toHaveBeenCalled();
-    expect(mockTrigger).not.toHaveBeenCalled();
   });
 
   test('an unreadable list sends nothing and does not throw', async () => {

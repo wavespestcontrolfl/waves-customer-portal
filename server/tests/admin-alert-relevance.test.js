@@ -30,7 +30,7 @@ jest.mock('../services/audit-log', () => ({ auditAlertWouldClose: (...args) => m
 const mockResolveRequest = jest.fn(async () => 1);
 jest.mock('../services/portal-inbox', () => ({ resolveRequestQuietly: (...args) => mockResolveRequest(...args) }));
 // The unfinished-booking pass's SQL runs in portal-unfinished-bookings-postgres.test.js; here it is a stub.
-const mockRunUnfinished = jest.fn(async () => ({ skipped: false, found: 3, raised: 2 }));
+const mockRunUnfinished = jest.fn(async () => ({ skipped: false, found: 0, raised: 0 }));
 jest.mock('../services/portal-unfinished-bookings', () => ({ runPortalUnfinishedBookings: (...args) => mockRunUnfinished(...args) }));
 let mockTables;
 let mockQueries;
@@ -190,7 +190,6 @@ const visit = (over = {}) => ({ id: VISIT, customer_id: CUST, status: 'pending',
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.ADMIN_ALERT_RELEVANCE;
-  delete process.env.GATE_PORTAL_BOOKING_ITEMS;
   mockBundles = new Map();
   mockNoteVisits = new Map();
   mockTables = { notifications: [], scheduled_services: [], 'scheduled_services as ss': [], leads: [], estimates: [] };
@@ -2128,11 +2127,10 @@ describe('customer-contact classes', () => {
       });
     });
 
-    describe('unfinished bookings reach a person (GATE_PORTAL_BOOKING_ITEMS)', () => {
+    describe('unfinished bookings reach a person', () => {
       const ESTIMATE = uid(72);
       const OTHER_ESTIMATE = uid(74);
       const REQ = uid(73);
-      const pb = (value) => { if (value === undefined) delete process.env.GATE_PORTAL_BOOKING_ITEMS; else process.env.GATE_PORTAL_BOOKING_ITEMS = value; };
       // The bell portal-unfinished-bookings.js raises for the card step of an estimate our office sent: category
       // alert, doneWhen customer_answered, the estimate id.
       const checkoutBell = (over = {}) => note({
@@ -2142,18 +2140,10 @@ describe('customer-contact classes', () => {
       const phoneOnlyBell = (over = {}) => checkoutBell({ customerId: undefined, contactPhone: '+19415550142', contactName: 'Sam Visitor', ...over });
       const openEstimate = (over = {}) => ({ id: ESTIMATE, accepted_at: null, status: 'viewed', archived_at: null, ...over });
 
-      test.each([[undefined, false], ['', false], ['on', false], ['1', false], ['TRUE', false], [' true', false], ['true', true]])('GATE_PORTAL_BOOKING_ITEMS = %j -> live %s (strict)', (value, live) => {
-        pb(value);
-        expect(require('../config/feature-gates').portalBookingItemsLive()).toBe(live);
-      });
-
-      test('the prefix repeated here is the module\'s own, and the class exists only while its gate is true; a portal chat bell keeps its own class', () => {
+      test('the prefix repeated here is the module\'s own, and the class exists; a portal chat bell keeps its own class', () => {
         const mod = jest.requireActual('../services/portal-unfinished-bookings');
         expect(mod.CHECKOUT_KEY_PREFIX.startsWith(mod.KEY_PREFIX)).toBe(true);
         expect(require('../services/portal-inbox')).toBeDefined();
-        expect(classify(checkoutBell())).toBeNull();
-        expect(classify(checkoutBell(), { anyMode: true }).key).toBe('portal_unfinished_booking');
-        pb('true');
         expect(classify(checkoutBell()).key).toBe('portal_unfinished_booking');
         expect(classify(phoneOnlyBell()).key).toBe('portal_unfinished_booking');
         // Another bell in the same category, another prefix, or no customer_answered promise is not this class.
@@ -2162,8 +2152,7 @@ describe('customer-contact classes', () => {
         expect(classify(note({ category: 'billing', metadata: { dedupeKey: `portal-unfinished-checkout:${ESTIMATE}`, doneWhen: 'customer_answered' } }))).toBeNull();
       });
 
-      test('it is finished by the estimate accepted, declined or archived, or a visit booked after the drop-off; nothing else, and only while its gate is on', async () => {
-        pb('true');
+      test('it is finished by the estimate accepted, declined or archived, or a visit booked after the drop-off; nothing else', async () => {
         // Nothing to find: still relevant.
         mockTables.estimates = [openEstimate()];
         expect(await judged(checkoutBell(), null)).toMatchObject({ cls: 'portal_unfinished_booking', reason: null, would: null });
@@ -2184,27 +2173,19 @@ describe('customer-contact classes', () => {
         expect(await judged(checkoutBell(), null)).toMatchObject({ reason: 'A visit was booked' });
         // A bell with no customer has no visit to find.
         expect(await judged(phoneOnlyBell(), null)).toMatchObject({ reason: null });
-        // Own gate off: not judged, nothing read.
-        pb(undefined);
-        mockQueries = [];
-        mockTables.estimates = [openEstimate({ status: 'accepted' })];
-        expect(await judged(checkoutBell(), null)).toMatchObject({ cls: null, reason: null });
-        expect(mockQueries.filter((q) => q.table === 'estimates')).toEqual([]);
       });
 
       test('a person\'s contact after the drop-off closes it, with the portal request class\'s reasons; before it, or an automated text, does not', async () => {
-        pb('true');
         mockTables.estimates = [openEstimate()];
         expect((await judged(checkoutBell(), { backAt: at(20), textAt: at(20) })).reason).toBe('A person called back');
         expect((await judged(checkoutBell(), { textAt: at(20) })).reason).toBe('Answered by text');
         expect((await judged(checkoutBell(), { replyAt: at(20) })).reason).toBe('Answered by email');
         expect(await judged(checkoutBell(), { textAt: at(-20), backAt: at(-20) })).toMatchObject({ reason: null, would: null });
-        // The witnesses are read for the customer under the booking gate alone (the chat gate stays off).
+        // The witnesses are read for the customer (the chat gate stays off).
         expect(mockLoadContactBundles.mock.calls.pop()[0].map((i) => [i.kind, i.refs, i.bellAt])).toEqual([['customer', { customerId: CUST }, T0]]);
       });
 
       test('an estimate with no customer on file is matched by the phone in the bell; with no phone either, only the estimate closes apply', async () => {
-        pb('true');
         mockTables.estimates = [openEstimate()];
         expect((await judged(phoneOnlyBell(), { textAt: at(20) })).reason).toBe('Answered by text');
         expect(mockLoadContactBundles.mock.calls.pop()[0].map((i) => [i.kind, i.refs, i.bellAt])).toEqual([['customer', { customerId: null, phone: '+19415550142' }, T0]]);
@@ -2215,27 +2196,20 @@ describe('customer-contact classes', () => {
         expect(await judged(note({ category: 'service', metadata: { doneWhen: 'request_answered', requestId: REQ, contactPhone: '+19415550142' } }), { textAt: at(20) })).toMatchObject({ cls: null });
       });
 
-      test('the sweep closes a finished bell with the reason and leaves a waiting one open; gate off closes nothing; the gate switched off puts it back', async () => {
+      test('the sweep closes a finished bell with the reason and leaves a waiting one open', async () => {
         const finished = checkoutBell();
         const waiting = checkoutBell({ dedupeKey: `portal-unfinished-checkout:${OTHER_ESTIMATE}`, checkoutEstimateId: OTHER_ESTIMATE });
         mockTables.notifications = [finished, waiting];
         mockTables.estimates = [openEstimate({ accepted_at: at(30), status: 'accepted' }), openEstimate({ id: OTHER_ESTIMATE })];
-        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 0 });
-        pb('true');
         expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ retired: 1, byClass: { portal_unfinished_booking: 1 } });
         expect(finished).toMatchObject({ done_by: 'relevance', resolution: 'Estimate was accepted' });
         expect(waiting.done_at ?? null).toBeNull();
         // Nothing to settle behind it: no request row is resolved.
         expect(mockResolveRequest).not.toHaveBeenCalled();
-        pb(undefined);
-        expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ rearmed: 1, retired: 0 });
-        expect(finished.done_at ?? null).toBeNull();
       });
 
-      test('the sweep runs the unfinished-booking pass only while the gate is on, reports what it raised, and a failure never fails the sweep', async () => {
-        await runAdminAlertRelevanceSweep({ now: NOW_AFTER });
-        expect(mockRunUnfinished).not.toHaveBeenCalled();
-        pb('true');
+      test('the sweep runs the unfinished-booking pass, reports what it raised, and a failure never fails the sweep', async () => {
+        mockRunUnfinished.mockResolvedValueOnce({ skipped: false, found: 3, raised: 2 });
         expect(await runAdminAlertRelevanceSweep({ now: NOW_AFTER })).toMatchObject({ skipped: false, bookingsRaised: 2 });
         expect(mockRunUnfinished).toHaveBeenCalledWith({ now: NOW_AFTER });
         mockRunUnfinished.mockRejectedValueOnce(new Error('boom: customer phone +19415550142'));

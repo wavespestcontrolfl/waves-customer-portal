@@ -1,4 +1,4 @@
-// GATE_PORTAL_ASK_PUSH on the late re-ring: a row the sweep really re-rang also pages the
+// The phone page on the late re-ring: a row the sweep really re-rang also pages the
 // admin phones, once. A row the fenced update did not rewrite (a reply closed it first) pages nobody. The SQL and
 // the single-ring fence run against Postgres in portal-item-close-postgres.test.js; here the database is a stub.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -58,12 +58,10 @@ const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'p
 beforeEach(() => {
   jest.clearAllMocks();
   require('../services/portal-ask-push').__private.resetPageLimits();
-  process.env.GATE_PORTAL_ASK_PUSH = 'true';
   mockState.rows = [row('n-1', 'c-1'), row('n-2', 'c-2')];
   mockState.updates = { 'n-1': 1, 'n-2': 1 };
   mockState.customers = { 'c-1': { first_name: 'Pat', last_name: 'Sample' }, 'c-2': { first_name: 'Lee', last_name: 'Other' } };
 });
-afterEach(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
 
 describe('the late re-ring pages the phones', () => {
   test('a page that never answers does not hold the sweep (the page is not awaited)', async () => {
@@ -96,13 +94,6 @@ describe('the late re-ring pages the phones', () => {
     const out = await runPortalLateRering({ now: NOW });
     expect(out.rung).toBe(1);
     expect(pushes().map(([, p]) => p.itemKey)).toEqual(['late:n-2']);
-  });
-
-  test('gate off: the row is re-rung and no push is sent', async () => {
-    delete process.env.GATE_PORTAL_ASK_PUSH;
-    const out = await runPortalLateRering({ now: NOW });
-    expect(out.rung).toBe(2);
-    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   test('a push that throws costs the re-ring nothing', async () => {

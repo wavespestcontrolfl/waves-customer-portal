@@ -1,5 +1,5 @@
 /**
- * The phone page for a customer's ask inside the app (GATE_PORTAL_ASK_PUSH, owner 2026-11-02).
+ * The phone page for a customer's ask inside the app (owner 2026-11-02).
  *
  * A portal chat hand-off, a customer service request, the late "Still waiting" re-ring, an estimate page's change
  * or call request and an unfinished booking each write an admin bell row. None of them rang a phone: three new leads asked ten times
@@ -13,7 +13,7 @@
  * - The text names the customer by first name and last initial and the ask in a few words. No phone, no email:
  *   a push shows on a lock screen (the trigger also redacts contact details from title and body).
  * - Sends nothing to a customer.
- * - Never throws. Gate off returns { skipped: 'gate_off' }.
+ * - Never throws.
  * - Never holds the caller past its own checks: pages go out from a small in-process queue (page limits below).
  */
 
@@ -120,7 +120,6 @@ async function customerShortName(customerId, database = null) {
  */
 async function pushPortalAsk({ itemKey, title, body = null, link = null, customerId = null } = {}) {
   try {
-    if (!require('../config/feature-gates').portalAskPushLive?.()) return { skipped: 'gate_off' };
     if (!itemKey || !title) return { skipped: 'incomplete' };
     const payload = {
       itemKey: String(itemKey), title, body, ...(link ? { link } : {}), ...(customerId ? { customerId: String(customerId) } : {}),

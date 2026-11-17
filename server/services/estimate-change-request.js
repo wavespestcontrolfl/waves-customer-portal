@@ -52,7 +52,7 @@ const CHANGE_REQUEST_KIND = {
   // promised one): rings by default through the explicit bell tag, the way
   // accepted estimates do. The category stays overridable for silencing.
   bell: true,
-  // GATE_PORTAL_ASK_PUSH: the same ask also pages the admin phones (the bell alone sat unread).
+  // The same ask also pages the admin phones (the bell alone sat unread).
   pushAsk: true,
 };
 

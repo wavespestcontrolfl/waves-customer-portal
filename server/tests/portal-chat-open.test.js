@@ -951,11 +951,10 @@ describe('one item holds a bounded amount of text', () => {
   });
 });
 
-// GATE_PORTAL_ASK_PUSH (owner 2026-11-02): a hand-off bell that really rang also pages the admin phones, once the
+// Owner 2026-11-02: a hand-off bell that really rang also pages the admin phones, once the
 // transaction that wrote the ask has committed. Never for a silent dedupe, a quiet refresh, a withheld bell, a failed
 // bell write or a rolled-back transaction.
-describe('GATE_PORTAL_ASK_PUSH: the hand-off bell also rings the phones', () => {
-  const PUSH = 'GATE_PORTAL_ASK_PUSH';
+describe('the hand-off bell also rings the phones', () => {
   const handOff = (input) => calls(tool('escalate', { reason: 'Customer is unhappy with a visit', topic: 'complaint', ...input }));
   const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
   const fakeTurn = () => ({
@@ -973,7 +972,6 @@ describe('GATE_PORTAL_ASK_PUSH: the hand-off bell also rings the phones', () => 
   // Whether the outer transaction had committed when the push was sent.
   let committedAtPush;
   beforeEach(() => {
-    process.env[PUSH] = 'true';
     require('../services/portal-ask-push').__private.resetPageLimits();
     committedAtPush = [];
     triggerNotification.mockImplementation(async (key) => {
@@ -982,17 +980,8 @@ describe('GATE_PORTAL_ASK_PUSH: the hand-off bell also rings the phones', () => 
     });
   });
   afterEach(() => {
-    delete process.env[PUSH];
     triggerNotification.mockReset();
     triggerNotification.mockImplementation(async () => ({ bellWritten: true }));
-  });
-
-  test('gate off: the bell rings and no push is sent', async () => {
-    delete process.env[PUSH];
-    mockCreate.mockResolvedValueOnce(handOff({}));
-    await say('The tech was rude');
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(pushes()).toHaveLength(0);
   });
 
   test('a new hand-off sends one pushOnly page: first name and last initial, the ask in a few words, no contact details', async () => {

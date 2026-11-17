@@ -137,7 +137,7 @@
  *     `bundle_quote_requested` carrying its request id at the top of its metadata) closes once an estimate was
  *     handed to that customer after the bell. Whenever the sweep closes one of them it also resolves that
  *     request row quietly (portal-inbox.js resolveRequestQuietly: no customer email). A cancellation bell (`cancellation_reviewed`) is never judged.
- *   - GATE_PORTAL_BOOKING_ITEMS (boolean, own gate; owner 2026-11-02): the unfinished-booking bell
+ *   - Unfinished bookings (owner 2026-11-02): the unfinished-booking bell
  *     (portal-unfinished-bookings.js, the card step of an estimate our office sent: dedupeKey
  *     `portal-unfinished-checkout:<estimate id>`, `doneWhen: 'customer_answered'`) closes once a person
  *     contacted the customer after the drop-off (the portal request class's contact rule; an estimate with no
@@ -181,8 +181,6 @@ const SMS_THREAD_PREFIX = 'sms-thread:';
 // Repeated, not imported, for the same reason; a test pins the two together.
 const UNKNOWN_SMS_PREFIX = 'sms-reply:';
 
-// GATE_PORTAL_BOOKING_ITEMS as a class gate, the same way: 'true' or 'off'.
-const portalBookingGate = () => (require('../config/feature-gates').portalBookingItemsLive?.() ? 'true' : 'off');
 // The dedupeKey prefix of the unfinished-booking bells (portal-unfinished-bookings.js KEY_PREFIX). Repeated, not
 // imported: that module reads the database at load. A test pins the two together.
 const UNFINISHED_BOOKING_PREFIX = 'portal-unfinished-';
@@ -450,7 +448,7 @@ async function loadQuoteHandoffs(rows, data, conn) {
   }
 }
 
-// Each unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS, the card step of an estimate our office sent): did it end
+// Each unfinished-booking bell (the card step of an estimate our office sent): did it end
 // after the drop-off? The estimate was accepted, declined or archived, or a live visit was booked for the bell's
 // customer after the drop-off (the new-lead class's live-booking predicate). Person contact is the contact rule's,
 // not read here. A bell with no customer is judged by the estimate alone. Loaded into data.bookingMovedOn (bell id
@@ -466,7 +464,6 @@ function bookingBoundaryAt(row, meta = parseMeta(row.metadata)) {
 }
 
 async function loadUnfinishedBookings(rows, data, conn) {
-  if (portalBookingGate() === 'off') return;
   const bells = rows.map((row) => ({ row, meta: parseMeta(row.metadata) })).filter(({ meta }) => isUnfinishedBookingBell(meta));
   if (!bells.length) return;
   const pick = (key) => [...new Set(bells.map(({ meta }) => uuidOrNull(meta[key])).filter(Boolean))];
@@ -1167,7 +1164,7 @@ function portalItemAnswered(s) {
   return reason ? { reason, mode: 'true' } : null;
 }
 
-// An unfinished-booking bell (GATE_PORTAL_BOOKING_ITEMS): finished once the estimate was accepted, declined or
+// An unfinished-booking bell: finished once the estimate was accepted, declined or
 // archived, or a visit was booked for the customer after the drop-off (loadUnfinishedBookings, bookingBoundaryAt).
 // A person's contact after the drop-off closes it too, by the portal request class's contactRule (portalItemAnswered).
 function unfinishedBookingSettled(s) {
@@ -1300,13 +1297,13 @@ const CLASSES = [
     rule: addServiceQuoted,
     onRetired: (bell) => resolveRequestOf(bell, 'Estimate sent'),
   },
-  { // portal-unfinished-bookings.js — a customer opened the card step of an estimate our office sent and left
-    // (GATE_PORTAL_BOOKING_ITEMS). Closed by a person's contact with that customer after the drop-off (an estimate
-    // with no customer on file by the phone in the bell), or when the estimate ended or a visit was booked.
+  { // portal-unfinished-bookings.js — a customer opened the card step of an estimate our office sent and left.
+    // Closed by a person's contact with that customer after the drop-off (an estimate with no customer on file by the
+    // phone in the bell), or when the estimate ended or a visit was booked.
     key: 'portal_unfinished_booking', categories: ['alert'], prefix: UNFINISHED_BOOKING_PREFIX, doneWhen: 'customer_answered',
     // Only the bell that promises an answer to the customer: the class's doneWhen, checked like the request class's.
     match: (meta) => meta.doneWhen === 'customer_answered',
-    gate: portalBookingGate, rule: unfinishedBookingSettled, contact: 'customer', contactRule: portalItemAnswered,
+    rule: unfinishedBookingSettled, contact: 'customer', contactRule: portalItemAnswered,
   },
   { // estimator-engine/index.js notify — the call's quote bells ("Quote promised on call", "AI estimate draft needs
     // review", the commercial scaffold), one per call. Nothing closed them when the quote went out (owner 2026-11-09).
@@ -1756,11 +1753,9 @@ async function estimateReRingPass(now) {
   }
 }
 
-// GATE_PORTAL_BOOKING_ITEMS: a visitor who started to book and left rings ONE admin bell (portal-unfinished-
-// bookings.js). After the re-ring passes, so a bell this run just raised is judged by the next sweep. Off:
-// nothing is read or written. A failure is logged and never fails the sweep.
+// A visitor who started to book and left rings ONE admin bell (portal-unfinished-
+// bookings.js). After the re-ring passes, so a bell this run just raised is judged by the next sweep. A failure is logged and never fails the sweep.
 async function unfinishedBookingsPass(now) {
-  if (portalBookingGate() === 'off') return null;
   try {
     return (await require('./portal-unfinished-bookings').runPortalUnfinishedBookings({ now })).raised;
   } catch (err) {

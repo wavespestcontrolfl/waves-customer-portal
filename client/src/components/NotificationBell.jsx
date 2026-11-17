@@ -267,7 +267,7 @@ function takeAlertCall() {
   return match ? { id: match[1], version: match[2] } : null;
 }
 
-// The 8 AM banner (server morning-banner.js, GATE_MORNING_BANNER) opens /admin/dashboard?bell=open: the alert list shows.
+// The 8 AM banner (server morning-banner.js) opens /admin/dashboard?bell=open: the alert list shows.
 // Cold start: the page loads with ?bell=open, and the first bell on the page takes it out of the address before anything
 // runs, so a reload or Back never opens it again. Warm: the Waves Admin app sends the tap as a cancelable
 // 'wavesadmin:openlink' event (detail = { url }), which the layout answers with its own router navigation, so the bell

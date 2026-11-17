@@ -577,7 +577,7 @@ app bundle (`ios/WavesPay/Resources/Sounds`). iOS plays its default sound when t
 older app version still rings. A Sound switch set to off now holds on iOS too: `apns.js` sends no `aps.sound`
 for a `silent` push. A new alert type gets a sound by adding a line to the map and a file to the app.
 
-Bell-only kinds that also push (owner 2026-11-03, "ok add", choices A and B; gate `GATE_BELL_BANNERS`, dark): three
+Bell-only kinds that also push (owner 2026-11-03, "ok add", choices A and B): three
 kinds of alert reached only the portal bell and now also send a phone banner when a write rings. A: `sms_operational_followup`
 (a text follow-up due) and `call_commitment_overdue` (a promise to a caller overdue) push only from 7:00 AM up to 9:00 PM
 Eastern, judged when the banner is sent; outside those hours the bell row stays and no banner goes (the 8 AM summary banner
@@ -589,8 +589,7 @@ nothing; a write inside a nested transaction waits for the outermost commit). It
 `pushOnly`, to admin-role phones, with the row's own title, body and link and a tag per row. A new kind of this sort is one
 line in `BELL_BANNER_KINDS`, one registry entry whose `build` takes `alertTitle` / `alertBody` / `alertLink`, and a sound line.
 
-New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark; own gate, not
-`GATE_BELL_BANNERS`): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
+New-lead email banner (owner 2026-11-04, "ring new"; gate `GATE_RING_NEW_CONTACTS`, dark): a lead created from an email, and a follow-up email that completed a quote request, put ONE phone
 banner on the owner's phone at any hour (kind `new_lead_email`, the New lead sound). The writer (`email-actions.js`) keys the
 existing `new_lead` bell row on the email id (`email-lead:<lead|draft>:<email id>`) and names the kind with
 `notifyAdmin`'s `bannerKind` option, which is never stored on the row; a retry or re-sync finds the row and sends no
@@ -615,7 +614,7 @@ still waits for a call") or by unsetting the gate. It sends nothing to a lead.
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.
 
-The 8 AM banner (owner 2026-11-03, "ok add", choice C; `GATE_MORNING_BANNER`, dark): once a day at 8:00 AM
+The 8 AM banner (owner 2026-11-03, "ok add", choice C): once a day at 8:00 AM
 ET, `server/services/morning-banner.js` sends ONE phone banner, "N items wait for you" ("1 item waits for you"),
 where N counts the waiting items nobody has read yet (owner 2026-11-04, "fix count"), with the three busiest areas of
 those in the text and the whole open count after them when some were already read ("Comms 6 · Schedule 3 · Billing 2 ·
@@ -627,7 +626,7 @@ counts (an alert row already echoes most of them). With nothing unread it sends 
 trigger, sent `pushOnly`: no bell row, admin-role phones only, and one banner per ET day (the send first takes a
 `sms_send_claims` row `morning_banner:<ET date>`, so a deploy overlap or a restart cannot send a second one; a
 day missed while the server was down is not made up). The owner turns it off in Push Settings (Alerts group,
-"Morning summary: items waiting for you") or by unsetting the gate. It sends nothing to a customer.
+"Morning summary: items waiting for you"). It sends nothing to a customer.
 
 The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
 (`server/services/tech-open-visit-nudge.js`) reaches the owner as a Waves Admin banner instead of a text. It is the

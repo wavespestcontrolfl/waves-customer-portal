@@ -6,7 +6,7 @@
  *      conversation is a `portal_chat` agent_sessions row;
  *   2. customer service requests that are not resolved / closed / cancelled and
  *      were not made by staff (source 'admin').
- * With GATE_PORTAL_BOOKING_ITEMS on, a third kind joins them (3): the open admin bells for a visitor who
+ * A third kind joins them (3): the open admin bells for a visitor who
  * started to book and left (portal-unfinished-bookings.js: dedupeKey `portal-unfinished-...`). They are bells,
  * not requests: a person marks one handled with the bell's own Done, and `closeOlder` marks them Done too.
  * With GATE_PORTAL_MESSAGES on, a fourth kind (4): a customer's own message in their portal thread
@@ -41,8 +41,6 @@ const ALERT_CLOSE_RESOLUTION = 'Closed as older than 14 days (Portal tab)';
 // not imported: that module reads the database at load. A test pins the two together.
 const BOOKING_KEY_PREFIX = 'portal-unfinished-';
 
-// GATE_PORTAL_BOOKING_ITEMS, read at call time. A test that mocks feature-gates without the reader reads off.
-const bookingsLive = () => Boolean(featureGates.portalBookingItemsLive?.());
 // GATE_PORTAL_MESSAGES, read at call time the same way.
 const messagesLive = () => Boolean(featureGates.portalMessagesLive?.());
 
@@ -147,7 +145,7 @@ async function summary(cutoff = windowCutoff()) {
   const [chats, requests, bookings, messages] = await Promise.all([
     countOf(openChats().where('e.created_at', '>', cutoff)),
     countOf(openRequests().where('r.created_at', '>', cutoff)),
-    bookingsLive() ? countOf(openBookings().where('n.created_at', '>', cutoff)) : 0,
+    countOf(openBookings().where('n.created_at', '>', cutoff)),
     messagesLive() ? countOf(openMessages().where('cv.last_inbound_at', '>', cutoff)) : 0,
   ]);
   return { count: chats + requests + bookings + messages };
@@ -335,7 +333,7 @@ async function listOpen(cutoff, recent) {
     .limit(LIST_CAP)
     .select('r.id', 'r.created_at', 'r.customer_id', 'r.category', 'r.subject', 'r.description',
       'r.requested_service', 'r.source', 'r.urgency', 'r.status', 'r.metadata', 'c.first_name', 'c.last_name', 'c.phone', db.raw(HAS_TEXTS_SQL));
-  const bookingItems = bookingsLive() ? await listBookings(cutoff, op) : [];
+  const bookingItems = await listBookings(cutoff, op);
   const messageItems = messagesLive() ? await listMessages(cutoff, op) : [];
   return [...chatRows.map(chatItem), ...requestRows.map(requestItem), ...bookingItems, ...messageItems]
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -347,7 +345,6 @@ async function listOpen(cutoff, recent) {
 // `older` holds their true totals.
 async function list(now = new Date()) {
   const cutoff = windowCutoff(now);
-  const withBookings = bookingsLive();
   const withMessages = messagesLive();
   const [items, olderItems, recent, chats, requests, bookings, messages] = await Promise.all([
     listOpen(cutoff, true),
@@ -355,12 +352,12 @@ async function list(now = new Date()) {
     summary(cutoff),
     countOf(openChats().where('e.created_at', '<=', cutoff)),
     countOf(openRequests().where('r.created_at', '<=', cutoff)),
-    withBookings ? countOf(openBookings().where('n.created_at', '<=', cutoff)) : 0,
+    countOf(openBookings().where('n.created_at', '<=', cutoff)),
     withMessages ? countOf(openMessages().where('cv.last_inbound_at', '<=', cutoff)) : 0,
   ]);
   return {
     cutoff: cutoff.toISOString(), items, olderItems, total: recent.count,
-    older: { chats, requests, ...(withBookings ? { bookings } : {}), ...(withMessages ? { messages } : {}) },
+    older: { chats, requests, bookings, ...(withMessages ? { messages } : {}) },
   };
 }
 
@@ -527,8 +524,7 @@ async function closeOlder(cutoff, actor, now = new Date()) {
     const alertActor = { by: String(actor.technicianId), role: actor.role, technicianId: actor.technicianId, resolution: ALERT_CLOSE_RESOLUTION };
     await closeAlerts('escalationId', chatIds, alertActor, trx);
     await closeAlerts('requestId', requestIds, alertActor, trx);
-    const withBookings = bookingsLive();
-    const bookingsClosed = withBookings ? await closeBookingsOlder(trx, cutoff, alertActor) : 0;
+    const bookingsClosed = await closeBookingsOlder(trx, cutoff, alertActor);
     const withMessages = messagesLive();
     const messageIds = withMessages ? await closeMessagesOlder(trx, cutoff, now) : [];
     await closeAlerts('portalConversationId', messageIds, alertActor, trx);
@@ -537,11 +533,11 @@ async function closeOlder(cutoff, actor, now = new Date()) {
       actor_id: actor.technicianId || null,
       action: 'portal_inbox.close_older',
       resource_type: 'portal_inbox',
-      metadata: { cutoff: cutoff.toISOString(), chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}), ...(withMessages ? { messages: messageIds.length } : {}) },
+      metadata: { cutoff: cutoff.toISOString(), chats: chatIds.length, requests: requestIds.length, bookings: bookingsClosed, ...(withMessages ? { messages: messageIds.length } : {}) },
       critical: true,
       trx,
     });
-    return { chats: chatIds.length, requests: requestIds.length, ...(withBookings ? { bookings: bookingsClosed } : {}), ...(withMessages ? { messages: messageIds.length } : {}) };
+    return { chats: chatIds.length, requests: requestIds.length, bookings: bookingsClosed, ...(withMessages ? { messages: messageIds.length } : {}) };
   });
 }
 

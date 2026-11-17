@@ -296,7 +296,7 @@ async function sendOfficeNotification(database, { subject, description, customer
   // releases automatically and its bell (if inserted) is found by the check.
   // suppressed:true stays POLICY (terminal success, no retry, no loud error).
   // `rang`: this send wrote a fresh bell row (not the crash-recovery find of an earlier sender's row, not a
-  // policy-withheld bell). Only then does GATE_PORTAL_ASK_PUSH page the phones, below, after the stamp.
+  // policy-withheld bell). Only then does the push page the phones, below, after the stamp.
   let rang = false;
   const deliver = async () => {
     const first = await attempt();
@@ -341,13 +341,12 @@ async function sendOfficeNotification(database, { subject, description, customer
 }
 
 
-// GATE_PORTAL_ASK_PUSH: the phone page for a customer's change or call request on an estimate. Runs after the bell
+// The phone page for a customer's change or call request on an estimate. Runs after the bell
 // row exists and the delivery stamp is written, outside the lock transaction, without holding the caller. Never
 // throws.
 async function pushOfficeAsk(database, { subject, customerId, requestId }) {
   try {
     const { pushPortalAsk, customerShortName } = require('./portal-ask-push');
-    if (!require('../config/feature-gates').portalAskPushLive?.()) return;
     const calling = /^call requested/i.test(String(subject || ''));
     await pushPortalAsk({
       itemKey: `estimate-request:${requestId}`,

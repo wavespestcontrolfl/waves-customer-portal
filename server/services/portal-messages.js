@@ -16,7 +16,7 @@
  *   in-app bell plus a push to the Waves app, or an email with the whole answer when no app device took the
  *   push.
  * - customerPost saves a customer's own message, then raises one admin bell per thread (a later message
- *   rewrites it and rings it again) and the admin phone page (GATE_PORTAL_ASK_PUSH).
+ *   rewrites it and rings it again) and the admin phone page.
  * - The customer reads the thread in the portal; their unread count is the office's answers newer than the
  *   thread's customerReadThrough stamp.
  * - A thread is an open Portal-tab item while its newest message is the customer's and is newer than the

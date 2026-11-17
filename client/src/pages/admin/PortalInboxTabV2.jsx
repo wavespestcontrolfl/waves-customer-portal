@@ -8,7 +8,7 @@ import { formatETDateTime } from "../../lib/timezone";
 
 // Communications -> Portal tab. Lists what customers asked
 // for inside the customer portal and nobody answered: portal chat hand-offs and
-// customer service requests, plus (GATE_PORTAL_BOOKING_ITEMS) visitors who started to book and left. The last 14 days come first; open items older than
+// customer service requests, plus visitors who started to book and left. The last 14 days come first; open items older than
 // that are listed one by one under the "Older than 14 days" line. Mark handled
 // works on both. "Close all older" closes every older item and sends nothing to
 // a customer.
@@ -574,7 +574,7 @@ export default function PortalInboxTabV2({ onCount }) {
             </div>
           ) : null}
           {data && (
-            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0, ...(prev.older.bookings !== undefined ? { bookings: 0 } : {}), ...(prev.older.messages !== undefined ? { messages: 0 } : {}) } }))}>
+            <OlderLine older={data.older} cutoff={data.cutoff} onClosed={() => setData((prev) => ({ ...prev, olderItems: [], older: { chats: 0, requests: 0, bookings: 0, ...(prev.older.messages !== undefined ? { messages: 0 } : {}) } }))}>
               {data.olderItems.length > 0 && (
                 <div className="mt-4">
                   {olderTotal(data.older) > data.olderItems.length && (
