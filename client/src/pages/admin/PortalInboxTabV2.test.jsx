@@ -24,7 +24,7 @@ const request = {
   requestedService: "", source: "portal", urgency: "routine", status: "new",
 };
 
-// A customer left the card step of an estimate our office sent (GATE_PORTAL_BOOKING_ITEMS): a bell, not a request.
+// A customer left the card step of an estimate our office sent: a bell, not a request.
 const booking = {
   kind: "booking", id: "bell-1", version: "0123456789abcdef0123456789abcdef", createdAt: "2026-10-31T15:00:00.000Z",
   customer: { id: "cust-7", firstName: "Jo", lastName: "Visitor", phone: "+19415550107", hasTexts: false },

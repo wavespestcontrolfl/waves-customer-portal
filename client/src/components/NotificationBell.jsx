@@ -267,7 +267,7 @@ function takeAlertCall() {
   return match ? { id: match[1], version: match[2] } : null;
 }
 
-// The 8 AM banner (server morning-banner.js, GATE_MORNING_BANNER) opens /admin/dashboard?bell=open: the alert list shows.
+// The 8 AM banner (server morning-banner.js) opens /admin/dashboard?bell=open: the alert list shows.
 // Cold start: the page loads with ?bell=open, and the first bell on the page takes it out of the address before anything
 // runs, so a reload or Back never opens it again. Warm: the Waves Admin app sends the tap as a cancelable
 // 'wavesadmin:openlink' event (detail = { url }), which the layout answers with its own router navigation, so the bell
@@ -394,7 +394,7 @@ function customerNameFor(n, type) {
   return String(n.title || '').toLowerCase().includes(name.toLowerCase()) ? null : name;
 }
 
-// "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE) on any row the server marked `sendToClaude` (never customer contact),
+// "Send to Claude" on any row the server marked `sendToClaude` (never customer contact),
 // below the row's text. Two steps: the button opens a small panel with an optional note for Claude; Send then moves the
 // row out of the bell into Claude's queue, where a Claude tab works on it (owner 2026-11-03: for any issue). onSend(n,
 // note) resolves 'sent' (the row leaves the list), 'refreshed' (the list was read again with a note) or 'failed'.
@@ -402,7 +402,7 @@ function customerNameFor(n, type) {
 // closing the whole bell).
 const NOTE_MAX = 500;
 const SENT_NOTE = 'Sent to Claude.';
-// "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY, owner login only, step 3): the same two-step panel on a
+// "Send a copy to Claude (read-only)" (owner login only, step 3): the same two-step panel on a
 // row step 1 refuses (customer contact, words our own code did not write). The alert STAYS in the bell.
 const COPY_SENT_NOTE = 'Copy sent to Claude.';
 const COPY_LABEL = 'Send a copy to Claude (read-only)';

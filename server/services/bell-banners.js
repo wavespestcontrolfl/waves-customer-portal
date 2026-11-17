@@ -1,14 +1,14 @@
 /**
- * Phone banners for bell-only admin alerts (GATE_BELL_BANNERS, owner 2026-11-03, "ok add", choices A and B).
+ * Phone banners for bell-only admin alerts (owner 2026-11-03, "ok add", choices A and B).
  *
- * Three kinds of admin alert reached only the portal bell. With the gate on, a write that RANG also sends one phone
+ * Three kinds of admin alert reached only the portal bell. A write that RANG also sends one phone
  * banner (APNs push) through triggerNotification, pushOnly: the bell row is already written by the caller.
  *   A. sms_operational_followup ("text follow-up due") and call_commitment_overdue ("promise to a caller overdue")
  *      push only between 7:00 AM and 9:00 PM Eastern. Outside those hours the bell row stays and no banner is sent
  *      (the 8 AM summary banner covers them).
  *   B. messenger_reply (a Facebook message) pushes at any hour, like a text.
  *   C. new_lead_email (a lead created from an email, or an email that completed a quote request) pushes at any hour, like
- *      a text, behind its own gate GATE_RING_NEW_CONTACTS instead of GATE_BELL_BANNERS (owner 2026-11-04, "ring new"). Its
+ *      a text, behind its own gate GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"). Its
  *      writer names the kind with notifyAdmin's `bannerKind` option, which is never stored on the row.
  *
  * NotificationService.notifyAdmin calls bannerAfterWrite(result, { metadata, trx }) once per write. The banner goes
@@ -22,8 +22,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
 
-// nightQuiet: no banner at night (9:00 PM to 7:00 AM Eastern). gate: the feature-gates reader that turns the kind on,
-// GATE_BELL_BANNERS (bellBannersLive) unless the kind names its own.
+// nightQuiet: no banner at night (9:00 PM to 7:00 AM Eastern). gate: the feature-gates reader that turns the kind on;
+// a kind with no gate is always on.
 const BELL_BANNER_KINDS = Object.freeze({
   sms_operational_followup: Object.freeze({ nightQuiet: true }),
   call_commitment_overdue: Object.freeze({ nightQuiet: true }),
@@ -46,11 +46,13 @@ function isNightQuiet(date = new Date()) {
   return hour >= QUIET_FROM_HOUR || hour < QUIET_UNTIL_HOUR;
 }
 
-// The kind's gate (GATE_BELL_BANNERS, or the kind's own), read at call time. A missing reader (a test that mocks
+// The kind's own gate, read at call time; a kind with no gate is on. A missing reader (a test that mocks
 // feature-gates) or a throw reads as off.
 function bannersLive(kind) {
+  const gate = BELL_BANNER_KINDS[kind]?.gate;
+  if (!gate) return true;
   try {
-    return require('../config/feature-gates')[BELL_BANNER_KINDS[kind]?.gate || 'bellBannersLive']?.() === true;
+    return require('../config/feature-gates')[gate]?.() === true;
   } catch {
     return false;
   }

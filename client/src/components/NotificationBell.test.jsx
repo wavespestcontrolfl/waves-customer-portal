@@ -1683,7 +1683,7 @@ describe('NotificationBell 8 AM banner link (?bell=open)', () => {
   });
 });
 
-describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', () => {
+describe('NotificationBell admin "Send to Claude"', () => {
   const SUMMARY = {
     happened: 'The check that reads home details from the county website failed.',
     steps: ['Nothing for you: Claude can fix this.', 'Fix the county page reader.'],
@@ -1860,7 +1860,7 @@ describe('NotificationBell admin "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE)', 
   });
 });
 
-describe('NotificationBell admin "Send a copy to Claude (read-only)" (GATE_ALERT_SEND_TO_CLAUDE_COPY)', () => {
+describe('NotificationBell admin "Send a copy to Claude (read-only)"', () => {
   const AT = '2026-11-04T15:00:00.000Z';
   const COPY_ID = 'copy-1';
   const rows = () => ([

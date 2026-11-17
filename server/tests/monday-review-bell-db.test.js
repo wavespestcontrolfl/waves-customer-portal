@@ -182,7 +182,7 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       drafts: async () => ({ count: 0, total: 0 }), visits: async () => ({ count: 0, priced: 0 }),
     };
     const rowsFor = (key) => db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]);
-    const run = (loaders, now) => Review.runMondayReview({ now, gateEnabled: true, loaders });
+    const run = (loaders, now) => Review.runMondayReview({ now, loaders });
 
     test('raises one unread needs-you row, replaces it next Monday, stays single the same day, and closes at zero', async () => {
       // 1. The first Monday rings: one unread, open row in the bell with the composed text and detail.

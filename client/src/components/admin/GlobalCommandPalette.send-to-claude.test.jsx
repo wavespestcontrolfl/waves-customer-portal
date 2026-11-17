@@ -8,7 +8,7 @@ import GlobalCommandPalette from './GlobalCommandPalette';
 import useIsMobile from '../../hooks/useIsMobile';
 import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 
-// The free "Send to Claude" beside Ask (GATE_IB_SEND_TO_CLAUDE): shown only when /admin/claude-ideas/status says enabled, on
+// The free "Send to Claude" beside Ask: shown only when /admin/claude-ideas/status says enabled, on
 // the desktop modal and the phone sheet; posts the idea with the page and record ids; never calls the Ask query; refuses
 // photos; and Undo cancels with the answer's `at`.
 vi.mock('../../lib/adminUsage', () => ({ markUsageSource: vi.fn(), trackAdminPageView: vi.fn() }));

@@ -55,8 +55,7 @@ const cell = (text, width) => {
 };
 
 (async () => {
-  // customers: true adds each alert's customer id (owner 2026-11-02): this script never sees the portal's gates.
-  const result = await listNeedsMe({ who, area, limit, after, customers: true });
+  const result = await listNeedsMe({ who, area, limit, after });
   if (process.argv.includes('--quality')) {
     const { alertQuality } = require('./report-evidence');
     result.quality = alertQuality(result);

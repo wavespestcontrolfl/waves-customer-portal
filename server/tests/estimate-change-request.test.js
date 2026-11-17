@@ -261,14 +261,13 @@ describe('bell policy', () => {
   });
 });
 
-// GATE_PORTAL_ASK_PUSH: the estimate page's change and call requests also page the admin phones, after the bell row
+// The estimate page's change and call requests also page the admin phones, after the bell row
 // exists and the delivery stamp is written. The measurement review (same notify core) is not part of this.
-describe('GATE_PORTAL_ASK_PUSH on the estimate page asks', () => {
+describe('the phone page on the estimate page asks', () => {
   const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
   // The push is not awaited by the request (it must not hold the customer): let it settle before reading it.
   const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
-  beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; require('../services/portal-ask-push').__private.resetPageLimits(); });
-  afterEach(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
+  beforeEach(() => { require('../services/portal-ask-push').__private.resetPageLimits(); });
 
   test('a change request pushes once: first name and last initial, no note, no contact details', async () => {
     await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Call me at 941-555-0100', database: mockDb(), viewabilityCheck: viewable });
@@ -294,14 +293,6 @@ describe('GATE_PORTAL_ASK_PUSH on the estimate page asks', () => {
     expect(pushes()).toHaveLength(1);
     expect(pushes()[0][1].title).toBe('Call a customer about an estimate');
     expect(pushes()[0][1].body).toBe('Pat S. asked for a call about an estimate');
-  });
-
-  test('gate off: the bell rings and no push is sent', async () => {
-    delete process.env.GATE_PORTAL_ASK_PUSH;
-    await createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: 'Lower it', database: mockDb(), viewabilityCheck: viewable });
-    await settle();
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   test('a bell the policy withheld pushes nothing', async () => {

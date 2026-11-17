@@ -287,10 +287,12 @@ describe('handOffToCustomer refusals write nothing', () => {
     expectNothingWritten();
   });
 
-  test('a visit Auto-Dispatch already moved as many times as it may: auto_move_limit', async () => {
+  // Owner 2026-11-17 ("pick limit"): the fallback booking may place a visit at the move limit.
+  test('a visit Auto-Dispatch already moved as many times as it may is handed off; the move log is not read', async () => {
     state.autoMoveRows = [{ scheduled_service_id: 'svc-1', moves: 2 }];
-    expect(await handOff()).toEqual({ ok: false, reason: 'auto_move_limit' });
-    expectNothingWritten();
+    expect(await handOff()).toMatchObject({ ok: true });
+    expect(state.reads).not.toContain('reschedule_log');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
   test('a plan with an unresolved plan_lapsed alert: plan_lapsed (Auto-Dispatch skips it)', async () => {

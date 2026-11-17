@@ -638,8 +638,8 @@ const NotificationService = {
   },
 
   // Create admin notification (no recipient_id needed). The write itself is writeAdmin below; a write that rang a
-  // bell-only reminder or a Facebook message also sends its phone banner (bell-banners.js, GATE_BELL_BANNERS), after
-  // the row commits. Gate off: bannerAfterWrite returns at once and nothing else changes.
+  // bell-only reminder or a Facebook message also sends its phone banner (bell-banners.js), after
+  // the row commits.
   // bannerKind (optional): the phone-banner kind (bell-banners.js) for a row whose own metadata carries no triggerKey,
   // so the row is written exactly as without it. Only the banner reads it.
   async notifyAdmin(category, title, body, opts = {}) {
@@ -736,7 +736,7 @@ const NotificationService = {
           // refresh should write; `quiet` writes it without ringing or bumping.
           const adjusted = refreshOnDedupe && typeof standingRefresh === 'function'
             ? await standingRefresh(existing, existingMeta) : null;
-          // A row the owner sent to Claude (GATE_ALERT_SEND_TO_CLAUDE) stays in Claude's queue while it is open: this
+          // A row the owner sent to Claude stays in Claude's queue while it is open: this
           // emission still updates its text, never its routing (admin-alert-routing.js keepSentToClaude).
           const useMeta = keepSentToClaude(existing, existingMeta, adjusted?.metadata ? { ...metadata, ...adjusted.metadata } : metadata);
           const useDetail = adjusted && 'detail' in adjusted ? adjusted.detail : createOpts.detail;

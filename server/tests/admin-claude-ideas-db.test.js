@@ -1,5 +1,5 @@
 /**
- * "Send to Claude" for an idea against live Postgres (GATE_IB_SEND_TO_CLAUDE): the row lands with the exact metadata the Mac
+ * "Send to Claude" for an idea against live Postgres: the row lands with the exact metadata the Mac
  * launcher reads, Activity-only (not in the bell list, in Claude's queue) even with the bell policy on; the same idea
  * sent again while it is open is a duplicate that writes nothing; Undo closes the row as done by the admin; and Undo after a
  * Mac tab stamped `startedAt` is refused. The idea's words live in the stamp only and the row is owner-only (Codex security
@@ -24,7 +24,6 @@ maybeDescribe('send an idea to Claude (live Postgres)', () => {
   const send = (text, extra = {}) => sendIdeaToClaude({ text, by: ADMIN, ...extra });
 
   beforeAll(async () => {
-    process.env.GATE_IB_SEND_TO_CLAUDE = 'true';
     // The bell policy is on: only the row's own Claude's-queue mark keeps it from being silenced (create(): routedToClaude).
     process.env.GATE_ADMIN_BELL_POLICY = 'true';
     process.env.GATE_AGENT_ACTIVITY = 'true';
@@ -33,7 +32,6 @@ maybeDescribe('send an idea to Claude (live Postgres)', () => {
     ({ sendIdeaToClaude, cancelClaudeIdea, ideaDedupeKey } = require('../services/admin-claude-ideas'));
   });
   afterAll(async () => {
-    delete process.env.GATE_IB_SEND_TO_CLAUDE;
     delete process.env.GATE_ADMIN_BELL_POLICY;
     delete process.env.GATE_AGENT_ACTIVITY;
     await db('notifications').where('recipient_type', 'admin').whereRaw("metadata->'sentToClaude'->>'idea' LIKE ?", [`%${RUN}%`]).del();

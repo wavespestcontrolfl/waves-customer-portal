@@ -60,14 +60,14 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('relay_hot_lead', {})).not.toBe(__private.pushTagFor('relay_hot_lead', {}));
   });
 
-  // GATE_PORTAL_ASK_PUSH: one banner per ask, so a repeat collapses and a second customer's ask does not replace the first.
+  // One banner per ask, so a repeat collapses and a second customer's ask does not replace the first.
   test('portal_ask gets a per-ask push tag', () => {
     expect(__private.pushTagFor('portal_ask', { itemKey: 'request:r-1' })).toBe('waves-portal_ask-request:r-1');
     expect(__private.pushTagFor('portal_ask', { itemKey: 'late:n-9' })).not.toBe(__private.pushTagFor('portal_ask', { itemKey: 'request:r-1' }));
     expect(__private.pushTagFor('portal_ask', {})).not.toBe(__private.pushTagFor('portal_ask', {}));
   });
 
-  // GATE_MORNING_BANNER: one banner per ET day, so a late repeat replaces the same day's banner and tomorrow's does not.
+  // One banner per ET day, so a late repeat replaces the same day's banner and tomorrow's does not.
   test('waiting_summary gets a per-ET-day push tag', () => {
     expect(__private.pushTagFor('waiting_summary', { day: '2026-11-03' })).toBe('waves-waiting_summary-2026-11-03');
     expect(__private.pushTagFor('waiting_summary', { day: '2026-11-04' })).not.toBe(__private.pushTagFor('waiting_summary', { day: '2026-11-03' }));
@@ -82,7 +82,7 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('customer_landline_from_call', {})).toBe('waves-customer_landline_from_call-unknown-customer');
   });
 
-  // GATE_MORNING_BANNER (owner 2026-11-03, "ok add", choice C).
+  // The 8 AM summary banner (owner 2026-11-03, "ok add", choice C).
   test('waiting_summary says how many items wait, with the top three areas, and opens the alert list', () => {
     const areas = [{ area: 'Comms', count: 6 }, { area: 'Schedule', count: 3 }, { area: 'Billing', count: 2 }, { area: 'Leads', count: 1 }];
     const built = TRIGGER_REGISTRY.waiting_summary.build({ count: 12, areas });
@@ -475,7 +475,7 @@ describe('triggerNotification bell outcome', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  // GATE_BELL_BANNERS: a banner for a bell row its writer rang under bell: true keeps that authorization, so a type the
+  // A banner for a bell row its writer rang under bell: true keeps that authorization, so a type the
   // policy would otherwise silence (one with no customer declaration) still gets its banner.
   test.each(['dashboard_alert'])(
     'policy on: a %s banner pushes only as bellAuthorized pushOnly', async (key) => {
@@ -1044,8 +1044,8 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     gateSpy.mockRestore(); allowSpy.mockRestore();
   });
 
-  // GATE_MORNING_BANNER: with the bell policy on, the banner pushes (pushOnly, no bell row) only while its gate is on.
-  test.each([['true', 1], [undefined, 0]])('GATE_MORNING_BANNER=%p: the pushOnly waiting_summary banner sends %p push(es), never a bell row', async (gate, pushes) => {
+  // With the bell policy on, the banner pushes (pushOnly, no bell row).
+  test('the pushOnly waiting_summary banner sends one push, never a bell row', async () => {
     const PushService = require('../services/push-notifications');
     const bellPolicy = require('../services/notification-bell-policy');
     const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
@@ -1054,15 +1054,10 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     ));
     NotificationService.notifyAdmin.mockClear();
     PushService.sendToAdminUsers.mockClear();
-    if (gate) process.env.GATE_MORNING_BANNER = gate;
     try {
-      const stats = await triggerNotification('waiting_summary', { count: 5, areas: [{ area: 'Comms', count: 5 }], day: '2026-11-03' }, { pushOnly: true });
+      await triggerNotification('waiting_summary', { count: 5, areas: [{ area: 'Comms', count: 5 }], day: '2026-11-03' }, { pushOnly: true });
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(pushes);
-      if (!pushes) {
-        expect(stats.policySilenced).toBe(true);
-        return;
-      }
+      expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
       const [adminIds, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
       expect(adminIds).toEqual(['admin-1']);
       expect(payloadFor('admin-1')).toMatchObject({
@@ -1070,7 +1065,6 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
         tag: 'waves-waiting_summary-2026-11-03', sound: 'waves-reminder.caf', priority: 'normal',
       });
     } finally {
-      delete process.env.GATE_MORNING_BANNER;
       gateSpy.mockRestore();
     }
   });
@@ -1376,7 +1370,7 @@ describe('sms_reply keeps the whole text for the bell', () => {
   });
 });
 
-// GATE_BELL_BANNERS (bell-banners.js): three bell-only alerts also send a phone banner, built from the written row's words.
+// Bell banners (bell-banners.js): three bell-only alerts also send a phone banner, built from the written row's words.
 describe('bell banner triggers', () => {
   const PushService = require('../services/push-notifications');
   const recipients = [];

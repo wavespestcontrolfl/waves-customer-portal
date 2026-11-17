@@ -14,7 +14,6 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
-  morningBannerLive: jest.fn(() => false),
   ownerNudgeBannerLive: jest.fn(() => false),
 }));
 jest.mock('../services/internal-test-customers', () => ({
@@ -49,7 +48,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, morningBannerLive, ownerNudgeBannerLive } = require('../config/feature-gates');
+const { isEnabled, ownerNudgeBannerLive } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const NotificationService = require('../services/notification-service');
 const bellPolicy = require('../services/notification-bell-policy');
@@ -82,7 +81,6 @@ const gateOff = () => isEnabled.mockReturnValue(false);
 beforeEach(() => {
   jest.clearAllMocks();
   gateOff();
-  morningBannerLive.mockReturnValue(false);
   ownerNudgeBannerLive.mockReturnValue(false);
   bellPolicy.clearOverrideCache();
 });
@@ -533,7 +531,7 @@ describe('bellAllowed decision order', () => {
     }
   });
 
-  // GATE_PORTAL_ASK_PUSH: the app-ask page rings by its trigger key even over a silenced service category.
+  // The app-ask page rings by its trigger key even over a silenced service category.
   test('portal_ask rings by its trigger key even when the owner silenced its category', async () => {
     mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:service', bell_enabled: false }]) });
     bellPolicy.clearOverrideCache();
@@ -586,16 +584,14 @@ describe('bellAllowed decision order', () => {
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 
-  test('GATE_MORNING_BANNER: the waiting_summary banner passes the policy only while the gate is on, even with the alert category silenced', async () => {
+  test('the waiting_summary banner passes the policy, even with the alert category silenced', async () => {
     mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:alert', bell_enabled: false }]) });
     const summary = { category: 'alert', triggerKey: 'waiting_summary' };
-    await expect(bellPolicy.bellAllowed(summary)).resolves.toBe(false);
-    morningBannerLive.mockReturnValue(true);
     await expect(bellPolicy.bellAllowed(summary)).resolves.toBe(true);
     // Only that one joins: other alert-category events keep today's answer.
     await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' })).resolves.toBe(false);
     await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: null })).resolves.toBe(false);
-    expect([...bellPolicy._private.MORNING_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['waiting_summary']);
+    expect(bellPolicy._private.TRIGGER_BELL_ALLOWLIST.has('waiting_summary')).toBe(true);
     // The customer-alerts gate list is untouched.
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
@@ -604,17 +600,11 @@ describe('bellAllowed decision order', () => {
     mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:alert', bell_enabled: false }]) });
     const nudge = { category: 'alert', triggerKey: 'open_visits_nudge' };
     await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
-    // The morning banner's gate does not open it.
-    morningBannerLive.mockReturnValue(true);
-    await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(false);
-    morningBannerLive.mockReturnValue(false);
     ownerNudgeBannerLive.mockReturnValue(true);
     await expect(bellPolicy.bellAllowed(nudge)).resolves.toBe(true);
-    // And its gate does not open the morning banner or any other alert-category event.
-    await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'waiting_summary' })).resolves.toBe(false);
+    // And its gate does not open any other alert-category event.
     await expect(bellPolicy.bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' })).resolves.toBe(false);
     expect([...bellPolicy._private.OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['open_visits_nudge']);
-    expect([...bellPolicy._private.MORNING_BANNER_TRIGGER_BELL_ALLOWLIST]).toEqual(['waiting_summary']);
     expect([...bellPolicy._private.GATED_TRIGGER_BELL_ALLOWLIST]).toEqual(['bill_payment_error']);
   });
 

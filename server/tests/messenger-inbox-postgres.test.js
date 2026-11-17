@@ -426,28 +426,27 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       expect(reopened[0].done_at).toBeNull();
     });
 
-    test('the bell carries the messenger_reply trigger key; with GATE_BELL_BANNERS on each ring sends one phone banner, a quiet poll none', async () => {
+    test('the bell carries the messenger_reply trigger key; each ring sends one phone banner, a quiet poll none', async () => {
       const triggers = require('../services/notification-triggers');
       const banner = jest.spyOn(triggers, 'triggerNotification').mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
       const settle = () => new Promise((resolve) => { setTimeout(resolve, 150); });
       try {
-        // Gate off: the trigger key is on the row, and nothing is sent.
+        // The first message: the trigger key is on the row, and one banner is sent.
         const conv = conversation('a', { name: 'Pat Synthetic', unread: 1, messages: [{ fromPage: false, text: 'First question', at: ago(8) }] });
         await messenger.pollMessenger();
         await settle();
         const [first] = await bellsOf('a');
         expect(first.metadata).toMatchObject({ triggerKey: 'messenger_reply', conversationId: first.metadata.conversationId });
-        expect(banner).not.toHaveBeenCalled();
+        expect(banner).toHaveBeenCalledTimes(1);
 
-        // Gate on: the next message re-rings the same row and sends one banner built from that row.
-        process.env.GATE_BELL_BANNERS = 'true';
+        // The next message re-rings the same row and sends one banner built from that row.
         await db('notifications').where({ id: first.id }).update({ read_at: new Date() });
         conv.messages.push({ id: mid('a', 1), fromPage: false, text: 'Second question', at: ago(4) });
         conv.updated = ago(4);
         await messenger.pollMessenger();
         await settle();
-        expect(banner).toHaveBeenCalledTimes(1);
-        const [key, payload, opts] = banner.mock.calls[0];
+        expect(banner).toHaveBeenCalledTimes(2);
+        const [key, payload, opts] = banner.mock.calls[1];
         expect(key).toBe('messenger_reply');
         expect(payload).toMatchObject({ alertRowId: first.id, alertLink: first.link });
         expect(payload.alertBody).toContain('Second question');
@@ -456,9 +455,8 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
         // A poll that finds nothing new rings nothing and sends nothing.
         await messenger.pollMessenger();
         await settle();
-        expect(banner).toHaveBeenCalledTimes(1);
+        expect(banner).toHaveBeenCalledTimes(2);
       } finally {
-        delete process.env.GATE_BELL_BANNERS;
         banner.mockRestore();
       }
     });
@@ -655,6 +653,9 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       const release = client.releaseConnection.bind(client);
       let held = 0;
       let peak = 0;
+      // The phone banner reads the committed row on a connection of its own, after the bell write; it is not part of
+      // the reconcile this test counts, so it is stubbed out here.
+      const bannerStub = jest.spyOn(require('../services/bell-banners'), 'bannerAfterWrite').mockReturnValue(null);
       client.acquireConnection = async () => { const c = await acquire(); held += 1; peak = Math.max(peak, held); return c; };
       client.releaseConnection = (c) => { held -= 1; return release(c); };
       try {
@@ -684,6 +685,7 @@ maybeDescribe('messenger inbox (live Postgres)', () => {
       } finally {
         client.acquireConnection = acquire;
         client.releaseConnection = release;
+        bannerStub.mockRestore();
       }
     });
 

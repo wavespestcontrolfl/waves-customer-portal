@@ -497,10 +497,8 @@ async function queryCustomers(input, readCustomerIds = [], pageCustomerId = null
     // update path already refuse them, so listing one sends the operator
     // (and the model) chasing a record no other tool will touch.
     .whereNull('customers.deleted_at');
-  // GATE_CUSTOMER_LAST_TOUCH: serve the newest person touch as last_contact_date (customerListRow reads it).
-  if (require('../../config/feature-gates').customerLastTouchLive?.() === true) {
-    query = query.select(db.raw(`${require('../customer-intelligence/quiet-customers').contactTouchSql('customers')} as last_touch_at`));
-  }
+  // Serve the newest person touch as last_contact_date (customerListRow reads it).
+  query = query.select(db.raw(`${require('../customer-intelligence/quiet-customers').contactTouchSql('customers')} as last_touch_at`));
 
   const supportedFilters = new Set(Object.keys(TOOLS.find(t => t.name === 'query_customers').input_schema.properties.filters.properties));
   const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));

@@ -1,6 +1,6 @@
-// "Send a copy to Claude (read-only)" (step 3, GATE_ALERT_SEND_TO_CLAUDE_COPY): the refusal table, the one row a send writes
+// "Send a copy to Claude (read-only)" (step 3): the refusal table, the one row a send writes
 // (no customer words anywhere in it), the version fence, the dedupe and suppressed answers, the 10-second Undo fence, the two
-// routes (gate off 404, another admin 403), the bell list's marking and owner-only pass-through, and the alert-button
+// routes (another admin 403), the bell list's marking and owner-only pass-through, and the alert-button
 // route's owner-only refusal. The row itself against Postgres is notification-admin-claude-queue.test.js (the fenced write).
 const express = require('express');
 
@@ -32,11 +32,6 @@ jest.mock('../services/admin-alert-explainer', () => ({
   withExplainerFields: jest.fn(async (rows) => rows),
   explainAdminAlert: jest.fn(),
 }));
-jest.mock('../config/feature-gates', () => ({
-  ...jest.requireActual('../config/feature-gates'),
-  alertSendToClaudeLive: jest.fn(() => true),
-  alertSendToClaudeCopyLive: jest.fn(() => true),
-}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const users = {
@@ -55,10 +50,9 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const NotificationService = require('../services/notification-service');
-const { alertSendToClaudeCopyLive, alertSendToClaudeLive } = require('../config/feature-gates');
 const { runAlertButton } = require('../services/admin-alert-buttons');
 const {
-  copyRefusal, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy, copyLive,
+  copyRefusal, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy,
 } = require('../services/admin-alert-copy-to-claude');
 const router = require('../routes/admin-notifications');
 
@@ -99,8 +93,6 @@ const call = (base, path, { who = 'admin', method = 'POST', body } = {}) => fetc
 
 beforeEach(() => {
   jest.clearAllMocks();
-  alertSendToClaudeCopyLive.mockReturnValue(true);
-  alertSendToClaudeLive.mockReturnValue(true);
   NotificationService.getAdminNotifications.mockResolvedValue([]);
   NotificationService.isAdminOwnerOnly.mockResolvedValue(false);
   NotificationService.getAdminNotificationForExplainer.mockResolvedValue(contactRow());
@@ -130,19 +122,9 @@ describe('copyRefusal', () => {
   });
 });
 
-describe('copyLive', () => {
-  test('reads the gate; a missing or throwing reader reads as off', () => {
-    expect(copyLive()).toBe(true);
-    alertSendToClaudeCopyLive.mockReturnValue(undefined);
-    expect(copyLive()).toBe(false);
-    alertSendToClaudeCopyLive.mockImplementation(() => { throw new Error('boom'); });
-    expect(copyLive()).toBe(false);
-  });
-});
-
 describe('withSendCopyToClaudeFields', () => {
   const rows = () => [contactRow(), { id: 'r2', category: 'system', done_at: null, metadata: { dedupeKey: 'x:1' }, sendToClaude: true }, stranger({ id: 'r3' })];
-  test('marks refused rows for the owner login while the gate is on, and never a row step 1 marked', () => {
+  test('marks refused rows for the owner login, and never a row step 1 marked', () => {
     const out = withSendCopyToClaudeFields(rows(), { role: 'admin', fullAccess: true });
     expect(out.map((r) => r.sendCopyToClaude === true)).toEqual([true, false, true]);
   });
@@ -153,11 +135,7 @@ describe('withSendCopyToClaudeFields', () => {
     const input = rows();
     expect(withSendCopyToClaudeFields(input, opts)).toBe(input);
   });
-  test('gate off: rows as they are; a throwing check leaves the row unmarked', () => {
-    alertSendToClaudeCopyLive.mockReturnValue(false);
-    const input = rows();
-    expect(withSendCopyToClaudeFields(input, { role: 'admin', fullAccess: true })).toBe(input);
-    alertSendToClaudeCopyLive.mockReturnValue(true);
+  test('a throwing check leaves the row unmarked', () => {
     const bad = { id: 'r4', get category() { throw new Error('boom'); }, get done_at() { return null; }, metadata: {} };
     expect(withSendCopyToClaudeFields([bad], { role: 'admin', fullAccess: true })).toEqual([bad]);
   });
@@ -291,15 +269,6 @@ describe('routes', () => {
   const send = (base, o = {}) => call(base, `/${o.id || PARENT}/send-copy-to-claude`, { who: o.who, body: o.body || { version: VERSION.toUpperCase() } });
   const cancel = (base, o = {}) => call(base, `/${o.id || COPY}/cancel-copy`, { who: o.who, body: o.body || { at: AT } });
 
-  test('gate off: both routes answer 404 like an unknown route and write nothing', async () => {
-    alertSendToClaudeCopyLive.mockReturnValue(false);
-    await withServer(async (base) => {
-      expect(await send(base)).toEqual({ status: 404, body: { error: 'Not found' } });
-      expect(await cancel(base)).toEqual({ status: 404, body: { error: 'Not found' } });
-    });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-
   test('another admin login is refused 403, a technician 403, no login 401', async () => {
     await withServer(async (base) => {
       expect(await send(base, { who: 'office' })).toEqual({ status: 403, body: { error: 'This action is limited to the owner account.' } });
@@ -371,15 +340,6 @@ describe('the bell list', () => {
       expect(out.body.notifications.some((n) => n.sendCopyToClaude)).toBe(false);
     });
     expect(NotificationService.getAdminNotifications).toHaveBeenCalledWith(51, 0, expect.objectContaining({ fullAccess: false }));
-  });
-
-  test('gate off: no copy button even for the owner', async () => {
-    alertSendToClaudeCopyLive.mockReturnValue(false);
-    NotificationService.getAdminNotifications.mockResolvedValue(listed());
-    await withServer(async (base) => {
-      const out = await call(base, '/', { method: 'GET' });
-      expect(out.body.notifications.some((n) => n.sendCopyToClaude)).toBe(false);
-    });
   });
 });
 
