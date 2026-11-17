@@ -177,15 +177,21 @@ describe('POST / - re-service fold (GATE_RESERVICE_FOLD)', () => {
   });
 
   test('gate on and a plan visit in range: the 200 fold answer, nothing inserted, the move carries the office choices', async () => {
-    const r = await post({ ...base, sendConfirmationSms: true, technicianId: 'tech-9', notes: 'Ants in the lanai', customerNotes: 'Gate open' });
+    const r = await post({
+      ...base, sendConfirmationSms: true, technicianId: 'tech-9', notes: 'Ants in the lanai', customerNotes: 'Gate open',
+      internalNotes: 'Ring the office first',
+    });
     expect(r.status).toBe(200);
     expect(r.body).toEqual(FOLD_ANSWER);
     expect(inserts).toHaveLength(0);
     expect(fold.findFoldTarget).toHaveBeenCalledWith(expect.anything(), { customerId: CUST, lane: 'pest', date: '2099-07-01', propertyId: null });
+    // The fold's early answer skips the insert that would store internal_notes, so they ride to the moved visit.
     expect(fold.moveFoldTarget).toHaveBeenCalledWith(expect.objectContaining({
       target: TARGET, date: '2099-07-01', windowStart: '10:00', technicianId: 'tech-9', notifyCustomer: true,
-      notes: 'Ants in the lanai\nGate open', actor: { techRole: 'admin', technicianId: 'staff-1' },
+      notes: 'Ants in the lanai\nGate open', internalNotes: 'Ring the office first', actor: { techRole: 'admin', technicianId: 'staff-1' },
     }));
+    await post(base);
+    expect(fold.moveFoldTarget.mock.calls[1][0].internalNotes).toBeNull();
   });
 
   test("the office's customerAskedTime reaches the move, whatever it is, for the move to judge", async () => {

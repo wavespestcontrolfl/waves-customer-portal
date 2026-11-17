@@ -147,6 +147,18 @@ test('words with no office notes: filled once and no notes write; no words and n
   expect(update.mock.calls[0][0]).toEqual({ notes: NOTES_LINE('Ants in the kitchen') });
 });
 
+test("the office's internal notes join the visit's own internal notes in SQL, in the same write as the notes", async () => {
+  const INTERNAL_LINE = { sql: "concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", bindings: ['[Re-service folded in, Tue, Nov 17] Ring the office first'] };
+  await run({ internalNotes: 'Ring the office first' });
+  expect(update).toHaveBeenCalledTimes(2);
+  expect(update.mock.calls[1][0]).toEqual({ notes: NOTES_LINE('Ants in the kitchen'), internal_notes: INTERNAL_LINE });
+  update.mockClear();
+  // Internal notes alone: one write of that column only.
+  await run({ customerRequest: null, notes: null, internalNotes: 'Ring the office first' });
+  expect(update).toHaveBeenCalledTimes(1);
+  expect(update.mock.calls[0][0]).toEqual({ internal_notes: INTERNAL_LINE });
+});
+
 test('a failed copy of the words does not undo the move: the answer says to add them by hand', async () => {
   update.mockRejectedValue(new Error('db down'));
   const out = await run();

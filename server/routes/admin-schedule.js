@@ -8682,7 +8682,7 @@ function askedTimeStamp(cols, customerAskedTime) {
 // that line moves that visit up instead of booking. null = no fold (gate off, a recurring booking, not a re-service, not a
 // free one without add-on lines, no plan visit in range); otherwise services/reservice-fold.js moveFoldTarget's { moved, answer | warning }.
 async function officeReserviceFold({ req, customerId, serviceKey, isRecurring, isCallback, scheduledDate, windowStart, free,
-  customerAskedTime, bookingProperty, technicianId, notifyCustomer, customerRequest, notes }) {
+  customerAskedTime, bookingProperty, technicianId, notifyCustomer, customerRequest, notes, internalNotes }) {
   if (require('../config/feature-gates').reserviceFoldLive?.() !== true) return null;
   const fold = require('../services/reservice-fold');
   const lane = fold.foldLaneForServiceKey(serviceKey);
@@ -8691,7 +8691,7 @@ async function officeReserviceFold({ req, customerId, serviceKey, isRecurring, i
   if (!target) return null;
   return fold.moveFoldTarget({
     conn: db, target, date: scheduledDate, windowStart, technicianId, customerAskedTime, notifyCustomer, customerRequest, notes,
-    actor: { techRole: req.techRole, technicianId: req.technicianId },
+    internalNotes, actor: { techRole: req.techRole, technicianId: req.technicianId },
   });
 }
 
@@ -9476,7 +9476,7 @@ async function scheduleCreateHandler(req, res, next) {
       // or found = undefined (the plan visit keeps its own).
       bookingProperty, technicianId: assignmentMode === 'unassigned' ? null : (resolvedTechId || undefined),
       notifyCustomer: sendConfirmationSms === undefined ? true : !!sendConfirmationSms,
-      customerRequest: officeCustomerRequest, notes: combinedNotes,
+      customerRequest: officeCustomerRequest, notes: combinedNotes, internalNotes: internalNotes || null,
     });
     if (reserviceFold?.moved) return res.status(200).json(reserviceFold.answer);
     if (reserviceFold?.warning) bookingWarnings.push(reserviceFold.warning);

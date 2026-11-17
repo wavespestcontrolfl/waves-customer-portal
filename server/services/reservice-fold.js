@@ -104,8 +104,9 @@ function moveRefusal(err) {
 // After the move committed: the office's words go to the moved visit so the technician knows the problem. The customer's
 // words fill customer_request only while it is empty (one guarded UPDATE: a visit that already has words, or got them
 // meanwhile, keeps them) and otherwise go into the notes line with their source, so nothing is lost or overwritten. Notes
-// are appended in SQL, never rewritten from the lookup snapshot. No column here fires a text, a reminder or a sync trigger.
-async function carryOfficeWords(conn, target, { customerRequest, notes, date }) {
+// are appended in SQL, never rewritten from the lookup snapshot, and the office's internal notes join the visit's own
+// internal notes the same way. No column here fires a text, a reminder or a sync trigger.
+async function carryOfficeWords(conn, target, { customerRequest, notes, internalNotes, date }) {
   const words = customerRequest?.text || null;
   let wordsToNotes = false;
   if (words) {
@@ -115,9 +116,14 @@ async function carryOfficeWords(conn, target, { customerRequest, notes, date }) 
     wordsToNotes = filled === 0;
   }
   const line = [wordsToNotes ? `Customer's words (${customerRequest.source}): ${words}.` : '', notes].filter(Boolean).join(' ');
-  if (!line) return;
-  await conn('scheduled_services').where({ id: target.id })
-    .update({ notes: conn.raw("concat_ws(E'\\n', nullif(notes, ''), ?::text)", [`[Re-service folded in, ${foldDateLabel(date)}] ${line}`]) });
+  const stamp = `[Re-service folded in, ${foldDateLabel(date)}]`;
+  const patch = {};
+  if (line) patch.notes = conn.raw("concat_ws(E'\\n', nullif(notes, ''), ?::text)", [`${stamp} ${line}`]);
+  if (internalNotes) {
+    patch.internal_notes = conn.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`${stamp} ${internalNotes}`]);
+  }
+  if (!Object.keys(patch).length) return;
+  await conn('scheduled_services').where({ id: target.id }).update(patch);
 }
 
 // Runs the planned move. A thrown refusal (moveRefusal) wrote nothing and comes back as `failure`: the re-service books.
@@ -143,7 +149,7 @@ async function runFoldMove({ planned, target, newDate, notifyCustomer, actor }) 
 }
 
 // The 200 answer the booking route sends when the plan visit moved. Carrying the office's words never undoes the move.
-async function foldAnswer({ conn, target, newDate, windowStart, out, notifyCustomer, customerRequest, notes }) {
+async function foldAnswer({ conn, target, newDate, windowStart, out, notifyCustomer, customerRequest, notes, internalNotes }) {
   const body = out.body || {};
   const warnings = [foldOfficeNotice(target, newDate, windowStart), ...(Array.isArray(body.warnings) ? body.warnings : [])];
   if (out.status >= 300) warnings.push(`The move reported an error after it saved (${body.error || 'no detail'}). Check the visit.`);
@@ -153,7 +159,7 @@ async function foldAnswer({ conn, target, newDate, windowStart, out, notifyCusto
     warnings.push(`The customer was not texted about the move: ${body.notificationError || 'the text could not be sent'}.`);
   }
   try {
-    await carryOfficeWords(conn, target, { customerRequest, notes, date: newDate });
+    await carryOfficeWords(conn, target, { customerRequest, notes, internalNotes, date: newDate });
   } catch (err) {
     logger.error(`[reservice-fold] moved ${target.id} but could not copy the office words: ${err.message}`);
     warnings.push('The plan visit moved, but the customer\'s words and notes did not copy to it. Add them to the visit.');
@@ -180,7 +186,9 @@ async function foldAnswer({ conn, target, newDate, windowStart, out, notifyCusto
  * Returns { moved: true, answer } for the 200 the booking route sends, or { moved: false, warning } when the plan or the
  * move refused before anything wrote (the caller then books the re-service as before). Any other error propagates.
  */
-async function moveFoldTarget({ conn = db, target, date, windowStart, technicianId, customerAskedTime, notifyCustomer, actor, customerRequest, notes }) {
+async function moveFoldTarget({
+  conn = db, target, date, windowStart, technicianId, customerAskedTime, notifyCustomer, actor, customerRequest, notes, internalNotes,
+}) {
   const newDate = dateOnlyString(date);
   const refused = (why) => ({
     moved: false,
@@ -190,7 +198,8 @@ async function moveFoldTarget({ conn = db, target, date, windowStart, technician
   if (plan.failure) return refused(plan.failure);
   const { out, failure } = await runFoldMove({ planned: plan.planned, target, newDate, notifyCustomer, actor });
   if (failure) return refused(failure);
-  return { moved: true, answer: await foldAnswer({ conn, target, newDate, windowStart, out, notifyCustomer, customerRequest, notes }) };
+  const answer = await foldAnswer({ conn, target, newDate, windowStart, out, notifyCustomer, customerRequest, notes, internalNotes });
+  return { moved: true, answer };
 }
 
 // Plans the single-visit move; the planner only reads. Its refusal, returned or thrown (moveRefusal: e.g. a plan visit with
