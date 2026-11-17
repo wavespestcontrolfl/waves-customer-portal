@@ -155,6 +155,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_CALL_CONFERENCE_PATH=test|true (owner 2026-11-16 "ok build all", live-call suite base: the main office staff ring connects through a per-call Twilio conference instead of <Dial><Number>, with the same press-1 screen, voicemail and recording. test = only callers listed in CALL_CONFERENCE_TEST_CALLERS; true = every main office ring. Read at call time via callConferencePathMode(); anything else is off, byte-identical TwiML. New spend (conference participant-minutes) and a named risk (rewrites the live inbound call path). Kill: unset.)
  *   GATE_TECH_WORK_DAYS=true (owner 2026-10-25, work days per technician: a technician row may carry technicians.work_days, the weekdays that person works (the Team tab "Work days" row; empty = every day). On, slot offers, automatic booking and automatic moves skip that technician on a day they do not work, and an automatic booking that lands on such a day stays unassigned for the owner; office saves (schedule create and edit, board assign and drag) still go through and add a plain warning line. Strict opt-in: exactly 'true', read at call time via techWorkDaysLive(). Ships DARK; off = work_days is ignored everywhere and the Team tab shows no editor. Sends nothing to a customer.)
  *   GATE_TECH_JOB_TYPE_CHECKS=true (owner 2026-10-25, second technician starts early 2027: job type from the service catalog. The capability checks (slot offers, automatic technician pick, tech-out auto-move, auto-dispatch apply, the save-time fences) today read a visit's job type from its NAME, so "Palm Tree Nutritional Treatment", "Semiannual Palm", "Palm Fert" and "Top Dress" read as general pest and a technician set to Off for Lawn can still get them. On, the category comes from the service library first (the visit's service_id, else its service key, to services.category, mapped onto the five capability categories by the same table the service-line map uses) and falls back to the name only when the catalog names none. Office saves (schedule create and edit, board assign and drag, lead booking, Dispatch New Appointment) also add a plain warning, never a block, when the chosen technician is set to Off for the visit's job type; "needs review" never warns. Strict opt-in: exactly 'true', read at call time via techJobTypeChecksLive(). Ships DARK; off = name-only classification and no extra warning, byte-identical. Sends nothing to a customer.)
  *   GATE_AUTO_DISPATCH_KEEP_TECH=true (owner 2026-10-25, second technician starts early 2027: the 04:10 auto-dispatch night run keeps each visit on its own technician. On, a visit that has a technician gets candidate slots on that same technician only (other technicians' slots are dropped as `other_tech`), and the write refuses to change a technician (`TECH_CHANGE_BLOCKED`, the visit stays). An unassigned visit is handled as before. Strict opt-in: exactly 'true', read at call time via autoDispatchKeepTechLive(), resolved once per run as config.keepTech. Ships DARK; off = the night run may move a visit to another technician for a shorter drive, byte-identical to before. Sends nothing to a customer.)
@@ -6651,6 +6652,15 @@ function bookArrivalGraceLive() {
 // (services/scheduling/customer-route-check.js). shadow = compute and log,
 // serve today's list; on = drop only the starts that would make ANOTHER
 // customer arrive after their window. Unset is the kill, no redeploy.
+// GATE_CALL_CONFERENCE_PATH read at CALL time (owner 2026-11-16, "ok build all"): 'off' | 'test' | 'on'.
+// test admits only the callers in CALL_CONFERENCE_TEST_CALLERS; true admits every main office ring
+// (services/call-conference-path.js). Anything else, unset too, is off. Unset is the kill, no redeploy.
+function callConferencePathMode() {
+  const value = String(process.env.GATE_CALL_CONFERENCE_PATH || '').trim().toLowerCase();
+  if (value === 'test') return 'test';
+  return value === 'true' ? 'on' : 'off';
+}
+
 function customerRouteCheckMode() {
   const value = String(process.env.GATE_CUSTOMER_ROUTE_CHECK || '').trim().toLowerCase();
   if (value === 'shadow') return 'shadow';
@@ -8342,6 +8352,8 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 module.exports.ibSeriesMoveLive = ibSeriesMoveLive;
 module.exports.customerRouteCheckMode = customerRouteCheckMode;
+// GATE_CALL_CONFERENCE_PATH reader, on its own line so gate PRs never conflict.
+module.exports.callConferencePathMode = callConferencePathMode;
 // GATE_MOVING_FLOW read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02). On, the moving link, the public
 // /moving/:token page and its routes, and the Customer 360 Moving card work (services/customer-moves.js,
 // routes/moving-public.js). Off = every new public and admin route answers 404 and the admin UI hides the card. Kill = unset.
