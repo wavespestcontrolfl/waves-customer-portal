@@ -212,6 +212,10 @@ router.get('/live', requireAdmin, async (req, res, next) => {
     // starts here WITHOUT being awaited, so the model runs only while someone watches this panel.
     const assistOn = require('../config/feature-gates').isEnabled('callLiveAssist');
     const liveAssist = assistOn ? require('../services/live-call-assist') : null;
+    // GATE_CALL_HOLD (dark): each call also carries hold { can_hold, on_hold, since } for the Hold button, read from
+    // the row's own conference_path (null off the conference ring and before a press 1). No query, no Twilio request.
+    const callHold = require('../services/call-hold');
+    const holdOn = callHold.isEnabled();
     const since = new Date(Date.now() - LIVE_CALL_WINDOW_MS);
     const ended = [...TERMINAL_CALL_STATUSES];
     const rows = await db('call_log')
@@ -246,10 +250,29 @@ router.get('/live', requireAdmin, async (req, res, next) => {
           : null,
         answered_by: String(meta.forward_acceptance?.csr_name || '').trim() || null,
         assist: liveAssist ? liveAssist.assistForPanel(meta) : null,
+        hold: holdOn ? callHold.holdForPanel(meta.conference_path) : null,
         lines: utterances.reverse().map((u) => ({ speaker: u.speaker, text: u.text || '', at: u.spoken_at })),
       };
     }));
     res.json(forStaffRole(req, { enabled: true, calls }));
+  } catch (err) { next(err); }
+});
+
+// POST /live/:id/hold — the Live call panel's Hold button (GATE_CALL_HOLD; call-hold.js requestHold). The staff who
+// answered the call are moved out of the room to the hold menu, as a star press does: the caller hears the hold script,
+// the recording pauses, and the staff press 1 on the phone to go back. Admin only, like the panel. 200 { result:
+// 'requested' | 'on_hold' }; 409 { result: 'unavailable' } (gate off, not a conference-ring call, not answered, or the
+// call is over); 502 { result: 'failed' } (Twilio refused the move: nothing changed).
+const HOLD_STATUS = { requested: 200, on_hold: 200, unavailable: 409, failed: 502 };
+router.post('/live/:id/hold', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Call id must be a UUID' });
+    const callHold = require('../services/call-hold');
+    if (!callHold.isEnabled()) return res.status(409).json({ result: 'unavailable' });
+    const row = await db('call_log').where({ id: req.params.id }).first('twilio_call_sid');
+    if (!row?.twilio_call_sid) return res.status(404).json({ error: 'Call not found' });
+    const result = await callHold.requestHold(row.twilio_call_sid, { by: 'button' });
+    return res.status(HOLD_STATUS[result] || 502).json({ result });
   } catch (err) { next(err); }
 });
 

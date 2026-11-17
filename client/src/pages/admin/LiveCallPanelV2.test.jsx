@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LiveCallPanelV2, { elapsedLabel } from "./LiveCallPanelV2";
 
@@ -125,6 +125,68 @@ describe("LiveCallPanelV2", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await act(async () => { vi.advanceTimersByTime(35000); });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  describe("Hold button (GATE_CALL_HOLD)", () => {
+    const withHold = (hold) => ({ ...call(lines(2)), hold });
+    // GET /live answers the calls; the POST answers the hold route's status.
+    const server = (hold, postAnswer = { ok: true, json: async () => ({ result: "requested" }) }) => vi.fn(async (url, opts) => (
+      opts?.method === "POST" ? postAnswer : answer([withHold(hold)])
+    ));
+
+    it("an answered conference-ring call shows Hold; a press posts to the call's hold route and waits for the hold", async () => {
+      const fetchMock = server({ can_hold: true, on_hold: false, since: null });
+      vi.stubGlobal("fetch", fetchMock);
+      render(<LiveCallPanelV2 />);
+      await flush();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hold" })); });
+      await flush();
+      const post = fetchMock.mock.calls.find(([, opts]) => opts?.method === "POST");
+      expect(post[0]).toBe("/api/admin/call-recordings/live/call-1/hold");
+      expect(post[1].headers.Authorization).toMatch(/^Bearer /);
+      expect(screen.getByRole("button", { name: "Putting on hold…" })).toBeDisabled();
+    });
+
+    it("a press that shows no hold within 15 s gives the button back", async () => {
+      vi.stubGlobal("fetch", server({ can_hold: true, on_hold: false, since: null }));
+      render(<LiveCallPanelV2 />);
+      await flush();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hold" })); });
+      await flush();
+      await act(async () => { vi.advanceTimersByTime(14000); });
+      expect(screen.getByRole("button", { name: "Putting on hold…" })).toBeDisabled();
+      await act(async () => { vi.advanceTimersByTime(2000); });
+      expect(screen.getByRole("button", { name: "Hold" })).toBeEnabled();
+    });
+
+    it("a refused press says to press star and gives the button back", async () => {
+      vi.stubGlobal("fetch", server({ can_hold: true, on_hold: false, since: null }, { ok: false, status: 502, json: async () => ({ result: "failed" }) }));
+      render(<LiveCallPanelV2 />);
+      await flush();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hold" })); });
+      await flush();
+      expect(screen.getByText("The hold did not start. Press star on the phone.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Hold" })).toBeEnabled();
+    });
+
+    it("a call on hold shows how long, and the way back; no Hold button", async () => {
+      vi.stubGlobal("fetch", server({ can_hold: false, on_hold: true, since: "2026-11-17T15:01:05.000Z" }));
+      render(<LiveCallPanelV2 />);
+      await flush();
+      expect(screen.getByTestId("live-call-hold")).toHaveTextContent("On hold 1:00. Press 1 on the phone to go back.");
+      expect(screen.queryByRole("button", { name: "Hold" })).not.toBeInTheDocument();
+    });
+
+    it("no Hold button when the hold is off, the call is not on the conference ring, or it cannot hold now", async () => {
+      for (const hold of [undefined, null, { can_hold: false, on_hold: false, since: null }]) {
+        vi.stubGlobal("fetch", server(hold));
+        const { unmount } = render(<LiveCallPanelV2 />);
+        await flush();
+        expect(screen.getByText("line 2")).toBeInTheDocument();
+        expect(screen.queryByTestId("live-call-hold")).not.toBeInTheDocument();
+        unmount();
+      }
+    });
   });
 
   it("formats the running time as m:ss", () => {
