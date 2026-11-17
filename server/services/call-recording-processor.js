@@ -12435,7 +12435,12 @@ const CallRecordingProcessor = {
     // GATE_LIVE_CALL_BACKUP_TRANSCRIPT: an answered call with NO recording keeps its live text as the
     // transcript, so extraction, summary and follow-ups still run. A recording that exists but failed
     // to transcribe never gets here with text: it stays no_transcription for the sweep to retry.
-    if (!transcription && !hadRecording && !call.recording_url && isEnabled('liveCallBackupTranscript') && liveTextSettled(call)) {
+    // Only the missing-recording sweep's pass may use it (opts.confirmedNoRecording): it runs after
+    // Twilio's recording lookup for the call succeeded and found no completed recording. A direct pass
+    // (the admin Process button, a webhook) never does, so a recording whose callback was lost is
+    // recovered by the sweep instead of shadowed by the live text.
+    if (!transcription && !hadRecording && !call.recording_url && opts.confirmedNoRecording === true
+      && isEnabled('liveCallBackupTranscript') && liveTextSettled(call)) {
       let live = null;
       try {
         live = await require('./live-call-transcription').liveTranscriptFor(callSid);
@@ -25945,7 +25950,10 @@ const CallRecordingProcessor = {
         const status = state?.processing_status || null;
         const owed = !status || status === 'pending' || status === 'no_transcription' || status === 'extraction_failed'
           || (status === 'processing' && state?.claim_stale === true);
-        if (owed && (Number(state?.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS) await this.processRecording(r.callSid);
+        // r is recoverRecordingForCall's no_completed_recording: its Twilio lookup succeeded and found none.
+        if (owed && (Number(state?.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS) {
+          await this.processRecording(r.callSid, { confirmedNoRecording: true });
+        }
       } catch (liveErr) {
         logger.warn(`[call-proc] live backup transcript pass failed for ${maskSid(r.callSid)}: ${liveErr.message}`);
       }

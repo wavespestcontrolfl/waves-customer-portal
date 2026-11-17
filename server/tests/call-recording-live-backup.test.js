@@ -23,6 +23,9 @@ const SID = 'CA00000000000000000000000000000456';
 const liveText = 'Caller: I need a termite inspection.\nAgent: Sure, what is the address?';
 
 // Rows + patches the fixture db holds. liveSweepRows feeds recoverMissingRecentRecordings.
+// The missing-recording sweep's pass: Twilio's lookup found no completed recording. Only it may use the live text.
+const SWEEP_PASS = { confirmedNoRecording: true };
+
 // callStatus / createdAt: the call itself (by default an inbound call that completed 40 minutes ago, past the
 // unrecorded-call watchdog's 30-minute grace, so no recording is still coming).
 function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0, transcription = null, provider = null,
@@ -88,30 +91,42 @@ describe('live-text backup transcript in processRecording', () => {
     else process.env.GEMINI_API_KEY = geminiKey;
   });
 
+  // Local pre-push audit P1: a direct pass has no Twilio lookup behind it, and a lost recording callback leaves the
+  // recording fields empty while Twilio holds the audio; the sweep's recovery must get that recording, not the live text.
+  test('a direct pass (webhook or the admin Process button) never uses the live text, even past the grace', async () => {
+    const direct = primeDb();
+    await processor.processRecording(SID);
+    expect(direct.row.processing_status).toBe('no_transcription');
+    const operator = primeDb();
+    await processor.processRecording(SID, { force: true, operator: true });
+    expect(operator.row.processing_status).toBe('no_transcription');
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+  });
+
   // Local pre-push audit P1s: a pass while the call is live (the admin process button) never extracts half a call,
   // and the live text never stands in while Twilio may still post a late recording (the watchdog's 30-minute grace).
   test('the live text stands in only once the call ended 30 minutes ago: never while live, never inside the grace', async () => {
     primeDb({ callStatus: 'in-progress' });
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(liveTranscriptFor).not.toHaveBeenCalled();
 
     // Ended 10 s ago (90 s call), and ended 28 minutes ago even with the transcription stopped: a recording may still come.
     const justEnded = primeDb({ createdAt: new Date(Date.now() - 100 * 1000) });
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(justEnded.row.processing_status).toBe('no_transcription');
     primeDb({ createdAt: new Date(Date.now() - (28 * 60 + 90) * 1000), metadata: { live_transcription: { stopped_at: new Date().toISOString() } } });
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(liveTranscriptFor).not.toHaveBeenCalled();
 
     const settled = primeDb({ createdAt: new Date(Date.now() - (31 * 60 + 90) * 1000) });
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(liveTranscriptFor).toHaveBeenCalledWith(SID);
     expect(settled.row.transcription).toBe(liveText);
   });
 
   test('gate on, no recording, live text: written as the transcript and extraction runs on it', async () => {
     const { row, patches } = primeDb();
-    const result = await processor.processRecording(SID);
+    const result = await processor.processRecording(SID, SWEEP_PASS);
     expect(liveTranscriptFor).toHaveBeenCalledWith(SID);
     const write = patches.find((p) => p.transcription_provider === 'twilio_realtime');
     expect(write).toMatchObject({ transcription: liveText, transcription_status: 'completed', transcription_model: null, transcript_structured: null });
@@ -125,7 +140,7 @@ describe('live-text backup transcript in processRecording', () => {
   test('the write carries the live provenance and the card-masked flag', async () => {
     liveTranscriptFor.mockResolvedValue({ text: liveText, utterances: 3, panMasked: true });
     const { patches } = primeDb();
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     const write = patches.find((p) => p.transcription_provider === 'twilio_realtime');
     const [, bindings] = db.raw.mock.calls.find(([sql]) => String(sql).includes('jsonb_object_agg'));
     expect(JSON.parse(bindings[bindings.length - 1])).toEqual({
@@ -137,7 +152,7 @@ describe('live-text backup transcript in processRecording', () => {
   test('gate off: no recording stays no_transcription and the live text is never read', async () => {
     mockGate.on = false;
     const { row } = primeDb();
-    const result = await processor.processRecording(SID);
+    const result = await processor.processRecording(SID, SWEEP_PASS);
     expect(result.error).toMatch(/transcription/i);
     expect(row.processing_status).toBe('no_transcription');
     expect(liveTranscriptFor).not.toHaveBeenCalled();
@@ -147,7 +162,7 @@ describe('live-text backup transcript in processRecording', () => {
   test('gate on but no utterances: no_transcription as today', async () => {
     liveTranscriptFor.mockResolvedValue(null);
     const { row } = primeDb();
-    const result = await processor.processRecording(SID);
+    const result = await processor.processRecording(SID, SWEEP_PASS);
     expect(result.error).toMatch(/transcription/i);
     expect(row.processing_status).toBe('no_transcription');
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -156,13 +171,13 @@ describe('live-text backup transcript in processRecording', () => {
   test('a read failure on the live text falls through to no_transcription', async () => {
     liveTranscriptFor.mockRejectedValue(new Error('db down'));
     const { row } = primeDb();
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(row.processing_status).toBe('no_transcription');
   });
 
   test('a call WITH a recording whose transcription failed stays no_transcription; live text unused', async () => {
     const { row } = primeDb({ recordingUrl: 'https://api.twilio.com/fixture-recording', recordingSid: 'RE00000000000000000000000000000001' });
-    const result = await processor.processRecording(SID);
+    const result = await processor.processRecording(SID, SWEEP_PASS);
     expect(result.error || result.reason).toMatch(/transcription/i);
     expect(row.processing_status).toBe('no_transcription');
     expect(liveTranscriptFor).not.toHaveBeenCalled();
@@ -171,14 +186,14 @@ describe('live-text backup transcript in processRecording', () => {
 
   test('a quarantined recording (SID kept, url cleared) never uses the live text', async () => {
     const { row } = primeDb({ recordingSid: 'RE00000000000000000000000000000002' });
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(row.processing_status).toBe('no_transcription');
     expect(liveTranscriptFor).not.toHaveBeenCalled();
   });
 
   test('a retry after a failed extraction goes through the live branch again and keeps the live provenance', async () => {
     const { row, patches } = primeDb();
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(row.transcription_provider).toBe('twilio_realtime');
     // A later utterance arrived; the retry must read it, not reuse the stored copy.
     const longer = `${liveText}\nCaller: It is 12 Palm Street.`;
@@ -187,7 +202,7 @@ describe('live-text backup transcript in processRecording', () => {
     row.processing_token = null;
     patches.length = 0;
     fetchSpy.mockClear();
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(liveTranscriptFor).toHaveBeenCalledTimes(2);
     expect(patches.some((p) => p.transcription_provider === 'twilio_builtin')).toBe(false);
     expect(patches.find((p) => p.transcription_provider === 'twilio_realtime')).toMatchObject({ transcription: longer });
@@ -200,7 +215,7 @@ describe('live-text backup transcript in processRecording', () => {
       recordingUrl: 'https://api.twilio.com/fixture-recording', recordingSid: 'RE00000000000000000000000000000003',
       status: 'extraction_failed', transcription: liveText, provider: 'twilio_realtime',
     });
-    const result = await processor.processRecording(SID);
+    const result = await processor.processRecording(SID, SWEEP_PASS);
     expect(result.error || result.reason).toMatch(/transcription/i);
     expect(row.processing_status).toBe('no_transcription');
     expect(patches.some((p) => p.transcription_provider === 'twilio_builtin')).toBe(false);
@@ -213,7 +228,7 @@ describe('live-text backup transcript in processRecording', () => {
       recordingUrl: 'https://api.twilio.com/fixture-recording', recordingSid: 'RE00000000000000000000000000000004',
       status: 'extraction_failed', transcription: liveText, provider: 'twilio_builtin',
     });
-    await processor.processRecording(SID);
+    await processor.processRecording(SID, SWEEP_PASS);
     expect(patches.some((p) => p.transcription_provider === 'twilio_builtin')).toBe(true);
   });
 
@@ -226,7 +241,7 @@ describe('live-text backup transcript in processRecording', () => {
       builder.update = (patch, returning) => (patch.transcription_provider === 'twilio_realtime' ? 0 : update(patch, returning));
       return builder;
     });
-    expect(await processor.processRecording(SID)).toMatchObject({ skipped: true, reason: 'terminal_write_ownership_lost' });
+    expect(await processor.processRecording(SID, SWEEP_PASS)).toMatchObject({ skipped: true, reason: 'terminal_write_ownership_lost' });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(row.transcription).toBeNull();
   });
@@ -263,7 +278,7 @@ describe('missing-recording sweep with live text', () => {
     primeSweep();
     await processor.recoverMissingRecentRecordings();
     expect(procSpy).toHaveBeenCalledTimes(1);
-    expect(procSpy).toHaveBeenCalledWith(SID);
+    expect(procSpy).toHaveBeenCalledWith(SID, { confirmedNoRecording: true });
   });
 
   test('a call inside the unrecorded-call grace gets no pass yet: its recording may still come', async () => {
