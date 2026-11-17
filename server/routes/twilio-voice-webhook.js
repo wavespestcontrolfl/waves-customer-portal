@@ -6,6 +6,8 @@ const { callStartedAt } = require('../utils/call-timeline');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { ringTargetForLine } = require('../services/tech-line');
 const conferencePath = require('../services/call-conference-path');
+const callHold = require('../services/call-hold');
+const holdScript = require('../services/call-hold-script');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -239,8 +241,12 @@ function appendCallerConference(twiml, callSid) {
   return dial;
 }
 
+// GATE_CALL_HOLD on: star takes the staff out of the room and requests /conference-staff-left (the same
+// action runs when the room ends under them, so that route checks the room). Off = no <Dial> attributes.
 function appendStaffConference(twiml, callSid) {
-  const dial = twiml.dial();
+  const dial = callHold.isEnabled()
+    ? twiml.dial({ hangupOnStar: true, action: `/api/webhooks/twilio/conference-staff-left?parent=${encodeURIComponent(callSid)}`, method: 'POST' })
+    : twiml.dial();
   dial.conference({
     startConferenceOnEnter: true,
     endConferenceOnExit: false,
@@ -4075,6 +4081,138 @@ router.post('/conference-staff-status', async (req, res) => {
     logger.error(`[conference] staff leg status failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
   }
   res.sendStatus(200);
+});
+
+// =========================================================================
+// Star-key hold (GATE_CALL_HOLD) — services/call-hold.js has the state and the Twilio calls.
+// =========================================================================
+
+const HOLD_ROUTE = (name, sid, extra = '') => `/api/webhooks/twilio/${name}?parent=${encodeURIComponent(sid)}${extra}`;
+const FACTS_PER_STEP = 4;
+const sendTwiml = (res, twiml) => res.type('text/xml').send(twiml.toString());
+const HANGUP_XML = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+
+function callerGone(twiml) {
+  twiml.say({ voice: SAY_VOICE }, 'The caller hung up.');
+  twiml.hangup();
+}
+
+// The staff go back into the room when it is still open, else the call ends.
+async function rejoinOrHangup(twiml, parentSid) {
+  if (await callHold.roomIsOpen(parentSid)) appendStaffConference(twiml, parentSid);
+  else twiml.hangup();
+}
+
+function appendHoldMenu(twiml, parentSid, { first = false } = {}) {
+  const gather = twiml.gather({ numDigits: 1, timeout: 15, action: HOLD_ROUTE('conference-staff-menu-choice', parentSid), method: 'POST' });
+  if (first) gather.say({ voice: SAY_VOICE }, 'Your caller is on hold. Press 1 to go back to the caller.');
+  twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
+}
+
+// POST /conference-staff-left — the staff pressed star (or the room ended under them). Gate off (flipped
+// mid-call) or a hold that did not start puts them back in the room; a caller who left ends the call.
+router.post('/conference-staff-left', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const twiml = new VoiceResponse();
+  try {
+    if (!conferencePath.CALL_SID_RE.test(parentSid)) {
+      twiml.hangup();
+    } else if (!callHold.isEnabled()) {
+      await rejoinOrHangup(twiml, parentSid);
+    } else {
+      const held = await callHold.startHold(parentSid, { by: 'star', legSid: req.body?.CallSid || null });
+      if (held === 'held') twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid, '&first=1'));
+      else if (held === 'no_room') twiml.hangup();
+      else appendStaffConference(twiml, parentSid);
+    }
+    return sendTwiml(res, twiml);
+  } catch (err) {
+    logger.error(`[call-hold] staff-left error for ${maskSid(parentSid)}: ${err.message}`);
+    try {
+      const safe = new VoiceResponse();
+      if (conferencePath.CALL_SID_RE.test(parentSid)) await rejoinOrHangup(safe, parentSid);
+      else safe.hangup();
+      return sendTwiml(res, safe);
+    } catch {
+      return res.type('text/xml').send(HANGUP_XML);
+    }
+  }
+});
+
+// POST /conference-staff-menu — the staff hear the menu once, then a silent 15 s <Gather> loop.
+router.post('/conference-staff-menu', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const twiml = new VoiceResponse();
+  try {
+    const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.holdState(parentSid) : { closed: true };
+    if (state.closed) callerGone(twiml);
+    else if (!state.open) await rejoinOrHangup(twiml, parentSid);
+    else appendHoldMenu(twiml, parentSid, { first: req.query.first === '1' });
+  } catch (err) {
+    logger.error(`[call-hold] menu error for ${maskSid(parentSid)}: ${err.message}`);
+    return res.type('text/xml').send(HANGUP_XML);
+  }
+  return sendTwiml(res, twiml);
+});
+
+// POST /conference-staff-menu-choice — 1 takes the caller off hold and puts the staff back in the room.
+router.post('/conference-staff-menu-choice', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const twiml = new VoiceResponse();
+  const toMenu = () => twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-staff-menu', parentSid));
+  try {
+    if (!conferencePath.CALL_SID_RE.test(parentSid)) {
+      twiml.hangup();
+    } else if (String(req.body?.Digits || '').trim() !== '1') {
+      toMenu();
+    } else {
+      const ended = await callHold.endHold(parentSid);
+      if (ended === 'returned') {
+        appendStaffConference(twiml, parentSid);
+      } else if (ended === 'no_room') {
+        callerGone(twiml);
+      } else {
+        twiml.say({ voice: SAY_VOICE }, 'Sorry, that did not work.');
+        toMenu();
+      }
+    }
+  } catch (err) {
+    logger.error(`[call-hold] menu choice error for ${maskSid(parentSid)}: ${err.message}`);
+    return res.type('text/xml').send(HANGUP_XML);
+  }
+  return sendTwiml(res, twiml);
+});
+
+// The hold script for one step: the opening on step 0, four facts in order (cycling through all of
+// them by step), the reminder between this step's last fact and the next step's first, then the next step.
+function appendHoldFacts(twiml, parentSid, step) {
+  const say = (text) => twiml.say({ voice: SAY_VOICE }, text);
+  if (step === 0) say(holdScript.OPENING);
+  for (let i = 0; i < FACTS_PER_STEP; i += 1) {
+    if (i > 0 || step === 0) twiml.pause({ length: 2 });
+    say(holdScript.FACTS[(step * FACTS_PER_STEP + i) % holdScript.FACTS.length]);
+  }
+  twiml.pause({ length: 2 });
+  say(holdScript.REMINDER);
+  twiml.redirect({ method: 'POST' }, HOLD_ROUTE('conference-hold-facts', parentSid, `&step=${step + 1}`));
+}
+
+// POST /conference-hold-facts — the holdUrl: what the caller hears while on hold. Twilio allows only
+// Say, Play, Pause and Redirect here. No customer data. A closed hold answers one second of silence.
+router.post('/conference-hold-facts', async (req, res) => {
+  const parentSid = String(req.query.parent || '');
+  const parsed = Number.parseInt(req.query.step, 10);
+  const step = Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  const twiml = new VoiceResponse();
+  try {
+    const state = conferencePath.CALL_SID_RE.test(parentSid) ? await callHold.holdState(parentSid) : { open: false };
+    if (!state.open) twiml.pause({ length: 1 });
+    else appendHoldFacts(twiml, parentSid, step);
+  } catch (err) {
+    logger.error(`[call-hold] facts error for ${maskSid(parentSid)}: ${err.message}`);
+    return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/></Response>');
+  }
+  return sendTwiml(res, twiml);
 });
 
 router._test = {
