@@ -208,6 +208,10 @@ router.get('/live', requireAdmin, async (req, res, next) => {
     if (!require('../config/feature-gates').isEnabled('liveCallTranscription')) {
       return res.json(forStaffRole(req, { enabled: false, calls: [] }));
     }
+    // GATE_CALL_LIVE_ASSIST (dark): each call also carries assist { intent, price, times, at } and the refresh for it
+    // starts here WITHOUT being awaited, so the model runs only while someone watches this panel.
+    const assistOn = require('../config/feature-gates').isEnabled('callLiveAssist');
+    const liveAssist = assistOn ? require('../services/live-call-assist') : null;
     const since = new Date(Date.now() - LIVE_CALL_WINDOW_MS);
     const ended = [...TERMINAL_CALL_STATUSES];
     const rows = await db('call_log')
@@ -227,6 +231,7 @@ router.get('/live', requireAdmin, async (req, res, next) => {
         .orderBy([{ column: 'spoken_at', order: 'desc' }, { column: 'id', order: 'desc' }])
         .limit(LIVE_CALL_LINES)
         .select('speaker', 'text', 'spoken_at');
+      if (liveAssist) liveAssist.refreshAssistIfDue(row, { customerId: customer?.id || null });
       return {
         id: row.id,
         started_at: meta.live_transcription?.live_at || null,
@@ -235,6 +240,7 @@ router.get('/live', requireAdmin, async (req, res, next) => {
           ? { id: customer.id, name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() }
           : null,
         answered_by: String(meta.forward_acceptance?.csr_name || '').trim() || null,
+        assist: liveAssist ? liveAssist.assistForPanel(meta) : null,
         lines: utterances.reverse().map((u) => ({ speaker: u.speaker, text: u.text || '', at: u.spoken_at })),
       };
     }));

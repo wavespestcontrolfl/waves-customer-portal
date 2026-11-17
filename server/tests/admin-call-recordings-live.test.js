@@ -5,6 +5,8 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'aut
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({}));
 jest.mock('../utils/known-caller-phone', () => ({ findKnownCallerCustomer: jest.fn() }));
+const mockAssist = { refreshAssistIfDue: jest.fn(() => new Promise(() => {})), assistForPanel: jest.fn(() => null) };
+jest.mock('../services/live-call-assist', () => mockAssist);
 const mockGates = { isEnabled: jest.fn(() => true) };
 jest.mock('../config/feature-gates', () => mockGates);
 
@@ -73,7 +75,37 @@ const row = (n, extra = {}) => ({
 });
 const utt = (i, speaker = 'caller') => ({ speaker, text: `line ${i}`, spoken_at: `2026-11-17T15:00:${String(i).padStart(2, '0')}.000Z` });
 
-beforeEach(() => { jest.clearAllMocks(); mockRole = 'admin'; findKnownCallerCustomer.mockResolvedValue(null); mockGates.isEnabled.mockImplementation(() => true); });
+beforeEach(() => { jest.clearAllMocks(); mockAssist.assistForPanel.mockReturnValue(null); mockRole = 'admin'; findKnownCallerCustomer.mockResolvedValue(null); mockGates.isEnabled.mockImplementation(() => true); });
+
+describe('GET /admin/call-recordings/live: assist (GATE_CALL_LIVE_ASSIST)', () => {
+  test('gate on: each call carries its assist and a refresh starts without the response waiting for it', async () => {
+    findKnownCallerCustomer.mockResolvedValue({ id: 'cust-1', first_name: 'Casey', last_name: 'Sample' });
+    const panel = { intent: 'Wants pest control', price: 'Standard pest control pricing: $99', times: 'Tuesday at 9 AM', at: '2026-11-17T15:01:00.000Z' };
+    mockAssist.assistForPanel.mockReturnValue(panel);
+    // The refresh never settles: a response that awaited it would hang.
+    mockAssist.refreshAssistIfDue.mockImplementation(() => new Promise(() => {}));
+    mockDb({ calls: [row(1)], utterances: { [SID_A]: [utt(1)] } });
+    await withServer(async (base) => {
+      const { calls } = await (await fetch(`${base}/admin/call-recordings/live`)).json();
+      expect(calls[0].assist).toEqual(panel);
+    });
+    expect(mockAssist.refreshAssistIfDue).toHaveBeenCalledTimes(1);
+    expect(mockAssist.refreshAssistIfDue.mock.calls[0][0].twilio_call_sid).toBe(SID_A);
+    expect(mockAssist.refreshAssistIfDue.mock.calls[0][1]).toEqual({ customerId: 'cust-1' });
+  });
+
+  test('gate off: assist is null on every call and nothing is refreshed', async () => {
+    mockGates.isEnabled.mockImplementation((gate) => gate !== 'callLiveAssist');
+    mockAssist.assistForPanel.mockReturnValue({ intent: 'should not show' });
+    mockDb({ calls: [row(1), row(2)], utterances: {} });
+    await withServer(async (base) => {
+      const { calls } = await (await fetch(`${base}/admin/call-recordings/live`)).json();
+      expect(calls.map((c) => c.assist)).toEqual([null, null]);
+    });
+    expect(mockAssist.refreshAssistIfDue).not.toHaveBeenCalled();
+    expect(mockAssist.assistForPanel).not.toHaveBeenCalled();
+  });
+});
 
 describe('GET /admin/call-recordings/live', () => {
   test('a technician login is refused before any query', async () => {
@@ -100,6 +132,7 @@ describe('GET /admin/call-recordings/live', () => {
         caller_phone: '+19415550101',
         customer: { id: 'cust-1', name: 'Casey Sample' },
         answered_by: 'Pat Example',
+        assist: null,
         lines: [
           { speaker: 'caller', text: 'line 1', at: '2026-11-17T15:00:01.000Z' },
           { speaker: 'staff', text: 'line 2', at: '2026-11-17T15:00:02.000Z' },
