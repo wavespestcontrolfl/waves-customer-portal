@@ -33,6 +33,7 @@ jest.mock('../services/call-conference-path', () => ({
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const db = require('../models/db');
+const logger = require('../services/logger');
 const cp = require('../services/call-conference-path');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 const { appendMainStaffRing, appendStaffRingDial } = voiceRouter._test;
@@ -173,6 +174,17 @@ describe('/conference-enter', () => {
     const res = await post('/conference-enter', { body, query: { ring: '25' } });
     expect(res.body).toBe(CLASSIC_RING_25);
     expect(cp.placeStaffLegs).not.toHaveBeenCalled();
+  });
+
+  test('a failure is logged by its code, never its message (a Twilio message can carry a phone number)', async () => {
+    const leaky = () => Object.assign(new Error('Call from +19415550100 to +19415550001 refused'), { code: 21212 });
+    cp.claimStart.mockRejectedValue(leaky());
+    await post('/conference-enter', { body, query: { ring: '25' } });
+    cp.onStaffLegStatus.mockRejectedValue(leaky());
+    await post('/conference-staff-status', { body: { CallSid: LEG, CallStatus: 'completed' }, query: { parent: SID, leg: '0' } });
+    const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls].flat().join(' ');
+    expect(logged.match(/21212/g)).toHaveLength(2);
+    expect(logged).not.toMatch(/555010|555000|Call from/);
   });
 
   test('no leg placed: the claim is marked and the caller gets today\'s ring', async () => {

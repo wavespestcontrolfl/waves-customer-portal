@@ -258,7 +258,7 @@ function appendMainStaffRing(twiml, forwardNumbers, ringTimeoutSec, { callSid = 
   try {
     admitted = Boolean(callSid) && conferencePath.admitsConferencePath({ from });
   } catch (err) {
-    logger.warn(`[voice] conference admission failed for ${maskSid(callSid)}; classic ring: ${err.message}`);
+    logger.warn(`[voice] conference admission failed for ${maskSid(callSid)}; classic ring (${conferencePath.errorCode(err)})`);
   }
   if (!admitted) return appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec);
   conferencePath.stashCallToken(callSid, callToken);
@@ -3862,7 +3862,7 @@ router.post('/call-status', async (req, res) => {
     // in between is closed here, and the claim itself refuses a call whose terminal status landed first.
     if (!isOutbound && TERMINAL_CALL_STATUSES.has(CallStatus) && (conferenceRing || conferencePath.conferenceRingOn())) {
       void conferencePath.closeForCallerEnd(CallSid)
-        .catch((err) => logger.warn(`[conference] leg clean-up failed for ${maskSid(CallSid)}: ${err.message}`));
+        .catch((err) => logger.warn(`[conference] leg clean-up failed for ${maskSid(CallSid)} (${conferencePath.errorCode(err)})`));
     }
 
     const { LEAD_CALL_REPLY_RING_SOURCE, noteRingEnded } = require('../services/lead-call-reply-ring');
@@ -3926,7 +3926,7 @@ router.post('/conference-enter', async (req, res) => {
       return res.type('text/xml').send(twiml.toString());
     }
     // The gate is read again: a call still in its greeting when the gate goes off takes today's ring.
-    if (!conferencePath.admitsConferencePath({ from: From })) throw new Error('gate no longer admits the call');
+    if (!conferencePath.admitsConferencePath({ from: From })) throw Object.assign(new Error('gate off'), { code: 'gate_off' });
     const { claim, state } = await conferencePath.claimStart(CallSid, { legCount: forwardNumbers.length, ringTimeoutSec });
     if (claim === 'retry' && state?.fallback !== 'classic_ring') {
       // A redelivered request: the legs already ring. The backstop is one claim, so a second is safe.
@@ -3934,7 +3934,7 @@ router.post('/conference-enter', async (req, res) => {
       appendCallerConference(twiml, CallSid);
       return res.type('text/xml').send(twiml.toString());
     }
-    if (claim !== 'claimed') throw new Error(`no conference claim (${claim})`);
+    if (claim !== 'claimed') throw Object.assign(new Error('no claim'), { code: `claim_${claim}` });
     const placed = await conferencePath.placeStaffLegs({
       callSid: CallSid,
       numbers: forwardNumbers,
@@ -3945,13 +3945,13 @@ router.post('/conference-enter', async (req, res) => {
     });
     if (!placed.length) {
       await conferencePath.updateState(CallSid, [[['fallback'], 'classic_ring']]).catch(() => {});
-      throw new Error('no staff leg placed');
+      throw Object.assign(new Error('no leg'), { code: 'no_leg_placed' });
     }
     conferencePath.scheduleNoAnswerBackstop(CallSid, ringTimeoutSec);
     appendCallerConference(twiml, CallSid);
     return res.type('text/xml').send(twiml.toString());
   } catch (err) {
-    logger.error(`[conference] ${maskSid(CallSid)} takes the classic ring: ${err.message}`);
+    logger.error(`[conference] ${maskSid(CallSid)} takes the classic ring (${conferencePath.errorCode(err)})`);
     const classic = new VoiceResponse();
     appendStaffRingDial(classic, forwardNumbers, ringTimeoutSec);
     return res.type('text/xml').send(classic.toString());
@@ -3995,24 +3995,24 @@ router.post('/conference-staff-accept', async (req, res) => {
         return goodbye();
       }
       await conferencePath.updateState(parentSid, [[['recording'], recording]])
-        .catch((err) => logger.warn(`[conference] recording stamp failed for ${maskSid(parentSid)}: ${err.message}`));
+        .catch((err) => logger.warn(`[conference] recording stamp failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`));
       await rememberForwardAccept({ parentCallSid: parentSid, dialCallSid: legSid, answeredByNumber: req.body?.To || req.body?.Called })
-        .catch((err) => logger.warn(`[conference] forward acceptance failed for ${maskSid(parentSid)}: ${err.message}`));
+        .catch((err) => logger.warn(`[conference] forward acceptance failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`));
       void conferencePath.loadState(parentSid).then((state) => conferencePath.endLegs(state, { except: legSid }))
-        .catch((err) => logger.warn(`[conference] other legs not ended for ${maskSid(parentSid)}: ${err.message}`));
+        .catch((err) => logger.warn(`[conference] other legs not ended for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`));
     }
     let callRow = null;
     try {
       callRow = await db('call_log').where('twilio_call_sid', parentSid).select('metadata', 'from_phone', 'call_outcome').first();
     } catch (lookupErr) {
-      logger.warn(`[conference] caller lookup failed for ${maskSid(parentSid)}: ${lookupErr.message}`);
+      logger.warn(`[conference] caller lookup failed for ${maskSid(parentSid)} (${conferencePath.errorCode(lookupErr)})`);
     }
     const twiml = new VoiceResponse();
     twiml.say({ voice: SAY_VOICE }, connectingAnnouncement(callRow));
     appendStaffConference(twiml, parentSid);
     return res.type('text/xml').send(twiml.toString());
   } catch (err) {
-    logger.error(`[conference] staff accept error for ${maskSid(parentSid)}: ${err.message}`);
+    logger.error(`[conference] staff accept error for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
   }
 });
@@ -4033,7 +4033,7 @@ router.post('/conference-staff-status', async (req, res) => {
       });
     }
   } catch (err) {
-    logger.error(`[conference] staff leg status failed for ${maskSid(parentSid)}: ${err.message}`);
+    logger.error(`[conference] staff leg status failed for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
   }
   res.sendStatus(200);
 });

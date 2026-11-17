@@ -344,6 +344,7 @@ async function conferenceDialOutcome(callSid, confStatus) {
 
 module.exports = {
   CALL_SID_RE,
+  errorCode,
   roomFor,
   admitsConferencePath,
   conferenceRingOn,
