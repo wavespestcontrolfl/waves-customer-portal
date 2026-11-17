@@ -1,7 +1,7 @@
 'use strict';
 
 // "Send a copy to Claude (read-only)" (step 3; owner 2026-11-03, decision 1 = A: "customer alerts = a COPY, read-only
-// until approval"; GATE_ALERT_SEND_TO_CLAUDE_COPY). Step 1 ("Send to Claude", admin-alert-send-to-claude.js) refuses a bell
+// until approval"). Step 1 ("Send to Claude", admin-alert-send-to-claude.js) refuses a bell
 // row that is customer contact or whose words our own code did not write, because a customer's own words must never reach a
 // Claude tab that can change code. For those rows the owner login gets a COPY instead: ONE new owner-only row in Claude's
 // queue that names the alert by id, kind and category and holds no customer word at all. A locked Mac tab (launcher v2b,
@@ -33,11 +33,6 @@ const metaOf = (value) => {
 };
 const stampOf = (meta) => (meta.sentToClaude && typeof meta.sentToClaude === 'object' ? meta.sentToClaude : null);
 
-// GATE_ALERT_SEND_TO_CLAUDE_COPY, read at call time; a missing or throwing reader reads as off.
-function copyLive() {
-  try { return require('../config/feature-gates').alertSendToClaudeCopyLive?.() === true; } catch { return false; }
-}
-
 // Why this row cannot be copied, or null when it can. null means step 1 refused it as customer contact or as words our
 // code did not write: exactly the rows a copy is for. 'sendable' means step 1 covers it (send the alert itself).
 function copyRefusal(row) {
@@ -52,10 +47,10 @@ function copyRefusal(row) {
 }
 
 // The bell list's persisted rows, marked `sendCopyToClaude: true` where a copy may be sent, for the owner login
-// (`fullAccess`: ib-access ibFullAccess) while GATE_ALERT_SEND_TO_CLAUDE_COPY is on; otherwise the rows as they are. A row
+// (`fullAccess`: ib-access ibFullAccess); otherwise the rows as they are. A row
 // step 1 already marked `sendToClaude` is left alone. Never throws: a row whose check throws stays unmarked.
 function withSendCopyToClaudeFields(rows, { role, fullAccess = false } = {}) {
-  if (!Array.isArray(rows) || role !== 'admin' || fullAccess !== true || !copyLive()) return rows;
+  if (!Array.isArray(rows) || role !== 'admin' || fullAccess !== true) return rows;
   return rows.map((row) => {
     try { return row.sendToClaude || copyRefusal(row) !== null ? row : { ...row, sendCopyToClaude: true }; } catch { return row; }
   });
@@ -148,5 +143,5 @@ async function cancelAlertCopy(copyId, { at, by, role, technicianId = null } = {
 }
 
 module.exports = {
-  copyLive, copyRefusal, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy, UUID_RE, KIND,
+  copyRefusal, withSendCopyToClaudeFields, sendAlertCopyToClaude, cancelAlertCopy, UUID_RE, KIND,
 };

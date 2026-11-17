@@ -1,7 +1,7 @@
 'use strict';
 
 // "Send to Claude" for an idea (owner 2026-11-03: "it should be for any issue, even ones that dont have an issue mid day,
-// but ideas"; GATE_IB_SEND_TO_CLAUDE). The owner types or dictates an idea in the Intelligence Bar box and taps a free
+// but ideas"). The owner types or dictates an idea in the Intelligence Bar box and taps a free
 // button beside Ask. It makes NO model call: it writes one admin notification row straight into Claude's queue (Activity-only,
 // who 'claude', class 'sent-to-claude', kind 'owner-idea'). The Mac launcher (com.waves.notif-dispatch, outside this repo)
 // opens a Claude tab that scopes the idea and asks the owner. The owner is the only admin login.
@@ -21,12 +21,7 @@ const ROUTE_RE = /^\/admin(\/[A-Za-z0-9_-]{1,64}){0,6}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SENT_MESSAGE = 'Sent to Claude. A Claude tab opens on the Mac within about 10 minutes.';
 
-// GATE_IB_SEND_TO_CLAUDE, read at call time; a missing or throwing reader reads as off.
-function ideaSendLive() {
-  try { return require('../config/feature-gates').ibSendToClaudeLive?.() === true; } catch { return false; }
-}
-
-// GATE_IB_ANSWER_SEND_TO_CLAUDE (it needs GATE_IB_SEND_TO_CLAUDE too), read at call time; a missing or throwing reader reads as off.
+// GATE_IB_ANSWER_SEND_TO_CLAUDE, read at call time; a missing or throwing reader reads as off.
 function answerSendLive() {
   try { return require('../config/feature-gates').ibAnswerSendToClaudeLive?.() === true; } catch { return false; }
 }
@@ -139,4 +134,4 @@ async function cancelClaudeIdea(id, { at, by, role, technicianId = null } = {}) 
   return { status: 200, body: { cancelled: true } };
 }
 
-module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, ideaSendLive, answerSendLive, ideaDedupeKey, cleanRecords, routeOrNull };
+module.exports = { sendIdeaToClaude, cancelClaudeIdea, cleanIdea, answerSendLive, ideaDedupeKey, cleanRecords, routeOrNull };

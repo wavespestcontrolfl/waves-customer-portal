@@ -1,6 +1,6 @@
 /**
  * "Send to Claude (free)" beside Ask in the Intelligence Bar box (owner 2026-11-03: "it should be for any issue, even ones
- * that dont have an issue mid day, but ideas"; GATE_IB_SEND_TO_CLAUDE).
+ * that dont have an issue mid day, but ideas").
  *
  * The button makes NO model call: it posts the typed or dictated idea to /admin/claude-ideas, which writes one admin
  * notification into Claude's queue (a Mac launcher opens a Claude tab for it). It never touches the Ask path: not

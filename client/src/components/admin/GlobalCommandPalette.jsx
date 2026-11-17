@@ -539,7 +539,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setAttachmentBusy(false);
   }, [setAttachmentBusy]);
 
-  // The free "Send to Claude" beside Ask (GATE_IB_SEND_TO_CLAUDE): no model call, nothing on the Ask path.
+  // The free "Send to Claude" beside Ask: no model call, nothing on the Ask path.
   const claudeIdea = useSendToClaudeIdea({
     open, prompt, attachments, attachmentsLoading, dictationPending, pastedRef, dictationUsedRef, pageData: ibPageData, route: location.pathname,
     onSent: () => {

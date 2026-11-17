@@ -59,8 +59,8 @@ const stockBell = () => ({
   detail: null, link: '/admin/inventory', metadata: { dedupeKey: 'stock-shortfall:p1' }, done_at: null, version: 'b'.repeat(32),
 });
 
-beforeEach(() => { process.env.GATE_ALERT_SEND_TO_CLAUDE = 'true'; delete process.env.GATE_CLAUDE_INPUT_GUARD; jest.clearAllMocks(); });
-afterAll(() => { delete process.env.GATE_ALERT_SEND_TO_CLAUDE; delete process.env.GATE_CLAUDE_INPUT_GUARD; });
+beforeEach(() => { delete process.env.GATE_CLAUDE_INPUT_GUARD; jest.clearAllMocks(); });
+afterAll(() => { delete process.env.GATE_CLAUDE_INPUT_GUARD; });
 
 test('guard off: the receipt bell is offered, as before', async () => {
   const row = await receiptBell();

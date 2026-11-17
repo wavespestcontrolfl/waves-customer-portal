@@ -1,4 +1,4 @@
-// "Send to Claude" (GATE_ALERT_SEND_TO_CLAUDE, services/admin-alert-send-to-claude.js): customer contact is never sent,
+// "Send to Claude" (services/admin-alert-send-to-claude.js): customer contact is never sent,
 // a row is sent only at the version the bell served, the stamp names the customer from the record and carries the
 // summary the owner saw (and the admin's own cleaned note), a send can be undone while no Mac tab has started on it,
 // a refresh keeps a sent row in Claude's queue only while it is open (admin-alert-routing.js
@@ -46,7 +46,7 @@ const row = (over = {}) => ({
   ...over,
 });
 
-const gates = { GATE_ALERT_EXPLAINER: process.env.GATE_ALERT_EXPLAINER, GATE_ALERT_SEND_TO_CLAUDE: process.env.GATE_ALERT_SEND_TO_CLAUDE };
+const gates = { GATE_ALERT_EXPLAINER: process.env.GATE_ALERT_EXPLAINER };
 afterAll(() => {
   for (const [k, v] of Object.entries(gates)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 });
@@ -265,29 +265,23 @@ describe('keepSentToClaude', () => {
 
 describe('the bell list marks a sendable row', () => {
   const listRows = () => [row(), row({ id: '00000000-0000-4000-8000-0000000000f2', category: 'inbound_sms' })];
-  const live = () => { process.env.GATE_ALERT_SEND_TO_CLAUDE = 'true'; };
 
   test('only the rows the allow-list permits, with no explainer gate (owner 2026-11-03)', () => {
-    live();
     delete process.env.GATE_ALERT_EXPLAINER;
     expect(withSendToClaudeFields(listRows(), { role: 'admin', fullAccess: true }).map((r) => r.sendToClaude === true)).toEqual([true, false]);
   });
 
-  test('only for the admin role and only while the send gate is on; otherwise the rows as they are', () => {
-    live();
+  test('only for the admin role and the owner login; otherwise the rows as they are', () => {
     const rows = listRows();
     expect(withSendToClaudeFields(rows, { role: 'technician', fullAccess: true })).toBe(rows);
     expect(withSendToClaudeFields(rows, { role: undefined, fullAccess: true })).toBe(rows);
     // Owner login only (Codex security review on #7548): another admin, or a caller that does not say, gets no marks.
     expect(withSendToClaudeFields(rows, { role: 'admin' })).toBe(rows);
     expect(withSendToClaudeFields(rows, { role: 'admin', fullAccess: false })).toBe(rows);
-    process.env.GATE_ALERT_SEND_TO_CLAUDE = 'false';
-    expect(withSendToClaudeFields(rows, { role: 'admin', fullAccess: true })).toBe(rows);
     expect(rows.some((r) => 'sendToClaude' in r)).toBe(false);
   });
 
   test('a row whose check throws stays unmarked and the others are still marked; a non-list passes through', () => {
-    live();
     const bad = {};
     Object.defineProperty(bad, 'metadata', { get() { throw new Error('boom'); } });
     const out = withSendToClaudeFields([row(), bad], { role: 'admin', fullAccess: true });

@@ -1,5 +1,4 @@
-// "Send to Claude" for an idea (GATE_IB_SEND_TO_CLAUDE): the status route never 404s; the send and cancel routes answer 404
-// with the gate off; cleanIdea, route, ids, date and pasted filtering; the dedupe answer; a suppressed row; and the cancel
+// "Send to Claude" for an idea: the status route never 404s; cleanIdea, route, ids, date and pasted filtering; the dedupe answer; a suppressed row; and the cancel
 // fence. The row itself against Postgres is admin-claude-ideas-db.test.js.
 const express = require('express');
 
@@ -10,7 +9,7 @@ jest.mock('../services/notification-service', () => ({
   getAdminNotificationForExplainer: jest.fn(),
   markAdminIdeaCancelled: jest.fn(),
 }));
-jest.mock('../config/feature-gates', () => ({ ibSendToClaudeLive: jest.fn(() => true), ibAnswerSendToClaudeLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ ibAnswerSendToClaudeLive: jest.fn(() => false) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const users = {
@@ -29,7 +28,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const NotificationService = require('../services/notification-service');
-const { ibSendToClaudeLive, ibAnswerSendToClaudeLive } = require('../config/feature-gates');
+const { ibAnswerSendToClaudeLive } = require('../config/feature-gates');
 const { cleanIdea, ideaDedupeKey } = require('../services/admin-claude-ideas');
 const router = require('../routes/admin-claude-ideas');
 
@@ -55,7 +54,6 @@ const call = (base, path, { who = 'admin', method = 'POST', body } = {}) => fetc
 
 beforeEach(() => {
   jest.clearAllMocks();
-  ibSendToClaudeLive.mockReturnValue(true);
   ibAnswerSendToClaudeLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: ID, deduped: false });
 });
@@ -85,35 +83,13 @@ describe('dedupe key', () => {
   });
 });
 
-describe('gate off', () => {
-  test('status answers enabled:false, send and cancel answer 404', async () => {
-    ibSendToClaudeLive.mockReturnValue(false);
-    await withServer(async (base) => {
-      expect(await call(base, '/status', { method: 'GET' })).toEqual({ status: 200, body: { enabled: false } });
-      expect((await call(base, '/', { body: { text: 'An idea' } })).status).toBe(404);
-      expect((await call(base, `/${ID}/cancel`, { body: { at: AT } })).status).toBe(404);
-    });
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
-  });
-  test('a missing reader reads as off', async () => {
-    ibSendToClaudeLive.mockReturnValue(undefined);
-    await withServer(async (base) => {
-      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: false });
-    });
-  });
-});
-
 describe('answerButton on the status (GATE_IB_ANSWER_SEND_TO_CLAUDE)', () => {
-  test('present only while the answer gate is on and the login is the owner with the box button on', async () => {
+  test('present only while the answer gate is on and the login is the owner', async () => {
     ibAnswerSendToClaudeLive.mockReturnValue(true);
     await withServer(async (base) => {
       expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true, answerButton: true });
       // Another admin login: not enabled, so no answerButton either.
       expect((await call(base, '/status', { method: 'GET', who: 'office' })).body).toEqual({ enabled: false });
-    });
-    ibSendToClaudeLive.mockReturnValue(false);
-    await withServer(async (base) => {
-      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: false });
     });
   });
   test('absent while the answer gate is off, and for a missing reader', async () => {
