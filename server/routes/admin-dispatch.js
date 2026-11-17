@@ -6377,7 +6377,14 @@ async function requireSeriesMoveAck({ serviceId, newDate, body, actor, reschedul
 // refreshed preview, and the count is enforced again inside the series
 // transaction (codex r18 P2).
 // Answers a refusal, or null.
-async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions }) {
+async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions, seriesPolicy }) {
+  // `seriesPolicy: 'single'` is for a caller that governs its own scope (the re-service fold moves one plan visit and leaves
+  // the plan alone, owner 2026-11-17): the rebooker never widens this move to the series, so no acknowledgement is owed.
+  // Every other caller passes nothing and gets the contract below exactly as before.
+  if (seriesPolicy === 'single') {
+    rescheduleOptions.seriesPolicy = 'single';
+    return null;
+  }
   if (!collectiveMoveGateOn()) return null;
   // The observed anchor (read above, or by the resolution) answers the
   // recurrence + date questions — one read, one snapshot.
@@ -6433,7 +6440,7 @@ async function planCollectiveDisclosure({ serviceId, newDate, observedForMove, b
 // reassignment). The reminder sync still runs, as for any silent move: it
 // releases the unit mover's reminder hold and keeps a pending creation
 // confirmation pending.
-async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board', keepSlot = false }) {
+async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCustomer, operationKey, body, actor, sourceSurface = 'dispatch_board', keepSlot = false, seriesPolicy }) {
   // Staff-initiated reschedules may override live lifecycle states
   // (en_route / on_site) — rain starts mid-route, or the customer calls
   // to push the visit while the tech is already there. The rebooker
@@ -6492,7 +6499,7 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   const expectVisit = body.expectVisit;
   const shownStopRefusal = planShownStop(expectVisit, rescheduleOptions);
   if (shownStopRefusal) return shownStopRefusal;
-  const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions });
+  const disclosureRefusal = await planCollectiveDisclosure({ serviceId, newDate, observedForMove, body, actor, rescheduleOptions, seriesPolicy });
   if (disclosureRefusal) return disclosureRefusal;
   return { plan: { rescheduleOptions, effectiveWindow, expectVisit, qualityDates, customerAskedTime: body?.customerAskedTime === true } };
 }

@@ -1,0 +1,118 @@
+/**
+ * services/reservice-fold.js moveFoldTarget and the office notice (GATE_RESERVICE_FOLD, owner 2026-11-17).
+ * The Dispatch board's staff move is mocked; pinned here: what the fold asks of it (one plan visit only, the office's start
+ * and technician, the confirmation choice), what the booking route gets back, that a refusal before any write means "book the
+ * re-service as before", that any other error is not swallowed, and what reaches the moved visit.
+ */
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../routes/admin-dispatch', () => ({
+  planVisitMoveForStaff: jest.fn(),
+  runPlannedVisitMove: jest.fn(),
+}));
+
+const dispatch = require('../routes/admin-dispatch');
+const { moveFoldTarget, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
+
+const TARGET = { id: 'plan-1', scheduled_date: '2099-11-29', service_type: 'Quarterly Pest Control Service', customer_request: null, notes: 'Dog in yard' };
+const ACTOR = { techRole: 'admin', technicianId: 'staff-1' };
+const PLAN = { plan: { rescheduleOptions: {} } };
+
+let update;
+let conn;
+beforeEach(() => {
+  jest.clearAllMocks();
+  update = jest.fn().mockResolvedValue(1);
+  conn = jest.fn(() => ({ where: jest.fn(() => ({ update })) }));
+  dispatch.planVisitMoveForStaff.mockResolvedValue(PLAN);
+  dispatch.runPlannedVisitMove.mockResolvedValue({ status: 200, body: { notificationSent: true, warnings: ['Overlaps another visit.'] } });
+});
+
+const run = (extra = {}) => moveFoldTarget({
+  conn, target: TARGET, date: '2099-11-17', windowStart: '10:00', technicianId: 'tech-9', notifyCustomer: true, actor: ACTOR,
+  customerRequest: { text: 'Ants in the kitchen', source: 'call' }, notes: 'Ants in the kitchen', ...extra,
+});
+
+test('asks the staff move for this one visit: the office start, technician and text choice, no series', async () => {
+  await run();
+  expect(dispatch.planVisitMoveForStaff).toHaveBeenCalledWith({
+    serviceId: 'plan-1', newDate: '2099-11-17', newWindow: { start: '10:00' }, notifyCustomer: true,
+    body: { technicianId: 'tech-9' }, actor: ACTOR, sourceSurface: 'office_booking', seriesPolicy: 'single',
+  });
+  expect(dispatch.runPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({
+    plan: PLAN.plan, serviceId: 'plan-1', newDate: '2099-11-17', reasonCode: 'admin', notifyCustomer: true, actor: ACTOR,
+    reasonText: expect.stringContaining('Re-service'),
+  }));
+});
+
+test('no start and no technician chosen: the move sends neither', async () => {
+  await run({ windowStart: null, technicianId: null, notifyCustomer: false });
+  expect(dispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newWindow: null, body: {}, notifyCustomer: false }));
+});
+
+test('a moved visit answers 200 with nothing created, the notice first and the move warnings after', async () => {
+  const out = await run();
+  expect(out.moved).toBe(true);
+  expect(out.answer).toEqual({
+    id: 'plan-1', recurringCreated: 0, appointments: [],
+    warnings: [foldOfficeNotice(TARGET), 'Overlaps another visit.'],
+    reserviceFold: { movedServiceId: 'plan-1', serviceType: TARGET.service_type, fromDate: '2099-11-29', toDate: '2099-11-17', start: '10:00', notificationSent: true },
+  });
+});
+
+test('the notice is plain English of about 25 words and names the real visit and date', () => {
+  const notice = foldOfficeNotice(TARGET);
+  expect(notice).toBe('No re-service booked: the Quarterly Pest Control Service on Sun, Nov 29 moved up to this time (within 14 days of the next plan visit).');
+  expect(notice.split(/\s+/).length).toBeLessThanOrEqual(25);
+  expect(FOLD_DAYS).toBe(14);
+});
+
+test("the office's words go to the moved visit in one update: the request when it has none, the notes appended with a dated prefix", async () => {
+  await run();
+  expect(update).toHaveBeenCalledTimes(1);
+  expect(update).toHaveBeenCalledWith({
+    customer_request: 'Ants in the kitchen', customer_request_source: 'call',
+    notes: 'Dog in yard\n[Re-service folded in, Tue, Nov 17] Ants in the kitchen',
+  });
+});
+
+test('a visit that already has the customer\'s words keeps them; nothing to carry writes nothing', async () => {
+  await run({ target: { ...TARGET, customer_request: 'Earlier words' } });
+  expect(update.mock.calls[0][0]).not.toHaveProperty('customer_request');
+  update.mockClear();
+  await run({ target: { ...TARGET, customer_request: 'Earlier words' }, customerRequest: null, notes: null });
+  expect(update).not.toHaveBeenCalled();
+});
+
+test('a failed copy of the words does not undo the move: the answer says to add them by hand', async () => {
+  update.mockRejectedValue(new Error('db down'));
+  const out = await run();
+  expect(out.moved).toBe(true);
+  expect(out.answer.warnings[out.answer.warnings.length - 1]).toMatch(/did not copy/);
+});
+
+test('the planner refuses: nothing moves and the caller books the re-service with the reason', async () => {
+  dispatch.planVisitMoveForStaff.mockResolvedValue({ status: 409, body: { error: 'That time is taken.' } });
+  const out = await run();
+  expect(out.moved).toBe(false);
+  expect(out.warning).toMatch(/booked as its own visit.*Sun, Nov 29.*That time is taken\./);
+  expect(dispatch.runPlannedVisitMove).not.toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+});
+
+test('a 409 from the rebooker before its write also means "book the re-service"; any other error is not swallowed', async () => {
+  dispatch.runPlannedVisitMove.mockRejectedValueOnce(Object.assign(new Error('Visit changed.'), { statusCode: 409 }));
+  const out = await run();
+  expect(out).toMatchObject({ moved: false });
+  expect(out.warning).toContain('Visit changed.');
+  dispatch.runPlannedVisitMove.mockRejectedValueOnce(new Error('boom'));
+  await expect(run()).rejects.toThrow('boom');
+});
+
+test('only the pest and lawn re-service keys fold; a rodent follow-up never does', () => {
+  expect(foldLaneForServiceKey('pest_re_service')).toBe('pest');
+  expect(foldLaneForServiceKey('lawn_re_service')).toBe('lawn');
+  expect(foldLaneForServiceKey('rodent_trapping_followup')).toBeNull();
+  expect(foldLaneForServiceKey('pest_control_quarterly')).toBeNull();
+  expect(foldLaneForServiceKey(undefined)).toBeNull();
+});
