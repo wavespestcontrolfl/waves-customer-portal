@@ -29,9 +29,9 @@ const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
 const WEBHOOK_PATH = '/api/webhooks/twilio/live-transcription';
 // Transcribing the caller's call: inbound = the caller, outbound = what the caller hears (staff).
 const SPEAKER_BY_TRACK = { inbound_track: 'caller', outbound_track: 'staff' };
-// Each new utterance is scrubbed together with the call's most recent ones, so a card number read
-// across utterances ("4242 4242" … "4242 4242") is caught. The post-call scrub uses the same rule
-// on diarized segments (utils/pan-scrub scrubSegments).
+// Each new utterance is scrubbed together with the ones spoken just before and after it, so a card
+// number read across utterances ("4242 4242" … "4242 4242") is caught, even when a line arrives
+// late. The post-call scrub uses the same rule on diarized segments (utils/pan-scrub scrubSegments).
 const SCRUB_WINDOW = 6;
 // A short code-shaped utterance (an expiry or a CVV) soon after a masked card number is masked
 // too: the masked text no longer shows the card to the window scrub. The link is the same speaker's
@@ -205,12 +205,22 @@ async function storeUtterance(callSid, body) {
     // A quarantined call keeps no live text: a late callback or a redelivery stores nothing.
     if (claimed.quarantined) return { stored: false, reason: 'quarantined' };
 
-    const rows = await trx('call_live_utterances')
+    // The rows spoken just before and just after this one, not the newest rows: a line that arrives
+    // late (after later lines were stored) is scrubbed with its own neighbors.
+    const columns = ['id', 'speaker', 'text', 'pan_masked', 'spoken_at'];
+    const earlier = await trx('call_live_utterances')
       .where('call_sid', callSid)
+      .where('spoken_at', '<=', spokenAt)
       .orderBy([{ column: 'spoken_at', order: 'desc' }, { column: 'id', order: 'desc' }])
       .limit(SCRUB_WINDOW - 1)
-      .select('id', 'speaker', 'text', 'pan_masked', 'spoken_at');
-    const recent = rows.reverse().map((r) => ({
+      .select(columns);
+    const later = await trx('call_live_utterances')
+      .where('call_sid', callSid)
+      .where('spoken_at', '>', spokenAt)
+      .orderBy([{ column: 'spoken_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .limit(SCRUB_WINDOW - 1)
+      .select(columns);
+    const recent = [...earlier.reverse(), ...later].map((r) => ({
       id: r.id, speaker: r.speaker, text: r.text || '', panMasked: !!r.pan_masked, spokenAt: new Date(r.spoken_at).getTime(),
     }));
     const incoming = { id: null, speaker, text: raw, panMasked: false, spokenAt: spokenAt.getTime() };

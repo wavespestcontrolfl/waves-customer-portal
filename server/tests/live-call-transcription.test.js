@@ -43,15 +43,21 @@ jest.mock('../models/db', () => {
     return q;
   }
   function utterances() {
-    const q = { filters: [] };
-    q.where = jest.fn((col, val) => { q.filters.push([col, val]); return q; });
-    q.orderBy = jest.fn(() => q);
+    const q = { filters: [], times: [], dir: 'desc' };
+    q.where = jest.fn((col, op, val) => {
+      if (val === undefined) q.filters.push([col, op]);
+      else q.times.push([op, new Date(val).getTime()]);
+      return q;
+    });
+    q.orderBy = jest.fn((cols) => { q.dir = cols[0].order; return q; });
     q.limit = jest.fn((n) => { q.lim = n; return q; });
     q.select = jest.fn(async () => {
       const sid = q.filters.find(([c]) => c === 'call_sid')?.[1];
+      const sign = q.dir === 'asc' ? 1 : -1;
       return state.utterances
         .filter((u) => u.call_sid === sid)
-        .sort((a, b) => (b.spoken_at - a.spoken_at) || (b.id - a.id))
+        .filter((u) => q.times.every(([op, at]) => (op === '<=' ? u.spoken_at.getTime() <= at : u.spoken_at.getTime() > at)))
+        .sort((a, b) => sign * ((a.spoken_at - b.spoken_at) || (a.id - b.id)))
         .slice(0, q.lim)
         .map((u) => ({ ...u }));
     });
@@ -244,6 +250,18 @@ describe('recordLiveTranscriptionEvent', () => {
     // Later, ordinary numbers stay: an address 2 minutes on is not a card code.
     await live.recordLiveTranscriptionEvent(content(4, 'inbound_track', '4 5 6', 130));
     expect(db.__state.utterances[2].text).toBe('4 5 6');
+  });
+
+  test('a card number half that arrives late is scrubbed with its own neighbors, not the newest rows', async () => {
+    await live.recordLiveTranscriptionEvent(content(2, 'inbound_track', '4242 4242', 1));
+    for (let i = 0; i < 6; i += 1) {
+      await live.recordLiveTranscriptionEvent(content(10 + i, 'outbound_track', `Line ${i}`, 10 + i));
+    }
+    // The second half was spoken at 2 s but its callback lands after six later lines.
+    await live.recordLiveTranscriptionEvent(content(3, 'inbound_track', '4242 4242', 2));
+    const caller = db.__state.utterances.filter((u) => u.speaker === 'caller');
+    expect(caller.map((u) => u.text).join(' ')).not.toMatch(/4242 4242/);
+    expect(caller.every((u) => u.pan_masked)).toBe(true);
   });
 
   test('a code read after a staff question is still masked (the same speaker\'s masked line is the link)', async () => {
