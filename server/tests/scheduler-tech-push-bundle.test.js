@@ -27,10 +27,12 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 
 jest.mock('../services/tech-visit-notifications', () => ({ flushBundledPushes: jest.fn(async () => ({ pushed: 0 })) }));
+jest.mock('../services/call-hold', () => ({ recoverPendingHolds: jest.fn(async () => ({ action: 'swept' })) }));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
 const { flushBundledPushes } = require('../services/tech-visit-notifications');
+const { recoverPendingHolds } = require('../services/call-hold');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -64,4 +66,13 @@ test('a sweep that throws is logged, never thrown into the scheduler', async () 
   flushBundledPushes.mockRejectedValueOnce(new Error('db down'));
   await expect(runEveryMinuteHandlers()).resolves.toBeDefined();
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[tech-push-bundle] sweep failed: db down'));
+});
+
+test('the star-key hold recovery sweep is registered every minute even with every gate off, and a throw is only logged', async () => {
+  isEnabled.mockImplementation(() => false);
+  recoverPendingHolds.mockRejectedValueOnce(new Error('db down'));
+  await expect(runEveryMinuteHandlers()).resolves.toBeDefined();
+  expect(recoverPendingHolds).toHaveBeenCalledTimes(1);
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[call-hold] recovery tick failed: db down'));
+  expect(flushBundledPushes).toHaveBeenCalledTimes(1);
 });

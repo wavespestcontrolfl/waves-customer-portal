@@ -29,14 +29,38 @@ jest.mock('twilio', () => {
 });
 
 jest.mock('../models/db', () => {
-  const state = { row: null, locks: new Map(), openTx: 0, txCount: 0, failReads: 0, failWrites: 0, customerId: null, writes: [] };
+  const state = { row: null, locks: new Map(), openTx: 0, txCount: 0, failReads: 0, failWrites: 0, failSweep: 0, customerId: null, writes: [], modifyCalls: [], sweeps: 0 };
   const tick = () => new Promise((resolve) => setImmediate(resolve));
   const clone = (value) => JSON.parse(JSON.stringify(value));
   function chainFor(table) {
     const conditions = [];
     const q = {};
+    let modified = false;
     q.where = jest.fn(() => q);
     q.whereRaw = jest.fn((sql) => { conditions.push(sql); return q; });
+    // The sweep's reads: modify runs the caller's guard against a recorder (the sandbox rows are then filtered out
+    // like the real SQL does); select answers the one row when the query's own pending condition holds.
+    q.modify = jest.fn((fn) => {
+      modified = true;
+      const recorder = { whereRaw: (sql, bindings) => { state.modifyCalls.push({ sql, bindings }); return recorder; } };
+      fn(recorder);
+      return q;
+    });
+    q.orderBy = jest.fn(() => q);
+    q.limit = jest.fn(() => q);
+    q.select = jest.fn(async () => {
+      await tick();
+      state.sweeps += 1;
+      if (state.failSweep > 0) { state.failSweep -= 1; throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }
+      const row = state.row;
+      const h = row?.metadata?.conference_path?.hold;
+      const sandbox = modified && state.modifyCalls.some((c) => (c.bindings || []).includes(row?.source));
+      if (!row || sandbox || !(h?.rec_pending === true || h?.alert_pending === true)) return [];
+      return [{
+        twilio_call_sid: row.sid, status: row.status || null, ended_at: row.metadata.ended_at || null,
+        rec_pending: h.rec_pending === true ? 'true' : null, alert_pending: h.alert_pending === true ? 'true' : null,
+      }];
+    });
     q.first = jest.fn(async () => {
       await tick();
       if (state.failReads > 0) { state.failReads -= 1; throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }
@@ -93,6 +117,7 @@ const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { nameOnFileForPhone } = require('../services/admin-alert-names');
 const hold = require('../services/call-hold');
 const cp = require('../services/call-conference-path');
+const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
 
 const SID = `CA${'a'.repeat(32)}`;
 const LEG = `CA${'0'.repeat(31)}1`;
@@ -115,7 +140,7 @@ const heldHold = (o = {}) => ({
   reminded_at: null, voicemail_at: null, voicemail_reason: null, vm_failed: false, gone: false, sender: null, ...o,
 });
 function seed(holdState, extra = {}) {
-  db.__state.row = { metadata: { conference_path: { room: `waves-${SID}`, accepted_leg_sid: LEG, legs: { 0: { sid: LEG } }, ...(holdState ? { hold: holdState } : {}), ...extra } } };
+  db.__state.row = { sid: SID, status: null, metadata: { conference_path: { room: `waves-${SID}`, accepted_leg_sid: LEG, legs: { 0: { sid: LEG } }, ...(holdState ? { hold: holdState } : {}), ...extra } } };
   return db.__state.row;
 }
 const holdOf = () => db.__state.row.metadata.conference_path.hold;
@@ -153,8 +178,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.SERVER_DOMAIN;
   const s = db.__state;
-  s.row = null; s.locks = new Map(); s.openTx = 0; s.txCount = 0; s.failReads = 0; s.failWrites = 0; s.customerId = null; s.writes = [];
+  s.row = null; s.locks = new Map(); s.openTx = 0; s.txCount = 0; s.failReads = 0; s.failWrites = 0; s.failSweep = 0; s.customerId = null; s.writes = []; s.modifyCalls = []; s.sweeps = 0;
   mockTw.clientArgs = [];
+  hold._test.resumeRetries.clear();
   jest.useFakeTimers({ now: NOW, doNotFake: ['setImmediate', 'nextTick'] });
 });
 afterEach(() => jest.useRealTimers());
@@ -952,5 +978,505 @@ describe('two server processes sharing one database', () => {
     const events = fakeTwilio();
     expect(await b.checkHold(SID)).toMatchObject({ phase: 'held', applied: null });
     expect(events).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// The two pending states: a recording resume that was not confirmed after a press 1 (rec_pending, step 'resume') and a
+// voicemail callback bell that was not written (alert_pending, step 'alert').
+const returnedPending = (o = {}) => heldHold({ phase: 'returned', ret_by: 'press1', applied: 'returned', rec_pending: true, ...o });
+const voicemailPending = (o = {}) => heldHold({ phase: 'voicemail', voicemail_reason: 'timeout', voicemail_at: iso(-1), applied: 'voicemail', alert_pending: true, ...o });
+
+describe('planner: pending resume and pending bell (pure)', () => {
+  const { planEvent, nextStep, planClaim } = hold._test;
+  const T = NOW.getTime();
+  const plan = (h, ev, closed = false) => planEvent(h, ev, T, closed);
+
+  test.each([
+    ['a return not confirmed', 'return', heldHold({ phase: 'returned', ret_by: 'press1', applied: 'held', rec_pending: true })],
+    ['a confirmed return with the resume pending', 'resume', returnedPending()],
+    ['a confirmed return, resume confirmed', null, returnedPending({ rec_pending: false })],
+    ['an aborted star', 'return', heldHold({ phase: 'returned', ret_by: 'abort', applied: null })],
+    ['a stale flag on a held hold', null, heldHold({ rec_pending: true })],
+    ['a confirmed voicemail with the bell pending', 'alert', voicemailPending()],
+    ['a confirmed voicemail, bell delivered', null, voicemailPending({ alert_pending: false, alerted_at: iso(0) })],
+    ['a voicemail not yet confirmed', 'voicemail', voicemailPending({ applied: 'held' })],
+    ['a voicemail whose step failed (re-hold first)', 'rehold', voicemailPending({ applied: 'returned', vm_failed: true })],
+  ])('the step wanted on %s is %s', (_name, step, state) => {
+    expect(nextStep(state)).toBe(step);
+  });
+
+  test('a confirmed return records whether the resume was confirmed; only a confirmed unhold is applied either way', () => {
+    const inFlight = heldHold({ phase: 'returned', ret_by: 'press1', applied: 'held' });
+    expect(plan(inFlight, { type: 'step_done', gen: 1, step: 'return', resumed: false }).next).toMatchObject({ applied: 'returned', rec_pending: true });
+    expect(plan(inFlight, { type: 'step_done', gen: 1, step: 'return', resumed: true }).next).toMatchObject({ applied: 'returned', rec_pending: false });
+    // A room that was gone has nothing to resume; a voicemail decided meanwhile resumes the recording itself.
+    expect(plan(inFlight, { type: 'step_done', gen: 1, step: 'return', gone: true }).next.rec_pending).toBe(false);
+    const voiced = heldHold({ phase: 'voicemail', applied: 'held', voicemail_reason: 'staff_left' });
+    expect(plan(voiced, { type: 'step_done', gen: 1, step: 'return', resumed: false }).next.rec_pending).toBe(false);
+  });
+
+  test('a resume confirmed clears rec_pending; the terminal codes clear it; any other failure keeps it', () => {
+    expect(plan(returnedPending({ last_error_code: '500' }), { type: 'step_done', gen: 1, step: 'resume' }).next)
+      .toMatchObject({ rec_pending: false, applied: 'returned', last_error_code: null });
+    ['16108', '21220', '20404'].forEach((code) => {
+      expect(plan(returnedPending(), { type: 'step_failed', gen: 1, step: 'resume', code }).next).toMatchObject({ rec_pending: false, last_error_code: code });
+    });
+    expect(plan(returnedPending(), { type: 'step_failed', gen: 1, step: 'resume', code: '51000' }).next).toMatchObject({ rec_pending: true, applied: 'returned', last_error_code: '51000' });
+    expect(plan(returnedPending(), { type: 'step_failed', gen: 1, step: 'resume', code: 'ECONNRESET' }).next.rec_pending).toBe(true);
+  });
+
+  test('the voicemail step records alert_pending in the same write that confirms it; a gone caller has no bell', () => {
+    const unconfirmed = heldHold({ phase: 'voicemail', voicemail_reason: 'timeout' });
+    expect(plan(unconfirmed, { type: 'step_done', gen: 1, step: 'voicemail', gone: false }).next).toMatchObject({ applied: 'voicemail', alert_pending: true });
+    expect(plan(unconfirmed, { type: 'step_done', gen: 1, step: 'voicemail', gone: true }).next).toMatchObject({ applied: 'voicemail', alert_pending: false });
+  });
+
+  test('a delivered bell clears alert_pending and stamps alerted_at; an undelivered one keeps it', () => {
+    expect(plan(voicemailPending(), { type: 'step_done', gen: 1, step: 'alert' }).next).toMatchObject({ alert_pending: false, alerted_at: iso(0), applied: 'voicemail', phase: 'voicemail' });
+    expect(plan(voicemailPending(), { type: 'step_failed', gen: 1, step: 'alert', code: 'alert' }).next).toMatchObject({ alert_pending: true, applied: 'voicemail', last_error_code: 'alert' });
+    const settled = voicemailPending({ alert_pending: false, alerted_at: iso(-30) });
+    expect(plan(settled, { type: 'step_done', gen: 1, step: 'alert' }).next).toBe(settled); // a late duplicate rewrites nothing
+  });
+
+  test('both step outcomes bind to the generation, and resume_over clears only a pending resume', () => {
+    const current = returnedPending({ gen: 2 });
+    expect(plan(current, { type: 'step_done', gen: 1, step: 'resume' }).next).toBe(current);
+    expect(plan(current, { type: 'step_failed', gen: 1, step: 'resume', code: '21220' }).next).toBe(current);
+    expect(plan(voicemailPending({ gen: 2 }), { type: 'step_done', gen: 1, step: 'alert' }).next.alert_pending).toBe(true);
+    expect(plan(current, { type: 'resume_over' }).next).toMatchObject({ rec_pending: false, applied: 'returned' });
+    const none = heldHold({ phase: 'returned', ret_by: 'press1', applied: 'returned' });
+    expect(plan(none, { type: 'resume_over' }).next).toBe(none);
+    expect(plan(null, { type: 'resume_over' }).next).toBeNull();
+  });
+
+  test('a pending resume or bell never blocks a new decision: star, press 1 and the staff hang-up answer as without it', () => {
+    expect(plan(returnedPending(), { type: 'press1' })).toMatchObject({ answer: 'closed' });
+    expect(plan(returnedPending(), { type: 'staff_left' })).toMatchObject({ answer: 'ordinary' });
+    expect(plan(returnedPending(), { type: 'check' }).answer).toEqual({ remind: false });
+    expect(plan(voicemailPending(), { type: 'star' })).toMatchObject({ answer: 'no_room' });
+    expect(plan(voicemailPending(), { type: 'press1' })).toMatchObject({ answer: 'voicemail' });
+    expect(plan(voicemailPending(), { type: 'staff_left' })).toMatchObject({ answer: 'voicemail' });
+  });
+
+  test('a new generation starts with no pending resume and no pending bell', () => {
+    const out = plan(returnedPending({ alert_pending: true }), { type: 'star', legSid: LEG });
+    expect(out).toMatchObject({ answer: 'start', next: { gen: 2, phase: 'held', applied: null, rec_pending: false, alert_pending: false } });
+  });
+
+  test('the claim: a closed call sends no resume (the flag is cleared at once) but still raises its bell; a live lease is busy', () => {
+    const closedResume = planClaim(returnedPending({ sender: { token: 'me', until: T + 1000 } }), 'me', T, true);
+    expect(closedResume.res).toEqual({ send: null });
+    expect(closedResume.next).toMatchObject({ rec_pending: false, sender: null });
+    expect(planClaim(voicemailPending(), 'me', T, true).res).toMatchObject({ send: 'alert', gen: 1, reason: 'timeout' });
+    expect(planClaim(returnedPending(), 'me', T, false)).toMatchObject({ res: { send: 'resume', gen: 1 }, next: { sender: { token: 'me', until: T + hold.LEASE_MS } } });
+    expect(planClaim(returnedPending({ sender: { token: 'other', until: T + 1000 } }), 'me', T, false).res).toEqual({ send: null, busy: true });
+    expect(planClaim(voicemailPending({ sender: { token: 'other', until: T + 1000 } }), 'me', T, false).res).toEqual({ send: null, busy: true });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+describe('a recording resume that fails after a press 1', () => {
+  const instances = [];
+  function loadInstance() {
+    let inst;
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => db);
+      inst = require('../services/call-hold');
+    });
+    instances.push(inst);
+    return inst;
+  }
+  const recordings = (events) => events.filter((e) => e.name === 'recording');
+  const alwaysFail = () => err500();
+
+  test('press 1 still answers returned and the staff rejoin; the pass tries the resume once more; rec_pending stays', async () => {
+    seed(heldHold({ open_at: iso(-30) }));
+    const events = fakeTwilio({ fail: { recording: alwaysFail } });
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(names(events)).toEqual(['list', 'participant', 'recording', 'recording']);
+    expect(events[1]).toMatchObject({ hold: false });
+    expect(holdOf()).toMatchObject({ phase: 'returned', applied: 'returned', ret_by: 'press1', rec_pending: true, last_error_code: '51000', sender: null });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('NOT resumed'));
+  });
+
+  test('a confirmed resume leaves nothing pending and no timer', async () => {
+    seed(heldHold());
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(recordings(events)).toHaveLength(1);
+    expect(holdOf().rec_pending).toBe(false);
+    expect(hold._test.resumeRetries.size).toBe(0);
+  });
+
+  test('the backoff retries after 2 s and resumes; the retry is a fenced resume request only (no room lookup, no unhold)', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({ fail: { recording: (n) => (n <= 2 ? err500() : null) } });
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(holdOf().rec_pending).toBe(true);
+    expect(hold._test.resumeRetries.size).toBe(1);
+    await advance(1999);
+    expect(recordings(events)).toHaveLength(2);
+    await advance(1);
+    expect(names(events)).toEqual(['list', 'participant', 'recording', 'recording', 'recording']);
+    expect(holdOf()).toMatchObject({ rec_pending: false, applied: 'returned', last_error_code: null, sender: null });
+    await advance(60000);
+    expect(recordings(events)).toHaveLength(3);
+    expect(hold._test.resumeRetries.size).toBe(0);
+  });
+
+  test('the backoff waits 2, 4, 8 and 16 s and stops after the fourth try; the state stays pending for the sweep', async () => {
+    seed(heldHold());
+    const events = fakeTwilio({ fail: { recording: alwaysFail } });
+    await hold.endHold(SID);
+    expect(recordings(events)).toHaveLength(2);
+    const seen = [];
+    for (const wait of [2000, 4000, 8000, 16000]) {
+      await advance(wait - 1);
+      seen.push(recordings(events).length);
+      await advance(1);
+      seen.push(recordings(events).length);
+    }
+    expect(seen).toEqual([2, 3, 3, 4, 4, 5, 5, 6]);
+    await advance(120000);
+    expect(recordings(events)).toHaveLength(6);
+    expect(hold._test.resumeRetries.size).toBe(0);
+    expect(holdOf()).toMatchObject({ rec_pending: true, applied: 'returned' });
+  });
+
+  test('a retry chain is one per call: a second failed resume does not stack a second timer', async () => {
+    seed(returnedPending());
+    const events = fakeTwilio({ fail: { recording: alwaysFail } });
+    await hold.checkHold(SID);
+    await advance(1000);
+    await hold.checkHold(SID); // a second failed pass while the first retry is waiting
+    expect(hold._test.resumeRetries.size).toBe(1);
+    expect(recordings(events)).toHaveLength(2);
+    await advance(1000); // the first chain's 2 s retry
+    expect(recordings(events)).toHaveLength(3);
+    await advance(1000); // a stacked second timer would have fired here
+    expect(recordings(events)).toHaveLength(3);
+  });
+
+  test.each(['16108', '21220', '20404'])('Twilio code %s cannot be retried: the pending state is cleared with a log, and nothing is retried', async (code) => {
+    seed(heldHold());
+    const events = fakeTwilio({ fail: { recording: () => err(400, Number(code)) } });
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(recordings(events)).toHaveLength(2);
+    expect(holdOf()).toMatchObject({ rec_pending: false, applied: 'returned', last_error_code: code });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`code ${code} cannot be retried`));
+    expect(hold._test.resumeRetries.size).toBe(0);
+    await advance(60000);
+    expect(recordings(events)).toHaveLength(2);
+  });
+
+  test('a pending resume never blocks: a duplicate press 1 answers returned with no Twilio call, the staff hang-up gets the ordinary room end', async () => {
+    seed(returnedPending());
+    const events = fakeTwilio();
+    expect(await hold.endHold(SID)).toBe('returned');
+    expect(events).toHaveLength(0);
+    expect(await hold.staffLeft(SID)).toBe('ordinary');
+    expect(events).toHaveLength(0);
+  });
+
+  test('a new star clears it (its own hold pauses the recording again): no resume goes out, and a late resume of the old generation is ignored', async () => {
+    seed(returnedPending());
+    const events = fakeTwilio();
+    expect(await hold.startHold(SID, { legSid: LEG })).toBe('held');
+    expect(statuses(events)).toEqual(['paused']);
+    expect(holdOf()).toMatchObject({ gen: 2, phase: 'held', applied: 'held', rec_pending: false });
+    await hold._test.decide(SID, { type: 'step_done', gen: 1, step: 'resume' });
+    expect(holdOf()).toMatchObject({ gen: 2, rec_pending: false, applied: 'held' });
+  });
+
+  test('a star arriving while the retry resume is in flight: the resume lands first (one sender), then the new hold pauses', async () => {
+    seed(returnedPending());
+    let land;
+    const events = fakeTwilio({ during: { recording: once(() => new Promise((resolve) => { land = resolve; })) } });
+    const retry = hold.checkHold(SID);
+    await flush();
+    expect(statuses(events)).toEqual(['in-progress']);
+    const star = hold.startHold(SID, { legSid: LEG });
+    await flush();
+    expect(holdOf()).toMatchObject({ gen: 2, phase: 'held', applied: null });
+    land();
+    await flush();
+    await advance(500);
+    await retry;
+    expect(await star).toBe('held');
+    expect(statuses(events)).toEqual(['in-progress', 'paused']);
+    expect(holdOf()).toMatchObject({ gen: 2, applied: 'held', rec_pending: false });
+  });
+
+  test('the sweep resumes it after a restart (a fresh module instance, no timers), once, with no retry timer of its own', async () => {
+    seed(returnedPending());
+    const fresh = loadInstance();
+    expect(fresh._test.resumeRetries.size).toBe(0);
+    const events = fakeTwilio();
+    expect(await fresh.recoverPendingHolds()).toMatchObject({ action: 'swept', open: 1 });
+    expect(names(events)).toEqual(['recording']);
+    expect(events[0]).toMatchObject({ sid: SID, which: 'Twilio.CURRENT', status: 'in-progress' });
+    expect(holdOf()).toMatchObject({ rec_pending: false, sender: null });
+    expect(await fresh.recoverPendingHolds()).toMatchObject({ open: 0 });
+    expect(events).toHaveLength(1);
+  });
+
+  test('a sweep whose resume fails leaves it pending, tries once per minute, and starts no backoff chain', async () => {
+    seed(returnedPending());
+    const fresh = loadInstance();
+    const events = fakeTwilio({ fail: { recording: alwaysFail } });
+    await fresh.recoverPendingHolds();
+    await fresh.recoverPendingHolds();
+    expect(recordings(events)).toHaveLength(2);
+    expect(fresh._test.resumeRetries.size).toBe(0);
+    expect(holdOf().rec_pending).toBe(true);
+  });
+
+  test('an ended call (a terminal status) is cleared with no Twilio request', async () => {
+    seed(returnedPending());
+    db.__state.row.status = 'completed';
+    const events = fakeTwilio();
+    expect(await hold.recoverPendingHolds()).toMatchObject({ action: 'swept', open: 1 });
+    expect(events).toHaveLength(0);
+    expect(holdOf()).toMatchObject({ rec_pending: false, applied: 'returned' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('the call is over'));
+  });
+
+  test('an ended call (metadata.ended_at, or a closed room) is cleared with no Twilio request', async () => {
+    seed(returnedPending());
+    db.__state.row.metadata.ended_at = '2026-11-17T14:59:00Z';
+    const events = fakeTwilio();
+    await hold.recoverPendingHolds();
+    expect(events).toHaveLength(0);
+    expect(holdOf().rec_pending).toBe(false);
+    seed(returnedPending(), { closed_at: '2026-11-17T14:59:00Z' });
+    await hold.checkHold(SID); // a loop fetch on a closed call: the claim clears it, nothing is sent
+    expect(events).toHaveLength(0);
+    expect(holdOf().rec_pending).toBe(false);
+  });
+
+  test('two server processes sweeping at once send one resume', async () => {
+    seed(returnedPending());
+    const a = loadInstance();
+    const b = loadInstance();
+    const events = fakeTwilio();
+    await Promise.all([a.recoverPendingHolds(), b.recoverPendingHolds()]);
+    expect(recordings(events)).toHaveLength(1);
+    expect(holdOf().rec_pending).toBe(false);
+  });
+
+  test('a sweep against a live lease (a resume in flight on another process) sends nothing', async () => {
+    seed(returnedPending({ sender: { token: 'other', until: NOW.getTime() + 5000 } }));
+    const events = fakeTwilio();
+    await hold.recoverPendingHolds();
+    expect(events).toHaveLength(0);
+    expect(holdOf()).toMatchObject({ rec_pending: true, sender: { token: 'other' } });
+  });
+
+  test('a sender that stalled past its lease sends no resume (fenced) and records nothing', async () => {
+    seed(returnedPending());
+    const events = fakeTwilio();
+    // Another sender takes the lease over between this pass's claim and its request (the fence's transaction).
+    const original = db.transaction;
+    let stolen = false;
+    db.transaction = jest.fn(async (fn) => {
+      if (!stolen && holdOf()?.sender) { stolen = true; holdOf().sender = { token: 'other', until: Date.now() + 60000 }; }
+      return original(fn);
+    });
+    await hold.checkHold(SID);
+    db.transaction = original;
+    expect(events).toHaveLength(0);
+    expect(holdOf()).toMatchObject({ rec_pending: true, sender: { token: 'other' } });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+describe('a voicemail callback bell that is not delivered', () => {
+  const instances = [];
+  function loadInstance() {
+    let inst;
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => db);
+      inst = require('../services/call-hold');
+    });
+    instances.push(inst);
+    return inst;
+  }
+  const limit = () => seed(heldHold({ open_at: iso(-300) }));
+
+  test('the voicemail is confirmed and the bell is pending in the same record; the pass then raises the bell and clears it', async () => {
+    limit();
+    fakeTwilio();
+    await hold.checkHold(SID);
+    const writes = db.__state.writes;
+    const confirmed = writes.findIndex((w) => w.applied === 'voicemail');
+    expect(writes[confirmed]).toMatchObject({ applied: 'voicemail', alert_pending: true });
+    expect(writes.slice(0, confirmed).every((w) => w.alert_pending !== true)).toBe(true);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(holdOf()).toMatchObject({ applied: 'voicemail', alert_pending: false, alerted_at: NOW.toISOString(), sender: null });
+  });
+
+  test('a null answer (notifyAdmin resolves null on a database failure) is not delivered: alert_pending stays, the room end stands', async () => {
+    limit();
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    const events = fakeTwilio();
+    expect(await hold.checkHold(SID)).toMatchObject({ phase: 'voicemail', applied: 'voicemail' });
+    expect(names(events)).toEqual(['list', 'room']);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1); // one try per pass
+    expect(holdOf()).toMatchObject({ applied: 'voicemail', alert_pending: true, sender: null });
+    expect(holdOf().alerted_at).toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('not written'));
+  });
+
+  test('a throw is not delivered either: alert_pending stays, logged by code', async () => {
+    limit();
+    raiseAdminAlert.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'EBELL' }));
+    fakeTwilio();
+    await hold.checkHold(SID);
+    expect(holdOf()).toMatchObject({ applied: 'voicemail', alert_pending: true });
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('(EBELL)'));
+  });
+
+  test.each([
+    ['a row with an id', { id: 'n9' }, false],
+    ['an intentional suppression', { id: null, suppressed: true, reason: 'fyi' }, false],
+    ['an answer with neither', {}, true],
+    ['undefined', undefined, true],
+    ['a null id with no suppression', { id: null }, true],
+  ])('%s: pending stays %s', async (_name, answer, pending) => {
+    limit();
+    raiseAdminAlert.mockResolvedValueOnce(answer);
+    fakeTwilio();
+    await hold.checkHold(SID);
+    expect(holdOf().alert_pending).toBe(pending);
+    expect(holdOf().alerted_at === undefined).toBe(pending);
+  });
+
+  test('a dedupe hit (the first bell was written, only its answer was lost) is delivered: the key is the same on every retry', async () => {
+    limit();
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    fakeTwilio();
+    await hold.checkHold(SID);
+    raiseAdminAlert.mockResolvedValueOnce({ id: 'n1', deduped: true });
+    await hold.recoverPendingHolds();
+    expect(raiseAdminAlert.mock.calls.map((c) => c[2].dedupeKey)).toEqual([`call-hold-voicemail:${SID}`, `call-hold-voicemail:${SID}`]);
+    expect(holdOf().alert_pending).toBe(false);
+  });
+
+  test('the sweep delivers it once, and an idle sweep afterwards raises nothing more', async () => {
+    limit();
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    const events = fakeTwilio();
+    await hold.checkHold(SID);
+    expect(holdOf().alert_pending).toBe(true);
+    expect(await hold.recoverPendingHolds()).toMatchObject({ action: 'swept', open: 1 });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+    expect(holdOf()).toMatchObject({ alert_pending: false, alerted_at: NOW.toISOString() });
+    expect(await hold.recoverPendingHolds()).toMatchObject({ open: 0 });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+    expect(names(events)).toEqual(['list', 'room']); // the bell needs no Twilio request, and the room is not ended twice
+  });
+
+  test('a failing sweep pass keeps it pending for the next minute, once per sweep', async () => {
+    seed(voicemailPending());
+    raiseAdminAlert.mockResolvedValue(null);
+    await hold.recoverPendingHolds();
+    await hold.recoverPendingHolds();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
+    expect(holdOf().alert_pending).toBe(true);
+    raiseAdminAlert.mockResolvedValue({ id: 'n1' });
+    await hold.recoverPendingHolds();
+    expect(holdOf().alert_pending).toBe(false);
+  });
+
+  test('the bell is raised for a call that has already ended (the caller left a message and hung up)', async () => {
+    seed(voicemailPending(), { closed_at: '2026-11-17T14:59:00Z' });
+    db.__state.row.status = 'completed';
+    const events = fakeTwilio();
+    await hold.recoverPendingHolds();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(events).toHaveLength(0);
+    expect(holdOf().alert_pending).toBe(false);
+  });
+
+  test('two server processes sweeping at once raise one bell', async () => {
+    seed(voicemailPending());
+    const a = loadInstance();
+    const b = loadInstance();
+    fakeTwilio();
+    await Promise.all([a.recoverPendingHolds(), b.recoverPendingHolds()]);
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1); // the mock is shared by both module instances
+    expect(holdOf().alert_pending).toBe(false);
+  });
+
+  test('a sender that stalled past its lease raises no bell (fenced): the new lease holder owns it', async () => {
+    seed(voicemailPending());
+    const original = db.transaction;
+    let stolen = false;
+    db.transaction = jest.fn(async (fn) => {
+      if (!stolen && holdOf()?.sender) { stolen = true; holdOf().sender = { token: 'other', until: Date.now() + 60000 }; }
+      return original(fn);
+    });
+    await hold.recoverPendingHolds();
+    db.transaction = original;
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(holdOf()).toMatchObject({ alert_pending: true, sender: { token: 'other' } });
+  });
+
+  test('a live lease of another sender is respected: nothing is raised', async () => {
+    seed(voicemailPending({ sender: { token: 'other', until: NOW.getTime() + 5000 } }));
+    await hold.recoverPendingHolds();
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(holdOf().alert_pending).toBe(true);
+  });
+
+  test('the sweep ignores the gate: with GATE_CALL_HOLD off it still finishes both pending states', async () => {
+    const gates = require('../config/feature-gates');
+    gates.callHoldLive.mockReturnValue(false);
+    seed(voicemailPending());
+    await hold.recoverPendingHolds();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    seed(returnedPending());
+    const events = fakeTwilio();
+    await hold.recoverPendingHolds();
+    expect(statuses(events)).toEqual(['in-progress']);
+    gates.callHoldLive.mockReturnValue(true);
+  });
+
+  test('a sandbox call is never read: the sweep applies the shared sandbox guard', async () => {
+    seed(voicemailPending());
+    db.__state.row.source = VOICE_RELAY_SANDBOX_SOURCE;
+    expect(await hold.recoverPendingHolds()).toMatchObject({ action: 'swept', open: 0 });
+    expect(db.__state.modifyCalls.map((c) => c.bindings)).toEqual([['source', VOICE_RELAY_SANDBOX_SOURCE], ['source', 'tech_voice']]);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    expect(holdOf().alert_pending).toBe(true);
+  });
+
+  test('an idle sweep is one read: no transaction, no Twilio request, no bell', async () => {
+    seed(heldHold({ phase: 'returned', ret_by: 'press1', applied: 'returned' }));
+    const events = fakeTwilio();
+    expect(await hold.recoverPendingHolds()).toEqual({ action: 'swept', open: 0 });
+    expect(db.__state.sweeps).toBe(1);
+    expect(db.__state.txCount).toBe(0);
+    expect(events).toHaveLength(0);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a database error in the sweep is contained: logged by code, never thrown, and the next sweep runs', async () => {
+    seed(voicemailPending());
+    db.__state.failSweep = 1;
+    await expect(hold.recoverPendingHolds()).resolves.toEqual({ action: 'error' });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sweep read failed (ECONNRESET)'));
+    expect(await hold.recoverPendingHolds()).toMatchObject({ action: 'swept', open: 1 });
+    expect(holdOf().alert_pending).toBe(false);
+  });
+
+  test('a failure on one row is contained: the sweep logs it and finishes', async () => {
+    seed(returnedPending());
+    db.__state.row.status = 'completed';
+    db.__state.failReads = 1; // the clear's transaction fails
+    await expect(hold.recoverPendingHolds()).resolves.toMatchObject({ action: 'swept', open: 1 });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sweep failed for'));
+    expect(holdOf().rec_pending).toBe(true);
   });
 });

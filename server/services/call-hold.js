@@ -23,6 +23,9 @@
  *   ret_by     'press1' | 'abort' (a star whose hold request failed: the staff were put back in the room),
  *   open_at, by, leg_sid, count, total_sec, reminded_at, voicemail_at, voicemail_reason,
  *   vm_failed  a voicemail step failed while the caller was not on hold (re-held so a loop exists),
+ *   rec_pending  a press 1 return was confirmed but the recording resume was not: step 'resume' retries it,
+ *   alert_pending  the voicemail was confirmed but its callback bell was not delivered: step 'alert' retries it,
+ *   alerted_at  when that bell was delivered,
  *   gone       the caller's room was already gone when a step ran,
  *   sender     { token, until }: the lease of the one sender }.
  *
@@ -45,6 +48,16 @@
  *                          finished first): a failed voicemail step is followed, in the same pass, by a re-hold of
  *                          the caller, so the facts loop exists again (nothing else runs for a caller alone in the
  *                          room); the staff-left handler tries once itself.
+ *
+ * TWO PENDING STATES THAT NEVER BLOCK A NEW DECISION (isIdle ignores both). A return confirms the unhold at once (the
+ * staff rejoin) and records whether the recording resume was confirmed; if not, rec_pending keeps step 'resume' wanted
+ * (a fenced resume request only) until it is confirmed, Twilio gives a code a retry cannot fix (TERMINAL_RESUME_CODES),
+ * or the call is over. A voicemail records alert_pending in the same write that confirms it; step 'alert' (no Twilio
+ * request, still the lease holder) raises the callback bell with its dedupe key and clears it only on a written row (an
+ * id, or an intentional suppression). Retries: a failed resume gets a 2, 4, 8, 16 s in-process backoff (one chain per
+ * call), then recoverPendingHolds, a 1 minute sweep (scheduler.js, whatever the gates say) that drains any recent call
+ * with either state pending through the same lease path, so two server processes send one resume and raise one bell.
+ *
  * Left open: Twilio unreachable for every request of a re-hold as well (see the report), and a database that
  * is down while the caller is held (no decision can be made; the caller keeps the script).
  *
@@ -58,6 +71,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const conferencePath = require('./call-conference-path');
+const { TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 
 const WEBHOOK_BASE = '/api/webhooks/twilio';
 // A hold open this long is told to the staff phone (reminder) and sent to voicemail (limit). Owner-approved.
@@ -68,11 +82,21 @@ const HOLD_LIMIT_SEC = 300;
 // requests) also fits in one lease.
 const REQUEST_TIMEOUT_MS = 2500;
 const LEASE_MS = 8 * 1000;
-// One pass sends at most this many steps (a hold, the return that replaced it, the voicemail that replaced that).
-const MAX_SENDS_PER_PASS = 4;
+// One pass runs at most this many steps (a hold, the return that replaced it, its resume, the voicemail that replaced
+// that, its bell).
+const MAX_SENDS_PER_PASS = 6;
 // The press 1 and star requests wait this long (in steps) for a step another sender holds the lease on.
 const WAIT_MS = 6 * 1000;
 const WAIT_STEP_MS = 250;
+// A failed recording resume is retried in this process after these delays (one chain per call), then by the sweep.
+const RESUME_BACKOFF_MS = [2000, 4000, 8000, 16000];
+// The 1 minute sweep reads calls created in this window, at most this many.
+const SWEEP_LOOKBACK_MS = 6 * 60 * 60 * 1000;
+const SWEEP_LIMIT = 25;
+// Twilio answers a retry cannot fix for a recording resume: 16108 the recording is already complete, 21220 the call
+// is not in progress, 20404 the call or recording is gone. The same rule as TERMINAL_RESUME_CODES in
+// live-call-card-pause.js (an unmerged PR: not imported).
+const TERMINAL_RESUME_CODES = new Set(['16108', '21220', '20404']);
 
 // Read through the module object at call time: a suite that mocks feature-gates as a bare object reads off.
 const isEnabled = () => typeof featureGates.callHoldLive === 'function' && featureGates.callHoldLive();
@@ -119,6 +143,8 @@ function planStar(hold, ev, nowMs) {
       voicemail_reason: null,
       vm_failed: false,
       gone: false,
+      rec_pending: false, // this hold pauses the recording again
+      alert_pending: false,
       sender: prev.sender || null,
     },
     answer: 'start',
@@ -161,9 +187,25 @@ function planStaffLeft(hold, nowMs, closed) {
 
 const APPLIED_BY_STEP = { hold: 'held', rehold: 'held', return: 'returned', voicemail: 'voicemail' };
 
-function planStepDone(hold, ev) {
+// A confirmed return records whether its recording resume was confirmed too (resumed === false keeps step 'resume'
+// wanted). It stays pending only while the phase is still 'returned': a voicemail decided meanwhile resumes the
+// recording itself (/call-complete?conf=1). A confirmed voicemail (room ended, caller not gone) wants its bell.
+function planStepDone(hold, ev, nowMs) {
   if (!hold || hold.gen !== ev.gen) return { next: hold, answer: null };
-  return { next: { ...hold, applied: APPLIED_BY_STEP[ev.step], vm_failed: false, gone: Boolean(ev.gone), last_error_code: null }, answer: null };
+  const done = { ...hold, last_error_code: null };
+  if (ev.step === 'resume') return { next: hold.rec_pending ? { ...done, rec_pending: false } : hold, answer: null };
+  if (ev.step === 'alert') return { next: hold.alert_pending ? { ...done, alert_pending: false, alerted_at: isoAt(nowMs) } : hold, answer: null };
+  return {
+    next: {
+      ...done,
+      applied: APPLIED_BY_STEP[ev.step],
+      vm_failed: false,
+      gone: Boolean(ev.gone),
+      rec_pending: ev.step === 'return' ? ev.resumed === false && hold.phase === 'returned' : Boolean(hold.rec_pending),
+      alert_pending: ev.step === 'voicemail' ? !ev.gone : Boolean(hold.alert_pending),
+    },
+    answer: null,
+  };
 }
 
 function planStepFailed(hold, ev) {
@@ -175,6 +217,9 @@ function planStepFailed(hold, ev) {
     return { next: { ...base, phase: 'returned', ret_by: 'abort', gone: Boolean(ev.gone) }, answer: null };
   }
   if (ev.step === 'voicemail') return { next: { ...base, vm_failed: hold.applied !== 'held' }, answer: null };
+  // A resume Twilio will never accept ends the pending state; any other failure leaves it pending. A bell that was
+  // not delivered stays pending too.
+  if (ev.step === 'resume' && TERMINAL_RESUME_CODES.has(String(ev.code))) return { next: { ...base, rec_pending: false }, answer: null };
   return { next: base, answer: null };
 }
 
@@ -192,21 +237,27 @@ function planEvent(hold, ev, nowMs, closed) {
     case 'press1': return planPressOne(hold, nowMs);
     case 'check': return planCheck(hold, ev, nowMs);
     case 'staff_left': return planStaffLeft(hold, nowMs, closed);
-    case 'step_done': return planStepDone(hold, ev);
+    case 'step_done': return planStepDone(hold, ev, nowMs);
     case 'step_failed': return planStepFailed(hold, ev);
     case 'abort': return planAbort(hold, ev);
+    // The sweep found the call over: no resume can land on its recording.
+    case 'resume_over': return { next: hold?.rec_pending ? { ...hold, rec_pending: false } : hold, answer: null };
     default: return { next: hold, answer: null };
   }
 }
 
 // The step the wanted state needs next, or null. 'rehold' puts a caller whose voicemail step failed back on
-// hold (the caller is not held, so no facts loop would run to retry it).
+// hold (the caller is not held, so no facts loop would run to retry it). 'resume' finishes a return whose recording
+// resume was not confirmed; 'alert' raises the callback bell of a confirmed voicemail. Neither blocks a new decision.
 function nextStep(hold) {
   if (!hold?.phase) return null;
   const { phase, applied } = hold;
   if (phase === 'held') return applied === 'held' ? null : 'hold';
-  if (phase === 'returned') return applied === 'returned' ? null : 'return';
-  if (applied === 'voicemail') return null;
+  if (phase === 'returned') {
+    if (applied !== 'returned') return 'return';
+    return hold.rec_pending ? 'resume' : null;
+  }
+  if (applied === 'voicemail') return hold.alert_pending ? 'alert' : null;
   return hold.vm_failed && applied !== 'held' ? 'rehold' : 'voicemail';
 }
 
@@ -215,7 +266,11 @@ function nextStep(hold) {
 function planClaim(hold, token, nowMs, closed) {
   const mine = hold?.sender?.token === token;
   const clearMine = (h) => (mine ? { ...h, sender: null } : h);
-  const step = closed ? null : nextStep(hold);
+  const wanted = nextStep(hold);
+  // A closed call (the caller's call ended) sends nothing to Twilio, and no resume can land on its recording; its
+  // voicemail bell is still raised (no Twilio request).
+  if (closed && wanted === 'resume') return { res: { send: null }, next: { ...clearMine(hold), rec_pending: false } };
+  const step = closed && wanted !== 'alert' ? null : wanted;
   if (!step) return { res: { send: null }, next: clearMine(hold) };
   const lease = hold.sender;
   if (lease && lease.token !== token && Number(lease.until) > nowMs) return { res: { send: null, busy: true }, next: hold };
@@ -311,16 +366,19 @@ async function pauseRecording(callSid) {
   }
 }
 
-// true when Twilio accepted the resume, false when it did not. Never throws.
-async function resumeRecording(callSid) {
+// { ok: true } when Twilio accepted the resume, else { ok: false, code }. Never throws.
+async function resumeOutcome(callSid) {
   try {
     await client().calls(callSid).recordings('Twilio.CURRENT').update({ status: 'in-progress' });
-    return true;
+    return { ok: true };
   } catch (err) {
-    logger.error(`[call-hold] recording NOT resumed for ${masked(callSid)} (${errorCode(err)}); the rest of the recording is silent`);
-    return false;
+    logger.error(`[call-hold] recording NOT resumed for ${masked(callSid)} (${errorCode(err)}); the rest of the recording is silent until a retry`);
+    return { ok: false, code: errorCode(err) };
   }
 }
+
+// true when Twilio accepted the resume, false when it did not. Never throws.
+const resumeRecording = async (callSid) => (await resumeOutcome(callSid)).ok;
 
 const holdParticipant = (callSid, roomSid) => client().conferences(roomSid).participants(callSid).update({
   hold: true,
@@ -345,18 +403,28 @@ async function endOpenRooms(callSid, fence) {
   return ended;
 }
 
-// One Twilio step. { ok, gone } or throws a REST error (or LeaseLost). `gone`: the caller's room is already gone.
-// fence() runs right before each request that changes the call.
-async function runStep(callSid, step, fence) {
+// One step. { ok, gone } or throws a REST error (or LeaseLost). `gone`: the caller's room is already gone. A return
+// also answers `resumed` (the recording resume was confirmed); 'resume' answers `resume` ({ ok, code }); 'alert' answers
+// `delivered`. fence() runs right before each request that changes the call (and before the bell is raised).
+async function runStep(callSid, step, fence, reason) {
   if (step === 'voicemail') return { ok: true, gone: (await endOpenRooms(callSid, fence)) === 0 };
+  if (step === 'alert') {
+    await fence();
+    return { ok: true, delivered: await raiseVoicemailAlert(callSid, reason) };
+  }
+  if (step === 'resume') {
+    await fence();
+    return { ok: true, resume: await resumeOutcome(callSid) };
+  }
   const roomSid = await findRoomSid(callSid);
   if (!roomSid) return { ok: false, gone: true };
+  let resumed;
   try {
     await fence();
     if (step === 'return') {
       await client().conferences(roomSid).participants(callSid).update({ hold: false });
       await fence();
-      await resumeRecording(callSid);
+      resumed = (await resumeOutcome(callSid)).ok;
     } else {
       await holdParticipant(callSid, roomSid);
       if (step === 'hold') {
@@ -368,7 +436,7 @@ async function runStep(callSid, step, fence) {
     if (isGone(err)) return { ok: false, gone: true };
     throw err;
   }
-  return { ok: true, gone: false };
+  return { ok: true, gone: false, resumed };
 }
 
 // Commit the decision (and the lease with it) before any Twilio request is sent.
@@ -409,13 +477,54 @@ async function recordOutcome(callSid, ev) {
   }
 }
 
+// A failed recording resume is retried in this process after 2, 4, 8 and 16 s (one chain per call, unref'd timers).
+// A retry stops once the next step is no longer 'resume' or after the fourth try; recoverPendingHolds is the rest.
+const resumeRetries = new Map();
+
+function scheduleResumeRetry(callSid, attempt = 0) {
+  if (attempt >= RESUME_BACKOFF_MS.length || resumeRetries.has(callSid)) return;
+  const timer = setTimeout(async () => {
+    resumeRetries.delete(callSid);
+    try {
+      await drain(callSid, { retry: false });
+      if (nextStep(holdFrom(await conferencePath.loadState(callSid))) === 'resume') scheduleResumeRetry(callSid, attempt + 1);
+    } catch (err) {
+      logger.warn(`[call-hold] resume retry failed for ${masked(callSid)} (${errorCode(err)})`);
+      scheduleResumeRetry(callSid, attempt + 1);
+    }
+  }, RESUME_BACKOFF_MS[attempt]);
+  if (typeof timer.unref === 'function') timer.unref();
+  resumeRetries.set(callSid, timer);
+}
+
+// The two steps that finish a confirmed decision: the recording resume, and the voicemail's callback bell.
+async function settleFollowUp(callSid, { gen, send: step }, out, retry) {
+  if (step === 'alert') {
+    await recordOutcome(callSid, out.delivered ? { type: 'step_done', gen, step } : { type: 'step_failed', gen, step, code: 'alert' });
+    if (!out.delivered) logger.warn(`[call-hold] callback bell not delivered for ${masked(callSid)}; the sweep retries it`);
+    return { failed: !out.delivered };
+  }
+  if (out.resume.ok) {
+    await recordOutcome(callSid, { type: 'step_done', gen, step });
+    logger.info(`[call-hold] recording resumed for ${masked(callSid)}`);
+    return { failed: false };
+  }
+  await recordOutcome(callSid, { type: 'step_failed', gen, step, code: out.resume.code });
+  if (TERMINAL_RESUME_CODES.has(String(out.resume.code))) {
+    logger.warn(`[call-hold] recording resume for ${masked(callSid)} dropped: Twilio code ${out.resume.code} cannot be retried`);
+    return { failed: false };
+  }
+  if (retry) scheduleResumeRetry(callSid);
+  return { failed: true };
+}
+
 // { failed } when the step failed (the loops and the waiters retry it later); { lost } when another sender took the
 // lease over (it records nothing: the new lease holder owns the state now).
-async function sendStep(callSid, claim, fence) {
+async function sendStep(callSid, claim, fence, retry) {
   const { gen, send: step } = claim;
   let out;
   try {
-    out = await runStep(callSid, step, fence);
+    out = await runStep(callSid, step, fence, claim.reason);
   } catch (err) {
     if (err instanceof LeaseLost) {
       logger.warn(`[call-hold] ${step} step stopped for ${masked(callSid)}: another sender took the lease`);
@@ -432,10 +541,10 @@ async function sendStep(callSid, claim, fence) {
     await recordOutcome(callSid, step === 'hold' ? { type: 'step_failed', gen, step, gone: true, code: 'gone' } : done);
     return { failed: step === 'hold', gone: true };
   }
-  await recordOutcome(callSid, { type: 'step_done', gen, step, gone: out.gone });
+  if (step === 'alert' || step === 'resume') return settleFollowUp(callSid, claim, out, retry);
+  await recordOutcome(callSid, { type: 'step_done', gen, step, gone: out.gone, resumed: out.resumed });
   if (step === 'voicemail' && !out.gone) {
     logger.info(`[call-hold] caller ${masked(callSid)} sent to voicemail (${claim.reason})`);
-    await raiseVoicemailAlert(callSid, claim.reason);
   } else if (step === 'return') {
     logger.info(`[call-hold] caller ${masked(callSid)} back from hold`);
   }
@@ -446,8 +555,9 @@ async function sendStep(callSid, claim, fence) {
 // token owns the lease for the whole pass. { busy } when another sender holds it (or took it over): this pass sends
 // nothing more and nothing waits. A failed step ends the pass, with one exception: a failed voicemail step that left
 // the caller unheld and alone in the room is followed by the re-hold (no loop would run for that caller otherwise).
-// A re-hold ends the pass too: the facts loop's next fetch retries the voicemail.
-async function drain(callSid) {
+// A re-hold ends the pass too: the facts loop's next fetch retries the voicemail. A failed resume or bell ends the pass
+// (a failed resume starts the backoff unless `retry` is false: the backoff's own pass and the sweep).
+async function drain(callSid, { retry = true } = {}) {
   const token = crypto.randomUUID();
   const fence = () => fenceLease(callSid, token);
   let holding = false;
@@ -458,7 +568,7 @@ async function drain(callSid) {
       const claim = await claimStep(callSid, token);
       holding = Boolean(claim.send);
       if (!claim.send || (failed && claim.send !== 'rehold')) return { busy: Boolean(claim.busy), failed, sent };
-      const out = await sendStep(callSid, claim, fence);
+      const out = await sendStep(callSid, claim, fence, retry);
       sent += 1;
       if (out.lost) {
         holding = false;
@@ -592,15 +702,17 @@ const VOICEMAIL_WHY = {
   staff_left: 'The staff phone hung up during a hold; the caller went to voicemail.',
 };
 
-// One bell per call (dedupeKey on the CallSid). A failure is logged by code and never stops the voicemail.
+// One bell per call (dedupeKey on the CallSid). true only when a row was written (an id) or the bell was suppressed on
+// purpose; a null answer (notifyAdmin resolves null when its database write fails) or a throw is NOT delivered: step
+// 'alert' stays pending and the sweep retries it. A failure is logged by code and never stops the voicemail.
 async function raiseVoicemailAlert(callSid, reason) {
   try {
     const call = await db('call_log').where('twilio_call_sid', callSid).first('id', 'customer_id', 'from_phone');
-    if (!call) return;
+    if (!call) return false;
     const { raiseAdminAlert } = require('./admin-alert-compose');
     const { fitAction } = require('./admin-alert-names');
     const name = await callerNameFor(call);
-    await raiseAdminAlert('voicemail_callback', {
+    const written = await raiseAdminAlert('voicemail_callback', {
       area: 'Comms',
       action: name ? fitAction('Comms', name, [(n) => `call ${n} back`]) : 'call back an unknown caller',
       why: VOICEMAIL_WHY[reason] || VOICEMAIL_WHY.timeout,
@@ -616,12 +728,72 @@ async function raiseVoicemailAlert(callSid, reason) {
       // bell is judged from its own time and closes once a person reaches the caller after it.
       metadata: { callLogId: call.id, reason, payload: { customerId: call.customer_id || null, phone: call.from_phone || null } },
     });
+    const delivered = Boolean(written && (written.id || written.suppressed));
+    if (!delivered) logger.error(`[call-hold] voicemail alert not written for ${masked(callSid)}`);
+    return delivered;
   } catch (err) {
     logger.error(`[call-hold] voicemail alert not raised for ${masked(callSid)} (${errorCode(err)})`);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The recovery sweep (scheduler.js, every minute, whatever the gates say: it only finishes work already started).
+// ---------------------------------------------------------------------------------------------------------
+
+let sweeping = false;
+
+async function recoverRow(row) {
+  const callSid = row.twilio_call_sid;
+  if (!callSid) return;
+  const recPending = row.rec_pending === 'true';
+  const ended = TERMINAL_CALL_STATUSES.has(String(row.status || '')) || Boolean(row.ended_at);
+  // The call is over: no resume can land on its recording. Cleared under the lock, with no Twilio request.
+  if (recPending && ended) {
+    await decide(callSid, { type: 'resume_over' });
+    logger.warn(`[call-hold] pending recording resume for ${masked(callSid)} dropped: the call is over`);
+  }
+  // Everything else goes through the lease path, like any other pass: two processes send one resume and raise one bell.
+  if (row.alert_pending === 'true' || (recPending && !ended)) await drain(callSid, { retry: false });
+}
+
+// Calls of the last 6 hours with a pending recording resume or a pending callback bell, newest first, at most 25. An
+// idle sweep is this one read (no transaction). Errors are logged by code and never thrown.
+async function recoverPendingHolds() {
+  if (sweeping) return { action: 'busy' };
+  sweeping = true;
+  try {
+    const rows = await db('call_log')
+      .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb))
+      .where('created_at', '>', new Date(Date.now() - SWEEP_LOOKBACK_MS))
+      .whereRaw("((metadata #>> '{conference_path,hold,rec_pending}') = 'true' OR (metadata #>> '{conference_path,hold,alert_pending}') = 'true')")
+      .orderBy('created_at', 'desc')
+      .limit(SWEEP_LIMIT)
+      .select(
+        'twilio_call_sid',
+        'status',
+        db.raw("metadata ->> 'ended_at' AS ended_at"),
+        db.raw("metadata #>> '{conference_path,hold,rec_pending}' AS rec_pending"),
+        db.raw("metadata #>> '{conference_path,hold,alert_pending}' AS alert_pending"),
+      );
+    for (const row of rows) {
+      try {
+        await recoverRow(row);
+      } catch (err) {
+        logger.warn(`[call-hold] sweep failed for ${masked(row.twilio_call_sid)} (${errorCode(err)})`);
+      }
+    }
+    return { action: 'swept', open: rows.length };
+  } catch (err) {
+    logger.warn(`[call-hold] sweep read failed (${errorCode(err)})`);
+    return { action: 'error' };
+  } finally {
+    sweeping = false;
   }
 }
 
 module.exports = {
   HOLD_REMINDER_SEC, HOLD_LIMIT_SEC, LEASE_MS, isEnabled, startHold, endHold, checkHold, staffLeft, holdState, roomIsOpen, heldSeconds, resumeRecording,
-  _test: { planEvent, planClaim, nextStep, decide },
+  recoverPendingHolds,
+  _test: { planEvent, planClaim, nextStep, decide, resumeRetries },
 };
