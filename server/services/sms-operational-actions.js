@@ -1213,7 +1213,7 @@ function keptLate(row, verdict) {
 
 // One open admin alert per customer (owner 2026-11-16, "one alert for each customer"): every text follow-up of a
 // customer that needs the office sits on one alert, keyed on the customer. The alert lists those promises
-// (metadata.commitment_ids, the promise that joined last first). A promise joins when its own overdue check rings,
+// (metadata.commitment_ids, the promises of the text that rang last first). A promise joins when its own overdue check rings,
 // together with the other open promises from its text (owner 2026-10-22: one staff text such as "Adam will be out
 // there and he'll look into it" yields several promises, and they are one alert). The alert rings exactly when the
 // alert of one text rang before: when it first appears, and again when a promise joins from a text that has no
@@ -1859,8 +1859,9 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // only; the customer's alert keeps the other promises that still need
     // it). Only with
     // GATE_ALERT_RING_ONCE on: its open-only probe lets the ring after the
-    // window raise a fresh alert, and the ring's supersede step leaves a system
-    // close alone. Without it a closed row would absorb that ring for a day.
+    // window raise a fresh alert (or ring the customer's open alert again, when
+    // the text has no promise left on it), and the ring's supersede step leaves a
+    // system close alone. Without it a closed row would absorb that ring for a day.
     if (holdBell) {
       if (alertRingOnce()) {
         await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true, now },

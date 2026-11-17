@@ -263,7 +263,7 @@ customer's message by this rule.
    A customer's overdue text follow-ups are one subject too (owner 2026-11-16, "one alert for each
    customer"): they share ONE bell row (`dedupeKey` `sms-commitment-customer:<customerId>`,
    `ringSmsCustomerBell` in `server/services/sms-operational-actions.js`). The row lists its promises
-   in `metadata.commitment_ids` (and `itemKeys`), the promise that joined last first. A promise joins
+   in `metadata.commitment_ids` (and `itemKeys`), the promises of the text that rang last first. A promise joins
    when its own overdue check rings, together with the other open promises from its text. The row
    rings exactly when the row of one text rang before the fold (`GATE_ALERT_RING_ONCE` on): when it
    first appears and again, unread and moved to the top, when a promise joins from a text that has
