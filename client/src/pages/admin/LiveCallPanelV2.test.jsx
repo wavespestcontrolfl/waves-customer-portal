@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LiveCallPanelV2, { elapsedLabel } from "./LiveCallPanelV2";
 
@@ -51,6 +51,36 @@ describe("LiveCallPanelV2", () => {
     expect(shown[7]).toBe("Agentline 10");
     await act(async () => { vi.advanceTimersByTime(1000); });
     expect(screen.getByText("2:06")).toBeInTheDocument();
+  });
+
+  it("shows the ask, price and open times above the lines, and hides a row with no text", async () => {
+    const withAssist = (assist) => ({ ...call(lines(2)), assist });
+    vi.stubGlobal("fetch", vi.fn(async () => answer([
+      withAssist({ intent: "Wants quarterly pest control", price: "Standard pest control pricing: $99 per application", times: "Tuesday November 18 at 9 AM; Wednesday November 19 at 10 AM", at: "2026-11-17T15:01:00.000Z" }),
+    ])));
+    const { unmount } = render(<LiveCallPanelV2 />);
+    await flush();
+    const rows = within(screen.getByTestId("live-call-assist")).getAllByRole("listitem").map((li) => li.textContent);
+    expect(rows).toEqual([
+      "Asking forWants quarterly pest control",
+      "PriceStandard pest control pricing: $99 per application",
+      "Open timesTuesday November 18 at 9 AM; Wednesday November 19 at 10 AM",
+    ]);
+    unmount();
+    vi.stubGlobal("fetch", vi.fn(async () => answer([withAssist({ intent: "Billing question", price: null, times: null, at: null })])));
+    render(<LiveCallPanelV2 />);
+    await flush();
+    const only = within(screen.getByTestId("live-call-assist")).getAllByRole("listitem").map((li) => li.textContent);
+    expect(only).toEqual(["Asking forBilling question"]);
+    expect(screen.queryByText("Price")).not.toBeInTheDocument();
+    expect(screen.queryByText("Open times")).not.toBeInTheDocument();
+  });
+
+  it("shows no assist block when assist is null", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => answer([{ ...call(lines(2)), assist: null }])));
+    render(<LiveCallPanelV2 />);
+    await flush();
+    expect(screen.queryByTestId("live-call-assist")).not.toBeInTheDocument();
   });
 
   it("pauses while the tab is hidden and polls again when it shows", async () => {

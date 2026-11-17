@@ -74,6 +74,29 @@ function useNow(active) {
   return now;
 }
 
+const ASSIST_ROWS = [
+  ["intent", "Asking for"],
+  ["price", "Price"],
+  ["times", "Open times"],
+];
+
+// What the caller asks for, the engine's price and the next open times, from GET /live `assist` (null when the
+// feature is off or nothing is known yet). A row with no text is left out.
+function AssistRows({ assist }) {
+  const rows = ASSIST_ROWS.filter(([key]) => assist?.[key]);
+  if (!rows.length) return null;
+  return (
+    <ul className="mt-3 mb-0 list-none space-y-1 pl-0 text-14 text-zinc-900" data-testid="live-call-assist">
+      {rows.map(([key, label]) => (
+        <li key={key} className="flex gap-2">
+          <span className="w-24 shrink-0 text-zinc-500">{label}</span>
+          <span>{assist[key]}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // Tailwind preflight is off in this app, so the links and the list set their own color, margin and padding.
 export default function LiveCallPanelV2() {
   const calls = useLiveCalls();
@@ -101,6 +124,7 @@ export default function LiveCallPanelV2() {
             {call.answered_by && <span className="text-zinc-600">Answered by {call.answered_by}</span>}
             <span className="text-zinc-600 tabular-nums ml-auto">{elapsedLabel(call.started_at, now)}</span>
           </div>
+          <AssistRows assist={call.assist} />
           <ul className="mt-3 mb-0 list-none space-y-1 pl-0 text-14 text-zinc-900">
             {(call.lines || []).slice(-SHOWN_LINES).map((line, i) => (
               <li key={`${line.at}-${i}`} className="flex gap-2">

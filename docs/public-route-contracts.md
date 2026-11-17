@@ -4246,7 +4246,18 @@ recording resumes 90 s later, and a new trigger moves the end out. State is
 went off still resumes. No new spend. The other events
 stamp `live_at`, `stopped_at` or `event_error*`. Every outcome answers 200,
 a failed write included. The post-call card-number quarantine deletes the
-call's live utterances. Gate off: no start, and the press-1 TwiML is
+call's live utterances (and the early summary below).
+With `GATE_CALL_EARLY_SUMMARY` also on (dark, owner 2026-11-16 "ok build all,
+use haiku"), `transcription-stopped` also schedules, after its 200 answer and
+a 3 s wait for the last utterances, one paid Claude Haiku 5.5 call over the
+call's live utterances: at most once per call (a compare-and-swap on
+`live_transcription.early_summary_claimed_at`), and none for a call with
+fewer than 3 utterances or one the recording pipeline already processed. Its
+2-3 sentence reply, card numbers masked, is saved only on
+`live_transcription.early_summary` for the Calls tab: never on
+`call_summary`, and never sent to anyone. A quarantined call saves none.
+`GATE_CALL_EARLY_SUMMARY` off: no model call and no new summary.
+`GATE_LIVE_CALL_TRANSCRIPTION` off: no start, and the press-1 TwiML is
 byte-identical),
 `/api/webhooks/twilio/outbound-amd` +
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine

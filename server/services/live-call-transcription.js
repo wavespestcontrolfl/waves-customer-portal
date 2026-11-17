@@ -331,7 +331,11 @@ async function recordLiveTranscriptionEvent(body = {}) {
   }
   const at = eventTime(body).toISOString();
   if (event === 'transcription-started') await stampLiveState(db, callSid, { live_at: at });
-  else if (event === 'transcription-stopped') await stampLiveState(db, callSid, { stopped_at: at });
+  else if (event === 'transcription-stopped') {
+    await stampLiveState(db, callSid, { stopped_at: at });
+    // The call ended. Gate off: nothing is required, read or called.
+    if (isEnabled('callEarlySummary')) require('./live-call-early-summary').afterCallStopped(callSid);
+  }
   else if (event === 'transcription-error') {
     await stampLiveState(db, callSid, {
       event_error_at: at,
@@ -341,6 +345,12 @@ async function recordLiveTranscriptionEvent(body = {}) {
   } else return { stored: false, reason: 'ignored_event' };
   return { stored: false, reason: event };
 }
+
+// QUARANTINED_SQL's predicate without its column alias, for a WHERE clause. Readers of a call's live text outside
+// this file (live-call-early-summary.js) check it, so the quarantine rule stays in one place: the purge stamped
+// quarantined_at, or the recording's own scrub flagged a card number (transcription_metadata.pan_detected), which
+// can land before its purge has run.
+const QUARANTINE_WHERE_SQL = QUARANTINED_SQL.replace(/ AS quarantined$/, '');
 
 /**
  * The post-call card-number quarantine found a card number on this call: drop its live text too.
@@ -354,7 +364,14 @@ async function purgeLiveUtterances(callSid) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`call_live_utterances:${callSid}`]);
     await stampLiveState(trx, callSid, { quarantined_at: new Date().toISOString() });
-    return trx('call_live_utterances').where('call_sid', callSid).del();
+    const purged = await trx('call_live_utterances').where('call_sid', callSid).del();
+    // The early summary (live-call-early-summary.js) was written from that text, so it goes too, gate on or off,
+    // in the same transaction. A summary still being written is refused by its save's quarantined_at check.
+    await trx('call_log')
+      .where('twilio_call_sid', callSid)
+      .whereRaw("(metadata -> 'live_transcription' -> 'early_summary') IS NOT NULL")
+      .update({ metadata: trx.raw("jsonb_set(metadata, '{live_transcription}', (metadata -> 'live_transcription') - 'early_summary', true)") });
+    return purged;
   });
 }
 
@@ -417,6 +434,7 @@ async function liveTranscriptFor(callSid) {
 
 module.exports = {
   startLiveTranscription,
+  QUARANTINE_WHERE_SQL,
   recordLiveTranscriptionEvent,
   purgeLiveUtterances,
   purgeQuarantinedLiveText,
