@@ -21,15 +21,15 @@
  * promise never expires again.
  *
  * What closes with it. A text promise's alert through the text lane's own closer (closeSmsCommitmentAlerts: the
- * shared alert stays for the text's other open promises). An email promise's alert by its key. A call promise's
+ * customer's alert stays for the customer's other open promises). An email promise's alert by its key. A call promise's
  * overdue reminder is the watchdog's: its next run retires a reminder whose promise is no longer open.
  * Nothing is sent to a customer. A text promise a booked visit holds (GATE_PROMISE_RECORD_EVIDENCE rule 3) is
  * never dismissed while held: a hold ends at most 14 days after the due time, and the limit is 30 days after it.
  *
  * Writes: one short statement per call promise, one short transaction per text or email promise (the promise,
- * then its alert). Every promise of one text shares one alert, and the text lane does its work on a text under
- * that text's row lock (sms-operational-actions.js lockLiveCommitment, lockCommitmentSource), so a text promise
- * takes that lock first: the alert is then closed, or kept, on the text's other promises as they stand. The
+ * then its alert). The text lane does its work on a text under that text's row lock (sms-operational-actions.js
+ * lockLiveCommitment, lockCommitmentSource), so a text promise takes that lock first; the closer then takes the lock
+ * of the customer's alert, and the alert is closed, or kept, on the customer's other promises as they stand. The
  * customer row is never locked here: estimate and payment paths take it with NOWAIT.
  * Every write repeats the whole rule in its WHERE, so a person's action, a new due time or a snooze that landed
  * since the read leaves the promise alone. A run that closed something records one audit_log row
@@ -184,7 +184,8 @@ const listPromiseAgeOutRuns = ({ conn = db, limit = 50 } = {}) => dismissed(conn
 // The alerts that run closed for those promises go back to the bell as they were. A row the run closed has the
 // run's own time as its done time and this job as its closer (a row some earlier close already held keeps that
 // earlier time and stays closed); it names a promise in commitment_id or commitment_ids. It is unread again when
-// the close is what marked it read.
+// the close is what marked it read. A customer's alert that stayed open lost only the promise from its list: the
+// text lane puts that promise back (restoreSmsCommitmentAlerts).
 const reopenAlerts = (conn, run, ids) => conn('notifications').where({ recipient_type: 'admin', done_by: DONE_BY })
   .whereRaw('done_at = ?::timestamptz', [String(run)])
   .whereRaw("(metadata->>'commitment_id' = ANY(?::text[]) OR jsonb_exists_any(COALESCE(metadata->'commitment_ids', '[]'::jsonb), ?::text[]))", [ids, ids])
@@ -206,9 +207,15 @@ async function reopenPromiseAgeOut({ run, apply = false, conn = db, now = new Da
   if (!apply || !found.total) return { run, found, reopened: 0, alertsReopened: 0 };
   return conn.transaction(async (trx) => {
     // `->` gives NULL for a promise that carried no proof.
-    const ids = (await dismissedBy(trx, run).update({ status: 'open', fulfillment: trx.raw("fulfillment -> 'prior'"), fulfilled_at: null, updated_at: now })
-      .returning(['id'])).map((row) => row.id);
-    const alertsReopened = ids.length ? await reopenAlerts(trx, run, ids) : 0;
+    const rows = await dismissedBy(trx, run).update({ status: 'open', fulfillment: trx.raw("fulfillment -> 'prior'"), fulfilled_at: null, updated_at: now })
+      .returning(['id', 'sms_log_id']);
+    const ids = rows.map((row) => row.id);
+    // The text lane holds its customers' alert locks around the reopen, then puts back a text promise that the run
+    // only took off a customer's alert (that alert stayed open, so the run closed no row for it).
+    const alertsReopened = ids.length
+      ? await require('./sms-operational-actions').restoreSmsCommitmentAlerts(trx, rows.filter((row) => row.sms_log_id).map((row) => row.id),
+        () => reopenAlerts(trx, run, ids), { now })
+      : 0;
     await require('./audit-log').recordAuditEvent({ actor_type: 'system', action: UNDO_AUDIT_ACTION, resource_type: 'call_commitment',
       metadata: { runId: String(run), reopened: ids.length, alertsReopened }, critical: true, trx });
     return { run, found, reopened: ids.length, alertsReopened };

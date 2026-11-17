@@ -1389,6 +1389,30 @@ async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled =
   return rows().where((q) => q.whereIn(trx.raw("metadata->>'dedupeKey'"), legacyKeys).orWhereIn('id', closing)).update(update);
 }
 
+// The undo of a close that took text promises off their alerts (the age-out's reopen). `ids` are the text promises
+// that are open again. `reopenClosed` reopens the alert rows that close had closed; it runs under the alert lock of
+// every customer concerned (the key first, the rows second, as every other writer). A promise the close only took
+// off a customer's alert that stayed open then goes back on it without a ring, when the alert has spoken for its
+// text. With no open alert it waits for its next overdue check, which rings a fresh one. Returns what
+// `reopenClosed` returned.
+async function restoreSmsCommitmentAlerts(trx, ids, reopenClosed, { now = new Date() } = {}) {
+  const byCustomer = new Map();
+  for (const item of ids.length ? await alertPromises(trx, { ids }) : []) byCustomer.set(item.owner_id, [...(byCustomer.get(item.owner_id) || []), item]);
+  // One order for every caller that holds more than one of these locks.
+  const customers = [...byCustomer.keys()].sort();
+  for (const customerId of customers) await lockCustomerAlert(trx, customerId);
+  const reopened = await reopenClosed();
+  for (const customerId of customers) {
+    const items = byCustomer.get(customerId);
+    const { stands, known } = await foldCustomerAlerts(trx, { customerId, textId: items[0].sms_log_id, ids: items.map((item) => item.id) });
+    const listed = new Set(known.map((item) => item.id));
+    const back = items.filter((item) => !listed.has(item.id) && stands?.spoke.includes(item.sms_log_id));
+    const members = back.length ? await needingAlert(trx, [...known, ...back], customerId, now) : [];
+    if (members.length) await writeCustomerAlert(trx, { customerId, members, stands, verdict: { verdict: 'open' }, refreshOnly: true });
+  }
+  return reopened;
+}
+
 // The bell's words (owner audit 2026-10-01): the customer's name and what is owed in the
 // headline, their quoted words in the why, the whole story in `detail`.
 // The parts of the bell that differ between one promise, several from one text and
@@ -2051,4 +2075,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, restoreSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

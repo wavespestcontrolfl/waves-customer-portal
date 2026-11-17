@@ -78,14 +78,15 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     if (!call) made.calls.push(onCall.id);
     return { ...await promise({ call_log_id: onCall.id, last_seen_generation: 1 }, { created_at: ago(days), updated_at: ago(days), ...over }), call: onCall };
   }
-  async function staffText({ days = 40 } = {}) {
-    const who = await customer();
+  // A staff text to a customer of its own, or to `who` (the `owner` of an earlier text).
+  async function staffText({ days = 40, who = null } = {}) {
+    const owner = who || await customer();
     const [text] = await db('sms_log').insert({
-      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: who.phone, customer_id: who.id, message_type: 'manual', status: 'delivered',
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: owner.phone, customer_id: owner.id, message_type: 'manual', status: 'delivered',
       message_body: 'I will send the details over today, and I will call you tomorrow.', created_at: ago(days),
     }).returning('id');
     made.texts.push(text.id);
-    return { id: text.id, customerId: who.id };
+    return { id: text.id, customerId: owner.id, owner };
   }
   const textPromise = ({ text, days = 40, ...over }) => promise({ sms_log_id: text.id },
     { sms_context: JSON.stringify({ basis: 'promise', customer_id: text.customerId }), created_at: ago(days), updated_at: ago(days), ...over });
@@ -104,6 +105,9 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     made.alerts.push(made1.id);
     return made1;
   }
+  // The one alert a customer's text promises share: it lists `listed` and has spoken for `texts`.
+  const customerAlert = (customerId, listed, texts) => alert({ dedupeKey: `sms-commitment-customer:${customerId}`, customerId, sms_log_id: listed[0].sms_log_id,
+    commitment_id: listed[0].id, commitment_ids: listed.map((item) => item.id), itemKeys: listed.map((item) => item.id).sort(), spoke_for: texts.map((text) => text.id) });
   // Resolves once a statement over `table` is waiting on a row lock: the run has read its page and is blocked.
   async function waitingOnLock(table) {
     for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -323,6 +327,46 @@ maybeDescribe('promise age-out (live Postgres)', () => {
     expect((await alertRow(doneBefore.id)).done_at.getTime()).toBe(ago(3).getTime());
     const audit = await db('audit_log').where({ action: 'promise_age_out.reopen' }).whereRaw("metadata->>'runId' = ?", [runId]).first('metadata');
     expect([audit.metadata.reopened, audit.metadata.alertsReopened]).toEqual([2, 2]);
+  });
+
+  test("reopenPromiseAgeOut puts a text promise back on the customer's alert that stayed open: no ring, and the alert stays read", async () => {
+    const first = await staffText();
+    const second = await staffText({ who: first.owner });
+    const aged = await textPromise({ text: first });
+    const stillDue = await textPromise({ text: second, description: 'Call you tomorrow', due_at: ago(10) });
+    const shared = await customerAlert(first.customerId, [stillDue, aged], [first, second]);
+    await db('notifications').where({ id: shared.id }).update({ read_at: ago(2) });
+    const { runId } = await run({ scope: (q) => q.where('cc.id', aged.id) });
+    // The run took the expired promise off the alert and closed no row.
+    const kept = await alertRow(shared.id);
+    expect([kept.done_at, meta(kept).commitment_ids]).toEqual([null, [stillDue.id]]);
+
+    const applied = await ageOut.reopenPromiseAgeOut({ run: runId, apply: true });
+
+    expect([applied.reopened, applied.alertsReopened]).toEqual([1, 0]);
+    const after = await alertRow(shared.id);
+    expect(meta(after).commitment_ids).toEqual([stillDue.id, aged.id]);
+    expect([after.done_at, after.read_at.getTime(), after.created_at.getTime(), meta(after).rungAt]).toEqual([null, ago(2).getTime(), kept.created_at.getTime(), undefined]);
+  });
+
+  test("reopenPromiseAgeOut reopens a customer's alert the run closed and lists every promise the run took off it", async () => {
+    const first = await staffText();
+    const second = await staffText({ who: first.owner });
+    const one = await textPromise({ text: first });
+    const two = await textPromise({ text: second });
+    const shared = await customerAlert(first.customerId, [one, two], [first, second]);
+    const { runId } = await run({ scope: (q) => q.whereIn('cc.id', [one.id, two.id]) });
+    // The first dismissal rewrote the alert to the other promise; the second closed it.
+    const closed = await alertRow(shared.id);
+    expect([closed.done_by, meta(closed).commitment_ids.length]).toEqual(['promise-age-out', 1]);
+
+    const applied = await ageOut.reopenPromiseAgeOut({ run: runId, apply: true });
+
+    expect([applied.reopened, applied.alertsReopened]).toEqual([2, 1]);
+    const after = await alertRow(shared.id);
+    expect([after.done_at, after.done_by, after.read_at]).toEqual([null, null, null]);
+    expect([...meta(after).commitment_ids].sort()).toEqual([one.id, two.id].sort());
+    expect(await db('notifications').whereRaw("metadata->>'customerId' = ?", [first.customerId]).whereNull('done_at').pluck('id')).toEqual([shared.id]);
   });
 
   test('a run whose audit row is not written fails loudly, and it is still found and reopened from the promises it dismissed', async () => {

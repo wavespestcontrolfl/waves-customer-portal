@@ -378,7 +378,9 @@ customer's message by this rule.
    prints what a run would dismiss; `server/scripts/reopen-promise-age-out.js` lists the runs, and with
    `--run <id> [--apply]` reopens one: its promises, each with the suggested proof it carried (kept as
    `fulfillment.prior`), and the alerts it closed for them (open again, and unread again when the close is what
-   marked them read).
+   marked them read). A text promise the run only took off a customer's alert that stayed open goes back on that
+   alert without a ring (`restoreSmsCommitmentAlerts`); when a person has closed that alert since, the promise's
+   next overdue check rings a fresh one.
    Quiet policy (owner ruling 2026-11-04, "IF THE ALERT IS OVER 3 DAYS OLD,, IT SHOULD FALL OFF";
    `GATE_ALERT_QUIET_FALL_OFF`): a second policy of the same module, `runAdminAlertQuietPolicy` in
    `server/services/admin-alert-retention.js`. It shares the nightly policy's candidates, activity stamps, `RERING`
