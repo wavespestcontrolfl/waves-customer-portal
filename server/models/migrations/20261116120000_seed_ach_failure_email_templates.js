@@ -5,10 +5,17 @@
  * 2026-09-28); this email is their only notice.
  *
  * Same shape as 20260522000002_seed_ach_processing_acknowledgment_templates (email half): transactional_required
- * stream, the transactional preference group upserted first, one active version, one preview fixture. Editable from
+ * stream, the transactional preference group first, one active version, one preview fixture. Editable from
  * the admin email templates library. The copy is NOT the texts' wording: their lines on a retry in 3 business days,
  * a switch to the card at the second failure and a bank update link at the third do not match the code, so each
  * email says only what happens.
+ *
+ * NEW keys, seeded directly (same convention as 20261008100000_membership_tier_upgraded_email_template). Idempotent:
+ * a template row is inserted only when its key is absent, and its version only when it has no active version, so a
+ * re-run never overwrites an operator's edits. The preference group is inserted only when missing (it exists in
+ * production; it is never rewritten). Each seeded template writes one audit_log event (email_template.seeded).
+ * down() is a documented NO-OP: once seeded the templates are admin-editable, and removing them on rollback would
+ * destroy those edits; the sender is dark behind its gate, so an unused template row is inert.
  */
 
 const SERVICE_FROM = 'contact@wavespestcontrol.com';
@@ -135,107 +142,89 @@ function emailTemplateRow(t) {
   };
 }
 
+const MIGRATION = '20261116120000_seed_ach_failure_email_templates';
+
+// Inserted only when missing: the group already exists in production (every transactional_required template uses
+// it), and an operator's edits to it are never rewritten.
 async function ensureTransactionalGroup(knex) {
   if (!(await knex.schema.hasTable('email_preference_groups'))) return;
-  const row = {
+  const existing = await knex('email_preference_groups').where({ key: 'transactional_required' }).first();
+  if (existing) return;
+  await knex('email_preference_groups').insert({
     key: 'transactional_required',
     name: 'Required account notices',
     description: 'Security, payment, legal, and account notices that must reach the customer.',
     send_stream: 'transactional_required',
     user_can_unsubscribe: false,
     sort_order: 10,
+    created_at: new Date(),
     updated_at: new Date(),
-  };
-  const existing = await knex('email_preference_groups').where({ key: row.key }).first();
-  if (existing) {
-    await knex('email_preference_groups').where({ key: row.key }).update(row);
-  } else {
-    await knex('email_preference_groups').insert({ ...row, created_at: new Date() });
-  }
+  });
 }
 
-async function upsertEmailTemplate(knex, definition) {
-  const row = emailTemplateRow(definition);
-  const existing = await knex('email_templates').where({ template_key: definition.key }).first();
-  let template = existing;
-  if (template) {
-    await knex('email_templates').where({ id: template.id }).update(row);
-    template = await knex('email_templates').where({ id: template.id }).first();
-  } else {
-    [template] = await knex('email_templates').insert({ ...row, created_at: new Date() }).returning('*');
+async function seedEmailTemplate(knex, definition) {
+  let template = await knex('email_templates').where({ template_key: definition.key }).first();
+  if (!template) {
+    [template] = await knex('email_templates').insert({ ...emailTemplateRow(definition), created_at: new Date() }).returning('*');
   }
-
-  let version = template.active_version_id
-    ? await knex('email_template_versions').where({ id: template.active_version_id }).first()
-    : null;
-  const versionFields = {
+  if (template.active_version_id) return; // seeded already: never overwrite operator edits
+  const latest = await knex('email_template_versions').where({ template_id: template.id }).max('version_number as max').first();
+  const [version] = await knex('email_template_versions').insert({
+    template_id: template.id,
+    version_number: Number(latest?.max || 0) + 1,
     status: 'active',
     subject: definition.subject,
     preview_text: definition.preview || null,
     blocks: JSON.stringify(definition.blocks),
     text_body: null,
     published_at: new Date(),
+    created_at: new Date(),
     updated_at: new Date(),
-  };
-  if (version) {
-    await knex('email_template_versions').where({ id: version.id }).update(versionFields);
-  } else {
-    const latest = await knex('email_template_versions')
-      .where({ template_id: template.id })
-      .max('version_number as max')
-      .first();
-    [version] = await knex('email_template_versions').insert({
-      template_id: template.id,
-      version_number: Number(latest?.max || 0) + 1,
-      ...versionFields,
-      created_at: new Date(),
-    }).returning('*');
-  }
-
+  }).returning('*');
   await knex('email_templates').where({ id: template.id }).update({
-    active_version_id: version?.id || template.active_version_id,
+    active_version_id: version.id,
     last_published_at: new Date(),
     updated_at: new Date(),
   });
-
-  const existingFixture = await knex('email_template_fixtures')
-    .where({ template_id: template.id, is_default: true })
-    .first();
-  const payload = JSON.stringify(PREVIEW_PAYLOAD);
-  if (existingFixture) {
-    await knex('email_template_fixtures').where({ id: existingFixture.id }).update({
-      name: 'Happy path',
-      payload,
-      updated_at: new Date(),
-    });
-  } else {
-    await knex('email_template_fixtures').insert({
-      template_id: template.id,
-      name: 'Happy path',
-      payload,
-      is_default: true,
-      created_at: new Date(),
-      updated_at: new Date(),
+  if (await knex.schema.hasTable('email_template_fixtures')) {
+    const hasFixture = await knex('email_template_fixtures').where({ template_id: template.id }).first('id');
+    if (!hasFixture) {
+      await knex('email_template_fixtures').insert({
+        template_id: template.id,
+        name: 'Happy path',
+        is_default: true,
+        payload: JSON.stringify(PREVIEW_PAYLOAD),
+        created_at: new Date(),
+        updated_at: new Date(),
+      });
+    }
+  }
+  // audit_log is append-only and written through services/audit-log.js.
+  if (await knex.schema.hasTable('audit_log')) {
+    await require('../../services/audit-log').recordAuditEvent({
+      actor_type: 'system',
+      action: 'email_template.seeded',
+      resource_type: 'email_template',
+      resource_id: template.id,
+      metadata: { templateKey: definition.key, versionId: version.id, migration: MIGRATION },
+      trx: knex,
+      critical: true,
     });
   }
 }
 
 exports.up = async function up(knex) {
-  const hasTables = (await knex.schema.hasTable('email_templates'))
-    && (await knex.schema.hasTable('email_template_versions'))
-    && (await knex.schema.hasTable('email_template_fixtures'));
-  if (!hasTables) return;
+  for (const table of ['email_templates', 'email_template_versions']) {
+    if (!(await knex.schema.hasTable(table))) return;
+  }
   await ensureTransactionalGroup(knex);
   for (const definition of EMAIL_TEMPLATES) {
-    await upsertEmailTemplate(knex, definition);
+    await seedEmailTemplate(knex, definition);
   }
 };
 
-exports.down = async function down(knex) {
-  if (await knex.schema.hasTable('email_templates')) {
-    await knex('email_templates').whereIn('template_key', EMAIL_TEMPLATES.map((t) => t.key)).del();
-  }
-};
+// Documented no-op: see the header.
+exports.down = async function down() {};
 
 exports.__private = {
   EMAIL_TEMPLATES,

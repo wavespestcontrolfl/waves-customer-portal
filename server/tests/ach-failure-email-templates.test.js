@@ -55,6 +55,78 @@ describe('bank payment failure email seeds (GATE_ACH_FAILURE_EMAIL)', () => {
     }
   });
 
+  // The seed against a recording knex stand-in (same harness as membership-tier-upgraded-email.test.js): what it
+  // writes, that a re-run writes nothing, that an operator's edit is never overwritten, and that down() deletes nothing.
+  function fakeKnex({ tables = ['email_templates', 'email_template_versions', 'email_template_fixtures', 'email_preference_groups', 'audit_log'] } = {}) {
+    const store = { email_templates: [], email_template_versions: [], email_template_fixtures: [], email_preference_groups: [], audit_log: [] };
+    let seq = 0;
+    const knex = (table) => {
+      let filter = () => true;
+      const rows = () => store[table].filter(filter);
+      const q = {
+        where(cond) { filter = (r) => Object.entries(cond).every(([k, v]) => r[k] === v); return q; },
+        first: async () => rows()[0],
+        max() { return { first: async () => ({ max: rows().reduce((m, r) => Math.max(m, r.version_number), 0) || null }) }; },
+        insert(row) {
+          const saved = { id: `${table}-${seq += 1}`, ...row };
+          store[table].push(saved);
+          const done = Promise.resolve([saved]);
+          done.returning = async () => [saved];
+          return done;
+        },
+        update: async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; },
+        del: async () => { throw new Error(`${table}: a seed never deletes`); },
+      };
+      return q;
+    };
+    knex.schema = { hasTable: async (name) => tables.includes(name) };
+    knex.store = store;
+    return knex;
+  }
+
+  test('seeds four active templates with one version, one fixture and one audit event each; a re-run changes nothing', async () => {
+    const knex = fakeKnex();
+    await seed.up(knex);
+    const snapshot = JSON.stringify(knex.store);
+    await seed.up(knex);
+    expect(JSON.stringify(knex.store)).toBe(snapshot);
+
+    expect(knex.store.email_templates.map((t) => t.template_key).sort()).toEqual(Object.keys(byKey).sort());
+    expect(knex.store.email_template_versions).toHaveLength(4);
+    expect(knex.store.email_template_fixtures).toHaveLength(4);
+    for (const template of knex.store.email_templates) {
+      const version = knex.store.email_template_versions.find((v) => v.template_id === template.id);
+      expect(template).toMatchObject({ status: 'active', active_version_id: version.id, send_stream: 'transactional_required' });
+      expect(JSON.parse(version.blocks)).toEqual(byKey[template.template_key].blocks);
+      for (const value of [template.allowed_variables, template.required_variables, version.blocks]) expect(() => JSON.parse(value)).not.toThrow();
+    }
+    expect(knex.store.audit_log).toHaveLength(4);
+    expect(knex.store.audit_log.every((row) => row.action === 'email_template.seeded' && row.action.length <= 96)).toBe(true);
+    // The group is inserted once when missing.
+    expect(knex.store.email_preference_groups).toHaveLength(1);
+  });
+
+  test('an existing preference group and an operator-edited template are left alone', async () => {
+    const knex = fakeKnex();
+    knex.store.email_preference_groups.push({ id: 'g-1', key: 'transactional_required', name: 'Operator name' });
+    knex.store.email_templates.push({ id: 't-edited', template_key: 'payment.ach_retry_notice', active_version_id: 'v-edited' });
+    await seed.up(knex);
+    expect(knex.store.email_preference_groups).toEqual([{ id: 'g-1', key: 'transactional_required', name: 'Operator name' }]);
+    expect(knex.store.email_templates.find((t) => t.id === 't-edited').active_version_id).toBe('v-edited');
+    expect(knex.store.email_template_versions).toHaveLength(3);
+    expect(knex.store.audit_log).toHaveLength(3);
+  });
+
+  test('a database without the template tables is a no-op, and down() never deletes', async () => {
+    const knex = fakeKnex({ tables: [] });
+    await expect(seed.up(knex)).resolves.toBeUndefined();
+    expect(knex.store.email_templates).toHaveLength(0);
+    const seeded = fakeKnex();
+    await seed.up(seeded);
+    await expect(seed.down(seeded)).resolves.toBeUndefined();
+    expect(seeded.store.email_templates).toHaveLength(4);
+  });
+
   test('the migration file name stays within 57 characters', () => {
     const names = fs.readdirSync(path.join(__dirname, '..', 'models', 'migrations')).filter((n) => n.includes('ach_failure_email'));
     expect(names).toHaveLength(1);
