@@ -7,6 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ callConferencePathMode: jest.fn(() => 'off') }));
+jest.mock('../services/call-hold', () => ({ startHoldVoicemail: jest.fn() }));
 
 const mockTw = { api: null };
 jest.mock('twilio', () => {
@@ -20,6 +21,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const gates = require('../config/feature-gates');
 const cp = require('../services/call-conference-path');
+const callHold = require('../services/call-hold');
 
 const SID = `CA${'a'.repeat(32)}`;
 const LEG0 = `CA${'0'.repeat(31)}1`;
@@ -312,6 +314,77 @@ describe('the winning staff call ends', () => {
     expect(await cp.onStaffLegStatus({ callSid: SID, index: 1, legSid: LEG1, status: 'canceled' })).toBe('accepted');
     expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
     expect(log.updates).toEqual([]);
+  });
+});
+
+describe('the winning staff call ends during a star-key hold', () => {
+  const held = (hold) => ({ conference_path: { ...ringing().conference_path, accepted_leg_sid: LEG0, hold } });
+  const ended = () => cp.onStaffLegStatus({ callSid: SID, index: 0, legSid: LEG0, status: 'completed' });
+  const rooms = [{ sid: 'CF1', status: 'in-progress' }];
+
+  beforeEach(() => callHold.startHoldVoicemail.mockReset());
+
+  test('hold open: the caller goes to voicemail, and the room is not ended here', async () => {
+    fakeCallLog(held({ open: true, open_at: '2026-11-17T15:00:00Z' }));
+    const log = fakeTwilio({ rooms });
+    for (const result of ['started', 'caller_gone']) {
+      callHold.startHoldVoicemail.mockResolvedValue(result);
+      expect(await ended()).toBe('hold_voicemail');
+    }
+    expect(callHold.startHoldVoicemail).toHaveBeenCalledWith(SID, 'staff_left');
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('the voicemail did not start (failed): today\'s room end', async () => {
+    fakeCallLog(held({ open: true }));
+    callHold.startHoldVoicemail.mockResolvedValue('failed');
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('room_ended');
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
+  });
+
+  test('not_needed with another request holding the voicemail claim: nothing is touched', async () => {
+    const row = fakeCallLog(held({ open: true }));
+    callHold.startHoldVoicemail.mockImplementation(async () => {
+      row.metadata.conference_path.hold = { open: false, voicemail_at: '2026-11-17T15:05:00Z' };
+      return 'not_needed';
+    });
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('hold_voicemail');
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('not_needed with the hold closed some other way (press 1 won): today\'s room end', async () => {
+    const row = fakeCallLog(held({ open: true }));
+    callHold.startHoldVoicemail.mockImplementation(async () => {
+      row.metadata.conference_path.hold = { open: false };
+      return 'not_needed';
+    });
+    fakeTwilio({ rooms });
+    expect(await ended()).toBe('room_ended');
+  });
+
+  test('a hold already sent to voicemail: no Twilio call at all, and no startHoldVoicemail', async () => {
+    fakeCallLog(held({ open: false, voicemail_at: '2026-11-17T15:05:00Z' }));
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('hold_voicemail');
+    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
+    expect(mockTw.api.conferences.list).not.toHaveBeenCalled();
+    expect(mockTw.api.calls).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([]);
+    expect(log.updates).toEqual([]);
+  });
+
+  test('no hold open (a closed hold, or none): today\'s behavior', async () => {
+    fakeCallLog(held({ open: false, count: 1, total_sec: 20 }));
+    const log = fakeTwilio({ rooms });
+    expect(await ended()).toBe('room_ended');
+    expect(callHold.startHoldVoicemail).not.toHaveBeenCalled();
+    expect(log.roomUpdates).toEqual([{ sid: 'CF1', status: 'completed' }]);
   });
 });
 
