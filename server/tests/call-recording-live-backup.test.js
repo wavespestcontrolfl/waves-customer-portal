@@ -23,12 +23,14 @@ const SID = 'CA00000000000000000000000000000456';
 const liveText = 'Caller: I need a termite inspection.\nAgent: Sure, what is the address?';
 
 // Rows + patches the fixture db holds. liveSweepRows feeds recoverMissingRecentRecordings.
-function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0, transcription = null, provider = null } = {}) {
+// callStatus / metadata / createdAt: the call itself (a finished inbound call whose live text stopped, unless a test says otherwise).
+function primeDb({ recordingUrl = null, recordingSid = null, status = null, attempts = 0, transcription = null, provider = null,
+  callStatus = 'completed', metadata = { live_transcription: { stopped_at: new Date().toISOString() } }, createdAt = new Date() } = {}) {
   const row = {
     id: 'live-backup-fixture', twilio_call_sid: SID, direction: 'inbound',
     from_phone: '+19415550123', to_phone: '+19415550124', recording_url: recordingUrl, recording_sid: recordingSid,
     recording_duration_seconds: 90, duration_seconds: 90, transcription, transcription_provider: provider, processing_status: status,
-    extraction_attempts: attempts, created_at: new Date(), metadata: {},
+    extraction_attempts: attempts, created_at: createdAt, metadata, status: callStatus,
   };
   const patches = [];
   db.mockImplementation((table) => {
@@ -83,6 +85,23 @@ describe('live-text backup transcript in processRecording', () => {
     fetchSpy.mockRestore();
     if (geminiKey === undefined) delete process.env.GEMINI_API_KEY;
     else process.env.GEMINI_API_KEY = geminiKey;
+  });
+
+  // Local pre-push audit P1: a pass while the call is live (the admin process button) never extracts half a call.
+  test('a call still live, or done but not settled, never uses the live text; a lost stopped event settles 2 minutes after the end', async () => {
+    primeDb({ callStatus: 'in-progress' });
+    await processor.processRecording(SID);
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+
+    const justEnded = primeDb({ metadata: {}, createdAt: new Date(Date.now() - 100 * 1000) });
+    await processor.processRecording(SID);
+    expect(liveTranscriptFor).not.toHaveBeenCalled();
+    expect(justEnded.row.processing_status).toBe('no_transcription');
+
+    const settled = primeDb({ metadata: {}, createdAt: new Date(Date.now() - 4 * 60 * 1000) });
+    await processor.processRecording(SID);
+    expect(liveTranscriptFor).toHaveBeenCalledWith(SID);
+    expect(settled.row.transcription).toBe(liveText);
   });
 
   test('gate on, no recording, live text: written as the transcript and extraction runs on it', async () => {

@@ -42,6 +42,16 @@ const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 // Stored on call_log.transcription_provider when the live text is the transcript (no recording).
 const LIVE_TRANSCRIPTION_PROVIDER = 'twilio_realtime';
+// The live text is whole only once the call is over and its transcription settled: an inbound call Twilio reported
+// completed, whose transcription-stopped event landed, or that ended 2 minutes ago (a lost stopped event). A pass
+// while the call is live (the admin process button, a sweep) never extracts from half a conversation.
+const LIVE_TEXT_SETTLE_MS = 2 * 60 * 1000;
+function liveTextSettled(call, now = Date.now()) {
+  if (call?.direction !== 'inbound' || call?.status !== 'completed') return false;
+  if (callMetadataObject(call).live_transcription?.stopped_at) return true;
+  const ended = callEndOf(call);
+  return ended != null && now - ended >= LIVE_TEXT_SETTLE_MS;
+}
 
 // The processing_status values that mean THIS call's own pipeline pass has
 // genuinely finished — the retry states (extraction_failed, no_transcription)
@@ -12425,7 +12435,7 @@ const CallRecordingProcessor = {
     // GATE_LIVE_CALL_BACKUP_TRANSCRIPT: an answered call with NO recording keeps its live text as the
     // transcript, so extraction, summary and follow-ups still run. A recording that exists but failed
     // to transcribe never gets here with text: it stays no_transcription for the sweep to retry.
-    if (!transcription && !hadRecording && !call.recording_url && isEnabled('liveCallBackupTranscript')) {
+    if (!transcription && !hadRecording && !call.recording_url && isEnabled('liveCallBackupTranscript') && liveTextSettled(call)) {
       let live = null;
       try {
         live = await require('./live-call-transcription').liveTranscriptFor(callSid);
