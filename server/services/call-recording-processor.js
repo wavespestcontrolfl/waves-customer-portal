@@ -870,6 +870,16 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   try {
     await updateUnifiedVoiceMessage({ ...call, recording_url: null }, { media: null });
   } catch { /* best-effort */ }
+  // The live transcript (GATE_LIVE_CALL_TRANSCRIPTION) is a second copy of the
+  // call's words, scrubbed by its own pass on a different transcript: a
+  // quarantined call keeps none of it.
+  if (call.twilio_call_sid) {
+    try {
+      await require('./live-call-transcription').purgeLiveUtterances(call.twilio_call_sid);
+    } catch (err) {
+      logger.warn(`[call-proc] PAN quarantine: live transcript purge failed for call ${call.id}: ${err.message}`);
+    }
+  }
   // One office heads-up per call, however many detection points re-run the
   // quarantine (wrapper + choke + backfill are all idempotent on the strip).
   if (!alreadyQuarantined) {
