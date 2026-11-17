@@ -18,7 +18,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), mondayReviewBellLive: jest.fn(() => false),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -35,7 +35,7 @@ jest.mock('../services/monday-review-bell', () => ({ runMondayReview: jest.fn(as
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, mondayReviewBellLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runMondayReview } = require('../services/monday-review-bell');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -51,17 +51,9 @@ function reviewTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mondayReviewBellLive.mockReturnValue(false);
 });
 
-test('gate off: the tick returns before the lock or any read', async () => {
-  await reviewTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('monday-review-bell', expect.any(Function));
-  expect(runMondayReview).not.toHaveBeenCalled();
-});
-
-test('gate on: the review runs once inside runExclusive and its outcome is logged', async () => {
-  mondayReviewBellLive.mockReturnValue(true);
+test('the review runs once inside runExclusive and its outcome is logged', async () => {
   await reviewTick();
   expect(runExclusive).toHaveBeenCalledWith('monday-review-bell', expect.any(Function));
   expect(runMondayReview).toHaveBeenCalledTimes(1);
@@ -69,7 +61,6 @@ test('gate on: the review runs once inside runExclusive and its outcome is logge
 });
 
 test('a failed run is logged, never thrown out of the tick', async () => {
-  mondayReviewBellLive.mockReturnValue(true);
   runMondayReview.mockRejectedValueOnce(new Error('connection reset'));
   await expect(reviewTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Monday review bell failed: connection reset');

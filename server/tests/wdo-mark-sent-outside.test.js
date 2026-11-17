@@ -1,12 +1,11 @@
 /**
- * "Sent another way" (GATE_WDO_MARK_SENT_OUTSIDE): POST
+ * "Sent another way": POST
  * /api/admin/projects/:id/mark-sent-outside records that a signed WDO report
  * went out by some other route than the portal. Records only — sent_at stays
  * NULL, nothing is sent, no filing is archived.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
-const mockGate = { on: true };
 const mockAudit = jest.fn().mockResolvedValue('audit-1');
 
 jest.mock('../models/db', () => {
@@ -18,10 +17,6 @@ jest.mock('../models/db', () => {
 jest.mock('../config', () => ({
   jwt: { secret: 'test-jwt-secret' },
   s3: { bucket: 'test-bucket', region: 'us-east-1' },
-}));
-jest.mock('../config/feature-gates', () => ({
-  ...jest.requireActual('../config/feature-gates'),
-  wdoMarkSentOutsideLive: jest.fn(() => mockGate.on),
 }));
 jest.mock('../services/audit-log', () => ({
   recordAuditEvent: (...args) => mockAudit(...args),
@@ -148,21 +143,10 @@ function wire({ current = baseProject(), updateRows = [{
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockGate.on = true;
   db.fn.now.mockReturnValue('NOW');
 });
 
 describe('POST /:id/mark-sent-outside', () => {
-  test('gate off -> 404 and nothing is read or written', async () => {
-    mockGate.on = false;
-    wire();
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, {});
-      expect(res.status).toBe(404);
-    });
-    expect(db).not.toHaveBeenCalled();
-  });
-
   test('a technician gets 403 and nothing is written', async () => {
     const { write } = wire();
     await withServer(async (baseUrl) => {
@@ -303,19 +287,17 @@ describe('GET /:id canMarkSentOutside', () => {
     });
   }
 
-  test('true for an admin on a signed, unsent, unmarked WDO report with the gate on', async () => {
+  test('true for an admin on a signed, unsent, unmarked WDO report', async () => {
     wireDetail(baseProject());
     expect((await getFlag()).canMarkSentOutside).toBe(true);
   });
 
   test.each([
-    ['gate off', () => { mockGate.on = false; }, baseProject()],
-    ['not signed', () => {}, baseProject({ wdo_signature: null })],
-    ['sent through the portal', () => {}, baseProject({ sent_at: '2026-10-21T10:00:00Z' })],
-    ['already marked', () => {}, baseProject({ sent_outside_portal_at: '2026-10-22T10:00:00Z' })],
-    ['not a WDO report', () => {}, baseProject({ project_type: 'termite_treatment' })],
-  ])('false when %s', async (_label, setup, project) => {
-    setup();
+    ['not signed', baseProject({ wdo_signature: null })],
+    ['sent through the portal', baseProject({ sent_at: '2026-10-21T10:00:00Z' })],
+    ['already marked', baseProject({ sent_outside_portal_at: '2026-10-22T10:00:00Z' })],
+    ['not a WDO report', baseProject({ project_type: 'termite_treatment' })],
+  ])('false when %s', async (_label, project) => {
     wireDetail(project);
     expect((await getFlag()).canMarkSentOutside).toBe(false);
   });

@@ -87,7 +87,6 @@ const InvoiceService = require('../services/invoice');
 const { acquireScheduledMintLockChain, TERMINAL_INVOICE_STATUSES } = require('../services/scheduled-invoice-mint');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { wdoMarkSentOutsideLive } = require('../config/feature-gates');
 const { recordAuditEvent } = require('../services/audit-log');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('../services/wdo-inspection-fee');
 
@@ -303,7 +302,7 @@ function isAdmin(req) {
   return req.techRole === 'admin';
 }
 
-// "Sent another way" (GATE_WDO_MARK_SENT_OUTSIDE): which projects can be
+// "Sent another way": which projects can be
 // marked as sent outside the portal. Same "signed" test as the WDO attention
 // sweep (wdo_signature IS NOT NULL); a portal send sets sent_at, so only a
 // report with no portal send and no earlier mark qualifies.
@@ -318,7 +317,7 @@ function markSentOutsideBlock(project) {
 }
 
 function canMarkSentOutside(req, project) {
-  return isAdmin(req) && wdoMarkSentOutsideLive() && !markSentOutsideBlock(project);
+  return isAdmin(req) && !markSentOutsideBlock(project);
 }
 
 function canAccessProject(req, project) {
@@ -4150,18 +4149,13 @@ router.delete('/:id/wdo-signature', requireTechOrAdmin, async (req, res, next) =
 
 // ---------------------------------------------------------------------------
 // POST /api/admin/projects/:id/mark-sent-outside — "Sent another way".
-// Admin-only, dark behind GATE_WDO_MARK_SENT_OUTSIDE (off = 404). Records that
+// Admin-only. Records that
 // a signed WDO report went out by some route other than the portal, so the
 // nightly attention sweep stops flagging it. Records only: no customer
 // message, no email, no filing archive, and sent_at stays NULL.
 // Body: { note? } (trimmed, max 500 characters).
 // ---------------------------------------------------------------------------
-function requireMarkSentOutsideGate(_req, res, next) {
-  if (!wdoMarkSentOutsideLive()) return res.status(404).json({ error: 'Not found' });
-  return next();
-}
-
-router.post('/:id/mark-sent-outside', requireMarkSentOutsideGate, requireAdmin, async (req, res, next) => {
+router.post('/:id/mark-sent-outside', requireAdmin, async (req, res, next) => {
   try {
     const rawNote = req.body?.note;
     if (rawNote != null && typeof rawNote !== 'string') return res.status(400).json({ error: 'note must be text' });
