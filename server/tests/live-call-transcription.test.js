@@ -7,7 +7,8 @@
  * module claimed, and card-number scrubbed across utterances (a number read in pieces, with staff
  * lines between them, or a piece that arrives late; a code read after a masked number, a staff
  * question in between included) while each mask stays on its own line; a quarantined call stores
- * no more live text, and a failed purge is retried.
+ * no more live text, and a failed purge is retried; nothing is stored while the star-key hold holds
+ * the caller.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -29,10 +30,16 @@ jest.mock('../models/db', () => {
     const q = { filters: [], raws: [] };
     q.where = jest.fn((col, val) => { q.filters.push([col, val]); return q; });
     q.whereRaw = jest.fn((sql) => { q.raws.push(sql); return q; });
-    q.first = jest.fn(async () => {
+    q.first = jest.fn(async (...cols) => {
+      state.firstSql = cols.map((c) => (typeof c === 'string' ? c : c?.sql || ''));
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
       if (!state.claimed.has(sid)) return undefined;
-      return { id: `log-${sid}`, quarantined: state.quarantined.has(sid) || state.panDetected.has(sid), card_pause_open: state.pauseOpen === true };
+      return {
+        id: `log-${sid}`,
+        quarantined: state.quarantined.has(sid) || state.panDetected.has(sid),
+        card_pause_open: state.pauseOpen === true,
+        hold_held: state.hold?.phase === 'held' || state.hold?.applied === 'held',
+      };
     });
     q.update = jest.fn(async (patch) => {
       const sid = q.filters.find(([c]) => c === 'twilio_call_sid')?.[1];
@@ -149,6 +156,7 @@ beforeEach(() => {
   s.utterances = [];
   s.nextId = 1;
   s.rawCalls = [];
+  s.hold = null;
   isEnabled.mockReturnValue(true);
   process.env.TWILIO_ACCOUNT_SID = 'AC' + 'c'.repeat(32);
   process.env.TWILIO_AUTH_TOKEN = 'token';
@@ -238,6 +246,37 @@ describe('recordLiveTranscriptionEvent', () => {
     isEnabled.mockImplementation((gate) => gate !== 'liveCallUpsetAlert');
     await live.recordLiveTranscriptionEvent(content(3, 'inbound_track', 'Hello?', 3));
     expect(mockUpset).not.toHaveBeenCalled();
+  });
+
+  test('while the star-key hold holds the caller, neither track is stored and no reader runs; text resumes after the return', async () => {
+    mockCardPause.mockClear();
+    db.__state.hold = { phase: 'held', applied: null };
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Thanks for holding. Here are a few pest facts while you wait.', 1)))
+      .resolves.toEqual({ stored: false, reason: 'on_hold' });
+    await expect(live.recordLiveTranscriptionEvent(content(3, 'inbound_track', 'I am still waiting', 2)))
+      .resolves.toEqual({ stored: false, reason: 'on_hold' });
+    expect(db.__state.utterances).toHaveLength(0);
+    expect(mockUpset).not.toHaveBeenCalled();
+    expect(mockCardPause).not.toHaveBeenCalled();
+    expect(db.__state.firstSql.some((sql) => sql.includes("(metadata #>> '{conference_path,hold,phase}') = 'held'")
+      && sql.includes(" OR (metadata #>> '{conference_path,hold,applied}') = 'held'"))).toBe(true);
+    db.__state.hold = { phase: 'returned', applied: 'returned' };
+    await expect(live.recordLiveTranscriptionEvent(content(4, 'outbound_track', 'Thanks for waiting, I am back', 3))).resolves.toMatchObject({ stored: true });
+    expect(db.__state.utterances.map((u) => [u.speaker, u.text])).toEqual([['staff', 'Thanks for waiting, I am back']]);
+  });
+
+  test('a return or a voicemail decided but not yet confirmed by Twilio stores nothing: the caller still hears the script', async () => {
+    db.__state.hold = { phase: 'returned', applied: 'held' };
+    await expect(live.recordLiveTranscriptionEvent(content(2, 'outbound_track', 'Chinch bugs usually walk, not fly, between lawns.', 1)))
+      .resolves.toEqual({ stored: false, reason: 'on_hold' });
+    db.__state.hold = { phase: 'voicemail', applied: 'held' };
+    await expect(live.recordLiveTranscriptionEvent(content(3, 'outbound_track', 'Roof rats are expert climbers.', 2)))
+      .resolves.toEqual({ stored: false, reason: 'on_hold' });
+    expect(db.__state.utterances).toHaveLength(0);
+    // Twilio confirmed the voicemail: the prompt and the message are the call's own text again.
+    db.__state.hold = { phase: 'voicemail', applied: 'voicemail' };
+    await expect(live.recordLiveTranscriptionEvent(content(4, 'inbound_track', 'Hi, please call me back about the ants', 3))).resolves.toMatchObject({ stored: true });
+    expect(db.__state.utterances.map((u) => [u.speaker, u.text])).toEqual([['caller', 'Hi, please call me back about the ants']]);
   });
 
   test('a redelivered event inserts nothing', async () => {

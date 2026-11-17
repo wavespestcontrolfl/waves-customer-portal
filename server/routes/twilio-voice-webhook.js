@@ -2681,9 +2681,9 @@ router.post('/inbound-forward-screen', (req, res) => {
 });
 
 // GATE_LIVE_CALL_TRANSCRIPTION (dark; owner 2026-11-16 "ok build all"): a human
-// pressed 1, so the caller's call starts live transcription
-// (services/live-call-transcription.js). Runs after the TwiML is sent and never
-// throws: the connect must not wait on, or fail with, a Twilio REST call.
+// pressed 1 (today's ring or the conference ring), so the caller's call starts live
+// transcription (services/live-call-transcription.js). Runs after the TwiML is sent and
+// never throws: the connect must not wait on, or fail with, a Twilio REST call.
 function startLiveTranscriptionAfterAccept(parentCallSid, callRow) {
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -4080,7 +4080,8 @@ router.post('/conference-staff-screen', (req, res) => {
 
 // POST /conference-staff-accept — press 1 on a staff leg. The first press 1 wins the call: the
 // recording starts on the caller's call, forward_acceptance is written as today, the other legs end
-// and this leg joins the room. A later press 1, or one after the caller left, hears Goodbye.
+// and this leg joins the room. Live text starts after the TwiML is sent, as on today's ring
+// (GATE_LIVE_CALL_TRANSCRIPTION). A later press 1, or one after the caller left, hears Goodbye.
 router.post('/conference-staff-accept', async (req, res) => {
   const parentSid = String(req.query.parent || '');
   const legSid = req.body?.CallSid || null;
@@ -4118,7 +4119,9 @@ router.post('/conference-staff-accept', async (req, res) => {
     const twiml = new VoiceResponse();
     twiml.say({ voice: SAY_VOICE }, connectingAnnouncement(callRow));
     appendStaffConference(twiml, parentSid);
-    return res.type('text/xml').send(twiml.toString());
+    res.type('text/xml').send(twiml.toString());
+    // The winning press 1, as on today's ring: live text starts on the caller's call (one start per call).
+    return startLiveTranscriptionAfterAccept(parentSid, callRow);
   } catch (err) {
     logger.error(`[conference] staff accept error for ${maskSid(parentSid)} (${conferencePath.errorCode(err)})`);
     return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
