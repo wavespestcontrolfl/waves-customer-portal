@@ -621,19 +621,28 @@ function callFinished(call) {
   return Boolean(call.processed_at) || CALL_VERDICT_STATUSES.has(call.processing_status);
 }
 
-// The customer's newest call that talks about email must be finished and
-// must name the fix in full (its transcript or AI extraction). A later call
-// may carry a correction no tier can read ("there is no 3 at the end"), and
-// a call still in processing may still change its extraction, so a person
-// decides (Codex r1 and the pre-push audit on #7906).
+// The email the call pipeline settled on for a call: ai_extraction.email,
+// the field it saves to the customer record (call-recording-processor.js).
+function extractedEmail(call) {
+  let x = call.ai_extraction;
+  if (typeof x === 'string') {
+    try { x = JSON.parse(x); } catch { return null; }
+  }
+  return x && typeof x === 'object' && typeof x.email === 'string' ? normalizeEmail(x.email) : null;
+}
+
+// The customer's newest call that talks about email must be finished, and
+// its extraction must give the fix as the caller's email. A transcript
+// mention is not enough: an agent's read-back the caller turned down ("No,
+// remove the final digit") names the address too. A later call may carry a
+// correction no tier can read ("there is no 3 at the end"), and a call
+// still in processing may still change its extraction, so a person decides
+// (Codex r1 and the pre-push audits on #7906).
 function newestEmailCallNames(calls, address) {
   const talk = (calls || []).filter((c) => EMAIL_TALK_RE.test(String(c.transcription || '')));
   const newest = talk[talk.length - 1];
   if (!newest || !callFinished(newest)) return false;
-  const extraction = typeof newest.ai_extraction === 'string'
-    ? newest.ai_extraction : JSON.stringify(newest.ai_extraction || {});
-  const named = `${newest.transcription || ''}\n${extraction}`.match(EMAIL_SCAN_RE) || [];
-  return named.some((e) => normalizeEmail(e) === address);
+  return extractedEmail(newest) === address;
 }
 
 /**

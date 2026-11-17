@@ -848,6 +848,23 @@ describe('rescueBouncedAddress self-fix', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  it('never saves a read-back the caller turned down: the newest email call must give the fix as its extracted email', async () => {
+    process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
+    world({
+      calls: [
+        RAE_CALLS[0],
+        {
+          id: 'call3', created_at: new Date('2026-07-16'), ai_extraction: JSON.stringify({ email: null }),
+          transcription: 'Agent: so your email is lynzafi@yahoo.com?\nCaller: No, remove the final letter.',
+        },
+      ],
+    });
+    const r = await rescue.rescueBouncedAddress('lymzafi@yahoo.com');
+    expect(r).toMatchObject({ status: 'suggested', candidate: 'lynzafi@yahoo.com' });
+    expect(r.selfFix).toBeUndefined();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   it('waits for a call still in processing: no self-fix while the newest email call has no verdict', async () => {
     process.env.GATE_CALL_BOUNCE_SELF_FIX = 'true';
     world({ calls: [RAE_CALLS[0], { ...RAE_CALLS[1], processing_status: 'processing', processed_at: null }] });
