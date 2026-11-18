@@ -2845,7 +2845,7 @@ function rememberPetNameAskDone(customerId) {
 }
 
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
-  const { preview: reportPreview, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+  const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
     () => showCustomerAlert('Could not open this report. Please try again.'),
   );
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
@@ -3542,10 +3542,14 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
               </div>
             </div>
           </div>
-          {lastService.notes ? (
+          {lastService.notes?.length > 220 ? (
+            <details style={{ marginTop: 12, color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
+              <summary>Visit summary</summary>
+              <p>{lastService.notes}</p>
+            </details>
+          ) : lastService.notes ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
-              {lastService.notes.slice(0, 220)}
-              {lastService.notes.length > 220 ? '...' : ''}
+              {lastService.notes}
             </p>
           ) : lastService.reportAvailable !== false ? (
             <div style={{ marginTop: 12 }}>
@@ -3557,9 +3561,32 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
             </div>
           ) : null}
           {lastService.reportUrl ? (
-            <a href={portalHomeReportUrl(lastService.reportUrl)} data-glass-accent="" style={{ ...dashboardPrimaryButton, display: 'inline-flex', marginTop: 14, textDecoration: 'none' }}>
-              View service report
-            </a>
+            isNativeApp() ? (
+              <button
+                type="button"
+                data-glass-accent=""
+                style={{ ...dashboardPrimaryButton, display: 'inline-flex', marginTop: 14 }}
+                onClick={() => {
+                  const reportUrl = portalHomeReportUrl(lastService.reportUrl);
+                  const pdfCandidate = lastService.reportPdfUrl;
+                  const pdfUrl = pdfCandidate && !String(pdfCandidate).startsWith('/report/')
+                    ? resolveApiAssetUrl(pdfCandidate)
+                    : null;
+                  openReportPage({
+                    id: lastService.id,
+                    title: `Visit Report — ${lastService.type || lastService.serviceType || 'Service'}`,
+                    fileName: `Service_Report_${lastService.date}.pdf`,
+                    ...(pdfUrl ? { pdfUrl } : {}),
+                  }, reportUrl);
+                }}
+              >
+                View service report
+              </button>
+            ) : (
+              <a href={portalHomeReportUrl(lastService.reportUrl)} data-glass-accent="" style={{ ...dashboardPrimaryButton, display: 'inline-flex', marginTop: 14, textDecoration: 'none' }}>
+                View service report
+              </a>
+            )
           ) : lastService.reportAvailable !== false ? (
             <button
               type="button"
@@ -13340,7 +13367,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reportRefreshing, setReportRefreshing] = useState(false);
-  const { preview: reportPreview, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+  const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
     () => showCustomerAlert('Could not open this report. Please try again.'),
   );
   const [propertyPrefs, setPropertyPrefs] = useState(null);
@@ -13930,13 +13957,36 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
             </div>
           )}
           {summary.reportUrl ? (
-            <a
-              href={portalHomeReportUrl(summary.reportUrl)}
-              data-glass-accent=""
-              style={{ ...PORTAL_PRIMARY_ACTION, display: 'flex', width: '100%', minHeight: 46, marginTop: 12, boxSizing: 'border-box', textDecoration: 'none' }}
-            >
-              View today&apos;s report
-            </a>
+            isNativeApp() ? (
+              <button
+                type="button"
+                data-glass-accent=""
+                style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 46, marginTop: 12 }}
+                onClick={() => {
+                  const reportUrl = portalHomeReportUrl(summary.reportUrl);
+                  const pdfCandidate = summary.reportPdfUrl;
+                  const pdfUrl = pdfCandidate && !String(pdfCandidate).startsWith('/report/')
+                    ? resolveApiAssetUrl(pdfCandidate)
+                    : null;
+                  openReportPage({
+                    id: tracker.id,
+                    title: `Visit Report — ${svcType}`,
+                    fileName: `Service_Report_${tracker.service?.date || 'Today'}.pdf`,
+                    ...(pdfUrl ? { pdfUrl } : {}),
+                  }, reportUrl);
+                }}
+              >
+                View today&apos;s report
+              </button>
+            ) : (
+              <a
+                href={portalHomeReportUrl(summary.reportUrl)}
+                data-glass-accent=""
+                style={{ ...PORTAL_PRIMARY_ACTION, display: 'flex', width: '100%', minHeight: 46, marginTop: 12, boxSizing: 'border-box', textDecoration: 'none' }}
+              >
+                View today&apos;s report
+              </a>
+            )
           ) : summary.reportPdfUrl ? (
             <button
               type="button"

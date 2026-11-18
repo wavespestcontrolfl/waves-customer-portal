@@ -114,3 +114,9 @@ test('does not look up reports for cancelled, missed or active visits', async ()
   ]) await attach({ customerId: 'customer-1' }, tracker, service);
   expect(listPortalServiceHistory).not.toHaveBeenCalled();
 });
+
+test('withholds an excerpt when the qualifier falls outside the displayed sentence', () => {
+  const reviewed = 'Treatment is safe once dry. Your technician confirmed timing.';
+  expect(require('../services/service-report/technician-report-copy').customerCopyViolations(reviewed)).toEqual([]);
+  expect(sentence(reviewed)).toBeNull();
+});

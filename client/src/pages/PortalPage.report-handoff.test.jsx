@@ -78,6 +78,24 @@ describe('completed visit report handoff on Home', () => {
     expect(screen.getByRole('link', { name: "View today's report" })).toHaveAttribute('href', '/report/report-1?source=portal_home');
   });
 
+  it('keeps a published tracker report inside the native app and Close restores Home', async () => {
+    nativeState.enabled = true;
+    nativeState.platform = 'ios';
+    todayTracker = completeTracker({
+      customerSummary: 'Reviewed closeout.',
+      reportUrl: '/report/report-native', reportPdfUrl: '/api/reports/report-native', reportPending: false,
+    });
+    render(<ServiceTracker />);
+    fireEvent.click(await screen.findByRole('button', { name: "View today's report" }));
+    const dialog = screen.getByRole('dialog', { name: 'Visit Report — Quarterly Pest Control' });
+    expect(dialog.querySelector('iframe')).toHaveAttribute('src', '/report/report-native?source=portal_home');
+    expect(screen.getByText('Service complete')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: "View today's report" })).toBeInTheDocument();
+    expect(api.fetchRaw).not.toHaveBeenCalled();
+  });
+
   it('refreshes a completion whose report row has not committed yet', async () => {
     todayTracker = completeTracker({ reportPending: true });
     render(<ServiceTracker />);
@@ -162,15 +180,30 @@ describe('completed visit report handoff on Home', () => {
 describe('last-visit report handoff on Home', () => {
   const customer = { id: 'customer-1', firstName: 'Pat', lastName: 'Customer', property: {} };
 
-  function renderDashboardReport(reportPdfUrl) {
+  function renderDashboardReport(reportPdfUrl, reportUrl = null) {
     api.getServices.mockResolvedValue({
       services: [{
         id: 'last-record', date: '2026-11-17', type: 'Quarterly Pest Control',
-        reportUrl: null, reportPdfUrl, reportAvailable: true,
+        reportUrl, reportPdfUrl, reportAvailable: true,
       }],
     });
     return render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
   }
+
+  it('keeps a published Last Visit report inside Android and Close restores Home', async () => {
+    nativeState.enabled = true;
+    nativeState.platform = 'android';
+    renderDashboardReport('/api/reports/last-published', '/report/last-published');
+    fireEvent.click(await screen.findByRole('button', { name: 'View service report' }));
+    const dialog = screen.getByRole('dialog', { name: 'Visit Report — Quarterly Pest Control' });
+    expect(dialog.querySelector('iframe')).toHaveAttribute('src', '/report/last-published?source=portal_home');
+    expect(screen.getByText('Last Visit')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View service report' })).toBeInTheDocument();
+    expect(api.fetchRaw).not.toHaveBeenCalled();
+    expect(saveBlobNative).not.toHaveBeenCalled();
+  });
 
   it('resolves the configured API origin and previews the last-visit PDF on iOS', async () => {
     nativeState.enabled = true;
