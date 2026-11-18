@@ -76,7 +76,11 @@ const fitWhy = (candidates) => candidates.find((text) => text.length <= MAX_WHY_
 function whyOf(card, sure, block) {
   const evidence = card.evidence || {};
   let how;
-  if (evidence.source === 'link') {
+  if (evidence.source === 'code') {
+    // A code the customer typed on their estimate (estimate-referral-code.js).
+    if (card.selfReferral) how = 'and entered a referral code from their own household';
+    else how = sure ? `and entered ${tidyName(sure.name)}'s referral code` : 'and entered a referral code no customer holds';
+  } else if (evidence.source === 'link') {
     if (card.selfReferral) how = 'through a referral link from their own household';
     else how = sure ? `through ${tidyName(sure.name)}'s referral link` : 'through a referral link no customer holds';
   } else if (evidence.spokenName) {
@@ -132,7 +136,8 @@ function detailOf(card, name, sure, block) {
   const first = firstName(name);
   const rate = Number(card.plan?.monthlyRate) > 0 ? ` at $${Number(card.plan.monthlyRate).toFixed(2)} a month` : '';
   const lines = [`${name} is on a ${card.plan?.tier || 'WaveGuard'} plan${rate}.`];
-  if (evidence.source === 'link') lines.push(`Came in through referral link ${evidence.code}.`);
+  if (evidence.source === 'code') lines.push(`Entered referral code ${evidence.code} on their estimate.`);
+  else if (evidence.source === 'link') lines.push(`Came in through referral link ${evidence.code}.`);
   else if (evidence.spokenName) lines.push(`Said on the first call: "Referred by ${evidence.spokenName}".`);
   else lines.push('Said on the first call that a customer referred them, with no name.');
   if (card.selfReferral) lines.push("The link code belongs to this customer's own household, so it cannot pay a referral.");

@@ -1,5 +1,6 @@
 /**
- * POST /api/estimates/:token/promo-code (GATE_ESTIMATE_PROMO_CODE): the
+ * POST /api/estimates/:token/promo-code (GATE_ESTIMATE_PROMO_CODE, and
+ * GATE_ESTIMATE_REFERRAL_CODE for a referrer's code in the same field): the
  * public-route guards. A dark gate, a staff preview and an estimate that
  * cannot be accepted all answer the same 404 an unknown token gets, before
  * the code is looked at; an open estimate hands the typed code to the service
@@ -12,14 +13,17 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 jest.mock('../config/feature-gates', () => ({ gates: {}, isEnabled: jest.fn(() => false) }));
-const mockPromo = { enterPromoCode: jest.fn(), promoCodeViewForEstimate: jest.fn(), redeemPromoCodeForAcceptedEstimate: jest.fn() };
+const mockPromo = { enterPromoCode: jest.fn(), isPromoCode: jest.fn(), promoCodeViewForEstimate: jest.fn(), redeemPromoCodeForAcceptedEstimate: jest.fn() };
 jest.mock('../services/estimate-promo-code', () => mockPromo);
-const mockRow = { current: null };
+const mockReferral = { enterReferralCode: jest.fn(), referralCodeViewForEstimate: jest.fn(), confirmReferralForAcceptedEstimate: jest.fn() };
+jest.mock('../services/estimate-referral-code', () => mockReferral);
+// The estimate row every read of `estimates` answers, and the code rows (by table) already on it.
+const mockRow = { current: null, codes: {} };
 jest.mock('../models/db', () => {
-  const fn = jest.fn(() => {
+  const fn = jest.fn((table) => {
     const q = {};
     for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'select', 'orderBy', 'limit', 'forUpdate']) q[m] = jest.fn(() => q);
-    q.first = jest.fn(async () => mockRow.current);
+    q.first = jest.fn(async () => (table === 'estimates' ? mockRow.current : mockRow.codes[table] || null));
     q.then = (ok, err) => Promise.resolve([]).then(ok, err);
     return q;
   });
@@ -34,7 +38,8 @@ const express = require('express');
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 
-const TOKEN = 'a'.repeat(64);
+// A new estimate link per test: the route allows 10 tries an hour per link.
+let TOKEN = 'a'.repeat(64);
 const openEstimate = () => ({
   id: 'est-1', token: TOKEN, status: 'viewed', customer_id: 'cust-1', estimate_data: {},
   expires_at: new Date(Date.now() + 7 * 86400000),
@@ -60,8 +65,10 @@ afterAll((done) => {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  TOKEN = require('crypto').randomBytes(32).toString('hex');
   isEnabled.mockImplementation((key) => key === 'estimatePromoCode');
   mockRow.current = openEstimate();
+  mockRow.codes = {};
 });
 
 const NOT_FOUND = { status: 404, body: { error: 'Estimate not found' } };
@@ -100,6 +107,43 @@ test('an open estimate relays the service answer: 400 with the reason, or the ap
   expect(mockPromo.enterPromoCode).toHaveBeenLastCalledWith({ estimate: expect.objectContaining({ id: 'est-1' }), rawCode: 'save25' }, db);
   expect(lastHeaders.get('cache-control')).toBe('no-store');
   expect(lastHeaders.get('x-robots-tag')).toBe('noindex');
+});
+
+test('with both gates on, a promo code in admin Discounts goes to the promo path and anything else is tried as a referral code', async () => {
+  isEnabled.mockReturnValue(true);
+  const applied = { code: 'WAVES-JANE', referral: true, note: 'note' };
+  mockReferral.enterReferralCode.mockResolvedValue({ ok: true, applied });
+  mockPromo.enterPromoCode.mockResolvedValue({ ok: false, reason: 'invalid_code' });
+
+  mockPromo.isPromoCode.mockResolvedValueOnce(true);
+  expect(await post(`/api/estimates/${TOKEN}/promo-code`, { code: 'EXPIRED25' })).toEqual({ status: 400, body: { error: 'invalid_code' } });
+  expect(mockReferral.enterReferralCode).not.toHaveBeenCalled();
+
+  mockPromo.isPromoCode.mockResolvedValueOnce(false);
+  expect(await post(`/api/estimates/${TOKEN}/promo-code`, { code: 'waves-jane' }))
+    .toEqual({ status: 200, body: { success: true, promoCode: { canEnter: false, applied } } });
+  expect(mockReferral.enterReferralCode).toHaveBeenLastCalledWith({ estimate: expect.objectContaining({ id: 'est-1' }), rawCode: 'waves-jane' }, db);
+});
+
+test('one code per estimate of either kind: the kind already on it answers', async () => {
+  isEnabled.mockReturnValue(true);
+  mockReferral.enterReferralCode.mockResolvedValue({ ok: false, reason: 'code_already_entered' });
+  mockRow.codes = { estimate_referral_codes: { id: 'ref-1' } };
+  expect(await post(`/api/estimates/${TOKEN}/promo-code`, { code: 'SAVE25' })).toEqual({ status: 400, body: { error: 'code_already_entered' } });
+  expect(mockPromo.enterPromoCode).not.toHaveBeenCalled();
+
+  mockPromo.enterPromoCode.mockResolvedValue({ ok: false, reason: 'code_already_entered' });
+  mockRow.codes = { estimate_promo_codes: { id: 'promo-1' } };
+  expect(await post(`/api/estimates/${TOKEN}/promo-code`, { code: 'WAVES-JANE' })).toEqual({ status: 400, body: { error: 'code_already_entered' } });
+  expect(mockReferral.enterReferralCode).toHaveBeenCalledTimes(1);
+});
+
+test('the referral gate alone opens the route for referral codes only', async () => {
+  isEnabled.mockImplementation((key) => key === 'estimateReferralCode');
+  mockReferral.enterReferralCode.mockResolvedValue({ ok: false, reason: 'invalid_code' });
+  expect(await post(`/api/estimates/${TOKEN}/promo-code`, { code: 'SAVE25' })).toEqual({ status: 400, body: { error: 'invalid_code' } });
+  expect(mockPromo.enterPromoCode).not.toHaveBeenCalled();
+  expect(mockPromo.isPromoCode).not.toHaveBeenCalled();
 });
 
 test('an estimate accepted while the request ran is refused on the locked row and the code is not saved', async () => {

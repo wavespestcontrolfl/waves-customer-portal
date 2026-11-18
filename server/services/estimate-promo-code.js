@@ -121,6 +121,13 @@ async function usesLeft(conn, discount) {
   return Number(discount.promo_code_current_uses || 0) + Number(held?.c || 0) < max;
 }
 
+// Is this text a promo code in admin Discounts, in any state? The estimate
+// route asks before it tries the text as a referral code instead.
+async function isPromoCode(conn, rawCode) {
+  const code = normalizeCode(rawCode);
+  return Boolean(code && await conn('discounts').where({ promo_code: code }).first('id'));
+}
+
 const appliedView = (row) => ({ code: row.code, creditAmount: round2(row.credit_amount), credited: row.status === 'redeemed' });
 
 /**
@@ -307,6 +314,7 @@ async function sweepAcceptedPromoCodes() {
 }
 
 module.exports = {
+  isPromoCode,
   sweepAcceptedPromoCodes,
   customerRedeemedPromoCredit,
   normalizeCode,

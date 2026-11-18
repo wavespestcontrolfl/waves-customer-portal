@@ -1464,6 +1464,8 @@ async function markEstimateManuallyAccepted({
     // marked it won posts its account credit, as the customer's own accept
     // does (GATE_ESTIMATE_PROMO_CODE). Never throws; nothing is sent.
     await require('./estimate-promo-code').redeemPromoCodeForAcceptedEstimate({ estimateId });
+    // The same for a referral code they typed (GATE_ESTIMATE_REFERRAL_CODE).
+    await require('./estimate-referral-code').confirmReferralForAcceptedEstimate({ estimateId });
   }
   return acceptResponse(claim, normalizedBillingTerm, warnings);
 }

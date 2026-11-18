@@ -76,8 +76,12 @@ function codeFromLanding(url) {
 }
 
 // What the customer row says about a referral, or null when it says nothing.
-// A link code wins over a spoken name: the code names the referrer.
+// A code the customer typed on their estimate wins over everything: they
+// named the referrer themselves. A link code wins over a spoken name: the
+// code names the referrer.
 function evidenceFor(customer) {
+  const typed = String(customer.entered_referral_code || '');
+  if (CODE_RE.test(typed)) return { source: 'code', code: typed, spokenName: null };
   const code = codeFromLanding(customer.landing_page_url);
   if (code) return { source: 'link', code, spokenName: null };
   const detail = String(customer.lead_source_detail || '').trim();
@@ -109,7 +113,16 @@ const CUSTOMER_COLUMNS = [
   'id', 'first_name', 'last_name', 'phone', 'email', 'account_id', 'city', 'active',
   'monthly_rate', 'waveguard_tier', 'landing_page_url', 'lead_source_detail', 'created_at',
 ];
-const customerSelect = (conn) => [...CUSTOMER_COLUMNS, conn.raw(`${ON_PLAN_SQL} AS on_plan`)];
+// The referral code this customer typed on an estimate of theirs
+// (estimate_referral_codes, services/estimate-referral-code.js), newest first.
+// `owner` is the customers reference the subquery correlates on: the table
+// name, or the list's alias. A constant, never request input.
+const ENTERED_CODE_FROM = 'FROM estimate_referral_codes r JOIN estimates e ON e.id = r.estimate_id';
+const enteredCodeSql = (owner) => `(SELECT r.code ${ENTERED_CODE_FROM} WHERE e.customer_id = ${owner}.id
+  ORDER BY r.created_at DESC LIMIT 1) AS entered_referral_code`;
+const customerSelect = (conn) => [
+  ...CUSTOMER_COLUMNS, conn.raw(`${ON_PLAN_SQL} AS on_plan`), conn.raw(enteredCodeSql('customers')),
+];
 
 // The customer a referral code belongs to: the active promoter that owns it
 // (a merged-away promoter's code follows merged_into_promoter_id, as the /r/
@@ -189,7 +202,7 @@ function performedRecurringVisits(conn) {
 // The likely referrers for one referee's evidence, as the Queue shows them, and
 // whether the link code belongs to the referee's own household.
 async function suggestionsFor(conn, customer, evidence) {
-  if (evidence.source === 'link') {
+  if (evidence.code) {
     const owner = await customerForCode(evidence.code, conn);
     if (owner && sameHousehold(owner, customer)) return { suggestions: [], selfReferral: true };
     return { suggestions: owner ? [suggestionView(owner, { exact: true, viaCode: true })] : [], selfReferral: false };
@@ -232,7 +245,8 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
     .whereNull('c.deleted_at')
     .whereRaw(ON_PLAN_SQL)
     .where(function evidence() {
-      this.whereILike('c.landing_page_url', '%ref=%')
+      this.whereRaw(`EXISTS (SELECT 1 ${ENTERED_CODE_FROM} WHERE e.customer_id = c.id)`)
+        .orWhereILike('c.landing_page_url', '%ref=%')
         .orWhereILike('c.lead_source_detail', 'Referred by %')
         .orWhereILike('c.lead_source_detail', 'Referral (unnamed)%');
     })
@@ -243,7 +257,7 @@ async function listInboundReferrals(conn = db, { customerId = null } = {}) {
       }
     })
     .orderBy('c.created_at', 'desc')
-    .select(CUSTOMER_COLUMNS.map((col) => `c.${col}`));
+    .select([...CUSTOMER_COLUMNS.map((col) => `c.${col}`), conn.raw(enteredCodeSql('c'))]);
 
   const candidates = rows
     .map((c) => ({ customer: c, evidence: evidenceFor(c), digits: phoneMatchDigits(normalizePhone(c.phone) || '') }))
@@ -389,7 +403,7 @@ async function confirmInboundReferral({ customerId, referrerCustomerId, reviewed
       referee_email: locked.referee.email ? String(locked.referee.email).trim().slice(0, 150) : null,
       referral_code: promoter.referral_code,
       status: 'pending',
-      source: locked.evidence.source === 'link' ? 'inbound_link' : 'inbound_call',
+      source: `inbound_${locked.evidence.source}`,
       promoter_id: promoter.id,
       referrer_reward_amount: settings.referrer_reward_cents / 100,
       referrer_reward_status: 'pending',
@@ -472,6 +486,9 @@ async function dismissInboundReferral({ customerId, reviewedBy = null }) {
 }
 
 module.exports = {
+  CODE_RE,
+  customerForCode,
+  sameHousehold,
   listInboundReferrals,
   sureReferrerOf,
   confirmInboundReferral,

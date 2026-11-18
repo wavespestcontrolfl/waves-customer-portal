@@ -16916,6 +16916,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // credit now that the accept is committed (GATE_ESTIMATE_PROMO_CODE).
     // Never throws and never fails the accept.
     await require('../services/estimate-promo-code').redeemPromoCodeForAcceptedEstimate({ estimateId: estimate.id });
+    // A referral code the customer entered: its owner is confirmed as the
+    // referrer once the customer is on a plan (GATE_ESTIMATE_REFERRAL_CODE).
+    // Sends nothing, pays nothing now, never throws.
+    await require('../services/estimate-referral-code').confirmReferralForAcceptedEstimate({ estimateId: estimate.id });
 
     // The success screen renders from THIS payload without a /data refetch,
     // so the referral card rides here too (same gate + program check as
@@ -19280,17 +19284,46 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
   }
 });
 
-// The `promoCode` block of /data (GATE_ESTIMATE_PROMO_CODE). A read failure
-// hides the block and never fails the page.
+// The code field takes a promo code (GATE_ESTIMATE_PROMO_CODE), a referral
+// code (GATE_ESTIMATE_REFERRAL_CODE), or both. Dark = both gates off.
+const estimateCodeEntryOn = () => featureGates.isEnabled('estimatePromoCode') || featureGates.isEnabled('estimateReferralCode');
+
+// The `promoCode` block of /data: the field while the estimate can still be
+// accepted, and the one code (of either kind) already on it. With the
+// referral gate off it is the promo block unchanged. A read failure hides
+// the block and never fails the page.
 async function estimatePromoCodeViewFor(estimate) {
   try {
-    return await require('../services/estimate-promo-code').promoCodeViewForEstimate(estimate, {
-      open: isEstimateAcceptActive(estimate) && !estimate.price_locked_at,
-    });
+    const open = isEstimateAcceptActive(estimate) && !estimate.price_locked_at;
+    const promo = await require('../services/estimate-promo-code').promoCodeViewForEstimate(estimate, { open });
+    const referral = await require('../services/estimate-referral-code').referralCodeViewForEstimate(estimate, { open });
+    if (promo?.applied || !referral) return promo;
+    if (referral.applied) return referral;
+    return { canEnter: true, applied: null, acceptsReferral: true, ...(promo ? {} : { acceptsPromo: false }) };
   } catch (err) {
     logger.warn(`[estimate-public] promo code block suppressed for estimate ${estimate.id}: ${err.code || err.message}`);
     return null;
   }
+}
+
+// One code per estimate, of either kind. The kind already on the estimate
+// answers (the same code again is fine, another is refused). Otherwise a
+// code that is a promo code in admin Discounts goes to the promo path, and
+// anything else is tried as a referral code. `trx` holds the estimate lock.
+async function enterEstimateCode(trx, estimate, rawCode) {
+  const Promo = require('../services/estimate-promo-code');
+  const Referral = require('../services/estimate-referral-code');
+  const entry = { estimate, rawCode };
+  if (await trx('estimate_referral_codes').where({ estimate_id: estimate.id }).first('id')) {
+    return Referral.enterReferralCode(entry, trx);
+  }
+  const promoOn = featureGates.isEnabled('estimatePromoCode');
+  const referralOn = featureGates.isEnabled('estimateReferralCode');
+  const promoOnEstimate = await trx('estimate_promo_codes').where({ estimate_id: estimate.id }).first('id');
+  if (promoOnEstimate || (promoOn && (!referralOn || await Promo.isPromoCode(trx, rawCode)))) {
+    return Promo.enterPromoCode(entry, trx);
+  }
+  return referralOn ? Referral.enterReferralCode(entry, trx) : { ok: false, reason: 'invalid_code' };
 }
 
 // Gate-aware skip so a dark gate answers the generic 404 on every probe.
@@ -19300,7 +19333,7 @@ const promoCodeLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => !featureGates.isEnabled('estimatePromoCode'),
+  skip: () => !estimateCodeEntryOn(),
   keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
   message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
 });
@@ -19324,7 +19357,7 @@ function stampPromoCodeHeaders(req, res, next) {
 }
 router.post('/:token/promo-code', stampPromoCodeHeaders, promoCodeLimiter, async (req, res) => {
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
-  if (!featureGates.isEnabled('estimatePromoCode')) return notFound();
+  if (!estimateCodeEntryOn()) return notFound();
   // The field is inert in the staff "Customer View": staff never enter a
   // customer's code from the preview.
   if (req.query.adminPreview === '1') return notFound();
@@ -19346,7 +19379,7 @@ router.post('/:token/promo-code', stampPromoCodeHeaders, promoCodeLimiter, async
     const outcome = await db.transaction(async (trx) => {
       const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
       if (!locked || !isEstimateAcceptActive(locked) || locked.price_locked_at) return null;
-      return require('../services/estimate-promo-code').enterPromoCode({ estimate: locked, rawCode: req.body.code }, trx);
+      return enterEstimateCode(trx, locked, req.body.code);
     });
     if (!outcome) return notFound();
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });

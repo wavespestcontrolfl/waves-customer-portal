@@ -177,6 +177,22 @@ jest.mock('../services/customer-credit', () => ({
       t.timestamp('created_at', { useTz: true }).defaultTo(db.fn.now());
     });
     await require('../models/migrations/20261026150000_referral_inbound_reviews').up(db);
+    // A referral code typed on an estimate is evidence too (estimate-referral-code.js): the reader joins these.
+    await db.schema.withSchema(mockSchema).createTable('estimates', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('customer_id');
+      t.string('status');
+      t.timestamp('accepted_at', { useTz: true });
+    });
+    await db.schema.withSchema(mockSchema).createTable('activity_log', (t) => {
+      t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+      t.uuid('customer_id');
+      t.uuid('estimate_id');
+      t.string('action');
+      t.text('description');
+      t.jsonb('metadata');
+    });
+    await require('../models/migrations/20261118200000_estimate_referral_codes').up(db);
     // The admin bell's columns (migrations 20260401000080, 20260928220000, 20261001001500), for the new-referral bell.
     await db.schema.withSchema(mockSchema).createTable('notifications', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -211,6 +227,8 @@ jest.mock('../services/customer-credit', () => ({
   beforeEach(async () => {
     jest.clearAllMocks();
     await db('notifications').del();
+    await db('activity_log').del();
+    await db('estimates').del();
     await db('referral_inbound_reviews').del();
     await db('referrals').del();
     await db('service_records').del();
@@ -599,6 +617,116 @@ jest.mock('../services/customer-credit', () => ({
       expect(results.find((r) => r.status === 'rejected').reason).toMatchObject({ code: 'MILESTONE_DUE' });
       expect(await db('referral_promoters').where({ customer_id: referrer.id }).first()).toMatchObject({ total_referrals_converted: 2, milestone_level: 'none' });
       expect(await saved()).toEqual({ referrals: '1', answers: '1' });
+    });
+  });
+
+  describe('a referral code typed on the estimate (GATE_ESTIMATE_REFERRAL_CODE)', () => {
+    let typed;
+    beforeAll(() => { typed = require('../services/estimate-referral-code'); });
+
+    const estimate = async (customerId, status = 'viewed') => (await db('estimates').insert({ customer_id: customerId, status }).returning('*'))[0];
+    const enter = (est, rawCode) => typed.enterReferralCode({ estimate: est, rawCode });
+    const accepted = (est, daysAgo = 0) => db('estimates').where({ id: est.id })
+      .update({ status: 'accepted', accepted_at: new Date(Date.now() - daysAgo * 86400000) });
+
+    test('entering a code saves it and nothing else; once accepted and on a plan the code owner is confirmed, with nothing sent or paid', async () => {
+      const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'Waves-Jane9' });
+      const friend = await customer();
+      const est = await estimate(friend.id);
+
+      // Typed in another case, as a phone keyboard does: the code is saved as issued.
+      expect(await enter(est, ' WAVES-JANE9 ')).toEqual({
+        ok: true,
+        applied: { code: 'Waves-Jane9', referral: true, note: 'You’ll get a $25.00 account credit after your first recurring service.' },
+      });
+      expect(await db('referrals')).toHaveLength(0);
+      expect(await typed.referralCodeViewForEstimate(est, { open: true })).toMatchObject({ canEnter: false, applied: { code: 'Waves-Jane9' } });
+
+      // Accepted, not on a plan yet: nothing to confirm, and the code waits.
+      await accepted(est);
+      expect(await typed.confirmReferralForAcceptedEstimate({ estimateId: est.id })).toBe('none');
+
+      await db('customers').where({ id: friend.id }).update({ waveguard_tier: 'Bronze', monthly_rate: 47 });
+      const [card] = await inbound.listInboundReferrals();
+      expect(card).toMatchObject({
+        customerId: friend.id,
+        evidence: { source: 'code', code: 'Waves-Jane9' },
+        suggestions: [{ customerId: referrer.id, viaCode: true }],
+      });
+
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 1, confirmed: 1 });
+      expect(await db('referrals').first()).toMatchObject({
+        referrer_customer_id: referrer.id,
+        source: 'inbound_code',
+        status: 'signed_up',
+        referrer_reward_status: 'pending_service',
+      });
+      expect(postCreditMovement).not.toHaveBeenCalled();
+      // Answered: off the list, and the next pass has nothing to do.
+      expect(await inbound.listInboundReferrals()).toEqual([]);
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 0, confirmed: 0 });
+    });
+
+    test('a code nobody holds, a household\'s own code and a customer already serviced all get the one generic refusal', async () => {
+      const referrer = await customer({ referral_code: 'WAVES-JANE' });
+      const stranger = await customer();
+      const sameHome = await customer({ account_id: referrer.account_id });
+      const serviced = await customer();
+      await db('service_records').insert({ customer_id: serviced.id, status: 'completed' });
+
+      for (const [owner, code] of [[stranger, 'WAVES-NOBODY'], [stranger, '!!'], [sameHome, 'WAVES-JANE'], [serviced, 'WAVES-JANE']]) {
+        expect(await enter(await estimate(owner.id), code)).toEqual({ ok: false, reason: 'invalid_code' });
+      }
+      expect(await db('estimate_referral_codes')).toHaveLength(0);
+    });
+
+    test('one code per estimate: the same code again is fine, another is refused', async () => {
+      await customer({ referral_code: 'WAVES-JANE' });
+      await customer({ referral_code: 'WAVES-OMAR' });
+      const est = await estimate((await customer()).id);
+      expect((await enter(est, 'WAVES-JANE')).ok).toBe(true);
+      expect((await enter(est, 'waves-jane')).ok).toBe(true);
+      expect(await enter(est, 'WAVES-OMAR')).toEqual({ ok: false, reason: 'code_already_entered' });
+      expect(await db('estimate_referral_codes')).toHaveLength(1);
+    });
+
+    test('a card the deferred confirm refuses (the first plan visit is done) is held for the office, with nothing saved', async () => {
+      await customer({ referral_code: 'WAVES-JANE' });
+      const friend = await customer();
+      const est = await estimate(friend.id);
+      await enter(est, 'WAVES-JANE');
+      await accepted(est);
+      await db('customers').where({ id: friend.id }).update({ waveguard_tier: 'Bronze', monthly_rate: 47 });
+      await recurringVisit(friend.id);
+
+      expect(await typed.confirmReferralForAcceptedEstimate({ estimateId: est.id })).toBe('held');
+      expect(await db('referrals')).toHaveLength(0);
+      expect(await db('referral_inbound_reviews')).toHaveLength(0);
+      // Still on the Queue, where the office confirms it for both credits now.
+      expect((await inbound.listInboundReferrals()).map((c) => c.customerId)).toEqual([friend.id]);
+      // The hourly pass reads a recent acceptance again, and a held card never keeps another
+      // customer's code from being confirmed in the same pass.
+      const second = await customer({ waveguard_tier: 'Bronze', monthly_rate: 47 });
+      const secondEst = await estimate(second.id);
+      await enter(secondEst, 'WAVES-JANE');
+      await accepted(secondEst);
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 2, confirmed: 1 });
+      // It stops reading a held card once the acceptance is old.
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 1, confirmed: 0 });
+      await accepted(est, 60);
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 0, confirmed: 0 });
+    });
+
+    test('a paused program takes no code and shows no field', async () => {
+      await customer({ referral_code: 'WAVES-JANE' });
+      const est = await estimate((await customer()).id);
+      await db('referral_program_settings').where({ id: 1 }).update({ program_active: false });
+      try {
+        expect(await enter(est, 'WAVES-JANE')).toEqual({ ok: false, reason: 'invalid_code' });
+        expect(await typed.referralCodeViewForEstimate(est, { open: true })).toBeNull();
+      } finally {
+        await db('referral_program_settings').where({ id: 1 }).update({ program_active: true });
+      }
     });
   });
 

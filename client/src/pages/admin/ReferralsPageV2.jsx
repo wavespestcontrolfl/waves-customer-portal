@@ -370,6 +370,8 @@ function adminPost(path, body) {
 }
 
 function inboundEvidenceLine(evidence) {
+  if (evidence.source === "code")
+    return `Entered referral code ${evidence.code} on their estimate`;
   if (evidence.source === "link")
     return `Came in through referral link ${evidence.code}`;
   if (evidence.spokenName)
@@ -562,7 +564,9 @@ function InboundReferralCard({ item, onDone, flash }) {
               <div style={{ fontSize: 14, color: D.muted }}>
                 {item.evidence.source === "link"
                   ? "Owner of the link code"
-                  : "Likely referrers"}
+                  : item.evidence.source === "code"
+                    ? "Owner of the code"
+                    : "Likely referrers"}
               </div>
               {item.suggestions.map((c) =>
                 pickRow(
