@@ -9,7 +9,8 @@
  * the customer sees and pays comes from the server.
  *
  * Props:
- *   promoCode  — { canEnter, applied: { code, creditAmount } | null }
+ *   promoCode  — { canEnter, applied: { code, creditAmount, credited } | null }
+ *                (`credited` false = saved, and the setup now running posts it)
  *   submitCode — async (code) => { ok } | { ok: false, error }
  *   onSaved    — called once the code is saved (the page reloads)
  *   panelStyle — the pay page's panel style, so the field matches its cards
@@ -38,7 +39,11 @@ export default function PayPromoCode({ promoCode, submitCode, onSaved, panelStyl
     return (
       <div data-glass="soft" data-section="promo-code" className="waves-no-print" style={panel}>
         <div style={label}>Promo code {promoCode.applied.code}</div>
-        <p style={text}>{fmtMoney(promoCode.applied.creditAmount)} credit toward this invoice.</p>
+        <p style={text}>
+          {promoCode.applied.credited
+            ? `${fmtMoney(promoCode.applied.creditAmount)} credit applied to this invoice.`
+            : `We’re applying a ${fmtMoney(promoCode.applied.creditAmount)} credit to this invoice.`}
+        </p>
       </div>
     );
   }

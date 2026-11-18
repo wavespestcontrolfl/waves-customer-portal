@@ -9,12 +9,13 @@
  *           amount frozen from the discount row. No money moves and no Stripe
  *           call is made. The page then reloads.
  *   redeem  the payment-setup step the reload runs (stripe.js
- *           createInvoicePaymentIntent) calls redeemEnteredPromoCode inside
+ *           createInvoicePaymentIntent) calls redeemAndApplyPromoCode inside
  *           its transaction, under the invoice row lock: the credit posts to
- *           the ledger once and one use is counted. That step then applies
- *           the credit to this invoice and re-prices the payment, the path it
- *           already runs for a customer with automatic credit on. Only the
- *           promo amount is drawn, never the rest of the customer's balance.
+ *           the ledger once, one use is counted, and that amount is drawn
+ *           against this invoice, all or nothing. The setup step then
+ *           re-prices the payment, as it already does for a customer with
+ *           automatic credit on. Only the promo amount is drawn, never the
+ *           rest of the customer's balance.
  *
  * A new-customer-only code works on the customer's first invoice: the visit
  * that invoice bills does not count against them.
@@ -30,6 +31,7 @@ const { invoiceAmountDue, assertInvoiceCollectible } = require('./invoice-helper
 const Promo = require('./estimate-promo-code');
 
 const gateOn = () => isEnabled('payPromoCode');
+const APPLIED_BY = 'system:pay_promo_code';
 
 // Why a code entered on a pay page posted no credit, as the office reads it.
 const VOID_REASONS = {
@@ -75,7 +77,10 @@ async function promoCodeViewForInvoice(invoice, { saveRequired = false, conn = d
 async function pendingPromoCredit(invoice, conn = db) {
   try {
     if (!gateOn() || !invoiceTakesPromoCode(invoice)) return 0;
-    const row = await conn('invoice_promo_codes').where({ invoice_id: invoice.id, status: 'entered' }).first('credit_amount');
+    const read = (c) => c('invoice_promo_codes').where({ invoice_id: invoice.id, status: 'entered' }).first('credit_amount');
+    // Inside a caller's transaction the read runs in a savepoint, so a
+    // failure here cannot leave that transaction aborted.
+    const row = conn.isTransaction ? await conn.transaction(read) : await read(conn);
     return row ? round2(row.credit_amount) : 0;
   } catch (err) {
     logger.warn(`[invoice-promo-code] pending credit not read for invoice ${invoice.id}: ${err.code || err.message}`);
@@ -161,23 +166,41 @@ async function redeemRow(trx, row, invoice) {
 
 /**
  * The payment-setup step's hook, inside its transaction with the invoice row
- * locked. When a code was entered on this invoice and not redeemed yet, the
- * credit is posted and one use counted; returns the amount the setup step
- * should now draw against the invoice, or 0. Runs in a savepoint and never
- * throws: a failure posts nothing, leaves the code entered for the next
- * setup, and the payment is set up at the amount due as it stands.
+ * locked and any open payment already retired. A code entered on this
+ * invoice and not redeemed yet is redeemed (the credit posts, one use is
+ * counted) AND that amount is drawn against the invoice, as one step in a
+ * savepoint: if the invoice takes none of it (an active payment plan, a
+ * payment attached after all), nothing is posted and the code stays entered,
+ * so a code is never spent on an invoice it did not lower. Only the promo
+ * amount is drawn, whatever the customer's automatic-credit choice. Never
+ * throws: the payment is then set up at the amount due as it stands.
+ * Returns the amount applied to the invoice, or 0.
  */
-async function redeemEnteredPromoCode(trx, invoice) {
+async function redeemAndApplyPromoCode(trx, invoice) {
   try {
     if (!gateOn() || !invoiceTakesPromoCode(invoice)) return 0;
     // Every statement inside the savepoint, the first read included: an error
     // here must never leave the setup step's own transaction aborted.
     return await trx.transaction(async (savepoint) => {
       const row = await savepoint('invoice_promo_codes').where({ invoice_id: invoice.id, status: 'entered' }).first();
-      return row ? redeemRow(savepoint, row, invoice) : 0;
+      if (!row) return 0;
+      const posted = await redeemRow(savepoint, row, invoice);
+      // Voided (switched off, used up, not eligible): that verdict is kept.
+      if (!(posted > 0)) return 0;
+      const drawn = await require('./customer-credit').applyAccountCreditToInvoice({
+        invoiceId: invoice.id, customerRequested: true, applyAtMost: posted, createdBy: APPLIED_BY,
+      }, savepoint);
+      if (!(drawn?.applied > 0)) {
+        throw Object.assign(new Error('promo credit not applied'), { promoNotApplied: drawn?.skipped || 'nothing_applied' });
+      }
+      return drawn.applied;
     });
   } catch (err) {
-    logger.error(`[invoice-promo-code] invoice ${invoice.id}: credit not posted (${err?.code || err?.message})`);
+    if (err?.promoNotApplied) {
+      logger.info(`[invoice-promo-code] invoice ${invoice.id}: code left entered, the invoice took no credit (${err.promoNotApplied})`);
+    } else {
+      logger.error(`[invoice-promo-code] invoice ${invoice.id}: credit not posted (${err?.code || err?.message})`);
+    }
     return 0;
   }
 }
@@ -186,5 +209,5 @@ module.exports = {
   pendingPromoCredit,
   promoCodeViewForInvoice,
   enterPromoCodeOnInvoice,
-  redeemEnteredPromoCode,
+  redeemAndApplyPromoCode,
 };

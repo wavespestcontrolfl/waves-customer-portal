@@ -45,10 +45,12 @@ describe('PayPromoCode', () => {
     expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
   });
 
-  it('a code already on the invoice shows the server amount and no field', () => {
-    render(<PayPromoCode promoCode={{ canEnter: false, applied: { code: 'SAVE25', creditAmount: 25 } }} submitCode={vi.fn()} onSaved={vi.fn()} />);
+  it('a code already on the invoice shows the server amount and no field, worded by whether the credit has posted', () => {
+    const { rerender } = render(<PayPromoCode promoCode={{ canEnter: false, applied: { code: 'SAVE25', creditAmount: 25, credited: false } }} submitCode={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.getByText('Promo code SAVE25')).toBeInTheDocument();
-    expect(screen.getByText(/\$25(\.00)? credit toward this invoice\./)).toBeInTheDocument();
+    expect(screen.getByText(/applying a \$25(\.00)? credit to this invoice\./)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument();
+    rerender(<PayPromoCode promoCode={{ canEnter: false, applied: { code: 'SAVE25', creditAmount: 25, credited: true } }} submitCode={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByText(/\$25(\.00)? credit applied to this invoice\./)).toBeInTheDocument();
   });
 });

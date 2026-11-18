@@ -358,15 +358,11 @@ jest.mock('../config/feature-gates', () => ({
 
     const invoice = async (fields = {}) => (await db('invoices').insert({ total: 100, ...fields }).returning('*'))[0];
     const enterOn = (inv, rawCode) => pay.enterPromoCodeOnInvoice({ invoice: inv, rawCode });
-    // What the pay page's payment setup does, in its one transaction: redeem
-    // the entered code, then draw that amount against the invoice.
+    // What the pay page's payment setup does with a code, in its one
+    // transaction under the invoice lock. Returns the amount applied.
     const setup = (inv) => db.transaction(async (trx) => {
       const locked = await trx('invoices').where({ id: inv.id }).forUpdate().first();
-      const promoDraw = await pay.redeemEnteredPromoCode(trx, locked);
-      if (promoDraw > 0) {
-        await credit.applyAccountCreditToInvoice({ invoiceId: inv.id, customerRequested: true, applyAtMost: promoDraw }, trx);
-      }
-      return promoDraw;
+      return pay.redeemAndApplyPromoCode(trx, locked);
     });
     const fresh = (inv) => db('invoices').where({ id: inv.id }).first();
 
@@ -402,7 +398,7 @@ jest.mock('../config/feature-gates', () => ({
       const disc = await discount({ amount: 60 });
       const inv = await invoice({ customer_id: cust.id, total: 40 });
       await enterOn(inv, disc.promo_code);
-      expect(await setup(inv)).toBe(60);
+      expect(await setup(inv)).toBe(40);
       expect(await fresh(inv)).toMatchObject({ status: 'prepaid', credit_applied: '40.00' });
       expect(await balanceOf(cust.id)).toBe(20);
     });
@@ -472,6 +468,26 @@ jest.mock('../config/feature-gates', () => ({
       expect(await db('invoice_promo_codes').where({ invoice_id: inv.id }).first()).toMatchObject({ status: 'void', void_reason: 'code_inactive' });
       expect(await db('activity_log').where({ customer_id: cust.id, action: 'invoice_promo_code_not_credited' })).toHaveLength(1);
       expect(await pay.promoCodeViewForInvoice(await fresh(inv))).toBeNull();
+    });
+
+    test('a code is never spent on an invoice it cannot lower: nothing posts and it stays entered for a later setup', async () => {
+      const cust = await customer();
+      const disc = await discount();
+      const inv = await invoice({ customer_id: cust.id });
+      await enterOn(inv, disc.promo_code);
+      // The invoice is on a payment plan, which takes no account credit.
+      const [plan] = await db('payment_plans').insert({ invoice_id: inv.id, status: 'active' }).returning('*');
+      expect(await pay.pendingPromoCredit(inv)).toBe(25);
+      expect(await setup(inv)).toBe(0);
+      expect(await balanceOf(cust.id)).toBe(0);
+      expect(await ledgerOf(cust.id)).toHaveLength(0);
+      expect(await usesOf(disc.id)).toBe(0);
+      expect((await db('invoice_promo_codes').where({ invoice_id: inv.id }).first()).status).toBe('entered');
+
+      await db('payment_plans').where({ id: plan.id }).update({ status: 'completed' });
+      expect(await setup(inv)).toBe(25);
+      expect(Number((await fresh(inv)).credit_applied)).toBe(25);
+      expect(await pay.pendingPromoCredit(await fresh(inv))).toBe(0);
     });
 
     test('gate off: no field, and a setup redeems nothing', async () => {

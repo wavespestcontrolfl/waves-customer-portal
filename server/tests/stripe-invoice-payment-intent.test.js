@@ -127,7 +127,10 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     }));
     // No promo code on the invoice unless a case says so (a doMock outlives
     // resetModules, so every case starts from this one).
-    jest.doMock('../services/invoice-promo-code', () => ({ redeemEnteredPromoCode: jest.fn(async () => 0) }));
+    jest.doMock('../services/invoice-promo-code', () => ({
+      pendingPromoCredit: jest.fn(async () => 0),
+      redeemAndApplyPromoCode: jest.fn(async () => 0),
+    }));
   });
 
   test('rechecks the saved-card fence while holding the invoice lock', async () => {
@@ -711,13 +714,21 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   });
 
   describe('a promo code entered on the pay page (GATE_PAY_PROMO_CODE)', () => {
-    // The redemption itself (ledger, use count, once per customer) is covered
-    // against real Postgres in invoice-promo-code-postgres.test.js. Here: what
-    // the setup step does with the amount it hands back.
-    const withPromoPosted = (amount) => {
-      const redeemEnteredPromoCode = jest.fn(async () => amount);
-      jest.doMock('../services/invoice-promo-code', () => ({ redeemEnteredPromoCode }));
-      return redeemEnteredPromoCode;
+    // The redemption and its draw (ledger, use count, once per customer, all
+    // or nothing) are covered against real Postgres in
+    // estimate-promo-code-postgres.test.js. Here: what the setup step does
+    // around them.
+    const withPromoWaiting = (amount) => {
+      const promo = {
+        pendingPromoCredit: jest.fn(async () => amount),
+        // The real step posts the credit and draws it against the invoice.
+        redeemAndApplyPromoCode: jest.fn(async () => {
+          invoiceRow.credit_applied = String(amount);
+          return amount;
+        }),
+      };
+      jest.doMock('../services/invoice-promo-code', () => promo);
+      return promo;
     };
     const staleCardIntent = () => {
       invoiceRow.stripe_payment_intent_id = 'pi_stale_card';
@@ -730,31 +741,29 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       });
     };
 
-    test('with automatic credit off, only the promo amount is drawn and the payment is re-priced at what is left', async () => {
-      // No balance the customer chose to apply; the $25 promo credit was just posted.
+    test('with no balance the customer chose to apply, the open payment is retired, the code is redeemed and the payment is priced at what is left', async () => {
       customerAccountCredits = '0.00';
-      const redeem = withPromoPosted(25);
-      applyCreditSideEffect = () => { invoiceRow.credit_applied = '25.00'; };
+      const promo = withPromoWaiting(25);
       staleCardIntent();
 
       const StripeService = require('../services/stripe');
       const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
 
-      expect(redeem).toHaveBeenCalledTimes(1);
-      const { applyAccountCreditToInvoice } = require('../services/customer-credit');
-      expect(applyAccountCreditToInvoice).toHaveBeenCalledWith(
-        { invoiceId: invoiceRow.id, customerRequested: true, applyAtMost: 25, createdBy: 'system:pay_promo_code' },
-        trxMock,
-      );
-      // The open payment was retired and the new one is the amount due ($75 − $25).
+      // The open payment is cleared BEFORE the code is redeemed: the draw refuses an attached payment.
       expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_stale_card');
+      expect(stripeClient.paymentIntents.cancel.mock.invocationCallOrder[0])
+        .toBeLessThan(promo.redeemAndApplyPromoCode.mock.invocationCallOrder[0]);
+      expect(promo.redeemAndApplyPromoCode).toHaveBeenCalledWith(trxMock, invoiceRow);
+      // The customer's own balance is not drawn: only the promo step ran.
+      expect(require('../services/customer-credit').applyAccountCreditToInvoice).not.toHaveBeenCalled();
+      // The new payment is the amount due ($75 − $25).
       expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(5000);
       expect(result.paymentIntentId).toBe('pi_after_promo');
     });
 
-    test('with automatic credit on, the posted promo credit is part of the balance and is drawn as any credit is', async () => {
-      customerAccountCredits = '40.00'; // $15 the customer already had + the $25 just posted
-      withPromoPosted(25);
+    test('with automatic credit on, the code is redeemed first and the customer\'s own balance is then drawn as before', async () => {
+      customerAccountCredits = '15.00';
+      const promo = withPromoWaiting(25);
       applyCreditSideEffect = () => { invoiceRow.credit_applied = '40.00'; };
       staleCardIntent();
 
@@ -763,12 +772,14 @@ describe('StripeService.createInvoicePaymentIntent', () => {
 
       const { applyAccountCreditToInvoice } = require('../services/customer-credit');
       expect(applyAccountCreditToInvoice).toHaveBeenCalledWith({ invoiceId: invoiceRow.id }, trxMock);
+      expect(promo.redeemAndApplyPromoCode.mock.invocationCallOrder[0])
+        .toBeLessThan(applyAccountCreditToInvoice.mock.invocationCallOrder[0]);
       expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(3500);
     });
 
-    test('no code on the invoice: the open payment is left alone and no credit is applied', async () => {
+    test('no code waiting: the open payment is left alone and nothing is redeemed or applied', async () => {
       customerAccountCredits = '0.00';
-      withPromoPosted(0);
+      const promo = withPromoWaiting(0);
       invoiceRow.stripe_payment_intent_id = 'pi_open';
       stripeClient.paymentIntents.retrieve.mockResolvedValue({
         id: 'pi_open', status: 'requires_payment_method', client_secret: 'pi_open_secret', amount: 7500,
@@ -778,16 +789,17 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       const StripeService = require('../services/stripe');
       await StripeService.createInvoicePaymentIntent(invoiceRow.id);
 
-      const { applyAccountCreditToInvoice } = require('../services/customer-credit');
-      expect(applyAccountCreditToInvoice).not.toHaveBeenCalled();
+      expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
+      expect(require('../services/customer-credit').applyAccountCreditToInvoice).not.toHaveBeenCalled();
       expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     });
 
-    test('a setup that holds credit coverage for a card capture never redeems a code', async () => {
-      const redeem = withPromoPosted(25);
+    test('a setup that holds credit coverage for a card capture never looks for a code', async () => {
+      const promo = withPromoWaiting(25);
       const StripeService = require('../services/stripe');
       await StripeService.createInvoicePaymentIntent(invoiceRow.id, { holdCoverageForCapture: true });
-      expect(redeem).not.toHaveBeenCalled();
+      expect(promo.pendingPromoCredit).not.toHaveBeenCalled();
+      expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
     });
   });
 
