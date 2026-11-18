@@ -12,7 +12,7 @@ jest.mock('../services/day-replan/planner', () => {
 // The close-gaps measurement runs for real; one test makes it throw.
 jest.mock('../services/day-replan/close-gaps', () => {
   const actual = jest.requireActual('../services/day-replan/close-gaps');
-  return { ...actual, openTime: jest.fn(actual.openTime) };
+  return { ...actual, openTime: jest.fn(actual.openTime), planSims: jest.fn(actual.planSims) };
 });
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
@@ -558,6 +558,23 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     rec = record(inserts[0]);
     expect(rec.p2).toMatchObject({ freed: [], packed: null, changes: [] });
     expect(rec.p2.still.map((s) => s.why)).toEqual(['same_customer', 'same_customer']);
+  });
+
+  test('every close-gaps simulation gets the day\'s schedule blocks, the per-home (P2) one included (Codex #7935)', async () => {
+    const { planSims } = require('../services/day-replan/close-gaps');
+    planSims.mockClear();
+    const twoHomes = [
+      row('a', 0.020, 8, { customer_id: 'cust-x', property_id: 'prop-1' }),
+      row('b', 0.021, 14, { customer_id: 'cust-x', property_id: 'prop-2' }),
+      row('c', 0.022, 10),
+    ];
+    const block = { id: 'blk', technician_id: TECH, start_time: '12:00:00', end_time: '13:00:00', block_type: 'blocked' };
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes }, blocks: [block] });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    expect(record(inserts[0]).p2.freed.sort()).toEqual(['a', 'b']);
+    // One call for the day as planned, one for the per-home plan.
+    expect(planSims).toHaveBeenCalledTimes(2);
+    for (const [args] of planSims.mock.calls) expect(args.blocks).toEqual([expect.objectContaining({ startMin: 720, endMin: 780 })]);
   });
 
   test('P2: a freed stop\'s customer window is read before the day is re-planned; an unreadable one stays fixed', async () => {

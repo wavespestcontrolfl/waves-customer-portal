@@ -567,11 +567,15 @@ async function measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }
   const freed = entries.filter((e, i) => locked(i) && !e.why).map((e) => e.row.id);
   const still = entries.filter((e, i) => locked(i) && e.why).map((e) => ({ id: e.row.id, why: e.why }));
   if (!freed.length) return { freed, still, driveRuleAccepts: false, pack: null, packed: null, changes: [] };
-  const alt = { ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }), origin: plan.origin };
+  // planEntries returns the plan without its inputs; the simulations below need the origin and the schedule blocks.
+  const alt = {
+    ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }),
+    origin: plan.origin, blocks: plan.blocks,
+  };
   const altSims = simsOf(env, alt);
   const packed = openTime(altSims.planned, bounds);
   const pack = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
-  const driveRuleAccepts = alt.verdict.accepted;
+  const driveRuleAccepts = alt.verdict.accepted && keptWithBlocks(alt, altSims);
   const changes = driveRuleAccepts || pack.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
   return { freed, still, driveRuleAccepts, pack, packed, changes };
 }
