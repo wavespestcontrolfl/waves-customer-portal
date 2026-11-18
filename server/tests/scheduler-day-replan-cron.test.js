@@ -34,11 +34,13 @@ jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest
 jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
 
 jest.mock('../services/day-replan', () => ({ runDayReplanIfEnabled: jest.fn() }));
+jest.mock('../services/day-replan/open-blocks-alert', () => ({ runOpenBlocksAlert: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled, dayReplanMode, nightPassWaitLive } = require('../config/feature-gates');
 const { runDayReplanIfEnabled } = require('../services/day-replan');
+const { runOpenBlocksAlert } = require('../services/day-replan/open-blocks-alert');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -102,4 +104,31 @@ test('a held writer lock fails the tick loudly instead of passing as a run', asy
   await registration()[1]();
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('the run lock was held'));
   runExclusive.mockImplementation(async (_key, task) => task());
+});
+
+describe('07:05 open blocks to sell (owner 2026-11-18): reads the re-plan numbers, raises one admin row', () => {
+  function openBlocksJob() {
+    isEnabled.mockImplementation((name) => name === 'cronJobs');
+    initScheduledJobs();
+    const found = cron.schedule.mock.calls.filter(([, task]) => String(task).includes("'open-blocks-alert'"));
+    expect(found).toHaveLength(1);
+    return found[0];
+  }
+
+  test('registered once at 7:05 AM Eastern; runs under its own health lock with no gate', async () => {
+    const [expression, task, options] = openBlocksJob();
+    expect(expression).toBe('5 7 * * *');
+    expect(options).toEqual({ timezone: 'America/New_York' });
+    runOpenBlocksAlert.mockResolvedValueOnce({ status: 'raised', openMin: 325 });
+    await task();
+    expect(runExclusive.mock.calls.map(([name]) => name)).toEqual(['open-blocks-alert']);
+    expect(runOpenBlocksAlert).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledWith('[open-blocks] raised openMin=325');
+  });
+
+  test('a failure is logged, never thrown out of the tick', async () => {
+    runOpenBlocksAlert.mockRejectedValueOnce(new Error('db down'));
+    await expect(openBlocksJob()[1]()).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith('[open-blocks] tick failed: db down');
+  });
 });

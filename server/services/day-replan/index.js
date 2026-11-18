@@ -49,6 +49,9 @@ const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
+const {
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
+} = require('./close-gaps');
 const { applyAcceptedDay, reconcileApplied } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
@@ -116,7 +119,7 @@ function dayOnlyOn() {
 
 // The extra columns the told-lock reasons read (first_or_one_time, person_placed). Gate off: none, as before.
 const TOLD_LOCK_SELECT = [
-  'scheduled_services.recurring_parent_id', 'scheduled_services.recurring_dispatch_due_date',
+  'scheduled_services.recurring_dispatch_due_date',
   'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
 ];
 
@@ -131,6 +134,9 @@ async function loadDayStops(conn, dateStr, toldLock = nightToldLockOn()) {
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type', 'scheduled_services.source_action',
       'scheduled_services.is_recurring', 'scheduled_services.is_callback',
+      // The told lock (first_or_one_time) and the close-gaps replay (a series visit made from a plan is not a new
+      // booking) both read it, so it is read with the told lock off too.
+      'scheduled_services.recurring_parent_id',
       // Identity and premise fields the co-visit helpers (isCoVisitPair) read, exactly as the 04:20 pass selects them.
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
@@ -293,8 +299,25 @@ function toldLockReason(row, { told, personPlaced, dayTold }) {
   return null;
 }
 
+/** One home of one customer: the property, else the service address. */
+function homeKey(row) {
+  const home = row.property_id
+    ? `p:${row.property_id}`
+    : `a:${String(row.service_address_line1 || '').trim().toLowerCase()}|${String(row.service_address_zip || '').trim()}`;
+  return `${row.customer_id}|${home}`;
+}
+
+/**
+ * Live stops of this row's customer that day. The live lock counts them per customer; the close-gaps measurement
+ * (P2, owner 2026-11-18) passes ctx.homeCounts and counts them per home instead. It only measures: no live caller
+ * passes homeCounts.
+ */
+function sameCustomerStops(row, ctx) {
+  return ctx.homeCounts ? ctx.homeCounts.get(homeKey(row)) : ctx.customerCounts.get(row.customer_id);
+}
+
 function fixedReason(row, ctx) {
-  const { dateStr, now, visitCounts, customerCounts, sent24 } = ctx;
+  const { dateStr, now, visitCounts, sent24 } = ctx;
   if (!MOVABLE_STATUSES.includes(row.status)) return 'status';
   if (row.reservation_expires_at) return 'hold';
   if (row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return 'staff_lock';
@@ -302,7 +325,7 @@ function fixedReason(row, ctx) {
   // keeps its time: an automatic re-time must never stand in for the office's approval (Codex #7555 P2).
   if (officeReviewPending(row)) return 'office_review_pending';
   if (row.visit_id != null && visitCounts.get(row.visit_id) > 1) return 'grouped';
-  if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
+  if (row.customer_id != null && sameCustomerStops(row, ctx) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';
   if (sent24.has(row.id)) return 'reminder_24h_sent';
   // The 24-hour reminder carries the new hour; when it will not go out, nothing tells the customer. A context without
@@ -430,7 +453,7 @@ function fixedList(entries, grandfathered) {
   }));
 }
 
-function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode = 'shadow', planId = null }) {
+function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode = 'shadow', planId = null, closeGaps = null }) {
   // The numbers are the app's own simulation (route-reorder-window-fit simulateArrivalRoute); the planner's stand in
   // only where that simulation gave none.
   const current = check.current || result.current;
@@ -451,6 +474,7 @@ function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode
     reason: verdict.reason,
     changes: JSON.stringify(verdict.accepted ? result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) })) : []),
     fixed: JSON.stringify(fixedList(entries, result.grandfathered)),
+    close_gaps: closeGaps ? JSON.stringify(closeGaps) : null,
   };
 }
 
@@ -466,6 +490,15 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const origin = homeFromMap(env.techHomes, techId);
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
+  const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
+  return { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+}
+
+/**
+ * The planner and the app's simulation for one tech-day's entries: the live locks, or the close-gaps measurement's
+ * per-home locks (P2). No database.
+ */
+function planEntries(env, { rows, entries, blocks, origin, techId, dayContext }) {
   // Co-visit rows (one physical stop) are merged into one planner stop; the baselines name each group by its first row.
   const entryById = new Map(entries.map((e) => [String(e.row.id), e]));
   const rowGroups = coVisitGroups(promisedWindowOrder(rows));
@@ -494,10 +527,111 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const verdict = finalVerdict(result, check, DEFAULT_OPTIONS.minSavingMin);
   const members = new Map(rowGroups.map((g) => [String(g[0].id), g.map((r) => r.id)]));
   const finalResult = { ...result, grandfathered: result.grandfathered.flatMap((id) => members.get(String(id)) || [id]) };
+  return { rowGroups, stops, staleReasons, check, verdict, result: finalResult, plannerResult: result };
+}
+
+function countHomes(rows) {
+  const counts = new Map();
+  for (const row of rows) {
+    if (row.customer_id == null) continue;
+    const key = homeKey(row);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * The day's bounds for the open-time figures, with what is not open time cut out: the technician's schedule blocks
+ * and the hours other rows hold (the planner's blockedHours).
+ */
+function boundsOf(env, plan, techId) {
+  const held = blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 }));
   return {
-    entries, rowGroups, stops, blocks, origin, staleReasons, check, verdict, dayContext,
-    result: finalResult, plannerResult: result, hash: versionHash(dayContext.allRows),
+    departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin, unavailable: [...plan.blocks, ...held],
+    driveBlocks: serviceBlocks(plan.blocks),
   };
+}
+const simsOf = (env, plan) => planSims({
+  groups: plan.rowGroups, currentOrder: plan.result.current.order, best: plan.result.best, origin: plan.origin, departureMin: env.departureMin,
+  blocks: plan.blocks, marginMin: DEFAULT_OPTIONS.marginMin,
+});
+// A plan's promises hold: the live check's verdict, and again with the schedule blocks in the simulation.
+const keptWithBlocks = (plan, sims) => plan.check.planned?.kept === true && sims.plannedKept === true;
+
+/** P2: the same-customer lock counted per home. Null when no stop of the day had that lock. */
+async function measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }) {
+  const locked = (i) => plan.entries[i].why === 'same_customer';
+  if (!plan.entries.some((e, i) => locked(i))) return null;
+  const homeCtx = { ...plan.dayContext, homeCounts: countHomes(plan.dayContext.allRows) };
+  const entries = plan.entries.map((e, i) => (locked(i) ? { ...e, why: fixedReason(e.row, homeCtx) } : e));
+  // A fixed stop's customer window was never read (attachPrefs skips fixed stops); a freed one needs it, and an
+  // unreadable one stays fixed (pref_unknown), as in the live run.
+  await attachPrefs(conn, entries.filter((e, i) => locked(i) && !e.why));
+  const freed = entries.filter((e, i) => locked(i) && !e.why).map((e) => e.row.id);
+  const still = entries.filter((e, i) => locked(i) && e.why).map((e) => ({ id: e.row.id, why: e.why }));
+  if (!freed.length) return { freed, still, driveRuleAccepts: false, pack: null, packed: null, changes: [] };
+  // planEntries returns the plan without its inputs; the simulations below need the origin and the schedule blocks.
+  const alt = {
+    ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }),
+    origin: plan.origin, blocks: plan.blocks,
+  };
+  const altSims = simsOf(env, alt);
+  const packed = openTime(altSims.planned, bounds);
+  const pack = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
+  const driveRuleAccepts = alt.verdict.accepted && keptWithBlocks(alt, altSims);
+  const changes = driveRuleAccepts || pack.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  return { freed, still, driveRuleAccepts, pack, packed, changes };
+}
+
+/**
+ * Each replayed booking's customer window. A movable stop's was read by the live run; a fixed one's is read here, and
+ * one that cannot be read is marked false so the replay leaves that booking out.
+ */
+async function replayPrefs(conn, plan) {
+  const prefs = new Map(plan.entries.map((e) => [String(e.row.id), e.pref]));
+  const byId = new Map(plan.entries.map((e) => [String(e.row.id), e]));
+  for (const group of recentGroups(plan.rowGroups, plan.dayContext.now)) {
+    const entry = byId.get(String(group[0].id));
+    if (!entry || !entry.why) continue;
+    try {
+      prefs.set(String(entry.row.id), await loadPref(conn, entry.row));
+    } catch (err) {
+      prefs.set(String(entry.row.id), false);
+      logger.warn(`[day-replan] close-gaps: a replayed booking's preference read failed (${err.message}); it is not replayed`);
+    }
+  }
+  return prefs;
+}
+
+/**
+ * The close-gaps measurement for one planned tech-day (./close-gaps.js; owner 2026-11-18). It measures only and never
+ * throws: a failure leaves the row's close_gaps null, and the night's plan row is written either way.
+ */
+async function measureCloseGaps(conn, env, plan, { rows, techId }) {
+  try {
+    const bounds = boundsOf(env, plan, techId);
+    const sims = simsOf(env, plan);
+    const nowFig = openTime(sims.current, bounds);
+    const packed = openTime(sims.planned, bounds);
+    const p1 = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: plan.verdict.accepted });
+    const lunchLost = !!(nowFig && nowFig.lunch && packed && !packed.lunch);
+    return {
+      v: 1,
+      now: nowFig,
+      packed,
+      p1: { ...p1, lunchLost, changes: p1.wouldAccept ? hourChanges(plan.rowGroups, plan.result.best) : [] },
+      p2: await measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }),
+      s1: replayRecentBookings({
+        groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
+        marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
+        blockedHours: blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind), blocks: plan.blocks,
+      }),
+      gaps: lockedGaps(nowFig, new Map(plan.entries.map((e) => [String(e.row.id), e.why]))),
+    };
+  } catch (err) {
+    logger.warn(`[day-replan] close-gaps measurement failed (${err.message}); the plan row is written without it`);
+    return null;
+  }
 }
 
 function skipDay(summary, { dateStr, techId, reason, stops }) {
@@ -543,8 +677,9 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const { entries, check, verdict, staleReasons, result, plannerResult } = plan;
   const apply = env.mode === 'apply';
   const planId = apply ? crypto.randomUUID() : null;
+  const closeGaps = await measureCloseGaps(conn, env, plan, { rows, techId });
   await conn(PLAN_TABLE).insert(planRow({
-    runId: env.runId, techId, dateStr, entries, result, check, verdict, ...(apply ? { mode: 'apply', planId } : {}),
+    runId: env.runId, techId, dateStr, entries, result, check, verdict, closeGaps, ...(apply ? { mode: 'apply', planId } : {}),
   }));
   summary.days += 1;
   // Which current route the saving was measured against, and the planner's own figures, stay out of the table:
@@ -730,4 +865,6 @@ function applyDeps() {
 
 module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
-  loadDayStops, loadPref, legMin } };
+  loadDayStops, loadPref, legMin,
+  // The close-gaps measurement (owner 2026-11-18).
+  measureCloseGaps, homeKey } };
