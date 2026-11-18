@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Fills NULL start and end coordinates on mileage_log rows from the Bouncie GPS trail (GATE_MILEAGE_TRIP_COORDS).
+ * Fills NULL start and end coordinates on mileage_log rows from the Bouncie GPS trail.
  *
  * Why: Bouncie's trip-start and trip-end webhooks carry no location, and the trip-metrics event that creates the
  * mileage_log row carries none either, so every row was stored with NULL start_lat/start_lng/end_lat/end_lng. GPS
@@ -23,12 +23,11 @@
  *    NULL, which is today's state.
  *  - is_business, purpose, deduction and classification columns are never touched (the tax review stays
  *    suggestion-only, owner policy).
- *  - A write needs GATE_MILEAGE_TRIP_COORDS=true; a dry run reads and counts without it.
+ *  - A write needs apply: true; a dry run reads and counts without it.
  */
 const logger = require('./logger');
 const { loadTruckTrips, parsePayload } = require('./bouncie-truck-stops');
 const { firstPresent } = require('./bouncie-payload');
-const { mileageTripCoordsLive } = require('../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime, dateOnlyString } = require('../utils/datetime-et');
 
 const DEFAULT_BATCH_SIZE = 300;
@@ -213,14 +212,13 @@ async function processGroup(conn, group, totals, { apply, now }) {
  * Fills NULL trip coordinates from the trip-data log.
  * @param {object} conn knex
  * @param {{apply?:boolean, sinceDate?:string, tripId?:string, batchSize?:number, now?:number}} [opts]
- *   apply: write (needs the gate); default false = count only. sinceDate: YYYY-MM-DD lower bound on trip_date.
+ *   apply: write; default false = count only. sinceDate: YYYY-MM-DD lower bound on trip_date.
  *   tripId: only the row with this bouncie_trip_id.
- * @returns {Promise<{skipped?:string, candidates:number, rowsFilled:number, startFilled:number, endFilled:number,
+ * @returns {Promise<{candidates:number, rowsFilled:number, startFilled:number, endFilled:number,
  *   noPoints:number, noEndEvent:number, unsettled:number, noStartEvent:number, incompleteTrail:number}>}
  */
 async function fillTripCoordinates(conn, { apply = false, sinceDate = null, tripId = null, batchSize = DEFAULT_BATCH_SIZE, now = Date.now() } = {}) {
   const totals = { candidates: 0, rowsFilled: 0, startFilled: 0, endFilled: 0, noPoints: 0, noEndEvent: 0, unsettled: 0, noStartEvent: 0, incompleteTrail: 0 };
-  if (apply && !mileageTripCoordsLive()) return { skipped: 'gate_off', ...totals };
   for (let afterId = null; ;) {
     const rows = await loadCandidates(conn, { afterId, batchSize, sinceDate, tripId });
     if (!rows.length) break;
@@ -232,9 +230,8 @@ async function fillTripCoordinates(conn, { apply = false, sinceDate = null, trip
   return totals;
 }
 
-/** The last `days` ET days, for the daily cron. Gate off = no-op. Never throws. */
+/** The last `days` ET days, for the daily cron. Never throws. */
 async function fillRecentTripCoordinates(conn, { days = 3, now = Date.now() } = {}) {
-  if (!mileageTripCoordsLive()) return { skipped: 'gate_off' };
   try {
     const sinceDate = etDateString(addETDays(new Date(now), -days));
     const result = await fillTripCoordinates(conn, { apply: true, sinceDate, now });

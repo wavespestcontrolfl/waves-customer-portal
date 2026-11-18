@@ -33,12 +33,10 @@ const trip = (n, tripId, extra = {}) => ({
   is_business: false, purpose: 'unclassified', deduction_amount: 0, classification_method: 'needs_review', ...extra,
 });
 
-beforeEach(() => { nextLogId = 1; delete process.env.GATE_MILEAGE_TRIP_COORDS; });
-afterAll(() => { delete process.env.GATE_MILEAGE_TRIP_COORDS; });
+beforeEach(() => { nextLogId = 1; });
 
 describe('fillTripCoordinates', () => {
   test('start = earliest point, end = latest point, across batches that arrive out of order', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [
@@ -53,7 +51,6 @@ describe('fillTripCoordinates', () => {
   });
 
   test('fills only NULL pairs and never overwrites or touches classification columns', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [
         trip(1, 't1', { start_lat: 1.5, start_lng: 2.5 }),
@@ -76,7 +73,6 @@ describe('fillTripCoordinates', () => {
   });
 
   test('a trip with no trip-data, another vehicle or another trip id is left alone', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 'no-data'), trip(2, 't2')],
       log: [
@@ -90,20 +86,17 @@ describe('fillTripCoordinates', () => {
     expect(conn.tables.mileage_log.every((row) => row.start_lat == null && row.end_lat == null)).toBe(true);
   });
 
-  test('gate off: apply writes nothing; a dry run counts without writing', async () => {
+  test('a dry run counts without writing', async () => {
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [...bounds('t1', 0, 10), logRow('t1', [sample(0, 27.4, -82.5), sample(10, 27.5, -82.58)])],
     });
-    expect(await fillTripCoordinates(conn, { apply: true, now: NOW })).toMatchObject({ skipped: 'gate_off', rowsFilled: 0 });
-    expect(conn).not.toHaveBeenCalled();
     const dry = await fillTripCoordinates(conn, { now: NOW });
     expect(dry).toMatchObject({ candidates: 1, rowsFilled: 1, startFilled: 1, endFilled: 1 });
     expect(conn.tables.mileage_log[0].start_lat).toBeNull();
   });
 
   test('is idempotent and pages through rows in small batches', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1'), trip(2, 't2'), trip(3, 't3')],
       log: ['t1', 't2', 't3'].flatMap((id) => [...bounds(id, 0, 5), logRow(id, [sample(0, 27.4, -82.5), sample(5, 27.5, -82.6)])]),
@@ -115,7 +108,6 @@ describe('fillTripCoordinates', () => {
   });
 
   test('sinceDate and tripId narrow the candidates', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1', { trip_date: '2026-09-01' }), trip(2, 't2')],
       log: [logRow('t2', [sample(0, 27.4, -82.5)])],
@@ -130,7 +122,6 @@ describe('settled trips and complete trails', () => {
   const trail = [sample(0, 27.4, -82.5), sample(5, 27.45, -82.55), sample(10, 27.5, -82.6)];
 
   test('a trail missing its LAST batch writes nothing; once the batch arrives the next run fills the right end', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [boundaryRow('trip-start', 't1', NINE_PM), boundaryRow('trip-end', 't1', 10), logRow('t1', trail.slice(0, 2))],
@@ -145,7 +136,6 @@ describe('settled trips and complete trails', () => {
   });
 
   test('a trail missing its FIRST batch writes nothing; once the batch arrives the next run fills the right start', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [boundaryRow('trip-start', 't1', 0), boundaryRow('trip-end', 't1', 10), logRow('t1', trail.slice(1))],
@@ -158,7 +148,6 @@ describe('settled trips and complete trails', () => {
   });
 
   test('a trail within 3 minutes of the start and end events is complete', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [boundaryRow('trip-start', 't1', -2), boundaryRow('trip-end', 't1', 12), logRow('t1', trail)],
@@ -167,7 +156,6 @@ describe('settled trips and complete trails', () => {
   });
 
   test('a trip that ended under 2 hours ago is left for a later run, then filled', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [boundaryRow('trip-start', 't1', 0), boundaryRow('trip-end', 't1', 10), logRow('t1', trail)],
@@ -179,7 +167,6 @@ describe('settled trips and complete trails', () => {
   });
 
   test('a cross-midnight trip whose trip-end webhook is delayed is not filled at the 01:00 run, then is filled later', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     // 23:50 ET Oct 8 to 00:55 ET Oct 9 (03:50Z to 04:55Z), dated Oct 8; the cron runs at 01:00 ET (05:00Z).
     const iso = (hhmm) => `2026-10-09T${hhmm}:00Z`;
     const ms = (hhmm) => Date.parse(iso(hhmm));
@@ -209,7 +196,6 @@ describe('settled trips and complete trails', () => {
   });
 
   test('a trip whose trip-end event never arrives is never filled, however old', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [boundaryRow('trip-start', 't1', 0), logRow('t1', trail)],
@@ -221,7 +207,6 @@ describe('settled trips and complete trails', () => {
   });
 
   test('a trip with a trip-end event but no trip-start event is not filled', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = makeFakeDb({
       mileage: [trip(1, 't1')],
       log: [boundaryRow('trip-end', 't1', 10), logRow('t1', trail)],
@@ -247,14 +232,7 @@ describe('settled trips and complete trails', () => {
 });
 
 describe('fillRecentTripCoordinates', () => {
-  test('gate off is a no-op that does not touch the database', async () => {
-    const conn = makeFakeDb({ mileage: [trip(1, 't1')], log: [] });
-    expect(await fillRecentTripCoordinates(conn, { now: NOW })).toEqual({ skipped: 'gate_off' });
-    expect(conn).not.toHaveBeenCalled();
-  });
-
-  test('gate on fills recent settled trips', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
+  test('fills recent settled trips', async () => {
     const log = [...bounds('t1', 0, 5), logRow('t1', [sample(0, 27.4, -82.5), sample(5, 27.5, -82.6)])];
     const conn = makeFakeDb({ mileage: [trip(1, 't1')], log });
     expect(await fillRecentTripCoordinates(conn, { now: NOW })).toMatchObject({ candidates: 1, rowsFilled: 1 });
@@ -262,7 +240,6 @@ describe('fillRecentTripCoordinates', () => {
   });
 
   test('a database error never throws out of the daily entry point', async () => {
-    process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
     const conn = jest.fn(() => { throw new Error('db down'); });
     await expect(fillRecentTripCoordinates(conn, { now: NOW })).resolves.toMatchObject({ skipped: 'error' });
   });
