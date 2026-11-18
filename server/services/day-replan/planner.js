@@ -57,6 +57,10 @@ const DEFAULT_OPTIONS = Object.freeze({
   closeMin: 17 * 60,
   minSavingMin: 10,
   exactLimit: 9,
+  // The close-gaps P1 measurement's pack objective (owner 2026-11-18 *tune*). Set, the best plan is the one that ENDS
+  // earliest among plans driving at most this many minutes more than the current route (then less drive, fewer
+  // changes). Unset (the live plan): least drive first.
+  packAllowanceMin: null,
 });
 
 const MAX_LOCAL_PASSES = 500;
@@ -256,6 +260,12 @@ function compareIds(ctx, a, b) {
 
 /** Negative when plan a beats plan b. */
 function comparePlans(ctx, a, b) {
+  if (ctx.packLimit != null) {
+    const overA = a.driveMin > ctx.packLimit;
+    const overB = b.driveMin > ctx.packLimit;
+    if (overA !== overB) return overA ? 1 : -1;
+    if (a.endMin !== b.endMin) return a.endMin - b.endMin;
+  }
   if (a.driveMin !== b.driveMin) return a.driveMin - b.driveMin;
   if (a.endMin !== b.endMin) return a.endMin - b.endMin;
   const changed = changedCount(ctx, a) - changedCount(ctx, b);
@@ -283,7 +293,9 @@ function exhaustiveSearch(ctx) {
       if (taken[idx]) continue;
       const next = step(ctx, state, idx);
       // Strictly more: an equal prefix can still tie on drive and win on the later tie-breaks.
-      if (!next || (best && next.drive > best.driveMin)) continue;
+      // The pack objective prunes at its drive limit; the live rule at the best plan's drive.
+      const cap = ctx.packLimit != null ? ctx.packLimit : (best ? best.driveMin : Infinity);
+      if (!next || next.drive > cap) continue;
       taken[idx] = true;
       order.push(idx);
       slots[idx] = next.slot;
@@ -449,6 +461,7 @@ function planDay({ stops, origin, departureMin, legMin, options = {} }) {
   const ctx = buildContext(stops, origin, departureMin, legMin, options);
   const current = chooseCurrent(ctx, options.baselines);
   ctx.dayEndMin = current.endMin;
+  if (ctx.opts.packAllowanceMin != null) ctx.packLimit = current.driveMin + ctx.opts.packAllowanceMin;
   const found = ctx.n <= ctx.opts.exactLimit ? exhaustiveSearch(ctx) : localSearch(ctx);
   const best = found ? describePlan(ctx, found) : null;
   const verdict = decide(current, best, ctx.opts.minSavingMin);

@@ -299,25 +299,8 @@ function toldLockReason(row, { told, personPlaced, dayTold }) {
   return null;
 }
 
-/** One home of one customer: the property, else the service address. */
-function homeKey(row) {
-  const home = row.property_id
-    ? `p:${row.property_id}`
-    : `a:${String(row.service_address_line1 || '').trim().toLowerCase()}|${String(row.service_address_zip || '').trim()}`;
-  return `${row.customer_id}|${home}`;
-}
-
-/**
- * Live stops of this row's customer that day. The live lock counts them per customer; the close-gaps measurement
- * (P2, owner 2026-11-18) passes ctx.homeCounts and counts them per home instead. It only measures: no live caller
- * passes homeCounts.
- */
-function sameCustomerStops(row, ctx) {
-  return ctx.homeCounts ? ctx.homeCounts.get(homeKey(row)) : ctx.customerCounts.get(row.customer_id);
-}
-
 function fixedReason(row, ctx) {
-  const { dateStr, now, visitCounts, sent24 } = ctx;
+  const { dateStr, now, visitCounts, customerCounts, sent24 } = ctx;
   if (!MOVABLE_STATUSES.includes(row.status)) return 'status';
   if (row.reservation_expires_at) return 'hold';
   if (row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return 'staff_lock';
@@ -325,7 +308,7 @@ function fixedReason(row, ctx) {
   // keeps its time: an automatic re-time must never stand in for the office's approval (Codex #7555 P2).
   if (officeReviewPending(row)) return 'office_review_pending';
   if (row.visit_id != null && visitCounts.get(row.visit_id) > 1) return 'grouped';
-  if (row.customer_id != null && sameCustomerStops(row, ctx) > 1) return 'same_customer';
+  if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';
   if (sent24.has(row.id)) return 'reminder_24h_sent';
   // The 24-hour reminder carries the new hour; when it will not go out, nothing tells the customer. A context without
@@ -495,8 +478,8 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
 }
 
 /**
- * The planner and the app's simulation for one tech-day's entries: the live locks, or the close-gaps measurement's
- * per-home locks (P2). No database.
+ * The planner and the app's simulation for one tech-day's entries. env.plannerOptions: planner settings for the
+ * close-gaps P1 measurement (the pack objective); the live plan passes none. No database.
  */
 function planEntries(env, { rows, entries, blocks, origin, techId, dayContext }) {
   // Co-visit rows (one physical stop) are merged into one planner stop; the baselines name each group by its first row.
@@ -517,6 +500,7 @@ function planEntries(env, { rows, entries, blocks, origin, techId, dayContext })
       baselines: baselines.map((b) => ({ ...b, order: [...new Set(b.order.map((id) => leaderOf.get(String(id))))] })),
       firstHour: env.openMin / 60,
       closeMin: env.closeMin,
+      ...(env.plannerOptions || {}),
     },
   });
   // The app's own simulator has the last word on the planner's best plan.
@@ -528,16 +512,6 @@ function planEntries(env, { rows, entries, blocks, origin, techId, dayContext })
   const members = new Map(rowGroups.map((g) => [String(g[0].id), g.map((r) => r.id)]));
   const finalResult = { ...result, grandfathered: result.grandfathered.flatMap((id) => members.get(String(id)) || [id]) };
   return { rowGroups, stops, staleReasons, check, verdict, result: finalResult, plannerResult: result };
-}
-
-function countHomes(rows) {
-  const counts = new Map();
-  for (const row of rows) {
-    if (row.customer_id == null) continue;
-    const key = homeKey(row);
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-  return counts;
 }
 
 /**
@@ -558,29 +532,32 @@ const simsOf = (env, plan) => planSims({
 // A plan's promises hold: the live check's verdict, and again with the schedule blocks in the simulation.
 const keptWithBlocks = (plan, sims) => plan.check.planned?.kept === true && sims.plannedKept === true;
 
-/** P2: the same-customer lock counted per home. Null when no stop of the day had that lock. */
-async function measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }) {
-  const locked = (i) => plan.entries[i].why === 'same_customer';
-  if (!plan.entries.some((e, i) => locked(i))) return null;
-  const homeCtx = { ...plan.dayContext, homeCounts: countHomes(plan.dayContext.allRows) };
-  const entries = plan.entries.map((e, i) => (locked(i) ? { ...e, why: fixedReason(e.row, homeCtx) } : e));
-  // A fixed stop's customer window was never read (attachPrefs skips fixed stops); a freed one needs it, and an
-  // unreadable one stays fixed (pref_unknown), as in the live run.
-  await attachPrefs(conn, entries.filter((e, i) => locked(i) && !e.why));
-  const freed = entries.filter((e, i) => locked(i) && !e.why).map((e) => e.row.id);
-  const still = entries.filter((e, i) => locked(i) && e.why).map((e) => ({ id: e.row.id, why: e.why }));
-  if (!freed.length) return { freed, still, driveRuleAccepts: false, pack: null, packed: null, changes: [] };
-  // planEntries returns the plan without its inputs; the simulations below need the origin and the schedule blocks.
-  const alt = {
-    ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }),
-    origin: plan.origin, blocks: plan.blocks,
-  };
+/**
+ * P1's plan when the drive rule does not take the day (owner 2026-11-18 *tune*, after the replay test): the plan that
+ * ENDS earliest with no more drive than the current route (the planner's pack objective, packAllowanceMin 0).
+ */
+function packPlan(env, plan, { rows, techId }) {
+  const planned = planEntries({ ...env, plannerOptions: { packAllowanceMin: 0 } }, {
+    rows, entries: plan.entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext,
+  });
+  return { ...planned, origin: plan.origin, blocks: plan.blocks };
+}
+
+/**
+ * P1: the drive rule on the drive-best plan first (the live rule); else the pack plan, which P1 would accept when it
+ * keeps every promise, drives no more, ends no later and grows the biggest block by P1_MIN_GAIN.
+ */
+function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) {
+  const lunchLost = (fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
+  if (plan.verdict.accepted) {
+    const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
+    return { ...v, plan: 'drive', packed, lunchLost: lunchLost(packed), changes: [] };
+  }
+  const alt = packPlan(env, plan, { rows, techId });
   const altSims = simsOf(env, alt);
-  const packed = openTime(altSims.planned, bounds);
-  const pack = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
-  const driveRuleAccepts = alt.verdict.accepted && keptWithBlocks(alt, altSims);
-  const changes = driveRuleAccepts || pack.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
-  return { freed, still, driveRuleAccepts, pack, packed, changes };
+  const fig = openTime(altSims.planned, bounds);
+  const v = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
+  return { ...v, plan: 'pack', packed: fig, lunchLost: lunchLost(fig), changes: v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [] };
 }
 
 /**
@@ -612,15 +589,13 @@ async function measureCloseGaps(conn, env, plan, { rows, techId }) {
     const bounds = boundsOf(env, plan, techId);
     const sims = simsOf(env, plan);
     const nowFig = openTime(sims.current, bounds);
+    // The drive-best plan: the one the live apply writes (the morning notification reads it for an applied day).
     const packed = openTime(sims.planned, bounds);
-    const p1 = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: plan.verdict.accepted });
-    const lunchLost = !!(nowFig && nowFig.lunch && packed && !packed.lunch);
     return {
-      v: 1,
+      v: 2,
       now: nowFig,
       packed,
-      p1: { ...p1, lunchLost, changes: p1.wouldAccept ? hourChanges(plan.rowGroups, plan.result.best) : [] },
-      p2: await measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }),
+      p1: measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }),
       s1: replayRecentBookings({
         groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
         marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
@@ -867,4 +842,4 @@ module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, 
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
   loadDayStops, loadPref, legMin,
   // The close-gaps measurement (owner 2026-11-18).
-  measureCloseGaps, homeKey } };
+  measureCloseGaps } };

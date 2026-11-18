@@ -7,19 +7,25 @@
  *   now / packed  The open time of the day as booked, and of the night's best plan, from the app's own simulation:
  *                 the open start before the first stop (from the day's first hour), each wait between stops, the open
  *                 tail to the day's close, the biggest open block, the sellable minutes (blocks of SELLABLE_MIN or
- *                 more) and whether a lunch-length break is left.
- *   p1            "Accept a packed day": would the re-plan take the best plan if it also accepted one that drives no
- *                 more, ends no later, keeps every promise and makes the biggest open block P1_MIN_GAIN minutes
- *                 bigger? Measured on the plan the planner already finds (least drive, then the earlier end), not a
- *                 separate packing search.
- *   p2            "Same customer, different homes": the same-customer lock counted per home (./index.js).
+ *                 more), the job slots (room for a new job: SLOT_MIN) and whether a lunch-length break is left.
+ *   p1            "Accept a packed day": the drive rule on the drive-best plan first; when it does not take the day,
+ *                 the plan that ends earliest with no more drive (the planner's pack objective, ./index.js packPlan),
+ *                 accepted when it keeps every promise, ends no later and makes the biggest open block P1_MIN_GAIN
+ *                 minutes bigger. p1.packed is that plan's open time.
  *   s1            "Book into a block": each stop booked in the last 24 hours, replayed over the whole hours of its day
  *                 with the rest of the day as booked (see replayBooking).
+ *
+ * The replay test of 2026-11-18 (owner *tune*: 49 tech-days, 11 held out) set three of these: the pack plan for P1
+ * (more open time with half the hour changes of the drive-best plan), the job-slots rank for S1 (see replayBooking),
+ * and job slots. The same-home lock (P2) freed no stop in 49 days and was removed.
  *   gaps          Each wait of NOTE_MIN minutes or more left in the day as booked, with the lock on the stop after it.
  */
 const { planSequence, simulate, promisesKept } = require('./app-sim');
 
 const SELLABLE_MIN = 60;
+// A job slot: room for one new job, 80 open minutes (the median job is 60 minutes, and a job added to the day adds
+// one drive, about 19 minutes on the average leg). A block holds floor(minutes / SLOT_MIN) jobs.
+const SLOT_MIN = 80;
 const NOTE_MIN = 15;
 const P1_MIN_GAIN = 30;
 const S1_DRIVE_ALLOWANCE_MIN = 5;
@@ -53,10 +59,6 @@ function minusUnavailable(blocks, unavailable = []) {
 }
 
 /**
- * The open blocks of one simulated day: the open start, each wait between stops, and the open tail, less the
- * unavailable intervals in bounds.unavailable.
- */
-/**
  * When the van sets off for the next stop: as soon as it is free, unless the drive would cross a schedule block;
  * then after that block (the simulator's own rule, route-reorder-window-fit.js advanceSim).
  */
@@ -71,6 +73,9 @@ function departAfter(freeMin, driveMin, driveBlocks) {
 }
 
 /**
+ * The open blocks of one simulated day: the open start, each wait between stops, and the open tail, less the
+ * unavailable intervals in bounds.unavailable. Every block is clipped to the working day [openMin, closeMin]: a stop
+ * booked before 8 AM or after 5 PM leaves no sellable time outside those hours (pre-push audit, tune PR).
  * driveBlocks: the schedule blocks the simulation ran with (planSims / tryStart). A drive they delay is placed where
  * the van really drives, so the open time is the time before the drive and the time after it (Codex #7935 r2).
  */
@@ -82,15 +87,15 @@ function openBlocks(sim, { departureMin, openMin, closeMin, unavailable, driveBl
     const drive = a.driveMin || 0;
     const depart = departAfter(prevDeparture, drive, sorted);
     const kind = i === 0 ? 'start' : 'wait';
-    // The first stop: the van cannot start a job before the day's first hour, so the open start counts from there.
-    const clip = (from) => (i === 0 ? Math.max(from, openMin) : from);
-    const pieces = [[clip(prevDeparture), depart], [clip(depart + drive), a.arrivalMin]];
+    // No job starts before the day's first hour or runs past its last: only the working day counts.
+    const pieces = [[prevDeparture, depart], [depart + drive, a.arrivalMin]]
+      .map(([from, to]) => [Math.max(from, openMin), Math.min(to, closeMin)]);
     for (const [from, to] of pieces) if (to > from) blocks.push({ kind, startMin: from, min: to - from, before: a.id });
     // A co-visit continuation leaves no earlier than its sibling; the clock never runs backwards.
     prevDeparture = Math.max(prevDeparture, a.departureMin);
   });
-  const tail = closeMin - sim.serviceFinishMin;
-  if (tail > 0) blocks.push({ kind: 'tail', startMin: sim.serviceFinishMin, min: tail, before: null });
+  const tailStart = Math.max(sim.serviceFinishMin, openMin);
+  if (closeMin > tailStart) blocks.push({ kind: 'tail', startMin: tailStart, min: closeMin - tailStart, before: null });
   return minusUnavailable(blocks, unavailable);
 }
 
@@ -107,13 +112,13 @@ function openTime(sim, bounds) {
     waitMin: round(sum(blocks.filter((b) => b.kind === 'wait'), (b) => b.min)),
     biggestMin: round(blocks.reduce((max, b) => Math.max(max, b.min), 0)),
     sellableMin: round(sum(blocks.filter((b) => b.min >= SELLABLE_MIN), (b) => b.min)),
+    slots: sum(blocks, (b) => Math.floor(b.min / SLOT_MIN)),
     lunch: blocks.some((b) => lunchOverlap(b) >= LUNCH.needMin),
     blocks: blocks.filter((b) => b.min >= NOTE_MIN).slice(0, MAX_BLOCKS)
       .map((b) => ({ kind: b.kind, start: round(b.startMin), min: round(b.min), before: b.before })),
   };
 }
 
-/** Simulations of the day as booked and of the planner's best plan (null where it has none). */
 /** Schedule blocks the simulator can take (it refuses the whole day on one malformed interval). */
 const serviceBlocks = (blocks) => (blocks || [])
   .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin)
@@ -204,23 +209,24 @@ function tryStart(input, startMin) {
   const sim = simulate(seq, { origin, departureMin: bounds.departureMin, blockedIntervals: serviceBlocks(input.blocks) });
   if (!sim || !promisesKept(sim, seq, marginMin)) return null;
   const fig = openTime(sim, bounds);
-  return { start: hhmm(startMin), startMin, driveMin: fig.driveMin, waitMin: fig.waitMin, sellableMin: fig.sellableMin, biggestMin: fig.biggestMin };
+  return { start: hhmm(startMin), startMin, driveMin: fig.driveMin, waitMin: fig.waitMin, sellableMin: fig.sellableMin, biggestMin: fig.biggestMin, slots: fig.slots };
 }
 
 const prefOk = (pref, startMin) => !pref || (startMin >= pref.startMin && startMin < pref.endMin);
 const strip = (fit) => (fit ? {
-  start: fit.start, driveMin: fit.driveMin, waitMin: fit.waitMin, sellableMin: fit.sellableMin, biggestMin: fit.biggestMin,
+  start: fit.start, driveMin: fit.driveMin, waitMin: fit.waitMin, sellableMin: fit.sellableMin, biggestMin: fit.biggestMin, slots: fit.slots,
 } : null);
 
 /**
  * S1 for one stop booked in the last 24 hours, with the rest of the day as booked: the time it was booked at, the
  * whole hour with the least drive (today's picker ranks by added drive; only hours the planner's occupancy rule
  * leaves free, see hourFree), and the hour a block-aware picker would
- * offer, which is, within S1_DRIVE_ALLOWANCE_MIN of that least drive, the hour that front-loads the day ("even front
- * load jobs"): the least waiting between stops, then the biggest open block, then less drive, then earlier. Waiting
- * comes first because the biggest block alone would push a job to the end of the day and leave the wait at midday;
- * the sellable total alone cannot tell a 6-hour afternoon from one split 4 + 2. Hours outside the stop's customer
- * window are not tried.
+ * offer, which is, within S1_DRIVE_ALLOWANCE_MIN of that least drive, the hour that leaves the most job slots to
+ * sell (SLOT_MIN), then the least waiting (front-load: "even front load jobs"), then the biggest open block, then less
+ * drive, then earlier. Replay test 2026-11-18, 87 replays, 20 held out: least waiting first lost job slots on the
+ * tuned days, and the biggest block first pushed a job to the end of the day whenever two hours left about the same
+ * block (a minute of rounding decided). Slots first gained the most slots on both sets and still drove less than the
+ * booked hours. Hours outside the stop's customer window are not tried.
  */
 function replayBooking(input) {
   const { group, pref, bounds } = input;
@@ -237,7 +243,7 @@ function replayBooking(input) {
   if (!tried.length) return { ...base, leastDrive: null, s1: null, differs: false };
   const leastDrive = [...tried].sort((a, b) => a.driveMin - b.driveMin || a.startMin - b.startMin)[0];
   const s1 = tried.filter((t) => t.driveMin <= leastDrive.driveMin + S1_DRIVE_ALLOWANCE_MIN)
-    .sort((a, b) => a.waitMin - b.waitMin || b.biggestMin - a.biggestMin || a.driveMin - b.driveMin || a.startMin - b.startMin)[0];
+    .sort((a, b) => b.slots - a.slots || a.waitMin - b.waitMin || b.biggestMin - a.biggestMin || a.driveMin - b.driveMin || a.startMin - b.startMin)[0];
   return { ...base, leastDrive: strip(leastDrive), s1: strip(s1), differs: s1.startMin !== bookedMin };
 }
 
@@ -264,6 +270,6 @@ function replayRecentBookings({ groups, prefById, now, ...rest }) {
 
 module.exports = {
   openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
-  SELLABLE_MIN, P1_MIN_GAIN, S1_DRIVE_ALLOWANCE_MIN,
+  SELLABLE_MIN, SLOT_MIN, P1_MIN_GAIN, S1_DRIVE_ALLOWANCE_MIN,
   _internals: { openBlocks, minusUnavailable, replayBooking, recentlyBooked, lastHour, tryStart, hourFree, departAfter },
 };

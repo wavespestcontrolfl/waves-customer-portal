@@ -29,9 +29,9 @@ const NOW = new Date('2026-11-18T12:05:00Z'); // 07:05 ET
 const TECH = '00000000-0000-4000-8000-000000000001';
 
 const rec = (blocks, extra = {}) => ({
-  v: 1,
+  v: 2,
   now: { driveMin: 90, endMin: 900, waitMin: 60, biggestMin: Math.max(0, ...blocks.map((b) => b.min)), sellableMin: blocks.filter((b) => b.min >= 60).reduce((n, b) => n + b.min, 0), lunch: true, blocks },
-  packed: null, p1: { wouldAccept: false, reason: 'small_gain', gainMin: 0, lunchLost: false, changes: [] }, p2: null, s1: [], gaps: [],
+  packed: null, p1: { plan: 'pack', packed: null, wouldAccept: false, reason: 'small_gain', gainMin: 0, lunchLost: false, changes: [] }, s1: [], gaps: [],
   ...extra,
 });
 const tail = (start, min) => ({ kind: 'tail', start, min, before: null });
@@ -92,14 +92,24 @@ describe('the copy', () => {
     expect(out.metadata).toMatchObject({ severity: 'needs-you', who: 'person', subject: { type: 'check', id: 'open-blocks' } });
   });
 
-  test('the why adds what re-timing would free when a measured rule frees an hour or more', () => {
-    const packed = { ...rec([tail(600, 420)]).now };
+  test('the why adds what re-timing would free when P1 frees an hour or more: P1\'s own plan (record v2)', () => {
+    const packPlan = { ...rec([tail(600, 420)]).now };
+    const driveBest = { ...rec([tail(660, 360)]).now };
     const withGain = _internals.summarize([{
       technician_id: TECH, day: '2026-11-21',
-      close_gaps: rec([tail(695, 325)], { packed, p1: { wouldAccept: true, reason: 'bigger_block', gainMin: 95, lunchLost: false, changes: [] } }),
+      close_gaps: rec([tail(695, 325)], { packed: driveBest, p1: { plan: 'pack', packed: packPlan, wouldAccept: true, reason: 'bigger_block', gainMin: 95, lunchLost: false, changes: [] } }),
     }], new Map());
     expect(withGain.freedMin).toBe(95);
     expect(composeAdminAlert(_internals.alertSpec(withGain)).why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM; re-timing booked jobs could free 1 h 35 min more.');
+  });
+
+  test('a record from before the replay test (v1) measured P1 on the drive-best plan', () => {
+    const packed = { ...rec([tail(600, 420)]).now };
+    const v1 = _internals.summarize([{
+      technician_id: TECH, day: '2026-11-21',
+      close_gaps: { ...rec([tail(695, 325)], { packed, p1: { wouldAccept: true, reason: 'bigger_block', gainMin: 95, lunchLost: false, changes: [] } }), v: 1, p2: null },
+    }], new Map());
+    expect(v1.freedMin).toBe(95);
   });
 
   test('a day the 04:40 run re-timed is read as re-timed: its planned blocks, and no gain counted twice', () => {
@@ -112,16 +122,35 @@ describe('the copy', () => {
     expect(applied.freedMin).toBe(0);
   });
 
+  test('a block of an hour that is short of 80 minutes says so', () => {
+    const short = _internals.summarize([{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(960, 60)]) }], new Map([[TECH, 'Pat']]));
+    expect(short.slots).toBe(0);
+    expect(_internals.detailText(short)).toContain('(1 h, short of a job and its drive)');
+    expect(_internals.detailText(short)).toContain('Room for 0 new jobs');
+  });
+
   test('the detail lists each block with its technician and the measuring line', () => {
     const text = _internals.detailText(sum);
-    expect(text).toContain('- Thu Nov 19, Pat: 1:35 PM to 5:00 PM (3 h 25 min)');
-    expect(text).toContain('- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min)');
+    // Job slots: 205 and 325 open minutes hold 2 and 4 new jobs of 80 minutes (a 1-hour job and its drive).
+    expect(sum.slots).toBe(6);
+    expect(text).toContain('Room for 6 new jobs: each needs 80 free minutes (a 1-hour job and its drive).');
+    expect(text).toContain('- Thu Nov 19, Pat: 1:35 PM to 5:00 PM (3 h 25 min, room for 2 jobs)');
+    expect(text).toContain('- Sat Nov 21, Pat: 11:35 AM to 5:00 PM (5 h 25 min, room for 4 jobs)');
     expect(text).not.toContain('9:05 AM');
     expect(text).toContain('Measuring only (no visit changes)');
   });
 });
 
 describe('runOpenBlocksAlert', () => {
+  test('a morning row that is not written fails the tick and leaves the earlier rows open', async () => {
+    openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    closeAdminAlertKeys.mockClear();
+    const { conn } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }], assignable: [{ id: TECH }], services: busyWeek() });
+    await expect(runOpenBlocksAlert({ conn, now: NOW })).rejects.toThrow('open-blocks row not written');
+    expect(closeAdminAlertKeys).not.toHaveBeenCalled();
+  });
+
   test('raises one row keyed to this morning and closes an earlier morning\'s row', async () => {
     openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17', 'open-blocks:2026-11-18']);
     const { conn, calls } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }], assignable: [{ id: TECH }], services: busyWeek() });
@@ -255,12 +284,21 @@ describe('days the re-plan does not plan (no stop, or one): open hours by the bo
     const [, spec2, opts2] = raiseAdminAlert.mock.calls[0];
     // Five empty working days (Thu, Fri, Mon, Tue, Wed) of 9 hours each, plus Saturday's 5 h 25 min.
     expect(spec2.action).toBe('sell 50 open hours in the next 7 days');
-    expect(opts2.detail).toContain('- Thu Nov 19, Pat: 8:00 AM to 5:00 PM (9 h, no stops booked)');
+    expect(opts2.detail).toContain('- Thu Nov 19, Pat: 8:00 AM to 5:00 PM (9 h, room for 6 jobs, no stops booked)');
   });
 
   test('a failed read of those days still raises the planned days', async () => {
     const { conn } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }] });
     getBlackoutDates.mockRejectedValueOnce(new Error('settings down'));
     await expect(runOpenBlocksAlert({ conn, now: NOW })).resolves.toMatchObject({ status: 'raised', openMin: 325 });
+  });
+
+  test('a failed read with no planned block measured nothing: the tick fails and the earlier rows stay open', async () => {
+    openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
+    closeAdminAlertKeys.mockClear();
+    const { conn } = fakeConn({ rows: [] });
+    getBlackoutDates.mockRejectedValueOnce(new Error('settings down'));
+    await expect(runOpenBlocksAlert({ conn, now: NOW })).rejects.toThrow('day rules unread');
+    expect(closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 });

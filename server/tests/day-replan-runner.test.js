@@ -525,84 +525,42 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     expect(inserts).toHaveLength(1);
     expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'saving_below_floor', changes: '[]' });
     const rec = record(inserts[0]);
-    expect(rec.v).toBe(1);
-    expect(rec.packed.driveMin).toBeLessThanOrEqual(rec.now.driveMin);
-    expect(rec.packed.endMin).toBeLessThan(rec.now.endMin);
-    expect(rec.packed.biggestMin).toBeGreaterThanOrEqual(rec.now.biggestMin + 30);
-    expect(rec.p1).toMatchObject({ wouldAccept: true, reason: 'bigger_block', lunchLost: false });
+    expect(rec.v).toBe(2);
+    // P1's plan is the pack plan (ends earliest at no extra drive), not the drive-best one.
+    expect(rec.p1).toMatchObject({ plan: 'pack', wouldAccept: true, reason: 'bigger_block', lunchLost: false });
+    expect(rec.p1.packed.driveMin).toBeLessThanOrEqual(rec.now.driveMin);
+    expect(rec.p1.packed.endMin).toBeLessThan(rec.now.endMin);
+    expect(rec.p1.packed.biggestMin).toBeGreaterThanOrEqual(rec.now.biggestMin + 30);
+    expect(rec.p1.packed.slots).toBeGreaterThan(rec.now.slots);
     expect(rec.p1.changes.map((c) => c.id).sort()).toEqual(['b', 'c']);
     expect(rec.gaps.map((g) => [g.before, g.why])).toEqual([['b', null], ['c', null]]);
-    expect(rec.p2).toBeNull();
+    expect(rec).not.toHaveProperty('p2');
     expect(rec.s1).toEqual([]);
     // Measuring only: the run never wrote a visit.
     expect(calls.filter(([table, op]) => table === 'scheduled_services' && ['update', 'insert', 'del'].includes(op))).toEqual([]);
   });
 
-  test('P2: one customer\'s stops at two homes are freed when the lock is counted per home; at one home they stay fixed', async () => {
-    const twoHomes = [
-      row('a', 0.020, 8, { customer_id: 'cust-x', property_id: 'prop-1' }),
-      row('b', 0.021, 14, { customer_id: 'cust-x', property_id: 'prop-2' }),
-      row('c', 0.022, 10),
-    ];
-    let { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes } });
-    await runDayReplanIfEnabled({ now: NOW, conn });
-    let rec = record(inserts[0]);
-    expect(JSON.parse(inserts[0].row.fixed).map((f) => [f.id, f.why])).toEqual([['a', 'same_customer'], ['b', 'same_customer']]);
-    expect(rec.p2.freed.sort()).toEqual(['a', 'b']);
-    expect(rec.p2.still).toEqual([]);
-    expect(rec.p2.packed).not.toBeNull();
-
-    const oneHome = twoHomes.map((r) => (r.customer_id === 'cust-x' ? { ...r, property_id: 'prop-1' } : r));
-    ({ conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: oneHome } }));
-    await runDayReplanIfEnabled({ now: NOW, conn });
-    rec = record(inserts[0]);
-    expect(rec.p2).toMatchObject({ freed: [], packed: null, changes: [] });
-    expect(rec.p2.still.map((s) => s.why)).toEqual(['same_customer', 'same_customer']);
-  });
-
-  test('every close-gaps simulation gets the day\'s schedule blocks, the per-home (P2) one included (Codex #7935)', async () => {
+  test('the pack plan is simulated with the day\'s schedule blocks, as the drive-best plan is (Codex #7935)', async () => {
     const { planSims } = require('../services/day-replan/close-gaps');
     planSims.mockClear();
-    const twoHomes = [
-      row('a', 0.020, 8, { customer_id: 'cust-x', property_id: 'prop-1' }),
-      row('b', 0.021, 14, { customer_id: 'cust-x', property_id: 'prop-2' }),
-      row('c', 0.022, 10),
-    ];
+    const rows = [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
     const block = { id: 'blk', technician_id: TECH, start_time: '12:00:00', end_time: '13:00:00', block_type: 'blocked' };
-    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes }, blocks: [block] });
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, blocks: [block] });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(record(inserts[0]).p2.freed.sort()).toEqual(['a', 'b']);
-    // One call for the day as planned, one for the per-home plan.
+    expect(record(inserts[0]).p1.plan).toBe('pack');
+    // One call for the drive-best plan, one for the pack plan.
     expect(planSims).toHaveBeenCalledTimes(2);
     for (const [args] of planSims.mock.calls) expect(args.blocks).toEqual([expect.objectContaining({ startMin: 720, endMin: 780 })]);
   });
 
-  test('P2: a freed stop\'s customer window is read before the day is re-planned; an unreadable one stays fixed', async () => {
-    const twoHomes = [
-      row('a', 0.020, 8, { customer_id: 'cust-x', property_id: 'prop-1' }),
-      row('b', 0.021, 14, { customer_id: 'cust-x', property_id: 'prop-2' }),
-      row('c', 0.022, 10),
-    ];
-    getCustomerSchedulingPreferences.mockImplementation(async (customerId) => (customerId === 'cust-x'
-      ? { preferred_time_window: { startMin: 13 * 60, endMin: 17 * 60 } } : { preferred_time_window: null }));
-    let { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes } });
+  test('a day the drive rule takes is not re-planned for P1: the drive-best plan is the one the live rule writes', async () => {
+    const { planSims } = require('../services/day-replan/close-gaps');
+    planSims.mockClear();
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    let rec = JSON.parse(inserts[0].row.close_gaps);
-    expect(getCustomerSchedulingPreferences.mock.calls.filter(([id]) => id === 'cust-x')).toHaveLength(2);
-    // The afternoon-only customer's stops are never moved into the morning (stop c has no window).
-    const theirs = rec.p2.changes.filter((c) => ['a', 'b'].includes(c.id));
-    expect(theirs.length).toBeGreaterThan(0);
-    for (const c of theirs) expect(Number(c.to.slice(0, 2))).toBeGreaterThanOrEqual(13);
-
-    getCustomerSchedulingPreferences.mockImplementation(async (customerId) => {
-      if (customerId === 'cust-x') throw new Error('prefs down');
-      return { preferred_time_window: null };
-    });
-    ({ conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes } }));
-    await runDayReplanIfEnabled({ now: NOW, conn });
-    rec = JSON.parse(inserts[0].row.close_gaps);
-    expect(rec.p2).toMatchObject({ freed: [], packed: null });
-    expect(rec.p2.still.map((x) => x.why)).toEqual(['pref_unknown', 'pref_unknown']);
+    expect(inserts[0].row.accepted).toBe(true);
+    expect(record(inserts[0]).p1).toMatchObject({ plan: 'drive', wouldAccept: false, reason: 'drive_rule_accepts', changes: [] });
+    expect(planSims).toHaveBeenCalledTimes(1);
   });
 
   test('a stop booked in the last 24 hours is replayed over its day\'s hours', async () => {
