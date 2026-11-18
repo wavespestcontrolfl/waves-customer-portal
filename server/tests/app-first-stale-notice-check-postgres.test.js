@@ -53,6 +53,10 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
       expect(await find(trx, (await seed(trx, {})).visitId)).toHaveLength(0);
       expect(await find(trx, (await seed(trx, { stamp: daysBefore(39, PUSH_AT).toISOString(), requestedChannel: 'push' })).visitId)).toHaveLength(0);
       expect(await find(trx, (await seed(trx, { stamp: 'not-a-date' })).visitId)).toHaveLength(0);
+      // An impossible calendar date next to a valid stale row: only the valid one is reported, and nothing throws.
+      const impossible = await seed(trx, { stamp: '2026-02-31T12:00:00Z' });
+      expect(await find(trx, impossible.visitId)).toHaveLength(0);
+      expect(await find(trx, stale.visitId)).toHaveLength(1);
     } finally {
       await trx.rollback();
     }

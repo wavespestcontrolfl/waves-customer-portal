@@ -28,11 +28,12 @@ const notificationsRoute = require('../routes/notifications');
 
 const { notificationPrefsDbUpdates, loadPreferencePayload, settleShownAppChoices, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
 
-const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
+const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS', 'GATE_APP_FIRST_STALE_TEXT'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   ENV_KEYS.forEach((k) => { process.env[k] = 'true'; });
+  delete process.env.GATE_APP_FIRST_STALE_TEXT;
   mockCustomerStatus.mockReset();
   mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
   resolvePrimaryProfileId.mockResolvedValue('primary-1');
@@ -183,6 +184,37 @@ describe('GET payload: App is shown for an untouched Text default', () => {
     const payload = await loadPreferencePayload(req());
     expect(payload.serviceReminder24hChannel).toBe('push');
     expect(payload.paymentConfirmationChannel).toBe('sms');
+  });
+
+  describe('GATE_APP_FIRST_STALE_TEXT: the page shows what routing will do for a phone not opened in 30 days', () => {
+    // Reachable only when no floor is asked for: the holder's only phone was last seen 40 days ago.
+    const staleOnly = (_id, _db, opts = {}) => ({ enabled: true, registered: true, fresh: false, reachable: !opts.reachableSince });
+
+    test('both gates on: the stored Text shows, and the status read carried the 30 day floor', async () => {
+      process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+      mockCustomerStatus.mockImplementation(staleOnly);
+      mockRows({ own: defaults, primary: defaults });
+      const payload = await loadPreferencePayload(req());
+      for (const key of KEYS) expect(payload[key]).toBe('sms');
+      const opts = mockCustomerStatus.mock.calls[0][2];
+      expect(Math.abs(Date.now() - opts.reachableSince.getTime() - 30 * 86400000)).toBeLessThan(60000);
+    });
+
+    test('both gates on: an App save is not dropped as an echo of a page that showed Text', async () => {
+      process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+      mockCustomerStatus.mockImplementation(staleOnly);
+      const updates = { enRouteChannel: 'push' };
+      expect(await settleShownAppChoices({ customerId: 'c-1', query: { appPreferences: '1' } }, updates, {})).toBe(false);
+      expect(updates).toEqual({ enRouteChannel: 'push' });
+    });
+
+    test('new gate off: App shows as today and no floor is asked for', async () => {
+      mockCustomerStatus.mockImplementation(staleOnly);
+      mockRows({ own: defaults, primary: defaults });
+      const payload = await loadPreferencePayload(req());
+      for (const key of KEYS) expect(payload[key]).toBe('push');
+      expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
+    });
   });
 
   test.each([

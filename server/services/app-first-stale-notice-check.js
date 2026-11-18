@@ -47,32 +47,44 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// One row per stale-stamped push in the window. The stamp is cast only when it
-// is an ISO timestamp (no `?` in the pattern: knex reads it as a binding; inside a CASE, so one malformed value cannot fail the
-// query). Bindings, in order: window start, stale days.
-const ISO_STAMP = '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+){0,1}(Z|[+-][0-9]{2}:[0-9]{2})$';
-const STALE_PUSHES_SQL = `
-  WITH stamped AS (
-    SELECT l.id, l.customer_id, l.created_at, l.message_type,
-           NULLIF(l.metadata->>'scheduled_service_id', '') AS visit_id,
-           CASE WHEN l.metadata->>'app_checked_in_at' ~ '${ISO_STAMP}'
-                THEN (l.metadata->>'app_checked_in_at')::timestamptz END AS checked_in_at
-      FROM sms_log l
-     WHERE l.direction = 'outbound'
-       AND l.from_phone = 'push'
-       AND l.created_at >= ?::timestamptz
-       AND l.metadata->>'requestedChannel' = 'sms'
-       AND l.metadata->>'app_checked_in_at' IS NOT NULL
-  )
-  SELECT st.id, st.customer_id, st.created_at, st.message_type, st.visit_id, st.checked_in_at,
-         floor(extract(epoch FROM (st.created_at - st.checked_in_at)) / 86400)::int AS days_since_app_use,
+// One row per automatic app push in the window that carries a stamp. The stamp
+// comes back as text and is read in JS (staleRows), so one malformed value can
+// never fail the query. Bindings: window start.
+const STAMPED_PUSHES_SQL = `
+  SELECT l.id, l.customer_id, l.created_at, l.message_type,
+         NULLIF(l.metadata->>'scheduled_service_id', '') AS visit_id,
+         l.metadata->>'app_checked_in_at' AS app_checked_in_at,
          ss.scheduled_date::text AS scheduled_date,
          c.first_name, c.last_name
-    FROM stamped st
-    LEFT JOIN scheduled_services ss ON ss.id::text = st.visit_id
-    LEFT JOIN customers c ON c.id = st.customer_id
-   WHERE st.checked_in_at < st.created_at - (? * interval '1 day')
-   ORDER BY st.created_at`;
+    FROM sms_log l
+    LEFT JOIN scheduled_services ss ON ss.id::text = l.metadata->>'scheduled_service_id'
+    LEFT JOIN customers c ON c.id = l.customer_id
+   WHERE l.direction = 'outbound'
+     AND l.from_phone = 'push'
+     AND l.created_at >= ?::timestamptz
+     AND l.metadata->>'requestedChannel' = 'sms'
+     AND l.metadata->>'app_checked_in_at' IS NOT NULL
+   ORDER BY l.created_at`;
+
+// A stamp counts only when it is an ISO date that survives a round trip: V8 reads
+// 2026-02-31 as Mar 3, so the date part must match (routing writes toISOString).
+function stampMs(stamp) {
+  const text = String(stamp ?? '');
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === text.slice(0, 10) ? ms : null;
+}
+
+// Rows whose stamp is valid and more than STALE_DAYS before the push, with the
+// whole days between them.
+function staleRows(rows) {
+  const stale = [];
+  for (const row of rows) {
+    const checkedIn = stampMs(row.app_checked_in_at);
+    const gapMs = checkedIn == null ? 0 : new Date(row.created_at).getTime() - checkedIn;
+    if (gapMs > STALE_DAYS * 86400000) stale.push({ ...row, days_since_app_use: Math.floor(gapMs / 86400000) });
+  }
+  return stale;
+}
 
 // One item per visit (or per row with no visit): the notice types joined, the
 // oldest stamp's days since app use.
@@ -91,8 +103,8 @@ function groupByVisit(pushRows) {
 
 async function findStaleAppNoticeVisits({ database = db, now = new Date() } = {}) {
   const windowStart = new Date(now.getTime() - PUSH_WINDOW_HOURS * 3600 * 1000);
-  const result = await database.raw(STALE_PUSHES_SQL, [windowStart, STALE_DAYS]);
-  return groupByVisit(result?.rows || []);
+  const result = await database.raw(STAMPED_PUSHES_SQL, [windowStart]);
+  return groupByVisit(staleRows(result?.rows || []));
 }
 
 const who = (row) => {
@@ -162,7 +174,8 @@ async function postStaleAppNoticeDigest(rows) {
       sendEmail: () => sendMail({ subject, html, text }),
     });
   } catch (err) {
-    logger.error(`[app-first-stale-notice] digest send failed: ${err.message}`);
+    // A controlled code only: the mail provider's message can hold an address.
+    logger.error(`[app-first-stale-notice] digest send failed: ${err.code || err.statusCode || 'send_failed'}`);
     return { sent: false, error: true };
   }
 }
@@ -184,6 +197,7 @@ async function runAppFirstStaleNoticeCheck({ database = db, now = new Date() } =
 module.exports = {
   OPS_DIGEST_KEY,
   STALE_DAYS,
+  staleRows,
   groupByVisit,
   findStaleAppNoticeVisits,
   postStaleAppNoticeDigest,

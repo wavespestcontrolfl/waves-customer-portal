@@ -1051,6 +1051,8 @@ module.exports = {
   PUSH_ROUTING_POLICY,
   APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
+  // the settings page shares routing's stale-app floor (null while GATE_APP_FIRST_STALE_TEXT is off)
+  staleTextFloor,
   // exported for tests
   _test: { APP_FIRST_STALE_DAYS, pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };
