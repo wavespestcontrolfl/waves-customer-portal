@@ -177,6 +177,9 @@ maybeDescribe('older-key text alerts that reopen (live Postgres)', () => {
       const standing = await alertRow(open[0]);
       expect([...meta(standing).commitment_ids].sort()).toEqual([closedPromise.id, openPromise.id].sort());
       expect(meta(standing).dedupeKey).toBe(customerKey(text.customerId));
+      // The Reopen's 72-hour hold goes with the promises to the row that stands.
+      expect(meta(standing).quietHoldFrom).toBe(meta(await alertRow(old.id)).quietHoldFrom);
+      expect(meta(standing).quietHoldFrom).toBeTruthy();
       const folded = await alertRow(open[0] === own.id ? old.id : own.id);
       expect([folded.done_by, folded.resolution]).toEqual(['supersede', 'Replaced by one alert for this customer']);
     });

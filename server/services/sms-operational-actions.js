@@ -1442,6 +1442,13 @@ async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = 
     }
     // Two alerts for one customer fold into one, as for any other pair of rows; the one that stands lists them all.
     const { stands, known } = await foldCustomerAlerts(trx, { customerId, ids: group.flatMap(({ meta }) => listedOn(meta)) });
+    // The Reopen's 72-hour hold (metadata.quietHoldFrom) goes with the promises to the row that stands, so the quiet
+    // fall-off does not close the restored promises early.
+    const hold = group.map(({ meta }) => meta.quietHoldFrom).filter(Boolean).sort().pop();
+    if (stands && hold) {
+      await trx('notifications').where({ id: stands.id }).whereRaw("COALESCE(metadata->>'quietHoldFrom', '') < ?", [hold])
+        .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ quietHoldFrom: hold })]) });
+    }
     const members = stands ? await needingAlert(trx, known, customerId, now) : [];
     if (members.length) await writeCustomerAlert(trx, { customerId, members, stands, verdict: { verdict: 'open' }, refreshOnly: true });
   }
