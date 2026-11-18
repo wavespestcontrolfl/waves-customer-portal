@@ -140,6 +140,7 @@ async function holdUnverifiedLead({ intake, leadSourceId = null, reason = 'missi
     ...(intake.additionalProperties && intake.additionalProperties.length
       ? { additional_properties: intake.additionalProperties } : {}),
     ...(intake.signHost ? { sign_host: intake.signHost } : {}),
+    source_evidence: intake.sourceEvidence || null,
   };
 
   const result = await db.transaction(async (trx) => {

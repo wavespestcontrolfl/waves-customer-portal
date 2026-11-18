@@ -4385,7 +4385,17 @@ DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and
-independently of `heard_about`, the SAME technically-observed attribution
+independently of `heard_about`, website forms, quotes and self-booking can
+send the optional boolean `attribution.observed`. Only literal `true` with
+an empty referrer and no campaign signal can classify an entry as Direct.
+Older payloads may omit the marker. The server derives the staff-facing
+`source_evidence` from the submitted first-touch signals and ignores any
+client-supplied source label. Explicit GBP tags or a Google Maps referrer
+take precedence, followed by Google and Meta click IDs or matching paid
+campaign tags. Under the existing Meta routing rule an `fbclid` or `fbc`
+selects the Meta line. An unpaid social tag alone stays organic.
+
+The same technically-observed attribution
 pipeline both endpoints already run (UTM/click-id/referrer →
 `server/services/lead-source-classify.js`) now also classifies an
 AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,

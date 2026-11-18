@@ -6,6 +6,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { _test } = require('../routes/lead-webhook');
 const { buildLeadWebhookIntake, determineLeadSource } = _test;
 const { SPOKE_SITES } = require('../services/content-astro/spoke-sites');
+// Vendored snapshot of astro/src/lib/paid-source-fixtures.json; root integration
+// byte-compares the two repos, while portal CI remains standalone.
+const paidSourceFixtures = require('./fixtures/paid-source-fixtures.json');
+
+function determineFromAttribution(attribution = {}) {
+  const utm = attribution.utm || {};
+  return determineLeadSource(
+    attribution.page_url || '', attribution.landing_url || '',
+    utm.source, utm.medium, utm.campaign, utm.content,
+    attribution.fbclid, attribution.fbc, attribution.gclid,
+    attribution.wbraid, attribution.gbraid, attribution.referrer,
+  );
+}
+
+function backendKindFromLegacy(result) {
+  if (result.source === 'google_business') return 'google_business';
+  if (result.source === 'google_ads' && result.channel === 'paid') return 'google_ads';
+  if (result.source === 'facebook') return result.channel === 'paid' ? 'meta_ads' : 'organic_social';
+  if (result.source === 'waves_website' && /organic search/i.test(result.detail)) return 'organic_search';
+  if (result.source === 'website' && result.channel === 'referral') return 'referral';
+  return null;
+}
+
+describe('determineLeadSource consumes the shared attribution matrix', () => {
+  test.each(paidSourceFixtures)('$name', ({ attribution, expected_backend_kind: expected }) => {
+    expect(backendKindFromLegacy(determineFromAttribution(attribution))).toBe(expected);
+  });
+});
 
 describe('buildLeadWebhookIntake — Meta click ids', () => {
   test('captures fbclid/fbc/fbp from a nested attribution object', () => {
@@ -90,6 +118,20 @@ describe('determineLeadSource — UTM casing (normalized comparisons)', () => {
   });
 });
 
+describe('determineLeadSource — non-Meta organic social', () => {
+  test('LinkedIn stays generic organic social, never Facebook', () => {
+    expect(determineLeadSource('', '', 'linkedin', 'organic', '', '', '', '')).toMatchObject({
+      source: 'website', channel: 'social', detail: 'LinkedIn organic social',
+    });
+  });
+
+  test('Nextdoor keeps its existing source key', () => {
+    expect(determineLeadSource('', '', 'nextdoor', 'organic', '', '', '', '')).toMatchObject({
+      source: 'nextdoor', channel: 'social',
+    });
+  });
+});
+
 describe('determineLeadSource — Meta click id wins inside the facebook branch', () => {
   // The normalized facebook branch returns before the standalone fbclid/_fbc
   // branch below it, so a paid Meta lead tagged utm_medium=paid_social (not
@@ -108,10 +150,21 @@ describe('determineLeadSource — Meta click id wins inside the facebook branch'
     expect(r.channel).toBe('paid');
   });
 
-  test('non-cpc medium with NO click id still classifies organic (unchanged)', () => {
+  test('explicit paid_social with NO click id still classifies paid', () => {
     const r = determineLeadSource('', '', 'facebook', 'paid_social', 'spring', '', '', '');
     expect(r.source).toBe('facebook');
+    expect(r.channel).toBe('paid');
+  });
+
+  test('facebook + organic remains organic social', () => {
+    const r = determineLeadSource('', '', 'facebook', 'organic', 'spring', '', '', '');
+    expect(r.source).toBe('facebook');
     expect(r.channel).toBe('organic');
+  });
+
+  test('google + ppc is paid even without a click id', () => {
+    const r = determineLeadSource('', '', 'google', 'ppc', 'spring', '', '', '');
+    expect(r).toMatchObject({ source: 'google_ads', channel: 'paid' });
   });
 });
 
@@ -146,6 +199,13 @@ describe('determineLeadSource — gclid (Google auto-tagging)', () => {
   test('a Waves page WITHOUT a click id stays organic waves_website (unchanged)', () => {
     const r = determineLeadSource('https://wavespestcontrol.com/pest-control-lakewood', '', '', '', '', '');
     expect(r.source).toBe('waves_website');
+  });
+});
+
+describe('determineLeadSource — Google Maps', () => {
+  test('canonical /maps referral is Google Business rather than generic organic search', () => {
+    const r = determineLeadSource('', 'https://wavespestcontrol.com/quote', '', '', '', '', '', '', '', '', '', 'https://www.google.com/maps');
+    expect(r).toMatchObject({ source: 'google_business', channel: 'organic', detail: 'Google Maps referral' });
   });
 });
 

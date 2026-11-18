@@ -16,7 +16,7 @@
  */
 const { findGbpLocationByUtmContent } = require('../config/locations');
 const { SPOKE_SITES } = require('./content-astro/spoke-sites');
-const { findAiAssistant, hostnameOf } = require('./ai-referral-sources');
+const { classifyAttributionSignals } = require('./lead-source-evidence');
 
 // Single source of truth for the spoke fleet: the domains determineLeadSource()
 // matches for organic domain_website attribution are derived from SPOKE_SITES (the
@@ -74,12 +74,13 @@ function areaForLandingUrl(url) {
 
 function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid, referrer) {
   const url = landingUrl || pageUrl || '';
-  const source = String(utmSource || '').trim().toLowerCase();
-  const medium = String(utmMedium || '').trim().toLowerCase();
-  const campaign = String(utmCampaign || '').trim().toLowerCase();
+  const classified = classifyAttributionSignals({
+    referrer, landing_url: landingUrl || pageUrl,
+    utm: { source: utmSource, medium: utmMedium, campaign: utmCampaign, content: utmContent },
+    fbclid, fbc, gclid, wbraid, gbraid,
+  });
 
-  // UTM-based attribution (most specific)
-  if (source === 'gbp' || (source === 'google' && medium === 'organic' && campaign === 'gbp')) {
+  if (classified.bucket === 'google_business' && classified.reason === 'gbp_tags') {
     const gbpLocation = findGbpLocationByUtmContent(utmContent);
     return {
       source: 'google_business',
@@ -88,40 +89,34 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
       area: gbpLocation?.id || null,
     };
   }
-  if (source === 'google' && medium === 'cpc') return { source: 'google_ads', detail: `Campaign: ${utmCampaign}`, channel: 'paid', area: utmContent };
-  if (source === 'facebook' || source === 'fb') {
-    // A deterministic Meta click id wins regardless of the medium label —
-    // fbclid/_fbc only ride ad clicks (organic visits carry only _fbp), so
-    // utm_medium=paid_social etc. with a click id is still a paid click.
-    // Without one, only medium=cpc marks paid (unchanged).
-    const isPaid = medium === 'cpc' || !!(fbclid || fbc);
-    return { source: 'facebook', detail: `${utmMedium} — ${utmCampaign}`, channel: isPaid ? 'paid' : 'organic' };
+  if (classified.bucket === 'google_business') {
+    return { source: 'google_business', detail: 'Google Maps referral', channel: 'organic', area: areaForLandingUrl(url) };
   }
-  if (source === 'nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
-  // Google auto-tagging (the default) appends gclid — or wbraid/gbraid for
-  // iOS/web-to-app — to ad-click landing URLs WITHOUT utm_source/medium, so an
-  // auto-tagged paid click would otherwise fall through to the organic/referrer
-  // default and never count as Google Ads. The Google analog of the Meta fbclid
-  // branch below. (Explicit utm_source=google&cpc above still wins, with richer detail.)
-  if (gclid || wbraid || gbraid) {
-    return { source: 'google_ads', detail: utmCampaign ? `Campaign: ${utmCampaign}` : 'Google Ads click (gclid)', channel: 'paid', area: utmContent };
+  if (classified.bucket === 'google_ads') {
+    const clickLabel = classified.reason === 'paid_tags' ? 'Google paid campaign' : `Google Ads click (${classified.reason})`;
+    return { source: 'google_ads', detail: utmCampaign ? `Campaign: ${utmCampaign}` : clickLabel, channel: 'paid', area: utmContent };
   }
-  // Meta auto-appends fbclid to ad-click landing URLs even without explicit UTMs;
-  // _fbc is its cookie form (survives navigation when the URL fbclid is lost). A
-  // lead carrying either, with no clearer source above, is a paid Meta click.
-  // (_fbp alone is NOT counted — Meta sets it on every visit, organic included.)
-  if (fbclid || fbc) return { source: 'facebook', detail: fbclid ? 'Meta click (fbclid)' : 'Meta click (_fbc)', channel: 'paid' };
-
-  // AI-assistant referral (owner-approved 2026-09-27): a visitor who asked an
-  // AI answer engine and followed its citation link. Checked after every
-  // paid/explicit UTM branch above (a click id would already have won) and
-  // BEFORE the domain/hub fallback below, so an AI-referred visit isn't
-  // silently folded into domain_website/waves_website. Self-reported
-  // "How did you hear about us?" answers are a SEPARATE field (leads.heard_about)
-  // — this branch is technically-observed attribution only.
-  const aiAssistant = findAiAssistant(source, hostnameOf(referrer));
-  if (aiAssistant) {
-    return { source: 'ai_assistant', detail: aiAssistant.detail, channel: 'organic', area: areaForLandingUrl(url) };
+  if (classified.bucket === 'meta_ads') {
+    const detail = classified.reason === 'paid_tags' || utmCampaign
+      ? `${utmMedium} — ${utmCampaign}`
+      : `Meta click (${classified.reason === 'fbc' ? '_fbc' : 'fbclid'})`;
+    return { source: 'facebook', detail, channel: 'paid' };
+  }
+  if (classified.bucket === 'organic_social') {
+    if (classified.socialName === 'Nextdoor') return { source: 'nextdoor', detail: utmCampaign || '', channel: 'social' };
+    if (['Facebook', 'Instagram'].includes(classified.socialName)) {
+      return { source: 'facebook', detail: `${classified.socialName}${utmCampaign ? ` — ${utmCampaign}` : ''}`, channel: 'organic' };
+    }
+    return { source: 'website', detail: `${classified.socialName} organic social`, channel: 'social' };
+  }
+  if (classified.bucket === 'ai') {
+    return { source: 'ai_assistant', detail: classified.ai.detail, channel: 'organic', area: areaForLandingUrl(url) };
+  }
+  if (classified.bucket === 'organic_search') {
+    return { source: 'waves_website', detail: `${classified.searchName} organic search`, channel: 'organic', area: areaForLandingUrl(url) };
+  }
+  if (classified.bucket === 'referral') {
+    return { source: 'website', detail: `Referral: ${classified.referrerHost}`, channel: 'referral', area: areaForLandingUrl(url) };
   }
 
   // Domain-based attribution. The spoke fleet is single-sourced from SPOKE_SITES

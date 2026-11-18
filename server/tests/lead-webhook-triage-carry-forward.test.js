@@ -63,4 +63,13 @@ describeDb('AI triage extracted_data replace', () => {
     expect(await replace({}, { summary: 's', attribution: { pageUrl: 'https://chatgpt.com/' } }))
       .toEqual({ summary: 's' });
   });
+
+  test('the intake source survives triage and a generated source cannot replace or supply it', async () => {
+    const observed = { kind: 'organic_search', label: 'Organic search', detail: 'Google', basis: 'Referring host' };
+    const triage = { summary: 'Ant inquiry', source_evidence: { kind: 'google_ads', label: 'Google Ads' } };
+    expect(await replace({ source_evidence: observed }, triage)).toEqual({
+      source_evidence: observed, summary: 'Ant inquiry',
+    });
+    expect(await replace({}, triage)).toEqual({ summary: 'Ant inquiry' });
+  });
 });

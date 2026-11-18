@@ -56,6 +56,7 @@ const leadAttribution = require('../services/lead-attribution');
 // (lead-estimate-link.js) classifies with the exact same semantics. This route
 // keeps using — and re-exporting via `_test` — the shared implementation.
 const { determineLeadSource } = require('../services/lead-source-classify');
+const { sourceEvidenceFromAttribution } = require('../services/lead-source-evidence');
 const { GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
 const { sanitizeHeardAbout, sanitizeHeardAboutPrompt } = require('../services/heard-about');
 
@@ -360,6 +361,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       heardAbout,
       heardAboutPrompt,
       signHost,
+      sourceEvidence,
     } = intake;
     // The visitor's declared timeline sets urgency directly; null when the
     // form didn't ask (older cached pages) so the AI triage may still guess.
@@ -590,6 +592,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
       ...(signHost ? { sign_host: signHost } : {}),
+      ...(sourceEvidence ? { source_evidence: sourceEvidence } : {}),
     };
     const buildPrefillAttachFields = () => ({
       first_name: firstName, last_name: lastName,
@@ -1066,6 +1069,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             // the triage's prose guess only fills in when the form didn't ask.
             if (triageResult.urgency && !declaredUrgency) updates.urgency = triageResult.urgency;
             if (triageResult.extractedData) {
+              // source_evidence is server-owned intake evidence. The model may
+              // summarize the source, but it cannot replace that proof.
+              const { source_evidence: _ignoredSourceEvidence, ...safeTriageExtracted } = triageResult.extractedData;
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
               // one-shot stamp the attach just preserved. The replace branch
@@ -1078,8 +1084,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // pipeline reads them to tell a web-form address from a call's.
               // The submission's page URLs ride along as well (TRIAGE_REPLACE_EXTRACTED_SQL).
               updates.extracted_data = attachedCallLead
-                ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
-                : db.raw(TRIAGE_REPLACE_EXTRACTED_SQL, [JSON.stringify(triageResult.extractedData)]);
+                ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(safeTriageExtracted)])
+                : db.raw(TRIAGE_REPLACE_EXTRACTED_SQL, [JSON.stringify(safeTriageExtracted)]);
             }
             if (Object.keys(updates).length > 0) {
               updates.updated_at = new Date();
@@ -1324,6 +1330,8 @@ async function attachVoicemailPrefillLead({ body, fields, webhookStage }) {
 // match path re-check ITS candidate guards (open-status set, ownership, name)
 // in the same statement — a concurrent claim between its SELECT and this
 // UPDATE must miss, not overwrite. Returns the row or null.
+const CALL_ATTACH_EXTRACTED_SQL = "COALESCE(extracted_data, '{}'::jsonb) || (?::jsonb - 'source_evidence')";
+
 async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
   const query = db('leads')
     .where({ id: leadId })
@@ -1337,7 +1345,7 @@ async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
       // responded, and that status buckets as closed in the admin UI.
       status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
       extracted_data: db.raw(
-        "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
+        CALL_ATTACH_EXTRACTED_SQL,
         [JSON.stringify(webhookStage)]
       ),
       updated_at: new Date(),
@@ -1574,6 +1582,9 @@ function getLeadWebhookAttribution(body = {}) {
     // must satisfy the exposure intake's unit-id contract or the join is dead
     // weight. null (not '') when absent/malformed.
     anonId: sanitizeAnonUnitId(body.anon_id || attr.anon_id),
+    // Browser-observed first-touch marker. Only strict true is accepted;
+    // missing/legacy attribution must never be reinterpreted as direct.
+    observed: attr.observed === true,
   };
 }
 
@@ -1612,8 +1623,9 @@ const TRIAGE_REPLACE_EXTRACTED_SQL = "jsonb_strip_nulls(jsonb_build_object("
   + "'address', COALESCE(extracted_data, '{}'::jsonb)->'address', "
   + "'additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', "
   + "'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', "
-  + "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host'"
-  + ")) || (?::jsonb - 'attribution') || jsonb_strip_nulls(jsonb_build_object("
+  + "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host', "
+  + "'source_evidence', COALESCE(extracted_data, '{}'::jsonb)->'source_evidence'"
+  + ")) || ((?::jsonb - 'attribution') - 'source_evidence') || jsonb_strip_nulls(jsonb_build_object("
   + "'attribution', NULLIF(jsonb_strip_nulls(jsonb_build_object("
   + "'pageUrl', NULLIF(btrim(COALESCE(extracted_data, '{}'::jsonb)->'attribution'->>'pageUrl'), ''), "
   + "'landingUrl', NULLIF(btrim(COALESCE(extracted_data, '{}'::jsonb)->'attribution'->>'landingUrl'), '')"
@@ -1664,6 +1676,23 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.gbraid,
     attribution.referrer,
   );
+  const sourceEvidence = sourceEvidenceFromAttribution({
+    observed: attribution.observed,
+    referrer: attribution.referrer,
+    landing_url: attribution.landingUrl,
+    utm: {
+      source: attribution.utmSource,
+      medium: attribution.utmMedium,
+      campaign: attribution.utmCampaign,
+      content: attribution.utmContent,
+      term: attribution.utmTerm,
+    },
+    gclid: attribution.gclid,
+    wbraid: attribution.wbraid,
+    gbraid: attribution.gbraid,
+    fbclid: attribution.fbclid,
+    fbc: attribution.fbc,
+  });
 
   const heardAbout = sanitizeHeardAbout(body.heard_about);
   return {
@@ -1683,6 +1712,7 @@ function buildLeadWebhookIntake(body = {}) {
     serviceKey,
     timeline,
     leadSource,
+    sourceEvidence,
     heardAbout,
     heardAboutPrompt: sanitizeHeardAboutPrompt(body.heard_about_prompt, heardAbout),
     // Exact key only, like `message` below — and kept OUT of `message`.
@@ -2189,6 +2219,7 @@ module.exports._test = {
   normalizeSignHost,
   SIGN_HOST_MAX_LENGTH,
   TRIAGE_REPLACE_EXTRACTED_SQL,
+  CALL_ATTACH_EXTRACTED_SQL,
   getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
   normalizeLeadServiceKey,
