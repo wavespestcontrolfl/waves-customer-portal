@@ -1458,7 +1458,13 @@ async function markEstimateManuallyAccepted({
   if (ctx.dryRun) return { dryRun: true, alreadyAccepted: claim.alreadyAccepted, billingTerm: normalizedBillingTerm, effects: claim.effects };
 
   const warnings = [];
-  if (claim.shouldRunDownstream) await runPostCommitWork(claim, ctx, { leadLinkService, warnings });
+  if (claim.shouldRunDownstream) {
+    await runPostCommitWork(claim, ctx, { leadLinkService, warnings });
+    // A promo code the customer typed on this estimate before the office
+    // marked it won posts its account credit, as the customer's own accept
+    // does (GATE_ESTIMATE_PROMO_CODE). Never throws; nothing is sent.
+    await require('./estimate-promo-code').redeemPromoCodeForAcceptedEstimate({ estimateId });
+  }
   return acceptResponse(claim, normalizedBillingTerm, warnings);
 }
 

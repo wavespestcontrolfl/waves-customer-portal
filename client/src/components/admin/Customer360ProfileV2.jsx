@@ -3652,6 +3652,7 @@ const CREDIT_SOURCE_LABELS = {
   invoice_application: "Applied to invoice",
   invoice_prepaid: "Prepaid invoice",
   referral: "Referral",
+  promo_code: "Promo code",
 };
 
 function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onChanged }) {

@@ -1446,6 +1446,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Estimate promo-code credit recovery (GATE_ESTIMATE_PROMO_CODE; the
+  // service returns at once with the gate off). The credit step that runs
+  // right after an accept is a fast path: this hourly pass redeems any code
+  // still waiting on an accepted estimate, through the same idempotent step.
+  cron.schedule('42 * * * *', async () => {
+    try {
+      await runExclusive('estimate-promo-code-sweep', async () => {
+        await require('./estimate-promo-code').sweepAcceptedPromoCodes();
+      });
+    } catch (err) {
+      logger.error(`[estimate-promo-code] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Legacy outbound-review activation backstop (PR #3361, Codex r5/r7 P1):
   // drains the whole pre-hold-removal review population — worked rows whose
   // post-commit activation was lost to a process exit, moved rows still

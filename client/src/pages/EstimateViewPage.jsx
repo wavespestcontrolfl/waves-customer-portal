@@ -47,6 +47,7 @@ import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } fr
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
+import PromoCodeSection from '../components/estimate/PromoCodeSection';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
@@ -5385,6 +5386,28 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
   );
 }
 
+// Promo code field / note (GATE_ESTIMATE_PROMO_CODE): renders only from the
+// payload's `promoCode` block. The page owns the endpoint; a staff preview
+// never posts, and the request it would make carries the same marker so the
+// route refuses it too.
+export function EstimatePromoCode({ promoCode, token, staffView = false }) {
+  if (!promoCode) return null;
+  const submitCode = async (code) => {
+    const url = `${API_BASE}/estimates/${token}/promo-code${staffView ? '?adminPreview=1' : ''}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const result = await response.json().catch(() => ({}));
+    return response.ok ? { ok: true, promoCode: result.promoCode } : { ok: false, error: result.error };
+  };
+  // Keyed on the served state so a /data reload that changes it (the accept,
+  // a code entered in another tab) replaces the section's own state.
+  const stateKey = `${promoCode.applied?.code || ''}:${promoCode.applied?.credited === true}:${promoCode.canEnter === true}`;
+  return <PromoCodeSection key={stateKey} promoCode={promoCode} submitCode={submitCode} staffView={staffView} />;
+}
+
 // Lawn program seasons (GATE_ESTIMATE_LAWN_CALENDAR): what each of the four
 // SWFL turf seasons is FOR, as customer-facing education under the lawn
 // price card. Owner 2026-09-05: the per-season application counts, month
@@ -10052,6 +10075,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
+          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
           {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={readOnlyPreview} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
@@ -10082,6 +10106,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
         {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
+        <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
         {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
             → /data ships `proposal`): the line items + totals + included-service
             terms the customer used to get only inside the emailed PDF. Rendered
@@ -10191,6 +10216,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         {successCard}
         {/* The success screen renders from the accept response without a
             /data refetch, so the referral card rides acceptResult.referral. */}
+        <EstimatePromoCode promoCode={acceptResult?.promoCode} token={token} staffView={readOnlyPreview} />
         {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={readOnlyPreview} /> : null}
       </Page>
     );
@@ -10258,6 +10284,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
         {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
         {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
+        <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -10879,6 +10906,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
           {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
+          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
 
           {bookingContent}
 
