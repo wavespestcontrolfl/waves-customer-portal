@@ -99,6 +99,7 @@ describe('POST /api/public/track/:token/stops-ahead', () => {
   });
 
   test.each([
+    ['office is rebooking', { status: 'rescheduled', track_state: 'scheduled' }],
     ['completed status', { status: 'completed', track_state: 'scheduled' }],
     ['no_show status', { status: 'no_show', track_state: 'scheduled' }],
     ['en_route track_state', { status: 'confirmed', track_state: 'en_route' }],

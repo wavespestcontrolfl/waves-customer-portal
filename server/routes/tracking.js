@@ -12,11 +12,19 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { computeStopsAhead } = require('../services/stops-ahead');
+const { listPortalServiceHistory } = require('../services/portal-service-history');
 // Contact session (GATE_CONTACT_LOGIN): no public /track bearer, the
 // holder's primary property's visits only (whatever GATE_APP_PROPERTY_SCOPE
 // says — codex #6363 r16 security P1), and the scope echo the contact app
 // expects.
-const { withoutTrackBearers, sessionRecordScope: sessionScope, CONTACT_PROPERTY_SCOPE_ECHO } = require('../services/contact-session-projection');
+const {
+  withoutTrackBearers,
+  sessionRecordScope: sessionScope,
+  CONTACT_PROPERTY_SCOPE_ECHO,
+  contactSessionReportsWithheld,
+  withholdReportArtifacts,
+  contactSafeReportLinks,
+} = require('../services/contact-session-projection');
 const scopeEcho = (req, scope) => (req.contactSession ? CONTACT_PROPERTY_SCOPE_ECHO : resolvedScopePayload(scope));
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
@@ -230,6 +238,53 @@ function formatScheduledTracker(service, tech, customer) {
   };
 }
 
+function completionSummarySentence(value) {
+  const firstLine = String(value || '').trim().split(/\r?\n/, 1)[0].trim();
+  if (!firstLine) return null;
+  const sentence = firstLine.match(/^.*?[.!?](?=\s|$)/)?.[0] || firstLine;
+  return sentence.length > 280 ? `${sentence.slice(0, 277).trimEnd()}...` : sentence;
+}
+
+// End the signed-in visit tracker with the report for this exact stop. The
+// shared history reader owns canonical-sibling selection, reviewed customer
+// notes, project-report handling and typed-report suppression. Contact
+// sessions then receive the same withheld/contact-safe projection as Visits.
+async function attachCompletionSummary(req, tracker, service) {
+  if (!tracker || tracker.state !== 'complete' || tracker.currentStep !== 7) return tracker;
+  try {
+    const { services } = await listPortalServiceHistory(req.customerId, {
+      limit: 1,
+      completedOnly: true,
+      scheduledServiceId: service.id,
+    });
+    // Completion and report publication are separate commits. Keep a pending
+    // state so Home can refresh instead of borrowing another visit's report.
+    if (!services.length) {
+      tracker.serviceSummary = { reportPending: true, reportWithheld: false };
+      return tracker;
+    }
+    let record = services[0];
+    const reportWithheld = await contactSessionReportsWithheld(req);
+    if (reportWithheld) record = withholdReportArtifacts(record);
+    else if (req.contactSession) record = contactSafeReportLinks(record);
+    const authenticatedReportUrl = record.reportAvailable === true
+      && !record.isProjectCompletion
+      ? `/api/documents/service-report/${record.id}`
+      : null;
+    tracker.serviceSummary = {
+      customerSummary: completionSummarySentence(record.notes),
+      reportUrl: record.reportUrl || null,
+      reportPdfUrl: record.reportPdfUrl || authenticatedReportUrl,
+      reportPending: record.reportAvailable === true && !record.reportUrl && !record.reportPdfUrl && !authenticatedReportUrl,
+      reportWithheld,
+    };
+  } catch (err) {
+    logger.warn(`[tracking] completion report lookup failed for ${service?.id}: ${err.message}`);
+    tracker.serviceSummary = { reportPending: true, reportWithheld: false };
+  }
+  return tracker;
+}
+
 function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
   const todayOnly = !!opts.todayOnly;
   const activeOnly = !!opts.activeOnly;
@@ -415,6 +470,7 @@ router.get('/active', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
       await attachRainChance(formatted, canonical, locationCustomer);
+      await attachCompletionSummary(req, formatted, canonical);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -492,6 +548,7 @@ router.get('/today', async (req, res, next) => {
       await attachTechPhoto(formatted, tech);
       await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
       await attachRainChance(formatted, canonical, locationCustomer);
+      await attachCompletionSummary(req, formatted, canonical);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -597,6 +654,8 @@ router._test = {
   scopedLocationCustomer,
   isFreshTechStatusTimestamp,
   formatScheduledTracker,
+  attachCompletionSummary,
+  completionSummarySentence,
 };
 
 module.exports = router;

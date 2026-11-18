@@ -1,11 +1,7 @@
 // @vitest-environment jsdom
-// The Completed sub-tab reads /services customer-wide; under the saved-property
-// MODEL the disclosure shows whenever the list is saved-shaped — even with ONE
-// active entry, because a profile whose other houses were retired still lists
-// their visits and reports here (GitHub codex #4207 r8 P2).
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => {
@@ -36,13 +32,41 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-describe('Completed history disclosure under the saved-property model', () => {
-  it('shows with a ONE-entry saved list (other houses may have been retired)', async () => {
-    render(<VisitsTab customer={customer} properties={savedOnly} activePropertyId="cust-1:pa" subTab="completed" onSubTabChange={() => {}} />);
-    expect(await screen.findByTestId('completed-profile-wide-notice')).toBeInTheDocument();
+const openCompleted = (props = {}) => render(
+  <VisitsTab customer={customer} properties={savedOnly} activePropertyId="cust-1:pa" subTab="completed" onSubTabChange={() => {}} {...props} />
+);
+
+describe('Completed visits by property', () => {
+  it('opens the selected house, then shows retired and unassigned history in All properties', async () => {
+    api.getServices.mockImplementation(async ({ historyProperty }) => ({
+      historyProperty, historyCustomerId: customer.id,
+      services: [{ id: 'record', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: historyProperty === 'all' ? 'Retired address' : 'Selected address' }],
+      total: 1,
+    }));
+    openCompleted();
+    expect(await screen.findByText('Selected address')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: /Show completed visits for/ }), { target: { value: 'all' } });
+    expect(screen.queryByText('Selected address')).not.toBeInTheDocument();
+    expect(await screen.findByText('Retired address')).toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledWith({ limit: 100, historyProperty: 'pa' });
+    expect(api.getServices).toHaveBeenCalledWith({ limit: 100, historyProperty: 'all' });
   });
-  it('stays hidden on a profile-shaped list (gate off)', async () => {
-    render(<VisitsTab customer={customer} properties={profileShaped} activePropertyId="cust-1" subTab="completed" onSubTabChange={() => {}} />);
-    expect(screen.queryByTestId('completed-profile-wide-notice')).not.toBeInTheDocument();
+
+  it('withholds records served for another property or by an older server', async () => {
+    api.getServices.mockResolvedValue({ services: [{ id: 'wrong', type: 'Wrong house' }], historyProperty: 'pb', historyCustomerId: customer.id });
+    openCompleted();
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    expect(screen.queryByText('Wrong house')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { properties: profileShaped, activePropertyId: 'cust-1' },
+    { customer: { ...customer, actor: { kind: 'contact' } } },
+    { customer: { ...customer, cancelled: true } },
+  ])('keeps the existing read path when property history is unavailable', async (props) => {
+    openCompleted(props);
+    expect(await screen.findByText('No completed visits yet')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Show completed visits for/ })).not.toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledWith({ limit: 100 });
   });
 });

@@ -21,7 +21,7 @@ const CUSTOMER_PRODUCT_COLUMNS = [
 const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const applicationLimits = require('../services/application-limits');
-const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+const { appPropertyScopeEnabled, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 // Contact session (GATE_CONTACT_LOGIN): a contact the report rule withholds
 // from (a tenant, an occupant on a managed account) reads the visit list and
 // detail without report artifacts — the same verdict /api/documents applies.
@@ -37,9 +37,11 @@ const listQuerySchema = Joi.object({
   type: Joi.string().pattern(/^[A-Za-z0-9 _-]+$/).max(50).optional(),
   // Opt-in saved-property scope (GATE_APP_PROPERTY_SCOPE): Home's "Last
   // Visit" card and the request overlay's callback check follow the selected
-  // house (GitHub codex r5 P1). The Completed list stays customer-wide by
-  // design — the tab says so. No-op when the gate is off or single-home.
+  // house (GitHub codex r5 P1).
   propertyScoped: Joi.boolean().truthy('1').falsy('0').default(false),
+  // Completed history uses explicit property links. Legacy, unassigned visits
+  // stay reachable in the account-wide view, including after a home retires.
+  historyProperty: Joi.alternatives().try(Joi.string().uuid(), Joi.valid('all')),
 });
 
 // =========================================================================
@@ -49,17 +51,24 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { limit, offset, type, propertyScoped } = value;
+    const { limit, offset, type, propertyScoped, historyProperty } = value;
     // A contact's list is always scoped to the primary property, whatever
     // the holder's property gate says (codex #6363 r16 P1 + security P1);
     // the holder's stays customer-wide unless asked.
-    const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped ? await resolveSessionScope(req) : null);
+    if (historyProperty && (req.contactSession || req.customerInactive || !appPropertyScopeEnabled())) {
+      return res.status(403).json({ error: 'Property history is unavailable for this session.' });
+    }
+    const selectedHistory = historyProperty && historyProperty !== 'all';
+    const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped || selectedHistory ? await resolveSessionScope(req) : null);
+    if (selectedHistory && String(scope?.property?.id) !== historyProperty) {
+      return res.status(409).json({ error: 'Your selected property changed. Reopen Visits to see its history.' });
+    }
 
     // Completed visits only, one record per appointment: the Completed tab
     // and Home's Last Visit card showed incomplete records as completed
     // visits and a visit's sibling records as extra visits.
     const { services: listed, total } = await listPortalServiceHistory(req.customerId, {
-      limit, offset, type, scope, completedOnly: true,
+      limit, offset, type, scope, completedOnly: true, historyProperty,
     });
     // A contact the rule withholds from gets no artifact; an allowed contact
     // gets the visit without the public report bearers (the authenticated
@@ -74,6 +83,7 @@ router.get('/', async (req, res, next) => {
       // compares it with the house it shows and withholds the Last Visit card
       // on a mismatch (uncapped codex r1v P1) — same echo as /schedule.
       ...(propertyScoped && scope ? { propertyScope: resolvedScopePayload(scope) } : {}),
+      ...(historyProperty ? { historyProperty, historyCustomerId: req.customerId } : {}),
       services: enriched,
       total,
       limit: parseInt(limit),

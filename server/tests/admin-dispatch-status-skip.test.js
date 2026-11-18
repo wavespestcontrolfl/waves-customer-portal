@@ -153,6 +153,7 @@ const skip = (id = 'visit-2', body = {}) => call('PUT', `${id}/status`, { status
 const planVisit = (over = {}) => ({
   id: 'visit-2', customer_id: 'customer-1', technician_id: 'tech-9', status: 'pending', track_state: 'scheduled',
   scheduled_date: '2040-03-20', window_start: '13:00', window_end: '15:00', service_type: 'Pest Control',
+  service_id: 'pest-service', property_id: 'house-1',
   is_recurring: true, recurring_parent_id: 'visit-1', recurring_pattern: 'quarterly', is_callback: false,
   followup_included: false, source_action: null, customer_confirmed: true, ...over,
 });

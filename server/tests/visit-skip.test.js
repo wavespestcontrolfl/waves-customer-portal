@@ -14,7 +14,7 @@ jest.mock('../models/db', () => jest.fn(() => { throw new Error('visit-skip read
 const mockImpact = jest.fn();
 jest.mock('../services/appointment-cancel-impact', () => ({ computeCancelAppointmentImpact: (...a) => mockImpact(...a) }));
 
-const { skipVerdict, assertSkippable, skipPreview, _private: { MESSAGES } } = require('../services/visit-skip');
+const { skipVerdict, assertSkippable, skipPreview, nextPlanVisitDate, _private: { MESSAGES } } = require('../services/visit-skip');
 
 // A knex-shaped reader over rows in memory. It honours the filters visit-skip.js writes (equality, the series group,
 // status list, "later than", order, limit), so a query that asks for the wrong rows fails a test.
@@ -62,7 +62,8 @@ function memoryConn(rows) {
 // The second visit of a quarterly pest plan: open, nobody on the way, a child of the series root.
 const planVisit = (over = {}) => ({
   id: 'visit-2', status: 'pending', track_state: 'scheduled', is_recurring: true, recurring_parent_id: 'visit-1',
-  is_callback: false, followup_included: false, scheduled_date: '2027-03-20', recurring_pattern: 'quarterly', ...over,
+  is_callback: false, followup_included: false, scheduled_date: '2027-03-20', recurring_pattern: 'quarterly',
+  service_id: 'pest-service', property_id: 'house-1', ...over,
 });
 const office = (conn = memoryConn([])) => ({ conn, isAdmin: true, actorId: 'admin-1' });
 const bare = () => mockImpact.mockResolvedValue({ card_cancel_refusals: [] });
@@ -261,5 +262,24 @@ describe('skipPreview: what the cancel window shows', () => {
     await expect(skipPreview('visit-2', office(memoryConn(rows)))).resolves.toMatchObject({
       nextVisitDate: '2027-06-21', lawnRound: { round: 3, start: '2027-03-15', end: '2027-04-23' },
     });
+  });
+});
+
+describe('public next-visit date scope', () => {
+  test('requires durable service and property keys when used by a customer tracker', async () => {
+    const row = planVisit({ service_id: null });
+    await expect(nextPlanVisitDate(memoryConn([row]), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBeNull();
+  });
+
+  test('does not name a later row from another service or house', async () => {
+    const row = planVisit();
+    const rows = [
+      planVisit({ id: 'wrong-service', scheduled_date: '2027-04-01', service_id: 'lawn-service' }),
+      planVisit({ id: 'wrong-house', scheduled_date: '2027-04-02', property_id: 'house-2' }),
+      planVisit({ id: 'same-service-house', scheduled_date: '2027-06-21' }),
+    ];
+    await expect(nextPlanVisitDate(memoryConn(rows), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-06-21');
   });
 });

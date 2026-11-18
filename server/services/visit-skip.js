@@ -90,16 +90,22 @@ async function assertSkippable(trx, serviceId, { isAdmin = false, actorId = null
 }
 
 // The plan's next open visit after `date`: what the office tells the customer ("see you on ...").
-async function nextPlanVisitDate(conn, row, date) {
+async function nextPlanVisitDate(conn, row, date, { requireServiceAndProperty = false } = {}) {
   const { isPlanSeriesRow } = require('./recurring-series-cancel-reseed');
+  // A public tracker must not name a different service or house as the next
+  // regular visit. Older rows without both durable keys fail closed and show
+  // no date; the office preview keeps its established series-only lookup.
+  if (requireServiceAndProperty && (!row.service_id || !row.property_id)) return null;
   const rootId = row.recurring_parent_id || row.id;
-  const later = await conn('scheduled_services')
+  const query = conn('scheduled_services')
     .where(function seriesRows() { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
     .whereIn('status', SKIPPABLE_FROM_STATUSES)
-    .where('scheduled_date', '>', date)
+    .where('scheduled_date', '>', date);
+  if (requireServiceAndProperty) query.where({ service_id: row.service_id, property_id: row.property_id });
+  const later = await query
     .orderBy('scheduled_date', 'asc')
     .limit(NEXT_VISIT_SCAN)
-    .select('id', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+    .select('id', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included', 'service_id', 'property_id');
   const next = (later || []).find((candidate) => String(candidate.id) !== String(row.id) && isPlanSeriesRow(candidate));
   return next ? dateOnlyString(next.scheduled_date) : null;
 }
@@ -132,6 +138,7 @@ module.exports = {
   skipVerdict,
   assertSkippable,
   skipPreview,
+  nextPlanVisitDate,
   SKIPPABLE_FROM_STATUSES,
   _private: { rowRefusal, nextPlanVisitDate, lawnRoundFor, MESSAGES },
 };

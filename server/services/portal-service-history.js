@@ -11,6 +11,7 @@ const db = require('../models/db');
 // legacy inspection-fee scrub on top (owner ruling 2026-10-01; codex #2817).
 const { customerSafeVisitNotes } = require('./context-aggregator');
 const { applyPropertyPredicate } = require('./account-properties');
+const { formatAddress } = require('../utils/address-normalizer');
 
 // Saved-property scope (GATE_APP_PROPERTY_SCOPE) on a service-record query
 // that LEFT JOINs the visit: the shared predicate's "every property retired"
@@ -77,7 +78,7 @@ const ONE_RECORD_PER_APPOINTMENT = `(
 // so an incomplete visit is never shown or described as a completed one and
 // a visit's sibling records never show as extra visits.
 async function listPortalServiceHistory(customerId, {
-  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, database = db,
+  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, scheduledServiceId = null, database = db, historyProperty = null,
 } = {}) {
   let query = database('service_records')
     .where({ 'service_records.customer_id': customerId })
@@ -97,7 +98,27 @@ async function listPortalServiceHistory(customerId, {
   if (type) {
     query = query.where('service_records.service_type', 'ilike', `%${type}%`);
   }
-  if (scope) query = scopeRecordsToProperty(query, scope);
+  // The completion tracker asks for the report belonging to its exact stop.
+  // Keep this alongside customer_id and the canonical-sibling predicate so a
+  // same-day visit can never lend its report to another completed tracker.
+  if (scheduledServiceId) query = query.where('service_records.scheduled_service_id', scheduledServiceId);
+  // The explicit Completed filter only accepts a stamped property ID. Home
+  // and contact sessions retain their existing primary/legacy scope rules.
+  const selectedHistory = historyProperty && historyProperty !== 'all';
+  const filterHistory = (q) => selectedHistory
+    ? q.where('scheduled_services.property_id', historyProperty).where('scheduled_services.customer_id', customerId)
+    : scopeRecordsToProperty(q, scope);
+  query = filterHistory(query);
+  if (historyProperty) {
+    query.leftJoin('customer_properties as visit_property', function () {
+      this.on('visit_property.id', '=', 'scheduled_services.property_id')
+        .andOn('visit_property.customer_id', '=', 'service_records.customer_id');
+    }).select(
+      'scheduled_services.customer_id as visit_customer_id',
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2', 'scheduled_services.service_address_city',
+      'visit_property.address_line1 as property_line1', 'visit_property.address_line2 as property_line2', 'visit_property.city as property_city',
+    );
+  }
   if (completedOnly) query = query.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
 
   const services = await query;
@@ -130,8 +151,16 @@ async function listPortalServiceHistory(customerId, {
     // Any typed delivery posture other than auto_send (internal_only
     // shadow, disabled kill switch) keeps report links off customer surfaces.
     const internalOnlyReport = suppressCustomerArtifacts;
+    // Use the booking-time address as a unit. Current property details are
+    // only a fallback for linked visits that predate the address stamp.
+    const historyAddress = historyProperty && String(svc.visit_customer_id) === String(customerId)
+      ? formatAddress(svc.service_address_line1
+        ? { line1: svc.service_address_line1, line2: svc.service_address_line2, city: svc.service_address_city }
+        : { line1: svc.property_line1, line2: svc.property_line2, city: svc.property_city })
+      : null;
     return {
       id: svc.id,
+      ...(historyProperty ? { propertyAddress: historyAddress || null } : {}),
       date: svc.service_date,
       type: svc.service_type,
       status: svc.status || null,
@@ -152,16 +181,16 @@ async function listPortalServiceHistory(customerId, {
       isProjectCompletion,
       projectId: structuredNotes.projectId || null,
       projectType: structuredNotes.projectType || null,
-      projectReportPortalAttached: Boolean(structuredNotes.portalAttached && projectReportUrl),
+      projectReportPortalAttached: Boolean(!internalOnlyReport && structuredNotes.portalAttached && projectReportUrl),
       // internal_only typed completions (Phase-1b shadow) store a report
       // for admin review, but the customer must not see it — the flag is
       // frozen at completion time, so graduating the profile to auto_send
       // later never retroactively exposes shadow reports.
       reportUrl: isProjectCompletion
-        ? projectReportUrl
+        ? (!internalOnlyReport ? projectReportUrl : null)
         : (svc.report_view_token && !internalOnlyReport ? `/report/${svc.report_view_token}` : null),
       reportPdfUrl: isProjectCompletion
-        ? projectReportUrl
+        ? (!internalOnlyReport ? projectReportUrl : null)
         : (svc.report_view_token && !internalOnlyReport ? `/api/reports/${svc.report_view_token}` : null),
       reportToken: !internalOnlyReport ? (svc.report_view_token || null) : null,
       reportGeneratedAt: !internalOnlyReport ? (svc.report_generated_at || null) : null,
@@ -170,7 +199,7 @@ async function listPortalServiceHistory(customerId, {
       // button at all (the /api/documents/service-report fallback 404s
       // for suppressed records, so a fallback link would dead-end).
       reportAvailable: isProjectCompletion
-        ? Boolean(projectReportUrl)
+        ? Boolean(!internalOnlyReport && projectReportUrl)
         : !internalOnlyReport,
     };
   }));
@@ -178,11 +207,9 @@ async function listPortalServiceHistory(customerId, {
   // Get total count for pagination
   let totalQuery = database('service_records')
     .where({ 'service_records.customer_id': customerId });
-  if (scope) {
-    totalQuery = scopeRecordsToProperty(
-      totalQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
-      scope,
-    );
+  if (scheduledServiceId) totalQuery = totalQuery.where('service_records.scheduled_service_id', scheduledServiceId);
+  if (scope || selectedHistory) {
+    totalQuery = filterHistory(totalQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'));
   }
   if (completedOnly) totalQuery = totalQuery.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);
   const total = await totalQuery.count('service_records.id as count').first();
