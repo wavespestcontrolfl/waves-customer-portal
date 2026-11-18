@@ -9,11 +9,16 @@ jest.mock('../models/db', () => {
   const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNull: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereRaw: jest.fn(() => q), update: jest.fn(async () => 1), first: jest.fn(async () => undefined) };
   const db = jest.fn(() => q);
   db.raw = jest.fn((sql) => sql);
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.__q = q;
   return db;
 });
 
+// The reopen runs in one transaction with the older-key adoption; the adoption itself is tested against Postgres.
+jest.mock('../services/sms-operational-actions', () => ({ adoptOlderKeyAlerts: jest.fn(async () => 0) }));
+
 const db = require('../models/db');
+const { adoptOlderKeyAlerts } = require('../services/sms-operational-actions');
 const NotificationService = require('../services/notification-service');
 
 describe('markReadAdmin', () => {
@@ -178,6 +183,18 @@ describe('reopenAdminDone', () => {
     // The done fields clear and a hold stamp (metadata.quietHoldFrom) lands in the same write.
     expect(db.__q.update).toHaveBeenCalledWith({ done_at: null, done_by: null, resolution: null, metadata: expect.any(String) });
     expect(db.raw).toHaveBeenCalledWith(expect.stringContaining("COALESCE(metadata, '{}'::jsonb) || ?::jsonb"), [expect.stringMatching(/^\{"quietHoldFrom":"\d{4}-/)]);
+  });
+
+  test('a reopened row goes through the older-key adoption in the same transaction; a refused reopen does not', async () => {
+    adoptOlderKeyAlerts.mockClear();
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('reopened');
+    expect(db.transaction).toHaveBeenCalled();
+    expect(adoptOlderKeyAlerts).toHaveBeenCalledWith(db, expect.objectContaining({ notificationIds: ['n1'] }));
+    adoptOlderKeyAlerts.mockClear();
+    db.__q.update.mockResolvedValue(0);
+    db.__q.first.mockResolvedValueOnce({ done_at: new Date(), fence_ok: true });
+    expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('not_reopenable');
+    expect(adoptOlderKeyAlerts).not.toHaveBeenCalled();
   });
 
   test('a quiet-72h close is reopenable and a person-only reading of PERSON_DONE_BY_SQL stays unchanged', () => {

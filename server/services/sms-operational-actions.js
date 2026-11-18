@@ -1375,6 +1375,60 @@ async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled =
   return rows().whereIn('id', closing).update(update);
 }
 
+// An alert an older build keyed on the promise (`sms-commitment:<id>`) or on its text (`sms-commitment-source:<id>`) is
+// closed history now: no code writes those keys since #7902 (one alert per customer), and no reader looks for them.
+// A closed one can still come back open, though: a person's Reopen in Recently done, the age-out undo
+// (reopenPromiseAgeOut), the retention undo (undoRetentionRun) and the quiet fall-off undo (reopenQuietFallOff) clear
+// done on a row and nothing else. Every one of those calls this on the rows it reopened, in its own transaction, so the
+// row takes the customer's key (or folds into the customer's open alert) before it is seen: it then folds, rings and
+// settles with its promises like a row written today. `notificationIds` are the rows just reopened; `commitmentIds`
+// find the open older-key rows that list one of those promises. A row whose customer cannot be told (its open
+// promises belong to more than one customer, or it names none) is left as it is. Returns the rows that were adopted.
+const OLDER_ALERT_KEY_SQL = "(metadata->>'dedupeKey' LIKE 'sms-commitment-source:%' OR metadata->>'dedupeKey' LIKE 'sms-commitment:%')";
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = [], now = new Date() } = {}) {
+  const byId = [...new Set(notificationIds.filter(Boolean).map(String))];
+  const byPromise = [...new Set(commitmentIds.filter(Boolean).map(String))];
+  if (!byId.length && !byPromise.length) return 0;
+  const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at').whereRaw(OLDER_ALERT_KEY_SQL)
+    .where((q) => {
+      if (byId.length) q.whereIn('id', byId);
+      if (byPromise.length) q.orWhereRaw(LISTS_ANY_SQL, [byPromise, byPromise]);
+    })
+    .orderBy('id').select('id', 'metadata');
+  const byCustomer = new Map();
+  for (const row of rows) {
+    const meta = alertMeta(row);
+    // Who the row speaks for: the owner of its open promises (a merge moves a text, and the row's own customer id
+    // can be the former owner), else the customer it was written for.
+    const owners = [...new Set((await alertPromises(trx, { ids: listedOn(meta) })).map((item) => item.owner_id))];
+    const customerId = owners.length === 1 ? owners[0] : (!owners.length && UUID_TEXT.test(String(meta.customerId || '')) ? String(meta.customerId) : null);
+    if (!customerId) {
+      logger.warn(`[sms-operations] reopened older-key alert ${row.id} left as is: ${owners.length ? 'its promises belong to more than one customer' : 'no customer to key it on'}`);
+      continue;
+    }
+    byCustomer.set(customerId, [...(byCustomer.get(customerId) || []), { id: row.id, meta }]);
+  }
+  // One order for every caller that holds more than one of these locks. A row reopened by the caller is already locked
+  // by that write; no other writer takes an older-key row under this lock, so the two orders never meet.
+  const customers = [...byCustomer.keys()].sort();
+  for (const customerId of customers) {
+    await lockCustomerAlert(trx, customerId);
+    const group = byCustomer.get(customerId);
+    for (const { id, meta } of group) {
+      const spoke = [...new Set([...(Array.isArray(meta.spoke_for) ? meta.spoke_for : []), meta.sms_log_id].filter(Boolean).map(String))];
+      await trx('notifications').where({ id, recipient_type: 'admin' }).whereNull('done_at').update({ link: customerCommsLink(customerId),
+        metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ customerId, dedupeKey: smsCustomerAlertKey(customerId),
+          commitment_ids: listedOn(meta), spoke_for: spoke })]) });
+    }
+    // Two alerts for one customer fold into one, as for any other pair of rows; the one that stands lists them all.
+    const { stands, known } = await foldCustomerAlerts(trx, { customerId, ids: group.flatMap(({ meta }) => listedOn(meta)) });
+    const members = stands ? await needingAlert(trx, known, customerId, now) : [];
+    if (members.length) await writeCustomerAlert(trx, { customerId, members, stands, verdict: { verdict: 'open' }, refreshOnly: true });
+  }
+  return [...byCustomer.values()].reduce((sum, group) => sum + group.length, 0);
+}
+
 // The undo of a close that took text promises off their alerts (the age-out's reopen). `ids` are the text promises
 // that are open again. `reopenClosed` reopens the alert rows that close had closed; it runs under the alert lock of
 // every customer concerned (the key first, the rows second, as every other writer). A promise the close only took
@@ -1388,6 +1442,8 @@ async function restoreSmsCommitmentAlerts(trx, ids, reopenClosed, { now = new Da
   const customers = [...byCustomer.keys()].sort();
   for (const customerId of customers) await lockCustomerAlert(trx, customerId);
   const reopened = await reopenClosed();
+  // A closed row an older build keyed on the promise or its text may have come back: it takes the customer's key first.
+  await adoptOlderKeyAlerts(trx, { commitmentIds: ids, now });
   for (const customerId of customers) {
     const items = byCustomer.get(customerId);
     const { stands, known } = await foldCustomerAlerts(trx, { customerId, ids: items.map((item) => item.id) });
@@ -2060,4 +2116,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, restoreSmsCommitmentAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, restoreSmsCommitmentAlerts, adoptOlderKeyAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

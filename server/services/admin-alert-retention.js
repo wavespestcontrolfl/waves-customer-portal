@@ -534,12 +534,16 @@ async function undoRetentionRun({ run, execute = false, conn = db, now = new Dat
     if (!ids.length) break;
     const n = await conn.transaction(async (trx) => {
       await trx.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
-      return trx('notifications')
+      const back = await trx('notifications')
         .whereIn('id', ids)
         .where({ recipient_type: 'admin', done_by: RETENTION_BY })
         .whereNotNull('done_at')
         .whereRaw(`metadata->'${STAMP_KEY}'->>'run' = ?`, [run])
-        .update({ ...DONE_CLEARED, metadata: trx.raw(`(COALESCE(metadata, '{}'::jsonb) - '${STAMP_KEY}') || ?::jsonb`, [trail]) });
+        .update({ ...DONE_CLEARED, metadata: trx.raw(`(COALESCE(metadata, '{}'::jsonb) - '${STAMP_KEY}') || ?::jsonb`, [trail]) })
+        .returning('id');
+      // A text follow-up alert an older build keyed on the promise or its text takes the customer's key as it reopens.
+      await require('./sms-operational-actions').adoptOlderKeyAlerts(trx, { notificationIds: back.map((r) => r.id), now });
+      return back.length;
     });
     reopened += n;
     if (!n) break;
@@ -684,8 +688,12 @@ async function reopenQuietFallOff({ since = null, run = null, apply = false, now
     if (!ids.length) break;
     const n = await conn.transaction(async (trx) => {
       await trx.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
-      return match(trx('notifications').whereIn('id', ids))
-        .update({ ...DONE_CLEARED, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) });
+      const back = await match(trx('notifications').whereIn('id', ids))
+        .update({ ...DONE_CLEARED, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) })
+        .returning('id');
+      // A text follow-up alert an older build keyed on the promise or its text takes the customer's key as it reopens.
+      await require('./sms-operational-actions').adoptOlderKeyAlerts(trx, { notificationIds: back.map((r) => r.id), now });
+      return back.length;
     });
     reopened += n;
     if (!n) break;
