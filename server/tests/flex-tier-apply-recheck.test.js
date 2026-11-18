@@ -1,9 +1,11 @@
 // FLEX-TIER orchestrator integration (GATE_AUTO_DISPATCH_FLEX_TIER on): the
-// pass-1 sweep uses the 73h freeze + the fixed ±5-day radius (never the
+// pass-1 sweep uses the 25h freeze + the fixed ±5-day radius (never the
 // route-tiers days-out ladder), and the pass-2 apply path re-checks that
 // freeze right before mutating. Mirrors route-tiers-apply-recheck.test.js's
 // harness (heavy sub-services mocked, REAL flex-tier logic over a mocked db).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The night told-lock's promise reader (auto-dispatch/told-visits.js) has its own suites; nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
@@ -184,10 +186,10 @@ test('flexTierEnabled takes precedence when routeTiersEnabled is also on', async
   expect(changed.constraints.route_tiers.mode).toBe('flex'); // not 'tiers'
 });
 
-test('a reminder sent between pass 1 and the apply freezes the move (73h band)', async () => {
+test('a reminder sent between pass 1 and the apply freezes the move (25h band)', async () => {
   reminderResults = [
     [], // pass-1: clean
-    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_72h_sent: true, suppressed_by_sibling: false }], // apply re-check: sent
+    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_24h_sent: true, suppressed_by_sibling: false }], // apply re-check: sent
   ];
   const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
   expect(res.changed).toBe(0);
@@ -195,13 +197,13 @@ test('a reminder sent between pass 1 and the apply freezes the move (73h band)',
   expect(decisions('no_change').map((d) => d.reason_code)).toContain('REMINDER_SENT_FROZEN');
 });
 
-test('a visit inside the 73h band but outside route-tiers\' own 72.25h band is still frozen at pass 1', async () => {
-  // 73h out: unsent flag, but the row sits inside the Flexible tier's OWN
-  // (tighter) claimable band — must freeze even though it is outside the
-  // narrower 72.25h band route-tiers itself uses.
-  const at73h = new Date(Date.now() + 73 * 3600000).toISOString();
+test('a visit inside the 25h band but outside route-tiers\' own 24.25h band is still frozen at pass 1', async () => {
+  // 24.75h out: unsent flag, but the row sits inside the Flexible tier's OWN
+  // (wider) claimable band — must freeze even though it is outside the
+  // narrower 24.25h band route-tiers itself uses.
+  const at25h = new Date(Date.now() + 24.75 * 3600000).toISOString();
   reminderResults = [
-    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: at73h, reminder_72h_sent: false, suppressed_by_sibling: false }],
+    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: at25h, reminder_24h_sent: false, suppressed_by_sibling: false }],
   ];
   const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
   expect(res.changed).toBe(0);
@@ -391,13 +393,17 @@ test('gate off (neither flexTierEnabled nor routeTiersEnabled): legacy flat lock
 // Codex pre-push P1, finding 1: loadReminderFreeze reports an EMPTY frozen
 // set for a visit with NO appointment_reminders row at all (not "sent",
 // just absent) — and the flex ctx removed eligibility.js's own days-out
-// lock, so a visit due inside 73h with no reminder row yet must still be
+// lock, so a visit due inside 25h with no reminder row yet must still be
 // caught, directly from its own schedule, at BOTH pass 1 and the apply-time
 // recheck.
-describe('own-schedule 73h freeze — independent of reminder evidence (Codex pre-push P1)', () => {
-  const soonDate = shiftDateStr(TODAY, 2); // ~48h out — inside 73h, well outside the lookahead-irrelevant range
+describe('own-schedule 25h freeze — independent of reminder evidence (Codex pre-push P1)', () => {
+  // A visit ~20h out — inside the night pass's 25h freeze.
   function soonSvc() {
-    return { ...svc(), scheduled_date: soonDate };
+    const when = new Date(Date.now() + 20 * 3600000);
+    const { hour, minute } = require('../utils/datetime-et').etParts(when);
+    return {
+      ...svc(), scheduled_date: etDateString(when), window_start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, window_end: null,
+    };
   }
 
   test('pass 1: skipped as WITHIN_73H even though the reminder-freeze read is a clean empty set (no row)', async () => {
@@ -413,17 +419,17 @@ describe('own-schedule 73h freeze — independent of reminder evidence (Codex pr
     expect(decisions('skipped').map((d) => d.reason_code)).toContain('WITHIN_73H');
   });
 
-  test('apply-time recheck: a visit that DRIFTS inside 73h during a slow scoring pass is caught independently of the reminder table', async () => {
-    // The visit is >73h out when pass 1 reads the clock, but the "scoring
+  test('apply-time recheck: a visit that DRIFTS inside 25h during a slow scoring pass is caught independently of the reminder table', async () => {
+    // The visit is >25h out when pass 1 reads the clock, but the "scoring
     // pass" (candidate-slots mock) advances the wall clock far enough that
-    // by the apply-time recheck it is inside 73h — recheckDayMoveWindow's
+    // by the apply-time recheck it is inside 25h — recheckDayMoveWindow's
     // own-schedule check must catch it even with a clean (empty) reminder
     // read both times.
     reminderResults = [[], []];
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
     try {
       jest.setSystemTime(new Date('2026-08-13T08:00:00Z'));
-      const visitDate = shiftDateStr(etDateString(new Date()), 4); // ~96h out — outside 73h at pass 1
+      const visitDate = shiftDateStr(etDateString(new Date()), 2); // ~52h out — outside 25h at pass 1
       db.mockImplementation((table) => {
         if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
         if (table === 'scheduled_services') return buildChain([{ ...svc(), scheduled_date: visitDate, window_start: '08:00' }]);
@@ -431,7 +437,7 @@ describe('own-schedule 73h freeze — independent of reminder evidence (Codex pr
       });
       candidateSlots.findValidCandidateSlots.mockImplementation(async () => {
         // Advance the wall clock ~26h during the "long scoring pass" — the
-        // visit (still at its own original date/window) is now inside 73h.
+        // visit (still at its own original date/window) is now inside 25h.
         jest.setSystemTime(new Date('2026-08-14T13:00:00Z'));
         return {
           current: { ...CURRENT, date: visitDate }, candidates: [{ ...CAND, date: shiftDateStr(visitDate, 1) }],

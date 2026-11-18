@@ -5,6 +5,8 @@
 // before. Same harness as night-told-lock-orchestrator.test.js; the lock's reads and its place on the move
 // transaction are in auto-dispatch-reminder-off-lock.test.js. Synthetic ids only.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The night told-lock's promise reader (auto-dispatch/told-visits.js) has its own suites; nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
@@ -110,8 +112,8 @@ afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const decisions = () => audit.logDecision.mock.calls.map((c) => c[1]);
 const codes = () => decisions().map((d) => d.reason_code);
-const flex = (over = {}) => runAutoDispatch({ mode: 'apply', flexTierEnabled: true, nightLock24h: true, ...over });
-const tiers = (over = {}) => runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, nightLock24h: true, ...over });
+const flex = (over = {}) => runAutoDispatch({ mode: 'apply', flexTierEnabled: true, ...over });
+const tiers = (over = {}) => runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, ...over });
 const legacy = (over = {}) => runAutoDispatch({ mode: 'apply', ...over });
 
 describe.each([['flex', flex], ['tiers', tiers], ['legacy', legacy]])('%s mode', (_name, go) => {

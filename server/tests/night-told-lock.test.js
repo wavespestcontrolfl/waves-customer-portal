@@ -1,6 +1,5 @@
-// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): a night tool never changes a
-// time the customer was already told. This suite covers the gate reader, the
-// once-per-run config read, route-tiers' loadReminderFreeze with
+// Night told-lock (owner 2026-11-05, "D1 a"): a night tool never changes a
+// time the customer was already told. This suite covers route-tiers' loadReminderFreeze with
 // { lock24h: true, toldLock: true } (a visit with a known-slot promise freezes,
 // by the promise reader in auto-dispatch/told-visits.js, mocked here; a
 // reminder_72h_sent flag alone does not), and the promise that
@@ -11,8 +10,6 @@ jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: je
 
 const fs = require('fs');
 const path = require('path');
-const gates = require('../config/feature-gates');
-const { getAutoDispatchConfig } = require('../services/auto-dispatch/config');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { loadToldVisitIds } = require('../services/auto-dispatch/told-visits');
 
@@ -22,43 +19,6 @@ const NOW = new Date('2026-11-10T09:00:00Z');
 const at = (hours) => new Date(NOW.getTime() + hours * HOUR).toISOString();
 
 beforeEach(() => { loadToldVisitIds.mockReset(); loadToldVisitIds.mockResolvedValue(new Set()); });
-afterEach(() => {
-  delete process.env.GATE_NIGHT_TOLD_LOCK;
-  delete process.env.GATE_NIGHT_LOCK_24H;
-});
-
-describe('the gate reader', () => {
-  test('dark by default; only exactly "true" turns it on, read at call time', () => {
-    expect(gates.nightToldLockLive()).toBe(false);
-    for (const v of ['', 'false', '1', 'on', 'TRUE', 'yes']) {
-      process.env.GATE_NIGHT_TOLD_LOCK = v;
-      expect(gates.nightToldLockLive()).toBe(false);
-    }
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
-    expect(gates.nightToldLockLive()).toBe(true);
-    delete process.env.GATE_NIGHT_TOLD_LOCK;
-    expect(gates.nightToldLockLive()).toBe(false);
-  });
-
-  test('the reader is exported on its own line, and the boot log has an entry', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
-    expect(src).toMatch(/^module\.exports\.nightToldLockLive = nightToldLockLive;$/m);
-    expect(gates.gates.nightToldLock).toBe(false);
-  });
-});
-
-describe('config: the gate is read once per run into config.nightToldLock', () => {
-  test('off by default, on with the env, overridable, and fixed once built', () => {
-    expect(getAutoDispatchConfig().nightToldLock).toBe(false);
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
-    const config = getAutoDispatchConfig();
-    expect(config.nightToldLock).toBe(true);
-    expect(getAutoDispatchConfig({ nightToldLock: false }).nightToldLock).toBe(false);
-    delete process.env.GATE_NIGHT_TOLD_LOCK;
-    expect(config.nightToldLock).toBe(true); // no mid-run mixing
-    expect(getAutoDispatchConfig({ nightToldLock: true }).nightToldLock).toBe(true);
-  });
-});
 
 // A db stub that records the selected columns and answers the owner query.
 function reminderDb({ rows = [], owners = [] } = {}) {
@@ -179,13 +139,6 @@ describe('without toldLock nothing changes', () => {
     expect(await frozenFor({ reminder_72h_sent: true, windows_preclosed: true })).toBe(true);
     expect(await frozenFor({ appointment_time: at(80) })).toBe(false);
     expect(loadToldVisitIds).not.toHaveBeenCalled();
-  });
-
-  test('only one gate on: the reader of one never moves the other (strict, call time)', () => {
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    expect(gates.nightToldLockLive()).toBe(false);
-    expect(getAutoDispatchConfig().nightToldLock).toBe(false);
-    expect(getAutoDispatchConfig().nightLock24h).toBe(true);
   });
 });
 

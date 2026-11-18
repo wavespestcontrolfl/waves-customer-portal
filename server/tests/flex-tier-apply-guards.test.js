@@ -24,6 +24,8 @@ jest.mock('../services/auto-dispatch/reminder-off', () => ({
   ...jest.requireActual('../services/auto-dispatch/reminder-off'),
   assertRemindersOn: jest.fn(async () => {}),
 }));
+// The night told-lock's promise reader (auto-dispatch/told-visits.js) has its own suites; nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn(),
@@ -105,6 +107,12 @@ function seriesTrx(rowsByParent, busyParents, moves = [], { rowLockBusy = false 
 
 // The unit mover's per-member targets for `rows`, each landing on its own
 // current start (the member guard reads a sibling's destination start here).
+// The ET date and HH:MM of an instant `hours` from now (a visit that far out).
+const hoursAhead = (hours) => {
+  const when = new Date(Date.now() + hours * 3600000);
+  const { hour, minute } = require('../utils/datetime-et').etParts(when);
+  return { scheduled_date: etDateString(when), window_start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
+};
 const targetsOf = (rows) => rows.map((r) => ({ id: r.id, startHHMM: r.window_start }));
 
 beforeEach(() => {
@@ -300,12 +308,12 @@ describe('checkFlexSiblingBounds — unplaced due-date sibling', () => {
 describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Finding 2 wiring)', () => {
   test('makeMoveGuard applies the flex check when config.guardMode is flex, and skips it otherwise', async () => {
     const row = {
-      id: 's1', scheduled_date: dayOffset(2), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
+      id: 's1', ...hoursAhead(20), is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
     };
     const best = { date: dayOffset(9), technician_id: null };
     const guardOn = makeMoveGuard({ service: row, best, config: { guardMode: 'flex' } });
     await expect(guardOn({ trx: jest.fn(), technicianId: null }))
-      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }); // 73h own-schedule freeze, no trx query needed
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }); // 25h own-schedule freeze, no trx query needed
     const guardOff = makeMoveGuard({ service: row, best, config: {} });
     await expect(guardOff({ trx: jest.fn(), technicianId: null })).resolves.toBeUndefined();
   });
@@ -313,7 +321,7 @@ describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Findin
   test('makeMemberGuard dispatches to the flex sibling check when config.guardMode is flex', async () => {
     const service = { id: 's1', status: 'confirmed' };
     const sibling = {
-      id: 's2', status: 'confirmed', scheduled_date: dayOffset(2), window_start: '09:00',
+      id: 's2', status: 'confirmed', ...hoursAhead(20),
       is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
       lat: 27.4, lng: -82.5, customer_active: true, // clears eligibility so the flex freeze is what's actually exercised
     };
@@ -334,7 +342,7 @@ describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Findin
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
     const guard = makeMemberGuard({ service, best: { date: dayOffset(9) }, config: { guardMode: 'flex' }, techChanged: false });
     await expect(guard({ trx, members: [service, { id: 's2', status: 'confirmed' }] }))
-      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('73 hours') });
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('25 hours') });
   });
 });
 
@@ -424,6 +432,8 @@ describe('destination freeze — the DESTINATION instant must clear 73h, not jus
   });
 
   test('makeMoveGuard checks the destination the rebooker is about to write — the tapped row and a forwarded grouped member alike', async () => {
+    // Wed 2026-10-07 15:00 ET: Thu 10-08 17:00 ET is 26h away (clear of the 25h night freeze), 09:00 only 18h.
+    jest.setSystemTime(new Date('2026-10-07T19:00:00Z'));
     const best = { date: '2026-10-08', start_time: '09:00', technician_id: null };
     const guard = makeMoveGuard({ service: row, best, config: { guardMode: 'flex' } });
     await expect(guard({ trx: seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] }), technicianId: null, destination: { date: '2026-10-08', windowStart: '09:00' } }))
@@ -498,16 +508,17 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
   }
   const service = { id: 's1', visit_id: 'v1', status: 'confirmed', technician_id: null };
 
-  test('a grouped move whose earlier sibling is inside its own 73 hours is not recommended', async () => {
+  test('a grouped move whose earlier sibling is inside its own 25 hours is not recommended', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
-    // Both at Thu 10-08: the tapped 17:00 stop is 74h out, its 09:00 sibling 66h.
+    // Wed 2026-10-07 15:00 ET; both at Thu 10-08: the tapped 17:00 stop is 26h out, its 09:00 sibling 18h.
+    jest.setSystemTime(new Date('2026-10-07T19:00:00Z'));
     const refusal = await previewGroupMove(
       { ...service, scheduled_date: '2026-10-08', window_start: '17:00' },
       { date: '2026-10-13', start_time: '17:00', end_time: '18:00', technician_id: null },
       { guardMode: 'flex' },
       groupConn({ date: '2026-10-08' }),
     );
-    expect(refusal).toEqual({ code: 'GROUP_MEMBER_GUARD', description: expect.stringContaining('73 hours') });
+    expect(refusal).toEqual({ code: 'GROUP_MEMBER_GUARD', description: expect.stringContaining('25 hours') });
   });
 
   test('a grouped move every sibling can legally make passes the whole member guard', async () => {

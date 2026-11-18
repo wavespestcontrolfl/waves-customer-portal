@@ -1,9 +1,8 @@
-// GATE_NIGHT_TOLD_LOCK orchestrator integration (owner 2026-11-05, "D1 a"): with the
-// gate on AND the run's nightLock24h on (both read once per run into the config),
+// Night told-lock orchestrator integration (owner 2026-11-05, "D1 a"):
 // the 04:10 / 05:00 auto-dispatch run skips a visit the customer was told a time
 // for (a known-slot promise, read by auto-dispatch/told-visits.js, mocked here:
 // REMINDER_SENT_FROZEN), at evaluation and at the apply-time re-check. A
-// reminder_72h_sent flag with no real promise freezes nothing. Gate off, or nightLock24h off: today's behavior. Same harness as
+// reminder_72h_sent flag with no real promise freezes nothing. Same harness as
 // night-lock-24h-orchestrator.test.js. Synthetic ids only.
 jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -126,13 +125,10 @@ beforeEach(() => {
 });
 
 beforeEach(() => { loadToldVisitIds.mockReset(); loadToldVisitIds.mockResolvedValue(new Set()); });
-afterEach(() => { delete process.env.GATE_NIGHT_LOCK_24H; });
 afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const skipCodes = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action !== 'changed').map((d) => d.reason_code);
 
-
-afterEach(() => { delete process.env.GATE_NIGHT_TOLD_LOCK; });
 
 const skipTexts = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.reason_code === 'REMINDER_SENT_FROZEN').map((d) => d.reason_description);
 const tiers = (over = {}) => runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, ...over });
@@ -142,10 +138,10 @@ const told = (...ids) => loadToldVisitIds.mockResolvedValue(new Set(ids));
 
 // In tiers mode a 6-day move from a 30 h visit is outside the tier ladder (a drift skip), so only the freeze code is compared there.
 describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name, go, moves) => {
-  test('gate on + nightLock24h on: a visit 30 h out with a known-slot promise is skipped REMINDER_SENT_FROZEN', async () => {
+  test('a visit 30 h out with a known-slot promise is skipped REMINDER_SENT_FROZEN', async () => {
     setup(30, [reminderRow(30, {})]);
     told('s1');
-    const res = await go({ nightLock24h: true, nightToldLock: true });
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
     expect(skipTexts()[0]).toContain('told-time');
@@ -156,7 +152,7 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
     setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
     loadToldVisitIds.mockResolvedValueOnce(new Set()).mockResolvedValue(new Set(['s1']));
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: current(), candidates: [CAND] });
-    const res = await go({ nightLock24h: true, nightToldLock: true });
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     if (moves) expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
@@ -164,7 +160,7 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
 
   test('a reminder_72h_sent flag with no real promise (skipped reminder) freezes nothing', async () => {
     setup(30, [reminderRow(30, { reminder_72h_sent: true }), reminderRow(30, { reminder_72h_sent: true })]);
-    const res = await go({ nightLock24h: true, nightToldLock: true });
+    const res = await go();
     expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
     if (moves) expect(res.changed).toBe(1);
   });
@@ -172,49 +168,8 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
   test('a promise read that fails freezes the visit (fail closed)', async () => {
     setup(30, [reminderRow(30, {})]);
     loadToldVisitIds.mockRejectedValue(new Error('promise read down'));
-    const res = await go({ nightLock24h: true, nightToldLock: true });
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_STATUS_UNKNOWN');
-  });
-
-  test('gate off: the same told visit is not frozen by the promise (today), and no promise is read', async () => {
-    setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
-    told('s1');
-    const res = await go({ nightLock24h: true, nightToldLock: false });
-    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
-    expect(loadToldVisitIds).not.toHaveBeenCalled();
-    if (moves) expect(res.changed).toBe(1);
-  });
-});
-
-describe('the told-lock only acts with nightLock24h', () => {
-  test('nightLock24h off: the 73-hour rule decides, text says 73-hour; no promise is read', async () => {
-    setup(30, [reminderRow(30, { reminder_72h_sent: true })]);
-    told('s1');
-    await flex({ nightLock24h: false, nightToldLock: true });
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-    expect(skipTexts()[0]).toContain('73-hour');
-    expect(loadToldVisitIds).not.toHaveBeenCalled();
-  });
-
-  test('both gates read once per run from the environment; the run config carries nightToldLock', async () => {
-    setup(30, [reminderRow(30, {})]);
-    told('s1');
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
-    const res = await tiers();
-    expect(res.changed).toBe(0);
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-    expect(audit.startRun.mock.calls[0][0].nightToldLock).toBe(true);
-  });
-
-  test('only the told-lock gate on (nightLock24h off by env): no promise is read, tiers keeps the 72-hour rule', async () => {
-    setup(30, [reminderRow(30, { reminder_72h_sent: true })]);
-    told('s1');
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
-    await tiers();
-    expect(skipTexts()[0]).toContain('72-hour');
-    expect(loadToldVisitIds).not.toHaveBeenCalled();
-    expect(audit.startRun.mock.calls[0][0].nightLock24h).toBe(false);
   });
 });

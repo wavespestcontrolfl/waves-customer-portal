@@ -18,6 +18,12 @@ jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: 
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
+// The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no person placed any visit.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
+jest.mock('../services/auto-dispatch/eligibility', () => ({
+  ...jest.requireActual('../services/auto-dispatch/eligibility'),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+}));
 
 const logger = require('../services/logger');
 const { planDay } = require('../services/day-replan/planner');
@@ -81,6 +87,8 @@ function row(id, lngOffset, hour, extra = {}) {
     estimated_duration_minutes: 60,
     service_type: 'Quarterly Pest Control Service',
     is_recurring: true,
+    // A recurring child, so the night told-lock's first_or_one_time reason does not fix it.
+    recurring_parent_id: `parent-${id}`,
     is_callback: false,
     auto_dispatch_locked: false,
     auto_dispatch_excluded: false,
@@ -564,7 +572,7 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
   });
 
   test('a stop booked in the last 24 hours is replayed over its day\'s hours', async () => {
-    const rows = [row('a', 0.020, 8), row('n', 0.021, 14, { created_at: new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString(), source_action: 'online_booking' })];
+    const rows = [row('a', 0.020, 8), row('n', 0.021, 14, { created_at: new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString(), source_action: 'online_booking', recurring_parent_id: null })];
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
     await runDayReplanIfEnabled({ now: NOW, conn });
     const [replay] = record(inserts[0]).s1;
@@ -574,8 +582,7 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     expect(replay.differs).toBe(true);
   });
 
-  test('the day\'s stops carry recurring_parent_id with the told lock off too, so a series visit is never replayed as a booking', async () => {
-    delete process.env.GATE_NIGHT_TOLD_LOCK;
+  test('the day\'s stops carry recurring_parent_id, so a series visit is never replayed as a booking', async () => {
     const recent = new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString();
     const rows = [row('a', 0.020, 8), row('n', 0.021, 14, { created_at: recent, is_recurring: true, recurring_parent_id: 'root-1' })];
     const { conn, inserts, selects } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });

@@ -14,10 +14,10 @@
  *     (appointment_reminders.reminder_72h_sent; the reminder is the hard gate
  *     because its SMS promises an arrival window). Unreadable reminder status
  *     freezes the run's every day (fail closed).
- *     GATE_NIGHT_LOCK_24H (owner 2026-11-03) moves that lock to the 24-hour
- *     reminder for the nightly pass: frozen = starts within 24 hours OR
- *     reminder_24h_sent; the 72-hour reminder locks nothing. The gate is read
- *     once by the cron entry (runRouteReorderIfEnabled) and handed down as
+ *     Since owner 2026-11-03 the nightly pass uses the 24-hour reminder lock
+ *     instead: frozen = starts within 24 hours OR
+ *     reminder_24h_sent; the 72-hour reminder locks nothing. The cron entry
+ *     (runRouteReorderIfEnabled) hands it down as
  *     opts.nightLock24h; every other caller (change-triggered repair, the
  *     cleanup script, direct calls) keeps the 72-hour rule. Skip reason codes
  *     (WITHIN_72H, REMINDER_SENT_FROZEN) are unchanged either way; the ledger's
@@ -295,14 +295,14 @@ function violatesWindowChronology(orderedStops, sourceStops) {
   return false;
 }
 
-/** loadReminderFreeze's trailing arguments for this pass: none gate off (the
- *  pre-gate call, byte for byte), the explicit lock24h option gate on. */
+/** loadReminderFreeze's trailing arguments for this pass: none for a caller on
+ *  the 72-hour rule, the explicit lock24h option for the nightly pass. */
 function lockOptArgs(lock24h) {
   return lock24h ? [undefined, { lock24h: true }] : [];
 }
 
 /** True when the visit starts within the freeze clock of `now` — 72 hours, or
- *  24 with `lock24h` (GATE_NIGHT_LOCK_24H, passed down by the nightly pass);
+ *  24 with `lock24h` (passed down by the nightly pass);
  *  windowless visits freeze off the canonical 08:00 slot time the reminder
  *  system uses. */
 function withinFreezeClock(dateStr, windowStart, now, lock24h = false) {
@@ -1193,8 +1193,8 @@ async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdere
       }
     }
     const commitNow = opts.now || new Date();
-    // GATE_NIGHT_LOCK_24H, as the nightly run read it (opts.nightLock24h) —
-    // never re-read here, so a mid-run flip cannot mix the two rules.
+    // The nightly run's lock rule (opts.nightLock24h) — never re-read here, so
+    // the plan and the commit use the same rule.
     const lock24h = opts.nightLock24h === true;
     const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow, ...lockOptArgs(lock24h));
     if (commitFreeze.failed) {
@@ -1466,9 +1466,8 @@ async function runRouteReorder(opts = {}, conn = db) {
   const repairEnabled = repairGates.every(gateEnvValue);
   if (opts.repairOnly && !repairEnabled) return { status: 'gate_off' };
   const completeOrderEnabled = gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER');
-  // GATE_NIGHT_LOCK_24H: only the cron entry passes opts.nightLock24h (its one
-  // read of the gate for this run); a repair run, the cleanup script or a
-  // direct call keeps the 72-hour freeze.
+  // Only the cron entry passes opts.nightLock24h; a repair run, the cleanup
+  // script or a direct call keeps the 72-hour freeze.
   const lock24h = opts.nightLock24h === true;
   // Stale-order canonicalization mode (owner ruling 2026-09-26: "a driveable
   // order beats a stale one"): opts.canonicalizeStale opts in directly (the
@@ -2061,11 +2060,9 @@ async function writeLedgerRow({
 /** Cron entry — double-checks the gate so a stale scheduler can never run it. */
 async function runRouteReorderIfEnabled() {
   if (!gateEnvValue('GATE_ROUTE_REORDER')) return { status: 'gate_off' };
-  // GATE_NIGHT_LOCK_24H (owner 2026-11-03): this nightly entry is the pass that
-  // opts in — one call-time read, handed down as opts.nightLock24h.
-  const { nightLock24hLive } = require('../config/feature-gates');
-  const lock24h = typeof nightLock24hLive === 'function' && nightLock24hLive() === true;
-  return lock24h ? runRouteReorder({ nightLock24h: true }) : runRouteReorder();
+  // Owner 2026-11-03: this nightly entry is the pass that uses the 24-hour lock,
+  // handed down as opts.nightLock24h.
+  return runRouteReorder({ nightLock24h: true });
 }
 
 /**

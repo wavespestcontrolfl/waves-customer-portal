@@ -696,7 +696,7 @@ function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
 // The `scheduled_date` floor loadEligibleServices() queries with. ROUTE-TIERS
 // loads from its own tier-2 floor (today+6 — the days-out ladder decides the
 // rest per visit); FLEX-TIER loads from tomorrow on — its precise cutoff is
-// the 73h freeze, checked per visit against the live reminder row, so a
+// the 25h freeze, checked per visit against the live reminder row, so a
 // coarser SQL floor here only costs a few extra unfrozen-but-too-close reads,
 // never misses one; legacy loads from its own flat lock boundary. Byte for
 // byte the old behavior when neither gate is on.
@@ -717,66 +717,52 @@ function buildEligCtx(guardMode, today, lockBoundary, lockWindowDays) {
 }
 
 // The freeze, in hours, the reminder-freeze read enforces for the active mode:
-// flex = its own band (73 h; 25 h with GATE_NIGHT_LOCK_24H), tiers = the
-// reminder sender's claimable band (72.25 h; 24.25 h gate on). `lock24h` is
-// the run's one gate read (config.nightLock24h).
-function reminderFreezeHours(guardMode, lock24h) {
-  return guardMode === 'flex' ? flexTier.flexFreezeHoursFor(lock24h) : routeTiers.sendableHoursFor(lock24h);
+// flex = its own band (25 h), tiers = the reminder sender's claimable band
+// (24.25 h). The run always passes `lock24h` true (owner 2026-11-03).
+function reminderFreezeHours(guardMode) {
+  return guardMode === 'flex' ? flexTier.flexFreezeHoursFor(true) : routeTiers.sendableHoursFor(true);
 }
 
-// The trailing arguments of loadReminderFreeze for a night run. Gate off they
-// are exactly the pre-gate call (the band alone); gate on they add the
-// explicit lock24h option, so no caller's default ever changes.
-// GATE_NIGHT_TOLD_LOCK (`toldLock`, the run's one read, only with lock24h): the
-// option also freezes a visit the customer was told a time for (a known-slot promise).
+// The trailing arguments of loadReminderFreeze for a night run: the band plus
+// the explicit lock24h option, so no other caller's default ever changes. A night
+// run (owner 2026-11-05, "D1 a") also freezes a visit the customer was told a time
+// for (`toldLock`, a known-slot promise).
 // GATE_DAY_ONLY_PROMISE (`dayOnly`, only with toldLock): the option also freezes a visit whose latest promise is a
 // day-only or unknown-window one (opts.anyPromise).
-function freezeReadArgs(guardMode, lock24h, toldLock = false, dayOnly = false) {
-  const hours = reminderFreezeHours(guardMode, lock24h);
-  if (lock24h !== true) return [hours];
-  if (toldLock !== true) return [hours, { lock24h: true }];
+function freezeReadArgs(guardMode, dayOnly = false) {
+  const hours = reminderFreezeHours(guardMode);
   return [hours, dayOnly === true ? { lock24h: true, toldLock: true, anyPromise: true } : { lock24h: true, toldLock: true }];
 }
 
-
-// The run's one read of GATE_NIGHT_TOLD_LOCK (config.nightToldLock) counts only
-// together with config.nightLock24h: a known-slot promise then freezes
-// a visit too (loadReminderFreeze opts.toldLock). Only this config carries it;
-// the rain pass and route-reorder never build it.
-function toldLockOf(config) {
-  return !!config && config.nightLock24h === true && config.nightToldLock === true;
-}
-
-// The run's one read of GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise) counts only together with the told-lock
-// (toldLockOf): a day-only or unknown-window promise then freezes a visit too (loadReminderFreeze opts.anyPromise).
+// The run's one read of GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise): a day-only or unknown-window promise then
+// freezes a visit too (loadReminderFreeze opts.anyPromise). Only this config carries it; the rain pass and
+// route-reorder never build it.
 function dayOnlyOf(config) {
-  return toldLockOf(config) && config.dayOnlyPromise === true;
+  return !!config && config.dayOnlyPromise === true;
 }
 
-// How the skip text names the reminder that froze a visit: gate off, flex
-// says 73-hour and tiers 72-hour (the 09-25 wording); gate on, both are the
-// 24-hour reminder. Codes stay the same either way.
-function frozenReminderLabel(guardMode, lock24h, toldLock = false) {
-  if (lock24h === true) return toldLock === true ? '24-hour or told-time' : '24-hour';
-  return guardMode === 'flex' ? '73-hour' : '72-hour';
+// How the skip text names the reminder that froze a visit: the 24-hour reminder, or a time the customer was told.
+// Codes stay the same.
+function frozenReminderLabel() {
+  return '24-hour or told-time';
 }
 
 // Bulk per-run guard context for the active mode. ROUTE-TIERS needs the
-// reminder freeze (its 72.25h band) + drift-anchor evidence; FLEX-TIER needs
-// the reminder freeze (its own, tighter 73h band) + the SAME drift-anchor
+// reminder freeze (its 24.25h band) + drift-anchor evidence; FLEX-TIER needs
+// the reminder freeze (its own, tighter 25h band) + the SAME drift-anchor
 // evidence (its ±5 days are measured from the durable original date too) +
 // each visit's series neighbors. Both FAIL CLOSED: a failed read must
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
 // buildPlacementAudit above). Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
-async function loadGuardContext(guardMode, services, nowDate, lock24h = false, toldLock = false, dayOnly = false) {
+async function loadGuardContext(guardMode, services, nowDate, dayOnly = false) {
   if (guardMode === 'legacy') {
     return {
       reminderFreeze: null, anchorMap: null, neighborMap: null, degraded: false,
     };
   }
   const ids = services.map((s) => s.id);
-  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode, lock24h, toldLock, dayOnly));
+  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode, dayOnly));
   // ALL ids, not just change_count>0 — the durable move records (not the
   // best-effort stamp) decide whether a visit has spent drift budget.
   const anchorMap = await routeTiers.loadAnchorMap(db, ids);
@@ -798,17 +784,16 @@ async function loadGuardContext(guardMode, services, nowDate, lock24h = false, t
 // Why the flex tier's own-schedule freeze holds a visit. A recurring child with
 // no arrival window and no due date has no instant to freeze on (the freeze
 // reads an uncomposable instant as frozen, fail closed), so it is skipped as
-// before — but labelled for what it is, not as a 73-hour cutoff weeks away. A
+// before — but labelled for what it is, not as a 25-hour cutoff weeks away. A
 // combined-allocation stamp does not change this: reservation_arrival_start
 // returns NULL for a row with no window_start before it reads the stamp.
-// The code stays WITHIN_73H under GATE_NIGHT_LOCK_24H (ledger and report
-// compatibility); only the wording names the 25-hour cutoff.
-function frozenSkipReason(service, lock24h = false) {
+// The code stays WITHIN_73H (ledger and report compatibility); only the
+// wording names the 25-hour cutoff.
+function frozenSkipReason(service) {
   const noWindow = !service.window_start && !service.recurring_dispatch_due_date;
-  const cutoff = lock24h === true ? '25-hour' : '73-hour';
   return noWindow
     ? { code: 'NO_ARRIVAL_WINDOW', description: 'Visit has no arrival window and no due date; auto-dispatch cannot place it' }
-    : { code: 'WITHIN_73H', description: `${cutoff} cutoff reached on the visit's own schedule — frozen (independent of reminder evidence)` };
+    : { code: 'WITHIN_73H', description: "25-hour cutoff reached on the visit's own schedule — frozen (independent of reminder evidence)" };
 }
 
 // Label only: flexTierMoveWindow collapses to the visit's own date when the
@@ -829,7 +814,7 @@ function staleAnchorMeta(window, origDate, anchor) {
 // Reminder evidence only ever ADDS a freeze (a sent flag, or the sender's
 // own claimable band read off appointment_reminders ROWS) — a visit with NO
 // reminder row at all is invisible to that check, and the flex ctx skips
-// eligibility.js's days-out lock entirely, so the 73h cutoff is ALSO
+// eligibility.js's days-out lock entirely, so the 25h cutoff is ALSO
 // enforced directly from the visit's own canonical arrival (Codex pre-push
 // P1; an unreadable arrival throws, and the run records it). The ±5-day
 // window is anchored to the durable original date (route-tiers'
@@ -838,11 +823,11 @@ function staleAnchorMeta(window, origDate, anchor) {
 // run's health (Codex #4995 r6 P2); a visit merely missing from the map is
 // refused on its own.
 async function flexWindowFor(service, {
-  neighborMap, anchor, today, nowDate, lock24h = false,
+  neighborMap, anchor, today, nowDate,
 }) {
   const skip = (code, description, degraded) => ({ window: null, meta: null, skip: { code, description, ...(degraded ? { degraded } : {}) } });
-  if (await flexTier.ownScheduleFrozen(db, service, nowDate, lock24h)) {
-    const frozen = frozenSkipReason(service, lock24h);
+  if (await flexTier.ownScheduleFrozen(db, service, nowDate, true)) {
+    const frozen = frozenSkipReason(service);
     return skip(frozen.code, frozen.description);
   }
   if (!neighborMap) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Series occurrence order could not be read — no move (fail closed)', true);
@@ -868,18 +853,18 @@ async function flexWindowFor(service, {
 // (flex mode's own-schedule freeze needs hours, not whole days). Returns
 // { window, meta, skip }; `skip` is {code, description} when the visit
 // cannot move this run/window.
-async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate, lock24h = false, toldLock = false) {
+async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
   const { reminderFreeze, anchorMap, neighborMap } = guardCtx;
   if (!reminderFreeze || reminderFreeze.failed) {
     return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable — frozen (fail closed)' } };
   }
   if (reminderFreeze.frozen.has(service.id)) {
-    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel(guardMode, lock24h, toldLock)} reminder already sent — visit is frozen` } };
+    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel()} reminder already sent — visit is frozen` } };
   }
   if (guardMode === 'flex') {
     return flexWindowFor(service, {
-      neighborMap, anchor: routeTiers.resolveAnchor(service, anchorMap), today, nowDate, lock24h,
+      neighborMap, anchor: routeTiers.resolveAnchor(service, anchorMap), today, nowDate,
     });
   }
   const dateStr = toDateStr(service.scheduled_date);
@@ -919,19 +904,19 @@ async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate
 // runAutoDispatch's pass-2 loop for the same complexity-budget reason as
 // resolveDayMoveWindow. Returns { window, meta, skip }; skip.degraded flags
 // a read failure the caller must fold into the run's health status.
-async function recheckDayMoveWindow(guardMode, service, meta, nowDate, lock24h = false, toldLock = false, dayOnly = false) {
+async function recheckDayMoveWindow(guardMode, service, meta, nowDate, dayOnly = false) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
-  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode, lock24h, toldLock, dayOnly));
+  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode, dayOnly));
   if (applyFreeze.failed) {
     return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', degraded: true } };
   }
   if (applyFreeze.frozen.has(service.id)) {
-    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel(guardMode, lock24h, toldLock)} reminder was sent during the run — visit is frozen` } };
+    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${frozenReminderLabel()} reminder was sent during the run — visit is frozen` } };
   }
   const todayNow = etDateString(nowDate);
   if (guardMode === 'flex') {
     return flexWindowFor(service, {
-      neighborMap: await flexTier.loadSeriesNeighbors(db, [service]), anchor: meta && meta.anchor, today: todayNow, nowDate, lock24h,
+      neighborMap: await flexTier.loadSeriesNeighbors(db, [service]), anchor: meta && meta.anchor, today: todayNow, nowDate,
     });
   }
   const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(service.scheduled_date));
@@ -1243,7 +1228,7 @@ async function evaluateServiceForRun(service, run) {
 
   // ── Day-move guard (only when a guard mode is active) ──
   const guard = dayMoveGuarded(guardMode, service)
-    ? await resolveDayMoveWindow(guardMode, service, run.guardCtx, run.today, run.nowDate, config.nightLock24h === true, toldLockOf(config))
+    ? await resolveDayMoveWindow(guardMode, service, run.guardCtx, run.today, run.nowDate)
     : { window: null, meta: null, skip: null };
   if (guard.skip) return logSkip(run, service, guardSkipReason(guard.skip));
 
@@ -1289,9 +1274,8 @@ async function evaluateServiceForRun(service, run) {
     // GATE_AUTO_DISPATCH_KEEP_TECH: a visit with a technician is offered that
     // technician's slots only (candidate-slots.js candidateFromSlot).
     keepTech: config.keepTech === true,
-    // GATE_NIGHT_LOCK_24H (the run's one read, config.nightLock24h): the flex
-    // candidate admission uses the 25 h freeze, not 73 h (flex-tier.js).
-    nightLock24h: config.nightLock24h === true,
+    // The flex candidate admission uses the 25 h freeze (flex-tier.js).
+    nightLock24h: true,
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -1393,7 +1377,7 @@ async function recheckPlannedMove(pm, run) {
   }
   if (!dayMoveGuarded(run.guardMode, pm.service)) return null;
   const recheckNow = new Date();
-  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, run.config.nightLock24h === true, toldLockOf(run.config), dayOnlyOf(run.config));
+  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, dayOnlyOf(run.config));
   if (recheck.skip) {
     if (recheck.skip.degraded) run.guardReadDegraded = true;
     return recheck.skip;
@@ -1674,12 +1658,12 @@ async function runPassTwo(run) {
 
 // The run log's day-move rule, worded for the guard mode that is really in
 // force. Legacy keeps the flat lock boundary; tiers and flex do not use it.
-function describeGuardRule(guardMode, lockBoundary, today, lock24h = false) {
+function describeGuardRule(guardMode, lockBoundary, today) {
   if (guardMode === 'flex') {
     const floor = shiftDateStr(today, routeTiers.MIN_DESTINATION_DAYS_OUT);
-    return `flex: frozen under ${flexTier.flexFreezeHoursFor(lock24h)}h, day moves on or after ${floor}`;
+    return `flex: frozen under ${flexTier.flexFreezeHoursFor(true)}h, day moves on or after ${floor}`;
   }
-  if (guardMode === 'tiers') return `tiers: day moves from ${routeTiers.TIER2_MIN_DAYS_OUT} days out${lock24h === true ? ', frozen under 24h' : ''}`;
+  if (guardMode === 'tiers') return `tiers: day moves from ${routeTiers.TIER2_MIN_DAYS_OUT} days out, frozen under 24h`;
   return `lock>${lockBoundary}`;
 }
 
@@ -1696,7 +1680,7 @@ async function runAutoDispatch(opts = {}) {
   // Cards an earlier run held but never summarized get their own push; this
   // run's cards are held under its id for its summary push.
   await require('../tech-visit-notifications').beginAutoDispatchRun(runId);
-  logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} ${describeGuardRule(config.guardMode, lockBoundary, today, config.nightLock24h === true)} lookahead<=${lookaheadEnd}`);
+  logger.info(`[auto-dispatch] run ${runId} mode=${config.mode} ${describeGuardRule(config.guardMode, lockBoundary, today)} lookahead<=${lookaheadEnd}`);
 
   let runStatus = 'completed';
   let runError = null;
@@ -1761,7 +1745,7 @@ async function runAutoDispatch(opts = {}) {
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
     // failed read freezes/guard-unknowns every visit rather than moving
     // without the check.
-    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, config.nightLock24h === true, toldLockOf(config), dayOnlyOf(config));
+    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, dayOnlyOf(config));
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
     await loadRunReminderOff(run, services);

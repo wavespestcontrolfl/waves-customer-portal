@@ -47,7 +47,7 @@ const DAY = '2097-06-10';
 const HQ = { lat: 27.4330885, lng: -82.4056801 };
 // GATE_REMINDER_72H_EMAIL_FIRST is cleared too: these fixture visits are one-time, and under it their 72-hour reminder
 // goes by email, so they would never move.
-const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_NIGHT_TOLD_LOCK', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP', 'GATE_MAKE_ROOM_EMPTY_HOUR'];
+const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_DAY_ONLY_PROMISE', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_TECH_START_POINTS', 'GATE_REMINDER_72H_EMAIL_FIRST', 'GATE_SLOT_TRAVEL_GAP', 'GATE_MAKE_ROOM_EMPTY_HOUR'];
 
 maybeDescribe('make-room accept on real PostgreSQL', () => {
   let database;
@@ -99,6 +99,8 @@ maybeDescribe('make-room accept on real PostgreSQL', () => {
       await mockConn('scheduled_services').insert({
         id: v.id, customer_id: v.customerId, technician_id: techId, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
         status: 'pending', window_start: `${pad(v.hour)}:00`, window_end: `${pad(v.hour + 1)}:00`, estimated_duration_minutes: 60,
+        // A recurring child: the night told-lock keeps a first or one-time visit fixed.
+        is_recurring: true, recurring_parent_id: randomUUID(),
         lat: HQ.lat + v.dLat, lng: HQ.lng + v.dLng, route_order: i + 1,
       });
     }

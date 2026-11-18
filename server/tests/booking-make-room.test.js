@@ -58,7 +58,7 @@ function makeDeps({
   return {
     evaluated,
     loadDayStops: jest.fn(async (_conn, dateStr) => rows.filter((r) => r.scheduled_date === dateStr)),
-    // The full day facts with GATE_NIGHT_TOLD_LOCK on: E was told its hour; nobody else was told or placed by a person.
+    // The full day facts (the night told-lock reads): E was told its hour; nobody else was told or placed by a person.
     loadDayContext: jest.fn(async (_conn, dateStr, now) => {
       const allRows = rows.filter((r) => r.scheduled_date === dateStr);
       return { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told), personPlaced: new Set() };

@@ -1,9 +1,9 @@
-// GATE_NIGHT_LOCK_24H (owner 2026-11-03) at the apply-time write path: the
+// The night-pass 24-hour lock (owner 2026-11-03) at the apply-time write path: the
 // tapped row's own-schedule and destination checks (checkFlexOwnBounds) and
 // the grouped siblings' freeze (checkFlexSiblingBounds) use the 25-hour flex
-// freeze and the 24-hour reminder when the run's config carries
-// nightLock24h; their refusal text names the hours enforced. Gate off (no
-// lock24h argument) is the 73-hour rule, call for call.
+// freeze and the 24-hour reminder when called with lock24h (makeMoveGuard and
+// makeMemberGuard always pass it); their refusal text names the hours
+// enforced. Without the lock24h argument the helpers keep the 73-hour rule.
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
@@ -136,17 +136,11 @@ describe('checkFlexOwnBounds with lock24h', () => {
     await expect(checkFlexOwnBounds(seriesTrx({ p1: [row] }), row, BEST, 'flex', refuseFactory(), later, true)).resolves.toBeUndefined();
   });
 
-  test('makeMoveGuard reads the run\'s config.nightLock24h (not the gate)', async () => {
+  test('makeMoveGuard always enforces the 25-hour freeze, whatever the config carries', async () => {
     const row = rowAt(20);
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    try {
-      const guard = (config) => makeMoveGuard({ service: row, best: { date: dayOffset(6) }, config })({ trx: jest.fn(), technicianId: 't1', service: row });
-      // Config says off although the env says on: the 73-hour rule applies.
-      await expect(guard({ guardMode: 'flex', nightLock24h: false })).rejects.toThrow('within 73 hours');
-      await expect(guard({ guardMode: 'flex', nightLock24h: true })).rejects.toThrow('within 25 hours');
-    } finally {
-      delete process.env.GATE_NIGHT_LOCK_24H;
-    }
+    const guard = (config) => makeMoveGuard({ service: row, best: { date: dayOffset(6) }, config })({ trx: jest.fn(), technicianId: 't1', service: row });
+    await expect(guard({ guardMode: 'flex' })).rejects.toThrow('within 25 hours');
+    await expect(guard({ guardMode: 'flex', nightLock24h: false })).rejects.toThrow('within 25 hours');
   });
 });
 
@@ -154,12 +148,12 @@ describe('checkFlexSiblingBounds with lock24h', () => {
   const BEST = { date: dayOffset(6) };
   const sib = (hours, over = {}) => rowAt(hours, { id: 's2', ...over });
 
-  test('asks route-tiers for the 25 h band with the lock24h option; gate off asks for 73 h with no option', async () => {
+  test('asks route-tiers for the 25 h band with the lock24h and toldLock options; without lock24h it asks for 73 h with no option', async () => {
     const rows = [sib(30)];
     const trx = seriesTrx({ p1: rows });
     routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
     await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuseFactory(), targetsOf(rows), true)).resolves.toBeUndefined();
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true });
     await expect(checkFlexSiblingBounds(seriesTrx({ p1: rows }), rows, rows, BEST, TODAY, refuseFactory(), targetsOf(rows)))
       .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('73 hours') });
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(expect.anything(), ['s2'], expect.any(Date), 73);

@@ -1,9 +1,9 @@
 // GATE_DAY_ONLY_PROMISE part A (owner 2026-11-05 "D1 a" / "D2 a"): through the real 04:10 auto-dispatch run (the same
-// harness as night-told-lock-orchestrator.test.js), with BOTH GATE_NIGHT_TOLD_LOCK and this gate on (and nightLock24h),
+// harness as night-told-lock-orchestrator.test.js), with this gate on,
 // a recurring visit 30 h out whose latest promise is day-only, or an unknown window, is skipped REMINDER_SENT_FROZEN:
 // the dispatcher moves DATES and the customer was told that day. Checked at evaluation and at the apply-time
 // re-check; the moving visit's own transaction and the grouped-sibling guards are in the apply section below. This gate
-// off: PR 1's behavior (a day or unknown promise does not freeze). The promise reader (told-visits) runs for real;
+// off: the known-slot told lock alone (a day or unknown promise does not freeze). The promise reader (told-visits) runs for real;
 // only the detector's database read (loadPromiseEvents) is fed events. Synthetic ids only.
 jest.mock('../services/no-show-detector', () => {
   const actual = jest.requireActual('../services/no-show-detector');
@@ -129,13 +129,10 @@ beforeEach(() => {
 });
 
 beforeEach(() => { detector.loadPromiseEvents.mockReset(); detector.loadPromiseEvents.mockResolvedValue([]); });
-afterEach(() => { delete process.env.GATE_NIGHT_LOCK_24H; delete process.env.GATE_NIGHT_TOLD_LOCK; delete process.env.GATE_DAY_ONLY_PROMISE; });
+afterEach(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
 afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const skipCodes = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action !== 'changed').map((d) => d.reason_code);
-
-
-afterEach(() => { delete process.env.GATE_NIGHT_TOLD_LOCK; });
 
 
 const skipTexts = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.reason_code === 'REMINDER_SENT_FROZEN').map((d) => d.reason_description);
@@ -147,7 +144,7 @@ const promise = (over = {}) => ({ visit_id: 's1', start_at: null, communicated_a
 const dayPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise({ level: 'day' })]);
 const unknownPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise()]);
 const hourPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise({ start_at: SLOT })]);
-const on = { nightLock24h: true, nightToldLock: true, dayOnlyPromise: true };
+const on = { dayOnlyPromise: true };
 
 describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name, go, moves) => {
   test('all three gates on: a visit 30 h out whose latest promise is day-only is skipped REMINDER_SENT_FROZEN at evaluation', async () => {
@@ -189,7 +186,7 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
   });
 
-  test('this gate off (told-lock on): PR 1 behavior, a day-only or unknown-window promise does not freeze', async () => {
+  test('this gate off: the known-slot told lock alone, a day-only or unknown-window promise does not freeze', async () => {
     setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
     dayPromise();
     const res = await go({ ...on, dayOnlyPromise: false });
@@ -211,21 +208,10 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
   });
 });
 
-describe('this gate acts only together with the told-lock and nightLock24h', () => {
-  test('told-lock off or nightLock24h off: a day-only promise freezes nothing, and no promise is read', async () => {
+describe('this gate is read once per run', () => {
+  test('the gate is read from the environment; the run config carries dayOnlyPromise', async () => {
     setup(30, [reminderRow(30, {})]);
     dayPromise();
-    await flex({ nightLock24h: true, nightToldLock: false, dayOnlyPromise: true });
-    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
-    await flex({ nightLock24h: false, nightToldLock: true, dayOnlyPromise: true });
-    expect(detector.loadPromiseEvents).not.toHaveBeenCalled();
-  });
-
-  test('all three gates read once per run from the environment; the run config carries dayOnlyPromise', async () => {
-    setup(30, [reminderRow(30, {})]);
-    dayPromise();
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
     process.env.GATE_DAY_ONLY_PROMISE = 'true';
     const res = await tiers();
     expect(res.changed).toBe(0);
@@ -236,8 +222,6 @@ describe('this gate acts only together with the told-lock and nightLock24h', () 
   test('the env gate off: config.dayOnlyPromise is false and a day-only promise does not freeze', async () => {
     setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
     dayPromise();
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
     await flex();
     expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(false);
     expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
@@ -246,18 +230,17 @@ describe('this gate acts only together with the told-lock and nightLock24h', () 
 
 describe('dayOnlyOf and the freeze option', () => {
   const { dayOnlyOf, freezeReadArgs } = _internals;
-  test('dayOnlyOf needs nightLock24h, nightToldLock and dayOnlyPromise, all strictly true', () => {
+  test('dayOnlyOf needs dayOnlyPromise strictly true', () => {
     expect(dayOnlyOf(on)).toBe(true);
-    for (const off of [{ nightLock24h: false }, { nightToldLock: false }, { dayOnlyPromise: false }, { dayOnlyPromise: 'true' }]) expect(dayOnlyOf({ ...on, ...off })).toBe(false);
+    for (const off of [{ dayOnlyPromise: false }, { dayOnlyPromise: 'true' }]) expect(dayOnlyOf({ ...on, ...off })).toBe(false);
     expect(dayOnlyOf(undefined)).toBe(false);
     expect(dayOnlyOf({})).toBe(false);
   });
 
-  test('freezeReadArgs adds anyPromise only with the told-lock and the day-only flag; otherwise exactly PR 1', () => {
-    expect(freezeReadArgs('flex', true, true, true)).toEqual([25, { lock24h: true, toldLock: true, anyPromise: true }]);
-    expect(freezeReadArgs('flex', true, true, false)).toEqual([25, { lock24h: true, toldLock: true }]);
-    expect(freezeReadArgs('flex', true, true)).toEqual([25, { lock24h: true, toldLock: true }]);
-    expect(freezeReadArgs('flex', true, false, true)).toEqual([25, { lock24h: true }]);
-    expect(freezeReadArgs('flex', false, true, true)).toEqual([73]);
+  test('freezeReadArgs adds anyPromise only with the day-only flag; otherwise the told-lock options', () => {
+    expect(freezeReadArgs('flex', true)).toEqual([25, { lock24h: true, toldLock: true, anyPromise: true }]);
+    expect(freezeReadArgs('flex', false)).toEqual([25, { lock24h: true, toldLock: true }]);
+    expect(freezeReadArgs('flex')).toEqual([25, { lock24h: true, toldLock: true }]);
+    expect(freezeReadArgs('tiers', true)).toEqual([24.25, { lock24h: true, toldLock: true, anyPromise: true }]);
   });
 });

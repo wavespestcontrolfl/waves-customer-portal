@@ -1,4 +1,4 @@
-// GATE_NIGHT_TOLD_LOCK: auto-dispatch/told-visits.js turns the no-show detector's promise reader into a set of
+// Night told-lock: auto-dispatch/told-visits.js turns the no-show detector's promise reader into a set of
 // visits the customer was told a time for. TOLD = the latest promise has a known slot (start_at != null).
 // reminder_72h_sent is never read; an unknown-window promise is not told; a read failure throws (callers fail
 // closed). The detector's own loadPromiseEvents / latestPromises are used for real except the db reads. Synthetic ids.
