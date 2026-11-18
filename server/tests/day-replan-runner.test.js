@@ -34,6 +34,7 @@ const HQ = { lat: 27.4330885, lng: -82.4056801 };
 function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blocks = [] } = {}) {
   const calls = [];
   const inserts = [];
+  const selects = [];
   const conn = (table) => {
     const state = { table, date: null };
     const chain = new Proxy(state, {
@@ -55,6 +56,7 @@ function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blo
         }
         return (...args) => {
           calls.push([table, String(prop)]);
+          if (prop === 'select') selects.push([table, args.flat()]);
           if (prop === 'where' && args[0] === 'scheduled_services.scheduled_date') target.date = args[1];
           return chain;
         };
@@ -63,7 +65,7 @@ function fakeConn({ stopsByDate = {}, reminders = [], failReminders = false, blo
     return chain;
   };
   conn.raw = (sql) => ({ sql });
-  return { conn, calls, inserts };
+  return { conn, calls, inserts, selects };
 }
 
 function row(id, lngOffset, hour, extra = {}) {
@@ -595,6 +597,17 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     // 8 AM is held by stop a (the planner's occupancy rule), so the first free hour is 9.
     expect(replay.s1.start).toBe('09:00');
     expect(replay.differs).toBe(true);
+  });
+
+  test('the day\'s stops carry recurring_parent_id with the told lock off too, so a series visit is never replayed as a booking', async () => {
+    delete process.env.GATE_NIGHT_TOLD_LOCK;
+    const recent = new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString();
+    const rows = [row('a', 0.020, 8), row('n', 0.021, 14, { created_at: recent, is_recurring: true, recurring_parent_id: 'root-1' })];
+    const { conn, inserts, selects } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    const stopSelect = selects.find(([table, cols]) => table === 'scheduled_services' && cols.includes('scheduled_services.window_start'));
+    expect(stopSelect[1]).toContain('scheduled_services.recurring_parent_id');
+    expect(JSON.parse(inserts[0].row.close_gaps).s1).toEqual([]);
   });
 
   test('a measurement failure leaves close_gaps null and the plan row is written anyway', async () => {

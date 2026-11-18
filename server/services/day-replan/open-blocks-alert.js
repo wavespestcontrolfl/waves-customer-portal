@@ -9,6 +9,12 @@
  * re-timing booked jobs would free under the rules being measured. The full list is in the row's detail.
  * It sends nothing to a customer and changes no visit.
  *
+ * Tech-days the re-plan does not plan (no stop, or one: FEWER_THAN_2_STOPS) are counted here by the booking hour grid:
+ * each whole hour from 8:00 AM to 5:00 PM that no row and no schedule block holds, for every assignable technician who
+ * is not marked absent, Monday to Saturday (the picker's default days), with blackout days left out. Drive is not
+ * counted on those days. A day with two or more stops that the re-plan skipped (a stop untimed, in progress or with no
+ * location) is left out.
+ *
  * One row per morning (dedupe key open-blocks:<date>; a second run the same morning dedupes onto it). The row from an
  * earlier morning closes when a new one is raised, and every open one closes on a morning with no open hour left.
  */
@@ -18,6 +24,10 @@ const { raiseAdminAlert } = require('../admin-alert-compose');
 const { closeAdminAlertKeys, openAdminAlertKeys } = require('../admin-alert-episodes');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { SELLABLE_MIN } = require('./close-gaps');
+const { _internals: replan } = require('./index');
+const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
+const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
 const KEY_PREFIX = 'open-blocks:';
 const DAYS = 7;
@@ -66,8 +76,68 @@ function freedMin(rec) {
   return Math.max(...gains);
 }
 
-/** The numbers for one morning from the latest run's rows (pure). */
-function summarize(rows, techNames) {
+/** Runs of whole free hours as open blocks, by the booking hour grid (pure). */
+function hourGridBlocks(heldHours) {
+  const blocks = [];
+  for (let h = DAY_OPEN / 60; h < DAY_CLOSE / 60; h += 1) {
+    if (heldHours.has(h)) continue;
+    const last = blocks.at(-1);
+    if (last && last.start + last.min === h * 60) last.min += 60;
+    else blocks.push({ kind: 'hours', start: h * 60, min: 60, before: null });
+  }
+  return blocks;
+}
+
+/** Hours a schedule block covers (any part of the hour). */
+function blockHours(block) {
+  const out = [];
+  for (let h = Math.floor(block.startMin / 60); h * 60 < block.endMin; h += 1) out.push(h);
+  return out;
+}
+
+/**
+ * Open blocks of the tech-days the re-plan did not plan, by the hour grid. `planned`: the `<day>|<tech>` keys the run
+ * planned. Returns [{ day, technician_id, stops, blocks }].
+ */
+async function unplannedDays(conn, now, planned) {
+  const from = etDateString(addETDays(now, 1));
+  const to = etDateString(addETDays(now, DAYS));
+  const { _internals: findTime } = require('../scheduling/find-time');
+  let days = findTime.enumerateDates(from, to);
+  const { getBlackoutDates } = require('../scheduling/blackout-dates');
+  const blackout = await getBlackoutDates(from, to);
+  days = days.filter((d) => !blackout.has(d));
+  const techs = await applyAssignable(conn('technicians')).select('technicians.id');
+  if (!techs.length || !days.length) return [];
+  const absent = await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techs.map((t) => t.id) });
+  const rows = await conn('scheduled_services').whereBetween('scheduled_date', [from, to])
+    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES).whereNotNull('window_start')
+    .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
+    .select('id', 'technician_id', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"), 'window_start', 'window_end', 'estimated_duration_minutes');
+  const blocks = await conn('tech_schedule_blocks').whereBetween('date', [from, to]).whereNot('block_type', 'available')
+    .select('technician_id', conn.raw("to_char(date, 'YYYY-MM-DD') as day"), 'start_time', 'end_time');
+  const techBlind = !require('../scheduling/occupancy').techScopedConfirmActive();
+  const toMin = (v) => { const [h, m] = String(v).slice(0, 5).split(':').map(Number); return h * 60 + m; };
+  const out = [];
+  for (const day of days) {
+    const dayRows = rows.filter((r) => r.day === day);
+    for (const { id: techId } of techs) {
+      if (planned.has(`${day}|${techId}`) || absent.has(`${techId}:${day}`)) continue;
+      const own = dayRows.filter((r) => String(r.technician_id) === String(techId));
+      if (own.length >= 2) continue;
+      const held = new Set([...own.flatMap((r) => replan.rowHours(r)), ...replan.blockedHoursFor(dayRows, techId, techBlind)]);
+      for (const b of blocks) {
+        if (b.day !== day || (b.technician_id != null && String(b.technician_id) !== String(techId))) continue;
+        for (const h of blockHours({ startMin: toMin(b.start_time), endMin: toMin(b.end_time) })) held.add(h);
+      }
+      out.push({ day, technician_id: techId, stops: own.length, blocks: hourGridBlocks(held) });
+    }
+  }
+  return out;
+}
+
+/** The numbers for one morning from the latest run's rows and the unplanned days (pure). */
+function summarize(rows, techNames, unplanned = []) {
   const blocks = [];
   let freed = 0;
   let replayed = 0;
@@ -83,12 +153,17 @@ function summarize(rows, techNames) {
     replayed += (rec.s1 || []).length;
     pickDiffers += (rec.s1 || []).filter((s) => s.differs).length;
   }
+  for (const u of unplanned) {
+    const tech = techNames.get(String(u.technician_id)) || null;
+    for (const b of u.blocks) blocks.push({ day: u.day, tech, grid: true, stops: u.stops, ...b });
+  }
   blocks.sort((a, b) => a.day.localeCompare(b.day) || a.start - b.start);
   const biggest = blocks.reduce((best, b) => (!best || b.min > best.min ? b : best), null);
   return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), biggest, freedMin: freed, replayed, pickDiffers };
 }
 
-const blockText = (b) => `${dayLabel(b.day)}${b.tech ? `, ${b.tech}` : ''}: ${clock(b.start)} to ${clock(b.start + b.min)} (${span(b.min)})`;
+const gridNote = (b) => (b.grid ? (b.stops ? ', 1 stop that day, drive not counted' : ', no stops booked') : '');
+const blockText = (b) => `${dayLabel(b.day)}${b.tech ? `, ${b.tech}` : ''}: ${clock(b.start)} to ${clock(b.start + b.min)} (${span(b.min)}${gridNote(b)})`;
 
 function alertSpec(sum) {
   const hours = Math.round(sum.totalMin / 60);
@@ -111,7 +186,7 @@ function alertSpec(sum) {
 
 function detailText(sum) {
   const lines = [
-    'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM):',
+    'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM; Sundays and blackout days left out):',
     ...sum.blocks.slice(0, MAX_DETAIL_BLOCKS).map((b) => `- ${blockText(b)}`),
   ];
   if (sum.blocks.length > MAX_DETAIL_BLOCKS) lines.push(`- and ${sum.blocks.length - MAX_DETAIL_BLOCKS} more.`);
@@ -135,13 +210,16 @@ async function techNamesFor(conn, ids) {
   }
 }
 
-/** The latest fresh run's close-gaps rows for tomorrow through 7 days out, or null when no fresh run has any. */
+/**
+ * The latest fresh run's plan rows for tomorrow through 7 days out (a row whose measurement failed has close_gaps null:
+ * its day counts as planned but adds no blocks), or null when no fresh run has close-gaps numbers.
+ */
 async function latestRows(conn, now) {
   const since = new Date(now.getTime() - RUN_FRESH_HOURS * 3600 * 1000);
   const run = await conn('day_replan_plans').whereNotNull('close_gaps').where('created_at', '>=', since)
     .orderBy('created_at', 'desc').first('run_id');
   if (!run) return null;
-  return conn('day_replan_plans').where({ run_id: run.run_id }).whereNotNull('close_gaps')
+  return conn('day_replan_plans').where({ run_id: run.run_id })
     .whereBetween('service_date', [etDateString(addETDays(now, 1)), etDateString(addETDays(now, DAYS))])
     .select('technician_id', conn.raw("to_char(service_date, 'YYYY-MM-DD') as day"), 'close_gaps', 'apply_status');
 }
@@ -157,8 +235,14 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     logger.warn('[open-blocks] no fresh re-plan run with close-gaps numbers; nothing raised');
     return { status: 'no_run' };
   }
-  const names = await techNamesFor(conn, [...new Set(rows.map((r) => String(r.technician_id)))]);
-  const sum = summarize(rows, names);
+  let unplanned = [];
+  try {
+    unplanned = await unplannedDays(conn, now, new Set(rows.map((r) => `${r.day}|${r.technician_id}`)));
+  } catch (err) {
+    logger.warn(`[open-blocks] days without a plan unread (${err.message}); only planned days are listed`);
+  }
+  const names = await techNamesFor(conn, [...new Set([...rows, ...unplanned].map((r) => String(r.technician_id)))]);
+  const sum = summarize(rows, names, unplanned);
   const key = `${KEY_PREFIX}${etDateString(now)}`;
   if (!sum.biggest) {
     const closed = await closeEarlier(conn, null);
@@ -174,4 +258,7 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
   return { status: 'raised', id: posted?.id || null, deduped: !!posted?.deduped, openMin: sum.totalMin, closed };
 }
 
-module.exports = { runOpenBlocksAlert, _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, KEY_PREFIX } };
+module.exports = {
+  runOpenBlocksAlert,
+  _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, KEY_PREFIX },
+};

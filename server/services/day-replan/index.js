@@ -119,7 +119,7 @@ function dayOnlyOn() {
 
 // The extra columns the told-lock reasons read (first_or_one_time, person_placed). Gate off: none, as before.
 const TOLD_LOCK_SELECT = [
-  'scheduled_services.recurring_parent_id', 'scheduled_services.recurring_dispatch_due_date',
+  'scheduled_services.recurring_dispatch_due_date',
   'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
 ];
 
@@ -134,6 +134,9 @@ async function loadDayStops(conn, dateStr, toldLock = nightToldLockOn()) {
       'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
       'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_type', 'scheduled_services.source_action',
       'scheduled_services.is_recurring', 'scheduled_services.is_callback',
+      // The told lock (first_or_one_time) and the close-gaps replay (a series visit made from a plan is not a new
+      // booking) both read it, so it is read with the told lock off too.
+      'scheduled_services.recurring_parent_id',
       // Identity and premise fields the co-visit helpers (isCoVisitPair) read, exactly as the 04:20 pass selects them.
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
