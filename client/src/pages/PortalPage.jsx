@@ -17389,9 +17389,9 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
       {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
         <>
           {canFilterHistory && (
-            <label style={{ display: 'grid', gap: 4, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
+            <label style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 4, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
               Show completed visits for
-              <CustomerSelect value={showAllProperties ? 'all' : 'selected'} onChange={e => setShowAllProperties(e.target.value === 'all')}>
+              <CustomerSelect fullWidth style={{ textOverflow: 'ellipsis' }} value={showAllProperties ? 'all' : 'selected'} onChange={e => setShowAllProperties(e.target.value === 'all')}>
                 <option value="selected">This property{entry?.propertyId === historyPropertyId && entry.address?.line1 ? ` · ${formatAddress(entry.address)}` : ''}</option>
                 <option value="all">All properties</option>
               </CustomerSelect>
