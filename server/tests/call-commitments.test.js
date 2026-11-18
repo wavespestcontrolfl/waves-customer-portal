@@ -1219,6 +1219,21 @@ describe('model vocabulary slips are normalized before schema validation (audit 
     expect(normalizeModelOutput({ commitments: 'not-an-array' })).toEqual({ commitments: 'not-an-array' });
     expect(normalizeModelOutput(null)).toBeNull();
   });
+  test('an over-long description or quote is clamped instead of failing the response (11-16, 11-17)', async () => {
+    const said = `I will call you back tomorrow morning with the price ${Array.from({ length: 50 }, (_, i) => `detail${i}`).join(' ')}`;
+    expect(said.length).toBeGreaterThan(300);
+    const longCall = `Agent: ${said}.`;
+    const create = jest.fn(async () => reply([item({ description: `Call back with the price ${'and more '.repeat(40)}`, evidence: [{ quote: said, speaker: 'agent' }] })]));
+    const out = await extractCommitmentsWithModel(longCall, { client: { messages: { create } } });
+    expect(out.skipped).toBeUndefined();
+    expect(out.items).toHaveLength(1);
+    const [kept] = out.items;
+    expect(kept.description.length).toBeLessThanOrEqual(240);
+    expect(kept.description).toMatch(/^Call back with the price and more .*…$/);
+    expect(kept.evidence[0].quote.length).toBeLessThanOrEqual(300);
+    expect(said.startsWith(kept.evidence[0].quote)).toBe(true);
+    expect(kept.evidence[0].quote).toMatch(/detail\d+$/);
+  });
   test('non-string channel or kind is left for the validator (codex r1 P2): the item still fails the schema', async () => {
     expect(normalizeChannel(false)).toBe(false);
     expect(normalizeChannel(1)).toBe(1);
