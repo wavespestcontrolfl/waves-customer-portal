@@ -160,10 +160,14 @@ test("the office's internal notes join the visit's own internal notes in SQL, in
 });
 
 test('a failed copy of the words does not undo the move: the answer says to add them by hand', async () => {
-  update.mockRejectedValue(new Error('db down'));
+  update.mockRejectedValue(Object.assign(new Error('insert into "scheduled_services" ... Ants in the kitchen'), { code: '22001' }));
   const out = await run();
   expect(out.moved).toBe(true);
   expect(out.answer.warnings[out.answer.warnings.length - 1]).toMatch(/did not copy/);
+  // The log names the visit and the error code, never the database message (it carries the customer's words).
+  const logger = require('../services/logger');
+  expect(logger.error).toHaveBeenCalledWith('[reservice-fold] moved plan-1 but could not copy the office words (code 22001)');
+  expect(JSON.stringify(logger.error.mock.calls)).not.toContain('Ants in the kitchen');
 });
 
 test('the planner refuses: nothing moves and the caller books the re-service with the reason', async () => {

@@ -166,7 +166,8 @@ async function foldAnswer({ conn, target, newDate, windowStart, out, notifyCusto
   try {
     await carryOfficeWords(conn, target, { customerRequest, notes, internalNotes, date: newDate });
   } catch (err) {
-    logger.error(`[reservice-fold] moved ${target.id} but could not copy the office words: ${err.message}`);
+    // The visit id and the error code only: a Knex message carries the SQL bindings, which hold the customer's words.
+    logger.error(`[reservice-fold] moved ${target.id} but could not copy the office words (code ${err?.code || 'none'})`);
     warnings.push('The plan visit moved, but the customer\'s words and notes did not copy to it. Add them to the visit.');
   }
   return {
