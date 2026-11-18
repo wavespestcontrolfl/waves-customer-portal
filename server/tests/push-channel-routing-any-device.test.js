@@ -24,6 +24,9 @@ function subscriptionQuery() {
       const row = mockDevices.find((device) => filters.every((f) => f(device)));
       return row ? { id: row.id } : undefined;
     },
+    async select() {
+      return mockDevices.filter((device) => filters.every((f) => f(device)));
+    },
   };
   return q;
 }
@@ -210,14 +213,22 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(await send()).not.toHaveProperty('contactCompanion');
   });
 
-  it('app notifications gate on: the flag follows customerStatus.appStale', async () => {
+  it('a browser-only holder (no phone app) gets no contact companion with the floor on', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ platform: 'web', updated_at: hoursAgo(2) }));
+    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
+    expect(await send()).not.toHaveProperty('contactCompanion');
+  });
+
+  it('app notifications gate on: ONE status read decides the text and the companion (customerStatus.appStale)', async () => {
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
     mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: true });
     expect(await send()).toMatchObject({ reason: 'no_fresh_device', contactCompanion: true });
+    expect(mockCustomerStatus).toHaveBeenCalledTimes(1);
     mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: false });
     expect(await send()).not.toHaveProperty('contactCompanion');
-    mockCustomerStatus.mockRejectedValue(new Error('boom'));
+    mockCustomerStatus.mockResolvedValue({ enabled: false, reachable: false, appStale: true });
     expect(await send()).not.toHaveProperty('contactCompanion');
   });
 
