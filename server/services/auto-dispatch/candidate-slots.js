@@ -46,6 +46,7 @@ const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
+const { ROUTE_POSITION, routeStamp, targetStamp, routeFits, positionFor } = require('./route-position');
 const { techStartPointsLive, techStartPoint, START_COLUMNS } = require('../scheduling/tech-start-point');
 const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
@@ -208,7 +209,7 @@ const DAY_STOP_KEY_COLUMNS = ['scheduled_services.scheduled_date', 'scheduled_se
 // child not yet placed) excluded outright, as the occupancy reader keeps it
 // inert; otherwise it would default to a fictional 08:00 stop. No
 // technician ids: the unassigned rows alone.
-async function loadDayStopRows(db, { technicianIds, dates, excludeIds }) {
+async function loadDayStopRows(db, { technicianIds, dates, excludeIds, lock = false }) {
   const techIds = [...new Set((technicianIds || []).filter(Boolean).map(String))];
   const dateList = [...new Set((dates || []).filter(Boolean))];
   if (!dateList.length) return [];
@@ -223,6 +224,7 @@ async function loadDayStopRows(db, { technicianIds, dates, excludeIds }) {
     .whereNotNull('scheduled_services.window_start')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id');
   if (ids.length) query.whereNotIn('scheduled_services.id', ids);
+  if (lock) query.orderBy('scheduled_services.id').forUpdate('scheduled_services');
   const rows = await query.select(...DAY_STOP_COLUMNS, ...DAY_STOP_KEY_COLUMNS);
   return rows
     .map((r) => ({ ...rowToDayStop(r), dateStr: toDateStr(r.scheduled_date), technician_id: r.technician_id ?? null }))
@@ -538,9 +540,20 @@ function candidateRouteOrder(service, cand) {
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
-function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
+function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ, ctx = {}) {
   const moved = movedSiblings(siblings, placement, cand);
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)), home);
+  const target = { ...service, technician_id: cand.technician_id, window_start: cand.start_time, window_end: cand.end_time,
+    lat: geo.lat, lng: geo.lng, geo };
+  const otherDay = toDateStr(service.scheduled_date) !== cand.date || service.technician_id !== cand.technician_id;
+  const position = otherDay && !siblings.length && service.technician_id && service.window_start
+    ? positionFor(stops, target, { origin: home, departureMin: ctx.departureMinutes ?? DAY_OPEN, sourceStamp: ctx.sourceRouteStamp })
+    : undefined;
+  if (position === null) return null;
+  const numbers = new Map(position?.order.map((id, i) => [id, i + 1]));
+  const sequence = position ? stops.map(r => ({ ...r, route_order: numbers.get(r.id) })) : stops;
+  const moving = serviceToRouteStop(position ? target : service, geo, hhmmToMin(cand.start_time), moved,
+    position ? numbers.get(service.id) : candidateRouteOrder(service, cand));
+  const cost = routeCost(sequence, moving, home);
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
@@ -549,8 +562,31 @@ function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home
     stops_that_day: stops.length + 1,
     same_area_share: clusterShare(stops, geo),
     model: 'shared_v1',
+    ...(position ? { [ROUTE_POSITION]: position } : {}),
     [ROAD_LEGS]: roadLegsOf(cost, cand.date, hhmmToMin(cand.start_time)),
   };
+}
+
+// Called under date and technician locks, before the move is written. A stale route keeps the visit in place.
+async function verifyScoredPosition(trx, service, date, technicianId, window, position) {
+  const sourceDate = toDateStr(service.scheduled_date);
+  const rows = await loadDayStopRows(trx, { dates: [sourceDate, date], technicianIds: [service.technician_id, technicianId], lock: true });
+  const moving = rows.find(r => r.id === service.id);
+  const others = rows.filter(r => r.id !== service.id);
+  const source = stopsForTechDay(others, service.technician_id, sourceDate);
+  const targetDay = stopsForTechDay(others, technicianId, date);
+  const changed = () => Object.assign(new Error('Dispatch route changed after scoring'), { code: 'ROUTE_CHANGED', statusCode: 409 });
+  if (!moving || moving.visit_id || routeStamp(source) !== position.sourceStamp || routeStamp(targetDay) !== position.destinationStamp) throw changed();
+  // The scorer prices timed, active stops. Never number over a visit outside that read.
+  const hidden = await trx('scheduled_services').where({ scheduled_date: date, technician_id: technicianId })
+    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled', 'no_show'])
+    .where(q => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', trx.fn.now()))
+    .where(q => q.whereNull('window_start').orWhereIn('status', ['completed', 'en_route', 'on_site'])).first('id');
+  if (hidden) throw changed();
+  const blocks = await require('../day-replan')._internals.loadBlocks(trx, date, technicianId);
+  const target = { ...moving, technician_id: technicianId, window_start: window.start, window_end: window.end };
+  if (targetStamp(target) !== position.targetStamp
+      || !routeFits([...targetDay, target], position.order, position.origin, position.departureMin, blocks)) throw changed();
 }
 
 /**
@@ -579,7 +615,9 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id)));
+    const scored = scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id), ctx);
+    if (scored) kept.push(scored);
+    else if (drops) drops.route_window = (drops.route_window || 0) + 1;
   }
   return kept;
 }
@@ -801,6 +839,7 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category)
   const { excludeIds, siblings } = await groupContextFor(service, ctx);
   const dayTechs = await currentDayTechs(service, ctx, dateStr, category);
   const days = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, { technicianId, dateStr, excludeIds })));
+  if (service.technician_id && !siblings.length) ctx.sourceRouteStamp = routeStamp(days[0]);
   await loadStartPoints(ctx, dayTechs);
   const startMin = hhmmToMin(service.window_start) ?? DAY_OPEN;
   return leastDrive(dayTechs.map((dayTech, i) => {
@@ -1380,6 +1419,7 @@ module.exports = {
   CURRENT_DAY_TECH_UNRESOLVED,
   findValidCandidateSlots,
   computeCurrentPlacement,
+  verifyScoredPosition,
   territoryTechnicianForVisit,
   territoryCoverForVisit,
   inBlackout,

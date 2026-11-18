@@ -295,6 +295,7 @@ function noWindowVisits(conn, from, to) {
     .whereNotNull('s.recurring_parent_id')
     .whereNull('s.window_start')
     .whereNull('s.recurring_dispatch_due_date')
+    .where(pickWindowClosed)
     .whereIn('s.status', ['pending', 'confirmed'])
     .where('s.scheduled_date', '>=', from)
     .where('s.scheduled_date', '<=', to)
@@ -469,7 +470,48 @@ async function prepareNoWindowNotices(nowDate, today, to) {
 // One notice per windowless recurring visit. Same row lock + shared dedupe as
 // the due-date notice, so a staff placement that wins the lock makes this a no-op.
 // `soonEnd` (soonEndFor): a visit on or before it gets the SOON_DAYS words.
-async function flagNoWindowVisits(candidates, today, to, soonEnd) {
+async function noWindowDetail(trx, row, date, now = new Date()) {
+  const root = await trx('scheduled_services').where({ id: row.recurring_parent_id, customer_id: row.customer_id })
+    .first('scheduled_date', 'recurring_pattern');
+  const series = root ? `Series started ${toDateStr(root.scheduled_date)}${root.recurring_pattern ? ` (${root.recurring_pattern})` : ''}.` : null;
+  const detail = [series, 'The dispatch due date is missing.'].filter(Boolean);
+  const { etDateString } = require('../../utils/datetime-et');
+  if (date <= etDateString(now) || !row.technician_id || row.visit_id || row.customer_confirmed
+      || row.reservation_expires_at || row.auto_dispatch_locked || row.auto_dispatch_excluded) return { detail: detail.join(' '), hours: [] };
+  const { _internals: replan } = require('../day-replan');
+  const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+  const { getBlackoutDates } = require('../scheduling/blackout-dates');
+  const { inBlackout, violatesPreferredDay, DAY_OPEN, DAY_CLOSE } = require('./candidate-slots');
+  const mowing = require('./mowing-days');
+  const techId = row.technician_id;
+  const prefs = await require('./preferences').getCustomerSchedulingPreferences(row.customer_id, row.service_type, trx,
+    { serviceId: row.service_id, serviceKey: row.service_key_snapshot });
+  const tech = await applyAssignable(trx('technicians')).where('technicians.id', techId).first('technicians.id');
+  const absent = await absentTechDays(trx, { dateFrom: date, dateTo: date, technicianIds: [techId] });
+  const closures = await getBlackoutDates(date, date, trx, { strict: true });
+  const inactive = await require('../technician-capabilities').inactiveCapabilitiesForServices(trx, [techId], [row]);
+  const levels = await replan.loadToldLevels(trx, [row], now);
+  const unavailable = !tech || absent.has(`${techId}:${date}`) || closures.has(date) || inactive.length
+    || levels.told.has(row.id) || inBlackout(date, prefs.blackout) || violatesPreferredDay(date, prefs)
+    || mowing.blocksLive(date, mowing.unitRule(prefs, [row]));
+  if (unavailable) return { detail: detail.join(' '), hours: [] };
+  const target = (await replan.loadDayStops(trx, date)).find(r => r.id === row.id);
+  const duration = Number(target?.estimated_duration_minutes);
+  if (!target || !(duration > 0)) return { detail: detail.join(' '), hours: [] };
+  const slots = [];
+  const fmt = min => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  for (let start = DAY_OPEN; start + duration <= DAY_CLOSE; start += 60) {
+    slots.push({ date, techId, windowStart: fmt(start), windowEnd: fmt(start + duration) });
+  }
+  const { assessOfferedHours } = require('../day-replan/booking-fit');
+  const fits = await assessOfferedHours(trx, slots, target, { now, pref: prefs.preferred_time_window || replan.dryWindowPref(prefs.dry_time) });
+  const hours = fits.sort((a, b) => a.driveMin - b.driveMin || b.slots - a.slots || a.startMin - b.startMin)
+    .slice(0, 2).map(f => f.slot.windowStart);
+  if (hours.length) detail.push(`Route-checked starts for the assigned technician: ${hours.join(' or ')} ET. Confirm availability in dispatch when placing the visit.`);
+  return { detail: detail.join(' '), hours };
+}
+
+async function flagNoWindowVisits(candidates, today, to, soonEnd, now) {
   if (!candidates.length) return 0;
   const standing = await standingNoticeKeys('recurring-no-window:%', NO_WINDOW_RESOLVED_TITLE);
   // A slot is spent only when a NEW notice is raised: a candidate the locked
@@ -486,11 +528,16 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd) {
       const current = await noWindowVisits(trx, today, to)
         .where({ 's.id': row.id, 's.customer_id': row.customer_id, 's.scheduled_date': date })
         .forNoKeyUpdate('s')
-        .first('s.id');
+        .first('s.*');
       if (!current) return null;
       // The plan may have lapsed since actionableNoWindowRows read it; the
       // visit's row lock does not hold recurring_plan_alerts (Codex #6208 r9 P2).
       if (!(await require('./eligibility').isRecurringPlanActive(row, trx)).active) return null;
+      let suggestion = { detail: 'The dispatch due date is missing.', hours: [] };
+      try {
+        // A failed optional query rolls back its savepoint and leaves the original notice usable.
+        suggestion = await trx.transaction(nested => noWindowDetail(nested, current, date, now));
+      } catch (err) { logger.warn(`[auto-dispatch] no-window suggestions unavailable (${err.message})`); }
       const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
         area: 'Schedule',
         action: await namedVisitAction(row.customer_id,
@@ -506,7 +553,8 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd) {
         bell: true,
         dedupeKey: noWindowKey(row),
         refreshOnDedupe: true,
-        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date },
+        detail: suggestion.detail,
+        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date, suggestedStarts: suggestion.hours },
         trx,
       });
       if (!inserted) throw new Error(`Recurring no-window notice could not be recorded for ${row.id}`);
@@ -659,7 +707,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     if (notice) flagged += 1;
   }
   if (noWindowError) throw noWindowError;
-  return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd, soonEndFor(nowDate));
+  return flagged + await flagNoWindowVisits(noWindowRows, today, noWindowEnd, soonEndFor(nowDate), nowDate);
 }
 
 module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits, retireResolvedNotices, standingNoticeKeys, retireMissingGeoNotices, maintainMissingGeoNotices, standingMissingGeoKeys, nearTermPinlessVisits, pinNoticeHeldOut, NEAR_TERM_PIN_DAYS, withinRingBudget, recentBudgetKeys, ringsLeft, missingGeoKey, namedVisitAction, noticeRang, NEW_NOTICES_PER_RUN, SOON_DAYS, soonEndFor, visitSubject };

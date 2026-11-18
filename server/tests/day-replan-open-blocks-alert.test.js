@@ -3,6 +3,7 @@
  * morning from the latest re-plan run's close-gaps numbers, the copy passes the notification rule, and an earlier
  * morning's row closes. Fake knex, synthetic ids only.
  */
+jest.mock('../routes/estimate-slots-public', () => ({ _internals: { offerableEstimateSlots: jest.fn() } }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/admin-alert-compose', () => {
@@ -39,12 +40,14 @@ const wait = (start, min) => ({ kind: 'wait', start, min, before: 'v1' });
 
 // `assignable`: the technicians the hour-grid count covers (none unless a test says so); `services` and `blocks`: that
 // count's schedule rows and schedule blocks.
-function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, name: 'Pat Tester' }], assignable = [], services = [], blocks = [] } = {}) {
+function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, name: 'Pat Tester' }], assignable = [], services = [], blocks = [], estimates = [] } = {}) {
   const calls = [];
   const conn = (table) => {
     const q = {
       where(...args) { calls.push([table, 'where', args]); return q; },
       whereNotNull() { return q; },
+      whereNull() { return q; },
+      limit() { return q; },
       whereIn() { return q; },
       whereNotIn() { return q; },
       whereNot() { return q; },
@@ -53,6 +56,7 @@ function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, n
       first: async () => run,
       select: async (first) => {
         if (table === 'technicians') return first === 'technicians.id' ? assignable : techs;
+        if (table === 'estimates') return estimates;
         if (table === 'scheduled_services') return services;
         if (table === 'tech_schedule_blocks') return blocks;
         return rows;
@@ -141,7 +145,42 @@ describe('the copy', () => {
   });
 });
 
+test('a matching estimate needs the assigned technician and the entire visit inside the opening', () => {
+  const block = { day: '2026-11-20', tech: 'Pat', techId: 't1', start: 600, min: 90 };
+  const offer = { date: block.day, techId: 't1', start: '10:00', end: '11:00', finishMin: 675, driveMin: 42, addedDriveMin: 5, proposed: 1 };
+  const fits = diff => _internals.matchingHour([{ ...offer, ...diff }], [block]);
+  expect(fits({})).toMatchObject({ tech: 'Pat', start: 600 });
+  for (const diff of [{ techId: 'other' }, { finishMin: 691 }, { end: '12:00' }, { driveMin: null }]) expect(fits(diff)).toBeNull();
+});
+
+test('a route-aware alternate preserves the first card, technician, day, rain priority and five-minute driving limit', () => {
+  const { rankOfferedHours } = require('../services/day-replan/booking-fit');
+  const base = { date: '2026-11-20', techId: 't1' };
+  const slots = ['09', '10', '11', '12', '13', '14', '15'].map(h => ({ ...base, windowStart: h + ':00' }));
+  slots[3].date = '2026-11-21';
+  slots[4].techId = 't2';
+  slots[5].wet = true;
+  const fits = slots.map((slot, i) => ({ slot, driveMin: [8, 20, 25, 15, 6, 5, 26][i], slots: i, waitMin: 0, startMin: 540 + i * 60 }));
+  const ranked = rankOfferedHours(slots, fits, { pinned: 1, rainTierOf: s => Number(!!s.wet) });
+  expect(ranked.map(s => s.windowStart)).toEqual(['09:00', '11:00', '10:00', '12:00', '13:00', '14:00', '15:00']);
+});
+
 describe('runOpenBlocksAlert', () => {
+  test('the same morning notice contains a fresh matching estimate without contacting the customer', async () => {
+    const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+    const { OFFER_RANK } = require('../services/day-replan/booking-fit');
+    const day = '2026-11-19';
+    const estimate = { id: 'estimate123', customer_id: 'customer', customer_name: 'Test Customer' };
+    const { conn } = fakeConn({ rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 90)]) }], assignable: [{ id: TECH }], estimates: [estimate] });
+    offerableEstimateSlots.mockResolvedValueOnce({ [OFFER_RANK]: async () => [
+      { date: day, techId: TECH, start: '10:00', end: '11:00', finishMin: 670, driveMin: 25, addedDriveMin: 3, proposed: 1 },
+    ] });
+    await runOpenBlocksAlert({ conn, now: NOW });
+    const notice = raiseAdminAlert.mock.calls.at(-1)[2];
+    expect(notice.detail).toContain('Test Customer (#estimate), Thu Nov 19 at 10:00 AM with Pat');
+    expect(notice.metadata.estimateMatches).toEqual([{ id: estimate.id, date: day, start: 600, techId: TECH }]);
+  });
+
   test('a morning row that is not written fails the tick and leaves the earlier rows open', async () => {
     openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
     raiseAdminAlert.mockResolvedValueOnce(null);

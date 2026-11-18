@@ -2171,13 +2171,14 @@ function routeCheckModeFor(userOpts) {
 // removal can never leave an empty picker (the floor returns the pool whole). The helper
 // returns the input's own objects in input order. Returns the pool unchanged with the
 // gate off or on any error.
-async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
+async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode, paidCalls = true }) {
   try {
     if (mode === 'off' || !pool.length) return pool;
     const routeCheck = require('./scheduling/customer-route-check');
     const checked = await routeCheck.filterOfferedSlots({
       surface: 'estimate', mode, slots: pool, durationMinutes, today: new Date(),
-      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
+      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes },
+        ...(!paidCalls ? { cacheLocation: true } : {}), excludeEstimateId: estimateId },
     });
     return Array.isArray(checked.slots) ? checked.slots : pool;
   } catch (err) {
@@ -2396,6 +2397,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_BOOKING_MAKE_ROOM on (hour mode): this list may carry one make-room hour; read at call time.
   const makeRoomMode = makeRoomModeFor(userOpts);
   const makeRoomOffer = makeRoomOffersOn(makeRoomMode);
+  const measureHours = userOpts.measureBookingFit === true ||
+    (userOpts.offer === true && ['shadow', 'apply'].includes(require('../config/feature-gates').dayReplanMode?.()));
   // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
   // visit before the move-in date, which the customer can still change. Only
   // a stamped estimate reads its move; every other estimate skips the lookup.
@@ -2451,6 +2454,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // switch must not serve the other mode's list for the TTL. An entry built for a
     // caller that did not ask for the check (offer unset) is always 'off'.
     `route-check:${routeCheckMode}`,
+    measureHours ? 'measure-hours' : 'no-hour-measure',
     // A gate flip to live must not serve the other list for the TTL.
     ...(lineMapOfferLive() ? ['line-map:live'] : []),
     // A list with a make-room hour (mode on) is never served to a caller in another mode, or the other way round.
@@ -2508,7 +2512,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // outlook now so it overlaps the slot computation below. Bounded + cached +
   // fail-open inside the service; the extra .catch is belt-and-braces — this
   // decoration must never break or delay a slot payload.
-  const rainOutlookPromise = isEnabled('bookingRainChips')
+  const rainOutlookPromise = paidCalls && isEnabled('bookingRainChips')
     ? getDailyRainOutlookBounded(RAIN_OFFICE_POINT.lat, RAIN_OFFICE_POINT.lng).catch(() => null)
     : null;
 
@@ -2635,6 +2639,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         ...(funnel ? { zoneDayFunnel: funnel } : {}),
       },
     };
+    if (measureHours) {
+      const { observeOffers, OFFER_RANK } = require('./day-replan/booking-fit');
+      fallback[OFFER_RANK] = observeOffers(db, [...primary, ...expander], null);
+    }
     return fallback;
   }
 
@@ -2771,7 +2779,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
   const routeChecked = await routeCheckedPool(funneledEligible, {
-    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
+    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode, paidCalls,
   });
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   const makeRoomArgs = {
@@ -2803,9 +2811,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = await slotRainTierOf(funneledBookable, {
+  const rainTierOf = paidCalls ? await slotRainTierOf(funneledBookable, {
     profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
-  });
+  }) : null;
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,
@@ -2849,6 +2857,17 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // staleness guard.
     },
   };
+
+  if (measureHours) {
+    const { observeOffers, OFFER_RANK } = require('./day-replan/booking-fit');
+    const scarcity = firstDayAvailability(funneledBookable);
+    const pinned = scarcity?.openCount <= SCARCE_FIRST_DAY_MAX
+      ? shown.reduce((last, slot, i) => slot.date === scarcity.date ? i + 1 : last, 1) : 1;
+    const target = coords.source === 'service_zone_fallback' ? null : {
+      lat: coords.lat, lng: coords.lng, planning_exempt: true, estimated_duration_minutes: candidateExpectedMinutes || serviceProfile.durationMinutes,
+    };
+    result[OFFER_RANK] = observeOffers(db, shown, target, { pinned, rainTierOf, calendar: userOpts.dispatchCalendar });
+  }
 
   // Never cache a funnel-ACTIVE result: the funnel's day set changes with
   // EVERY zone-stop mutation (create/cancel/reschedule/hold-expiry on ANY
@@ -2913,7 +2932,9 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const primary = result.primary || [];
   const expander = result.expander || [];
   const nearby = result.nearby ?? [...primary, ...expander].some((s) => s.routeOptimal);
+  const { OFFER_RANK } = require('./day-replan/booking-fit');
   return {
+    ...(result[OFFER_RANK] ? { [OFFER_RANK]: result[OFFER_RANK] } : {}),
     summary: summarizeWindow(when, { count: primary.length + expander.length, nearby }),
     understood: when.understood,
     window: { date_from: when.dateFrom, date_to: when.dateTo },

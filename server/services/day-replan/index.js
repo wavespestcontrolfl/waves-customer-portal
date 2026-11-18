@@ -52,7 +52,7 @@ const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./
 const {
   openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
 } = require('./close-gaps');
-const { applyAcceptedDay, reconcileApplied } = require('./apply');
+const { applyAcceptedDay, reconcileApplied, finalRoute } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
 const MAX_DAYS_AHEAD = 30;
@@ -524,10 +524,21 @@ const keptWithBlocks = (plan, sims) => plan.check.planned?.kept === true && sims
  * ENDS earliest with no more drive than the current route (the planner's pack objective, packAllowanceMin 0).
  */
 function packPlan(env, plan, { rows, techId }) {
-  const planned = planEntries({ ...env, plannerOptions: { packAllowanceMin: 0 } }, {
-    rows, entries: plan.entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext,
+  let missingDayPromise = 0;
+  const entries = plan.entries.map((entry) => {
+    if (entry.why) return entry;
+    if (!plan.dayContext.dayTold?.has(entry.row.id)) {
+      missingDayPromise += 1;
+      return { ...entry, why: 'no_recorded_day_promise' };
+    }
+    // The booked start remains available. P1 may only move this visit earlier, inside its own preference.
+    const latest = hhmmToMin(entry.row.window_start) + 1;
+    return { ...entry, pref: { startMin: entry.pref?.startMin ?? 0, endMin: Math.min(entry.pref?.endMin ?? latest, latest) } };
   });
-  return { ...planned, origin: plan.origin, blocks: plan.blocks };
+  const planned = planEntries({ ...env, plannerOptions: { packAllowanceMin: 0 } }, {
+    rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext,
+  });
+  return { ...planned, origin: plan.origin, blocks: plan.blocks, missingDayPromise };
 }
 
 /**
@@ -536,7 +547,7 @@ function packPlan(env, plan, { rows, techId }) {
  */
 function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) {
   const lunchLost = (fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
-  if (plan.verdict.accepted) {
+  if (plan.verdict.accepted && plan.result.changes.length && finalRoute(plan, env, techId)) {
     const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
     return { ...v, plan: 'drive', packed, lunchLost: lunchLost(packed), changes: [] };
   }
@@ -544,7 +555,16 @@ function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) 
   const altSims = simsOf(env, alt);
   const fig = openTime(altSims.planned, bounds);
   const v = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
-  return { ...v, plan: 'pack', packed: fig, lunchLost: lunchLost(fig), changes: v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [] };
+  const changes = v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  const numericChanges = changes.map((c) => ({ id: c.id, toMin: hhmmToMin(c.to) }));
+  let reason = v.reason;
+  if (v.wouldAccept) {
+    if (!changes.length) reason = 'no_eligible_hour_change';
+    else if (!finalRoute(alt, env, techId, numericChanges)) reason = 'route_order_not_coherent';
+  }
+  const wouldAccept = v.wouldAccept && reason === v.reason;
+  return { ...v, reason, wouldAccept, plan: 'pack', packed: fig, lunchLost: wouldAccept && lunchLost(fig),
+    missingDayPromise: alt.missingDayPromise, changes: wouldAccept ? changes : [] };
 }
 
 /**
@@ -579,7 +599,7 @@ async function measureCloseGaps(conn, env, plan, { rows, techId }) {
     // The drive-best plan: the one the live apply writes (the morning notification reads it for an applied day).
     const packed = openTime(sims.planned, bounds);
     return {
-      v: 2,
+      v: 3,
       now: nowFig,
       packed,
       p1: measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }),
@@ -825,6 +845,6 @@ function applyDeps() {
 
 module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
-  loadDayStops, loadPref, legMin,
+  loadDayStops, loadPref, loadToldLevels, legMin,
   // The close-gaps measurement (owner 2026-11-18).
   measureCloseGaps } };

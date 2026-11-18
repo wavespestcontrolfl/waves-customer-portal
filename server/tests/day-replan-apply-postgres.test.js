@@ -151,6 +151,82 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     await mockConn.rollback();
   });
 
+  async function scoredCrossDay() {
+    const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
+    const { loadDayStopRows } = require('../services/auto-dispatch/candidate-slots')._internals;
+    const date = '2097-06-11';
+    const [mover, , left, right] = visits;
+    for (const [v, start, end, n] of [[left, '13:00', '14:00', 1], [right, '15:00', '16:00', 2]]) {
+      await mockConn('scheduled_services').where('id', v.id).update({ scheduled_date: date, window_start: start, window_end: end, route_order: n });
+    }
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
+    const others = rows.filter(r => r.dateStr === DAY && r.id !== mover.id);
+    const target = { ...rows.find(r => r.id === mover.id), window_start: '14:00', window_end: '15:00' };
+    const position = positionFor(rows.filter(r => r.dateStr === date), target, { sourceStamp: routeStamp(others), origin: HQ, departureMin: 450 });
+    expect(position.order).toEqual([left.id, mover.id, right.id]);
+    return { date, left, right, mover, position };
+  }
+
+  test('the auto-dispatch writer puts a cross-day move exactly between its scored neighbors', async () => {
+    const { date, left, right, mover, position } = await scoredCrossDay();
+    await rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position });
+    const ordered = await mockConn('scheduled_services').where({ technician_id: techId, scheduled_date: date }).orderBy('route_order');
+    expect(ordered.map(r => [r.id, r.route_order])).toEqual([[left.id, 1], [mover.id, 2], [right.id, 3]]);
+  });
+
+  test('a different writer cannot use a cross-day dispatch position', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'admin', 'admin',
+      { seriesPolicy: 'single', dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+  });
+
+  test('a changed destination hour after pricing aborts the whole cross-day move', async () => {
+    const { date, right, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where('id', right.id).update({ window_start: '16:00', window_end: '17:00' });
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('booking-time measurement tests existing cards against the committed route, holds and end of day', async () => {
+    const { date, mover } = await scoredCrossDay();
+    const { observeOffers } = require('../services/day-replan/booking-fit');
+    const slot = h => ({ date, techId, windowStart: h + ':00', windowEnd: String(Number(h) + 1).padStart(2, '0') + ':00' });
+    const cards = ['09', '12', '13', '14', '15', '17'].map(slot);
+    await mockConn('tech_schedule_blocks').insert({ date, technician_id: techId, block_type: 'blocked', start_time: '12:00', end_time: '13:00' });
+    const target = { lat: HQ.lat, lng: HQ.lng + mover.lngOffset, planning_exempt: true, estimated_duration_minutes: 60 };
+    const observation = observeOffers(mockConn, cards, target, { pinned: 1, now: NOW });
+    expect(observation()).toBe(observation());
+    const measured = await observation();
+    expect(measured.map(m => m.start)).toEqual(cards.map(s => s.windowStart));
+    expect(measured[0]).toMatchObject({ displayed: 1, proposed: 1, driveMin: expect.any(Number), finishMin: expect.any(Number) });
+    for (const i of [1, 2, 4, 5]) expect(measured[i]).not.toHaveProperty('driveMin');
+  });
+
+  test('the office notice shows the verified series and two feasible starts, and a live customer pick stays quiet', async () => {
+    const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
+    const compose = require('../services/admin-alert-compose');
+    const capture = jest.spyOn(compose, 'raiseAdminAlert').mockResolvedValue({ id: 'synthetic-notice' });
+    const [target, root, pending] = visits;
+    const start = '2097-03-11';
+    await mockConn('scheduled_services').where('id', root.id).update({ customer_id: target.customerId, scheduled_date: start,
+      recurring_pattern: 'quarterly', recurring_parent_id: null });
+    for (const visit of [target, pending]) await mockConn('appointment_reminders').where({ scheduled_service_id: visit.id }).del();
+    await mockConn('scheduled_services').where('id', target.id).update({ recurring_parent_id: root.id, window_start: null, window_end: null, customer_confirmed: false });
+    await mockConn('scheduled_services').where('id', pending.id).update({ scheduled_date: '2097-06-11', window_start: null, window_end: null,
+      customer_pick_by: '2097-06-10T23:00:00Z' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const notices = capture.mock.calls.map(c => c[2]).filter(n => n?.metadata?.scheduledServiceId);
+    const notice = notices.find(n => n.metadata.scheduledServiceId === target.id);
+    expect(notice?.detail).toContain(`Series started ${start} (quarterly)`);
+    expect(notice?.metadata.suggestedStarts).toHaveLength(2);
+    expect(new Set(notice.metadata.suggestedStarts).size).toBe(2);
+    expect(notices.some(n => n.metadata.scheduledServiceId === pending.id)).toBe(false);
+    expect((await mockConn('scheduled_services').where('id', target.id).first('window_start')).window_start).toBeNull();
+  });
+
   const visitRows = async () => mockConn('scheduled_services').whereIn('id', visits.map((v) => v.id)).select('id', 'window_start', 'window_end', 'route_order', 'status');
   const startOf = (rows, id) => String(rows.find((r) => r.id === id).window_start).slice(0, 5);
   const reminders = async () => mockConn('appointment_reminders').whereIn('scheduled_service_id', visits.map((v) => v.id)).select('scheduled_service_id', 'appointment_time', 'reminder_24h_sent', 'reminder_72h_sent', 'cancelled');

@@ -73,7 +73,7 @@ const standing = (row, rec) => (row.apply_status === 'applied' && rec.packed ? r
  */
 function freedMin(rec) {
   const fig = rec.p1 && rec.p1.wouldAccept ? (rec.p1.packed || rec.packed) : null;
-  return fig && rec.now ? Math.max(0, fig.sellableMin - rec.now.sellableMin) : 0;
+  return fig && rec.now ? fig.sellableMin - rec.now.sellableMin : 0;
 }
 
 /** New jobs a block has room for (close-gaps SLOT_MIN: a 1-hour job and the drive it adds). */
@@ -103,7 +103,7 @@ async function eligibility(conn, now) {
   const from = etDateString(addETDays(now, 1));
   const to = etDateString(addETDays(now, DAYS));
   const { getBlackoutDates } = require('../scheduling/blackout-dates');
-  const blackout = await getBlackoutDates(from, to);
+  const blackout = await getBlackoutDates(from, to, conn, { strict: true });
   const techs = await applyAssignable(conn('technicians')).select('technicians.id');
   const techIds = techs.map((t) => String(t.id));
   const absent = techIds.length ? await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techIds }) : new Set();
@@ -157,7 +157,7 @@ function summarize(rows, techNames, unplanned = []) {
     const rec = parse(row.close_gaps);
     if (!rec || !rec.now) continue;
     for (const b of standing(row, rec).blocks || []) {
-      if (b.min >= SELLABLE_MIN) blocks.push({ day: row.day, tech: techNames.get(String(row.technician_id)) || null, ...b });
+      if (b.min >= SELLABLE_MIN) blocks.push({ day: row.day, techId: String(row.technician_id), tech: techNames.get(String(row.technician_id)) || null, ...b });
     }
     // An applied day already has the re-plan's hours; the measured rules' gains were counted from the day as booked.
     if (row.apply_status !== 'applied') freed += freedMin(rec);
@@ -166,7 +166,7 @@ function summarize(rows, techNames, unplanned = []) {
   }
   for (const u of unplanned) {
     const tech = techNames.get(String(u.technician_id)) || null;
-    for (const b of u.blocks) blocks.push({ day: u.day, tech, grid: true, stops: u.stops, ...b });
+    for (const b of u.blocks) blocks.push({ day: u.day, techId: String(u.technician_id), tech, grid: true, stops: u.stops, ...b });
   }
   blocks.sort((a, b) => a.day.localeCompare(b.day) || a.start - b.start);
   const biggest = blocks.reduce((best, b) => (!best || b.min > best.min ? b : best), null);
@@ -206,13 +206,60 @@ function detailText(sum) {
     ...sum.blocks.slice(0, MAX_DETAIL_BLOCKS).map((b) => `- ${blockText(b)}`),
   ];
   if (sum.blocks.length > MAX_DETAIL_BLOCKS) lines.push(`- and ${sum.blocks.length - MAX_DETAIL_BLOCKS} more.`);
+  if (sum.matches?.length) {
+    lines.push('', 'Open estimates with a route-checked hour');
+    for (const m of sum.matches) lines.push(`- ${m.name || 'Estimate'} (#${m.id.slice(0, 8)}), ${dayLabel(m.date)} at ${clock(m.start)}${m.tech ? ` with ${m.tech}` : ''}. Forecast drive change ${m.addedDriveMin > 0 ? '+' : ''}${m.addedDriveMin} min.`);
+  }
   lines.push(
     '',
-    'Measuring only (no visit changes): re-timing booked jobs to the front of the day under the new rules would free'
-      + ` ${span(sum.freedMin)} more.`,
+    `Measuring only (no visit changes). Moving flexible visits earlier would leave ${span(Math.abs(sum.freedMin))} ${sum.freedMin < 0 ? 'less' : 'more'}.`,
     `New bookings from the last 24 hours, replayed: ${sum.replayed}. A block-aware picker would pick a different hour for ${sum.pickDiffers}.`,
   );
   return lines.join('\n');
+}
+
+// Keep the first feasible match per estimate. Both the displayed arrival window and service belong inside
+// the standing block. The picker has already checked the customer's plan, service mix and the calendar.
+function matchingHour(offers, blocks) {
+  const minute = t => Number(String(t).slice(0, 2)) * 60 + Number(String(t).slice(3, 5));
+  const matches = [];
+  for (const offer of offers) {
+    if (!Number.isFinite(offer.driveMin) || !Number.isFinite(offer.addedDriveMin)) continue;
+    const start = minute(offer.start);
+    const end = minute(offer.end);
+    const block = blocks.find(b => b.day === offer.date && b.techId === String(offer.techId)
+      && b.start <= start && end > start && end <= b.start + b.min && offer.finishMin <= b.start + b.min);
+    if (block) matches.push({ offer, block, start });
+  }
+  matches.sort((a, b) => a.offer.addedDriveMin - b.offer.addedDriveMin || a.offer.date.localeCompare(b.offer.date)
+    || a.offer.proposed - b.offer.proposed);
+  if (matches.length) {
+    const { offer, block, start } = matches[0];
+    return { date: offer.date, start, tech: block.tech, techId: block.techId, addedDriveMin: Math.round(offer.addedDriveMin) };
+  }
+  return null;
+}
+
+async function matchEstimates(conn, blocks, now) {
+  const { offerableEstimateSlots } = require('../../routes/estimate-slots-public')._internals;
+  const { OFFER_RANK } = require('./booking-fit');
+  const candidates = await conn('estimates').whereIn('status', ['viewed', 'sent']).whereNull('archived_at')
+    .whereNotNull('customer_id').where(q => q.whereNull('expires_at').orWhere('expires_at', '>', now))
+    .orderBy('created_at', 'desc').orderBy('id').limit(20).select('id', 'customer_id', 'customer_name');
+  const dates = blocks.map(b => b.day).sort();
+  const dispatchWindow = { dateFrom: dates[0], dateTo: dates[dates.length - 1], dispatchCalendar: new Map() };
+  const matches = [];
+  for (const estimate of candidates) {
+    try {
+      const result = await offerableEstimateSlots(estimate.id, estimate.customer_id, { dispatchWindow });
+      const match = matchingHour(await result?.[OFFER_RANK]?.() || [], blocks);
+      if (match) matches.push({ ...match, id: String(estimate.id), name: estimate.customer_name });
+      if (matches.length === 5) break;
+    } catch (err) {
+      if (err.code !== 'COORDS_NEED_GEOCODE') logger.warn(`[open-blocks] estimate match unavailable (${err.message})`);
+    }
+  }
+  return matches;
 }
 
 async function techNamesFor(conn, ids) {
@@ -274,11 +321,15 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     const closed = await closeEarlier(conn, null);
     return { status: 'no_open_hours', closed, ...(fresh ? {} : { noRun: true }) };
   }
+  if (rulesRead) {
+    try { sum.matches = await matchEstimates(conn, sum.blocks, now); }
+    catch (err) { logger.warn(`[open-blocks] estimate matches unavailable (${err.message})`); }
+  }
   const posted = await raiseAdminAlert('schedule', alertSpec(sum), {
     bell: true,
     dedupeKey: key,
     detail: fresh ? detailText(sum) : `${detailText(sum)}\nThe night re-plan left no numbers this morning, so days with two or more stops are not listed.`,
-    metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers },
+    metadata: { estimateMatches: (sum.matches || []).map(({ id, date, start, techId }) => ({ id, date, start, techId })), openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers },
   });
   // notifyAdmin answers null when its write fails. Then no morning row exists: keep the earlier rows open and fail
   // the tick, so job health shows it (pre-push audit, tune PR). A dedupe hit answers the open row, with its id.
@@ -289,5 +340,5 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
 
 module.exports = {
   runOpenBlocksAlert,
-  _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
+  _internals: { matchingHour, summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
 };

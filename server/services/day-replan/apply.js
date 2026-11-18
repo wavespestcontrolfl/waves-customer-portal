@@ -136,9 +136,9 @@ function movesFrom(fresh) {
  * The route the plan will leave: the new hours in the accepted order, expanded to rows. Null when the app would not
  * read it as a real plan, or when the app's simulator does not give the planned figures for it.
  */
-function finalRoute(fresh, env, techId) {
+function finalRoute(fresh, env, techId, changes = fresh.result.changes) {
   const best = fresh.result.best;
-  const toStart = new Map(fresh.result.changes.map((c) => [String(c.id), c.toMin]));
+  const toStart = new Map(changes.map((c) => [String(c.id), c.toMin]));
   const groupOf = new Map(fresh.rowGroups.map((g) => [String(g[0].id), g]));
   const finalGroups = fresh.rowGroups.map((g) => g.map((r) => (toStart.has(String(r.id)) ? withHour(r, toStart.get(String(r.id))) : r)));
   const ordered = best.order.flatMap((id) => groupOf.get(String(id)) || []);
@@ -459,6 +459,6 @@ async function reconcileApplied(conn, depsOrGetter, { today }) {
 }
 
 module.exports = {
-  applyAcceptedDay, reconcileApplied, INITIATOR, REASON_CODE,
+  applyAcceptedDay, reconcileApplied, finalRoute, INITIATOR, REASON_CODE,
   _internals: { changesKey, recheckVisit, movesFrom, finalRoute, fingerprintOf, stopSignature, reconcileReminders, writeMoves, writeRouteOrder, assertNoClash },
 };
