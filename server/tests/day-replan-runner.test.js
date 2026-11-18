@@ -9,6 +9,11 @@ jest.mock('../services/day-replan/planner', () => {
   const actual = jest.requireActual('../services/day-replan/planner');
   return { planDay: jest.fn(actual.planDay), DEFAULT_OPTIONS: actual.DEFAULT_OPTIONS };
 });
+// The close-gaps measurement runs for real; one test makes it throw.
+jest.mock('../services/day-replan/close-gaps', () => {
+  const actual = jest.requireActual('../services/day-replan/close-gaps');
+  return { ...actual, openTime: jest.fn(actual.openTime) };
+});
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
@@ -503,5 +508,73 @@ describe('movable or fixed', () => {
 
   test('first visits, one-time visits and hand-placed visits are not locked by kind', () => {
     expect(_internals.fixedReason(stop({ service_type: 'One-Time Pest Control Service', is_recurring: false }), base())).toBeNull();
+  });
+});
+
+describe('close-gaps measurement (owner 2026-11-18): measured on every plan row, changes nothing', () => {
+  beforeEach(() => { process.env.GATE_DAY_REPLAN = 'shadow'; });
+  const record = (insert) => JSON.parse(insert.row.close_gaps);
+
+  test('a packed plan at the same drive is rejected by the drive rule, and the packed-day rule would take it', async () => {
+    // Three stops side by side at 8 AM, 11 AM and 3 PM: the same drive in any hour order, so only the hours move.
+    const rows = [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
+    const { conn, inserts, calls } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'saving_below_floor', changes: '[]' });
+    const rec = record(inserts[0]);
+    expect(rec.v).toBe(1);
+    expect(rec.packed.driveMin).toBeLessThanOrEqual(rec.now.driveMin);
+    expect(rec.packed.endMin).toBeLessThan(rec.now.endMin);
+    expect(rec.packed.biggestMin).toBeGreaterThanOrEqual(rec.now.biggestMin + 30);
+    expect(rec.p1).toMatchObject({ wouldAccept: true, reason: 'bigger_block', lunchLost: false });
+    expect(rec.p1.changes.map((c) => c.id).sort()).toEqual(['b', 'c']);
+    expect(rec.gaps.map((g) => [g.before, g.why])).toEqual([['b', null], ['c', null]]);
+    expect(rec.p2).toBeNull();
+    expect(rec.s1).toEqual([]);
+    // Measuring only: the run never wrote a visit.
+    expect(calls.filter(([table, op]) => table === 'scheduled_services' && ['update', 'insert', 'del'].includes(op))).toEqual([]);
+  });
+
+  test('P2: one customer\'s stops at two homes are freed when the lock is counted per home; at one home they stay fixed', async () => {
+    const twoHomes = [
+      row('a', 0.020, 8, { customer_id: 'cust-x', property_id: 'prop-1' }),
+      row('b', 0.021, 14, { customer_id: 'cust-x', property_id: 'prop-2' }),
+      row('c', 0.022, 10),
+    ];
+    let { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    let rec = record(inserts[0]);
+    expect(JSON.parse(inserts[0].row.fixed).map((f) => [f.id, f.why])).toEqual([['a', 'same_customer'], ['b', 'same_customer']]);
+    expect(rec.p2.freed.sort()).toEqual(['a', 'b']);
+    expect(rec.p2.still).toEqual([]);
+    expect(rec.p2.packed).not.toBeNull();
+
+    const oneHome = twoHomes.map((r) => (r.customer_id === 'cust-x' ? { ...r, property_id: 'prop-1' } : r));
+    ({ conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: oneHome } }));
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    rec = record(inserts[0]);
+    expect(rec.p2).toMatchObject({ freed: [], packed: null, changes: [] });
+    expect(rec.p2.still.map((s) => s.why)).toEqual(['same_customer', 'same_customer']);
+  });
+
+  test('a stop booked in the last 24 hours is replayed over its day\'s hours', async () => {
+    const rows = [row('a', 0.020, 8), row('n', 0.021, 14, { created_at: new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString(), source_action: 'online_booking' })];
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    const [replay] = record(inserts[0]).s1;
+    expect(replay).toMatchObject({ id: 'n', source: 'online_booking', booked: { start: '14:00' } });
+    expect(replay.s1.start).toBe('08:00');
+    expect(replay.differs).toBe(true);
+  });
+
+  test('a measurement failure leaves close_gaps null and the plan row is written anyway', async () => {
+    require('../services/day-replan/close-gaps').openTime.mockImplementationOnce(() => { throw new Error('boom'); });
+    const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+    const out = await runDayReplanIfEnabled({ now: NOW, conn });
+    expect(out.status).toBe('completed');
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].row).toMatchObject({ accepted: true, close_gaps: null });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('close-gaps measurement failed (boom)'));
   });
 });

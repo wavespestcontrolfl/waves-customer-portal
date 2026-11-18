@@ -2132,6 +2132,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 07:05 — open blocks to sell (owner 2026-11-18, "shadow, but i want admin notifications"). One admin
+  // notification from the 04:40 re-plan's close-gaps numbers: the open hours in the next 7 days a new job could
+  // fill, the biggest block, and what re-timing booked jobs would free under the rules being measured. Admin bell
+  // only; it sends nothing to a customer and changes no visit. runExclusive records the job health.
+  cron.schedule('5 7 * * *', async () => {
+    try {
+      await runExclusive('open-blocks-alert', async () => {
+        const result = await require('./day-replan/open-blocks-alert').runOpenBlocksAlert();
+        logger.info(`[open-blocks] ${result.status}${result.openMin != null ? ` openMin=${result.openMin}` : ''}`);
+      });
+    } catch (err) {
+      logger.error(`[open-blocks] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 5:00AM — Auto-Dispatch CATCH-UP (owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,

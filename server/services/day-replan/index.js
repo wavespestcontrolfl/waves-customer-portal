@@ -49,6 +49,9 @@ const { windowByKey } = require('../auto-dispatch/dry-time');
 const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
+const {
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings,
+} = require('./close-gaps');
 const { applyAcceptedDay, reconcileApplied } = require('./apply');
 
 const DEFAULT_DAYS_AHEAD = 14;
@@ -293,8 +296,25 @@ function toldLockReason(row, { told, personPlaced, dayTold }) {
   return null;
 }
 
+/** One home of one customer: the property, else the service address. */
+function homeKey(row) {
+  const home = row.property_id
+    ? `p:${row.property_id}`
+    : `a:${String(row.service_address_line1 || '').trim().toLowerCase()}|${String(row.service_address_zip || '').trim()}`;
+  return `${row.customer_id}|${home}`;
+}
+
+/**
+ * Live stops of this row's customer that day. The live lock counts them per customer; the close-gaps measurement
+ * (P2, owner 2026-11-18) passes ctx.homeCounts and counts them per home instead. It only measures: no live caller
+ * passes homeCounts.
+ */
+function sameCustomerStops(row, ctx) {
+  return ctx.homeCounts ? ctx.homeCounts.get(homeKey(row)) : ctx.customerCounts.get(row.customer_id);
+}
+
 function fixedReason(row, ctx) {
-  const { dateStr, now, visitCounts, customerCounts, sent24 } = ctx;
+  const { dateStr, now, visitCounts, sent24 } = ctx;
   if (!MOVABLE_STATUSES.includes(row.status)) return 'status';
   if (row.reservation_expires_at) return 'hold';
   if (row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true) return 'staff_lock';
@@ -302,7 +322,7 @@ function fixedReason(row, ctx) {
   // keeps its time: an automatic re-time must never stand in for the office's approval (Codex #7555 P2).
   if (officeReviewPending(row)) return 'office_review_pending';
   if (row.visit_id != null && visitCounts.get(row.visit_id) > 1) return 'grouped';
-  if (row.customer_id != null && customerCounts.get(row.customer_id) > 1) return 'same_customer';
+  if (row.customer_id != null && sameCustomerStops(row, ctx) > 1) return 'same_customer';
   if (!startsMoreThanLockAway(row, dateStr, now)) return 'within_24h';
   if (sent24.has(row.id)) return 'reminder_24h_sent';
   // The 24-hour reminder carries the new hour; when it will not go out, nothing tells the customer. A context without
@@ -430,7 +450,7 @@ function fixedList(entries, grandfathered) {
   }));
 }
 
-function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode = 'shadow', planId = null }) {
+function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode = 'shadow', planId = null, closeGaps = null }) {
   // The numbers are the app's own simulation (route-reorder-window-fit simulateArrivalRoute); the planner's stand in
   // only where that simulation gave none.
   const current = check.current || result.current;
@@ -451,6 +471,7 @@ function planRow({ runId, techId, dateStr, entries, result, check, verdict, mode
     reason: verdict.reason,
     changes: JSON.stringify(verdict.accepted ? result.changes.map((c) => ({ id: c.id, from: minToHhmm(c.fromMin), to: minToHhmm(c.toMin) })) : []),
     fixed: JSON.stringify(fixedList(entries, result.grandfathered)),
+    close_gaps: closeGaps ? JSON.stringify(closeGaps) : null,
   };
 }
 
@@ -466,6 +487,15 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const origin = homeFromMap(env.techHomes, techId);
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
+  const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
+  return { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+}
+
+/**
+ * The planner and the app's simulation for one tech-day's entries: the live locks, or the close-gaps measurement's
+ * per-home locks (P2). No database.
+ */
+function planEntries(env, { rows, entries, blocks, origin, techId, dayContext }) {
   // Co-visit rows (one physical stop) are merged into one planner stop; the baselines name each group by its first row.
   const entryById = new Map(entries.map((e) => [String(e.row.id), e]));
   const rowGroups = coVisitGroups(promisedWindowOrder(rows));
@@ -494,10 +524,69 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const verdict = finalVerdict(result, check, DEFAULT_OPTIONS.minSavingMin);
   const members = new Map(rowGroups.map((g) => [String(g[0].id), g.map((r) => r.id)]));
   const finalResult = { ...result, grandfathered: result.grandfathered.flatMap((id) => members.get(String(id)) || [id]) };
-  return {
-    entries, rowGroups, stops, blocks, origin, staleReasons, check, verdict, dayContext,
-    result: finalResult, plannerResult: result, hash: versionHash(dayContext.allRows),
-  };
+  return { rowGroups, stops, staleReasons, check, verdict, result: finalResult, plannerResult: result };
+}
+
+function countHomes(rows) {
+  const counts = new Map();
+  for (const row of rows) {
+    if (row.customer_id == null) continue;
+    const key = homeKey(row);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+const boundsOf = (env) => ({ departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin });
+const simsOf = (env, plan) => planSims({
+  groups: plan.rowGroups, currentOrder: plan.result.current.order, best: plan.result.best, origin: plan.origin, departureMin: env.departureMin,
+});
+
+/** P2: the same-customer lock counted per home. Null when no stop of the day had that lock. */
+function measureSameHome(env, plan, { rows, techId, nowFig }) {
+  const locked = (i) => plan.entries[i].why === 'same_customer';
+  if (!plan.entries.some((e, i) => locked(i))) return null;
+  const homeCtx = { ...plan.dayContext, homeCounts: countHomes(plan.dayContext.allRows) };
+  const entries = plan.entries.map((e, i) => (locked(i) ? { ...e, why: fixedReason(e.row, homeCtx) } : e));
+  const freed = entries.filter((e, i) => locked(i) && !e.why).map((e) => e.row.id);
+  const still = entries.filter((e, i) => locked(i) && e.why).map((e) => ({ id: e.row.id, why: e.why }));
+  if (!freed.length) return { freed, still, driveRuleAccepts: false, pack: null, packed: null, changes: [] };
+  const alt = { ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }), origin: plan.origin };
+  const packed = openTime(simsOf(env, alt).planned, boundsOf(env));
+  const pack = packVerdict({ now: nowFig, packed, kept: alt.check.planned?.kept === true, driveRuleAccepts: false });
+  const driveRuleAccepts = alt.verdict.accepted;
+  const changes = driveRuleAccepts || pack.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  return { freed, still, driveRuleAccepts, pack, packed, changes };
+}
+
+/**
+ * The close-gaps measurement for one planned tech-day (./close-gaps.js; owner 2026-11-18). It measures only and never
+ * throws: a failure leaves the row's close_gaps null, and the night's plan row is written either way.
+ */
+function measureCloseGaps(env, plan, { rows, techId }) {
+  try {
+    const bounds = boundsOf(env);
+    const sims = simsOf(env, plan);
+    const nowFig = openTime(sims.current, bounds);
+    const packed = openTime(sims.planned, bounds);
+    const p1 = packVerdict({ now: nowFig, packed, kept: plan.check.planned?.kept === true, driveRuleAccepts: plan.verdict.accepted });
+    const lunchLost = !!(nowFig && nowFig.lunch && packed && !packed.lunch);
+    return {
+      v: 1,
+      now: nowFig,
+      packed,
+      p1: { ...p1, lunchLost, changes: p1.wouldAccept ? hourChanges(plan.rowGroups, plan.result.best) : [] },
+      p2: measureSameHome(env, plan, { rows, techId, nowFig }),
+      s1: replayRecentBookings({
+        groups: plan.rowGroups, prefById: new Map(plan.entries.map((e) => [String(e.row.id), e.pref])),
+        now: plan.dayContext.now, origin: plan.origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds,
+      }),
+      gaps: lockedGaps(nowFig, new Map(plan.entries.map((e) => [String(e.row.id), e.why]))),
+    };
+  } catch (err) {
+    logger.warn(`[day-replan] close-gaps measurement failed (${err.message}); the plan row is written without it`);
+    return null;
+  }
 }
 
 function skipDay(summary, { dateStr, techId, reason, stops }) {
@@ -543,8 +632,9 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const { entries, check, verdict, staleReasons, result, plannerResult } = plan;
   const apply = env.mode === 'apply';
   const planId = apply ? crypto.randomUUID() : null;
+  const closeGaps = measureCloseGaps(env, plan, { rows, techId });
   await conn(PLAN_TABLE).insert(planRow({
-    runId: env.runId, techId, dateStr, entries, result, check, verdict, ...(apply ? { mode: 'apply', planId } : {}),
+    runId: env.runId, techId, dateStr, entries, result, check, verdict, closeGaps, ...(apply ? { mode: 'apply', planId } : {}),
   }));
   summary.days += 1;
   // Which current route the saving was measured against, and the planner's own figures, stay out of the table:
@@ -730,4 +820,6 @@ function applyDeps() {
 
 module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
-  loadDayStops, loadPref, legMin } };
+  loadDayStops, loadPref, legMin,
+  // The close-gaps measurement (owner 2026-11-18).
+  measureCloseGaps, homeKey } };

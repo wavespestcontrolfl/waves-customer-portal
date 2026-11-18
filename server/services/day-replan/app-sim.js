@@ -73,22 +73,28 @@ function promisesKept(sim, seq, marginMin) {
 const figures = (sim) => ({ driveMin: sim.travelMin, endMin: sim.finishMin });
 
 /**
+ * The rows of a plan in its order (ids are each co-visit group's first row id), each at the plan's hour for its
+ * group; a group with no slot, or a slot equal to its booked hour, keeps the row as booked.
+ */
+function planSequence(groups, order, slots = {}) {
+  const byLeader = new Map(groups.map((g) => [String(g[0].id), g]));
+  return order.flatMap((id) => (byLeader.get(String(id)) || []).map((row) => {
+    const slot = slots[id];
+    return slot == null || slot === toMin(row.window_start) ? row : withHour(row, slot);
+  }));
+}
+
+/**
  * @param {{ groups: object[][], baselineOrder: string[], best: {order: string[], slots: object}|null,
  *           origin: {lat: number, lng: number}, departureMin: number, marginMin: number }} input
  *   groups: the co-visit groups (arrays of rows); orders and slots are keyed by each group's first row id.
  * @returns {{ current: {driveMin, endMin}|null, planned: {driveMin, endMin, kept: boolean}|null }}
  */
 function appSimCheck({ groups, baselineOrder, best, origin, departureMin, marginMin }) {
-  const byLeader = new Map(groups.map((g) => [String(g[0].id), g]));
-  const expand = (order) => order.flatMap((id) => (byLeader.get(String(id)) || []).map((row) => ({ row, id })));
-  const baselineSeq = expand(baselineOrder).map((e) => e.row);
-  const currentSim = simulate(baselineSeq, { origin, departureMin });
+  const currentSim = simulate(planSequence(groups, baselineOrder), { origin, departureMin });
   let planned = null;
   if (best) {
-    const seq = expand(best.order).map(({ row, id }) => {
-      const slot = best.slots[id];
-      return slot == null || slot === toMin(row.window_start) ? row : withHour(row, slot);
-    });
+    const seq = planSequence(groups, best.order, best.slots);
     const sim = simulate(seq, { origin, departureMin });
     planned = sim ? { ...figures(sim), kept: promisesKept(sim, seq, marginMin) } : null;
   }
@@ -109,4 +115,4 @@ function finalVerdict(result, check, minSavingMin) {
   return { accepted: ok, reason: ok ? 'accepted' : 'app_sim_rejects', savedMin };
 }
 
-module.exports = { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict, withHour };
+module.exports = { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict, withHour, planSequence, simulate, promisesKept };
