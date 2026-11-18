@@ -56,15 +56,36 @@ function minusUnavailable(blocks, unavailable = []) {
  * The open blocks of one simulated day: the open start, each wait between stops, and the open tail, less the
  * unavailable intervals in bounds.unavailable.
  */
-function openBlocks(sim, { departureMin, openMin, closeMin, unavailable }) {
+/**
+ * When the van sets off for the next stop: as soon as it is free, unless the drive would cross a schedule block;
+ * then after that block (the simulator's own rule, route-reorder-window-fit.js advanceSim).
+ */
+function departAfter(freeMin, driveMin, driveBlocks) {
+  let depart = freeMin;
+  for (let i = 0; i <= driveBlocks.length; i += 1) {
+    const hit = driveBlocks.find((b) => depart < b.endMin && depart + driveMin > b.startMin);
+    if (!hit) break;
+    depart = hit.endMin;
+  }
+  return depart;
+}
+
+/**
+ * driveBlocks: the schedule blocks the simulation ran with (planSims / tryStart). A drive they delay is placed where
+ * the van really drives, so the open time is the time before the drive and the time after it (Codex #7935 r2).
+ */
+function openBlocks(sim, { departureMin, openMin, closeMin, unavailable, driveBlocks = [] }) {
+  const sorted = [...driveBlocks].sort((a, b) => a.startMin - b.startMin);
   const blocks = [];
   let prevDeparture = departureMin;
   sim.arrivals.forEach((a, i) => {
-    const reached = prevDeparture + (a.driveMin || 0);
+    const drive = a.driveMin || 0;
+    const depart = departAfter(prevDeparture, drive, sorted);
+    const kind = i === 0 ? 'start' : 'wait';
     // The first stop: the van cannot start a job before the day's first hour, so the open start counts from there.
-    const from = i === 0 ? Math.max(reached, openMin) : reached;
-    const min = a.arrivalMin - from;
-    if (min > 0) blocks.push({ kind: i === 0 ? 'start' : 'wait', startMin: from, min, before: a.id });
+    const clip = (from) => (i === 0 ? Math.max(from, openMin) : from);
+    const pieces = [[clip(prevDeparture), depart], [clip(depart + drive), a.arrivalMin]];
+    for (const [from, to] of pieces) if (to > from) blocks.push({ kind, startMin: from, min: to - from, before: a.id });
     // A co-visit continuation leaves no earlier than its sibling; the clock never runs backwards.
     prevDeparture = Math.max(prevDeparture, a.departureMin);
   });
@@ -242,7 +263,7 @@ function replayRecentBookings({ groups, prefById, now, ...rest }) {
 }
 
 module.exports = {
-  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups,
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
   SELLABLE_MIN, P1_MIN_GAIN, S1_DRIVE_ALLOWANCE_MIN,
-  _internals: { openBlocks, minusUnavailable, replayBooking, recentlyBooked, lastHour, tryStart, hourFree },
+  _internals: { openBlocks, minusUnavailable, replayBooking, recentlyBooked, lastHour, tryStart, hourFree, departAfter },
 };

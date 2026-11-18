@@ -50,7 +50,7 @@ const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
 const {
-  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups,
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups, serviceBlocks,
 } = require('./close-gaps');
 const { applyAcceptedDay, reconcileApplied } = require('./apply');
 
@@ -546,7 +546,10 @@ function countHomes(rows) {
  */
 function boundsOf(env, plan, techId) {
   const held = blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 }));
-  return { departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin, unavailable: [...plan.blocks, ...held] };
+  return {
+    departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin, unavailable: [...plan.blocks, ...held],
+    driveBlocks: serviceBlocks(plan.blocks),
+  };
 }
 const simsOf = (env, plan) => planSims({
   groups: plan.rowGroups, currentOrder: plan.result.current.order, best: plan.result.best, origin: plan.origin, departureMin: env.departureMin,

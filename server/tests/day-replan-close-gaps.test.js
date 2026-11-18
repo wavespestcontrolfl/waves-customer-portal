@@ -61,6 +61,29 @@ describe('openTime', () => {
     expect(openTime(sim([arrival('a', 480, 540, 10)]), { ...BOUNDS, unavailable: [{ startMin: 540, endMin: 1020 }] }).sellableMin).toBe(0);
   });
 
+  test('a drive a schedule block delays is placed after the block: the time it takes is not sold (Codex #7935 r2)', () => {
+    // p ends 9:50 AM; a block holds 10 to 11 AM; the 20-minute drive to q (booked noon) waits for the block, so the
+    // van drives 11:00 to 11:20. Open: 9:50 to 10:00 and 11:20 to noon, not 11:00 to noon.
+    const block = { startMin: 600, endMin: 660 };
+    const day = sim([arrival('p', 530, 590, 10), arrival('q', 720, 780, 20)]);
+    const fig = openTime(day, { ...BOUNDS, unavailable: [block], driveBlocks: [block] });
+    expect(fig.blocks).toEqual([
+      { kind: 'start', start: 480, min: 50, before: 'p' },
+      { kind: 'wait', start: 680, min: 40, before: 'q' },
+      { kind: 'tail', start: 780, min: 240, before: null },
+    ]);
+    expect(fig).toMatchObject({ waitMin: 50, sellableMin: 240, biggestMin: 240 });
+    // Without the drive rule the 11 AM hour would read as sellable.
+    expect(openTime(day, { ...BOUNDS, unavailable: [block] }).sellableMin).toBe(300);
+  });
+
+  test('departAfter follows the simulator: past each block the drive would cross, in turn', () => {
+    const blocks = [{ startMin: 600, endMin: 660 }, { startMin: 670, endMin: 700 }];
+    expect(_internals.departAfter(590, 20, blocks)).toBe(700);
+    expect(_internals.departAfter(560, 20, blocks)).toBe(560);
+    expect(_internals.departAfter(590, 20, [])).toBe(590);
+  });
+
   test('no simulation, no figures', () => {
     expect(openTime(null, BOUNDS)).toBeNull();
   });
