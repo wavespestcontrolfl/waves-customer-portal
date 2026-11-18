@@ -33,7 +33,13 @@ router.get('/', async (req, res, next) => {
     if (queryError) {
       return res.status(400).json({ error: 'limit must be 1-100 and cursor must be a non-negative integer' });
     }
-    const { payerLookupFailed: _internalOnly, ...body } = await listPortalPayments(req.customerId, { limit: page.limit, cursor: page.cursor });
+    const { payerLookupFailed: _internalOnly, ...body } = await listPortalPayments(req.customerId, {
+      limit: page.limit,
+      cursor: page.cursor,
+      // Keep bearer recovery links on the intended signed-in Billing surface
+      // and behind the same gate as the account's open-invoice Pay actions.
+      includeRecoveryInvoices: isEnabled('portalPayNow'),
+    });
     res.json(body);
   } catch (err) {
     next(err);

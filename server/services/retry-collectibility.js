@@ -213,20 +213,23 @@ const ATTEMPT_RECOVERY = Object.freeze({ ARMED: 'armed', ENDED: 'ended', NONE: '
 const LADDER_STOPPED_NOTE = 'retry ladder stopped';
 const metaFlag = (value) => value === true || value === 'true';
 
-function monthlyAttemptRecovery(row) {
-  // Refunded: the money went back by a person's decision.
-  if (row.status === 'refunded') return ATTEMPT_RECOVERY.ENDED;
+function isParkedOrSupersededAttempt(row) {
   // Superseded: a collector resolved it (another door, Charge now, the sweep's
   // already-collected branch), a retry rung's own row was folded into its original, or a
   // park superseded it by its own id (ambiguous outcome, orphan charge, prepay absorbed).
-  if (row.superseded_by_payment_id != null) return ATTEMPT_RECOVERY.ENDED;
+  if (row.superseded_by_payment_id != null) return true;
   const meta = parseMeta(row);
   // Ambiguous Stripe outcome: charge() stamps it on the row it inserts. Stripe may hold the
   // money, so this row is never one to "charge by hand", even before billing-cron parks it.
-  if (metaFlag(meta.ambiguous_outcome)) return ATTEMPT_RECOVERY.ENDED;
+  if (metaFlag(meta.ambiguous_outcome)) return true;
   // SCA park: charge() stamps requires_action; billing-cron leaves the row failed and unarmed
   // on purpose and alerts the office (autopay-sca-parked.js).
-  if (metaFlag(meta.requires_action)) return ATTEMPT_RECOVERY.ENDED;
+  return metaFlag(meta.requires_action);
+}
+
+function monthlyAttemptRecovery(row) {
+  // Refunded: the money went back by a person's decision.
+  if (row.status === 'refunded' || isParkedOrSupersededAttempt(row)) return ATTEMPT_RECOVERY.ENDED;
   // Ladder exhausted: the last rung disarms the row, pauses service and alerts.
   if (Number(row.retry_count || 0) >= MAX_RETRY_RUNGS) return ATTEMPT_RECOVERY.ENDED;
   // Ladder stopped by the sweep (DISARM), with its note on the row.
@@ -607,6 +610,7 @@ module.exports = {
   hasUnresolvedSiblingStripeOutcome,
   findCollectedMonthlyPayment,
   ATTEMPT_RECOVERY,
+  isParkedOrSupersededAttempt,
   monthlyAttemptRecovery,
   monthlyAttemptHasRecovery,
   deriveMonthlyChargeIdempotencyKey,

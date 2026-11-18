@@ -29,6 +29,13 @@ const aliasInvoiceIdOf = (p) => {
   const alias = m?.dispute_invoice_id || m?.waves_invoice_id;
   return alias != null ? String(alias) : null;
 };
+// A pay action needs to check every stored invoice reference for agreement.
+function paymentInvoiceIds(payment) {
+  const metadata = metadataOf(payment);
+  return [metadata?.invoice_id, metadata?.dispute_invoice_id, metadata?.waves_invoice_id]
+    .filter((value) => value != null)
+    .map((value) => String(value).toLowerCase());
+}
 const descriptionInvoiceNumberOf = (p) => {
   const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
   return m ? m[1] : null;
@@ -161,5 +168,5 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 module.exports = {
   LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL,
   LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
-  invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
+  invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
 };

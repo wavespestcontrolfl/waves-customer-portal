@@ -7095,7 +7095,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     failed: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
-      title: 'Payment failed - update your payment method',
+      title: 'Payment failed',
       // No interruption claim: a balance never withholds service (nothing
       // reads service_paused_at to block a visit). No retry promise either —
       // billing-cron only retries rows it armed with next_retry_at, which
@@ -7109,7 +7109,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // it renders with Auto Pay off. Both actions are stated plainly and
       // nothing is guaranteed about what happens next.
       detail: primaryOpenInvoice
-        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above, and update your saved card below.`
+        ? 'Your last payment could not be processed. Review your open invoices or update your saved payment method below.'
         : 'Your last payment could not be processed. Update your saved card below.',
     },
     expired: {
@@ -7434,7 +7434,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           </div>
           {/* Glass, not a gold tint: 9% gold over the blue scene read as a
               muddy green wash. The Pay button carries the gold. */}
-          <div data-glass="soft" style={{
+          <div id="billing-open-invoices" data-glass="soft" style={{
             minWidth: compact ? '100%' : 190,
             padding: '14px 16px',
             borderRadius: 8,
@@ -7557,8 +7557,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           </div>
           {bannerState === 'failed' && primaryOpenInvoice && (
             <div style={{ marginTop: 10 }}>
-              <a href={primaryOpenInvoice.payUrl} style={payNowButtonStyle} data-glass-accent="">
-                Pay {money(primaryOpenInvoice.amountDue)} now
+              <a href="#billing-open-invoices" style={payNowButtonStyle} data-glass-accent="">
+                View open invoices
               </a>
             </div>
           )}
@@ -8022,11 +8022,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               </div>
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {primaryOpenInvoice && (
-                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
-                      Pay {money(primaryOpenInvoice.amountDue)} now
+                  {p.recoveryInvoice ? (
+                    <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      Pay {money(p.recoveryInvoice.amountDue)} now
                     </a>
-                  )}
+                  ) : primaryOpenInvoice ? (
+                    <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      View open invoices
+                    </a>
+                  ) : null}
                   {/* Cancelled accounts have no card management: the setup-
                       intent route is not on the cancelled allowlist, so this
                       second entry point must hide with the section (the pay

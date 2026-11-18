@@ -38,6 +38,7 @@ test.each([{ code: '57014' }, { name: 'KnexTimeoutError' }, {}])('default receip
   const result = await listPortalPayments('customer-1');
   expect(result.payments).toHaveLength(1);
   expect(result.payments[0].receiptUrl).toBeNull();
+  expect(result.payments[0]).not.toHaveProperty('recoveryInvoice');
 });
 
 test('an ordinary scoped receipt lookup failure remains best effort', async () => {
