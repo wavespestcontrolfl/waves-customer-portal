@@ -137,11 +137,17 @@ describe('runOpenBlocksAlert', () => {
     expect(calls).toContainEqual(['day_replan_plans', 'whereBetween', ['service_date', ['2026-11-19', '2026-11-25']]]);
   });
 
-  test('no fresh re-plan run: nothing is raised or closed', async () => {
+  test('no fresh re-plan run (every day has fewer than two stops): the empty and one-stop days are still raised, with a note', async () => {
+    const { conn } = fakeConn({ run: null, assignable: [{ id: TECH }] });
+    await expect(runOpenBlocksAlert({ conn, now: NOW })).resolves.toMatchObject({ status: 'raised', noRun: true, openMin: 6 * 9 * 60 });
+    const [, , opts] = raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('The night re-plan left no numbers this morning');
+  });
+
+  test('no fresh run and nothing open: nothing is raised', async () => {
     const { conn } = fakeConn({ run: null });
-    await expect(runOpenBlocksAlert({ conn, now: NOW })).resolves.toEqual({ status: 'no_run' });
+    await expect(runOpenBlocksAlert({ conn, now: NOW })).resolves.toMatchObject({ status: 'no_open_hours', noRun: true });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
-    expect(closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
   test('no open hour left: nothing is raised and every open morning row closes', async () => {

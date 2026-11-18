@@ -221,7 +221,8 @@ async function techNamesFor(conn, ids) {
 
 /**
  * The latest fresh run's plan rows for tomorrow through 7 days out (a row whose measurement failed has close_gaps null:
- * its day counts as planned but adds no blocks), or null when no fresh run has close-gaps numbers.
+ * its day counts as planned but adds no blocks), or null when no fresh run has close-gaps numbers (a week where every
+ * tech-day has fewer than two stops writes no plan rows at all).
  */
 async function latestRows(conn, now) {
   const since = new Date(now.getTime() - RUN_FRESH_HOURS * 3600 * 1000);
@@ -239,11 +240,10 @@ async function closeEarlier(conn, keepKey) {
 }
 
 async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
-  const rows = await latestRows(conn, now);
-  if (!rows) {
-    logger.warn('[open-blocks] no fresh re-plan run with close-gaps numbers; nothing raised');
-    return { status: 'no_run' };
-  }
+  const fresh = await latestRows(conn, now);
+  // No fresh run: the hour-grid days are still counted; the detail says the planned days are missing.
+  if (!fresh) logger.warn('[open-blocks] no fresh re-plan run with close-gaps numbers; only days with no stop or one are counted');
+  const rows = fresh || [];
   // The eligibility rules filter the planned days and find the unplanned ones. Unread: the planned days are listed as
   // planned (the night run's own technicians and days) and no unplanned day is added.
   let planned = rows;
@@ -260,16 +260,16 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
   const key = `${KEY_PREFIX}${etDateString(now)}`;
   if (!sum.biggest) {
     const closed = await closeEarlier(conn, null);
-    return { status: 'no_open_hours', closed };
+    return { status: 'no_open_hours', closed, ...(fresh ? {} : { noRun: true }) };
   }
   const posted = await raiseAdminAlert('schedule', alertSpec(sum), {
     bell: true,
     dedupeKey: key,
-    detail: detailText(sum),
+    detail: fresh ? detailText(sum) : `${detailText(sum)}\nThe night re-plan left no numbers this morning, so days with two or more stops are not listed.`,
     metadata: { openMin: sum.totalMin, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers },
   });
   const closed = await closeEarlier(conn, key);
-  return { status: 'raised', id: posted?.id || null, deduped: !!posted?.deduped, openMin: sum.totalMin, closed };
+  return { status: 'raised', id: posted?.id || null, deduped: !!posted?.deduped, openMin: sum.totalMin, closed, ...(fresh ? {} : { noRun: true }) };
 }
 
 module.exports = {

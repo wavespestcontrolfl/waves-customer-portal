@@ -129,6 +129,16 @@ describe('S1 replay of a new booking', () => {
     expect(out.booked.start).toBe('14:00');
   });
 
+  test('a booking with no end holds its estimated minutes, as the occupancy rule reads it', () => {
+    const long = stop('n', 14, { offset: 0.002, window_end: null, estimated_duration_minutes: 120 });
+    const groups = [[stop('x', 8)], [long]];
+    expect(_internals.lastHour(long, BOUNDS.closeMin)).toBe(15);
+    // A row holds the 10 AM hour. 9 AM would run 9 to 11 and cross it (a 60-minute width would fit), and 10 AM is
+    // held, so the first hour that fits is 11.
+    const out = replay(groups, groups[1], { blockedHours: [10] });
+    expect(out.s1.start).toBe('11:00');
+  });
+
   test('hours held by other rows and schedule blocks are never offered', () => {
     const groups = [[stop('x', 8)], [stop('n', 14, { offset: 0.002 })]];
     const out = replay(groups, groups[1], { blockedHours: [9], blocks: [{ startMin: 600, endMin: 660 }] });

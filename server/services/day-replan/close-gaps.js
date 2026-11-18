@@ -133,8 +133,13 @@ function lockedGaps(now, whyById) {
     .map((b) => ({ before: b.before, start: b.start, min: b.min, why: whyById.get(String(b.before)) || null }));
 }
 
-/** The stop's booked window width in minutes (no booked end: 60), at least an hour. */
-const widthOf = (row) => (row.window_end ? Math.max(60, toMin(row.window_end) - toMin(row.window_start)) : 60);
+/**
+ * The minutes the stop's booking holds: its window, or with no booked end its estimated duration (else 60), as the
+ * occupancy rule (rowHours) and the planner (plannerStop) read it.
+ */
+const widthOf = (row) => Math.max(1, row.window_end
+  ? toMin(row.window_end) - toMin(row.window_start)
+  : (Number(row.estimated_duration_minutes) || 60));
 
 /** Last whole start hour whose window (the stop's booked width) still ends by the day's close. */
 function lastHour(row, closeMin) {
