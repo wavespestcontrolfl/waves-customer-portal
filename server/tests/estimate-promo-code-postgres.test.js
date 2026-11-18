@@ -381,8 +381,13 @@ jest.mock('../config/feature-gates', () => ({
       expect(Number((await fresh(inv)).credit_applied)).toBe(0);
       expect(await usesOf(disc.id)).toBe(0);
 
+      // Nothing to report before the code is redeemed, or for an invoice with no code.
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id)).toBeNull();
+      expect(await pay.promoCodeVerdictAfterSetup(randomUUID())).toBeUndefined();
       expect(await setup(inv)).toBe(25);
       expect(await setup(inv)).toBe(0);
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id))
+        .toEqual({ canEnter: false, applied: { code: disc.promo_code, creditAmount: 25, credited: true } });
       expect(Number((await fresh(inv)).credit_applied)).toBe(25);
       // Only the promo amount was drawn: the customer's own $15 is untouched.
       expect(await balanceOf(cust.id)).toBe(15);
@@ -468,6 +473,8 @@ jest.mock('../config/feature-gates', () => ({
       expect(await db('invoice_promo_codes').where({ invoice_id: inv.id }).first()).toMatchObject({ status: 'void', void_reason: 'code_inactive' });
       expect(await db('activity_log').where({ customer_id: cust.id, action: 'invoice_promo_code_not_credited' })).toHaveLength(1);
       expect(await pay.promoCodeViewForInvoice(await fresh(inv))).toBeNull();
+      // The setup tells the page to drop its note: no credit was priced in.
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id)).toBeNull();
     });
 
     test('a code is never spent on an invoice it cannot lower: nothing posts and it stays entered for a later setup', async () => {
@@ -483,6 +490,7 @@ jest.mock('../config/feature-gates', () => ({
       expect(await ledgerOf(cust.id)).toHaveLength(0);
       expect(await usesOf(disc.id)).toBe(0);
       expect((await db('invoice_promo_codes').where({ invoice_id: inv.id }).first()).status).toBe('entered');
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id)).toBeNull();
 
       await db('payment_plans').where({ id: plan.id }).update({ status: 'completed' });
       expect(await setup(inv)).toBe(25);

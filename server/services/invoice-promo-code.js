@@ -69,6 +69,26 @@ async function promoCodeViewForInvoice(invoice, { saveRequired = false, conn = d
 }
 
 /**
+ * What became of the code on this invoice, for the payment-setup response:
+ * the page saved the code, reloaded, and this setup is where it was redeemed
+ * (or was not). The applied block when the credit posted; null when it did
+ * not (voided, or the invoice took none of it), so the page drops its note
+ * and never promises a credit the payment was not priced with; undefined
+ * (no key in the response) when the gate is off or the invoice has no code.
+ */
+async function promoCodeVerdictAfterSetup(invoiceId, conn = db) {
+  try {
+    if (!gateOn()) return undefined;
+    const row = await conn('invoice_promo_codes').where({ invoice_id: invoiceId }).first();
+    if (!row) return undefined;
+    return row.status === 'redeemed' ? { canEnter: false, applied: appliedView(row) } : null;
+  } catch (err) {
+    logger.warn(`[invoice-promo-code] setup verdict not read for invoice ${invoiceId}: ${err.code || err.message}`);
+    return undefined;
+  }
+}
+
+/**
  * The credit a code entered on this invoice will post at the next payment
  * setup, or 0 (no code waiting, or the gate is off). The pay page projects
  * it so nothing is offered at the pre-credit amount in the meantime. A read
@@ -206,6 +226,7 @@ async function redeemAndApplyPromoCode(trx, invoice) {
 }
 
 module.exports = {
+  promoCodeVerdictAfterSetup,
   pendingPromoCredit,
   promoCodeViewForInvoice,
   enterPromoCodeOnInvoice,

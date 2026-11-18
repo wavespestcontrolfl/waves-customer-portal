@@ -1917,6 +1917,9 @@ export default function PayPageV2() {
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
+  // The promo code's outcome as /setup reports it (GATE_PAY_PROMO_CODE);
+  // undefined until a setup answers with one.
+  const [promoVerdict, setPromoVerdict] = useState(undefined);
   // Set when /setup reports an in-flight payment (409 + inProgress) — most often
   // an ACH bank debit still `processing`. We render a self-contained "bank
   // payment processing" state here rather than navigating to /receipt, whose
@@ -2246,6 +2249,9 @@ export default function PayPageV2() {
         return setup;
       })
       .then((setup) => {
+        // The setup is where a saved promo code is redeemed (or is not): its
+        // answer replaces what the GET said before the setup ran.
+        if ('promoCode' in setup) setPromoVerdict(setup.promoCode);
         // Account credit fully covered the invoice at setup (no PI minted, null
         // clientSecret) — flip to the existing "covered, nothing due" prepaid
         // state instead of mounting a card form that would hang on "Loading
@@ -3120,7 +3126,7 @@ export default function PayPageV2() {
                 full reload a stale invoice does: /setup then posts the
                 credit and prices the payment at the new amount. */}
             <PayPromoCode
-              promoCode={data.promoCode}
+              promoCode={promoVerdict === undefined ? data.promoCode : promoVerdict}
               panelStyle={subtlePanel}
               onSaved={() => window.location.reload()}
               submitCode={async (code) => {

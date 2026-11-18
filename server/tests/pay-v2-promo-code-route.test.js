@@ -9,9 +9,15 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ gates: {}, isEnabled: jest.fn(() => false) }));
-const mockPromo = { enterPromoCodeOnInvoice: jest.fn(), promoCodeViewForInvoice: jest.fn(), pendingPromoCredit: jest.fn() };
+const mockPromo = {
+  enterPromoCodeOnInvoice: jest.fn(), promoCodeViewForInvoice: jest.fn(), pendingPromoCredit: jest.fn(),
+  promoCodeVerdictAfterSetup: jest.fn(),
+};
 jest.mock('../services/invoice-promo-code', () => mockPromo);
-jest.mock('../services/stripe', () => ({}));
+// Only what /setup reads on its way to the mint; the entry route calls none of it.
+const mockStripe = { assertNoInvoiceChargeReconciliationPending: jest.fn(), createInvoicePaymentIntent: jest.fn() };
+jest.mock('../services/stripe', () => mockStripe);
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
 // The rows each table answers: the invoice, and the customer the saved-method rule reads.
 const mockRows = { invoices: null, customers: null };
 jest.mock('../models/db', () => {
@@ -90,6 +96,31 @@ test('the code is saved on the transaction that holds the invoice lock, and the 
   expect(db.transaction).toHaveBeenCalled();
   expect(lastHeaders.get('cache-control')).toContain('no-store');
   expect(lastHeaders.get('x-robots-tag')).toContain('noindex');
+});
+
+test('the entry route never calls Stripe', async () => {
+  mockPromo.enterPromoCodeOnInvoice.mockResolvedValueOnce({ ok: true, applied: { code: 'SAVE25', creditAmount: 25, credited: false } });
+  await post(`/api/pay/${token}/promo-code`, { code: 'SAVE25' });
+  expect(mockStripe.createInvoicePaymentIntent).not.toHaveBeenCalled();
+  expect(mockStripe.assertNoInvoiceChargeReconciliationPending).not.toHaveBeenCalled();
+});
+
+test('/setup reports what became of the code: the applied block, null when it was not credited, no key when there is none', async () => {
+  mockStripe.createInvoicePaymentIntent.mockResolvedValue({ clientSecret: 'cs', paymentIntentId: 'pi_1', amount: 75, baseAmount: 75 });
+  const applied = { code: 'SAVE25', creditAmount: 25, credited: true };
+
+  mockPromo.promoCodeVerdictAfterSetup.mockResolvedValueOnce({ canEnter: false, applied });
+  let setup = await post(`/api/pay/${token}/setup`, {});
+  expect(setup.status).toBe(200);
+  expect(setup.body).toMatchObject({ paymentIntentId: 'pi_1', promoCode: { canEnter: false, applied } });
+
+  mockPromo.promoCodeVerdictAfterSetup.mockResolvedValueOnce(null);
+  setup = await post(`/api/pay/${token}/setup`, {});
+  expect(setup.body.promoCode).toBeNull();
+
+  mockPromo.promoCodeVerdictAfterSetup.mockResolvedValueOnce(undefined);
+  setup = await post(`/api/pay/${token}/setup`, {});
+  expect('promoCode' in setup.body).toBe(false);
 });
 
 test('an invoice that must save a payment method first takes no code', async () => {

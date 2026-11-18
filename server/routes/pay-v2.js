@@ -977,8 +977,13 @@ router.post('/:token/setup', async (req, res, next) => {
     // leaves it null (client falls back to the GET version: safe direction).
     const postMintRow = await db('invoices').where({ id: invoice.id }).first('updated_at').catch(() => null);
     const postMintVersion = postMintRow?.updated_at ? new Date(postMintRow.updated_at).getTime() : null;
+    // A promo code on this invoice (GATE_PAY_PROMO_CODE) was redeemed in the
+    // mint above, or was not: the page's note follows this, never the GET it
+    // loaded before the setup ran. Absent with the gate off or no code.
+    const promoVerdict = await require('../services/invoice-promo-code').promoCodeVerdictAfterSetup(invoice.id);
 
     res.json({
+      ...(promoVerdict !== undefined ? { promoCode: promoVerdict } : {}),
       version: postMintVersion,
       clientSecret: result.clientSecret,
       paymentIntentId: result.paymentIntentId,
