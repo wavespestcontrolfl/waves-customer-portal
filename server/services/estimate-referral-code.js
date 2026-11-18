@@ -25,11 +25,11 @@ const { isEnabled } = require('../config/feature-gates');
 const engine = require('./referral-engine');
 const inbound = require('./referral-inbound');
 
-const SWEEP_LIMIT = 100;
 // The hourly pass looks only at estimates accepted this recently: long enough
-// for a new customer to land on a plan, and it bounds the work, since a card
-// the confirm holds gets no answer row and would otherwise be read again
-// every hour for good. An older card still waits in Referrals → Queue.
+// for a new customer to land on a plan, and it is the one bound on the work,
+// since a card the confirm holds gets no answer row and would otherwise be
+// read again every hour for good. An older card still waits in Referrals →
+// Queue.
 const SWEEP_WINDOW_DAYS = 45;
 
 const gateOn = () => isEnabled('estimateReferralCode');
@@ -181,8 +181,9 @@ async function sweepTypedReferralCodes() {
     .where('e.accepted_at', '>=', new Date(Date.now() - SWEEP_WINDOW_DAYS * 86400000))
     .whereNotNull('e.customer_id')
     .whereNotExists(db('referral_inbound_reviews as v').whereRaw('v.customer_id = e.customer_id').select(db.raw('1')))
-    .orderBy('r.created_at', 'desc')
-    .limit(SWEEP_LIMIT)
+    // Every waiting code in the window, oldest first: no cap, so codes the
+    // confirm holds can never keep another customer's from being tried.
+    .orderBy('r.created_at', 'asc')
     .pluck('r.estimate_id');
   let confirmed = 0;
   for (const estimateId of waiting) {

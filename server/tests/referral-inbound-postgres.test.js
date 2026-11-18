@@ -704,7 +704,14 @@ jest.mock('../services/customer-credit', () => ({
       expect(await db('referral_inbound_reviews')).toHaveLength(0);
       // Still on the Queue, where the office confirms it for both credits now.
       expect((await inbound.listInboundReferrals()).map((c) => c.customerId)).toEqual([friend.id]);
-      // The hourly pass reads a recent acceptance again, and stops once it is old.
+      // The hourly pass reads a recent acceptance again, and a held card never keeps another
+      // customer's code from being confirmed in the same pass.
+      const second = await customer({ waveguard_tier: 'Bronze', monthly_rate: 47 });
+      const secondEst = await estimate(second.id);
+      await enter(secondEst, 'WAVES-JANE');
+      await accepted(secondEst);
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 2, confirmed: 1 });
+      // It stops reading a held card once the acceptance is old.
       expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 1, confirmed: 0 });
       await accepted(est, 60);
       expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 0, confirmed: 0 });
