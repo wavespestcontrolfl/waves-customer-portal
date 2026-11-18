@@ -6,7 +6,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { openTime, packVerdict, hourChanges, lockedGaps, _internals } = require('../services/day-replan/close-gaps');
+const { openTime, planSims, packVerdict, hourChanges, lockedGaps, _internals } = require('../services/day-replan/close-gaps');
 const { _internals: replan } = require('../services/day-replan');
 
 const BOUNDS = { departureMin: 7 * 60 + 30, openMin: 8 * 60, closeMin: 17 * 60 };
@@ -137,6 +137,28 @@ describe('S1 replay of a new booking', () => {
     // held, so the first hour that fits is 11.
     const out = replay(groups, groups[1], { blockedHours: [10] });
     expect(out.s1.start).toBe('11:00');
+  });
+
+  test('a late finish that would run the replayed job into a schedule block refuses that hour (Codex #7935 r1)', () => {
+    // Stop x is booked 8 to 9 AM but takes 120 minutes, so it runs to 10 AM; a schedule block holds 10 AM to noon.
+    const groups = [[stop('x', 8, { estimated_duration_minutes: 120 })], [stop('n', 14, { offset: 0.002 })]];
+    const blocks = [{ startMin: 600, endMin: 720 }];
+    // Without the block in the simulation, 9 AM would pass: its booked hour misses the block, and x ends at 10.
+    expect(replay(groups, groups[1]).s1.start).toBe('09:00');
+    // With it, the van leaves x after the block, so a 9 AM job arrives after noon and its promise breaks.
+    const out = replay(groups, groups[1], { blocks });
+    expect(out.s1.start).toBe('12:00');
+  });
+
+  test('P1: a planned day a schedule block pushes past a promise is not kept', () => {
+    const groups = [[stop('a', 8, { estimated_duration_minutes: 120 })], [stop('b', 9, { offset: 0.001 })]];
+    const best = { order: ['a', 'b'], slots: {} };
+    const base = { groups, currentOrder: ['a', 'b'], best, origin: HQ, departureMin: BOUNDS.departureMin, marginMin: 15 };
+    expect(planSims(base).plannedKept).toBe(true);
+    expect(planSims({ ...base, blocks: [{ startMin: 600, endMin: 720 }] }).plannedKept).toBe(false);
+    // A malformed block is dropped, not allowed to void the whole day.
+    expect(planSims({ ...base, blocks: [{ startMin: 700, endMin: 650 }] }).plannedKept).toBe(true);
+    expect(planSims({ ...base, best: null }).plannedKept).toBeNull();
   });
 
   test('hours held by other rows and schedule blocks are never offered', () => {

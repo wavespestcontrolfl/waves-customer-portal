@@ -93,11 +93,22 @@ function openTime(sim, bounds) {
 }
 
 /** Simulations of the day as booked and of the planner's best plan (null where it has none). */
-function planSims({ groups, currentOrder, best, origin, departureMin }) {
-  return {
-    current: simulate(planSequence(groups, currentOrder), { origin, departureMin }),
-    planned: best ? simulate(planSequence(groups, best.order, best.slots), { origin, departureMin }) : null,
-  };
+/** Schedule blocks the simulator can take (it refuses the whole day on one malformed interval). */
+const serviceBlocks = (blocks) => (blocks || [])
+  .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin)
+  .map((b) => ({ startMin: b.startMin, endMin: b.endMin }));
+
+/**
+ * The day as booked and as planned, simulated with the schedule blocks (no drive or service inside one).
+ * plannedKept: every promise of the planned day still holds once the blocks push stops later; null with no plan.
+ */
+function planSims({ groups, currentOrder, best, origin, departureMin, blocks = [], marginMin = 0 }) {
+  const blockedIntervals = serviceBlocks(blocks);
+  const current = simulate(planSequence(groups, currentOrder), { origin, departureMin, blockedIntervals });
+  if (!best) return { current, planned: null, plannedKept: null };
+  const seq = planSequence(groups, best.order, best.slots);
+  const planned = simulate(seq, { origin, departureMin, blockedIntervals });
+  return { current, planned, plannedKept: !!planned && promisesKept(planned, seq, marginMin) };
 }
 
 /**
@@ -167,7 +178,9 @@ function tryStart(input, startMin) {
   const order = groups.map((g, i) => ({ id: g[0].id, start: startOf(g), i }))
     .sort((a, b) => a.start - b.start || a.i - b.i).map((x) => x.id);
   const seq = planSequence(groups, order, { [leaderId]: startMin });
-  const sim = simulate(seq, { origin, departureMin: bounds.departureMin });
+  // With the schedule blocks a late arrival that would run into one is pushed past it, and promisesKept then
+  // refuses the hour when that breaks a promise (Codex #7935 r1).
+  const sim = simulate(seq, { origin, departureMin: bounds.departureMin, blockedIntervals: serviceBlocks(input.blocks) });
   if (!sim || !promisesKept(sim, seq, marginMin)) return null;
   const fig = openTime(sim, bounds);
   return { start: hhmm(startMin), startMin, driveMin: fig.driveMin, waitMin: fig.waitMin, sellableMin: fig.sellableMin, biggestMin: fig.biggestMin };

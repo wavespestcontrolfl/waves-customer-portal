@@ -56,9 +56,11 @@ function withHour(row, slotMin) {
   return { ...row, window_start: hhmmss(slotMin), window_end: hhmmss(slotMin + width) };
 }
 
-function simulate(seq, { origin, departureMin }) {
+// blockedIntervals: the technician's schedule blocks, which no drive or service may cross. Only the close-gaps
+// measurement passes them; the live verdict (appSimCheck) does not, as before.
+function simulate(seq, { origin, departureMin, blockedIntervals = [] }) {
   return simulateArrivalRoute(RouteOptimizer, rangeFor, seq, {
-    startMin: departureMin, origin, end: origin, reportLate: true,
+    startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals,
   });
 }
 

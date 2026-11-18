@@ -550,7 +550,10 @@ function boundsOf(env, plan, techId) {
 }
 const simsOf = (env, plan) => planSims({
   groups: plan.rowGroups, currentOrder: plan.result.current.order, best: plan.result.best, origin: plan.origin, departureMin: env.departureMin,
+  blocks: plan.blocks, marginMin: DEFAULT_OPTIONS.marginMin,
 });
+// A plan's promises hold: the live check's verdict, and again with the schedule blocks in the simulation.
+const keptWithBlocks = (plan, sims) => plan.check.planned?.kept === true && sims.plannedKept === true;
 
 /** P2: the same-customer lock counted per home. Null when no stop of the day had that lock. */
 async function measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }) {
@@ -565,8 +568,9 @@ async function measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }
   const still = entries.filter((e, i) => locked(i) && e.why).map((e) => ({ id: e.row.id, why: e.why }));
   if (!freed.length) return { freed, still, driveRuleAccepts: false, pack: null, packed: null, changes: [] };
   const alt = { ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }), origin: plan.origin };
-  const packed = openTime(simsOf(env, alt).planned, bounds);
-  const pack = packVerdict({ now: nowFig, packed, kept: alt.check.planned?.kept === true, driveRuleAccepts: false });
+  const altSims = simsOf(env, alt);
+  const packed = openTime(altSims.planned, bounds);
+  const pack = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
   const driveRuleAccepts = alt.verdict.accepted;
   const changes = driveRuleAccepts || pack.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
   return { freed, still, driveRuleAccepts, pack, packed, changes };
@@ -602,7 +606,7 @@ async function measureCloseGaps(conn, env, plan, { rows, techId }) {
     const sims = simsOf(env, plan);
     const nowFig = openTime(sims.current, bounds);
     const packed = openTime(sims.planned, bounds);
-    const p1 = packVerdict({ now: nowFig, packed, kept: plan.check.planned?.kept === true, driveRuleAccepts: plan.verdict.accepted });
+    const p1 = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: plan.verdict.accepted });
     const lunchLost = !!(nowFig && nowFig.lunch && packed && !packed.lunch);
     return {
       v: 1,
