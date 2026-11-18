@@ -208,16 +208,20 @@ class PushNotificationService {
   // opts.withReachable: routing only (GATE_APP_FIRST_ANY_DEVICE) also reads
   // `reachable`; the customer-facing status routes keep their exact shape.
   // opts.reachableSince: the oldest check-in that still counts as reachable
-  // (GATE_APP_FIRST_STALE_TEXT); null = no bound.
+  // (GATE_APP_FIRST_STALE_TEXT); null = no bound. With withReachable the status
+  // also reports `reachableCheckedInAt`: the newest check-in among the same rows
+  // (holder, phone app, active, provider configured), whatever reachableSince is.
   async customerStatus(customerId, database = db, { contactKey = null, withReachable = false, reachableSince = null } = {}) {
     const context = await customerPushContext(customerId, database);
-    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false } : {}) };
+    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false, reachableCheckedInAt: null } : {}) };
     const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
       .filter((row) => (contactKey ? String(row.contact_phone_key || '') === String(contactKey) : !row.contact_phone_key));
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
     const providers = { ios: apns.status().configured, android: fcm.status().configured };
+    const newestCheckIn = withReachable ? rows.filter((row) => providers[row.platform])
+      .reduce((newest, row) => Math.max(newest, new Date(row.updated_at).getTime() || 0), 0) : 0;
     return {
       enabled: context.enabled,
       registered: rows.length > 0,
@@ -225,7 +229,8 @@ class PushNotificationService {
       // Any active holder device whose provider is configured, however long
       // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
       ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]
-        && (!reachableSince || new Date(row.updated_at).getTime() >= new Date(reachableSince).getTime())) } : {}),
+        && (!reachableSince || new Date(row.updated_at).getTime() >= new Date(reachableSince).getTime())),
+      reachableCheckedInAt: newestCheckIn ? new Date(newestCheckIn) : null } : {}),
     };
   }
 

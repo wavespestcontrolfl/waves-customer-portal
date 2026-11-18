@@ -12,7 +12,7 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
   let Check;
   const NOW = new Date('2026-11-18T20:30:00Z');
   const daysBefore = (days, from = NOW) => new Date(from.getTime() - days * 86400000);
-  const FIRST_PUSH = daysBefore(1);
+  const PUSH_AT = daysBefore(1);
 
   beforeAll(() => {
     const target = new URL(process.env.DATABASE_URL);
@@ -23,49 +23,36 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
     Check = require('../services/app-first-stale-notice-check');
   });
 
-  async function seed(trx, { appSeenDaysBeforeFirstPush, withText = false, pushTypes = ['reminder_72h', 'tech_en_route'] } = {}) {
+  // One automatic app push for one synthetic visit; `stamp` is the metadata app_checked_in_at as written.
+  async function seed(trx, { stamp, requestedChannel = 'sms', types = ['reminder_72h', 'tech_en_route'] } = {}) {
     const customerId = randomUUID();
     const visitId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Tester', phone: '+19415550143', email: `${customerId}@example.invalid` });
-    if (appSeenDaysBeforeFirstPush != null) {
-      await trx('push_subscriptions').insert({ customer_id: customerId, role: 'customer', platform: 'ios', device_token: `qa-${randomUUID()}`,
-        subscription_data: '{}', active: true, updated_at: daysBefore(appSeenDaysBeforeFirstPush, FIRST_PUSH) });
+    for (const [i, type] of types.entries()) {
+      await trx('sms_log').insert({
+        customer_id: customerId, direction: 'outbound', from_phone: 'push', to_phone: '9415550143', message_body: 'Synthetic notice',
+        status: 'sent', message_type: type, created_at: new Date(PUSH_AT.getTime() + i * 3600000),
+        metadata: JSON.stringify({ channel: 'push', requestedChannel, scheduled_service_id: visitId, ...(stamp === undefined ? {} : { app_checked_in_at: stamp }) }),
+      });
     }
-    const log = (extra) => trx('sms_log').insert({ customer_id: customerId, direction: 'outbound', to_phone: '9415550143', message_body: 'Synthetic notice',
-      status: 'sent', metadata: JSON.stringify({ scheduled_service_id: visitId }), ...extra });
-    for (const [i, type] of pushTypes.entries()) {
-      await log({ from_phone: 'push', message_type: type, created_at: new Date(FIRST_PUSH.getTime() + i * 3600000) });
-    }
-    if (withText) await log({ from_phone: '+19415550000', message_type: 'appointment_reminder', created_at: daysBefore(2) });
     return { customerId, visitId };
   }
 
-  const find = async (trx, visitId) => (await Check.findStaleAppNoticeVisits({ database: trx, now: NOW })).filter((r) => r.visit_id === visitId);
+  const find = async (trx, visitId) => (await Check.findStaleAppNoticeVisits({ database: trx, now: NOW })).filter((i) => i.visit_id === visitId);
 
-  test('an app last opened 39 days before the first push is found; 5 days before is not; a text for the visit clears it; no app record at all is found', async () => {
+  test('a stamp 39 days before the push is found as one visit item; 5 days, no stamp, an explicit App choice and a malformed stamp are not, and never throw', async () => {
     const trx = await db.transaction();
     try {
-      const stale = await seed(trx, { appSeenDaysBeforeFirstPush: 39 });
-      const rows = await find(trx, stale.visitId);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ customer_id: stale.customerId, first_name: 'Sample', days_since_app_use: 39 });
-      expect([...rows[0].notice_types].sort()).toEqual(['reminder_72h', 'tech_en_route']);
+      const stale = await seed(trx, { stamp: daysBefore(39, PUSH_AT).toISOString() });
+      const items = await find(trx, stale.visitId);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ key: `visit:${stale.visitId}`, customer_id: stale.customerId, first_name: 'Sample', days_since_app_use: 39 });
+      expect([...items[0].notice_types].sort()).toEqual(['reminder_72h', 'tech_en_route']);
 
-      const fresh = await seed(trx, { appSeenDaysBeforeFirstPush: 5 });
-      expect(await find(trx, fresh.visitId)).toHaveLength(0);
-
-      const texted = await seed(trx, { appSeenDaysBeforeFirstPush: 39, withText: true });
-      expect(await find(trx, texted.visitId)).toHaveLength(0);
-
-      const never = await seed(trx, {});
-      const neverRows = await find(trx, never.visitId);
-      expect(neverRows).toHaveLength(1);
-      expect(neverRows[0].days_since_app_use).toBeNull();
-
-      // A page view 5 days before the first push counts as app activity.
-      const viewer = await seed(trx, { appSeenDaysBeforeFirstPush: 39 });
-      await trx('customer_page_views').insert({ customer_id: viewer.customerId, page: 'portal', viewed_at: daysBefore(5, FIRST_PUSH) });
-      expect(await find(trx, viewer.visitId)).toHaveLength(0);
+      expect(await find(trx, (await seed(trx, { stamp: daysBefore(5, PUSH_AT).toISOString() })).visitId)).toHaveLength(0);
+      expect(await find(trx, (await seed(trx, {})).visitId)).toHaveLength(0);
+      expect(await find(trx, (await seed(trx, { stamp: daysBefore(39, PUSH_AT).toISOString(), requestedChannel: 'push' })).visitId)).toHaveLength(0);
+      expect(await find(trx, (await seed(trx, { stamp: 'not-a-date' })).visitId)).toHaveLength(0);
     } finally {
       await trx.rollback();
     }

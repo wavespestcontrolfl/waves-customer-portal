@@ -11,13 +11,14 @@
  * not opened in 30 days. This check finds the same gap in live data, so the
  * owner never has to catch it again; with that gate on it should normally find 0.
  *
- * A problem visit: in the last 48 hours at least one outbound visit notice went
- * as an app push (sms_log from_phone 'push' with a scheduled_service_id), no
- * text went for that visit in the 4 days before its newest push, and the
- * customer's last app activity before the visit's FIRST push is older than 30
- * days or missing. Last app activity before T = the latest of the holder's
- * phone-app device check-in (push_subscriptions.updated_at, bumped on every app
- * launch), a token page view and a refresh-token sign-in, each at or before T.
+ * What it reads: routing records the evidence at send time. Every any-device push
+ * proof row (sms_log from_phone 'push') carries metadata.app_checked_in_at, the
+ * newest check-in of the holder's phone app that routing saw when it chose push
+ * (push-channel-routing.js, anyDeviceReach). A problem row: outbound, in the last
+ * 48 hours, an automatic replacement of a text (metadata.requestedChannel 'sms',
+ * never an explicit App choice), with that stamp more than 30 days before the push.
+ * Rows without a stamp are unknown and skipped. One item per visit, or per row when
+ * it has no visit. Whatever else went for the visit, a push to a stale app is the miss.
  *
  * Read-only: SELECTs only. The result is one ops digest row (key below) that
  * retires itself on a clean run; a failed query never retires it.
@@ -34,7 +35,6 @@ const OPS_DIGEST_KEY = 'app-first-stale-notice';
 // imported: that module loads the whole send stack). Change both together.
 const STALE_DAYS = 30;
 const PUSH_WINDOW_HOURS = 48;
-const TEXT_LOOKBACK_DAYS = 4;
 const MAX_ROWS_SHOWN = 20;
 const LINK = '/admin/customers';
 
@@ -47,58 +47,52 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// One row per visit that got an app push in the window. Bindings, in order:
-// window start, stale days, text lookback days.
-const PROBLEM_VISITS_SQL = `
-  WITH pushes AS (
-    SELECT metadata->>'scheduled_service_id' AS visit_id,
-           (array_agg(customer_id ORDER BY created_at))[1] AS customer_id,
-           min(created_at) AS first_push,
-           max(created_at) AS last_push,
-           array_agg(DISTINCT message_type) AS notice_types
-      FROM sms_log
-     WHERE direction = 'outbound'
-       AND from_phone = 'push'
-       AND created_at >= ?::timestamptz
-       AND COALESCE(metadata->>'scheduled_service_id', '') <> ''
-     GROUP BY 1
-  ), seen AS (
-    SELECT p.*,
-           GREATEST(
-             (SELECT max(s.updated_at) FROM push_subscriptions s
-               WHERE s.customer_id = p.customer_id AND s.role = 'customer'
-                 AND s.platform IN ('ios', 'android') AND s.contact_phone_key IS NULL
-                 AND s.updated_at <= p.first_push),
-             (SELECT max(v.viewed_at) FROM customer_page_views v
-               WHERE v.customer_id = p.customer_id AND v.viewed_at < p.first_push),
-             (SELECT max(r.created_at) FROM customer_refresh_tokens r
-               WHERE r.customer_id = p.customer_id AND r.contact_key IS NULL AND r.created_at < p.first_push)
-           ) AS last_app_use
-      FROM pushes p
+// One row per stale-stamped push in the window. The stamp is cast only when it
+// is an ISO timestamp (no `?` in the pattern: knex reads it as a binding; inside a CASE, so one malformed value cannot fail the
+// query). Bindings, in order: window start, stale days.
+const ISO_STAMP = '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+){0,1}(Z|[+-][0-9]{2}:[0-9]{2})$';
+const STALE_PUSHES_SQL = `
+  WITH stamped AS (
+    SELECT l.id, l.customer_id, l.created_at, l.message_type,
+           NULLIF(l.metadata->>'scheduled_service_id', '') AS visit_id,
+           CASE WHEN l.metadata->>'app_checked_in_at' ~ '${ISO_STAMP}'
+                THEN (l.metadata->>'app_checked_in_at')::timestamptz END AS checked_in_at
+      FROM sms_log l
+     WHERE l.direction = 'outbound'
+       AND l.from_phone = 'push'
+       AND l.created_at >= ?::timestamptz
+       AND l.metadata->>'requestedChannel' = 'sms'
+       AND l.metadata->>'app_checked_in_at' IS NOT NULL
   )
-  SELECT seen.visit_id, seen.customer_id, seen.first_push, seen.last_push, seen.notice_types, seen.last_app_use,
-         CASE WHEN seen.last_app_use IS NULL THEN NULL
-              ELSE floor(extract(epoch FROM (seen.first_push - seen.last_app_use)) / 86400)::int END AS days_since_app_use,
+  SELECT st.id, st.customer_id, st.created_at, st.message_type, st.visit_id, st.checked_in_at,
+         floor(extract(epoch FROM (st.created_at - st.checked_in_at)) / 86400)::int AS days_since_app_use,
          ss.scheduled_date::text AS scheduled_date,
          c.first_name, c.last_name
-    FROM seen
-    LEFT JOIN scheduled_services ss ON ss.id::text = seen.visit_id
-    LEFT JOIN customers c ON c.id = seen.customer_id
-   WHERE (seen.last_app_use IS NULL OR seen.last_app_use < seen.first_push - (? * interval '1 day'))
-     AND NOT EXISTS (
-       SELECT 1 FROM sms_log t
-        WHERE t.direction = 'outbound'
-          AND t.from_phone IS DISTINCT FROM 'push'
-          AND COALESCE(t.status, '') NOT IN ('failed', 'undelivered')
-          AND t.metadata->>'scheduled_service_id' = seen.visit_id
-          AND t.created_at >= seen.last_push - (? * interval '1 day')
-     )
-   ORDER BY seen.first_push`;
+    FROM stamped st
+    LEFT JOIN scheduled_services ss ON ss.id::text = st.visit_id
+    LEFT JOIN customers c ON c.id = st.customer_id
+   WHERE st.checked_in_at < st.created_at - (? * interval '1 day')
+   ORDER BY st.created_at`;
+
+// One item per visit (or per row with no visit): the notice types joined, the
+// oldest stamp's days since app use.
+function groupByVisit(pushRows) {
+  const items = new Map();
+  for (const row of pushRows) {
+    const key = row.visit_id ? `visit:${row.visit_id}` : `sms:${row.id}`;
+    const item = items.get(key) || { key, visit_id: row.visit_id, customer_id: row.customer_id, scheduled_date: row.scheduled_date,
+      first_name: row.first_name, last_name: row.last_name, notice_types: [], days_since_app_use: row.days_since_app_use };
+    if (row.message_type && !item.notice_types.includes(row.message_type)) item.notice_types.push(row.message_type);
+    item.days_since_app_use = Math.max(item.days_since_app_use, row.days_since_app_use);
+    items.set(key, item);
+  }
+  return [...items.values()];
+}
 
 async function findStaleAppNoticeVisits({ database = db, now = new Date() } = {}) {
   const windowStart = new Date(now.getTime() - PUSH_WINDOW_HOURS * 3600 * 1000);
-  const result = await database.raw(PROBLEM_VISITS_SQL, [windowStart, STALE_DAYS, TEXT_LOOKBACK_DAYS]);
-  return result?.rows || [];
+  const result = await database.raw(STALE_PUSHES_SQL, [windowStart, STALE_DAYS]);
+  return groupByVisit(result?.rows || []);
 }
 
 const who = (row) => {
@@ -106,9 +100,33 @@ const who = (row) => {
   const initial = String(row.last_name || '').trim().charAt(0);
   return initial ? `${first} ${initial.toUpperCase()}.` : first;
 };
-const lastUse = (row) => (row.days_since_app_use == null ? 'no app use on record' : `${row.days_since_app_use} days since app use`);
+const lastUse = (row) => `${row.days_since_app_use} days since app use`;
 const customerUrl = (row) => (row.customer_id ? `${adminPortalUrl()}/admin/customers/${row.customer_id}` : null);
 const lineFor = (row) => `${row.scheduled_date || 'no date'} · ${who(row)} · ${(row.notice_types || []).join(', ')} · ${lastUse(row)}`;
+
+// The email fallback goes to an internal address only. A guard failure returns
+// { ok: false } (the digest seam still writes the in-app row).
+async function sendMail({ subject, html, text }) {
+  if (typeof sendgrid.isConfigured === 'function' && !sendgrid.isConfigured()) {
+    logger.warn('[app-first-stale-notice] mailer not configured — skipping email');
+    return { ok: false, error: 'mailer_unconfigured' };
+  }
+  const to = digestEmail();
+  if (!isInternalEmailRecipient(to)) {
+    logger.warn('[app-first-stale-notice] recipient is not an internal address — skipping email');
+    return { ok: false, error: 'recipient_not_internal' };
+  }
+  return sendgrid.sendOne({
+    to,
+    fromEmail: fromEmail(),
+    fromName: FROM_NAME,
+    subject,
+    html,
+    text,
+    categories: ['ops', 'app-first-stale-notice'],
+    suppressErrorLog: true,
+  });
+}
 
 async function postStaleAppNoticeDigest(rows) {
   if (!rows.length) {
@@ -118,24 +136,15 @@ async function postStaleAppNoticeDigest(rows) {
   const shown = rows.slice(0, MAX_ROWS_SHOWN);
   const subject = `FIX: ${rows.length} visit${rows.length === 1 ? '' : 's'} got app-only notices on an app not opened in ${STALE_DAYS}+ days`;
   const text = [
-    `${rows.length} visit(s) in the last ${PUSH_WINDOW_HOURS} hours got app push notices and no text, and the customer's app was not opened in the ${STALE_DAYS} days before the first notice. GATE_APP_FIRST_STALE_TEXT should send the text for these; check that it is on and working.`,
+    `${rows.length} visit(s) in the last ${PUSH_WINDOW_HOURS} hours went as app push to an app that had not been opened in ${STALE_DAYS}+ days. GATE_APP_FIRST_STALE_TEXT should send the text for these; check that it is on and working.`,
     '',
     ...shown.map((r) => `- ${lineFor(r)}${customerUrl(r) ? ` · ${customerUrl(r)}` : ''}`),
   ].join('\n');
   const html = [
-    `<p><strong>${rows.length}</strong> visit(s) in the last ${PUSH_WINDOW_HOURS} hours got app push notices and no text, and the customer's app was not opened in the ${STALE_DAYS} days before the first notice. <code>GATE_APP_FIRST_STALE_TEXT</code> should send the text for these; check that it is on and working.</p>`,
+    `<p><strong>${rows.length}</strong> visit(s) in the last ${PUSH_WINDOW_HOURS} hours went as app push to an app that had not been opened in ${STALE_DAYS}+ days. <code>GATE_APP_FIRST_STALE_TEXT</code> should send the text for these; check that it is on and working.</p>`,
     `<ul style="margin:0 0 12px 18px;padding:0;">${shown.map((r) => `<li style="margin:0 0 6px 0;">${esc(lineFor(r))}${customerUrl(r) ? ` &middot; <a href="${esc(customerUrl(r))}">customer</a>` : ''}</li>`).join('')}</ul>`,
   ].join('\n');
 
-  if (typeof sendgrid.isConfigured === 'function' && !sendgrid.isConfigured()) {
-    logger.warn('[app-first-stale-notice] mailer not configured — skipping digest send');
-    return { skipped: 'unconfigured' };
-  }
-  const to = digestEmail();
-  if (!isInternalEmailRecipient(to)) {
-    logger.warn('[app-first-stale-notice] recipient is not an internal address — skipping digest send');
-    return { skipped: 'recipient' };
-  }
   try {
     return await deliverOpsDigest({
       fallOff: true,
@@ -145,19 +154,12 @@ async function postStaleAppNoticeDigest(rows) {
       text,
       link: rows.length === 1 && rows[0].customer_id ? `${LINK}/${rows[0].customer_id}` : LINK,
       metadata: { visits: rows.length },
-      itemKeys: rows.map((r) => String(r.visit_id)),
+      itemKeys: rows.map((r) => r.key),
       dedupeKey: OPS_DIGEST_KEY,
       refreshOnDedupe: true,
-      sendEmail: () => sendgrid.sendOne({
-        to,
-        fromEmail: fromEmail(),
-        fromName: FROM_NAME,
-        subject,
-        html,
-        text,
-        categories: ['ops', 'app-first-stale-notice'],
-        suppressErrorLog: true,
-      }),
+      // The mail guards live inside sendEmail: with in-app digests on, a missing
+      // SendGrid key or a bad recipient must not suppress the Activity row.
+      sendEmail: () => sendMail({ subject, html, text }),
     });
   } catch (err) {
     logger.error(`[app-first-stale-notice] digest send failed: ${err.message}`);
@@ -182,6 +184,7 @@ async function runAppFirstStaleNoticeCheck({ database = db, now = new Date() } =
 module.exports = {
   OPS_DIGEST_KEY,
   STALE_DAYS,
+  groupByVisit,
   findStaleAppNoticeVisits,
   postStaleAppNoticeDigest,
   runAppFirstStaleNoticeCheck,

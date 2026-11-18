@@ -19,6 +19,7 @@ function subscriptionQuery() {
       return q;
     },
     whereNull(col) { filters.push((row) => row[col] == null); return q; },
+    async select() { return mockDevices.filter((device) => filters.every((f) => f(device))).map((d) => ({ platform: d.platform, updated_at: d.updated_at })); },
     async first() {
       const row = mockDevices.find((device) => filters.every((f) => f(device)));
       return row ? { id: row.id } : undefined;
@@ -105,7 +106,7 @@ afterEach(() => {
   ENV_KEYS.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
 });
 
-const device = (extra = {}) => ({ id: 'd-1', customer_id: 'c-1', active: true, contact_phone_key: null, updated_at: hoursAgo(240), ...extra });
+const device = (extra = {}) => ({ id: 'd-1', customer_id: 'c-1', platform: 'ios', active: true, contact_phone_key: null, updated_at: hoursAgo(240), ...extra });
 
 describe('reachability without a recent check-in (legacy device query)', () => {
   it('gate on: a device last seen 10 days ago takes the push, no text, and the heartbeat floor is dropped', async () => {
@@ -216,6 +217,20 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
   });
 
+  it('legacy lookup with the floor ignores a fresh browser subscription: a stale phone app plus a fresh web row still gets the text', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ id: 'd-app', updated_at: hoursAgo(40 * 24) }));
+    mockDevices.push(device({ id: 'd-web', platform: 'web', updated_at: hoursAgo(1) }));
+    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+  });
+
+  it('new gate off: a browser-only holder is still reachable as today, and no check-in is stamped', async () => {
+    mockDevices.push(device({ platform: 'web', updated_at: hoursAgo(40 * 24) }));
+    expect((await send()).delivered).toBe(true);
+    expect(JSON.parse(mockProofRows[0].metadata)).not.toHaveProperty('app_checked_in_at');
+  });
+
   it('new gate on without GATE_APP_FIRST_ANY_DEVICE: the 72 hour rule, unchanged', async () => {
     delete process.env.GATE_APP_FIRST_ANY_DEVICE;
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
@@ -235,6 +250,32 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     delete process.env.GATE_APP_FIRST_STALE_TEXT;
     await send();
     expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
+  });
+
+  it('the proof row carries the phone app\'s newest check-in as app_checked_in_at, with the new gate off too', async () => {
+    const checkedIn = hoursAgo(40 * 24);
+    mockDevices.push(device({ updated_at: checkedIn }));
+    expect((await send()).delivered).toBe(true);
+    expect(JSON.parse(mockProofRows[0].metadata)).toMatchObject({ requestedChannel: 'sms', app_checked_in_at: checkedIn.toISOString() });
+  });
+
+  it('the account device status path stamps reachableCheckedInAt', async () => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    const checkedIn = hoursAgo(3 * 24);
+    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true, reachableCheckedInAt: checkedIn });
+    expect((await send()).delivered).toBe(true);
+    expect(JSON.parse(mockProofRows[0].metadata).app_checked_in_at).toBe(checkedIn.toISOString());
+  });
+
+  it('an explicit App send carries no stamp', async () => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    mockPrefs = { en_route_channel: 'push' };
+    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: true });
+    mockNotifyCustomer.mockResolvedValueOnce({ id: 'bell-9', push: { accepted: 1 } });
+    const result = await send({ messageType: 'tech_en_route', explicitPushOnly: true, notificationEventKey: 'visit-1:en-route' });
+    expect(result.delivered).toBe(true);
+    expect(JSON.parse(mockProofRows[0].metadata)).toMatchObject({ requestedChannel: 'push' });
+    expect(JSON.parse(mockProofRows[0].metadata)).not.toHaveProperty('app_checked_in_at');
   });
 
   it('explicit App choice: keeps its own path, no 30-day floor and no reachable read', async () => {

@@ -223,4 +223,15 @@ describe('customerStatus — per person', () => {
     subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 10 * 24 * 3600000) }];
     expect((await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true, reachableSince: since })).reachable).toBe(true);
   });
+
+  test('withReachable also reports the newest holder phone-app check-in, whatever the floor; the plain shape is unchanged', async () => {
+    const older = new Date(Date.now() - 40 * 24 * 3600000);
+    const newer = new Date(Date.now() - 35 * 24 * 3600000);
+    subs = [{ ...HOLDER_DEVICE, id: 'a', updated_at: older }, { ...HOLDER_DEVICE, id: 'b', updated_at: newer }, CONTACT_DEVICE];
+    const since = new Date(Date.now() - 30 * 24 * 3600000);
+    const status = await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true, reachableSince: since });
+    expect(status.reachable).toBe(false);
+    expect(status.reachableCheckedInAt.getTime()).toBe(newer.getTime());
+    expect(await Push.customerStatus(HOLDER_ID)).not.toHaveProperty('reachableCheckedInAt');
+  });
 });
