@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 //
-// Mileage trip coordinates backfill (GATE_MILEAGE_TRIP_COORDS). MUTATES mileage_log with --apply.
+// Mileage trip coordinates backfill. MUTATES mileage_log with --apply.
 //
 // Fills the NULL start and end coordinates of bouncie mileage_log rows from the first and last trip-data GPS point of
 // the same transactionId in bouncie_webhook_log. Writes only start_lat, start_lng, end_lat, end_lng and updated_at.
 // Never overwrites a coordinate that is already set; never touches is_business, purpose, deduction or classification.
 // Sends nothing to anyone and calls no paid API. Idempotent: a second run finds nothing left to fill.
 //
-// Dry run by default (counts only, reads the log, writes nothing). `--apply` writes and needs
-// GATE_MILEAGE_TRIP_COORDS=true in the environment the script runs in.
+// Dry run by default (counts only, reads the log, writes nothing). `--apply` writes.
 // `--since YYYY-MM-DD` limits the rows by trip_date. `--batch N` sets the page size (default 300).
 require('dotenv').config();
 
@@ -28,9 +27,6 @@ function parseArgs(argv) {
 }
 
 function report(opts, result) {
-  if (result.skipped === 'gate_off') {
-    return 'GATE_MILEAGE_TRIP_COORDS is not "true" here; nothing written. Set it for this run, or drop --apply for a dry run.';
-  }
   const label = opts.apply ? 'APPLIED' : 'DRY RUN';
   const lines = [
     `${label}${opts.sinceDate ? ` (trips since ${opts.sinceDate})` : ''}:`,

@@ -1,4 +1,4 @@
-// The backfill script: dry run by default (counts, writes nothing), --apply needs the gate, idempotent.
+// The backfill script: dry run by default (counts, writes nothing), --apply writes, idempotent.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -23,10 +23,10 @@ const fixture = () => makeFakeDb({
 });
 
 let logSpy;
-beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); delete process.env.GATE_MILEAGE_TRIP_COORDS; });
-afterEach(() => { logSpy.mockRestore(); delete process.env.GATE_MILEAGE_TRIP_COORDS; });
+beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+afterEach(() => { logSpy.mockRestore(); });
 
-test('dry run prints counts and writes nothing, even with the gate off', async () => {
+test('dry run prints counts and writes nothing', async () => {
   const conn = fixture();
   const { result, text } = await main([], conn);
   expect(result).toMatchObject({ candidates: 2, rowsFilled: 1, noPoints: 1 });
@@ -36,15 +36,7 @@ test('dry run prints counts and writes nothing, even with the gate off', async (
   expect(conn.tables.mileage_log.every((row) => row.start_lat == null)).toBe(true);
 });
 
-test('--apply without the gate writes nothing and says so', async () => {
-  const conn = fixture();
-  const { text } = await main(['--apply'], conn);
-  expect(text).toMatch(/GATE_MILEAGE_TRIP_COORDS is not "true"/);
-  expect(conn.tables.mileage_log[0].start_lat).toBeNull();
-});
-
-test('--apply with the gate on fills once and a second run finds nothing to fill', async () => {
-  process.env.GATE_MILEAGE_TRIP_COORDS = 'true';
+test('--apply fills once and a second run finds nothing to fill', async () => {
   const conn = fixture();
   const first = await main(['--apply', '--since', '2026-05-01', '--batch', '1'], conn);
   expect(first.result).toMatchObject({ rowsFilled: 1, startFilled: 1, endFilled: 1 });

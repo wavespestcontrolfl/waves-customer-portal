@@ -45,8 +45,8 @@ function initBouncieMileageCrons() {
         logger.error(`[bouncie-crons] Bouncie sync error: ${syncErr.message}`);
       }
 
-      // Copy GPS start/end points from the trip-data log into trips that lack coordinates (GATE_MILEAGE_TRIP_COORDS;
-      // off = no-op, never throws). Before the summary and the 01:40 trip link, which read those coordinates.
+      // Copy GPS start/end points from the trip-data log into trips that lack coordinates (never throws).
+      // Before the summary and the 01:40 trip link, which read those coordinates.
       await fillRecentTripCoordinates(db);
 
       // Compute daily summaries for all vehicles that had trips yesterday
