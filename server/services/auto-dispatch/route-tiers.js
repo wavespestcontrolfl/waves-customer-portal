@@ -48,7 +48,7 @@
  * services/appointment-reminders.js + migration 20260401000078):
  *   appointment_reminders.reminder_72h_sent = true on the row whose
  *   scheduled_service_id = the visit (UNIQUE — at most one row per visit).
- *   GATE_NIGHT_LOCK_24H (owner 2026-11-03) reads reminder_24h_sent instead,
+ *   The night passes (owner 2026-11-03) read reminder_24h_sent instead,
  *   the same way, for the night passes only (`loadReminderFreeze(..., { lock24h })`);
  *   every other caller keeps reminder_72h_sent.
  *   suppressed_by_sibling=true rows are non-delivering placeholders (their
@@ -73,10 +73,11 @@ const TIER2_RADIUS_DAYS = 3;
 const DRIFT_BUDGET_DAYS = 5;
 const MIN_DESTINATION_DAYS_OUT = 5;
 const FREEZE_HOURS = 72;
-// GATE_NIGHT_LOCK_24H (owner 2026-11-03: "bring the 24 hr in and remove the 72
-// hr"): the night passes' lock moves to the 24-hour reminder. Gate off, the
-// constants above and below are the 09-25 rule (72 h clock, 72.25 h band, the
-// 72-hour reminder's sent flag). Gate on, the night passes read these instead:
+// Owner 2026-11-03 ("bring the 24 hr in and remove the 72 hr"): the night
+// passes' lock moves to the 24-hour reminder. The constants above and below are
+// the 09-25 rule (72 h clock, 72.25 h band, the 72-hour reminder's sent flag),
+// still read by callers that do not pass `lock24h` (the staff rebooker). The
+// night passes read these instead:
 // the clock freeze is 24 h, the reminder-claimable band is the 24-hour leg's
 // 24.25 h (appointment-reminders.js: `hoursUntil <= 24.25`), and a sent
 // 24-hour reminder is what freezes. The 72-hour reminder locks nothing.
@@ -92,8 +93,8 @@ const FREEZE_HOURS_24H = 24;
 const REMINDER_SENDABLE_HOURS = 72.25;
 const REMINDER_SENDABLE_HOURS_24H = 24.25;
 
-/** The clock freeze, in hours, for a night pass. `lock24h` is the pass's one
- *  read of GATE_NIGHT_LOCK_24H (read once per run, passed down). */
+/** The clock freeze, in hours, for a night pass. The night passes pass `lock24h`
+ *  true (owner 2026-11-03). */
 function freezeHoursFor(lock24h) {
   return lock24h === true ? FREEZE_HOURS_24H : FREEZE_HOURS;
 }
@@ -280,15 +281,15 @@ function resolveAnchor(service, anchorMap) {
  * (flex-tier.js's FLEX_TIER_FREEZE_HOURS), which fully covers 72.25h, so a
  * visit still claimable by the reminder sender is always caught either way.
  *
- * `opts.lock24h` (GATE_NIGHT_LOCK_24H, owner 2026-11-03) is the night passes'
+ * `opts.lock24h` (owner 2026-11-03) is the night passes'
  * opt-in, never the default: the sent flag read is reminder_24h_sent (not
  * reminder_72h_sent), and with no explicit `freezeHours` the band is the
  * 24-hour leg's 24.25h. The flex tier passes its own 25h with it. Callers
  * that do not pass it (rebooker's staff series moves) keep the 72-hour
  * behavior, byte for byte.
  *
- * `opts.toldLock` (GATE_NIGHT_TOLD_LOCK, owner 2026-11-05 "D1 a") only counts
- * together with `lock24h`: a night tool never changes a time the customer was
+ * `opts.toldLock` (owner 2026-11-05 "D1 a") only counts
+ * together with `lock24h`; the night passes always pass both: a night tool never changes a time the customer was
  * already told, so a visit whose latest promise has a known slot (the
  * no-show detector's record of what really went out, auto-dispatch/told-visits.js)
  * is frozen too, whatever the band. reminder_72h_sent is not read for this: the

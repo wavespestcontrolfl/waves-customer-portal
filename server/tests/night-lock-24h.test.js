@@ -1,9 +1,8 @@
-// GATE_NIGHT_LOCK_24H (owner 2026-11-03): the night passes lock a visit at 24
-// hours, not 72/73. This suite covers the pieces that decide it: the gate
-// reader, the once-per-run config read, route-tiers' reminder freeze (clock
-// band + sent flag), the flex-tier freeze (25 h) and its invariants, and the
-// promise that rebooker's staff series moves keep the 72-hour freeze with the
-// gate on. The orchestrator, apply-time guards and route-reorder have their
+// Night-pass 24-hour lock (owner 2026-11-03): the night passes lock a visit at 24
+// hours, not 72/73. This suite covers the pieces that decide it:
+// route-tiers' reminder freeze (clock band + sent flag), the flex-tier freeze
+// (25 h) and its invariants, and the promise that rebooker's staff series
+// moves keep the 72-hour freeze. The orchestrator, apply-time guards and route-reorder have their
 // own night-lock-24h-*.test.js suites. Synthetic ids only.
 jest.mock('../services/appointment-reminders', () => ({
   // The real module's composer, without its dependencies.
@@ -18,8 +17,6 @@ jest.mock('../services/appointment-reminders', () => ({
 
 const fs = require('fs');
 const path = require('path');
-const gates = require('../config/feature-gates');
-const { getAutoDispatchConfig } = require('../services/auto-dispatch/config');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const flexTier = require('../services/auto-dispatch/flex-tier');
 
@@ -27,45 +24,6 @@ const { loadReminderFreeze } = routeTiers;
 const HOUR = 3600000;
 const NOW = new Date('2026-11-10T09:00:00Z');
 const at = (hours) => new Date(NOW.getTime() + hours * HOUR).toISOString();
-
-afterEach(() => { delete process.env.GATE_NIGHT_LOCK_24H; });
-
-describe('the gate reader', () => {
-  test('dark by default; only exactly "true" turns it on, read at call time', () => {
-    expect(gates.nightLock24hLive()).toBe(false);
-    for (const v of ['', 'false', '1', 'on', 'TRUE', 'yes']) {
-      process.env.GATE_NIGHT_LOCK_24H = v;
-      expect(gates.nightLock24hLive()).toBe(false);
-    }
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    expect(gates.nightLock24hLive()).toBe(true);
-    delete process.env.GATE_NIGHT_LOCK_24H;
-    expect(gates.nightLock24hLive()).toBe(false);
-  });
-
-  test('is exported on its own line and listed in the gate status map', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
-    expect(src).toMatch(/^module\.exports\.nightLock24hLive = nightLock24hLive;$/m);
-    expect(gates.gates.nightLock24h).toBe(false);
-  });
-});
-
-describe('config: the gate is read once per run into config.nightLock24h', () => {
-  test('off by default, on with the gate, and an override wins', () => {
-    expect(getAutoDispatchConfig().nightLock24h).toBe(false);
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    expect(getAutoDispatchConfig().nightLock24h).toBe(true);
-    expect(getAutoDispatchConfig({ nightLock24h: false }).nightLock24h).toBe(false);
-    delete process.env.GATE_NIGHT_LOCK_24H;
-    expect(getAutoDispatchConfig({ nightLock24h: true }).nightLock24h).toBe(true);
-  });
-
-  test('a flip after the config is built does not change that config (no mid-run mixing)', () => {
-    const config = getAutoDispatchConfig();
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    expect(config.nightLock24h).toBe(false);
-  });
-});
 
 describe('constants and helpers', () => {
   test('the 09-25 rule is untouched; the 11-03 rule is 24 h clock, 24.25 h band, 25 h flex', () => {
@@ -185,8 +143,7 @@ describe('loadReminderFreeze without the option keeps the 72-hour rule (rebooker
     expect(await frozenFor({ appointment_time: at(80), reminder_24h_sent: true })).toBe(false);
   });
 
-  test('the gate being ON does not change the default: the reader is not consulted by loadReminderFreeze', async () => {
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
+  test('the default reads reminder_72h_sent and the 72.25 h band', async () => {
     const frozenFor = async (over) => (await loadReminderFreeze(reminderDb({ rows: [row(over)] }), ['s1'], NOW)).frozen.has('s1');
     expect(await frozenFor({ reminder_72h_sent: true })).toBe(true);
     expect(await frozenFor({ appointment_time: at(60) })).toBe(true);
@@ -195,12 +152,12 @@ describe('loadReminderFreeze without the option keeps the 72-hour rule (rebooker
     expect(db.log.selects[0]).toContain('reminder_72h_sent');
   });
 
-  test('rebooker.js\'s two series-move callers pass neither the option nor the gate', () => {
+  test('rebooker.js\'s two series-move callers pass no 24-hour option', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
     const calls = src.split('\n').filter((line) => line.includes('loadReminderFreeze('));
     expect(calls).toHaveLength(2);
     for (const line of calls) expect(line).not.toMatch(/lock24h|nightLock24h|undefined,/);
-    expect(src).not.toMatch(/nightLock24h|NIGHT_LOCK_24H|lock24h/);
+    expect(src).not.toMatch(/nightLock24h|lock24h/);
   });
 });
 
@@ -230,7 +187,7 @@ describe('flex-tier freeze (own schedule and destination)', () => {
     expect(flexTier.destinationFrozen({ id: 's1' }, '2026-11-20', null, NOW, true)).toBe(true); // fail closed
   });
 
-  test('candidate admission follows ctx.nightLock24h (the run\'s one read)', () => {
+  test('candidate admission follows ctx.nightLock24h (the night run passes true)', () => {
     const svc = { id: 's1', scheduled_date: '2026-11-14', window_start: '09:00' };
     const tierWindow = { dateFrom: '2026-11-10', dateTo: '2026-11-19' };
     const slot = { date: '2026-11-11', start_time: '10:00' }; // 30 h out

@@ -16,8 +16,8 @@
  *                 DAY, or move up to ±FLEX_TIER_RADIUS_DAYS days, SILENTLY —
  *                 no customer comms (apply.js's rebooker call is unchanged;
  *                 it already sends none) — until FLEX_TIER_FREEZE_HOURS
- *                 before the visit (73 h; 25 h with GATE_NIGHT_LOCK_24H on,
- *                 owner 2026-11-03: the 24-hour reminder is the lock, and
+ *                 before the visit (25 h for the night pass, owner 2026-11-03:
+ *                 the 24-hour reminder is the lock, and
  *                 the 72-hour reminder locks nothing). That freeze is
  *                 deliberately wider than route-tiers' own reminder-claimable
  *                 band (72.25 h; 24.25 h gate on) and fully covers it, so the
@@ -53,14 +53,15 @@ const { etParts, etDateString } = require('../../utils/datetime-et');
 // route-tiers.js's tier ladder).
 const FLEX_TIER_RADIUS_DAYS = 5;
 const FLEX_TIER_FREEZE_HOURS = 73;
-// GATE_NIGHT_LOCK_24H (owner 2026-11-03): the night pass's lock is the 24-hour
+// Owner 2026-11-03: the night pass's lock is the 24-hour
 // reminder. 25 = 24 plus the same 1-hour margin 73 has over 72, and it must
 // keep covering route-tiers' REMINDER_SENDABLE_HOURS_24H (24.25), the band the
-// 24-hour reminder can still claim. Gate off, 73 above is the 09-25 rule.
+// 24-hour reminder can still claim. 73 above is the 09-25 rule, kept for
+// callers that do not pass `lock24h`.
 const FLEX_TIER_FREEZE_HOURS_24H = 25;
 
-/** The flex tier's freeze, in hours. `lock24h` is the run's one read of
- *  GATE_NIGHT_LOCK_24H (read once per run, passed down — never re-read here). */
+/** The flex tier's freeze, in hours. The night pass passes `lock24h`
+ *  true (owner 2026-11-03). */
 function flexFreezeHoursFor(lock24h) {
   return lock24h === true ? FLEX_TIER_FREEZE_HOURS_24H : FLEX_TIER_FREEZE_HOURS;
 }
@@ -235,7 +236,7 @@ function flexWindowAdmits(window, origDate, date) {
 }
 
 /**
- * Direct freeze check (73 h; 25 h with GATE_NIGHT_LOCK_24H) from the visit's OWN schedule: scheduled_date + the
+ * Direct freeze check (25 h for the night pass) from the visit's OWN schedule: scheduled_date + the
  * CANONICAL arrival start — reservation-arrival.js's arrivalStartForService,
  * the same resolution the reminder subsystem uses (scheduledServiceApptTime),
  * so a member of a combined work allocation freezes on the group's shared
@@ -251,7 +252,7 @@ function flexWindowAdmits(window, origDate, date) {
  * registration) is invisible to that check, and the Flexible tier's own
  * eligibility ctx (`ctx.flexTier`) skips eligibility.js's days-out lock
  * entirely — so this direct computation is the ONLY thing standing between
- * "no reminder row yet" and moving a visit that is due inside the freeze (73 hours; 25 with GATE_NIGHT_LOCK_24H).
+ * "no reminder row yet" and moving a visit that is due inside the freeze (25 hours for the night pass).
  * Fails closed: an uncomposable instant (missing/malformed scheduled_date
  * or window_start) freezes the visit; an unreadable arrival throws (below).
  */
@@ -267,7 +268,7 @@ async function ownScheduleFrozen(conn, service, now = new Date(), lock24h = fals
 
 // `date` + `start` composed into the ET instant (the reminders module's own
 // composer) is within the flex freeze (flexFreezeHoursFor(lock24h): 73 h, or
-// 25 h under GATE_NIGHT_LOCK_24H) of `now` — or cannot be composed at all
+// 25 h for the night pass) of `now` — or cannot be composed at all
 // (fail closed).
 function insideFreeze(date, start, now, lock24h = false) {
   const { composeScheduledApptTime } = require('../appointment-reminders');
@@ -299,7 +300,7 @@ function destinationArrival(service, date, start) {
 }
 
 /**
- * The DESTINATION's own freeze check (73 h; 25 h with GATE_NIGHT_LOCK_24H; Codex #4995 P1). The date window keeps a
+ * The DESTINATION's own freeze check (25 h for the night pass; Codex #4995 P1). The date window keeps a
  * visit's current date reachable for a same-day re-time, and a re-time to an
  * EARLIER hour can land inside the freeze while the current time sits
  * outside it (Thu 17:00, 74h out → Thu 09:00, 66h out) — after which the
@@ -344,7 +345,7 @@ const NO_FLEX_CANDIDATE_RULES = { findTimeArgs: {}, admit: (slots) => slots };
 function flexCandidateRules(service, ctx) {
   if (!(ctx.tierMeta && ctx.tierMeta.mode === 'flex')) return NO_FLEX_CANDIDATE_RULES;
   const origDate = toDateStr(service.scheduled_date);
-  const lock24h = ctx.nightLock24h === true; // the run's one gate read (index.js)
+  const lock24h = ctx.nightLock24h === true; // the night pass passes true (index.js)
   const { date, startMin } = freezeBoundaryFloor(ctx.nowDate, lock24h);
   const dropReason = (slot) => {
     if (destinationFrozen(service, slot.date, slot.start_time, ctx.nowDate, lock24h)) return 'flex_frozen';

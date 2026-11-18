@@ -5,6 +5,8 @@
 // is in auto-dispatch-reminder-off-lock-orchestrator.test.js. Synthetic ids only.
 jest.mock('../services/appointment-reminders', () => ({ loadVisitReminder24hAnswers: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The night told-lock's promise reader (auto-dispatch/told-visits.js) has its own suites; nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../models/db', () => jest.fn());
 // The person-placed check reads move history this fake trx does not model; it has its own suite.
 jest.mock('../services/auto-dispatch/eligibility', () => ({

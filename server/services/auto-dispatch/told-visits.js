@@ -1,5 +1,5 @@
 /**
- * GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): which visits has the customer actually been told a time for?
+ * Night told-lock (owner 2026-11-05, "D1 a"): which visits has the customer actually been told a time for?
  * GATE_DAY_ONLY_PROMISE (owner 2026-11-05 "D2 a"): and which only the DAY for? loadPromiseLevels answers with
  * 'none' / 'day' / 'hour'; loadToldVisitIds({ anyPromise: true }) is the "told anything" set.
  *

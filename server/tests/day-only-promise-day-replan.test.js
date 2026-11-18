@@ -1,9 +1,9 @@
 /**
- * GATE_DAY_ONLY_PROMISE on the nightly day re-plan (services/day-replan, owner 2026-11-05 "D2 a"): with the told-lock
- * AND this gate on, a stop the customer was told only the DAY for may change its hour inside that day: a first or
+ * GATE_DAY_ONLY_PROMISE on the nightly day re-plan (services/day-replan, owner 2026-11-05 "D2 a"): with
+ * this gate on, a stop the customer was told only the DAY for may change its hour inside that day: a first or
  * one-time visit and a person-placed visit told only the day are movable. A customer-confirmed stop, a stop told an
  * hour (a known slot, or an unknown window) and every other existing reason stay fixed. A failed level read fails
- * CLOSED. Gate off, or the told-lock off: PR 1's behavior, byte for byte. Same harness as night-told-lock-day-replan
+ * CLOSED. Gate off: the known-slot told lock alone. Same harness as night-told-lock-day-replan
  * and day-replan-apply; the promise reader (told-visits) is mocked. Synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -38,7 +38,6 @@ const toMin = (v) => { const [h, m] = String(v).slice(0, 5).split(':').map(Numbe
 const savedEnv = { ...process.env };
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.GATE_NIGHT_TOLD_LOCK;
   delete process.env.GATE_DAY_ONLY_PROMISE;
   isPersonPlacedVisit.mockImplementation(async () => ({ placed: false }));
   loadToldVisitIds.mockReset();
@@ -111,8 +110,7 @@ describe('loadDayContext', () => {
     return _internals.loadDayContext(conn, TOMORROW, NOW);
   };
 
-  test('both gates on: ONE bulk level read; hour -> told, day -> dayTold', async () => {
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
+  test('this gate on: ONE bulk level read; hour -> told, day -> dayTold', async () => {
     process.env.GATE_DAY_ONLY_PROMISE = 'true';
     loadPromiseLevels.mockImplementation(levelsOf({ a: 'day', b: 'hour' }));
     const ctx = await load();
@@ -125,8 +123,7 @@ describe('loadDayContext', () => {
     expect(_internals.fixedReason({ ...dayRows()[1], customer_confirmed: false }, ctx)).toBe('time_told');
   });
 
-  test('both gates on: a failed level read keeps the whole day fixed (every row counts as hour)', async () => {
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
+  test('this gate on: a failed level read keeps the whole day fixed (every row counts as hour)', async () => {
     process.env.GATE_DAY_ONLY_PROMISE = 'true';
     loadPromiseLevels.mockRejectedValue(new Error('level read down'));
     const ctx = await load();
@@ -137,8 +134,7 @@ describe('loadDayContext', () => {
     expect(logger.warn).toHaveBeenCalled();
   });
 
-  test('the told-lock alone: PR 1 exactly (known-slot told set, no dayTold, no level read)', async () => {
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
+  test('this gate off: the known-slot told set only (no dayTold, no level read)', async () => {
     loadToldVisitIds.mockResolvedValue(new Set(['b']));
     const ctx = await load();
     expect(loadPromiseLevels).not.toHaveBeenCalled();
@@ -146,27 +142,12 @@ describe('loadDayContext', () => {
     expect([...ctx.told]).toEqual(['b']);
     expect(ctx).not.toHaveProperty('dayTold');
   });
-
-  test('this gate alone (told-lock off): nothing is read, no told-lock facts', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    const ctx = await load();
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
-    expect(loadToldVisitIds).not.toHaveBeenCalled();
-    expect(ctx.toldLock).toBeUndefined();
-    expect(ctx.dayTold).toBeUndefined();
-  });
-
-  test('both gates off: nothing is read', async () => {
-    const ctx = await load();
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
-    expect(ctx.told).toBeUndefined();
-  });
 });
 
 describe('recheckVisit inside the move transaction (apply mode)', () => {
   const recurring = { a: { route_order: 1, is_recurring: true, recurring_parent_id: 'p-a' }, b: { route_order: 2, is_recurring: true, recurring_parent_id: 'p-b' },
     c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };
-  const oneTime = { a: { route_order: 1 }, b: { route_order: 2 }, c: { route_order: 3 }, d: { route_order: 4 } };
+  const oneTime = { a: { route_order: 1, recurring_parent_id: null }, b: { route_order: 2, recurring_parent_id: null }, c: { route_order: 3, recurring_parent_id: null }, d: { route_order: 4, recurring_parent_id: null } };
 
   function world({ rowExtra, over }) {
     const visits = [['a', 8], ['b', 9], ['c', 10], ['d', 11]];
@@ -193,14 +174,13 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     return { db, run, rowWrites: () => db.updates.filter((u) => u.table === 'scheduled_services') };
   }
   const deps = ({ dayOnly = true, levels = {}, placed = false } = {}) => ({
-    toldLockOn: () => true,
     dayOnlyOn: () => dayOnly,
     isPersonPlacedVisit: jest.fn(async () => ({ placed })),
     loadToldIds: jest.fn(async () => new Set()),
     loadPromiseLevels: jest.fn(levelsOf(levels)),
   });
 
-  test('both on: a one-time visit told only the day is written (no first_or_one_time)', async () => {
+  test('this gate on: a one-time visit told only the day is written (no first_or_one_time)', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' } });
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
@@ -208,20 +188,20 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(over.loadToldIds).not.toHaveBeenCalled();
   });
 
-  test('both on: a person-placed visit told only the day is written', async () => {
+  test('this gate on: a person-placed visit told only the day is written', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' }, placed: true });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
   });
 
-  test('both on: a visit told an hour meanwhile stops the write (time_told)', async () => {
+  test('this gate on: a visit told an hour meanwhile stops the write (time_told)', async () => {
     const over = deps({ levels: { a: 'day', b: 'hour' } });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('both on: a level read that throws fails closed (time_told), nothing written', async () => {
+  test('this gate on: a level read that throws fails closed (time_told), nothing written', async () => {
     const over = deps();
     over.loadPromiseLevels = jest.fn(async () => { throw new Error('level read down'); });
     const w = world({ rowExtra: recurring, over });
@@ -229,13 +209,13 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('both on: a one-time visit with no promise at all keeps today\'s rule (first_or_one_time)', async () => {
+  test('this gate on: a one-time visit with no promise at all keeps today\'s rule (first_or_one_time)', async () => {
     const over = deps({ levels: {} });
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:first_or_one_time', moved: 0 });
   });
 
-  test('this gate off (told-lock on): PR 1 behavior, the known-slot read and no level read', async () => {
+  test('this gate off: the known-slot read and no level read', async () => {
     const over = deps({ dayOnly: false, levels: { a: 'day', b: 'day' } });
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:first_or_one_time', moved: 0 });
@@ -249,8 +229,6 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(typeof real.loadPromiseLevels).toBe('function');
     expect(real.dayOnlyOn()).toBe(false);
     process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    expect(real.dayOnlyOn()).toBe(false); // counts only while the told-lock is on
-    process.env.GATE_NIGHT_TOLD_LOCK = 'true';
     expect(real.dayOnlyOn()).toBe(true);
   });
 });

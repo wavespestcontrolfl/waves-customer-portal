@@ -20,7 +20,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   recurringSeriesTopUpLive: jest.fn(() => false), dayReplanMode: jest.fn(() => 'off'),
-  nightPassWaitLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -38,7 +37,7 @@ jest.mock('../services/day-replan/open-blocks-alert', () => ({ runOpenBlocksAler
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, dayReplanMode, nightPassWaitLive } = require('../config/feature-gates');
+const { isEnabled, dayReplanMode } = require('../config/feature-gates');
 const { runDayReplanIfEnabled } = require('../services/day-replan');
 const { runOpenBlocksAlert } = require('../services/day-replan/open-blocks-alert');
 const logger = require('../services/logger');
@@ -56,7 +55,6 @@ function registration() {
 beforeEach(() => {
   jest.clearAllMocks();
   dayReplanMode.mockReturnValue('off');
-  nightPassWaitLive.mockReturnValue(false);
   runDayReplanIfEnabled.mockResolvedValue({ status: 'completed', days: 1, failed: [] });
 });
 
@@ -78,14 +76,13 @@ test.each(['shadow', 'apply'])('gate %s: runs under day-replan-nightly, nested i
   dayReplanMode.mockReturnValue(mode);
   await registration()[1]();
   expect(runExclusive.mock.calls.map(([name]) => name)).toEqual(['day-replan-nightly', 'auto-dispatch-recurring']);
-  expect(runExclusive.mock.calls[1][2]).toEqual({ recordHealth: false });
+  expect(runExclusive.mock.calls[1][2]).toEqual({ recordHealth: false, waitForLockMs: 25 * 60 * 1000 });
   expect(runDayReplanIfEnabled).toHaveBeenCalledTimes(1);
   expect(logger.error).not.toHaveBeenCalled();
 });
 
-test('GATE_NIGHT_PASS_WAIT on: the inner writer-lock call waits up to 25 minutes; off: no wait option', async () => {
+test('the inner writer-lock call waits up to 25 minutes; the outer lock does not', async () => {
   dayReplanMode.mockReturnValue('shadow');
-  nightPassWaitLive.mockReturnValue(true);
   await registration()[1]();
   expect(runExclusive.mock.calls[0][2]).toBeUndefined();
   expect(runExclusive.mock.calls[1][2]).toEqual({ recordHealth: false, waitForLockMs: 25 * 60 * 1000 });

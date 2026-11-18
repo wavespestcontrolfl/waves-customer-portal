@@ -20,11 +20,11 @@
  *   other live stop that day for the same customer (co-visits stay together), its appointment starts
  *   more than 24.25 hours from now (America/New_York), its 24-hour reminder is not sent, and that reminder will go out
  *   (reminder_24h_off: the customer turned it off, or the answer is unknown or unreadable; it is the only notice of a new hour).
- * GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a": a night tool never changes a time the customer was already told) fixes
- * four more kinds of stop, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
+ * A night tool never changes a time the customer was already told (owner 2026-11-05, "D1 a"), so four more kinds of
+ * stop are fixed, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
  * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
  * and an unreadable history keeps the stop fixed) and time_told (the customer has a known time from a delivered
- * text, email, call or booking, by the no-show detector's promise reader). Gate off: none of these apply, as before.
+ * text, email, call or booking, by the no-show detector's promise reader).
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -94,22 +94,10 @@ function legMin(a, b) {
   return RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(a.lat, a.lng, b.lat, b.lng)).minutes;
 }
 
-// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): a night tool never changes a time the customer was already told.
-// Read once per day load, call time, strict 'true'; an unreadable gate is off (today's rules).
-function nightToldLockOn() {
-  try {
-    const gates = require('../../config/feature-gates');
-    return typeof gates.nightToldLockLive === 'function' && gates.nightToldLockLive() === true;
-  } catch {
-    return false;
-  }
-}
-
 // GATE_DAY_ONLY_PROMISE (owner 2026-11-05 "D2 a"): until the 24-hour text a customer may have been told only the DAY.
-// Read once per day load, call time, strict 'true'; it counts only while the told-lock is on. An unreadable gate is off.
+// Read once per day load, call time, strict 'true'. An unreadable gate is off.
 function dayOnlyOn() {
   try {
-    if (!nightToldLockOn()) return false;
     const gates = require('../../config/feature-gates');
     return typeof gates.dayOnlyPromiseLive === 'function' && gates.dayOnlyPromiseLive() === true;
   } catch {
@@ -117,13 +105,13 @@ function dayOnlyOn() {
   }
 }
 
-// The extra columns the told-lock reasons read (first_or_one_time, person_placed). Gate off: none, as before.
+// The extra columns the told-lock reasons read (first_or_one_time, person_placed).
 const TOLD_LOCK_SELECT = [
   'scheduled_services.recurring_dispatch_due_date',
   'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
 ];
 
-async function loadDayStops(conn, dateStr, toldLock = nightToldLockOn()) {
+async function loadDayStops(conn, dateStr) {
   const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
   return dayStopsQuery(conn, {
     dateStr,
@@ -149,7 +137,7 @@ async function loadDayStops(conn, dateStr, toldLock = nightToldLockOn()) {
       'scheduled_services.property_id', 'scheduled_services.service_address_state', 'scheduled_services.recurring_dispatch_due_date',
       conn.raw('scheduled_services.lat AS raw_lat'), conn.raw('scheduled_services.lng AS raw_lng'),
       ...guardedCoordSelects(conn),
-      ...(toldLock ? TOLD_LOCK_SELECT : []),
+      ...TOLD_LOCK_SELECT,
     ],
   }).whereRaw(_internals.LIVE_HOLD_SQL);
 }
@@ -235,16 +223,14 @@ async function loadPersonPlaced(conn, rows) {
 
 /** The date's live rows and the facts every tech-day plan of that date reads. Null when the date has no rows. Throws on a failed read. */
 async function loadDayContext(conn, dateStr, now) {
-  const toldLock = nightToldLockOn();
-  const rows = await loadDayStops(conn, dateStr, toldLock);
+  const rows = await loadDayStops(conn, dateStr);
   if (!rows || rows.length === 0) return null;
   const sent24 = await loadReminder24hSent(conn, rows.map((r) => r.id));
   const reminder24hOff = await loadReminder24hOffIds(conn, rows);
   const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24, reminder24hOff };
-  if (!toldLock) return ctx;
   const dayOnly = dayOnlyOn();
   const facts = dayOnly ? await loadToldLevels(conn, rows, now) : { told: await loadToldIds(conn, rows, now) };
-  return { ...ctx, toldLock, ...facts, personPlaced: await loadPersonPlaced(conn, rows) };
+  return { ...ctx, toldLock: true, ...facts, personPlaced: await loadPersonPlaced(conn, rows) };
 }
 
 /**
@@ -284,7 +270,7 @@ function officeReviewPending(row) {
 }
 
 /**
- * GATE_NIGHT_TOLD_LOCK reasons, checked after the existing ones: a time the customer was told or chose does not
+ * Told-lock reasons, checked after the existing ones: a time the customer was told or chose does not
  * change. A told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed.
  */
 function toldLockReason(row, { told, personPlaced, dayTold }) {
@@ -314,6 +300,7 @@ function fixedReason(row, ctx) {
   // The 24-hour reminder carries the new hour; when it will not go out, nothing tells the customer. A context without
   // this fact (a caller that never loaded it) skips the check.
   if (ctx.reminder24hOff && ctx.reminder24hOff.has(row.id)) return 'reminder_24h_off';
+  // A context without the told-lock facts (booking-make-room's quick screen) skips these reasons.
   return ctx.toldLock === true ? toldLockReason(row, ctx) : null;
 }
 
@@ -805,8 +792,6 @@ function applyDeps() {
   const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   return {
     fixedReason,
-    // GATE_NIGHT_TOLD_LOCK: the move transaction re-reads the told-lock facts (apply.js recheckVisit).
-    toldLockOn: nightToldLockOn,
     // GATE_DAY_ONLY_PROMISE: the move transaction re-reads what the customer was told (apply.js toldLockFacts).
     dayOnlyOn,
     // The move transaction re-reads whether the visit's 24-hour reminder will go out (apply.js recheckVisit).

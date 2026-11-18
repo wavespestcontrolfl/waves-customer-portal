@@ -791,11 +791,10 @@ async function runAutonomousOpportunityMining({
 
 // The 4:20 route re-order and 4:40 day re-plan crons only BORROW the 4:10 writer lock
 // ('auto-dispatch-recurring'; recordHealth:false so no health row is stamped under that
-// name). With GATE_NIGHT_PASS_WAIT on (read at call time) they wait for it, bounded, instead
-// of skipping while the 4:10 run (road check up to 20 min) still holds it. Off: unchanged.
+// name). They wait for it, bounded, instead of skipping while the 4:10 run (road check
+// up to 20 min) still holds it.
 const NIGHT_PASS_LOCK_WAIT_MS = 25 * 60 * 1000;
 function nightPassLockOptions() {
-  if (!require('../config/feature-gates').nightPassWaitLive()) return { recordHealth: false };
   return { recordHealth: false, waitForLockMs: NIGHT_PASS_LOCK_WAIT_MS };
 }
 
@@ -2032,10 +2031,9 @@ function initScheduledJobs() {
       // apply pass can land moves onto reorder-band days (destination floor
       // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
       // fence a concurrent writer running at weaker isolation. If the 4:10
-      // run is still holding the lock, tonight's reorder tick is skipped
-      // (advisory lock is non-blocking) and picked up tomorrow - unless
-      // GATE_NIGHT_PASS_WAIT is on, when it waits up to 25 min for the lock
-      // (nightPassLockOptions) and only a wait that runs out is skipped.
+      // run is still holding the lock, the reorder tick waits up to 25 min for
+      // it (nightPassLockOptions) and only a wait that runs out is skipped and
+      // picked up tomorrow (advisory lock is non-blocking).
       await runExclusive('route-tiers-nightly', async () => {
         const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
         // recordHealth:false — this invocation only BORROWS the writer lock;

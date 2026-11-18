@@ -1,10 +1,11 @@
-// GATE_NIGHT_LOCK_24H orchestrator integration (owner 2026-11-03): with the
-// gate on (config.nightLock24h, read once per run), the 04:10 night pass in
-// flex mode freezes a visit only inside the 24-hour reminder's band (25 h
-// flex clock) or once its 24-hour reminder was sent; the 72-hour reminder
-// locks nothing. Gate off is the 09-25 rule. Same harness as
+// Night-pass 24-hour lock, orchestrator integration (owner 2026-11-03): the
+// 04:10 night pass in flex mode freezes a visit only inside the 24-hour
+// reminder's band (25 h flex clock) or once its 24-hour reminder was sent;
+// the 72-hour reminder locks nothing. Same harness as
 // flex-tier-apply-recheck.test.js (heavy sub-services mocked, REAL flex-tier
 // and route-tiers logic over a mocked db).
+// The night run also freezes told visits (auto-dispatch/told-visits.js); nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
@@ -123,33 +124,24 @@ beforeEach(() => {
   apply.revalidatePlacement.mockResolvedValue({ ok: true });
 });
 
-afterEach(() => { delete process.env.GATE_NIGHT_LOCK_24H; });
 afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const skipCodes = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action !== 'changed').map((d) => d.reason_code);
 const changed = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action === 'changed');
 const run = (over = {}) => runAutoDispatch({ mode: 'apply', flexTierEnabled: true, ...over });
 
-describe('flex mode, gate on (config.nightLock24h)', () => {
+describe('flex mode', () => {
   test('a visit 30 h out with its 72-hour reminder sent is NOT frozen, and the move applies', async () => {
     setup(30, [reminderRow(30, { reminder_72h_sent: true }), reminderRow(30, { reminder_72h_sent: true })]);
-    const res = await run({ nightLock24h: true });
+    const res = await run();
     expect(res.changed).toBe(1);
     expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
     expect(changed()[0].constraints.route_tiers).toMatchObject({ mode: 'flex' });
   });
 
-  test('the SAME visit with the gate off is frozen by that 72-hour reminder (control)', async () => {
-    setup(30, [reminderRow(30, { reminder_72h_sent: true })]);
-    const res = await run({ nightLock24h: false });
-    expect(res.changed).toBe(0);
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-    expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
-  });
-
   test('a visit 23 h out is frozen by the 24-hour band (reminder row present)', async () => {
     setup(23, [reminderRow(23, {})]);
-    const res = await run({ nightLock24h: true });
+    const res = await run();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
     expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
@@ -157,7 +149,7 @@ describe('flex mode, gate on (config.nightLock24h)', () => {
 
   test('a visit 23 h out with NO reminder row is frozen by its own schedule (WITHIN_73H code kept, text says 25-hour)', async () => {
     setup(23, []);
-    const res = await run({ nightLock24h: true });
+    const res = await run();
     expect(res.changed).toBe(0);
     const skipped = audit.logDecision.mock.calls.map((c) => c[1]).find((d) => d.reason_code === 'WITHIN_73H');
     expect(skipped).toBeTruthy();
@@ -166,15 +158,15 @@ describe('flex mode, gate on (config.nightLock24h)', () => {
 
   test('a visit 30 h out with reminder_24h_sent is frozen', async () => {
     setup(30, [reminderRow(30, { reminder_24h_sent: true })]);
-    const res = await run({ nightLock24h: true });
+    const res = await run();
     expect(res.changed).toBe(0);
     const skipped = audit.logDecision.mock.calls.map((c) => c[1]).find((d) => d.reason_code === 'REMINDER_SENT_FROZEN');
-    expect(skipped.reason_description).toContain('24-hour reminder already sent');
+    expect(skipped.reason_description).toContain('24-hour or told-time reminder already sent');
   });
 
   test('a 24-hour reminder sent between pass 1 and the apply freezes the move', async () => {
     setup(30, [reminderRow(30, {}), reminderRow(30, { reminder_24h_sent: true })]);
-    const res = await run({ nightLock24h: true });
+    const res = await run();
     expect(res.changed).toBe(0);
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
@@ -182,59 +174,36 @@ describe('flex mode, gate on (config.nightLock24h)', () => {
 
   test('the freeze boundary is 25 h on the visit\'s own schedule (24 h 30 min frozen, 26 h free)', async () => {
     setup(24.5, []);
-    expect((await run({ nightLock24h: true })).changed).toBe(0);
+    expect((await run()).changed).toBe(0);
     setup(26, []);
-    expect((await run({ nightLock24h: true })).changed).toBe(1);
+    expect((await run()).changed).toBe(1);
   });
 
-  test('the gate is read once per run: a flip DURING the run changes nothing, and the apply config carries the run\'s value', async () => {
+  test('the candidate search is told the 24-hour rule, and pass 2 (the apply-time recheck) uses it too', async () => {
     setup(30, [reminderRow(30, { reminder_72h_sent: true }), reminderRow(30, { reminder_72h_sent: true })]);
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    candidateSlots.findValidCandidateSlots.mockImplementation(async () => {
-      delete process.env.GATE_NIGHT_LOCK_24H; // kill switch pulled mid-run
-      return { current: current(), candidates: [CAND] };
-    });
     const res = await run();
-    // Pass 2 (the apply-time recheck) still used the 24-hour rule.
     expect(res.changed).toBe(1);
     expect(candidateSlots.findValidCandidateSlots.mock.calls[0][2].nightLock24h).toBe(true);
-    expect(audit.startRun.mock.calls[0][0].nightLock24h).toBe(true);
-    const applyArgs = apply.applyAutoDispatchMove.mock.calls[0];
-    expect(applyArgs.some((a) => a && typeof a === 'object' && a.nightLock24h === true)).toBe(true);
   });
 });
 
 describe('tiers mode follows the same reminder rule', () => {
-  test('gate on: a 72-hour reminder sent no longer freezes a visit (the tier ladder decides); gate off still does', async () => {
+  test('a 72-hour reminder sent no longer freezes a visit (the tier ladder decides); the 24-hour reminder does', async () => {
     setup(30, [reminderRow(30, { reminder_72h_sent: true })]);
-    await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, nightLock24h: true });
+    await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
     expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
     audit.logDecision.mockClear();
-    setup(30, [reminderRow(30, { reminder_72h_sent: true })]);
-    await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, nightLock24h: false });
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-    audit.logDecision.mockClear();
     setup(30, [reminderRow(30, { reminder_24h_sent: true })]);
-    await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true, nightLock24h: true });
+    await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
   });
 });
 
-describe('gate off: the 09-25 rule is untouched', () => {
-  test('a visit 30 h out is still frozen (73-hour rule); the run records nightLock24h false', async () => {
-    setup(30, [reminderRow(30, {})]);
-    const res = await run();
-    expect(res.changed).toBe(0);
-    expect(skipCodes()).toContain('REMINDER_SENT_FROZEN'); // the 30 h row sits inside the 73 h band
-    expect(audit.startRun.mock.calls[0][0].nightLock24h).toBe(false);
-  });
-
+describe('the run log line', () => {
   test('describeGuardRule words the rule for the mode in force', () => {
     const { describeGuardRule } = _internals;
-    expect(describeGuardRule('flex', 'x', '2026-11-10')).toBe('flex: frozen under 73h, day moves on or after 2026-11-15');
-    expect(describeGuardRule('flex', 'x', '2026-11-10', true)).toBe('flex: frozen under 25h, day moves on or after 2026-11-15');
-    expect(describeGuardRule('tiers', 'x', '2026-11-10')).toBe('tiers: day moves from 7 days out');
-    expect(describeGuardRule('tiers', 'x', '2026-11-10', true)).toBe('tiers: day moves from 7 days out, frozen under 24h');
-    expect(describeGuardRule('legacy', '2026-11-24', '2026-11-10', true)).toBe('lock>2026-11-24');
+    expect(describeGuardRule('flex', 'x', '2026-11-10')).toBe('flex: frozen under 25h, day moves on or after 2026-11-15');
+    expect(describeGuardRule('tiers', 'x', '2026-11-10')).toBe('tiers: day moves from 7 days out, frozen under 24h');
+    expect(describeGuardRule('legacy', '2026-11-24', '2026-11-10')).toBe('lock>2026-11-24');
   });
 });

@@ -1,6 +1,6 @@
-// GATE_NIGHT_LOCK_24H (owner 2026-11-03) in the 04:20 route-reorder pass: the
-// cron entry (runRouteReorderIfEnabled) reads the gate once and hands it down
-// as opts.nightLock24h. On, a tech-day is frozen only when a stop starts
+// The 24-hour night lock (owner 2026-11-03) in the 04:20 route-reorder pass: the
+// cron entry (runRouteReorderIfEnabled) hands it down as
+// opts.nightLock24h. With it, a tech-day is frozen only when a stop starts
 // within 24 hours or its 24-hour reminder was sent (skip codes WITHIN_72H and
 // REMINDER_SENT_FROZEN are unchanged), the commit-time fence uses the same
 // rule, and the ledger's freeze_hours records 24. Anything that does not pass
@@ -166,13 +166,12 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_ROUTE_REORDER;
-  delete process.env.GATE_NIGHT_LOCK_24H;
 });
 
 const ledgerOf = () => JSON.parse(ledgerInserts[0].result);
 const skipReasons = (ledger) => Object.fromEntries(ledger.skips.map((s) => [s.date, s.reason]));
 
-describe('opts.nightLock24h on (the nightly pass with the gate on)', () => {
+describe('opts.nightLock24h on (the nightly pass)', () => {
   test('a day whose stops are all 29+ h out is reorderable; a day with a stop 20 h out is frozen', async () => {
     // NOW is 04:10 ET 08-13. 08-14 09:00 ET is ~29 h out; 08-14 00:30 ET ~20 h out.
     stopsByDate['2026-08-14'] = backtrackDay('a'); // 09:00 stops -> reorderable
@@ -190,7 +189,7 @@ describe('opts.nightLock24h on (the nightly pass with the gate on)', () => {
     expect(skipReasons(ledgerOf())['2026-08-14']).toBe('WITHIN_72H');
   });
 
-  test('the SAME 29 h day is frozen when the option is absent (72-hour rule, gate off)', async () => {
+  test('the SAME 29 h day is frozen when the option is absent (72-hour rule)', async () => {
     stopsByDate['2026-08-14'] = backtrackDay('a');
     const res = await runRouteReorder({ now: NOW });
     expect(res.applied).toBe(0);
@@ -209,7 +208,7 @@ describe('opts.nightLock24h on (the nightly pass with the gate on)', () => {
     expect(routeTiers.loadReminderFreeze).toHaveBeenCalledWith(expect.anything(), ['aA', 'aB', 'aC'], NOW, undefined, { lock24h: true });
   });
 
-  test('gate off: the freeze read is the pre-gate call, argument for argument', async () => {
+  test('without the option the freeze read is the plain 72-hour call, argument for argument', async () => {
     stopsByDate['2026-08-16'] = backtrackDay('a');
     await runRouteReorder({ now: NOW });
     for (const call of routeTiers.loadReminderFreeze.mock.calls) expect(call).toHaveLength(3);
@@ -223,7 +222,7 @@ describe('opts.nightLock24h on (the nightly pass with the gate on)', () => {
     expect(res.status).toBe('completed_with_errors');
   });
 
-  test('the ledger records the hours actually used: 24 on (with night_lock_24h), 72 off', async () => {
+  test('the ledger records the hours actually used: 24 with the option (and night_lock_24h), 72 without it', async () => {
     await runRouteReorder({ now: NOW, nightLock24h: true });
     expect(JSON.parse(ledgerInserts[0].constraints)).toMatchObject({ freeze_hours: 24, night_lock_24h: true });
     ledgerInserts = [];
@@ -267,46 +266,22 @@ describe('opts.nightLock24h on (the nightly pass with the gate on)', () => {
   });
 });
 
-describe('the cron entry reads the gate once and passes it down', () => {
+describe('the cron entry passes the 24-hour lock down', () => {
   const frozenClock = () => jest.useFakeTimers({
     now: NOW,
     doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'clearImmediate', 'queueMicrotask', 'performance', 'hrtime'],
   });
 
-  test('gate on: runRouteReorderIfEnabled applies the 24-hour lock', async () => {
+  test('runRouteReorderIfEnabled applies the 24-hour lock', async () => {
     frozenClock();
     process.env.GATE_ROUTE_REORDER = 'true';
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
     stopsByDate['2026-08-14'] = backtrackDay('a'); // ~29 h out
     const res = await runRouteReorderIfEnabled();
     expect(res.applied).toBe(1);
     expect(JSON.parse(ledgerInserts[0].constraints).freeze_hours).toBe(24);
   });
 
-  test('gate off or unset: the same night keeps the 72-hour lock', async () => {
-    frozenClock();
-    process.env.GATE_ROUTE_REORDER = 'true';
-    stopsByDate['2026-08-14'] = backtrackDay('a');
-    const res = await runRouteReorderIfEnabled();
-    expect(res.applied).toBe(0);
-    expect(JSON.parse(ledgerInserts[0].constraints).freeze_hours).toBe(72);
-  });
-
-  test('a flip during the run does not mix rules: the commit fence still uses the run\'s 24-hour read', async () => {
-    frozenClock();
-    process.env.GATE_ROUTE_REORDER = 'true';
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
-    stopsByDate['2026-08-14'] = backtrackDay('a');
-    RouteOptimizer.optimizeRoute.mockImplementationOnce(async (stops) => {
-      delete process.env.GATE_NIGHT_LOCK_24H; // pulled while the optimizer runs
-      return { orderedStops: [...stops].sort((p, q) => p.lng - q.lng), totalDistanceMeters: 1, totalDurationSeconds: 1, unoptimizedDistanceMeters: 1, source: 'google_routes_api' };
-    });
-    const res = await runRouteReorderIfEnabled();
-    expect(res.applied).toBe(1);
-  });
-
   test('the repair-after-change entry never opts in', async () => {
-    process.env.GATE_NIGHT_LOCK_24H = 'true';
     process.env.GATE_ROUTE_REORDER = 'true';
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
     process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';

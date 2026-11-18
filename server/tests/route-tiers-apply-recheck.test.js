@@ -4,6 +4,8 @@
 // unreadable re-check fails closed. Uses the orchestrator harness with the
 // heavy sub-services mocked and REAL route-tiers logic over a mocked db.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The night told-lock's promise reader (auto-dispatch/told-visits.js) has its own suites; nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
@@ -103,10 +105,10 @@ test('clean freeze state both times ⇒ the tiered move applies', async () => {
   expect(changed.constraints.route_tiers).toMatchObject({ radius: 5, anchor: VISIT_DATE, drift_budget_days: 5 });
 });
 
-test('a 72h reminder sent between pass 1 and the apply freezes the move', async () => {
+test('a 24h reminder sent between pass 1 and the apply freezes the move', async () => {
   reminderResults = [
     [], // pass-1: clean
-    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_72h_sent: true, suppressed_by_sibling: false }], // apply re-check: sent
+    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_24h_sent: true, suppressed_by_sibling: false }], // apply re-check: sent
   ];
   const res = await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
   expect(res.changed).toBe(0);
@@ -166,7 +168,7 @@ test('a run crossing ET midnight recomputes the tier window before applying', as
 
 test('a pass-1 frozen visit never reaches scoring at all', async () => {
   reminderResults = [
-    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_72h_sent: true, suppressed_by_sibling: false }],
+    [{ scheduled_service_id: 's1', customer_id: 'c1', appointment_time: `${VISIT_DATE}T09:00:00Z`, reminder_24h_sent: true, suppressed_by_sibling: false }],
   ];
   const res = await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
   expect(res.changed).toBe(0);

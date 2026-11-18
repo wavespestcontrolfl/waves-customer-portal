@@ -156,7 +156,7 @@ function finalRoute(fresh, env, techId) {
 
 // ---- inside the transaction -------------------------------------------------------------------------------------
 
-// GATE_NIGHT_TOLD_LOCK (owner 2026-11-05, "D1 a"): the columns the told-lock reasons read inside the move transaction,
+// Night told-lock (owner 2026-11-05, "D1 a"): the columns the told-lock reasons read inside the move transaction,
 // the same facts loadDayContext gives the planner (day-replan/index.js TOLD_LOCK_SELECT + the reason's own fields).
 const TOLD_ROW_COLUMNS = [
   'customer_confirmed', 'is_recurring', 'recurring_parent_id', 'scheduled_date', 'recurring_dispatch_due_date',
@@ -196,10 +196,9 @@ async function promiseLevelFacts(trx, deps, id) {
  * `toStart` is checked as well as the current start: a visit may not be moved INTO the 24-hour reach either.
  */
 async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
-  const toldLock = typeof deps.toldLockOn === 'function' && deps.toldLockOn() === true;
   const row = await trx('scheduled_services').where({ id }).first(
     'id', 'status', 'window_start', 'customer_id', 'property_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
-    ...(toldLock ? TOLD_ROW_COLUMNS : []),
+    ...TOLD_ROW_COLUMNS,
   );
   if (!row) throw coded('NOT_MOVABLE', 'the visit no longer exists');
   const live = (q) => q.whereNotIn('status', deps.excludedStatuses);
@@ -218,7 +217,7 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
     sent24: new Set(reminder && reminder.reminder_24h_sent === true ? [id] : []),
     // Whether the 24-hour reminder will still go out (it carries the new hour), read with the transaction; fails closed.
     ...(typeof deps.loadReminder24hOffIds === 'function' ? { reminder24hOff: await deps.loadReminder24hOffIds(trx, [row]) } : {}),
-    ...(toldLock ? await toldLockFacts(trx, deps, { row, id, dateStr }) : {}),
+    ...(await toldLockFacts(trx, deps, { row, id, dateStr })),
   };
   const why = deps.fixedReason(row, ctx) || deps.fixedReason({ ...row, window_start: minToHhmm(toStart) }, ctx);
   if (why) throw Object.assign(coded('NOT_MOVABLE', `the visit is no longer movable: ${why}`), { why });

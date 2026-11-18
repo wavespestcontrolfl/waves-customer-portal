@@ -2,6 +2,8 @@
 // REAL scorer + config so threshold / mode / counter / idempotency logic is
 // exercised end to end.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The night told-lock's promise reader (auto-dispatch/told-visits.js) has its own suites; nobody was told anything here.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
@@ -2183,10 +2185,10 @@ describe('run log line words the day-move rule for the guard mode in force', () 
     expect(describeGuardRule(undefined, '2026-11-09', '2026-10-26')).toBe('lock>2026-11-09');
   });
   test('tiers says day moves start 7 days out', () => {
-    expect(describeGuardRule('tiers', '2026-11-09', '2026-10-26')).toBe('tiers: day moves from 7 days out');
+    expect(describeGuardRule('tiers', '2026-11-09', '2026-10-26')).toBe('tiers: day moves from 7 days out, frozen under 24h');
   });
-  test('flex says frozen under 73h and day moves land on or after today + 5', () => {
-    expect(describeGuardRule('flex', '2026-11-09', '2026-10-26')).toBe('flex: frozen under 73h, day moves on or after 2026-10-31');
+  test('flex says frozen under 25h and day moves land on or after today + 5', () => {
+    expect(describeGuardRule('flex', '2026-11-09', '2026-10-26')).toBe('flex: frozen under 25h, day moves on or after 2026-10-31');
   });
 });
 
