@@ -138,6 +138,18 @@ maybeDescribe('older-key text alerts that reopen (live Postgres)', () => {
       expect(settled.map((r) => [r.status, r.reviewed_by])).toEqual([['fulfilled', staff], ['fulfilled', staff]]);
     });
 
+    test("a text's row that listed only the promise that rang speaks for every open promise of that text once reopened", async () => {
+      const text = await staffText();
+      const promises = [await textPromise(text), await textPromise(text, { description: 'Call you tomorrow' })];
+      const old = await alert({ dedupeKey: `sms-commitment-source:${text.id}`, customerId: text.customerId, sms_log_id: text.id,
+        commitment_id: promises[0].id }, person());
+
+      expect(await notifications.reopenAdminDone(old.id, { expectedDoneAt: await doneToken(old.id) })).toBe('reopened');
+
+      await expectsCustomerRow(old.id, text, promises);
+      expect(await actions.settleCommitmentsForDoneAlert(db, old.id, { reviewedBy: randomUUID() })).toBe(2);
+    });
+
     test('a row the quiet fall-off closed is adopted too', async () => {
       const text = await staffText();
       const promise = await textPromise(text);

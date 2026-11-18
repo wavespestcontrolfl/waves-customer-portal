@@ -1384,6 +1384,7 @@ async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled =
 // settles with its promises like a row written today. `notificationIds` are the rows just reopened; `commitmentIds`
 // find the open older-key rows that list one of those promises. A row whose customer cannot be told (its open
 // promises belong to more than one customer, or it names none) is left as it is. Returns the rows that were adopted.
+const SOURCE_ALERT_PREFIX = 'sms-commitment-source:';
 const OLDER_ALERT_KEY_SQL = "(metadata->>'dedupeKey' LIKE 'sms-commitment-source:%' OR metadata->>'dedupeKey' LIKE 'sms-commitment:%')";
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = [], now = new Date() } = {}) {
@@ -1399,6 +1400,10 @@ async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = 
   const byCustomer = new Map();
   for (const row of rows) {
     const meta = alertMeta(row);
+    // The promises the row spoke for: the ones it lists and, for a text's alert (`sms-commitment-source:<text id>`),
+    // every open promise of that text (the row could list only the promise that rang).
+    const textId = String(meta.dedupeKey).startsWith(SOURCE_ALERT_PREFIX) ? String(meta.dedupeKey).slice(SOURCE_ALERT_PREFIX.length) : null;
+    meta.commitment_ids = [...new Set([...listedOn(meta), ...(textId && UUID_TEXT.test(textId) ? (await openSourceCommitments(trx, textId).pluck('id')).map(String) : [])])];
     // Who the row speaks for: the owner of its open promises (a merge moves a text, and the row's own customer id
     // can be the former owner), else the customer it was written for.
     const owners = [...new Set((await alertPromises(trx, { ids: listedOn(meta) })).map((item) => item.owner_id))];
