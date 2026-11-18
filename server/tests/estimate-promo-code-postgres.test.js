@@ -1,0 +1,253 @@
+// Runs with the existing CI PostgreSQL pass; never a production connection.
+// Promo code on the estimate page (GATE_ESTIMATE_PROMO_CODE) against real
+// Postgres: what entering a code saves, what acceptance posts through the real
+// credit ledger, and the exactly-once indexes of the real migration. A private
+// schema keeps CI's migrated tables untouched.
+const SKIP = !process.env.DATABASE_URL;
+const { randomUUID } = require('crypto');
+
+const mockSchema = `estimate_promo_${randomUUID().replaceAll('-', '')}`;
+jest.mock('../models/db', () => {
+  const knex = require('knex');
+  return knex({
+    client: 'pg',
+    connection: process.env.DATABASE_URL,
+    searchPath: [mockSchema],
+    pool: { min: 0, max: 4 },
+  });
+});
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+}));
+const mockGate = { on: true };
+jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estimatePromoCode' && mockGate.on }));
+
+(SKIP ? describe.skip : describe)('estimate promo code (live Postgres)', () => {
+  let db;
+  let promo;
+
+  const customer = async () => (await db('customers').insert({}).returning('*'))[0];
+  const estimate = async (fields = {}) => (await db('estimates').insert({ status: 'viewed', ...fields }).returning('*'))[0];
+  const discount = async (fields = {}) => (await db('discounts').insert({
+    discount_key: `promo_${randomUUID()}`,
+    name: 'Fixture promo',
+    discount_type: 'fixed_amount',
+    amount: 25,
+    promo_code: `FIX${randomUUID().slice(0, 8).toUpperCase()}`,
+    is_active: true,
+    ...fields,
+  }).returning('*'))[0];
+  const balanceOf = async (id) => Number((await db('customers').where({ id }).first('account_credits')).account_credits);
+  const ledgerOf = (id) => db('customer_credit_ledger').where({ customer_id: id });
+  const usesOf = async (id) => (await db('discounts').where({ id }).first('promo_code_current_uses')).promo_code_current_uses;
+  const enter = (est, rawCode) => promo.enterPromoCode({ estimate: est, rawCode });
+  // The accept commits first (status and owner on the row), then the credit step runs.
+  const accept = async (est, customerId) => {
+    await db('estimates').where({ id: est.id }).update({ status: 'accepted', customer_id: customerId });
+    return promo.redeemPromoCodeForAcceptedEstimate({ estimateId: est.id });
+  };
+
+  beforeAll(async () => {
+    db = require('../models/db');
+    await db.raw('CREATE SCHEMA ??', [mockSchema]);
+    // A fresh builder per table: one builder would replay its earlier statements.
+    const schema = { createTable: (name, build) => db.schema.withSchema(mockSchema).createTable(name, build) };
+    const id = (t) => t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
+    await schema.createTable('customers', (t) => {
+      id(t);
+      t.decimal('account_credits', 10, 2).defaultTo(0);
+      t.timestamp('updated_at', { useTz: true });
+    });
+    await schema.createTable('estimates', (t) => {
+      id(t);
+      t.uuid('customer_id');
+      t.string('status');
+      t.timestamp('archived_at', { useTz: true });
+      t.jsonb('estimate_data');
+    });
+    await schema.createTable('discounts', (t) => {
+      id(t);
+      t.string('discount_key').unique().notNullable();
+      t.string('name');
+      t.string('discount_type');
+      t.decimal('amount', 10, 2);
+      t.string('service_key_filter');
+      t.boolean('requires_new_customer').defaultTo(false);
+      t.string('promo_code', 50).unique();
+      t.timestamp('promo_code_expiry');
+      t.integer('promo_code_max_uses');
+      t.integer('promo_code_current_uses').defaultTo(0);
+      t.boolean('is_active').defaultTo(true);
+    });
+    await schema.createTable('customer_discounts', (t) => {
+      id(t);
+      t.uuid('customer_id');
+      t.uuid('discount_id');
+    });
+    await schema.createTable('service_records', (t) => {
+      id(t);
+      t.uuid('customer_id');
+      t.string('status');
+    });
+    await schema.createTable('activity_log', (t) => {
+      id(t);
+      t.uuid('customer_id');
+      t.uuid('estimate_id');
+      t.string('action');
+      t.text('description');
+      t.jsonb('metadata');
+    });
+    await schema.createTable('customer_credit_ledger', (t) => {
+      id(t);
+      t.uuid('customer_id');
+      t.decimal('delta', 10, 2);
+      t.decimal('balance_after', 10, 2);
+      t.string('source', 40);
+      t.uuid('invoice_id');
+      t.uuid('referral_id');
+      t.text('note');
+      t.string('created_by', 200);
+      t.timestamp('created_at').defaultTo(db.fn.now());
+    });
+    // The real migration: its unique indexes are what the tests below lean on.
+    await require('../models/migrations/20261118120000_estimate_promo_codes').up(db);
+    promo = require('../services/estimate-promo-code');
+  });
+
+  afterAll(async () => {
+    await db.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [mockSchema]);
+    await db.destroy();
+  });
+
+  beforeEach(() => { mockGate.on = true; });
+
+  test('entering a code saves it and moves no money; acceptance posts the credit once and counts one use', async () => {
+    const cust = await customer();
+    const est = await estimate({ customer_id: cust.id });
+    const disc = await discount();
+
+    expect(await enter(est, ` ${disc.promo_code.toLowerCase()} `)).toEqual({
+      ok: true, applied: { code: disc.promo_code, creditAmount: 25, credited: false },
+    });
+    expect(await balanceOf(cust.id)).toBe(0);
+    expect(await usesOf(disc.id)).toBe(0);
+    expect(await promo.promoCodeViewForEstimate(est, { open: true }))
+      .toEqual({ canEnter: false, applied: { code: disc.promo_code, creditAmount: 25, credited: false } });
+
+    expect(await accept(est, cust.id)).toBe('redeemed');
+    expect(await accept(est, cust.id)).toBe('none');
+    expect(await balanceOf(cust.id)).toBe(25);
+    expect(await usesOf(disc.id)).toBe(1);
+    const ledger = await ledgerOf(cust.id);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({ delta: '25.00', balance_after: '25.00', source: 'promo_code' });
+    expect((await promo.promoCodeViewForEstimate(est)).applied.credited).toBe(true);
+    expect((await db('activity_log').where({ estimate_id: est.id }).orderBy('action')).map((r) => r.action))
+      .toEqual(['estimate_promo_code_credited', 'estimate_promo_code_entered']);
+  });
+
+  test('the amount is frozen at entry: a later edit to the discount does not move it', async () => {
+    const cust = await customer();
+    const est = await estimate({ customer_id: cust.id });
+    const disc = await discount({ amount: 40 });
+    await enter(est, disc.promo_code);
+    await db('discounts').where({ id: disc.id }).update({ amount: 400 });
+    expect(await accept(est, cust.id)).toBe('redeemed');
+    expect(await balanceOf(cust.id)).toBe(40);
+  });
+
+  test('every code that cannot be a credit gets the one generic refusal and saves nothing', async () => {
+    const cust = await customer();
+    await db('service_records').insert({ customer_id: cust.id, status: 'completed' });
+    const est = await estimate({ customer_id: cust.id });
+    const refused = [
+      'NOSUCHCODE',
+      '!!',
+      (await discount({ discount_type: 'percentage', amount: 10 })).promo_code,
+      (await discount({ promo_code_expiry: new Date(Date.now() - 86400000) })).promo_code,
+      (await discount({ is_active: false })).promo_code,
+      (await discount({ service_key_filter: 'pest_control' })).promo_code,
+      (await discount({ promo_code_max_uses: 1, promo_code_current_uses: 1 })).promo_code,
+      // This customer has a completed visit.
+      (await discount({ requires_new_customer: true })).promo_code,
+    ];
+    for (const code of refused) {
+      expect(await enter(est, code)).toEqual({ ok: false, reason: 'invalid_code' });
+    }
+    expect(await db('estimate_promo_codes').where({ estimate_id: est.id })).toHaveLength(0);
+  });
+
+  test('one code per estimate, and none on an estimate the office already discounted', async () => {
+    const first = await discount();
+    const second = await discount();
+    const est = await estimate();
+    expect((await enter(est, first.promo_code)).ok).toBe(true);
+    expect((await enter(est, first.promo_code)).ok).toBe(true);
+    expect(await enter(est, second.promo_code)).toEqual({ ok: false, reason: 'code_already_entered' });
+    expect(await db('estimate_promo_codes').where({ estimate_id: est.id })).toHaveLength(1);
+
+    const discounted = await estimate({
+      estimate_data: { summary: { manualDiscount: { type: 'PERCENT', value: 10, amount: 55 } } },
+    });
+    expect(await enter(discounted, second.promo_code)).toEqual({ ok: false, reason: 'discount_already_applied' });
+    expect(await promo.promoCodeViewForEstimate(discounted, { open: true })).toBeNull();
+  });
+
+  test('a code waiting on an open estimate holds one of its uses; one on a dead estimate does not', async () => {
+    const disc = await discount({ promo_code_max_uses: 1 });
+    const dead = await estimate({ status: 'expired' });
+    await db('estimate_promo_codes').insert({ estimate_id: dead.id, discount_id: disc.id, code: disc.promo_code, credit_amount: 25 });
+    expect((await enter(await estimate(), disc.promo_code)).ok).toBe(true);
+    expect(await enter(await estimate(), disc.promo_code)).toEqual({ ok: false, reason: 'invalid_code' });
+  });
+
+  test('acceptance posts nothing, and says why in the activity log, when the cap is spent or the code was switched off', async () => {
+    const cust = await customer();
+    const capped = await discount({ promo_code_max_uses: 1 });
+    const est = await estimate({ customer_id: cust.id });
+    await enter(est, capped.promo_code);
+    await db('discounts').where({ id: capped.id }).update({ promo_code_current_uses: 1 });
+    expect(await accept(est, cust.id)).toBe('void');
+
+    const off = await discount();
+    const est2 = await estimate({ customer_id: cust.id });
+    await enter(est2, off.promo_code);
+    await db('discounts').where({ id: off.id }).update({ is_active: false });
+    expect(await accept(est2, cust.id)).toBe('void');
+
+    expect(await balanceOf(cust.id)).toBe(0);
+    expect(await usesOf(capped.id)).toBe(1);
+    expect((await db('estimate_promo_codes').whereIn('estimate_id', [est.id, est2.id]).orderBy('void_reason'))
+      .map((r) => [r.status, r.void_reason]))
+      .toEqual([['void', 'code_inactive'], ['void', 'uses_exhausted']]);
+    expect(await db('activity_log').where({ action: 'estimate_promo_code_not_credited' })
+      .whereIn('estimate_id', [est.id, est2.id])).toHaveLength(2);
+    // A voided code leaves the page with nothing to show.
+    expect(await promo.promoCodeViewForEstimate(est)).toBeNull();
+  });
+
+  test('a customer redeems a code once: a second accepted estimate with it posts nothing', async () => {
+    const cust = await customer();
+    const disc = await discount();
+    const [a, b] = [await estimate(), await estimate()];
+    await enter(a, disc.promo_code);
+    await enter(b, disc.promo_code);
+    const outcomes = await Promise.all([accept(a, cust.id), accept(b, cust.id)]);
+    expect(outcomes.sort()).toEqual(['redeemed', 'void']);
+    expect(await balanceOf(cust.id)).toBe(25);
+    expect(await ledgerOf(cust.id)).toHaveLength(1);
+    expect(await usesOf(disc.id)).toBe(1);
+  });
+
+  test('gate off: no field, and an accepted estimate posts nothing and keeps its code', async () => {
+    const cust = await customer();
+    const disc = await discount();
+    const est = await estimate({ customer_id: cust.id });
+    await enter(est, disc.promo_code);
+    mockGate.on = false;
+    expect(await promo.promoCodeViewForEstimate(est, { open: true })).toBeNull();
+    expect(await accept(est, cust.id)).toBe('off');
+    expect(await balanceOf(cust.id)).toBe(0);
+    expect((await db('estimate_promo_codes').where({ estimate_id: est.id }).first()).status).toBe('entered');
+  });
+});

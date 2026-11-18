@@ -244,7 +244,7 @@
     {
       "router": "server/routes/estimate-public.js",
       "mount": "/api/estimates",
-      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN; first-visit and first-visit/availability are the same contract behind GATE_COMMERCIAL_FIRST_VISIT (owner 2026-10-26 decision page choice 1B: a signed commercial proposal's customer books the first visit; open, signed estimates only); consumer-notice is the same contract behind GATE_ESTIMATE_CONSUMER_NOTICE",
+      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN; first-visit and first-visit/availability are the same contract behind GATE_COMMERCIAL_FIRST_VISIT (owner 2026-10-26 decision page choice 1B: a signed commercial proposal's customer books the first visit; open, signed estimates only); consumer-notice is the same contract behind GATE_ESTIMATE_CONSUMER_NOTICE; promo-code is the same contract behind GATE_ESTIMATE_PROMO_CODE (owner 2026-11-18: the customer types a promo code on an open estimate; it saves the code only, the account credit posts at acceptance)",
       "routes": [
         "GET /api/estimates/:token",
         "GET /api/estimates/:token/data",
@@ -261,6 +261,7 @@
         "POST /api/estimates/:token/consumer-notice",
         "POST /api/estimates/:token/extension-request",
         "POST /api/estimates/:token/measurement-review",
+        "POST /api/estimates/:token/promo-code",
         "POST /api/estimates/:token/referral-link",
         "POST /api/estimates/:token/service-details/send",
         "PUT /api/estimates/:token/accept",

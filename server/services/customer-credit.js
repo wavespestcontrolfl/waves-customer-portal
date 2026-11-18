@@ -19,6 +19,9 @@ const VALID_SOURCES = Object.freeze([
   // window — minted at REDEMPTION (the booking), never at the inspection,
   // so an unredeemed promise never inflates a balance.
   'inspection_credit',
+  // A promo code the customer typed on their estimate, minted when the
+  // estimate is accepted (services/estimate-promo-code.js).
+  'promo_code',
 ]);
 
 // WaveGuard tier-extension prepaid-difference credit class. The writer
@@ -156,6 +159,7 @@ const CREDIT_DISPLAY_TYPE_BY_SOURCE = Object.freeze({
   // the customer would be told their inspection fee was credited and then
   // see no credit. 'service' → "Service credit".
   inspection_credit: 'service',
+  promo_code: 'promo',
 });
 
 // Controlled, customer-safe label per display type. We deliberately do NOT

@@ -16912,13 +16912,20 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
     }
 
+    // A promo code the customer entered on this estimate posts its account
+    // credit now that the accept is committed (GATE_ESTIMATE_PROMO_CODE).
+    // Never throws and never fails the accept.
+    await require('../services/estimate-promo-code').redeemPromoCodeForAcceptedEstimate({ estimateId: estimate.id });
+
     // The success screen renders from THIS payload without a /data refetch,
     // so the referral card rides here too (same gate + program check as
     // /data; the row is accepted by construction at this point).
     const acceptReferral = await estimateReferralCardFor({ id: estimate.id, status: 'accepted', customer_id: customerId || estimate.customer_id });
+    const acceptPromoCode = await estimatePromoCodeViewFor({ id: estimate.id });
 
     res.json({
       ...(acceptReferral ? { referral: acceptReferral } : {}),
+      ...(acceptPromoCode ? { promoCode: acceptPromoCode } : {}),
       ...buildAcceptSuccessPayload({
       invoiceMode,
       invoiceLinkDelivered,
@@ -19268,6 +19275,65 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
     // conflicting phone number (AGENTS.md PII-in-logs rule).
     logger.warn(`[estimate-public] referral-link failed (code=${err?.code || 'none'}, estimate=${estimateId || 'unresolved'})`);
     return res.status(503).json({ error: 'Referral link unavailable — please try again' });
+  }
+});
+
+// The `promoCode` block of /data (GATE_ESTIMATE_PROMO_CODE). A read failure
+// hides the block and never fails the page.
+async function estimatePromoCodeViewFor(estimate) {
+  try {
+    return await require('../services/estimate-promo-code').promoCodeViewForEstimate(estimate, {
+      open: isEstimateAcceptActive(estimate) && !estimate.price_locked_at,
+    });
+  } catch (err) {
+    logger.warn(`[estimate-public] promo code block suppressed for estimate ${estimate.id}: ${err.code || err.message}`);
+    return null;
+  }
+}
+
+// Gate-aware skip so a dark gate answers the generic 404 on every probe.
+// Keyed per IP and token: the cap is on guesses against one estimate.
+const promoCodeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.isEnabled('estimatePromoCode'),
+  keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// POST /api/estimates/:token/promo-code — the customer types a promo code on
+// an estimate they can still accept (GATE_ESTIMATE_PROMO_CODE). Body
+// { code }. A valid fixed-dollar code from admin Discounts is saved on the
+// estimate; the account credit posts when the estimate is accepted. No price
+// on the estimate changes, no money moves here and nothing is sent.
+// 404 covers dark gate / staff preview / malformed or unknown token / an
+// estimate that cannot be accepted. A refused code answers 400 with one of
+// three reasons; 'invalid_code' never says why.
+router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
+  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+  if (!featureGates.isEnabled('estimatePromoCode')) return notFound();
+  // The field is inert in the staff "Customer View": staff never enter a
+  // customer's code from the preview.
+  if (req.query.adminPreview === '1') return notFound();
+  if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) return notFound();
+  // Log identity: the estimate id once resolved, never the token or the code.
+  let estimateId = null;
+  try {
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    estimateId = estimate?.id || null;
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
+      return notFound();
+    }
+    if (!estimate || !isEstimateAcceptActive(estimate) || estimate.price_locked_at) return notFound();
+    if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
+    const outcome = await require('../services/estimate-promo-code').enterPromoCode({ estimate, rawCode: req.body.code });
+    if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+    return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
+  } catch (err) {
+    logger.warn(`[estimate-public] promo-code failed (code=${err?.code || 'none'}, estimate=${estimateId || 'unresolved'})`);
+    return res.status(503).json({ error: 'Promo code unavailable — please try again' });
   }
 });
 
@@ -31496,6 +31562,9 @@ async function composeEstimateDataPayload(estimate, {
     // Referral card (GATE_ESTIMATE_SUCCESS_REFERRAL): accepted estimates only;
     // include-when-present so every other response stays byte-identical.
     const successReferral = await estimateReferralCardFor(estimate);
+    // Promo code (GATE_ESTIMATE_PROMO_CODE): the field while the estimate can
+    // still be accepted, and the code already on it. Include-when-present.
+    const promoCode = await estimatePromoCodeViewFor(estimate);
 
     // Missing-contact prompt (owner ruling 2026-09-27): only meaningful
     // while the estimate can still be accepted — isEstimateAcceptActive
@@ -31580,6 +31649,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
+      ...(promoCode ? { promoCode } : {}),
       ...(contactGaps ? { contactGaps } : {}),
       ...(consultationOffer ? { consultationOffer } : {}),
       ...(assessmentFirst ? { assessmentFirst } : {}),

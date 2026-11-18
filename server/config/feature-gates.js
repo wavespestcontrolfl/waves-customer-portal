@@ -319,6 +319,7 @@
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
+ *   GATE_ESTIMATE_PROMO_CODE=true (owner 2026-11-18: a "Have a promo code?" field on the customer estimate page + POST /:token/promo-code; a valid fixed-dollar code from admin Discounts is saved on the estimate and posts a one-time account credit when the estimate is accepted, counting one use; the estimate price never changes; dev-open, prod dark; off = no field, the route answers 404 and no accepted estimate posts a credit)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
@@ -3196,6 +3197,13 @@ const gates = {
   // a read). Live program settings still decide whether the card shows at
   // all. Dev-open, prod dark. Enable with GATE_ESTIMATE_SUCCESS_REFERRAL=true.
   estimateSuccessReferral: isProd ? process.env.GATE_ESTIMATE_SUCCESS_REFERRAL === 'true' : true,
+  // Promo code on the customer estimate page (owner 2026-11-18): gates the
+  // `promoCode` block in /data, POST /:token/promo-code and the credit posted
+  // when an estimate carrying a code is accepted
+  // (services/estimate-promo-code.js). Off, a code already entered stays on
+  // its row and posts nothing. Dev-open, prod dark.
+  // Enable with GATE_ESTIMATE_PROMO_CODE=true.
+  estimatePromoCode: isProd ? process.env.GATE_ESTIMATE_PROMO_CODE === 'true' : true,
   // Owner-side "reading it now" bell: when the engagement engine's
   // multi_view_high_intent rule matches on a page open (>= minSessions
   // sittings inside windowHours — the DB-tunable rule params), raise ONE

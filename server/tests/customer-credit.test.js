@@ -40,7 +40,7 @@ describe('customer-credit postCreditMovement validation', () => {
   test('whitelists the expected sources', () => {
     expect([...CustomerCredit.VALID_SOURCES]).toEqual([
       'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
-      'inspection_credit',
+      'inspection_credit', 'promo_code',
     ]);
   });
 
