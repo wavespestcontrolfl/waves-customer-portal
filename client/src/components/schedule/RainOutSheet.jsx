@@ -386,7 +386,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
   const [customDate, setCustomDate] = useState(todayStr);
   const [customStart, setCustomStart] = useState('');
 
-  // GATE_RAINOUT_KEEP_RAIN_OK: the server drops all-rain-OK stops from the
+  // Keep rain-OK stops: the server drops all-rain-OK stops from the
   // "rest of route" count and badges for a RAIN move only, so the fetch says
   // when the picked reason is rain. Only that bucket change refetches (not
   // every reason pick); the refetch keeps the highlighted slot. Until the list

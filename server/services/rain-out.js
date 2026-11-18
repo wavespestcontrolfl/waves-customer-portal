@@ -703,15 +703,14 @@ function composeBetterDayClause({
 }
 
 // Explains WHY rain moves a spray visit. Dark until the owner flips
-// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away. With
-// GATE_RAINOUT_KEEP_RAIN_OK on, any rain-OK service (rain-fit) skips it too.
+// GATE_RAINOUT_EFFICACY_NOTE; skipped for work rain doesn't wash away, and for
+// any rain-OK service (rain-fit).
 const EFFICACY_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
 function composeEfficacyClause({ reasonCode, serviceType, serviceKey = null }) {
   if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
   if (reasonCode !== 'weather_rain') return '';
   if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
-  if (rainoutKeepRainOk(reasonCode)
-    && require('./scheduling/rain-fit').rainClassOf({ name: serviceType, serviceKey }) === 'ok') return '';
+  if (require('./scheduling/rain-fit').rainClassOf({ name: serviceType, serviceKey }) === 'ok') return '';
   return '\n\nWhy the move? Treatments need a few rain-free hours to bond - applying right before rain washes them away before they can work.';
 }
 
@@ -893,16 +892,14 @@ async function loadServiceWithCustomer(serviceId) {
     .first();
 }
 
-// GATE_RAINOUT_KEEP_RAIN_OK (dark; owner 2026-11-01): read at call time. The
-// rain-OK list says rain does not spoil the work, so it answers only a RAIN
-// move: for any other reason (running late, equipment, an emergency, a no-show,
+// Rain-out keeps rain-OK stops (owner 2026-11-01). The rain-OK list says rain
+// does not spoil the work, so it answers only a RAIN move: for any other reason (running late, equipment, an emergency, a no-show,
 // wind, lightning, heat) the tech cannot attend at all and the whole route
 // moves. No reason yet (the options fetch comes before the sheet's reason
 // pick) keeps the full list.
 const RAIN_OK_REASONS = new Set(['weather_rain']);
 function rainoutKeepRainOk(reasonCode = null) {
-  return RAIN_OK_REASONS.has(reasonCode)
-    && require('../config/feature-gates').rainoutKeepRainOkLive?.() === true;
+  return RAIN_OK_REASONS.has(reasonCode);
 }
 
 // Other not-yet-terminal jobs on this tech's plate today, ordered the
@@ -916,9 +913,9 @@ function rainoutKeepRainOk(reasonCode = null) {
 // window-only bound would wrongly sweep stops that share the anchor's
 // window or sit before it under a manual route_order.
 //
-// With GATE_RAINOUT_KEEP_RAIN_OK on AND a rain move (`reasonCode`), a stop whose
-// services are all rain-OK is left out, so a Move neither moves nor texts it;
-// the anchor's own visit group moves with the anchor and is never filtered.
+// On a rain move (`reasonCode`), a stop whose services are all rain-OK is left
+// out, so a Move neither moves nor texts it; the anchor's own visit group
+// moves with the anchor and is never filtered.
 async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null, reasonCode = null) {
   if (!technicianId) return [];
   const keepRainOk = rainoutKeepRainOk(reasonCode);
@@ -1600,7 +1597,7 @@ async function checkSlots({ targets, caller = null } = {}) {
  * route-scored day options with rain badges, the remaining-route count
  * for the scope toggle, and today's outlook for the header. The sheet fetches
  * this before the dispatcher picks a reason, so `reasonCode` is optional; none
- * means the full route list (GATE_RAINOUT_KEEP_RAIN_OK filters a rain move only).
+ * means the full route list (only a rain move is filtered).
  */
 async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
   const service = await loadServiceWithCustomer(serviceId);

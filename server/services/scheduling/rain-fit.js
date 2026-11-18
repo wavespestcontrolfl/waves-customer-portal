@@ -207,7 +207,7 @@ async function storedVisitServices(serviceId, { moveAlone = false } = {}, db) {
 }
 
 // The rows of a day's stop list that stay on it when rain-OK stops stay put
-// (GATE_RAINOUT_KEEP_RAIN_OK, rain-out.js, and the storm-watch nudge). Each row
+// (rain-out.js and the storm-watch nudge). Each row
 // carries id, service_type, service_key_snapshot and visit_id. A stop leaves
 // the list only when every service at it (the row and its add-ons) is rain-OK;
 // a 'skip' service does not make it outdoor, but a stop of 'skip' services

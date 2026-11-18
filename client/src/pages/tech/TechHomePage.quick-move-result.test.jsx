@@ -136,7 +136,7 @@ describe('Tech Home Quick Move result', () => {
   });
 });
 
-// GATE_RAINOUT_KEEP_RAIN_OK: the server filters the rest-of-route count for a
+// Keep rain-OK stops: the server filters the rest-of-route count for a
 // rain move only, so the sheet says which kind of move it is previewing.
 describe('Tech Home Quick Move: reason reaches the route count', () => {
   const optionCalls = () => fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.split('?')[0].endsWith('/rain-out-options'));

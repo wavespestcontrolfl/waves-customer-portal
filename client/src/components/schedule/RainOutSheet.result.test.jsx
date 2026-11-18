@@ -205,7 +205,7 @@ describe('RainOutSheet: let the customer pick a day', () => {
   });
 });
 
-// GATE_RAINOUT_KEEP_RAIN_OK: the server filters the rest-of-route list for a
+// Keep rain-OK stops: the server filters the rest-of-route list for a
 // rain move only, so the sheet says which kind of move it is previewing.
 describe('RainOutSheet: reason reaches the route preview', () => {
   const optionCalls = () => fetchMock.mock.calls.map(([path]) => String(path)).filter((path) => path.split('?')[0].endsWith('/rain-out-options'));

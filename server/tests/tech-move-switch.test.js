@@ -255,7 +255,7 @@ describe('the route check is told who is asking (the route-checked day list: Goo
     expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' }, reasonCode: null });
   });
 
-  test('the Quick Move options pass the picked rain reason through (GATE_RAINOUT_KEEP_RAIN_OK preview)', async () => {
+  test('the Quick Move options pass the picked rain reason through', async () => {
     const r = await call('GET', '/api/tech/services/svc-1/rain-out-options?reasonCode=weather_rain');
     expect(r.status).toBe(200);
     expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' }, reasonCode: 'weather_rain' });
