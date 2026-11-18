@@ -21,6 +21,8 @@
  */
 const mockTwilioCreate = jest.fn();
 const mockAttemptPushFirst = jest.fn();
+const mockSendCompanionPush = jest.fn(async () => ({}));
+const mockDecidePushRoute = jest.fn(() => 'sms_only');
 
 jest.mock('twilio', () => jest.fn(() => ({ messages: { create: mockTwilioCreate } })));
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'auth_test', verifyServiceSid: 'VA_test' } }));
@@ -48,8 +50,9 @@ jest.mock('../services/disclaimed-number-holds', () => ({
 // push-channel-routing.test.js. Stubbed here so this file tests sendSMS's
 // OWN null-tolerance, not attemptPushFirst's internals.
 jest.mock('../services/messaging/push-channel-routing', () => ({
-  decidePushRoute: jest.fn(() => 'sms_only'),
+  decidePushRoute: mockDecidePushRoute,
   attemptPushFirst: mockAttemptPushFirst,
+  sendCompanionPush: mockSendCompanionPush,
   gatePushRoutingOn: jest.fn(() => false),
 }));
 
@@ -163,6 +166,48 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
       error: 'app_event_already_visible', eventVisibleAt: visibleAt });
     expect(result.bellPersisted).toBeUndefined();
     expect(result.sid).toBeUndefined();
+  });
+
+  describe('GATE_APP_FIRST_STALE_TEXT contact companion: a stale holder phone gets the text, an eligible contact keeps the push', () => {
+    const notice = { customerId: 'cust-1', messageType: 'appointment_reminder', appointmentId: 'visit-1' };
+    const staleHolder = { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', contactCompanion: true };
+    beforeEach(() => {
+      mockDecidePushRoute.mockReturnValue('push_first');
+      mockSendCompanionPush.mockClear();
+    });
+    afterEach(() => { mockDecidePushRoute.mockReturnValue('sms_only'); });
+
+    test('fires sendCompanionPush with contactOnly only after the text is accepted', async () => {
+      mockAttemptPushFirst.mockResolvedValue(staleHolder);
+      mockTwilioCreate.mockImplementationOnce(async () => {
+        expect(mockSendCompanionPush).not.toHaveBeenCalled();
+        return { sid: 'SM_stale_holder' };
+      });
+      const result = await TwilioService.sendSMS('+19415550123', 'Reminder: your visit is tomorrow.', notice);
+      expect(result).toMatchObject({ success: true, sid: 'SM_stale_holder' });
+      expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+      expect(mockSendCompanionPush).toHaveBeenCalledTimes(1);
+      expect(mockSendCompanionPush.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', messageType: 'appointment_reminder', appointmentId: 'visit-1', contactOnly: true });
+    });
+
+    test('no companion when the text fails', async () => {
+      mockAttemptPushFirst.mockResolvedValue(staleHolder);
+      mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('provider down'), { status: 500 }));
+      await TwilioService.sendSMS('+19415550123', 'Reminder: your visit is tomorrow.', notice).catch(() => {});
+      expect(mockSendCompanionPush).not.toHaveBeenCalled();
+    });
+
+    test('no companion without the flag (an ordinary push_first fallback), and push_and_sms is unchanged (no contactOnly)', async () => {
+      mockAttemptPushFirst.mockResolvedValue({ delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device' });
+      mockTwilioCreate.mockResolvedValueOnce({ sid: 'SM_plain_fallback' });
+      await TwilioService.sendSMS('+19415550123', 'Reminder: your visit is tomorrow.', notice);
+      expect(mockSendCompanionPush).not.toHaveBeenCalled();
+      mockDecidePushRoute.mockReturnValue('push_and_sms');
+      mockTwilioCreate.mockResolvedValueOnce({ sid: 'SM_both' });
+      await TwilioService.sendSMS('+19415550123', 'Reminder: your visit is tomorrow.', notice);
+      expect(mockSendCompanionPush).toHaveBeenCalledTimes(1);
+      expect(mockSendCompanionPush.mock.calls[0][0]).not.toHaveProperty('contactOnly');
+    });
   });
 
 });

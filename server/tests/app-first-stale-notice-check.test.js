@@ -59,6 +59,30 @@ test('a failed digest send logs a controlled code, never the provider message (i
   expect(logged).not.toContain('someone@example.invalid');
 });
 
+test('visits count distinct visit ids; notices with no visit are reported apart in the subject, body and metadata', async () => {
+  const rows = [
+    pushRow({ id: 'r1', message_type: 'reminder_72h' }), pushRow({ id: 'r2', message_type: 'tech_en_route' }),
+    pushRow({ id: 'a', visit_id: null, scheduled_date: null, message_type: 'receipt', customer_id: 'cust-2' }),
+    pushRow({ id: 'b', visit_id: null, scheduled_date: null, message_type: 'receipt', customer_id: 'cust-3' }),
+  ];
+  await Check.runAppFirstStaleNoticeCheck({ database: dbReturning(rows) });
+  const arg = deliverOpsDigest.mock.calls[0][0];
+  expect(arg.subject).toBe('FIX: 1 visit got app-only notices on an app not opened in 30+ days, plus 2 other notices');
+  expect(arg.metadata).toEqual({ visits: 1, unlinkedNotices: 2 });
+  expect(arg.itemKeys).toEqual(['visit:visit-stale-1', 'sms:a', 'sms:b']);
+  expect(arg.text).toContain('Visits (1):');
+  expect(arg.text).toContain('Other notices, no visit on record (2):');
+});
+
+test('only unlinked notices: the subject names notices, not visits', async () => {
+  const rows = [pushRow({ id: 'a', visit_id: null, scheduled_date: null, message_type: 'receipt' }), pushRow({ id: 'b', visit_id: null, scheduled_date: null, message_type: 'receipt' })];
+  await Check.runAppFirstStaleNoticeCheck({ database: dbReturning(rows) });
+  const arg = deliverOpsDigest.mock.calls[0][0];
+  expect(arg.subject).toBe('FIX: 2 app-only notices went to an app not opened in 30+ days');
+  expect(arg.metadata).toEqual({ visits: 0, unlinkedNotices: 2 });
+  expect(arg.text).not.toContain('Visits (');
+});
+
 test('a push with no visit is its own item (sms:<row id>)', async () => {
   await Check.runAppFirstStaleNoticeCheck({ database: dbReturning([pushRow({ id: 'row-77', visit_id: null, scheduled_date: null })]) });
   expect(deliverOpsDigest.mock.calls[0][0].itemKeys).toEqual(['sms:row-77']);

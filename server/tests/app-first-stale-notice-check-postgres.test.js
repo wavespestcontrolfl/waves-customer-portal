@@ -24,7 +24,7 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
   });
 
   // One automatic app push for one synthetic visit; `stamp` is the metadata app_checked_in_at as written.
-  async function seed(trx, { stamp, requestedChannel = 'sms', types = ['reminder_72h', 'tech_en_route'] } = {}) {
+  async function seed(trx, { stamp, requestedChannel = 'sms', types = ['reminder_72h', 'tech_en_route'], noVisit = false } = {}) {
     const customerId = randomUUID();
     const visitId = randomUUID();
     await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Tester', phone: '+19415550143', email: `${customerId}@example.invalid` });
@@ -32,7 +32,7 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
       await trx('sms_log').insert({
         customer_id: customerId, direction: 'outbound', from_phone: 'push', to_phone: '9415550143', message_body: 'Synthetic notice',
         status: 'sent', message_type: type, created_at: new Date(PUSH_AT.getTime() + i * 3600000),
-        metadata: JSON.stringify({ channel: 'push', requestedChannel, scheduled_service_id: visitId, ...(stamp === undefined ? {} : { app_checked_in_at: stamp }) }),
+        metadata: JSON.stringify({ channel: 'push', requestedChannel, ...(noVisit ? {} : { scheduled_service_id: visitId }), ...(stamp === undefined ? {} : { app_checked_in_at: stamp }) }),
       });
     }
     return { customerId, visitId };
@@ -57,6 +57,23 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
       const impossible = await seed(trx, { stamp: '2026-02-31T12:00:00Z' });
       expect(await find(trx, impossible.visitId)).toHaveLength(0);
       expect(await find(trx, stale.visitId)).toHaveLength(1);
+    } finally {
+      await trx.rollback();
+    }
+  });
+
+  test('two standalone receipts (no visit id) come back as two sms:<row> items with no visit, never as visits', async () => {
+    const trx = await db.transaction();
+    try {
+      const stamp = daysBefore(39, PUSH_AT).toISOString();
+      const a = await seed(trx, { stamp, noVisit: true, types: ['receipt'] });
+      const b = await seed(trx, { stamp, noVisit: true, types: ['receipt'] });
+      const mine = (await Check.findStaleAppNoticeVisits({ database: trx, now: NOW })).filter((i) => [a.customerId, b.customerId].includes(i.customer_id));
+      expect(mine).toHaveLength(2);
+      for (const item of mine) {
+        expect(item.visit_id).toBeNull();
+        expect(item.key).toMatch(/^sms:/);
+      }
     } finally {
       await trx.rollback();
     }

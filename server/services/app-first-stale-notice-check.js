@@ -140,22 +140,36 @@ async function sendMail({ subject, html, text }) {
   });
 }
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// Visits are counted by distinct visit id. A notice with no visit on record (a
+// standalone receipt, say) is reported apart, never as a visit.
+function digestSubject(visits, notices) {
+  if (!visits) return `FIX: ${plural(notices, 'app-only notice')} went to an app not opened in ${STALE_DAYS}+ days`;
+  const base = `FIX: ${plural(visits, 'visit')} got app-only notices on an app not opened in ${STALE_DAYS}+ days`;
+  return notices ? `${base}, plus ${plural(notices, 'other notice')}` : base;
+}
+
+function digestBody(visitRows, noticeRows) {
+  const intro = `In the last ${PUSH_WINDOW_HOURS} hours these went as app push to an app that had not been opened in ${STALE_DAYS}+ days. GATE_APP_FIRST_STALE_TEXT should send the text for these; check that it is on and working.`;
+  const groups = [
+    { title: `Visits (${visitRows.length})`, rows: visitRows },
+    { title: `Other notices, no visit on record (${noticeRows.length})`, rows: noticeRows },
+  ].filter((group) => group.rows.length);
+  const text = [intro, ...groups.flatMap((g) => ['', `${g.title}:`, ...g.rows.slice(0, MAX_ROWS_SHOWN).map((r) => `- ${lineFor(r)}${customerUrl(r) ? ` · ${customerUrl(r)}` : ''}`)])].join('\n');
+  const html = [`<p>${esc(intro)}</p>`, ...groups.map((g) => `<p><strong>${esc(g.title)}</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${g.rows.slice(0, MAX_ROWS_SHOWN).map((r) => `<li style="margin:0 0 6px 0;">${esc(lineFor(r))}${customerUrl(r) ? ` &middot; <a href="${esc(customerUrl(r))}">customer</a>` : ''}</li>`).join('')}</ul>`)].join('\n');
+  return { text, html };
+}
+
 async function postStaleAppNoticeDigest(rows) {
   if (!rows.length) {
     await retireIfClean(OPS_DIGEST_KEY);
     return { skipped: 'clean' };
   }
-  const shown = rows.slice(0, MAX_ROWS_SHOWN);
-  const subject = `FIX: ${rows.length} visit${rows.length === 1 ? '' : 's'} got app-only notices on an app not opened in ${STALE_DAYS}+ days`;
-  const text = [
-    `${rows.length} visit(s) in the last ${PUSH_WINDOW_HOURS} hours went as app push to an app that had not been opened in ${STALE_DAYS}+ days. GATE_APP_FIRST_STALE_TEXT should send the text for these; check that it is on and working.`,
-    '',
-    ...shown.map((r) => `- ${lineFor(r)}${customerUrl(r) ? ` · ${customerUrl(r)}` : ''}`),
-  ].join('\n');
-  const html = [
-    `<p><strong>${rows.length}</strong> visit(s) in the last ${PUSH_WINDOW_HOURS} hours went as app push to an app that had not been opened in ${STALE_DAYS}+ days. <code>GATE_APP_FIRST_STALE_TEXT</code> should send the text for these; check that it is on and working.</p>`,
-    `<ul style="margin:0 0 12px 18px;padding:0;">${shown.map((r) => `<li style="margin:0 0 6px 0;">${esc(lineFor(r))}${customerUrl(r) ? ` &middot; <a href="${esc(customerUrl(r))}">customer</a>` : ''}</li>`).join('')}</ul>`,
-  ].join('\n');
+  const visitRows = rows.filter((r) => r.visit_id);
+  const noticeRows = rows.filter((r) => !r.visit_id);
+  const subject = digestSubject(visitRows.length, noticeRows.length);
+  const { text, html } = digestBody(visitRows, noticeRows);
 
   try {
     return await deliverOpsDigest({
@@ -165,7 +179,7 @@ async function postStaleAppNoticeDigest(rows) {
       html,
       text,
       link: rows.length === 1 && rows[0].customer_id ? `${LINK}?customerId=${encodeURIComponent(rows[0].customer_id)}` : LINK,
-      metadata: { visits: rows.length },
+      metadata: { visits: visitRows.length, unlinkedNotices: noticeRows.length },
       itemKeys: rows.map((r) => r.key),
       dedupeKey: OPS_DIGEST_KEY,
       refreshOnDedupe: true,

@@ -325,6 +325,13 @@ function appCheckedInStamp(anyDevice, acceptedCheckedInAt) {
   return anyDevice && acceptedCheckedInAt ? { app_checked_in_at: new Date(acceptedCheckedInAt).toISOString() } : {};
 }
 
+// GATE_APP_FIRST_STALE_TEXT: a stale holder phone sends the text, but an eligible
+// contact's phone keeps its push. The caller (twilio.js) fires it as a contact-only
+// companion after the text is accepted (sendCompanionPush contactOnly). Gate off = no flag.
+function contactCompanionFlag(anyDevice) {
+  return anyDevice && staleTextFloor() ? { contactCompanion: true } : {};
+}
+
 // messageType → the LIVE notification_prefs channel column the actual
 // senders consult (appointment-reminders.js, twilio.js en-route,
 // scheduler.js receipts). Every type in PUSH_ROUTING_POLICY must map here
@@ -506,7 +513,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, holderMinUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, holderMinUpdatedAt, nativeOnly, contactOnly = false, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   // signedInOnly (GATE_APP_FIRST_ANY_DEVICE): the tap opens the signed-in app tab, never a report / receipt bearer page.
   const presentation = pushPresentation(messageType);
   const { title, link, category } = signedInOnly ? presentation : await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
@@ -520,7 +527,7 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}), ...(holderMinUpdatedAt ? { holderMinUpdatedAt } : {}) });
+  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}), ...(holderMinUpdatedAt ? { holderMinUpdatedAt } : {}), ...(contactOnly ? { contactOnly: true } : {}) });
   return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null };
 }
 
@@ -808,7 +815,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // A persisted in-app bell is customer-visible even when no device accepts
     // the push; callers that must not undo a seen notice read bellPersisted.
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell, ...contactCompanionFlag(anyDevice) };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
@@ -995,9 +1002,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null, contactOnly = false }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
+    // contactOnly (GATE_APP_FIRST_STALE_TEXT): the holder's stale phone got the text; an
+    // eligible contact's phone still gets the push it had before, with no holder
+    // freshness gate, no 30-day floor for contact rows and no holder bell.
+    if (contactOnly) return await sendContactOnlyPush({ customerId, messageType, body, preSendCheck, appointmentId });
     if (!(await hasFreshPushDevice(customerId))) return;
     // The companion starts only after Twilio accepted the SMS, but its own
     // fan-out can still cross the cutoff — same per-leg gate. It also
@@ -1016,6 +1027,19 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }
+}
+
+// The same presentation and body an any-device push uses (signedInOnly, link-free
+// body, phone apps only), to contact devices alone. The result never counts: the
+// holder was texted, so no bell and no proof row.
+async function sendContactOnlyPush({ customerId, messageType, body, preSendCheck, appointmentId }) {
+  await sendPush(customerId, messageType, pushBodyFor(true, body), {
+    shouldContinue: windowGuardFrom(preSendCheck),
+    nativeOnly: true,
+    contactOnly: true,
+    signedInOnly: true,
+    appointmentId,
+  });
 }
 
 module.exports = {

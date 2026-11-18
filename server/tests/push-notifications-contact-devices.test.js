@@ -206,6 +206,21 @@ describe('sendToCustomer — a contact device belongs to ONE profile', () => {
   });
 });
 
+describe('sendToCustomer — contactOnly (the contact companion after the holder\'s text)', () => {
+  test('only the contact device is sent; the holder device is dropped and the stats stay holder-only', async () => {
+    const result = await Push.sendToCustomer(HOLDER_ID, { title: 't', body: 'b', url: '/', category: 'service' }, { messageType: 'tech_en_route', contactOnly: true });
+    expect(sentTokens()).toEqual(['tok-c']);
+    expect(result.sent).toBe(0);
+    expect(result.subscriptions).toBe(0);
+    expect(result.contactDevices).toMatchObject({ sent: 1 });
+  });
+
+  test('a type the contact is not eligible for sends nothing', async () => {
+    await Push.sendToCustomer(HOLDER_ID, { title: 't', body: 'b', url: '/', category: 'service' }, { messageType: 'billing_reminder', contactOnly: true });
+    expect(apns.send).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendToCustomer — acceptedCheckedInAt (the stamp the push proof row carries)', () => {
   const daysAgo = (n) => new Date(Date.now() - n * 24 * 3600000);
   const phone = (id, token, updated) => ({ ...HOLDER_DEVICE, id, device_token: token, updated_at: updated });
