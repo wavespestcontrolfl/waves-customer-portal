@@ -1,14 +1,16 @@
 /**
  * Reach rules A and B of the booking-link text (services/call-booking-link-text.js,
- * GATE_CALL_BOOKING_LINK_REACH=shadow, owner 2026-11-17 "link").
+ * GATE_CALL_BOOKING_LINK_REACH=shadow|true, owner 2026-11-17 "link").
  *
  * Pins what the gate may and may not do:
  *   - a call that ONLY rule A (quote promised) or rule B (earlier customer row) stops is
  *     staged with the reach mark; any other call keeps today's outcome and today's reason;
- *   - a marked row NEVER reaches the link builder or the sender, in any gate state: it ends
- *     as a skip (`reach_shadow_would_send`, `fee_visit`, or the rule that stopped it);
- *   - the mark survives a deferral;
- *   - a row without the mark is sent, and stopped, exactly as today while the gate is on.
+ *   - in `shadow` a marked row NEVER reaches the link builder or the sender: it ends as a
+ *     skip (`reach_shadow_would_send`, `fee_visit`, or the rule that stopped it);
+ *   - in `true` a marked row is sent only when every test passed, and the last test before
+ *     the provider request (neverSendRecheck) runs the reach tests again under the locks;
+ *   - the mark survives a deferral and a send;
+ *   - a row without the mark is sent, and stopped, exactly as today in every mode.
  * call-booking-link-text.test.js runs with no reader on its feature-gates mock, which is
  * the gate off: its 250+ cases are the proof that off is today's behavior.
  */
@@ -38,7 +40,7 @@ jest.mock('../services/outbound-call-reason', () => ({
 const { callBookingLinkReachMode } = require('../config/feature-gates');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { stagingIneligibleReason, stageOne, dispatchClaimedCall, _private } = require('../services/call-booking-link-text');
+const { stagingIneligibleReason, stageOne, dispatchClaimedCall, neverSendRecheck, _private } = require('../services/call-booking-link-text');
 
 const { callerOnFile } = _private;
 const KEY = 'call_booking_link_text';
@@ -195,97 +197,101 @@ describe('callerOnFile: is this caller already a customer, or already quoted or 
 });
 
 describe('stageOne under the gate', () => {
-  const NOW = new Date('2026-11-17T16:00:00Z'); // 11:00 AM ET
+  const STAGE_NOW = new Date('2026-11-17T16:00:00Z'); // 11:00 AM ET
   const stagedCall = (over = {}) => ({
-    id: 'call-1', direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199', created_at: new Date(NOW.getTime() - 60000),
+    id: 'call-1', direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199', created_at: new Date(STAGE_NOW.getTime() - 60000),
     duration_seconds: 90, transcription: TRANSCRIPT, metadata: { lead_id: 'lead-1' }, customer_id: null,
     ai_extraction_enriched: extraction(), ai_address_validation: { status: 'validated_accept', inServiceArea: true },
-    processing_token: null, updated_at: NOW, v2_extraction_status: 'valid', ...over,
+    processing_token: null, updated_at: STAGE_NOW, v2_extraction_status: 'valid', ...over,
   });
 
   test('rule A: a promised quote is staged with the mark, and the records are not read yet', async () => {
     const conn = fakeConn();
-    expect(await stageOne(conn, stagedCall({ ai_extraction_enriched: extraction(QUOTE_PROMISED) }), NOW)).toBe('pending');
+    expect(await stageOne(conn, stagedCall({ ai_extraction_enriched: extraction(QUOTE_PROMISED) }), STAGE_NOW)).toBe('pending');
     expect(conn.written).toEqual([expect.objectContaining({ status: 'pending', lead_id: 'lead-1', reach: 'quote_promised' })]);
     expect(conn.queried('customers')).toHaveLength(0);
   });
 
   test('rule B: an earlier row that is only a lead record is staged with the mark', async () => {
     const conn = fakeConn({ rows: { customers: [{ id: 'cust-old', pipeline_stage: 'new_lead', deleted_at: null }] } });
-    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old' }), NOW)).toBe('pending');
+    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old' }), STAGE_NOW)).toBe('pending');
     expect(conn.written).toEqual([expect.objectContaining({ status: 'pending', reach: 'existing_customer' })]);
   });
 
   test('rule B: a real customer still ends at once, with what the records showed', async () => {
     const conn = fakeConn({ rows: { customers: [{ id: 'cust-old', pipeline_stage: 'active_customer', deleted_at: null }] } });
-    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old' }), NOW)).toBe('skipped');
-    expect(conn.written).toEqual([{ status: 'skipped', reason: 'existing_customer', staged_at: NOW.toISOString(), on_file: 'customer_record' }]);
+    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old' }), STAGE_NOW)).toBe('skipped');
+    expect(conn.written).toEqual([{ status: 'skipped', reason: 'existing_customer', staged_at: STAGE_NOW.toISOString(), on_file: 'customer_record' }]);
   });
 
   test('a call another rule also stops keeps today\'s reason, and the records are never read', async () => {
     const conn = fakeConn();
     const commercial = extraction({ property: { property_type: 'commercial_office' } });
-    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old', ai_extraction_enriched: commercial }), NOW)).toBe('skipped');
-    expect(conn.written).toEqual([{ status: 'skipped', reason: 'existing_customer', staged_at: NOW.toISOString() }]);
+    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old', ai_extraction_enriched: commercial }), STAGE_NOW)).toBe('skipped');
+    expect(conn.written).toEqual([{ status: 'skipped', reason: 'existing_customer', staged_at: STAGE_NOW.toISOString() }]);
     expect(conn.queried('customers')).toHaveLength(0);
   });
 
   test('a marked call that is too old to queue keeps today\'s reason: the weekly check must not read it as a missed text', async () => {
-    const hoursAgo = new Date(NOW.getTime() - 6 * 60 * 60 * 1000);
+    const hoursAgo = new Date(STAGE_NOW.getTime() - 6 * 60 * 60 * 1000);
     const conn = fakeConn();
-    expect(await stageOne(conn, stagedCall({ created_at: hoursAgo, ai_extraction_enriched: extraction(QUOTE_PROMISED) }), NOW)).toBe('skipped');
-    expect(await stageOne(conn, stagedCall({ created_at: hoursAgo }), NOW)).toBe('skipped');
+    expect(await stageOne(conn, stagedCall({ created_at: hoursAgo, ai_extraction_enriched: extraction(QUOTE_PROMISED) }), STAGE_NOW)).toBe('skipped');
+    expect(await stageOne(conn, stagedCall({ created_at: hoursAgo }), STAGE_NOW)).toBe('skipped');
     expect(conn.written).toEqual([
-      { status: 'skipped', reason: 'quote_promised', staged_at: NOW.toISOString() },
-      { status: 'skipped', reason: 'stale_at_staging', staged_at: NOW.toISOString() },
+      { status: 'skipped', reason: 'quote_promised', staged_at: STAGE_NOW.toISOString() },
+      { status: 'skipped', reason: 'stale_at_staging', staged_at: STAGE_NOW.toISOString() },
     ]);
   });
 
   test('a call today\'s rules pass is staged with no mark', async () => {
     const conn = fakeConn();
-    expect(await stageOne(conn, stagedCall(), NOW)).toBe('pending');
+    expect(await stageOne(conn, stagedCall(), STAGE_NOW)).toBe('pending');
     expect(conn.written[0]).not.toHaveProperty('reach');
   });
 
   test('gate off: rules A and B stop the call at once, as today', async () => {
     callBookingLinkReachMode.mockReturnValue('off');
     const conn = fakeConn();
-    expect(await stageOne(conn, stagedCall({ ai_extraction_enriched: extraction(QUOTE_PROMISED) }), NOW)).toBe('skipped');
-    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old' }), NOW)).toBe('skipped');
+    expect(await stageOne(conn, stagedCall({ ai_extraction_enriched: extraction(QUOTE_PROMISED) }), STAGE_NOW)).toBe('skipped');
+    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old' }), STAGE_NOW)).toBe('skipped');
     expect(conn.written).toEqual([
-      { status: 'skipped', reason: 'quote_promised', staged_at: NOW.toISOString() },
-      { status: 'skipped', reason: 'existing_customer', staged_at: NOW.toISOString() },
+      { status: 'skipped', reason: 'quote_promised', staged_at: STAGE_NOW.toISOString() },
+      { status: 'skipped', reason: 'existing_customer', staged_at: STAGE_NOW.toISOString() },
     ]);
     expect(conn.queried('customers')).toHaveLength(0);
   });
 });
 
-describe('dispatchClaimedCall: a marked row is recorded, never sent', () => {
-  const NOW = new Date('2026-11-17T18:00:00Z'); // 1:00 PM ET, inside the send window
-  const LEAD = { id: 'lead-1', status: 'new', converted_at: null, phone: PHONE, first_name: 'Jamie', customer_id: null,
-    estimate_id: null, is_commercial: false, deleted_at: null };
-  const claimed = ({ reach, ...over } = {}) => ({
-    id: 'call-1', created_at: new Date('2026-11-17T15:30:00Z'), duration_seconds: 90, direction: 'inbound', from_phone: PHONE,
-    to_phone: '+19415550199', transcription: TRANSCRIPT, v2_extraction_status: 'valid', processing_token: null, customer_id: null,
-    ai_extraction_enriched: extraction(QUOTE_PROMISED), ai_address_validation: { status: 'validated_accept', inServiceArea: true },
-    ...over,
-    metadata: { lead_id: 'lead-1', ...(over.metadata || {}),
-      [KEY]: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(), staged_at: '2026-11-17T15:40:00.000Z', ...(reach ? { reach } : {}) } },
-  });
-  const db = ({ lead = LEAD, customers = [], first = {} } = {}) => fakeConn({
-    rows: { customers },
-    first: {
-      leads: lead,
-      scheduled_services: (calls) => (recordsVisitQuery(calls) ? first.visit : first.booked),
-      estimates: (calls) => (recordsEstimateQuery(calls) ? first.estimate : undefined),
-      invoices: first.invoice,
-    },
-  });
-  const expectNothingSent = () => {
-    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-  };
+// A claimed row at its send time, and the rows the send-time checks read.
+const NOW = new Date('2026-11-17T18:00:00Z'); // 1:00 PM ET, inside the send window
+const LEAD = { id: 'lead-1', status: 'new', converted_at: null, phone: PHONE, first_name: 'Jamie', customer_id: null,
+  estimate_id: null, is_commercial: false, deleted_at: null };
+const LEAD_ROW = { id: 'cust-old', pipeline_stage: 'new_lead', deleted_at: null };
+const claimed = ({ reach, ...over } = {}) => ({
+  id: 'call-1', created_at: new Date('2026-11-17T15:30:00Z'), duration_seconds: 90, direction: 'inbound', from_phone: PHONE,
+  to_phone: '+19415550199', transcription: TRANSCRIPT, v2_extraction_status: 'valid', processing_token: null, customer_id: null,
+  ai_extraction_enriched: extraction(QUOTE_PROMISED), ai_address_validation: { status: 'validated_accept', inServiceArea: true },
+  ...over,
+  metadata: { lead_id: 'lead-1', ...(over.metadata || {}),
+    [KEY]: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(), staged_at: '2026-11-17T15:40:00.000Z', ...(reach ? { reach } : {}) } },
+});
+// `freshCall` answers neverSendRecheck's locked re-read of the call (the only call_log read with forUpdate).
+const db = ({ lead = LEAD, customers = [], first = {}, freshCall } = {}) => fakeConn({
+  rows: { customers },
+  first: {
+    leads: lead,
+    call_log: (calls) => (called(calls, 'forUpdate') ? freshCall : undefined),
+    scheduled_services: (calls) => (recordsVisitQuery(calls) ? first.visit : first.booked),
+    estimates: (calls) => (recordsEstimateQuery(calls) ? first.estimate : undefined),
+    invoices: first.invoice,
+  },
+});
+const expectNothingSent = () => {
+  expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+};
 
+describe('dispatchClaimedCall in shadow: a marked row is recorded, never sent', () => {
   test('rule A, nothing on file two hours later: the log says it would send, and nothing is sent', async () => {
     const conn = db();
     const result = await dispatchClaimedCall(conn, claimed({ reach: 'quote_promised' }), NOW);
@@ -383,5 +389,230 @@ describe('dispatchClaimedCall: a marked row is recorded, never sent', () => {
     expect(tied.queried('customers')).toHaveLength(0);
     expect(quoted.queried('activity_log')).toHaveLength(1); // today's send-time skips still write their activity row
     expectNothingSent();
+  });
+});
+
+describe('stageOne with the gate at true', () => {
+  const STAGE_NOW = new Date('2026-11-17T16:00:00Z'); // 11:00 AM ET
+  const stagedCall = (over = {}) => ({
+    id: 'call-1', direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199', created_at: new Date(STAGE_NOW.getTime() - 60000),
+    duration_seconds: 90, transcription: TRANSCRIPT, metadata: { lead_id: 'lead-1' }, customer_id: null,
+    ai_extraction_enriched: extraction(QUOTE_PROMISED), ai_address_validation: { status: 'validated_accept', inServiceArea: true },
+    processing_token: null, updated_at: STAGE_NOW, v2_extraction_status: 'valid', ...over,
+  });
+  beforeEach(() => callBookingLinkReachMode.mockReturnValue('true'));
+
+  test('rules A and B stage the same calls with the same mark as in shadow', async () => {
+    const conn = fakeConn({ rows: { customers: [LEAD_ROW] } });
+    expect(await stageOne(conn, stagedCall(), STAGE_NOW)).toBe('pending');
+    expect(await stageOne(conn, stagedCall({ customer_id: 'cust-old', ai_extraction_enriched: extraction() }), STAGE_NOW)).toBe('pending');
+    expect(conn.written.map((w) => [w.status, w.reach])).toEqual([['pending', 'quote_promised'], ['pending', 'existing_customer']]);
+  });
+
+  test('a marked call that is too old to queue is a missed text now: stale_at_staging', async () => {
+    const conn = fakeConn();
+    expect(await stageOne(conn, stagedCall({ created_at: new Date(STAGE_NOW.getTime() - 6 * 60 * 60 * 1000) }), STAGE_NOW)).toBe('skipped');
+    expect(conn.written).toEqual([{ status: 'skipped', reason: 'stale_at_staging', staged_at: STAGE_NOW.toISOString() }]);
+  });
+
+  test('a real customer still ends at once, and a call another rule stops keeps today\'s reason', async () => {
+    const customer = fakeConn({ rows: { customers: [{ ...LEAD_ROW, pipeline_stage: 'active_customer' }] } });
+    expect(await stageOne(customer, stagedCall({ customer_id: 'cust-old', ai_extraction_enriched: extraction() }), STAGE_NOW)).toBe('skipped');
+    expect(customer.written[0]).toEqual(expect.objectContaining({ reason: 'existing_customer', on_file: 'customer_record' }));
+    const commercial = fakeConn();
+    const office = extraction({ ...QUOTE_PROMISED, property: { property_type: 'commercial_office' } });
+    expect(await stageOne(commercial, stagedCall({ ai_extraction_enriched: office }), STAGE_NOW)).toBe('skipped');
+    expect(commercial.written).toEqual([{ status: 'skipped', reason: 'not_residential', staged_at: STAGE_NOW.toISOString() }]);
+  });
+});
+
+describe('dispatchClaimedCall with the gate at true: a marked row is sent only when every test passes', () => {
+  beforeEach(() => callBookingLinkReachMode.mockReturnValue('true'));
+  const ruleB = () => ({
+    call: claimed({ reach: 'existing_customer', customer_id: 'cust-old', ai_extraction_enriched: extraction() }),
+    rows: { lead: { ...LEAD, customer_id: 'cust-old' }, customers: [LEAD_ROW] },
+  });
+
+  test('rule A, nothing on file two hours later: the text is sent and the row keeps its mark', async () => {
+    const conn = db();
+    const result = await dispatchClaimedCall(conn, claimed({ reach: 'quote_promised' }), NOW);
+    expect(result).toEqual({ sent: true, providerMessageId: 'SM_test_sid' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toEqual(expect.objectContaining({
+      to: PHONE, leadId: 'lead-1', audience: 'lead', entryPoint: 'call_booking_link_text',
+      providerPreSendCheck: expect.any(Function), withSmsHandoff: expect.any(Function),
+    }));
+    expect(conn.written).toEqual([expect.objectContaining({
+      status: 'sent', reach: 'quote_promised', provider_message_id: 'SM_test_sid', staged_at: '2026-11-17T15:40:00.000Z',
+    })]);
+    expect(conn.queried('activity_log')).toHaveLength(1); // a real send is logged like every other send
+  });
+
+  test('rule B, the earlier row is only a lead record: the text is sent', async () => {
+    const { call, rows } = ruleB();
+    const conn = db(rows);
+    expect((await dispatchClaimedCall(conn, call, NOW)).sent).toBe(true);
+    expect(conn.written).toEqual([expect.objectContaining({ status: 'sent', reach: 'existing_customer' })]);
+  });
+
+  test.each([
+    ['an estimate now exists', { first: { estimate: { id: 'est-1' } } }, {}, 'quote_promised', 'estimate'],
+    ['an invoice exists', { first: { invoice: { id: 'inv-1' } }, customers: [LEAD_ROW] }, {}, 'quote_promised', 'invoice'],
+    ['a row under the number is a customer', { customers: [{ ...LEAD_ROW, pipeline_stage: 'active_customer' }] }, {}, 'quote_promised', 'customer_record'],
+  ])('%s: no text, and the stop is logged', async (_label, rows, over, reason, onFile) => {
+    const conn = db(rows);
+    const result = await dispatchClaimedCall(conn, claimed({ reach: 'quote_promised', ...over }), NOW);
+    expect(result).toEqual({ sent: false, skipped: reason });
+    expect(conn.written).toEqual([expect.objectContaining({ status: 'skipped', reason, on_file: onFile, reach: 'quote_promised' })]);
+    expect(conn.queried('activity_log')).toHaveLength(1); // live: a send-time stop is logged like every other row's
+    expectNothingSent();
+  });
+
+  test('rule B, a visit is on file for that customer: no text', async () => {
+    const { call, rows } = ruleB();
+    const conn = db({ ...rows, first: { visit: { id: 'visit-1' } } });
+    expect(await dispatchClaimedCall(conn, call, NOW)).toEqual({ sent: false, skipped: 'existing_customer' });
+    expect(conn.written[0]).toEqual(expect.objectContaining({ on_file: 'visit' }));
+    expectNothingSent();
+  });
+
+  test('a fee visit is still left out, and a rule that stays still stops the row', async () => {
+    const fee = claimed({ reach: 'quote_promised', ai_extraction_enriched: extraction({ service_request: { quote_promised: true, primary_service_category: 'rodent' } }) });
+    expect((await dispatchClaimedCall(db(), fee, NOW)).skipped).toBe('fee_visit');
+    expect((await dispatchClaimedCall(db({ lead: { ...LEAD, is_commercial: true } }), claimed({ reach: 'quote_promised' }), NOW)).skipped).toBe('commercial_lead');
+    expect((await dispatchClaimedCall(db({ first: { booked: { id: 'visit-9' } } }), claimed({ reach: 'quote_promised' }), NOW)).skipped).toBe('booked_since_call');
+    expectNothingSent();
+  });
+
+  test('the gate as it reads at the send time decides: back to shadow records, off ends as today, neither sends', async () => {
+    callBookingLinkReachMode.mockReturnValue('shadow');
+    const shadow = db();
+    expect((await dispatchClaimedCall(shadow, claimed({ reach: 'quote_promised' }), NOW)).skipped).toBe('reach_shadow_would_send');
+    callBookingLinkReachMode.mockReturnValue('off');
+    const off = db();
+    expect((await dispatchClaimedCall(off, claimed({ reach: 'quote_promised' }), NOW)).skipped).toBe('quote_promised');
+    expect(shadow.queried('activity_log')).toHaveLength(0);
+    expect(off.queried('activity_log')).toHaveLength(0);
+    expectNothingSent();
+  });
+
+  test('a row without the mark is stopped by rules A and B exactly as today', async () => {
+    expect((await dispatchClaimedCall(db(), claimed(), NOW)).skipped).toBe('quote_promised');
+    const tied = db({ lead: { ...LEAD, customer_id: 'cust-old' }, customers: [LEAD_ROW] });
+    expect((await dispatchClaimedCall(tied, claimed({ ai_extraction_enriched: extraction() }), NOW)).skipped).toBe('existing_customer');
+    expect(tied.queried('customers')).toHaveLength(0);
+    expectNothingSent();
+  });
+});
+
+// The last test before the provider request. dispatchClaimedCall hands neverSendRecheck the
+// row's mark and the customers its handoff locked; these cases drive that hook directly.
+describe('neverSendRecheck for a marked row (gate at true)', () => {
+  beforeEach(() => callBookingLinkReachMode.mockReturnValue('true'));
+  const check = (call, rows, options) => neverSendRecheck(call, 'lead-1', PHONE, options)({ dbi: db({ ...rows, freshCall: call }) });
+  const ruleA = claimed({ reach: 'quote_promised' });
+  const ruleB = claimed({ reach: 'existing_customer', customer_id: 'cust-old', ai_extraction_enriched: extraction() });
+  const tied = { lead: { ...LEAD, customer_id: 'cust-old' }, customers: [LEAD_ROW] };
+  const locked = (...ids) => new Set(ids);
+
+  test('rule A: nothing on file, gate at true: the send may go', async () => {
+    await expect(check(ruleA, {}, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual({ ok: true });
+  });
+
+  test('without the mark the same rows are refused by rules A and B, as today', async () => {
+    await expect(check(ruleA, {})).resolves.toEqual({ ok: false, code: 'quote_promised' });
+    await expect(check(ruleB, tied)).resolves.toEqual({ ok: false, code: 'existing_customer' });
+  });
+
+  test('rule B: the lead-record customer is one the handoff locked: the send may go', async () => {
+    await expect(check(ruleB, tied, { reach: 'existing_customer', lockedCustomerIds: locked('cust-old') })).resolves.toEqual({ ok: true });
+  });
+
+  test('a customer under the number that the handoff did not lock defers the row to the next sweep', async () => {
+    const verdict = { ok: false, code: 'candidate_customer_set_changed', retryable: true };
+    await expect(check(ruleB, tied, { reach: 'existing_customer', lockedCustomerIds: locked() })).resolves.toEqual(verdict);
+    // a row another call or form made while the handoff waited for its locks
+    const widened = { ...tied, customers: [LEAD_ROW, { id: 'cust-new', pipeline_stage: 'new_lead', deleted_at: null }] };
+    await expect(check(ruleB, widened, { reach: 'existing_customer', lockedCustomerIds: locked('cust-old') })).resolves.toEqual(verdict);
+    // the customer this call made, set on the call after the handoff read it
+    const made = claimed({ reach: 'quote_promised', metadata: { created_customer_id: 'cust-made' } });
+    await expect(check(made, {}, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual(verdict);
+    await expect(check(made, {}, { reach: 'quote_promised', lockedCustomerIds: locked('cust-made') })).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['a visit', { first: { visit: { id: 'visit-1' } } }],
+    ['an estimate', { first: { estimate: { id: 'est-1' } } }],
+    ['a customer row past the lead stages', { customers: [{ ...LEAD_ROW, pipeline_stage: 'won' }] }],
+  ])('%s that appeared since the send-time check stops the send under the row\'s own rule', async (_label, rows) => {
+    const all = { ...tied, ...rows, customers: rows.customers || tied.customers };
+    await expect(check(ruleB, all, { reach: 'existing_customer', lockedCustomerIds: locked('cust-old') }))
+      .resolves.toEqual({ ok: false, code: 'existing_customer' });
+  });
+
+  // The handoff re-reads and locks the call row. A change that landed while the row waited for its locks is in
+  // that copy only, so the reach tests must read it and not the copy the dispatch began with.
+  const recheckOn = (stale, fresh, options) => neverSendRecheck(stale, 'lead-1', PHONE, options)({ dbi: db({ freshCall: fresh }) });
+
+  test('a fee visit that a later extraction found stops the send', async () => {
+    const fee = claimed({ reach: 'quote_promised', ai_extraction_enriched: extraction({ service_request: { quote_promised: true, secondary_categories: ['wdo'] } }) });
+    await expect(recheckOn(ruleA, fee, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual({ ok: false, code: 'fee_visit' });
+  });
+
+  test('a call the office tied to another customer while the row waited stops the send', async () => {
+    const relinked = { ...ruleA, customer_id: 'cust-elsewhere' };
+    await expect(recheckOn(ruleA, relinked, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual({ ok: false, code: 'quote_promised' });
+  });
+
+  test.each(['shadow', 'off'])('gate reads %s at the last moment: the send is refused under the row\'s own rule', async (mode) => {
+    callBookingLinkReachMode.mockReturnValue(mode);
+    await expect(check(ruleA, {}, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual({ ok: false, code: 'quote_promised' });
+  });
+
+  test('a rule that stays is judged first and keeps its own code', async () => {
+    const booked = { first: { booked: { id: 'visit-9' }, visit: { id: 'visit-9' } } };
+    await expect(check(ruleA, booked, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
+    const commercial = { lead: { ...LEAD, is_commercial: true } };
+    await expect(check(ruleA, commercial, { reach: 'quote_promised', lockedCustomerIds: locked() })).resolves.toEqual({ ok: false, code: 'commercial_lead' });
+  });
+});
+
+// The reader decides who can get a text, so it is tested on the real module (every other test here mocks it).
+// Only the exact word `true` sends, and only the exact word `shadow` records: a typo, `1` or `on` is off.
+describe('callBookingLinkReachMode (the real reader)', () => {
+  const { callBookingLinkReachMode: realMode } = jest.requireActual('../config/feature-gates');
+  const saved = process.env.GATE_CALL_BOOKING_LINK_REACH;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_CALL_BOOKING_LINK_REACH;
+    else process.env.GATE_CALL_BOOKING_LINK_REACH = saved;
+  });
+
+  test.each([
+    [undefined, 'off'], ['', 'off'], ['shadow', 'shadow'], [' Shadow ', 'shadow'], ['true', 'true'], [' TRUE ', 'true'],
+    ['on', 'off'], ['1', 'off'], ['yes', 'off'], ['live', 'off'], ['false', 'off'], ['shadow,true', 'off'],
+  ])('%p reads %s', (value, mode) => {
+    if (value === undefined) delete process.env.GATE_CALL_BOOKING_LINK_REACH;
+    else process.env.GATE_CALL_BOOKING_LINK_REACH = value;
+    expect(realMode()).toBe(mode);
+  });
+});
+
+describe('callerOnFile under the send handoff (lockedIds)', () => {
+  const call = { id: 'call-1', direction: 'inbound', from_phone: PHONE, to_phone: '+19415550199', customer_id: 'cust-old', metadata: { lead_id: 'lead-1' } };
+
+  test('every live row under the number, and the customer the call made, must be locked', async () => {
+    const conn = () => fakeConn({ rows: { customers: [LEAD_ROW] } });
+    expect(await callerOnFile(conn(), { call, leadId: 'lead-1', lockedIds: new Set(['cust-old']) })).toBeNull();
+    expect(await callerOnFile(conn(), { call, leadId: 'lead-1', lockedIds: new Set() })).toBe('unlocked_customer');
+    const made = { ...call, customer_id: 'cust-new', metadata: { lead_id: 'lead-1', created_customer_id: 'cust-new' } };
+    expect(await callerOnFile(conn(), { call: made, leadId: 'lead-1', lockedIds: new Set(['cust-old']) })).toBe('unlocked_customer');
+  });
+
+  test('a deleted row needs no lock, a customer past the lead stages stops first, and no lock list means no lock test', async () => {
+    const deleted = { id: 'cust-gone', pipeline_stage: 'new_lead', deleted_at: new Date('2026-06-01T00:00:00Z') };
+    expect(await callerOnFile(fakeConn({ rows: { customers: [LEAD_ROW, deleted] } }), { call, leadId: 'lead-1', lockedIds: new Set(['cust-old']) })).toBeNull();
+    const customer = fakeConn({ rows: { customers: [{ ...LEAD_ROW, pipeline_stage: 'active_customer' }] } });
+    expect(await callerOnFile(customer, { call, leadId: 'lead-1', lockedIds: new Set() })).toBe('customer_record');
+    expect(await callerOnFile(fakeConn({ rows: { customers: [LEAD_ROW] } }), { call, leadId: 'lead-1' })).toBeNull();
   });
 });

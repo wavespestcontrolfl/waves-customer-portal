@@ -70,7 +70,7 @@ const REASON_LABELS = {
   voicemail_or_spam: 'voicemail or spam',
   link_sent_recently: 'link already sent',
   stale_at_staging: 'too late to send',
-  // GATE_CALL_BOOKING_LINK_REACH (log only): what rules A and B would send, and the fee visits they leave out.
+  // GATE_CALL_BOOKING_LINK_REACH: what rules A and B would send while they only log, and the fee visits they leave out.
   reach_shadow_would_send: 'would send (log only)',
   fee_visit: 'fee visit',
 };
@@ -122,6 +122,8 @@ async function loadWeek(now = new Date()) {
       db.raw('metadata->?->>? AS decided_at', [METADATA_KEY, 'decided_at']),
       db.raw('metadata->?->>? AS staged_at', [METADATA_KEY, 'staged_at']),
       db.raw('metadata->?->>? AS failed', [METADATA_KEY, 'failed']),
+      // Set on a row rules A and B staged (GATE_CALL_BOOKING_LINK_REACH); a sent row keeps it.
+      db.raw('metadata->?->>? AS reach', [METADATA_KEY, 'reach']),
     );
   const job = await db('job_health').where({ job_name: JOB_NAME }).first('last_success_at', 'consecutive_failures');
   // "Not checked" is a standing state, like a stuck send, not a weekly
@@ -182,6 +184,8 @@ function tally({ outcomes, waiting }, now) {
   }
   return {
     sent: outcomes.filter((r) => r.status === 'sent').length,
+    // Of those, the texts only the wider rules A and B allowed.
+    reachSent: outcomes.filter((r) => r.status === 'sent' && r.reach).length,
     errors: outcomes.filter(isError).length,
     stuck,
     waiting: waiting.length - stuck,
@@ -238,7 +242,7 @@ function composeWeeklyCheck({ rows = [], job = null, unchecked = 0 }, now = new 
   const summary = clampSummary(problems.length ? problems.join(' · ') : healthySummary(live.length, t.topSkips));
 
   const detail = [
-    `Last ${WINDOW_DAYS} days: ${live.length} calls checked, ${t.sent} sent, ${t.waiting} waiting to send.`,
+    `Last ${WINDOW_DAYS} days: ${live.length} calls checked, ${t.sent} sent${t.reachSent ? ` (${t.reachSent} by the wider rules)` : ''}, ${t.waiting} waiting to send.`,
     `Problems: ${t.stuck} stuck, ${t.errors} errors, ${t.unchecked} not checked; sweep last succeeded ${sweep.lastSuccess ? hoursAgo(sweep.lastSuccess, now) : 'never'}${sweep.failing ? ', last run failed' : ''}.`,
     'Skipped:',
     ...(t.topSkips.length ? t.topSkips.map(([label, n]) => `  ${label}: ${n}`) : ['  none']),

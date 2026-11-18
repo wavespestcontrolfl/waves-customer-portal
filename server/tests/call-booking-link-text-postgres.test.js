@@ -1777,7 +1777,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
   // five tables' real column names), and that the reach mark survives the
   // real jsonb writes from staging through the claim to the final skip.
   // feature-gates is not mocked in this file, so the gate is read for real.
-  describe('reach rules A and B (GATE_CALL_BOOKING_LINK_REACH=shadow)', () => {
+  describe('reach rules A and B (GATE_CALL_BOOKING_LINK_REACH)', () => {
     const { callerOnFile } = callBookingLinkText._private;
     const QUOTE_PROMISED = { ...eligibleExtraction(), service_request: { service_intent: 'inspection_only', quote_promised: true } };
     const STAGED_AT = new Date('2027-01-15T15:55:00.000Z'); // send time lands ~3 minutes before NOW
@@ -1934,6 +1934,141 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       expect(quoteEntry).toMatchObject({ status: 'skipped', reason: 'quote_promised' });
       expect(quoteEntry).not.toHaveProperty('reach');
       expect(await entryOf(leadCallId)).toMatchObject({ status: 'skipped', reason: 'existing_customer' });
+    });
+
+    // Gate at `true`: a marked row that passed every test goes through the real
+    // locked handoff. sendCustomerMessage is mocked, so this stand-in runs the
+    // hooks the real sender runs, in its order: withSmsHandoff (the locks), then
+    // providerPreSendCheck (neverSendRecheck) on the handoff's own transaction,
+    // then onDispatchStart. `inHandoff` runs once the locks are held and before
+    // that last check: the gap a writer on another connection can still land in.
+    describe('gate at true: a marked row is sent through the locked handoff', () => {
+      beforeEach(() => { process.env.GATE_CALL_BOOKING_LINK_REACH = 'true'; });
+
+      const SENT = { sent: true, providerMessageId: 'SMtest000000000000000000000000r' };
+      const sendThroughHandoff = (inHandoff = async () => {}) => sendCustomerMessage.mockImplementation(
+        async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+          const verdict = await withSmsHandoff(async (trx) => {
+            await inHandoff();
+            const v = await providerPreSendCheck({ dbi: trx });
+            if (v.ok) await onDispatchStart();
+            return v;
+          });
+          return verdict.ok ? { ...SENT, deliveryOutcome: 'accepted' } : { sent: false, deliveryOutcome: 'not_sent', ...verdict };
+        },
+      );
+      // A row already claimed for its send time, one hour overdue.
+      const claimedRow = async (phone, { reach, customerId = null, extraction = eligibleExtraction() } = {}) => {
+        const leadId = await insertLead(mockPg, { phone, customer_id: customerId });
+        const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+        const callId = await insertCall(mockPg, {
+          from_phone: phone, customer_id: customerId, ai_extraction_enriched: extraction,
+          metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at, reach } },
+        });
+        buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-reach', line: 'Pick a time.\n\n', phone });
+        const dispatch = async () => callBookingLinkText.dispatchClaimedCall(mockPg, await mockPg('call_log').where({ id: callId }).first(), NOW);
+        return { leadId, callId, dispatch };
+      };
+
+      test('rule A: a quote-promised call with nothing on file is staged, claimed and sent, and keeps its mark', async () => {
+        const leadId = await insertLead(mockPg, { phone: '+15555550451' });
+        const callId = await insertCall(mockPg, {
+          from_phone: '+15555550451', metadata: { lead_id: leadId }, ai_extraction_enriched: QUOTE_PROMISED, created_at: STAGED_AT, updated_at: STAGED_AT,
+        });
+        buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-reach', line: 'Pick a time.\n\n', phone: '+15555550451' });
+        sendThroughHandoff();
+
+        expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
+        expect(await callBookingLinkText.claimForDispatch(mockPg, callId)).toBe(true);
+        const claimed = await mockPg('call_log').where({ id: callId }).first();
+        expect(await callBookingLinkText.dispatchClaimedCall(mockPg, claimed, NOW)).toEqual(SENT);
+
+        expect(await entryOf(callId)).toMatchObject({ status: 'sent', reach: 'quote_promised', lead_id: leadId, provider_message_id: SENT.providerMessageId });
+        expect((await mockPg('activity_log')).map((row) => row.action)).toEqual(['call_booking_link_text_sent']);
+        expect(await mockPg('call_booking_link_text_handoffs').where({ call_log_id: callId })).toHaveLength(1);
+        expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ to: '+15555550451', leadId, audience: 'lead' });
+      });
+
+      // The lock fence for rule B. Today the handoff's locked customers are
+      // complete because rule B refuses a lead tied to any earlier customer. A
+      // marked row is tied to exactly such a customer, so this proves the handoff
+      // locks it (it is a live row under the number) and that the last check then
+      // reads its records: a booking writer that holds that customer's comms lock
+      // makes the handoff wait, and its visit, committed while the handoff waited,
+      // stops the send. The visit is dated before the call, so the staying
+      // booked_since_call rule cannot be what stops it.
+      test('rule B: a booking writer holding customer-comms for the earlier lead-record customer makes the handoff wait, then its visit stops the send', async () => {
+        const customerId = await insertCustomer({ phone: '(555) 555-0452' });
+        const row = await claimedRow('+15555550452', { reach: 'existing_customer', customerId });
+        sendThroughHandoff();
+        const { lockCustomerComms } = require('../utils/customer-comms-lock');
+        let releaseWriter;
+        const writerHeld = new Promise((resolve) => { releaseWriter = resolve; });
+        const writer = mockPg.transaction(async (trx) => {
+          await lockCustomerComms(trx, customerId);
+          await trx('scheduled_services').insert({
+            id: randomUUID(), customer_id: customerId, scheduled_date: '2027-01-20', service_type: 'Pest Control', status: 'pending',
+            created_at: new Date(NOW.getTime() - 24 * 60 * 60 * 1000),
+          });
+          await writerHeld;
+        });
+        await new Promise((r) => setTimeout(r, 100));
+
+        let settled = false;
+        const dispatching = row.dispatch().then((result) => { settled = true; return result; });
+        try {
+          await new Promise((r) => setTimeout(r, 300));
+          expect(settled).toBe(false); // waiting on the customer's comms lock, not sending past it
+        } finally {
+          // Always let the writer commit: a failed check must not leave its transaction open under the suite.
+          releaseWriter();
+          await writer;
+        }
+
+        expect(await dispatching).toEqual({ sent: false, skipped: 'existing_customer' });
+        expect(await entryOf(row.callId)).toMatchObject({ status: 'skipped', reason: 'existing_customer', reach: 'existing_customer' });
+        expect(await mockPg('call_booking_link_text_handoffs')).toHaveLength(0);
+      }, 10000);
+
+      test('a customer row made under the number after the handoff took its locks defers the row, and the next attempt locks it and sends', async () => {
+        const row = await claimedRow('+15555550453', { reach: 'quote_promised', extraction: QUOTE_PROMISED });
+        let lateCustomerId = null;
+        sendThroughHandoff(async () => {
+          if (!lateCustomerId) lateCustomerId = await insertCustomer({ phone: '555-555-0453' });
+        });
+
+        expect(await row.dispatch()).toEqual({ sent: false, skipped: 'candidate_customer_set_changed', deferred: true });
+        expect(await entryOf(row.callId)).toMatchObject({ status: 'pending', reach: 'quote_promised' });
+        expect(await mockPg('call_booking_link_text_handoffs')).toHaveLength(0);
+        expect(await mockPg('activity_log')).toHaveLength(0);
+
+        expect(await callBookingLinkText.claimForDispatch(mockPg, row.callId)).toBe(true);
+        expect(await row.dispatch()).toEqual(SENT);
+        expect(await entryOf(row.callId)).toMatchObject({ status: 'sent', reach: 'quote_promised' });
+      });
+
+      test('an estimate written for the number while the handoff holds its locks stops the send under the row\'s own rule', async () => {
+        const row = await claimedRow('+15555550454', { reach: 'quote_promised', extraction: QUOTE_PROMISED });
+        sendThroughHandoff(() => mockPg('estimates').insert({ id: randomUUID(), status: 'draft', customer_phone: '555-555-0454', created_at: NOW }));
+
+        expect(await row.dispatch()).toEqual({ sent: false, skipped: 'quote_promised' });
+        expect(await entryOf(row.callId)).toMatchObject({ status: 'skipped', reason: 'quote_promised', reach: 'quote_promised' });
+        expect(await mockPg('call_booking_link_text_handoffs')).toHaveLength(0);
+      });
+
+      test('a row without the mark tied to an earlier customer is still refused, at the send-time check and at the last check', async () => {
+        const customerId = await insertCustomer({ phone: '+15555550455' });
+        const row = await claimedRow('+15555550455', { customerId });
+        sendThroughHandoff();
+        expect(await row.dispatch()).toEqual({ sent: false, skipped: 'existing_customer' });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+        // The lead is tied to the customer only once the handoff holds its locks.
+        const late = await claimedRow('+15555550456');
+        const lateCustomerId = await insertCustomer({ phone: '+15555550456' });
+        sendThroughHandoff(() => mockPg('leads').where({ id: late.leadId }).update({ customer_id: lateCustomerId }));
+        expect(await late.dispatch()).toEqual({ sent: false, skipped: 'existing_customer' });
+      });
     });
   });
 
