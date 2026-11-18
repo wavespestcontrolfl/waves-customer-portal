@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Trip link (GATE_TRIP_LINK, owner "TRIP LINK" and "BOTH" 2026-10-26).
+ * Trip link (owner "TRIP LINK" and "BOTH" 2026-10-26).
  *
  * Links each Bouncie trip and truck stop to the completed visit it served, and stores, per visit, the truck's GPS
  * arrival and departure, the GPS minutes on site, and the drive minutes and miles that got it there
@@ -9,8 +9,7 @@
  * job cost reads visit_gps_legs; the mileage review may read the suggestions.
  *
  * SHADOW DATA ONLY. This file writes visit_gps_legs and trip_links and nothing else: never mileage_log,
- * scheduled_services, job_costs, customer pins or alerts, and it sends nothing. Gate off: the nightly job reads
- * nothing and writes nothing (runTripLinkNightly). linkDay itself is gate-agnostic so the backfill script can call it.
+ * scheduled_services, job_costs, customer pins or alerts, and it sends nothing.
  *
  * One ET day, one technician at a time:
  *   1. The vehicle's stops that start that day (a gap of 5+ minutes between two trips, bouncie-truck-stops.js) and
@@ -30,7 +29,6 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const gates = require('../config/feature-gates');
 const { distanceMeters, loadArrivalConfig } = require('./gps-arrival-detector');
 const truckStops = require('./bouncie-truck-stops');
 const ctx = require('./visit-gps-context');
@@ -47,7 +45,6 @@ const LATE_CLOSE_DAYS = 7;
 const MS_PER_MIN = 60000;
 const INSERT_CHUNK = 200;
 
-const tripLinkLive = () => typeof gates.tripLinkLive === 'function' && gates.tripLinkLive();
 // The key of the completed visits that have no technician: they are recorded as 'no_vehicle' rows with no technician.
 const UNASSIGNED = 'unassigned';
 const NO_TECHNICIAN = { id: null, imei: '', changedAt: null };
@@ -410,9 +407,8 @@ async function lateArrivals(conn, now) {
   return rows.map((row) => row.arrived_at);
 }
 
-/** The nightly run (see nightlyDays). Gate off = nothing is read and nothing is written. */
+/** The nightly run (see nightlyDays). */
 async function runTripLinkNightly({ now = new Date(), conn = db } = {}) {
-  if (!tripLinkLive()) return { skipped: 'gated' };
   const [day, ...again] = nightlyDays(now, await lateArrivals(conn, now));
   const summary = await linkDay(conn, day, { now });
   const relinked = [];
@@ -431,5 +427,5 @@ async function runTripLinkNightly({ now = new Date(), conn = db } = {}) {
 
 module.exports = {
   linkDay, runTripLinkNightly, nightlyDays, lateArrivals, computeDay, matchVisit, visitWindow, driveLeg, kindOfPoint, purposeFor, groupVisits,
-  tripLinkLive, ALGORITHM_VERSION, WINDOW_BEFORE_MIN, WINDOW_AFTER_MIN, LATE_CLOSE_DAYS,
+  ALGORITHM_VERSION, WINDOW_BEFORE_MIN, WINDOW_AFTER_MIN, LATE_CLOSE_DAYS,
 };

@@ -12,7 +12,7 @@
  * and without it a SWFL grid street that repeats across cities could pin the
  * wrong city's house.
  *
- * Behind GATE_GEOCODE_COUNTY_FALLBACK at every caller. Throws on a county
+ * Callers: customer-geocode-review.js and geocoder-county-fallback.js. Throws on a county
  * outage so a caller never reads an outage as "no lot". No address text in
  * logs (PII rule).
  */

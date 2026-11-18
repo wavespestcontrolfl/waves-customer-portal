@@ -301,9 +301,9 @@ async function filterServiceReviewBlocks(rows, conn = db) {
 // Google's permanent "no street-level pin" answers: the county roll may still know the lot.
 const COUNTY_FALLBACK_REASON = /^(?:partial_match|no_result|coarse_result:)/;
 
-/** { lot, checked } from the county roll, or null (gate off, not eligible, or a county outage: nothing is learned). */
+/** { lot, checked } from the county roll, or null (not eligible, or a county outage: nothing is learned). */
 async function countyLotLookup(customer, result = { location: null, permanent: true }) {
-  if (result.location || !result.permanent || require('../config/feature-gates').geocodeCountyFallbackLive?.() !== true
+  if (result.location || !result.permanent
     || !COUNTY_FALLBACK_REASON.test(result.reason || '') || !completeAddress(customer)) return null;
   try {
     const lot = await require('./property-lookup/county-lot-pin').countyLotPinForAddress(customer);
@@ -393,7 +393,7 @@ function countyCheckedSince(evidence, cutoff) {
  */
 async function retryCountyNeedsPin({ limit = COUNTY_RETRY_BATCH, now = new Date(), conn = db } = {}) {
   const results = { checked: 0, pinned: 0, customerIds: [] };
-  if (!reviewEnabled() || require('../config/feature-gates').geocodeCountyFallbackLive?.() !== true) return results;
+  if (!reviewEnabled()) return results;
   const cutoff = new Date(now.getTime() - COUNTY_RETRY_DAYS * 86400000).toISOString();
   const query = conn('customer_geocode_reviews as r').join('customers as c', 'c.id', 'r.customer_id')
     .whereNull('c.deleted_at').where('r.status', 'needs_pin').whereNull('r.reviewed_by')

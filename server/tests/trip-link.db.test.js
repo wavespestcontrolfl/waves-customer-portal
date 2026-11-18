@@ -1,6 +1,6 @@
-// Trip link (GATE_TRIP_LINK) through PostgreSQL: the migration (up, down, up, constraints), linkDay end to end from
+// Trip link through PostgreSQL: the migration (up, down, up, constraints), linkDay end to end from
 // bouncie_webhook_log trip-data events, mileage_log rows, technicians, customers and completed visits; a re-run is
-// idempotent and replaces the day; gate off writes nothing; a dry run writes nothing; the tracker remap rule; and the
+// idempotent and replaces the day; a dry run writes nothing; the tracker remap rule; and the
 // admin summary numbers. Every write runs in a transaction that is rolled back. Synthetic customers, coordinates
 // and vehicle ids only. Skips without DATABASE_URL (CI runs it against the migrated database).
 const SKIP = !process.env.DATABASE_URL;
@@ -59,13 +59,11 @@ describeDb('trip link (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockPg = await database.transaction();
-    delete process.env.GATE_TRIP_LINK;
     gps._test.resetConfigCache();
     await mockPg('geo_fences').del(); // the seeded business fences are real places; none of them is near this fixture
   });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => {
-    delete process.env.GATE_TRIP_LINK;
     if (server) await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     if (database) await database.destroy();
   });
@@ -300,16 +298,13 @@ describeDb('trip link (PostgreSQL)', () => {
     await backfill.run(['--from', DAY, '--to', DAY, '--dry-run'], { conn: mockPg, log: out });
     expect(await counts()).toEqual({ legs: 0, links: 0 });
     expect(out.mock.calls.at(-1)[0]).toMatch(/DRY RUN/);
-    await backfill.run(['--from', DAY, '--to', DAY, '--force-shadow'], { conn: mockPg, log: out });
+    await backfill.run(['--from', DAY, '--to', DAY], { conn: mockPg, log: out });
     expect(await counts()).toEqual({ legs: 3, links: 4 });
   });
 
-  test('the nightly run: gate off reads and writes nothing, gate on links yesterday and the day before again', async () => {
+  test('the nightly run links yesterday and the day before again', async () => {
     await fixture();
     const now = new Date('2026-10-09T05:40:00Z'); // 01:40 ET on Oct 9
-    expect(await tripLink.runTripLinkNightly({ now, conn: mockPg })).toEqual({ skipped: 'gated' });
-    expect(await counts()).toEqual({ legs: 0, links: 0 });
-    process.env.GATE_TRIP_LINK = 'true';
     const result = await tripLink.runTripLinkNightly({ now, conn: mockPg });
     expect(result).toMatchObject({ day: DAY, trips: 4, relinked: [{ day: '2026-10-07', trips: 0, errors: 0 }] });
     expect(await counts()).toEqual({ legs: 3, links: 4 });
@@ -336,7 +331,6 @@ describeDb('trip link (PostgreSQL)', () => {
     // The night after the close-out re-links the worked day (four days back).
     await mockPg('visit_gps_legs').del();
     await mockPg('trip_links').del();
-    process.env.GATE_TRIP_LINK = 'true';
     const night = await tripLink.runTripLinkNightly({ now: new Date('2026-10-12T05:40:00Z'), conn: mockPg });
     expect(night.relinked.map((r) => r.day)).toEqual(['2026-10-10', DAY]);
     expect(await legOf(f.ids.b)).toMatchObject({ status: 'matched' });
@@ -421,7 +415,7 @@ describeDb('trip link (PostgreSQL)', () => {
     await link();
     expect(await legOf(loose)).toMatchObject({ technician_id: f.tech });
     expect(Number((await mockPg('visit_gps_legs').whereNull('technician_id').count({ n: '*' }).first()).n)).toBe(0);
-    const { body } = await (async () => { process.env.GATE_TRIP_LINK = 'true'; return summary(); })();
+    const { body } = await summary();
     expect(body.services).toBe(4);
   });
 
@@ -459,7 +453,7 @@ describeDb('trip link (PostgreSQL)', () => {
   });
 
   // ---- the summary route ----
-  test('the summary: gate off answers 404; on, the counts, medians and trip tallies', async () => {
+  test('the summary: the counts, medians and trip tallies', async () => {
     const f = await fixture();
     const far = await customer(north(9000));
     const noPin = await customer(null);
@@ -468,9 +462,6 @@ describeDb('trip link (PostgreSQL)', () => {
     await visit(noPin, f.tech, '15:00', '14:55');
     await visit(await customer(PIN), other, '14:48', '14:22');
     await link();
-    expect((await summary()).status).toBe(404);
-
-    process.env.GATE_TRIP_LINK = 'true';
     const { status, body } = await summary();
     expect(status).toBe(200);
     expect(body).toMatchObject({ from: DAY, to: DAY, days: 1, services: 6, visits: 5, matched_pct: 40 });

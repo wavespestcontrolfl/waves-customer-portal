@@ -1,4 +1,4 @@
-/** Hourly county pass: property pins, the visit pins they feed, and the needs_pin retry (GATE_GEOCODE_COUNTY_FALLBACK). */
+/** Hourly county pass: property pins, the visit pins they feed, and the needs_pin retry (needs GATE_GEOCODE_REVIEW). */
 let mockRecorded;
 let mockConfig;
 jest.mock('../models/db', () => {
@@ -74,7 +74,6 @@ function callbackCalls(fn) {
 let state;
 beforeEach(() => {
   process.env.GATE_GEOCODE_REVIEW = 'true';
-  process.env.GATE_GEOCODE_COUNTY_FALLBACK = 'true';
   db.mockClear();
   mockRecorded = [];
   state = { candidates: [], customer: customerRow(), review: undefined, prune: [], primaries: [], sourceProperty: sourceProperty(),
@@ -105,7 +104,7 @@ beforeEach(() => {
   refreshScheduleQualityAfterChange.mockClear();
   _unresolvedProperties.clear();
 });
-afterAll(() => { delete process.env.GATE_GEOCODE_REVIEW; delete process.env.GATE_GEOCODE_COUNTY_FALLBACK; });
+afterAll(() => { delete process.env.GATE_GEOCODE_REVIEW; });
 
 describe('sweepUnpinnedProperties', () => {
   test('only active unpinned properties of live customers are asked for, at most 25, behind the review fences', async () => {
@@ -284,11 +283,6 @@ describe('sweepUnpinnedProperties', () => {
     expect(propertyWrites()).toHaveLength(0);
   });
 
-  test('gate off: no query, no county call', async () => {
-    delete process.env.GATE_GEOCODE_COUNTY_FALLBACK;
-    expect(await sweepUnpinnedProperties()).toEqual({ checked: 0, pinned: 0, unresolved: 0 });
-    expect(db).not.toHaveBeenCalled();
-  });
 });
 
 describe('sweepPropertyVisitPins', () => {
@@ -385,13 +379,6 @@ describe('sweepPropertyVisitPins', () => {
     expect(emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
     expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ dates: ['2026-11-06'], now: NOW }, db);
   });
-
-  test('gate off: no query, no write', async () => {
-    delete process.env.GATE_GEOCODE_COUNTY_FALLBACK;
-    expect(await sweepPropertyVisitPins({ now: NOW })).toEqual({ checked: 0, pinned: 0, stale: 0, failed: 0 });
-    expect(db).not.toHaveBeenCalled();
-    expect(persistServicePin).not.toHaveBeenCalled();
-  });
 });
 
 describe('sweepCountyFallback', () => {
@@ -403,13 +390,6 @@ describe('sweepCountyFallback', () => {
     expect(await sweepUnpinnedProperties()).toEqual({ checked: 0, pinned: 0, unresolved: 0 });
     expect(await sweepPropertyVisitPins({ now: NOW })).toEqual({ checked: 0, pinned: 0, stale: 0, failed: 0 });
     expect(db).not.toHaveBeenCalled();
-  });
-
-  test('gate off: does nothing at all', async () => {
-    delete process.env.GATE_GEOCODE_COUNTY_FALLBACK;
-    expect(await sweepCountyFallback()).toBeNull();
-    expect(db).not.toHaveBeenCalled();
-    expect(countyLotPinForAddress).not.toHaveBeenCalled();
   });
 
   test('a failing needs_pin retry never blocks the property sweep or the visit pass', async () => {

@@ -3,7 +3,7 @@
 /**
  * What both truck-evidence jobs share about a completed visit and its vehicle: where the visit was supposed to
  * be, one row per physical visit, ET day bounds, the vehicle's home base, the active geo-fences and the tracker
- * remap rule. Moved out of pin-parked-check.js (GATE_PIN_PARKED_CHECK) so trip-link.js (GATE_TRIP_LINK) reads the
+ * remap rule. Moved out of pin-parked-check.js (GATE_PIN_PARKED_CHECK) so trip-link.js reads the
  * same facts the same way. Pure reads: nothing here writes.
  */
 const { distanceMeters, validLatitude, validLongitude } = require('./gps-arrival-detector');

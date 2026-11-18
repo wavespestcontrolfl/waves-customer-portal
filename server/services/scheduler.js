@@ -1383,8 +1383,8 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`[geocoder] service-location backstop failed (${err.code || 'service_sweep_error'}): ${err.message}`);
         }
-        // County-roll pins (GATE_GEOCODE_COUNTY_FALLBACK, dark): runs after the existing sweeps, and a
-        // customer sweep failure must not suppress it. It never throws; gate off it does nothing.
+        // County-roll pins: runs after the existing sweeps, and a
+        // customer sweep failure must not suppress it. It never throws; while GATE_GEOCODE_REVIEW is off it does nothing.
         let customerSweepError = null;
         try {
           await sweepUngeocodedCustomers();
@@ -2647,11 +2647,11 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // DAILY 01:40 — trip link (GATE_TRIP_LINK, dark): links yesterday's Bouncie trips and truck stops, and the day
+  // DAILY 01:40 — trip link: links yesterday's Bouncie trips and truck stops, and the day
   // before's again (trip events can arrive late), to the completed visits they served and stores the GPS minutes on
   // site, drive minutes and drive miles per visit (visit_gps_legs) and a business / personal suggestion per trip
   // (trip_links). Shadow data: it writes only those two tables, never mileage_log, scheduled_services, job_costs,
-  // pins or alerts, and sends nothing. Gate read per run; off = the run returns before any query. runExclusive records
+  // pins or alerts, and sends nothing. runExclusive records
   // the job health. Right after it, inside the same lease, the tick re-costs the visits just linked
   // (GATE_TECH_OPEN_TIME, dark; job job-cost-recost) so their drive minutes and miles reach job costs.
   //

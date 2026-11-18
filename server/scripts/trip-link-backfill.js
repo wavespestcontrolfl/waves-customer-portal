@@ -1,27 +1,24 @@
 #!/usr/bin/env node
 //
-// Trip link backfill (GATE_TRIP_LINK). WRITES visit_gps_legs and trip_links, and nothing else.
+// Trip link backfill. WRITES visit_gps_legs and trip_links, and nothing else.
 //
 // Links each Bouncie trip and truck stop of every ET day from --from to --to (at most 120 days per run, inclusive) to
 // the completed visit it served, exactly as the 01:40 ET nightly job does for yesterday. Derived data only: it never
 // writes mileage_log, scheduled_services, job_costs, pins or alerts and sends nothing. A re-run replaces each day.
 //
-//   node server/scripts/trip-link-backfill.js --from 2026-10-01 --to 2026-10-25 [--dry-run] [--force-shadow]
+//   node server/scripts/trip-link-backfill.js --from 2026-10-01 --to 2026-10-25 [--dry-run]
 //
 // --dry-run   computes and prints the summary; writes nothing.
-// Writing needs GATE_TRIP_LINK=true in the environment the script runs in; with the gate off it refuses unless
-// --force-shadow is passed (it only writes these two derived tables).
 require('dotenv').config();
 
 const MAX_DAYS = 120;
 const DAY_MS = 86400000;
 
 function parseArgs(argv) {
-  const opts = { from: null, to: null, dryRun: false, forceShadow: false };
+  const opts = { from: null, to: null, dryRun: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') opts.dryRun = true;
-    else if (arg === '--force-shadow') opts.forceShadow = true;
     else if (arg === '--from' || arg === '--to') { opts[arg.slice(2)] = argv[i + 1]; i += 1; }
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -40,17 +37,13 @@ function daysBetween(from, to) {
 
 /**
  * @param {string[]} argv
- * @param {{conn?:object, log?:Function, linkDay?:Function, gateOn?:Function}} deps injectable for tests
+ * @param {{conn?:object, log?:Function, linkDay?:Function}} deps injectable for tests
  */
 async function run(argv, deps = {}) {
   const opts = parseArgs(argv);
   const days = daysBetween(opts.from, opts.to);
   const tripLink = require('../services/trip-link');
-  const gateOn = deps.gateOn || tripLink.tripLinkLive;
   const log = deps.log || console.log;
-  if (!opts.dryRun && !gateOn() && !opts.forceShadow) {
-    throw new Error('GATE_TRIP_LINK is not "true" here, so nothing was written. Pass --force-shadow to write the two derived tables anyway.');
-  }
   const conn = deps.conn || require('../models/db');
   const linkDay = deps.linkDay || tripLink.linkDay;
   const total = { days: days.length, technicians: 0, trips: 0, errors: 0, legs: { total: 0, matched: 0, no_vehicle: 0, no_destination: 0, no_stop: 0, ambiguous: 0 } };
