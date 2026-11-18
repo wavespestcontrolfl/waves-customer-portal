@@ -1,4 +1,4 @@
-// GATE_PORTAL_ASK_PUSH on POST /api/requests: a customer's own submission also pages the admin phones once its bell
+// The phone page on POST /api/requests: a customer's own submission also pages the admin phones once its bell
 // row exists. A withheld or failed bell pages nobody. (Staff-made requests do not come through this customer route.)
 /**
  * A portal request's confirmation text and email give the same reply time as the portal chat: one business
@@ -25,7 +25,7 @@ jest.mock('../services/cancellation-resolution/resolve', () => ({ situationalHar
 jest.mock('../services/messaging/gsm-normalize', () => ({ gsmSafeName: (s) => s }));
 jest.mock('../services/reservice-link', () => ({ reserviceStreamlineAccess: jest.fn(async () => null) }));
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), portalAskPushLive: () => process.env.GATE_PORTAL_ASK_PUSH === 'true' }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
 jest.mock('../services/customer-photo-id-evidence', () => ({ requestPhotoIdEvidence: jest.fn() }));
 jest.mock('../middleware/auth', () => {
@@ -77,8 +77,7 @@ async function post(body) {
 
 const pushes = () => triggerNotification.mock.calls.filter(([key]) => key === 'portal_ask');
 const body = { category: 'pest_issue', subject: 'Ants in the kitchen', description: 'Trail along the counter. Call 941-555-0100', urgency: 'routine' };
-beforeEach(() => { process.env.GATE_PORTAL_ASK_PUSH = 'true'; require('../services/portal-ask-push').__private.resetPageLimits(); });
-afterEach(() => { delete process.env.GATE_PORTAL_ASK_PUSH; });
+beforeEach(() => { require('../services/portal-ask-push').__private.resetPageLimits(); });
 
 test('a new request rings the bell and sends one pushOnly page: first name and last initial, no description, no phone', async () => {
   const res = await post(body);
@@ -101,13 +100,6 @@ test('a new request rings the bell and sends one pushOnly page: first name and l
 test('an urgent request says so', async () => {
   await post({ ...body, urgency: 'urgent' });
   expect(pushes()[0][1].title).toBe('Answer an urgent portal request');
-});
-
-test('gate off: the bell rings and no push is sent', async () => {
-  delete process.env.GATE_PORTAL_ASK_PUSH;
-  expect((await post(body)).status).toBe(201);
-  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-  expect(triggerNotification).not.toHaveBeenCalled();
 });
 
 test.each([

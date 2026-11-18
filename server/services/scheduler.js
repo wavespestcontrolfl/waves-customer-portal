@@ -5682,7 +5682,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 8AM — Morning banner (GATE_MORNING_BANNER; returns before any read when off). Owner
+  // DAILY 8AM — Morning banner. Owner
   // 2026-11-03 ("ok add", choice C): ONE phone banner says how many items wait for the owner and
   // opens his alert list. Push only, admin phones only, nothing when zero wait. runExclusive stops
   // two instances running together; the send itself takes a per-ET-day sms_send_claims row, so a
@@ -5690,7 +5690,6 @@ function initScheduledJobs() {
   // nothing to a customer.
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {
-    if (!require('../config/feature-gates').morningBannerLive()) return;
     try {
       // runMorningBanner logs its own one line with the count.
       await runExclusive('morning-banner', () => require('./morning-banner').runMorningBanner());

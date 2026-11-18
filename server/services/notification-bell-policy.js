@@ -44,7 +44,11 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // denylisted internal_admin_alert redirect, which silenced them.
   'relay_hot_lead',                 // a caller told Sandy about an emergency; the page she promises the caller
   'relay_reservice_filed',          // a customer asked Sandy for a re-service; the ticket's phone page
-  'portal_ask',                     // a customer asked inside the app (chat hand-off, service request, estimate request); the phone page, pushOnly (GATE_PORTAL_ASK_PUSH)
+  'portal_ask',                     // a customer asked inside the app (chat hand-off, service request, estimate request); the phone page, pushOnly
+  // Owner 2026-11-03, "ok add", choice C: "At 8 AM, one banner tells you how many items wait for you, and it opens your
+  // alert list". The morning summary is the one non-customer phone banner the owner asked for. It is pushOnly, so it
+  // never writes a bell row, but the policy still gates the push once per event.
+  'waiting_summary',
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
   'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money
@@ -59,11 +63,6 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
 // Owner 2026-10-29, "small" E1: a customer's invoice payment that failed at checkout,
 // bank or card, rings beside payment_failed under the same 09-11 ruling.
 const GATED_TRIGGER_BELL_ALLOWLIST = new Set(['bill_payment_error']);
-
-// GATE_MORNING_BANNER (owner 2026-11-03, "ok add", choice C: "At 8 AM, one banner tells you how many items wait for you,
-// and it opens your alert list"): the morning summary is the one non-customer phone banner the owner asked for. It is
-// pushOnly, so it never writes a bell row, but the policy still gates the push once per event. Read only while the gate is on.
-const MORNING_BANNER_TRIGGER_BELL_ALLOWLIST = new Set(['waiting_summary']);
 
 // GATE_OWNER_NUDGE_BANNER (owner 2026-11-04, "banner": the owner's 7 PM open-visit nudge arrives as a phone banner instead of
 // a text): pushOnly like the morning banner, so no bell row, but the policy still gates the push once per event. Read only
@@ -259,13 +258,11 @@ function ringsAsCustomerAlert({ triggerKey = null, declared = null } = {}) {
   return declared?.contact === true || declared?.promise === true || GATED_TRIGGER_BELL_ALLOWLIST.has(triggerKey);
 }
 
-// A trigger on the always-ringing allowlist, or on a banner's while its gate is on (GATE_MORNING_BANNER,
-// GATE_OWNER_NUDGE_BANNER; read at call time; guarded: a test that mocks feature-gates
-// without the reader reads it as off).
+// A trigger on the always-ringing allowlist, or on a banner's while its gate is on (GATE_OWNER_NUDGE_BANNER; read at
+// call time; guarded: a test that mocks feature-gates without the reader reads it as off).
 function onAllowlist(triggerKey) {
   if (TRIGGER_BELL_ALLOWLIST.has(triggerKey)) return true;
-  const reader = MORNING_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey) ? 'morningBannerLive'
-    : OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey) ? 'ownerNudgeBannerLive' : null;
+  const reader = OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST.has(triggerKey) ? 'ownerNudgeBannerLive' : null;
   if (!reader) return false;
   const gates = require('../config/feature-gates');
   return typeof gates[reader] === 'function' && gates[reader]();
@@ -301,7 +298,6 @@ module.exports = {
   _private: {
     TRIGGER_BELL_ALLOWLIST,
     GATED_TRIGGER_BELL_ALLOWLIST,
-    MORNING_BANNER_TRIGGER_BELL_ALLOWLIST,
     OWNER_NUDGE_BANNER_TRIGGER_BELL_ALLOWLIST,
     TRIGGER_BELL_DENYLIST,
     CATEGORY_BELL_ALLOWLIST,

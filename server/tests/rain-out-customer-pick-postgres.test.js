@@ -194,6 +194,31 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     expect(await loaded()).toContain(serviceId);
   });
 
+  // Owner 2026-11-17 ("pick limit"): the fallback booking may place a visit at the move limit.
+  test('a visit Auto-Dispatch already moved twice (the default limit) is handed off, and the night run may then place it', async () => {
+    await insertVisit();
+    const moved = { scheduled_service_id: serviceId, customer_id: customerId, reason_code: 'auto_dispatch', initiated_by: 'auto_dispatch', original_window: '09:00-10:00', new_window: '13:00-14:00' };
+    await trx('reschedule_log').insert([
+      { ...moved, original_date: today, new_date: today },
+      { ...moved, original_date: today, new_date: today, original_window: '13:00-14:00', new_window: '09:00-10:00' },
+    ]);
+    expect((await handOff()).ok).toBe(true);
+
+    const moveLimit = require('../services/auto-dispatch/move-limit');
+    const config = { maxAutoMovesPerVisit: 2 };
+    const refuse = (id, why) => new Error(`${id} ${why}`);
+    await trx('scheduled_services').where({ id: serviceId }).update({ customer_pick_by: new Date(Date.now() - 60 * 1000) });
+    const unplaced = await trx('scheduled_services').where({ id: serviceId }).first();
+    expect(moveLimit.limitSkip(unplaced, await moveLimit.loadMoveCounts(trx, [serviceId], config), config)).toBeNull();
+    await expect(moveLimit.assertUnderLimit(trx, [unplaced], config, refuse)).resolves.toBeUndefined();
+
+    // Once the row has a window it counts again, though customer_pick_by stays set.
+    await trx('scheduled_services').where({ id: serviceId }).update({ window_start: '09:00', window_end: '10:00' });
+    const placed = await trx('scheduled_services').where({ id: serviceId }).first();
+    expect(moveLimit.limitSkip(placed, await moveLimit.loadMoveCounts(trx, [serviceId], config), config)).toMatchObject({ reason_code: 'MOVE_LIMIT_REACHED' });
+    await expect(moveLimit.assertUnderLimit(trx, [placed], config, refuse)).rejects.toThrow(/2 times/);
+  });
+
   test('an en route visit lands on confirmed with its tracker rewound and a status history row', async () => {
     await insertVisit({
       status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 20 * 60 * 1000),
@@ -260,13 +285,6 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
     ['a visit staff locked from Auto-Dispatch', async () => {
       await trx('scheduled_services').where({ id: serviceId }).update({ auto_dispatch_locked: true });
     }, 'auto_dispatch_held'],
-    ['a visit Auto-Dispatch already moved twice (the default limit)', async () => {
-      const moved = { scheduled_service_id: serviceId, customer_id: customerId, reason_code: 'auto_dispatch', initiated_by: 'auto_dispatch', original_window: '09:00-10:00', new_window: '13:00-14:00' };
-      await trx('reschedule_log').insert([
-        { ...moved, original_date: today, new_date: today },
-        { ...moved, original_date: today, new_date: today, original_window: '13:00-14:00', new_window: '09:00-10:00' },
-      ]);
-    }, 'auto_move_limit'],
   ])('%s: refused before any write', async (_label, arrange, reason) => {
     await insertVisit();
     await arrange();

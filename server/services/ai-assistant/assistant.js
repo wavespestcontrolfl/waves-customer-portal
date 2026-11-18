@@ -120,7 +120,7 @@ const waitFor = (work, turn, stage) => turn
   ? turn.waitFor(work, stage)
   : (typeof work === 'function' ? work() : work);
 
-// GATE_PORTAL_ASK_PUSH: did this bell write put the ask in front of the office? A row that exists and was not
+// Did this bell write put the ask in front of the office? A row that exists and was not
 // withheld, and is new or was rung again. A silent dedupe, a quiet refresh and a withheld (demo account or
 // policy) bell are not.
 const bellRangAgain = (result) => Boolean(result?.id) && !result.suppressed
@@ -1298,7 +1298,7 @@ class WavesAssistant {
 
   async escalatePortalTurn(conversation, customerMessage, reason, { gap, topic, newEmail, emailReadBack, alsoAsked, emailUnchecked, turn }) {
     const priority = escalationPriority(customerMessage);
-    // GATE_PORTAL_ASK_PUSH: the bell's phone page, held until the transaction below commits.
+    // The bell's phone page, held until the transaction below commits.
     const pushQueue = [];
 
     const persisted = await turn.transaction('escalation persistence', async (trx) => {
@@ -1439,7 +1439,7 @@ class WavesAssistant {
     const priority = escalationPriority(customerMessage);
     const item = { conversation, customerMessage, reason, topic, priority, say, turn };
     let saved;
-    const pushQueue = []; // GATE_PORTAL_ASK_PUSH: held until the turn's transaction commits
+    const pushQueue = []; // held until the turn's transaction commits
     if (turn) {
       saved = await turn.transaction('escalation persistence', async (trx) => {
         turn.assertActive('escalation persistence');
@@ -1523,7 +1523,7 @@ class WavesAssistant {
       conversation, customerMessage, topic: 'account_change', priority: escalationPriority(customerMessage), move,
       reason: 'Customer is moving and asked the portal assistant to transfer service',
     };
-    const pushQueue = []; // GATE_PORTAL_ASK_PUSH: held until the turn's transaction commits
+    const pushQueue = []; // held until the turn's transaction commits
     const ring = (stored, trx) => this.notifyOpenItem({
       escalation: stored.escalation, topic: 'account_change', conversation, customer: stored.customer, move, trx, pushQueue: turn ? pushQueue : null,
     });
@@ -1591,7 +1591,7 @@ class WavesAssistant {
       // { id: null, suppressed: true } when the bell was withheld (a demo
       // account), and null when the write failed.
       const rowExists = Boolean(result?.id) && !result.suppressed;
-      // GATE_PORTAL_ASK_PUSH: the phone page, only when the ask is new or rang again, and (inside a transaction)
+      // The phone page, only when the ask is new or rang again, and (inside a transaction)
       // only after it commits. Its own failure never costs the hand-off its bell.
       if (bellRangAgain(result)) {
         try { sendHandOffPush(handOffPush({ customer, escalation, conversation, topic, newEmail }), { trx, pushQueue }); } catch { /* the bell is the record */ }

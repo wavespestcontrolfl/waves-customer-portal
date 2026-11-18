@@ -1,5 +1,5 @@
 /**
- * Unfinished bookings against live Postgres (GATE_PORTAL_BOOKING_ITEMS), the SQL as the sweep runs it:
+ * Unfinished bookings against live Postgres, the SQL as the sweep runs it:
  *   - portal-unfinished-bookings.js: the card step of an estimate our office sent (made by staff, or drafted by the
  *     call and text estimator), opened and left, gets ONE admin bell; never a website estimate, a source-less
  *     estimate or a booking-page start (owner 2026-11-02, "A"); never inside the quiet hour, never past the 14-day
@@ -63,9 +63,11 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
       if (ids.length) await db(table).whereIn('id', ids).del();
     }
   };
-  beforeEach(() => { process.env.GATE_PORTAL_BOOKING_ITEMS = 'true'; });
+  // The phone page (portal-ask-push.js) is spied for every test, so nothing reaches a device.
+  let push;
+  beforeEach(() => { push = jest.spyOn(require('../services/portal-ask-push'), 'pushPortalAsk').mockResolvedValue({ sent: true }); });
   afterEach(async () => {
-    for (const key of ['GATE_PORTAL_BOOKING_ITEMS', 'GATE_PORTAL_ASK_PUSH']) delete process.env[key];
+    push.mockRestore();
     if (db) await cleanUp();
   }, 120000);
   afterAll(async () => { if (db) await cleanUp(); }, 120000);
@@ -208,16 +210,11 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(meta(rows[0]).customerId).toBeUndefined();
   });
 
-  // GATE_PORTAL_ASK_PUSH (portal-ask-push.js): the page is spied, so nothing reaches a device.
   describe('the phone page', () => {
-    let push;
-    beforeEach(() => { push = jest.spyOn(require('../services/portal-ask-push'), 'pushPortalAsk').mockResolvedValue({ sent: true }); });
-    afterEach(() => { push.mockRestore(); });
     const pagesFor = (...estimates) => push.mock.calls.map(([page]) => page)
       .filter((page) => estimates.some((e) => page.itemKey === estimateKey(e)));
 
     test('a new bell pages the admin phones once, first name and last initial; the next run does not page again', async () => {
-      process.env.GATE_PORTAL_ASK_PUSH = 'true';
       const c = await customer();
       const linked = await officeEstimate(c);
       const visitor = await officeEstimate(null);
@@ -236,14 +233,6 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
       }]);
       await run();
       expect(pagesFor(linked, visitor)).toHaveLength(2);
-    });
-
-    test('push gate off: the bell rings and no phone is paged', async () => {
-      const e = await officeEstimate(await customer());
-      await cardStep(e, ago(90));
-      await run();
-      expect(await bellsFor(estimateKey(e))).toHaveLength(1);
-      expect(pagesFor(e)).toEqual([]);
     });
   });
 
@@ -272,10 +261,6 @@ maybeDescribe('unfinished bookings reach a person (live Postgres)', () => {
     expect(item.customer.id).toBe(c.id);
     expect(item.version).toMatch(/^[0-9a-f]{32}$/);
     expect(listed.older).toHaveProperty('bookings');
-    // Gate off: the kind is not listed at all.
-    delete process.env.GATE_PORTAL_BOOKING_ITEMS;
-    expect((await portalInbox.list()).items.some((row) => row.id === bell.id)).toBe(false);
-    process.env.GATE_PORTAL_BOOKING_ITEMS = 'true';
     // The version the list served is the one the Done route checks.
     expect(await NotificationService.markAdminDone([bell.id], { by: 'portal-unfinished-bookings-test', role: 'admin', expectedVersion: item.version })).toBe(1);
   });

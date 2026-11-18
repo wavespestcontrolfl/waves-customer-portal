@@ -1,5 +1,5 @@
 /**
- * Phone banners for bell-only admin alerts (GATE_BELL_BANNERS, owner 2026-11-03, choices A and B): which writes send
+ * Phone banners for bell-only admin alerts (owner 2026-11-03, choices A and B): which writes send
  * one, the 7:00 AM to 9:00 PM Eastern window for the two reminder kinds, and the wait for the commit.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -35,11 +35,9 @@ beforeEach(() => {
     return chain;
   });
   jest.useFakeTimers({ now: NOON_ET });
-  process.env.GATE_BELL_BANNERS = 'true';
 });
 afterEach(() => {
   jest.useRealTimers();
-  delete process.env.GATE_BELL_BANNERS;
 });
 
 describe('isNightQuiet', () => {
@@ -73,7 +71,7 @@ test('the banner kinds: two reminders and the stuck-booking alert keep the night
     sms_operational_followup: { nightQuiet: true },
     call_commitment_overdue: { nightQuiet: true },
     messenger_reply: { nightQuiet: false },
-    // GATE_RING_NEW_CONTACTS, not GATE_BELL_BANNERS (owner 2026-11-04).
+    // Its own gate GATE_RING_NEW_CONTACTS (owner 2026-11-04).
     new_lead_email: { nightQuiet: false, gate: 'ringNewContactsLive' },
     // A customer stuck booking from an estimate (estimate-stuck-alert.js, owner 2026-11-05).
     estimate_stuck: { nightQuiet: true },
@@ -115,8 +113,6 @@ describe('bannerAfterWrite: which writes send a banner', () => {
   });
 
   test.each([
-    ['gate off', () => { delete process.env.GATE_BELL_BANNERS; }, row(), meta('messenger_reply')],
-    ['gate set to something other than true', () => { process.env.GATE_BELL_BANNERS = '1'; }, row(), meta('messenger_reply')],
     ['a trigger that is not a banner kind', () => {}, row(), meta('sms_reply')],
     ['an inherited object key', () => {}, row(), meta('toString')],
     ['no trigger key', () => {}, row(), {}],
