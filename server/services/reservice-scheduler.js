@@ -959,6 +959,7 @@ module.exports = {
   NON_COVERAGE_STATUSES,
   reserviceSelfServeEnabled,
   laneForCoverageRow,
+  applyCoverageScope,
   laneForCallbackRow,
   reserviceLanesForCustomer,
   loadReserviceEligibility,

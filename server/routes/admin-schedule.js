@@ -8678,6 +8678,23 @@ function askedTimeStamp(cols, customerAskedTime) {
   return cols.customer_asked_time && customerAskedTime === true ? { customer_asked_time: true } : {};
 }
 
+// GATE_RESERVICE_FOLD (owner 2026-11-17): a pest/lawn re-service within 14 days before the customer's next plan visit of
+// that line moves that visit up instead of booking. null = no fold (gate off, a recurring booking, not a re-service, not a
+// free one without add-on lines, no plan visit in range); otherwise services/reservice-fold.js moveFoldTarget's { moved, answer | warning }.
+async function officeReserviceFold({ req, customerId, serviceKey, isRecurring, isCallback, scheduledDate, windowStart, free,
+  customerAskedTime, bookingProperty, technicianId, notifyCustomer, customerRequest, notes, internalNotes }) {
+  if (require('../config/feature-gates').reserviceFoldLive?.() !== true) return null;
+  const fold = require('../services/reservice-fold');
+  const lane = fold.foldLaneForServiceKey(serviceKey);
+  if (isRecurring || !isCallback || !free || !lane || !customerId) return null;
+  const target = await fold.findFoldTarget(db, { customerId, lane, date: scheduledDate, propertyId: bookingProperty?.property_id || null });
+  if (!target) return null;
+  return fold.moveFoldTarget({
+    conn: db, target, date: scheduledDate, windowStart, technicianId, customerAskedTime, notifyCustomer, customerRequest, notes,
+    internalNotes, actor: { techRole: req.techRole, technicianId: req.technicianId },
+  });
+}
+
 async function scheduleCreateHandler(req, res, next) {
   try {
     const {
@@ -9446,6 +9463,23 @@ async function scheduleCreateHandler(req, res, next) {
       || positiveMoneyInput(estimatedPrice)
       || addonHasExplicitPrice;
     const zeroCallbackPrice = resolvedIsCallback && customerEligibleForFreeCallback(customer) && !explicitPriceProvided;
+
+    // Re-service fold (GATE_RESERVICE_FOLD): after validation and pricing reads, before the first write. Only a FREE re-service
+    // with no add-on line folds: a priced re-service or an add-on carries a charge or line a moved plan visit would drop.
+    // A moved plan visit is the whole answer (nothing is created); a refused move books the re-service as before, with the
+    // reason in `warnings`.
+    const reserviceFold = await officeReserviceFold({
+      req, customerId, serviceKey: serviceRecord?.service_key, isRecurring, isCallback: resolvedIsCallback, scheduledDate, windowStart,
+      customerAskedTime,
+      free: zeroCallbackPrice === true && (!serviceAddons || (Array.isArray(serviceAddons) && !serviceAddons.length)),
+      // The office's technician choice: an explicit Unassigned = null (the moved visit is unassigned); no technician chosen
+      // or found = undefined (the plan visit keeps its own).
+      bookingProperty, technicianId: assignmentMode === 'unassigned' ? null : (resolvedTechId || undefined),
+      notifyCustomer: sendConfirmationSms === undefined ? true : !!sendConfirmationSms,
+      customerRequest: officeCustomerRequest, notes: combinedNotes, internalNotes: internalNotes || null,
+    });
+    if (reserviceFold?.moved) return res.status(200).json(reserviceFold.answer);
+    if (reserviceFold?.warning) bookingWarnings.push(reserviceFold.warning);
 
     let finalPrice = pricing.finalPrice;
     if (zeroCallbackPrice) finalPrice = 0;

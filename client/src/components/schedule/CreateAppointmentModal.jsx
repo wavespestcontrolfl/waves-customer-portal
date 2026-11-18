@@ -1417,8 +1417,11 @@ export function classifyManualPrepayMintOutcome({ minted, fresh }) {
 // many series were created and what happens next — a prepaid year is NOT
 // billed per service report, so this says what actually happens instead of
 // the per-visit copy — plus the prepay outcome if any.
-export function composeAppointmentSuccessToast({ resultsCount, createdCount, estimateAccepted, prepayNotice }) {
-  const apptCount = resultsCount || createdCount;
+export function composeAppointmentSuccessToast({ resultsCount, createdCount, estimateAccepted, prepayNotice, foldedCount = 0 }) {
+  // GATE_RESERVICE_FOLD: a save the server answered by moving a plan visit up created nothing.
+  if (foldedCount > 0 && foldedCount === resultsCount) return 'Plan visit moved up. No re-service booked.';
+  // A fold created nothing, so it is not counted as a created appointment.
+  const apptCount = (resultsCount - foldedCount) || createdCount;
   const baseMessage = prepayNotice
     ? (apptCount === 1 ? 'Appointment created' : `${apptCount} appointment series created`)
     : (apptCount === 1
@@ -1428,6 +1431,7 @@ export function composeAppointmentSuccessToast({ resultsCount, createdCount, est
     estimateAccepted ? 'Estimate marked accepted.' : '',
     baseMessage,
     prepayNotice,
+    foldedCount > 0 ? `${foldedCount === 1 ? 'A plan visit' : `${foldedCount} plan visits`} moved up instead of a re-service.` : '',
   ].filter(Boolean).join(' ');
 }
 
@@ -4708,6 +4712,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         createdCount: createdGroupKeysRef.current.size,
         estimateAccepted: results.some((r) => r?.estimateAccepted),
         prepayNotice,
+        foldedCount: results.filter((r) => r?.reserviceFold).length,
       }));
       const apptWarnings = [
         ...committedWarnings,
