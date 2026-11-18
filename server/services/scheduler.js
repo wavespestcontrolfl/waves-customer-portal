@@ -9849,6 +9849,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8:30PM — Stale-app notice check (owner 2026-11-18). Read-only: finds
+  // visits from the last 48 h whose notices all went as app push, no text, to a
+  // customer whose app was not opened in 30 days. One self-closing ops digest.
+  // =========================================================================
+  cron.schedule('30 20 * * *', async () => {
+    try {
+      await runExclusive('app-first-stale-notice-check', async () => {
+        const result = await require('./app-first-stale-notice-check').runAppFirstStaleNoticeCheck();
+        logger.info(`App-first stale-notice check done: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`App-first stale-notice check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
   // (default 365); tasks use their stored 30-day expiry. The sweep runs with
   // either write gate off so pre-existing conversation data still ages out.

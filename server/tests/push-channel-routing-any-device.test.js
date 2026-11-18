@@ -88,7 +88,7 @@ const send = (overrides = {}) => PushRouting.attemptPushFirst({
   ...overrides,
 });
 
-const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
+const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_APP_FIRST_STALE_TEXT', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -185,6 +185,64 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
   it('gate off: a stale device is not enough', async () => {
     mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(mockCustomerStatus.mock.calls[0][2]).toBeUndefined();
+  });
+});
+
+describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text (owner 2026-11-18)', () => {
+  const DAY_MS = 24 * 3600000;
+  beforeEach(() => { process.env.GATE_APP_FIRST_ANY_DEVICE = 'true'; });
+
+  it('both gates on: a device last seen 40 days ago is not reachable, no push, so the text goes', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
+    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+  });
+
+  it('both gates on: a device last seen 10 days ago still takes the push, with a 30-day floor and phone apps only', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device());
+    expect((await send()).delivered).toBe(true);
+    const opts = mockSendToCustomer.mock.calls[0][2];
+    expect(opts.nativeOnly).toBe(true);
+    expect(opts.minUpdatedAt).toBeInstanceOf(Date);
+    expect(Math.abs(Date.now() - opts.minUpdatedAt.getTime() - 30 * DAY_MS)).toBeLessThan(60000);
+  });
+
+  it('new gate off: a device last seen 40 days ago takes the push as today, no floor', async () => {
+    mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
+    expect((await send()).delivered).toBe(true);
+    expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeUndefined();
+  });
+
+  it('new gate on without GATE_APP_FIRST_ANY_DEVICE: the 72 hour rule, unchanged', async () => {
+    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ updated_at: hoursAgo(10 * 24) }));
+    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+  });
+
+  it('account device status: both gates on pass the 30-day reachableSince; gate off passes none', async () => {
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    await send();
+    const arg = mockCustomerStatus.mock.calls[0][2];
+    expect(arg.withReachable).toBe(true);
+    expect(Math.abs(Date.now() - arg.reachableSince.getTime() - 30 * DAY_MS)).toBeLessThan(60000);
+    mockCustomerStatus.mockClear();
+    delete process.env.GATE_APP_FIRST_STALE_TEXT;
+    await send();
+    expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
+  });
+
+  it('explicit App choice: keeps its own path, no 30-day floor and no reachable read', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    mockPrefs = { en_route_channel: 'push' };
+    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: true });
+    await send({ messageType: 'tech_en_route', explicitPushOnly: true, notificationEventKey: 'visit-1:en-route' });
     expect(mockCustomerStatus.mock.calls[0][2]).toBeUndefined();
   });
 });

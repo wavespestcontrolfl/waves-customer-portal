@@ -61,6 +61,9 @@
  *      heartbeat floor are dropped for these sends (a device the app
  *      released, or a provider-rejected token, is already inactive). The
  *      fallback is unchanged: when no device accepts the push, the text goes.
+ *      With GATE_APP_FIRST_STALE_TEXT also on (owner 2026-11-18), a device
+ *      counts only if the app checked in within the last 30 days
+ *      (APP_FIRST_STALE_DAYS); a phone not opened for that long gets the text.
  *   c. Only the customer switches back to text: a stored 'sms' vetoes the app
  *      notice when the customer saved it (the *_channel_explicit marker the
  *      notifications route stamps); the seeded default 'sms' does not. Email
@@ -72,7 +75,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue, appFirstAnyDeviceLive } = require('../../config/feature-gates');
+const { gateEnvValue, appFirstAnyDeviceLive, appFirstStaleTextLive } = require('../../config/feature-gates');
 const { BILLING_MESSAGE_CATEGORIES } = require('./billing-channel-routing');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 
@@ -295,8 +298,9 @@ const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 // anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with
 // any active device on a configured provider, however long ago it checked in.
 async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
+  const staleFloor = anyDevice ? staleTextFloor() : null;
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
+    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true, ...(staleFloor ? { reachableSince: staleFloor } : {}) } : undefined);
     return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
   }
   const query = knex('push_subscriptions')
@@ -304,6 +308,7 @@ async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } =
     // A contact's device (contact login) is never proof the HOLDER has the app.
     .whereNull('contact_phone_key');
   if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
+  else if (staleFloor) query.where('updated_at', '>=', staleFloor);
   const row = await query.first('id').catch(() => null);
   return Boolean(row);
 }
@@ -552,7 +557,19 @@ function anyDeviceSend(explicitPushOnly) {
 // counts phone apps only): a stale browser subscription that accepts must never
 // stand in for delivery and skip the text. Otherwise: the 72 hour floor.
 function fanOutReach(anyDevice) {
-  return anyDevice ? { nativeOnly: true } : { minUpdatedAt: heartbeatCutoff() };
+  if (!anyDevice) return { minUpdatedAt: heartbeatCutoff() };
+  const staleFloor = staleTextFloor();
+  return staleFloor ? { nativeOnly: true, minUpdatedAt: staleFloor } : { nativeOnly: true };
+}
+
+// GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): an any-device phone counts only if the
+// app checked in (push_subscriptions.updated_at, bumped on every launch) within the last
+// 30 days. A phone not opened since gets the text, not a push nobody sees. A fixed
+// bound, not the refresh-token life. Called only on the any-device path; gate off = null.
+const APP_FIRST_STALE_DAYS = 30;
+function staleTextFloor() {
+  if (typeof appFirstStaleTextLive !== 'function' || !appFirstStaleTextLive()) return null;
+  return new Date(Date.now() - APP_FIRST_STALE_DAYS * 24 * 3600 * 1000);
 }
 
 function heartbeatCutoff() {
@@ -997,5 +1014,5 @@ module.exports = {
   APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { APP_FIRST_STALE_DAYS, pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

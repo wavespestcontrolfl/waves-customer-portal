@@ -214,4 +214,13 @@ describe('customerStatus — per person', () => {
     expect((await Push.customerStatus(HOLDER_ID)).registered).toBe(true);
     expect((await Push.customerStatus(HOLDER_ID, undefined, { contactKey: CONTACT_KEY })).registered).toBe(false);
   });
+
+  test('reachableSince (GATE_APP_FIRST_STALE_TEXT) bounds only `reachable`: a 40 day old device is registered but not reachable', async () => {
+    subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 40 * 24 * 3600000) }];
+    const since = new Date(Date.now() - 30 * 24 * 3600000);
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: true });
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true, reachableSince: since })).toMatchObject({ registered: true, reachable: false });
+    subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 10 * 24 * 3600000) }];
+    expect((await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true, reachableSince: since })).reachable).toBe(true);
+  });
 });
