@@ -182,6 +182,7 @@ jest.mock('../services/customer-credit', () => ({
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
       t.uuid('customer_id');
       t.string('status');
+      t.timestamp('accepted_at', { useTz: true });
     });
     await db.schema.withSchema(mockSchema).createTable('activity_log', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -625,7 +626,8 @@ jest.mock('../services/customer-credit', () => ({
 
     const estimate = async (customerId, status = 'viewed') => (await db('estimates').insert({ customer_id: customerId, status }).returning('*'))[0];
     const enter = (est, rawCode) => typed.enterReferralCode({ estimate: est, rawCode });
-    const accepted = (est) => db('estimates').where({ id: est.id }).update({ status: 'accepted' });
+    const accepted = (est, daysAgo = 0) => db('estimates').where({ id: est.id })
+      .update({ status: 'accepted', accepted_at: new Date(Date.now() - daysAgo * 86400000) });
 
     test('entering a code saves it and nothing else; once accepted and on a plan the code owner is confirmed, with nothing sent or paid', async () => {
       const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'Waves-Jane9' });
@@ -702,6 +704,10 @@ jest.mock('../services/customer-credit', () => ({
       expect(await db('referral_inbound_reviews')).toHaveLength(0);
       // Still on the Queue, where the office confirms it for both credits now.
       expect((await inbound.listInboundReferrals()).map((c) => c.customerId)).toEqual([friend.id]);
+      // The hourly pass reads a recent acceptance again, and stops once it is old.
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 1, confirmed: 0 });
+      await accepted(est, 60);
+      expect(await typed.sweepTypedReferralCodes()).toEqual({ checked: 0, confirmed: 0 });
     });
 
     test('a paused program takes no code and shows no field', async () => {

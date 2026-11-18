@@ -26,6 +26,11 @@ const engine = require('./referral-engine');
 const inbound = require('./referral-inbound');
 
 const SWEEP_LIMIT = 100;
+// The hourly pass looks only at estimates accepted this recently: long enough
+// for a new customer to land on a plan, and it bounds the work, since a card
+// the confirm holds gets no answer row and would otherwise be read again
+// every hour for good. An older card still waits in Referrals → Queue.
+const SWEEP_WINDOW_DAYS = 45;
 
 const gateOn = () => isEnabled('estimateReferralCode');
 
@@ -165,14 +170,15 @@ async function confirmReferralForAcceptedEstimate({ estimateId }) {
 /**
  * Hourly recovery (services/scheduler.js). The step after an accept is a fast
  * path: the customer may not be on a plan yet when it runs, or it may fail.
- * This runs the same step for every typed code on an accepted estimate whose
- * customer has no answer yet. Nothing is sent.
+ * This runs the same step for every typed code on an estimate accepted in
+ * the last SWEEP_WINDOW_DAYS whose customer has no answer yet. Nothing is sent.
  */
 async function sweepTypedReferralCodes() {
   if (!gateOn()) return { checked: 0, confirmed: 0 };
   const waiting = await db('estimate_referral_codes as r')
     .join('estimates as e', 'e.id', 'r.estimate_id')
     .where({ 'e.status': 'accepted' })
+    .where('e.accepted_at', '>=', new Date(Date.now() - SWEEP_WINDOW_DAYS * 86400000))
     .whereNotNull('e.customer_id')
     .whereNotExists(db('referral_inbound_reviews as v').whereRaw('v.customer_id = e.customer_id').select(db.raw('1')))
     .orderBy('r.created_at', 'desc')
