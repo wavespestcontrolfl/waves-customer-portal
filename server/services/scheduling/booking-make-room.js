@@ -475,7 +475,7 @@ const REMINDER_TYPES = ['reminder_72h', 'appointment_reminder'];
 
 // With the sender's app routing on (push-channel-routing decidePushRoute; app-first for reminders, owner 2026-11-04),
 // a text-led reminder goes in the app INSTEAD of a text when the customer has an app device the sender could reach
-// (its holderPushReach: a reachable or fresh native device). Such a customer never moves. A customer who chose
+// (its hasFreshPushDevice: a reachable or fresh native device). Such a customer never moves. A customer who chose
 // Text in the app is counted here too: the check fails closed.
 async function remindersMayGoInApp(customerId, env, conn) {
   if (!REMINDER_TYPES.some((messageType) => env.pushRouteFor(customerId, messageType) === 'push_first')) return false;

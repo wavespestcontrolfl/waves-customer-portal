@@ -206,21 +206,6 @@ describe('sendToCustomer — a contact device belongs to ONE profile', () => {
   });
 });
 
-describe('sendToCustomer — contactOnly (the contact companion after the holder\'s text)', () => {
-  test('only the contact device is sent; the holder device is dropped and the stats stay holder-only', async () => {
-    const result = await Push.sendToCustomer(HOLDER_ID, { title: 't', body: 'b', url: '/', category: 'service' }, { messageType: 'tech_en_route', contactOnly: true });
-    expect(sentTokens()).toEqual(['tok-c']);
-    expect(result.sent).toBe(0);
-    expect(result.subscriptions).toBe(0);
-    expect(result.contactDevices).toMatchObject({ sent: 1 });
-  });
-
-  test('a type the contact is not eligible for sends nothing', async () => {
-    await Push.sendToCustomer(HOLDER_ID, { title: 't', body: 'b', url: '/', category: 'service' }, { messageType: 'billing_reminder', contactOnly: true });
-    expect(apns.send).not.toHaveBeenCalled();
-  });
-});
-
 describe('sendToCustomer — acceptedCheckedInAt (the stamp the push proof row carries)', () => {
   const daysAgo = (n) => new Date(Date.now() - n * 24 * 3600000);
   const phone = (id, token, updated) => ({ ...HOLDER_DEVICE, id, device_token: token, updated_at: updated });
@@ -270,16 +255,12 @@ describe('customerStatus — per person', () => {
 
   test('GATE_APP_FIRST_STALE_TEXT: customerStatus itself bounds `reachable` to a 30 day check-in; off, a stale phone is reachable', async () => {
     subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 40 * 24 * 3600000) }];
-    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: true, appStale: false });
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: true });
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    // appStale: the floor alone excluded the holder's phone (the contact companion reads it).
-    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: false, appStale: true });
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: false });
     // The plain shape is untouched, and a phone opened 10 days ago stays reachable.
     expect(await Push.customerStatus(HOLDER_ID)).not.toHaveProperty('reachable');
     subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 10 * 24 * 3600000) }];
     expect((await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).reachable).toBe(true);
-    // No holder phone at all: not stale, so no contact companion.
-    subs = [CONTACT_DEVICE];
-    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ reachable: false, appStale: false });
   });
 });

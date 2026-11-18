@@ -62,6 +62,32 @@ maybeDescribe('stale-app notice check (live Postgres)', () => {
     }
   });
 
+  test('two services that share one visit count as ONE visit item, keyed by the shared visit id', async () => {
+    const trx = await db.transaction();
+    try {
+      const stamp = daysBefore(39, PUSH_AT).toISOString();
+      const customerId = randomUUID();
+      const sharedVisitId = randomUUID();
+      await trx('customers').insert({ id: customerId, first_name: 'Sample', last_name: 'Tester', phone: '+19415550144', email: `${customerId}@example.invalid` });
+      await trx('service_visits').insert({ id: sharedVisitId, customer_id: customerId, scheduled_date: '2026-11-18', stop_base_key: `fixture-${sharedVisitId}`, created_by: 'test' });
+      for (const [i, serviceType] of ['Quarterly Pest Control Service', 'Lawn Care Service'].entries()) {
+        const serviceId = randomUUID();
+        await trx('scheduled_services').insert({ id: serviceId, customer_id: customerId, visit_id: sharedVisitId,
+          service_type: serviceType, status: 'pending', scheduled_date: '2026-11-18' });
+        await trx('sms_log').insert({
+          customer_id: customerId, direction: 'outbound', from_phone: 'push', to_phone: '9415550144', message_body: 'Synthetic notice',
+          status: 'sent', message_type: 'appointment_reminder', created_at: new Date(PUSH_AT.getTime() + i * 3600000),
+          metadata: JSON.stringify({ channel: 'push', requestedChannel: 'sms', scheduled_service_id: serviceId, app_checked_in_at: stamp }),
+        });
+      }
+      const mine = (await Check.findStaleAppNoticeVisits({ database: trx, now: NOW })).filter((i) => i.customer_id === customerId);
+      expect(mine).toHaveLength(1);
+      expect(mine[0]).toMatchObject({ key: `visit:${sharedVisitId}`, visit_id: sharedVisitId, scheduled_date: '2026-11-18' });
+    } finally {
+      await trx.rollback();
+    }
+  });
+
   test('two standalone receipts (no visit id) come back as two sms:<row> items with no visit, never as visits', async () => {
     const trx = await db.transaction();
     try {

@@ -24,9 +24,6 @@ function subscriptionQuery() {
       const row = mockDevices.find((device) => filters.every((f) => f(device)));
       return row ? { id: row.id } : undefined;
     },
-    async select() {
-      return mockDevices.filter((device) => filters.every((f) => f(device)));
-    },
   };
   return q;
 }
@@ -201,77 +198,8 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
   it('both gates on: a device last seen 40 days ago is not reachable, no push, so the text goes', async () => {
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
-    // The holder's stale phone gets the text; an eligible contact's phone keeps its push
-    // (twilio.js fires it as a contact-only companion once the text is accepted).
-    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device', contactCompanion: true });
+    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
     expect(mockSendToCustomer).not.toHaveBeenCalled();
-  });
-
-  it('no contact companion flag when the holder has no phone app at all (contacts got no push before either)', async () => {
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
-    expect(await send()).not.toHaveProperty('contactCompanion');
-  });
-
-  it('a browser-only holder (no phone app) gets no contact companion with the floor on', async () => {
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    mockDevices.push(device({ platform: 'web', updated_at: hoursAgo(2) }));
-    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
-    expect(await send()).not.toHaveProperty('contactCompanion');
-  });
-
-  it('app notifications gate on: ONE status read decides the text and the companion (customerStatus.appStale)', async () => {
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
-    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: true });
-    expect(await send()).toMatchObject({ reason: 'no_fresh_device', contactCompanion: true });
-    expect(mockCustomerStatus).toHaveBeenCalledTimes(1);
-    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: false });
-    expect(await send()).not.toHaveProperty('contactCompanion');
-    mockCustomerStatus.mockResolvedValue({ enabled: false, reachable: false, appStale: true });
-    expect(await send()).not.toHaveProperty('contactCompanion');
-  });
-
-  it('no contact companion flag with the new gate off, or with the any-device gate off', async () => {
-    mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
-    expect(await send()).not.toHaveProperty('contactCompanion');
-    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
-    expect(await send()).not.toHaveProperty('contactCompanion');
-  });
-
-  it('sendCompanionPush contactOnly: contact devices only, the any-device presentation, no holder freshness gate and no bell', async () => {
-    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    const text = 'Reminder: your visit is tomorrow.\n\nManage it: https://example.invalid/r/abc';
-    // The any-device push for a fresh holder is the reference for what a contact receives.
-    mockDevices.push(device({ updated_at: hoursAgo(2) }));
-    await send({ body: text });
-    const [, reference, referenceOpts] = mockSendToCustomer.mock.calls[0];
-    mockSendToCustomer.mockClear();
-    mockNotifyCustomer.mockClear();
-    mockDevices.length = 0; // the holder's phone is stale or absent: no holder device gate may run
-    mockCustomerStatus.mockClear();
-    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: text, messageType: 'appointment_reminder', appointmentId: 'visit-1', contactOnly: true });
-    expect(mockSendToCustomer).toHaveBeenCalledTimes(1);
-    const [, notification, opts] = mockSendToCustomer.mock.calls[0];
-    expect(notification).toMatchObject({ title: reference.title, body: reference.body, url: reference.url, category: reference.category, tag: reference.tag });
-    expect(notification.body).not.toContain('example.invalid');
-    expect(opts).toMatchObject({ contactOnly: true, nativeOnly: true, messageType: 'appointment_reminder' });
-    expect(opts.minUpdatedAt).toBeUndefined();
-    expect(opts.holderMinUpdatedAt).toBeUndefined();
-    expect(referenceOpts.nativeOnly).toBe(true);
-    expect(mockCustomerStatus).not.toHaveBeenCalled();
-    expect(mockNotifyCustomer).not.toHaveBeenCalled();
-  });
-
-  it('sendCompanionPush without contactOnly: unchanged (the holder freshness gate and the heartbeat floor apply)', async () => {
-    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Reminder.', messageType: 'appointment_reminder' });
-    expect(mockSendToCustomer).not.toHaveBeenCalled();
-    mockDevices.push(device({ updated_at: hoursAgo(2) }));
-    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Reminder.', messageType: 'appointment_reminder' });
-    expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeInstanceOf(Date);
-    expect(mockSendToCustomer.mock.calls[0][2].contactOnly).toBeUndefined();
   });
 
   it('both gates on: a device last seen 10 days ago still takes the push, with a 30-day floor and phone apps only', async () => {

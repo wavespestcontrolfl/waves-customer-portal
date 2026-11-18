@@ -213,18 +213,6 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
   return [...holderSubs, ...kept];
 }
 
-// Which of the fan-out's rows this send may use.
-// opts.holderMinUpdatedAt: a floor for the account HOLDER's devices only
-// (GATE_APP_FIRST_STALE_TEXT, push-channel-routing fanOutReach): the 30-day rule decides
-// whether the holder gets the text; a contact's phone keeps its reach. Unset = no floor.
-// opts.contactOnly: contact devices alone (the contact companion after the holder's text).
-function reachableSubs(subs, opts) {
-  const holderFloor = new Date(opts.holderMinUpdatedAt).getTime();
-  return subs.filter((sub) => (opts.contactOnly
-    ? sub.contact_phone_key
-    : Number.isNaN(holderFloor) || sub.contact_phone_key || new Date(sub.updated_at).getTime() >= holderFloor));
-}
-
 class PushNotificationService {
   // opts.contactKey: a contact session's own status — only that contact's
   // devices count; a holder's status never counts a contact device.
@@ -234,7 +222,7 @@ class PushNotificationService {
   // GATE_APP_FIRST_STALE_TEXT is on (appFirstStaleFloor), so every reader follows it.
   async customerStatus(customerId, database = db, { contactKey = null, withReachable = false } = {}) {
     const context = await customerPushContext(customerId, database);
-    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false, appStale: false } : {}) };
+    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false } : {}) };
     const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
@@ -242,17 +230,14 @@ class PushNotificationService {
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
     const providers = { ios: apns.status().configured, android: fcm.status().configured };
     const reachableSince = withReachable ? appFirstStaleFloor() : null;
-    const deliverable = rows.filter((row) => providers[row.platform]);
-    const reachable = deliverable.some((row) => !reachableSince || new Date(row.updated_at).getTime() >= reachableSince.getTime());
     return {
       enabled: context.enabled,
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
       // Any active holder device whose provider is configured, however long
       // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
-      // appStale: the 30-day floor alone kept a holder phone from counting (the
-      // contact companion in push-channel-routing reads it).
-      ...(withReachable ? { reachable, appStale: Boolean(reachableSince) && !reachable && deliverable.length > 0 } : {}),
+      ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]
+        && (!reachableSince || new Date(row.updated_at).getTime() >= reachableSince.getTime())) } : {}),
     };
   }
 
@@ -321,7 +306,13 @@ class PushNotificationService {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      subs = reachableSubs(await contactDevicesAllowed(await query, contactPurpose, customerId), opts);
+      // opts.holderMinUpdatedAt: a floor for the account HOLDER's devices only
+      // (GATE_APP_FIRST_STALE_TEXT, push-channel-routing fanOutReach). The 30-day
+      // rule decides whether the holder gets the text; a contact's phone keeps its reach.
+      // Unset = NaN = no floor.
+      const holderFloor = new Date(opts.holderMinUpdatedAt).getTime();
+      subs = (await contactDevicesAllowed(await query, contactPurpose, customerId))
+        .filter((sub) => Number.isNaN(holderFloor) || sub.contact_phone_key || new Date(sub.updated_at).getTime() >= holderFloor);
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };

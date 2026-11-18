@@ -52,7 +52,9 @@ function esc(value) {
 // never fail the query. Bindings: window start.
 const STAMPED_PUSHES_SQL = `
   SELECT l.id, l.customer_id, l.created_at, l.message_type,
-         NULLIF(l.metadata->>'scheduled_service_id', '') AS visit_id,
+         -- Services that share one visit (scheduled_services.visit_id) count as ONE visit;
+         -- an ungrouped service counts by its own id.
+         COALESCE(ss.visit_id::text, NULLIF(l.metadata->>'scheduled_service_id', '')) AS visit_id,
          l.metadata->>'app_checked_in_at' AS app_checked_in_at,
          ss.scheduled_date::text AS scheduled_date,
          c.first_name, c.last_name
