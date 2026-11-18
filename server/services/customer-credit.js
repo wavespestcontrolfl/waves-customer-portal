@@ -253,7 +253,7 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, applyAtMost = null }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -441,7 +441,10 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       total: invoice.total,
       creditApplied: invoice.credit_applied,
       amountPaid: invoice.amount_paid,
-      balance: customer?.account_credits || 0,
+      // `applyAtMost` caps the draw: a customer who asked for one credit (a
+      // promo code entered on the pay page) has only that much drawn, never
+      // the rest of a balance they have not chosen to apply.
+      balance: Math.min(Number(customer?.account_credits) || 0, applyAtMost ?? Infinity),
       fullCoverageOnly,
     });
     if (applyAmt <= 0) return { applied: 0, skipped: skipReason || 'nothing_to_apply' };
