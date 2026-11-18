@@ -8,6 +8,12 @@
  * accepted; the price on the page never changes. The amount shown is the
  * server's, never typed here.
  *
+ * With GATE_ESTIMATE_REFERRAL_CODE the same field takes a referrer's code:
+ * the block then carries `acceptsReferral` (and `acceptsPromo: false` when
+ * only a referral code can be entered), and a saved referral code comes back
+ * as `applied: { code, referral: true, note }`, the note written by the
+ * server from the live referral program.
+ *
  * Props:
  *   promoCode  — { canEnter, applied: { code, creditAmount, credited } | null }
  *   submitCode — async (code) => { ok, promoCode } | { ok: false, error }
@@ -21,13 +27,26 @@ import { W } from './tokens';
 
 const REFUSALS = {
   invalid_code: 'That code isn’t valid for this estimate.',
-  code_already_entered: 'This estimate already has a promo code.',
+  code_already_entered: 'This estimate already has a code.',
   discount_already_applied: 'This estimate already includes a discount, so a promo code can’t be added.',
 };
 const FALLBACK = 'That didn’t go through. Please try again.';
 
 const heading = { fontSize: 20, fontWeight: 700, color: W.blueDeeper, margin: '0 0 8px' };
 const body = { fontSize: 16, lineHeight: 1.5, color: W.textBody, margin: 0 };
+
+// The note for a code already on the estimate. A referral code's wording is
+// the server's, from the live program; a promo code's amount is the server's.
+function appliedCopy(applied) {
+  if (applied.referral) return { title: `Referral code ${applied.code}`, text: applied.note };
+  const amount = fmtMoney(applied.creditAmount);
+  return {
+    title: `Promo code ${applied.code}`,
+    text: applied.credited
+      ? `A ${amount} credit was added to your account.`
+      : `We’ll add a ${amount} credit to your account when you accept this estimate.`,
+  };
+}
 
 export default function PromoCodeSection({ promoCode, submitCode, staffView = false }) {
   const [view, setView] = useState(promoCode || null);
@@ -37,15 +56,11 @@ export default function PromoCodeSection({ promoCode, submitCode, staffView = fa
   if (!view) return null;
 
   if (view.applied) {
-    const amount = fmtMoney(view.applied.creditAmount);
+    const { title, text } = appliedCopy(view.applied);
     return (
       <section data-section="promo-code" style={estimateCard()}>
-        <h2 style={heading}>Promo code {view.applied.code}</h2>
-        <p style={body}>
-          {view.applied.credited
-            ? `A ${amount} credit was added to your account.`
-            : `We’ll add a ${amount} credit to your account when you accept this estimate.`}
-        </p>
+        <h2 style={heading}>{title}</h2>
+        <p style={body}>{text}</p>
       </section>
     );
   }
@@ -68,14 +83,20 @@ export default function PromoCodeSection({ promoCode, submitCode, staffView = fa
     }
   };
 
+  // Apply does nothing while a request runs, in a staff preview, or with no text.
+  const idle = busy || staffView || !code.trim();
+  // Which kinds of code the server takes on this estimate.
+  const kind = !view.acceptsReferral ? 'Promo code'
+    : view.acceptsPromo === false ? 'Referral code' : 'Promo or referral code';
+
   return (
     <section data-section="promo-code" style={estimateCard()}>
-      <h2 style={heading}>Have a promo code?</h2>
+      <h2 style={heading}>Have a {kind.toLowerCase()}?</h2>
       <form onSubmit={onSubmit} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
         <input
           type="text"
           name="promoCode"
-          aria-label="Promo code"
+          aria-label={kind}
           autoComplete="off"
           autoCapitalize="characters"
           spellCheck={false}
@@ -91,12 +112,12 @@ export default function PromoCodeSection({ promoCode, submitCode, staffView = fa
         />
         <button
           type="submit"
-          disabled={busy || staffView || !code.trim()}
+          disabled={idle}
           style={{
             minHeight: 48, padding: '0 20px', border: 'none', borderRadius: 10,
             background: W.navyDeep, color: W.white, fontSize: 16, fontWeight: 600,
-            cursor: busy || staffView || !code.trim() ? 'default' : 'pointer',
-            opacity: busy || staffView || !code.trim() ? 0.6 : 1,
+            cursor: idle ? 'default' : 'pointer',
+            opacity: idle ? 0.6 : 1,
           }}
         >
           {busy ? 'Checking…' : 'Apply'}

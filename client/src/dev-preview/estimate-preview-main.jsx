@@ -1169,11 +1169,12 @@ window.fetch = async (input, init) => {
     // GATE_ESTIMATE_SUCCESS_REFERRAL /data blocks so both render in preview.
     // The lawn fixture is the catalog's 9-application program.
     const referral = scenario === 'accepted' ? { referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' } } : {};
-    // promoCode mirrors the GATE_ESTIMATE_PROMO_CODE /data block: the field
-    // on an open estimate, the credited note on the accepted one.
+    // promoCode mirrors the /data block with GATE_ESTIMATE_PROMO_CODE and
+    // GATE_ESTIMATE_REFERRAL_CODE both on: the field on an open estimate,
+    // the credited note on the accepted one.
     const promoCode = scenario === 'accepted'
       ? { canEnter: false, applied: { code: 'PREVIEW25', creditAmount: 25, credited: true } }
-      : { canEnter: true, applied: null };
+      : { canEnter: true, applied: null, acceptsReferral: true };
     return respond({
       promoCode,
       ...payload,
@@ -1193,8 +1194,12 @@ window.fetch = async (input, init) => {
     return respond({ code: 'WAVES-PREVIEW1', link: 'https://wavespestcontrol.com/r/WAVES-PREVIEW1', smsBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1. wavespestcontrol.com/r/WAVES-PREVIEW1', emailSubject: '$25 off Waves Pest Control', emailBody: 'We use Waves Pest Control and they’ll take $25 off your first service with my code WAVES-PREVIEW1.\n\nhttps://wavespestcontrol.com/r/WAVES-PREVIEW1' });
   }
   if (url.includes('/promo-code')) {
-    // PREVIEW25 is the one code the harness takes; anything else is refused.
+    // The harness takes one promo code (PREVIEW25) and one referral code
+    // (WAVES-PREVIEW1); anything else is refused.
     const typed = String(JSON.parse(init?.body || '{}').code || '').trim().toUpperCase();
+    if (typed === 'WAVES-PREVIEW1') {
+      return respond({ success: true, promoCode: { canEnter: false, applied: { code: typed, referral: true, note: 'You’ll get a $25.00 account credit after your first recurring service.' } } });
+    }
     return typed === 'PREVIEW25'
       ? respond({ success: true, promoCode: { canEnter: false, applied: { code: typed, creditAmount: 25, credited: false } } })
       : respond({ error: 'invalid_code' }, 400);

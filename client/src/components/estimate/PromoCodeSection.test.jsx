@@ -50,6 +50,21 @@ describe('PromoCodeSection', () => {
     expect(screen.getByLabelText('Promo code')).toBeInTheDocument();
   });
 
+  it('names the kinds of code the server takes, and shows a saved referral code with the server note', async () => {
+    const referral = { canEnter: false, applied: { code: 'WAVES-JANE', referral: true, note: 'You’ll get a $25.00 account credit after your first recurring service.' } };
+    const submitCode = vi.fn(async () => ({ ok: true, promoCode: referral }));
+    const { unmount } = render(<PromoCodeSection promoCode={{ ...open, acceptsReferral: true, acceptsPromo: false }} submitCode={submitCode} />);
+    expect(screen.getByRole('heading', { name: 'Have a referral code?' })).toBeInTheDocument();
+    unmount();
+
+    render(<PromoCodeSection promoCode={{ ...open, acceptsReferral: true }} submitCode={submitCode} />);
+    expect(screen.getByRole('heading', { name: 'Have a promo or referral code?' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Promo or referral code'), { target: { value: 'waves-jane' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(screen.getByText('Referral code WAVES-JANE')).toBeInTheDocument());
+    expect(screen.getByText('You’ll get a $25.00 account credit after your first recurring service.')).toBeInTheDocument();
+  });
+
   it('a staff preview never submits', () => {
     const submitCode = vi.fn();
     render(<PromoCodeSection promoCode={open} submitCode={submitCode} staffView />);

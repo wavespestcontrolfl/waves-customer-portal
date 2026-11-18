@@ -1454,6 +1454,10 @@ function initScheduledJobs() {
     try {
       await runExclusive('estimate-promo-code-sweep', async () => {
         await require('./estimate-promo-code').sweepAcceptedPromoCodes();
+        // The same recovery for a typed referral code
+        // (GATE_ESTIMATE_REFERRAL_CODE): the customer may not have been on a
+        // plan yet when the accept ran its step.
+        await require('./estimate-referral-code').sweepTypedReferralCodes();
       });
     } catch (err) {
       logger.error(`[estimate-promo-code] hourly sweep failed: ${err.message}`);
