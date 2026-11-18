@@ -50,6 +50,8 @@ const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services
 const { computeStopsAhead, isServiceDateToday } = require('../services/stops-ahead');
 const { gateEnvValue } = require('../config/feature-gates');
 const { customerTrackState } = require('../services/track-transitions');
+const { dayOnlyVisit } = require('../services/time-display');
+const { dateOnlyString } = require('../utils/date-only');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -122,6 +124,241 @@ function durationMinutes(windowStart, windowEnd) {
   const [eh, em] = String(windowEnd).split(':').map(Number);
   if ([sh, sm, eh, em].some(Number.isNaN)) return null;
   return (eh * 60 + em) - (sh * 60 + sm);
+}
+
+// Recommendation 3 starts with the rain handoff only. This sentence is
+// deliberately timeless: a valid tracking link can be reopened long after
+// the handoff's original service day.
+const CUSTOMER_MOVE_REASONS = Object.freeze({
+  weather_rain: 'Rain interrupted the route for this visit.',
+});
+
+const OFFICE_VISIT_CHANGES = Object.freeze({
+  cancelled: { kind: 'cancelled', nextActor: 'office' },
+  no_show: { kind: 'missed', nextActor: 'office' },
+});
+
+const RESCHEDULE_LOG_FIELDS = [
+  'original_date', 'original_window', 'new_date', 'new_window',
+  'reason_code', 'initiated_by', 'notes', 'created_at',
+];
+
+function hhmm(value) {
+  const match = /^(\d{2}:\d{2})/.exec(String(value || ''));
+  return match ? match[1] : null;
+}
+
+function handoffReasonCode(row) {
+  if (!row) return null;
+  return String(row.reason_code === 'customer_pick' ? row.notes : row.reason_code || '').trim() || null;
+}
+
+function isCustomerPickLog(row) {
+  return Boolean(row && (row.notes === 'customer_pick' || row.reason_code === 'customer_pick'));
+}
+
+function sameDate(left, right) {
+  const a = dateOnlyString(left);
+  const b = dateOnlyString(right);
+  return Boolean(a && b && a === b);
+}
+
+function sameWindowStart(left, right) {
+  const a = hhmm(left);
+  const b = hhmm(String(right || '').split('-')[0]);
+  return Boolean(a && b && a === b);
+}
+
+function laterThan(left, right) {
+  const a = new Date(left).getTime();
+  const b = new Date(right).getTime();
+  return Number.isFinite(a) && Number.isFinite(b) && a >= b;
+}
+
+function customerPickResolution(handoff, latest, service) {
+  if (!handoff || !latest || !service.window_start) return false;
+  if (latest.reason_code !== 'customer_request' || latest.initiated_by !== 'customer_self_serve') return false;
+  return laterThan(latest.created_at, handoff.created_at)
+    && sameDate(latest.original_date, handoff.new_date)
+    && sameDate(latest.new_date, service.scheduled_date)
+    && sameWindowStart(service.window_start, latest.new_window);
+}
+
+function autoPlacedPick(handoff, latest, service) {
+  if (!service.customer_pick_by || !dateOnlyString(service.scheduled_date) || !hhmm(service.window_start)) return false;
+  if (latest?.reason_code !== 'auto_dispatch' || latest?.initiated_by !== 'auto_dispatch') return false;
+  // The reschedule_log row commits atomically with the replacement slot.
+  // last_auto_dispatch_at is separate best-effort bookkeeping and cannot be
+  // display authority: a failed stamp must not turn the committed slot into
+  // an unrecognized handoff or bypass day-only redaction.
+  return laterThan(latest.created_at, handoff.created_at)
+    && sameDate(latest.original_date, handoff.new_date)
+    && sameDate(latest.new_date, service.scheduled_date)
+    && sameWindowStart(service.window_start, latest.new_window);
+}
+
+async function autoPlacedDayOnly(service) {
+  if (!service?.customer_pick_by || !service.window_start) return false;
+  return dayOnlyVisit(db, service);
+}
+
+function trackWindow(row, visitChange, officeRebooking = false, dayOnlyAutoPlaced = false) {
+  const dayOnlyReplacement = visitChange?.kind === 'customer_pick'
+    && visitChange.stage === 'booked'
+    && visitChange.current?.date
+    && !visitChange.current.windowStart;
+  const hideWindow = officeRebooking || dayOnlyAutoPlaced || dayOnlyReplacement;
+  return {
+    date: !officeRebooking && dayOnlyAutoPlaced ? dateOnlyString(row.scheduled_date) : null,
+    start: hideWindow ? null : composeWindowIso(row.scheduled_date, row.window_start),
+    end: hideWindow ? null : composeWindowIso(row.scheduled_date, row.window_end),
+  };
+}
+
+function isUnplacedCustomerPick(row) {
+  return Boolean(row.customer_pick_by && !row.window_start);
+}
+
+function allowsScheduledRouteTracking(row, customerState) {
+  return customerState === 'scheduled' && row.status !== 'rescheduled' && !isUnplacedCustomerPick(row);
+}
+
+function publicTrackState(row) {
+  const state = customerTrackState(row);
+  const terminal = ['cancelled', 'no_show', 'complete'].includes(state);
+  return !terminal && (row.status === 'rescheduled' || isUnplacedCustomerPick(row)) ? 'scheduled' : state;
+}
+
+function unverifiedUnplacedVisitChange(service) {
+  return service.customer_pick_by && !service.window_start
+    ? { kind: 'pending_rebook', nextActor: 'office' }
+    : null;
+}
+
+async function latestRescheduleLog(serviceId, { customerPickOnly = false, failureLabel } = {}) {
+  try {
+    const query = db('reschedule_log').where({ scheduled_service_id: serviceId });
+    if (customerPickOnly) {
+      query.where(function customerPickLog() {
+        this.where('notes', 'customer_pick').orWhere('reason_code', 'customer_pick');
+      });
+    }
+    return await query.orderBy('created_at', 'desc').first(...RESCHEDULE_LOG_FIELDS);
+  } catch (err) {
+    logger.warn(`[track-public] ${failureLabel} for ${serviceId}: ${err.message}`);
+    return null;
+  }
+}
+
+async function skippedVisitChange(service) {
+  let nextVisitDate = null;
+  try {
+    nextVisitDate = await require('../services/visit-skip').nextPlanVisitDate(
+      db,
+      service,
+      dateOnlyString(service.scheduled_date),
+      { requireServiceAndProperty: true },
+    );
+  } catch (err) {
+    logger.warn(`[track-public] next plan visit read failed for ${service.id}: ${err.message}`);
+  }
+  return {
+    kind: 'skipped',
+    nextActor: 'none',
+    nextVisit: nextVisitDate ? { date: nextVisitDate } : null,
+  };
+}
+
+function customerPickStage(service, handoff, latest) {
+  // A waiting handoff must still be parked on this handoff's placeholder.
+  // A later move makes the old handoff stale even if legacy data left the
+  // customer_pick_by marker behind.
+  const waitingForCustomer = Boolean(service.customer_pick_by && !service.window_start)
+    && sameDate(service.scheduled_date, handoff.new_date)
+    && isCustomerPickLog(latest)
+    && laterThan(latest.created_at, handoff.created_at);
+  const customerBooked = customerPickResolution(handoff, latest, service);
+  const autoBooked = autoPlacedPick(handoff, latest, service);
+  const booked = customerBooked || autoBooked;
+  return waitingForCustomer || booked ? { waitingForCustomer, booked, autoBooked } : null;
+}
+
+function customerPickVisitChange(service, handoff, reason, stage, hideAutoPlacedHour, now) {
+  const { waitingForCustomer, booked } = stage;
+  const deadline = service.customer_pick_by ? new Date(service.customer_pick_by) : null;
+  return {
+    kind: 'customer_pick',
+    stage: waitingForCustomer ? 'awaiting_customer' : 'booked',
+    nextActor: waitingForCustomer ? 'customer' : 'none',
+    reason,
+    previous: {
+      date: dateOnlyString(handoff.original_date),
+      windowStart: hhmm(String(handoff.original_window || '').split('-')[0]),
+    },
+    // The handoff's parked date is an internal routing placeholder, not a
+    // booked customer promise. Return a current slot only after a durable
+    // customer selection or Auto-Dispatch placement proves it is real.
+    current: booked ? {
+      date: dateOnlyString(service.scheduled_date),
+      windowStart: hideAutoPlacedHour ? null : hhmm(service.window_start),
+    } : null,
+    pickBy: deadline && Number.isFinite(deadline.getTime()) ? deadline.toISOString() : null,
+    deadlinePassed: Boolean(waitingForCustomer && deadline && deadline.getTime() <= now.getTime()),
+    action: waitingForCustomer
+      ? { kind: 'portal_visits', href: '/?tab=schedule', label: 'Open Visits' }
+      : null,
+  };
+}
+
+// The tracker token remains read-only authority. A customer-pick handoff may
+// point at the authenticated Schedule tab, whose own customer session returns
+// the write-capable reschedule link. The track payload never returns or mints
+// a reschedule token.
+async function buildVisitChange(service, customerState, now = new Date(), { dayOnlyAutoPlaced } = {}) {
+  if (service.status === 'skipped') return skippedVisitChange(service);
+
+  // `rescheduled` is the office-owned pending-rebook status. Its persisted
+  // date/window are the abandoned slot, not a current booking promise.
+  const officeVisitChange = service.status === 'rescheduled'
+    ? { kind: 'pending_rebook', nextActor: 'office' }
+    : OFFICE_VISIT_CHANGES[customerState] || null;
+  if (officeVisitChange || customerState !== 'scheduled') return officeVisitChange;
+
+  const handoff = await latestRescheduleLog(service.id, {
+    customerPickOnly: true,
+    failureLabel: 'customer-pick read failed',
+  });
+  if (!handoff) return unverifiedUnplacedVisitChange(service);
+
+  const reasonCode = handoffReasonCode(handoff);
+  // The pilot is rain-only. An unrelated Quick Move retains neutral office
+  // recovery until its customer copy is explicitly approved.
+  if (!CUSTOMER_MOVE_REASONS[reasonCode]) return unverifiedUnplacedVisitChange(service);
+
+  // Most scheduled polls have no rain handoff and stop above. Only a
+  // qualifying pilot row pays for this second query, which decides whether
+  // the handoff is still current or was resolved/superseded.
+  const latest = await latestRescheduleLog(service.id, {
+    failureLabel: 'latest customer-pick resolution read failed',
+  });
+  const stage = customerPickStage(service, handoff, latest);
+  if (!stage) return unverifiedUnplacedVisitChange(service);
+  const { waitingForCustomer, booked, autoBooked } = stage;
+
+  // A customer-selected hour is an explicit promise and is never hidden.
+  // An automatic placement follows the same canonical day-only verdict as
+  // every other customer surface. One verdict drives both this nested field
+  // and the top-level window (trackWindow), so no alternate field leaks it.
+  const hideAutoPlacedHour = autoBooked
+    && (dayOnlyAutoPlaced ?? await autoPlacedDayOnly(service));
+  return customerPickVisitChange(
+    service,
+    handoff,
+    CUSTOMER_MOVE_REASONS[reasonCode],
+    { waitingForCustomer, booked },
+    hideAutoPlacedHour,
+    now,
+  );
 }
 
 function isFreshVehicleTimestamp(updatedAt) {
@@ -422,6 +659,13 @@ router.get('/:token', async (req, res, next) => {
         's.completed_at',
         's.cancelled_at',
         's.cancellation_reason',
+        's.customer_pick_by',
+        's.service_id',
+        's.property_id',
+        's.is_recurring',
+        's.recurring_parent_id',
+        's.is_callback',
+        's.followup_included',
         's.track_token_expires_at',
         's.prep_token',
         's.prep_sent_at',
@@ -461,7 +705,10 @@ router.get('/:token', async (req, res, next) => {
     if (!isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
-    row = await ensureEnRouteDestinationGeocoded(row);
+    const officeRebooking = row.status === 'rescheduled';
+    const unplacedCustomerPick = isUnplacedCustomerPick(row);
+    const customerState = publicTrackState(row);
+    if (!officeRebooking && !unplacedCustomerPick) row = await ensureEnRouteDestinationGeocoded(row);
 
     // Presign the tech's photo (if S3-managed) inside this trusted
     // track-token boundary. Falls back to row.tech_photo_url for
@@ -480,18 +727,23 @@ router.get('/:token', async (req, res, next) => {
     // stale track_state='en_route' kept streaming live tech GPS until
     // token expiry for a visit that was already cancelled. Everything
     // non-terminal maps 1:1 from the canonical track_state machine.
-    const customerState = customerTrackState(row);
-
     // "N stops before yours" (GATE_STOPS_AWAY): bare counts only — never
     // other customers' info. Scheduled state only (the en-route card's
     // "on the way" copy owns later states); fail-soft null otherwise.
     // readOnly: this GET must never write (route contract, AGENTS.md) —
     // a value that isn't yet the durable clamp floor comes back pending
     // and the page acks via POST /:token/stops-ahead, which persists.
-    const stops = customerState === 'scheduled'
+    const scheduledRouteTracking = allowsScheduledRouteTracking(row, customerState);
+    const stops = scheduledRouteTracking
       ? await computeStopsAhead(db, row.id, { readOnly: true })
       : null;
     const stopsReady = stops && !stops.pending ? stops : null;
+    // The row shape is durable: automatic placement keeps customer_pick_by,
+    // while a human-selected hour clears it in the move transaction. Judge
+    // day-only before the optional narrative-log reads so a failed log lookup
+    // cannot expose the automatic hour through the top-level window.
+    const dayOnlyAutoPlaced = customerState === 'scheduled' ? await autoPlacedDayOnly(row) : false;
+    const visitChange = await buildVisitChange(row, customerState, new Date(), { dayOnlyAutoPlaced });
 
     const response = {
       state: customerState,
@@ -502,10 +754,7 @@ router.get('/:token', async (req, res, next) => {
             yearsWithWaves: null, // no hire_date column on technicians today
           }
         : null,
-      window: {
-        start: composeWindowIso(row.scheduled_date, row.window_start),
-        end: composeWindowIso(row.scheduled_date, row.window_end),
-      },
+      window: trackWindow(row, visitChange, officeRebooking, dayOnlyAutoPlaced),
       property: {
         lat: row.latitude != null ? parseFloat(row.latitude) : null,
         lng: row.longitude != null ? parseFloat(row.longitude) : null,
@@ -554,6 +803,7 @@ router.get('/:token', async (req, res, next) => {
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
+      visitChange,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
       // Client identity block for the card (owner 2026-07-13): names,
@@ -575,7 +825,7 @@ router.get('/:token', async (req, res, next) => {
         // drop into range as stops complete).
         pollIntervalSeconds: customerState === 'en_route'
           ? EN_ROUTE_POLL_SECONDS
-          : (customerState === 'scheduled' && gateEnvValue('GATE_STOPS_AWAY')
+          : (scheduledRouteTracking && gateEnvValue('GATE_STOPS_AWAY')
               && isServiceDateToday(row.scheduled_date)
             ? SCHEDULED_POLL_SECONDS
             : 0),
@@ -622,14 +872,17 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
   try {
     const row = await db('scheduled_services as s')
       .where('s.track_view_token', req.params.token)
-      .first('s.id', 's.status', 's.track_state', 's.track_token_expires_at');
+      .first(
+        's.id', 's.status', 's.track_state', 's.track_token_expires_at',
+        's.customer_pick_by', 's.window_start',
+      );
     if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });
     }
     // Same terminal-status precedence as the GET: only the scheduled
     // customer state carries a planned count.
     const customerState = customerTrackState(row);
-    const stops = customerState === 'scheduled'
+    const stops = allowsScheduledRouteTracking(row, customerState)
       ? await computeStopsAhead(db, row.id)
       : null;
     res.json({
@@ -682,6 +935,12 @@ router._test = {
   buildSummary,
   buildVehicle,
   buildApproxVehicle,
+  buildVisitChange,
+  handoffReasonCode,
+  autoPlacedDayOnly,
+  trackWindow,
+  allowsScheduledRouteTracking,
+  publicTrackState,
 };
 
 module.exports = router;

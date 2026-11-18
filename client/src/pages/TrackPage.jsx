@@ -85,6 +85,19 @@ function formatCompleteDate(iso) {
   }
 }
 
+function formatVisitDate(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return '';
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString(undefined, {
+    weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
+  });
+}
+
+function changeWindow(change) {
+  const date = change?.current?.date;
+  const start = change?.current?.windowStart;
+  return date && start ? formatWindow(`${date}T${start}:00`) : formatVisitDate(date);
+}
+
 // Build the property-address lines from the public-track payload. Returns
 // the visible lines in order: [line1, line2?, "City, ST Zip"]. Empty
 // strings filtered out so a missing line2 just collapses cleanly.
@@ -530,15 +543,69 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
 }
 
 // ── State cards ──────────────────────────────────────────────────
-function ScheduledCard({ data }) {
-  const techFirst = data.tech?.firstName || 'your tech';
-  const window = formatWindow(data.window?.start);
+function AwaitingScheduleChangeCard({ data }) {
+  const change = data.visitChange;
   return (
-    <Card accent={COLORS.wavesBlue}>
+    <Card accent={COLORS.orange}>
+      <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', fontWeight: 600 }}>
+        Schedule changed
+      </div>
       <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
-        {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
-        your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
+        Your {data.service?.type?.toLowerCase() || 'service'} visit needs a new time.
       </h1>
+      {change.reason ? (
+        <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+          {change.reason}
+        </div>
+      ) : null}
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+        Sign in to Visits, choose this property if needed, and see whether online times are still available. You can also call or text us and our office will help.
+      </div>
+      {change.action?.kind === 'portal_visits' ? (
+        <a
+          href={change.action.href}
+          data-glass-accent=""
+          data-glass-size="primary"
+          style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
+        >{change.action.label}</a>
+      ) : null}
+      <OfficeActions />
+      <ClientMeta data={data} />
+    </Card>
+  );
+}
+
+function scheduledHeading(data, bookedChange, window) {
+  const service = data.service?.type?.toLowerCase() || 'service';
+  if (bookedChange) return window ? `Your new ${service} visit is booked for ${window}.` : 'Your visit schedule changed.';
+  const greeting = data.customerFirstName ? `Hi ${data.customerFirstName} — ` : '';
+  return `${greeting}your ${service} is booked${window ? ` for ${window}` : ''}.`;
+}
+
+function ScheduledCard({ data }) {
+  if (data.visitChange?.kind === 'pending_rebook') return <PendingRebookCard data={data} />;
+  const customerPick = data.visitChange?.kind === 'customer_pick' ? data.visitChange : null;
+  if (customerPick?.stage === 'awaiting_customer') return <AwaitingScheduleChangeCard data={data} />;
+  const bookedChange = customerPick?.stage === 'booked' ? customerPick : null;
+  const techFirst = data.tech?.firstName || 'your tech';
+  const window = bookedChange
+    ? changeWindow(bookedChange)
+    : (formatWindow(data.window?.start) || formatVisitDate(data.window?.date));
+  return (
+    <Card accent={bookedChange ? COLORS.orange : COLORS.wavesBlue}>
+      {bookedChange ? (
+        <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', fontWeight: 600 }}>
+          Schedule changed
+        </div>
+      ) : null}
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
+        {scheduledHeading(data, bookedChange, window)}
+      </h1>
+      {bookedChange?.reason ? (
+        <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+          {bookedChange.reason}
+        </div>
+      ) : null}
       <StopsAheadHero
         stopsAhead={data.stopsAhead}
         routeProgress={data.routeProgress}
@@ -551,6 +618,33 @@ function ScheduledCard({ data }) {
       </div>
       <ClientMeta data={data} />
       <PrepLink data={data} />
+    </Card>
+  );
+}
+
+function OfficeActions() {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 20 }}>
+      <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" style={TRACK_PRIMARY_CTA}>Call Waves</a>
+      <a href={WAVES_SUPPORT_SMS_TEL} data-glass="chip" style={{ ...TRACK_PRIMARY_CTA, background: TRACK_SURFACE.surface, color: COLORS.glassNavy }}>Text Waves</a>
+    </div>
+  );
+}
+
+function PendingRebookCard({ data }) {
+  return (
+    <Card accent={COLORS.orange}>
+      <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', fontWeight: 600 }}>
+        Schedule changed
+      </div>
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
+        We're finding you a new time for your {data.service?.type?.toLowerCase() || 'service'} visit.
+      </h1>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+        Your reschedule request is with our office. Call or text us if you need help.
+      </div>
+      <OfficeActions />
+      <ClientMeta data={data} />
     </Card>
   );
 }
@@ -729,17 +823,10 @@ function CancelledCard({ data }) {
           <span style={{ color: TRACK_SURFACE.muted }}>Reason: </span>{reason}
         </div>
       ) : null}
-      <a
-        href={WAVES_SUPPORT_PHONE_TEL}
-        data-glass-accent=""
-        data-glass-size="primary"
-        style={{
-          display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.glassNavy, color: COLORS.white,
-          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
-          textDecoration: 'none',
-        }}
-      >Call to reschedule</a>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+        Call or text us and our office will help with the next step.
+      </div>
+      <OfficeActions />
     </Card>
   );
 }
@@ -756,19 +843,28 @@ function NoShowCard({ data }) {
       </h1>
       <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         We weren't able to complete your {data.service?.type?.toLowerCase() || 'service'}
-        {when ? ` on ${when}` : ' today'}. Let's get you back on the schedule — reschedule any time and we'll find a slot that works for you.
+        {when ? ` on ${when}` : ' today'}. Call or text us and our office will help find an available time.
       </div>
-      <a
-        href={WAVES_SUPPORT_PHONE_TEL}
-        data-glass-accent=""
-        data-glass-size="primary"
-        style={{
-          display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.glassNavy, color: COLORS.white,
-          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
-          textDecoration: 'none',
-        }}
-      >Call to reschedule</a>
+      <OfficeActions />
+    </Card>
+  );
+}
+
+function SkippedCard({ data }) {
+  const nextDate = formatVisitDate(data.visitChange?.nextVisit?.date);
+  return (
+    <Card accent={COLORS.orange}>
+      <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', fontWeight: 600 }}>
+        Visit skipped
+      </div>
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
+        This {data.service?.type?.toLowerCase() || 'service'} visit was skipped.
+      </h1>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+        No service will be performed for this visit, and no make-up visit is being added.
+        {nextDate ? ` Your next regular visit is ${nextDate}.` : ''}
+      </div>
+      <ClientMeta data={data} />
     </Card>
   );
 }
@@ -974,8 +1070,9 @@ export default function TrackPage() {
       {data.state === 'en_route' ? <EnRouteCard data={data} /> : null}
       {data.state === 'on_property' ? <OnPropertyCard data={data} /> : null}
       {data.state === 'complete' ? <CompleteCard data={data} /> : null}
-      {data.state === 'cancelled' ? <CancelledCard data={data} /> : null}
+      {data.state === 'cancelled' && data.visitChange?.kind !== 'skipped' ? <CancelledCard data={data} /> : null}
       {data.state === 'no_show' ? <NoShowCard data={data} /> : null}
+      {data.state === 'cancelled' && data.visitChange?.kind === 'skipped' ? <SkippedCard data={data} /> : null}
     </Page>
   );
 }

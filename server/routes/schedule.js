@@ -34,7 +34,7 @@ const { dayOnlyIds, dayOnlyFields, shownSlotFor } = require('../services/time-di
 // portal can never advertise a link that 404s or hide one the route serves
 // (codex r3 P1).
 const {
-  DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL,
+  OFFICE_REVIEW_PENDING_SOURCE_ACTIONS, isUnreviewedDispatchOwned, customerVisibleBookingWhere,
 } = require('../services/call-booking-source-actions');
 const { awaitingCustomerPick, AWAITING_PICK_REFUSAL } = require('../services/scheduling/self-serve-notice');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
@@ -194,11 +194,7 @@ router.get('/', async (req, res, next) => {
       // so the portal can't surface (and confirm) the default interval before
       // dispatch reviews it. De Morgan with NULL-safe legs: most rows have no
       // source_action, and `NOT (NULL = x)` would filter them out.
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -801,11 +797,7 @@ router.get('/account-next', async (req, res, next) => {
     const rows = await db('scheduled_services')
       .whereIn('scheduled_services.customer_id', ids)
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed', 'scheduled_services.customer_pick_by')
@@ -862,11 +854,7 @@ router.get('/properties-next', async (req, res, next) => {
       .whereIn('scheduled_services.customer_id', ids)
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as GET / and GET /next.
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .select(
@@ -949,11 +937,7 @@ router.get('/next', async (req, res, next) => {
       // Same dispatch-owned guard as the list above: a still-pending,
       // never-confirmed call-created follow-up can't surface as the
       // customer's next appointment (NULL-safe De Morgan legs).
-      .where((qb) => qb
-        .whereNull('scheduled_services.source_action')
-        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
-        .orWhere((q2) => q2.whereNot('scheduled_services.status', 'pending').whereRaw(`NOT ${UNREVIEWED_VOICE_MOVED_SQL}`))
-        .orWhere('scheduled_services.customer_confirmed', true))
+      .where(customerVisibleBookingWhere)
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.*', 'technicians.name as technician_name')
