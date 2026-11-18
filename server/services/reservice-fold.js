@@ -137,7 +137,11 @@ async function carryOfficeWords(conn, target, { customerRequest, notes, internal
   let toNotes = '';
   if (words || pests) {
     const filled = await conn('scheduled_services').where({ id: target.id })
-      .where((q) => q.whereNull('customer_request').orWhere('customer_request', ''))
+      // Empty, or already these very words (a double tap: the first carry filled it): never copied into the notes again.
+      .where((q) => {
+        q.whereNull('customer_request').orWhere('customer_request', '');
+        if (words) q.orWhere('customer_request', words);
+      })
       .update({
         ...(words ? { customer_request: words, customer_request_source: customerRequest.source } : {}),
         ...(pests ? { customer_request_pests: JSON.stringify(pests) } : {}),
@@ -341,4 +345,5 @@ module.exports = {
   foldOfficeNotice,
   moveFoldTarget,
   moveFoldTargetForCustomer,
+  carryOfficeWords,
 };

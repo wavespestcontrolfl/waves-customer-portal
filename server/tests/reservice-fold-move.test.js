@@ -48,11 +48,12 @@ const PLAN = { plan: { rescheduleOptions: {} } };
 
 let update;
 let conn;
+let query;
 beforeEach(() => {
   jest.clearAllMocks();
   update = jest.fn().mockResolvedValue(1);
   // Only the office-words copy writes; there is no other read or write on the connection.
-  const query = { update };
+  query = { update };
   query.where = jest.fn(() => query);
   query.whereRaw = jest.fn(() => query);
   conn = jest.fn(() => query);
@@ -160,6 +161,19 @@ test('a visit that already has words (or got them meanwhile) keeps them; the new
   expect(update.mock.calls[1][0]).toEqual({
     notes: NOTES_LINE("Customer's words (call): Ants in the kitchen. Ants in the kitchen"),
   });
+});
+
+test('the fill also matches a visit that already holds these very words (a double tap never copies them into the notes)', async () => {
+  await run();
+  const guard = query.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+  const seen = [];
+  const q = { whereNull: (c) => { seen.push(['null', c]); return q; }, orWhere: (c, v) => { seen.push(['or', c, v]); return q; } };
+  guard(q);
+  expect(seen).toEqual([['null', 'customer_request'], ['or', 'customer_request', ''], ['or', 'customer_request', 'Ants in the kitchen']]);
+  // No words (notes only): the equality match is not added.
+  query.where.mockClear();
+  await run({ customerRequest: null });
+  expect(query.where.mock.calls.some(([arg]) => typeof arg === 'function')).toBe(false);
 });
 
 test('words with no office notes: filled once and no notes write; no words and no notes: no write at all', async () => {

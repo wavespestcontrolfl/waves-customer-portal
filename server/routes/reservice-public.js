@@ -752,7 +752,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 // to drop. Everything below runs BEFORE the slot rebuild and createSelfBooking, and any "no" returns null: the route then
 // carries on exactly as it did. The pick folds only when the plan visit's OWN reschedule page would let the customer move it
 // (account, reviewed call booking, not a shared stop, outside the move notice) and its own one-day picker offers the picked
-// start. A repeat of the same pick finds the plan visit already on the slot and answers `replayed`: nothing moves, no text.
+// start. A repeat of the same pick finds the plan visit already on the slot and answers `replayed`: nothing moves, no text,
+// but the words still reach the visit once and the owner bell rings (at most once per visit).
 // A refused move (a clash, a raced edit) is tried once more from a fresh lookup: a second tap that raced the first then lands
 // on the replay instead of booking a re-service on top of the fold.
 async function linkReserviceFold({ customer, lane, catalog, date, startTime, config, details, pests, pestLabels: labels }) {
@@ -785,11 +786,24 @@ async function tryLinkFold({ fold, customer, lane, date, startTime, config, deta
       endLabel: slot.end_label,
       confirmationCode: null,
       rescheduleUrl: row?.reschedule_token ? `/reschedule/${row.reschedule_token}` : null,
-      reserviceFold: { serviceType: target.service_type, fromDate: target.scheduled_date, toDate: date },
+      // On a replay the visit already moved, so its earlier date is not known here.
+      reserviceFold: { serviceType: target.service_type, fromDate: replayed ? null : target.scheduled_date, toDate: date },
     };
   };
-  // Replay: the plan visit already sits on this date and start.
+  const customerRequest = details || labels.length ? { text: details || null, source: 'picker', pests, pestLabels: labels } : null;
+  // The owner bell is keyed per visit, so a repeat is a no-op. Through router._internals so the handler tests can observe it.
+  const bell = () => void Promise.resolve().then(() => router._internals.ringReserviceVisit(customer, {
+    id: target.id, serviceDate: date, windowStart: startTime, pests: labels, request: details || null,
+  })).catch((err) => logger.warn(`[reservice-public] fold bell failed for ${target.id}: ${err.message}`));
+  // Replay: the plan visit already sits on this date and start (a repeat tap after a fold, or a visit that was always there).
+  // Nothing moves and nothing is texted, but this request's words still reach the visit (once) and the owner is told.
   if (target.scheduled_date === date && reschedule.hhmm(target.window_start) === startTime) {
+    try {
+      await fold.carryOfficeWords(db, target, { customerRequest, date });
+    } catch (err) {
+      logger.error(`[reservice-public] replay could not copy the words to ${target.id} (code ${err?.code || 'none'})`);
+    }
+    bell();
     const end = reschedule.hhmm(target.window_end);
     return { reply: await reply(true, { start_time: startTime, end_time: end, start_label: timeLabel12(startTime), end_label: timeLabel12(end) }) };
   }
@@ -800,17 +814,13 @@ async function tryLinkFold({ fold, customer, lane, date, startTime, config, deta
   const slot = availability?.days?.find((d) => d.date === date)?.slots?.find((s) => s.start_time === startTime);
   if (!slot) return {};
   const moved = await fold.moveFoldTargetForCustomer({
-    conn: db, target, svc, elig, lane, date, slot,
-    customerRequest: details || labels.length ? { text: details || null, source: 'picker', pests, pestLabels: labels } : null,
+    conn: db, target, svc, elig, lane, date, slot, customerRequest,
   });
   if (!moved.moved) {
     logger.info(`[reservice-public] fold of ${target.id} refused (${moved.why})`);
     return { retry: true };
   }
-  // Through router._internals so the handler tests can observe the call.
-  void Promise.resolve().then(() => router._internals.ringReserviceVisit(customer, {
-    id: target.id, serviceDate: date, windowStart: slot.start_time, pests: labels, request: details || null,
-  })).catch((err) => logger.warn(`[reservice-public] fold bell failed for ${target.id}: ${err.message}`));
+  bell();
   return { reply: await reply(false, slot) };
 }
 

@@ -259,6 +259,39 @@ describeOrSkip('the customer link fold on real rows', () => {
     expect(row.notes.startsWith('Old note\n[Re-service folded in, ')).toBe(true);
   });
 
+  describe('the words on a replay (the plan visit already sits on the picked slot)', () => {
+    const words = (text) => ({ text, source: 'picker', pests: null, pestLabels: [] });
+    const carry = (target, text) => fold.carryOfficeWords(db, target, { customerRequest: words(text), date: RESERVICE_DAY });
+    const read = (id) => db('scheduled_services').where({ id }).first('customer_request', 'customer_request_source', 'notes');
+
+    test('a visit that was always at the slot (no fold ever ran) takes the words as its request', async () => {
+      const id = await planVisit(later(0), { window_start: '09:00', window_end: '10:00' });
+      await carry(await lookup(), 'Ants in the kitchen');
+      expect(await read(id)).toMatchObject({ customer_request: 'Ants in the kitchen', customer_request_source: 'picker', notes: null });
+    });
+
+    test('a true double tap: the same words again are not copied anywhere (not into the notes, the request unchanged)', async () => {
+      const id = await planVisit(later(0));
+      const target = await lookup();
+      await carry(target, 'Ants in the kitchen');
+      await carry(target, 'Ants in the kitchen');
+      expect(await read(id)).toMatchObject({ customer_request: 'Ants in the kitchen', notes: null });
+    });
+
+    test('new words on a repeat pick go into the notes once, however often they are sent', async () => {
+      const id = await planVisit(later(0), { notes: 'Old note' });
+      const target = await lookup();
+      await carry(target, 'Ants in the kitchen');
+      await carry(target, 'Spiders in the garage');
+      await carry(target, 'Spiders in the garage');
+      const row = await read(id);
+      expect(row.customer_request).toBe('Ants in the kitchen');
+      expect(row.notes.split("Customer's words (picker): Spiders in the garage.")).toHaveLength(2);
+      expect(row.notes.startsWith('Old note\n[Re-service folded in, ')).toBe(true);
+      expect(row.notes).not.toContain('Ants in the kitchen');
+    });
+  });
+
   test('a visit that changed since the lookup is refused (a 4xx) and nothing moves', async () => {
     const id = await planVisit(later(8));
     const { loadById, pageEligibility } = require('../routes/reschedule-public')._internals;

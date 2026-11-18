@@ -7272,8 +7272,12 @@ plan visit), date, window, startLabel, endLabel, confirmationCode: null,
 rescheduleUrl (the plan visit's), reserviceFold: { serviceType, fromDate,
 toDate } }` with no `prepPhotos`. A repeat of the same pick finds the plan
 visit on that date and start and answers `replayed: true` (nothing moves, no
-text). The customer gets exactly one text, the standard `appointment_rescheduled`
-notice, and the owner bell `reservice_self_booked` rings for the moved visit.
+text; `reserviceFold.fromDate` is null, since the visit's earlier date is not
+known there). The words of that request still reach the visit once (an empty
+request is filled; the same words again are not copied; different words join
+the notes) and the bell rings at most once per visit. The customer gets exactly
+one text, the standard `appointment_rescheduled` notice, on the move, and the
+owner bell `reservice_self_booked` rings for the moved visit.
 No new error codes: every refusal (no plan visit in range, not eligible, no fit,
 a clash or a raced edit) books the re-service exactly as before. GET and
 `/find-slots` are unchanged. Gate off: byte-identical, with no lookup.
