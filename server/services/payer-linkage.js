@@ -36,6 +36,10 @@ function paymentInvoiceIds(payment) {
     .filter((value) => value != null)
     .map((value) => String(value).toLowerCase());
 }
+function isCombinedPayment(payment) {
+  const value = metadataOf(payment)?.combined_payment;
+  return value === true || value === 'true';
+}
 const descriptionInvoiceNumberOf = (p) => {
   const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
   return m ? m[1] : null;
@@ -168,5 +172,5 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 module.exports = {
   LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL,
   LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
-  invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
+  invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
 };

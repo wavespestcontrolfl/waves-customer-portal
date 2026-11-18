@@ -75,6 +75,46 @@ test('two failed payments map to their own invoices instead of the oldest accoun
   expect(recovery.get('pay-b')).toEqual({ payUrl: '/pay/tok-b', amountDue: 60, invoiceNumber: 'WPC-200' });
 });
 
+test('combined ACH shares keep their invoice-specific recovery links after a bounce', async () => {
+  const second = invoice({
+    id: INV_B, token: 'tok-b', invoice_number: 'WPC-200', total: '60.00',
+    stripe_payment_intent_id: 'pi-shared',
+  });
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [
+    {
+      id: 'pay-a', status: 'failed', stripe_payment_intent_id: 'pi-shared',
+      metadata: { invoice_id: INV_A, combined_payment: true },
+    },
+    {
+      id: 'pay-b', status: 'failed', stripe_payment_intent_id: 'pi-shared',
+      metadata: { invoice_id: INV_B, combined_payment: true },
+    },
+  ], reader([second, invoice({ stripe_payment_intent_id: 'pi-shared' })]));
+
+  expect(recovery.get('pay-a')?.payUrl).toBe('/pay/tok-a');
+  expect(recovery.get('pay-b')?.payUrl).toBe('/pay/tok-b');
+});
+
+test('an unmarked shared Stripe identifier remains ambiguous', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', stripe_payment_intent_id: 'pi-shared',
+    metadata: { invoice_id: INV_A },
+  }], reader([
+    invoice({ stripe_payment_intent_id: 'pi-shared' }),
+    invoice({ id: INV_B, token: 'tok-b', invoice_number: 'WPC-200', stripe_payment_intent_id: 'pi-shared' }),
+  ]));
+
+  expect(recovery.has('pay-a')).toBe(false);
+});
+
+test('serialized null metadata cannot break recovery for a legacy failed row', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-legacy', status: 'failed', metadata: 'null', stripe_payment_intent_id: 'pi-a',
+  }], reader([invoice()]));
+
+  expect(recovery.get('pay-legacy')?.payUrl).toBe('/pay/tok-a');
+});
+
 test('conflicting non-explicit identifiers fail closed instead of choosing an invoice', async () => {
   const recovery = await recoveryInvoiceIndexFor('cust-1', [{
     id: 'pay-conflict', status: 'failed', metadata: null,

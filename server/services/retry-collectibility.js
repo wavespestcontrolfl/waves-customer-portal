@@ -314,9 +314,9 @@ function dateKeyOf(paymentDate) {
 
 function parseMeta(payment) {
   try {
-    return payment.metadata
-      ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata)
-      : {};
+    const raw = payment?.metadata;
+    const parsed = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {}; // unparseable legacy metadata — treat as unstamped/unclassified
   }

@@ -7,7 +7,7 @@ const db = require('../models/db');
 const { excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const StripeService = require('./stripe');
 const logger = require('./logger');
-const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, descriptionInvoiceNumberOf } = require('./payer-linkage');
+const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
 const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
@@ -145,31 +145,47 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   // Establish identity against every matching invoice before deciding whether
   // it is payable. Otherwise a settled invoice named by metadata could be
   // filtered out first and an unrelated payable invoice sharing another key
-  // could win. All identifiers on the attempt must resolve to one invoice.
-  const uniqueIndex = (keyOf) => {
+  // could win. All identifiers on an ordinary attempt must resolve uniquely
+  // to one invoice; marked combined shares are handled explicitly below.
+  const rowSetIndex = (keyOf, normalize = String) => {
     const index = new Map();
     for (const row of rows) {
       const key = keyOf(row);
       if (!key) continue;
-      const normalized = String(key);
-      index.set(normalized, index.has(normalized) ? null : row);
+      const normalized = normalize(key);
+      const matches = index.get(normalized) || [];
+      matches.push(row);
+      index.set(normalized, matches);
     }
     return index;
   };
-  const byId = uniqueIndex((row) => row.id);
-  const byIntent = uniqueIndex((row) => row.stripe_payment_intent_id);
-  const byCharge = uniqueIndex((row) => row.stripe_charge_id);
-  const byNumber = uniqueIndex((row) => row.invoice_number);
+  const byId = rowSetIndex((row) => row.id, (value) => String(value).toLowerCase());
+  const byIntent = rowSetIndex((row) => row.stripe_payment_intent_id);
+  const byCharge = rowSetIndex((row) => row.stripe_charge_id);
+  const byNumber = rowSetIndex((row) => row.invoice_number);
 
   const invoiceByPaymentId = new Map();
   for (const payment of failedPayments) {
-    const matches = paymentInvoiceIds(payment).map((id) => byId.get(id));
-    if (payment.stripe_payment_intent_id) matches.push(byIntent.get(String(payment.stripe_payment_intent_id)));
-    if (payment.stripe_charge_id) matches.push(byCharge.get(String(payment.stripe_charge_id)));
+    const explicitGroups = paymentInvoiceIds(payment).map((id) => byId.get(id) || []);
     const invoiceNumber = invoiceNumberOf(payment);
-    if (invoiceNumber) matches.push(byNumber.get(invoiceNumber));
-    const candidate = matches[0];
-    if (!candidate || !matches.every((match) => match === candidate)) continue;
+    const strictGroups = [...explicitGroups];
+    if (invoiceNumber) strictGroups.push(byNumber.get(invoiceNumber) || []);
+    const stripeGroups = [];
+    if (payment.stripe_payment_intent_id) stripeGroups.push(byIntent.get(String(payment.stripe_payment_intent_id)) || []);
+    if (payment.stripe_charge_id) stripeGroups.push(byCharge.get(String(payment.stripe_charge_id)) || []);
+    const candidateGroup = strictGroups[0] || stripeGroups[0];
+    const candidate = candidateGroup?.length === 1 ? candidateGroup[0] : null;
+    const combined = isCombinedPayment(payment);
+    // Combined balance payments intentionally store one ledger row per
+    // invoice while every share carries the same Stripe identifiers. The
+    // explicit invoice must still be unique, and the shared Stripe match set
+    // must contain it. Ordinary attempts keep requiring every key to resolve
+    // uniquely to the same invoice.
+    if (!candidate || (combined && !explicitGroups.length)) continue;
+    if (!strictGroups.every((group) => group.length === 1 && group[0] === candidate)) continue;
+    if (!stripeGroups.every((group) => (combined
+      ? group.includes(candidate)
+      : group.length === 1 && group[0] === candidate))) continue;
     // The existing Billing balance rescues a draft only when the attempt
     // explicitly names it. A Stripe or description match alone cannot
     // publish a draft invoice to the customer.
