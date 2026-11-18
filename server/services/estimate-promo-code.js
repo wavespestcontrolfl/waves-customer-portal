@@ -43,6 +43,7 @@ const VOID_REASONS = {
   customer_not_eligible: 'this customer is not eligible for the code or already used it',
   uses_exhausted: 'the code ran out of uses',
   no_customer: 'the accepted estimate has no customer account',
+  office_discount: 'the office added a discount to the estimate after the code was entered',
 };
 
 const gateOn = () => isEnabled('estimatePromoCode');
@@ -157,7 +158,10 @@ async function enterPromoCode({ estimate, rawCode }, conn = db) {
   }
   if (estimateHasStaffDiscount(estimate)) return { ok: false, reason: 'discount_already_applied' };
 
-  const discount = await conn('discounts').where({ promo_code: code, is_active: true }).first();
+  // The discount row is locked through the insert: two customers entering a
+  // code with one use left wait on each other, and the second one counts
+  // the first one's saved code.
+  const discount = await conn('discounts').where({ promo_code: code, is_active: true }).forUpdate().first();
   const creditAmount = creditAmountOf(discount);
   if (!creditAmount
     || await customerBlocked(conn, estimate.customer_id, discount)
@@ -205,9 +209,12 @@ async function voidRow(conn, { row, customerId, reason }) {
 async function redeemInTransaction(trx, estimateId) {
   const row = await trx('estimate_promo_codes').where({ estimate_id: estimateId, status: 'entered' }).forUpdate().first();
   if (!row) return 'none';
-  const accepted = await trx('estimates').where({ id: estimateId, status: 'accepted' }).first('customer_id');
+  const accepted = await trx('estimates').where({ id: estimateId, status: 'accepted' }).first('customer_id', 'estimate_data');
   if (!accepted) return 'none';
   const customerId = accepted.customer_id;
+  // No stacking, judged again on the accepted row: the office may have added
+  // a discount after the customer entered the code.
+  if (estimateHasStaffDiscount(accepted)) return voidRow(trx, { row, customerId: customerId || null, reason: 'office_discount' });
   // Accepted with no customer account to credit: closed with its audit row so
   // the office sees the promise, never left waiting on a step that will not run.
   if (!customerId) return voidRow(trx, { row, customerId: null, reason: 'no_customer' });

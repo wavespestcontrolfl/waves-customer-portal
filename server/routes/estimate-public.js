@@ -16921,7 +16921,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // so the referral card rides here too (same gate + program check as
     // /data; the row is accepted by construction at this point).
     const acceptReferral = await estimateReferralCardFor({ id: estimate.id, status: 'accepted', customer_id: customerId || estimate.customer_id });
-    const acceptPromoCode = await estimatePromoCodeViewFor({ id: estimate.id });
+    // The row is accepted by construction: only a code already on it shows,
+    // never the entry field.
+    const acceptPromoCode = await estimatePromoCodeViewFor({ id: estimate.id, status: 'accepted' });
 
     res.json({
       ...(acceptReferral ? { referral: acceptReferral } : {}),

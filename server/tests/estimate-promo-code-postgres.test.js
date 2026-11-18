@@ -240,6 +240,30 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     expect(await usesOf(disc.id)).toBe(0);
   });
 
+  test('two customers entering a code with one use left: one is saved, the other gets the generic refusal', async () => {
+    const disc = await discount({ promo_code_max_uses: 1 });
+    const [a, b] = [await estimate(), await estimate()];
+    // Each entry on its own transaction, as the route runs it.
+    const inTrx = (est) => db.transaction((trx) => promo.enterPromoCode({ estimate: est, rawCode: disc.promo_code }, trx));
+    const outcomes = await Promise.all([inTrx(a), inTrx(b)]);
+    expect(outcomes.map((o) => o.ok).sort()).toEqual([false, true]);
+    expect(outcomes.find((o) => !o.ok)).toEqual({ ok: false, reason: 'invalid_code' });
+    expect(await db('estimate_promo_codes').where({ discount_id: disc.id })).toHaveLength(1);
+  });
+
+  test('an office discount added after the code was entered: acceptance posts no credit', async () => {
+    const cust = await customer();
+    const disc = await discount();
+    const est = await estimate({ customer_id: cust.id });
+    await enter(est, disc.promo_code);
+    await db('estimates').where({ id: est.id })
+      .update({ estimate_data: { summary: { manualDiscount: { type: 'PERCENT', value: 10, amount: 55 } } } });
+    expect(await accept(est, cust.id)).toBe('void');
+    expect(await balanceOf(cust.id)).toBe(0);
+    expect(await usesOf(disc.id)).toBe(0);
+    expect((await db('estimate_promo_codes').where({ estimate_id: est.id }).first()).void_reason).toBe('office_discount');
+  });
+
   test('a customer redeems a code once: a second accepted estimate with it posts nothing', async () => {
     const cust = await customer();
     const disc = await discount();
