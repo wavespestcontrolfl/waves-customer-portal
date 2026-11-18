@@ -142,6 +142,15 @@ describe('the copy', () => {
 });
 
 describe('runOpenBlocksAlert', () => {
+  test('a morning row that is not written fails the tick and leaves the earlier rows open', async () => {
+    openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
+    raiseAdminAlert.mockResolvedValueOnce(null);
+    closeAdminAlertKeys.mockClear();
+    const { conn } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }], assignable: [{ id: TECH }], services: busyWeek() });
+    await expect(runOpenBlocksAlert({ conn, now: NOW })).rejects.toThrow('open-blocks row not written');
+    expect(closeAdminAlertKeys).not.toHaveBeenCalled();
+  });
+
   test('raises one row keyed to this morning and closes an earlier morning\'s row', async () => {
     openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17', 'open-blocks:2026-11-18']);
     const { conn, calls } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }], assignable: [{ id: TECH }], services: busyWeek() });

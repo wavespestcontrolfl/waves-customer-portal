@@ -275,8 +275,11 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     detail: fresh ? detailText(sum) : `${detailText(sum)}\nThe night re-plan left no numbers this morning, so days with two or more stops are not listed.`,
     metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers },
   });
+  // notifyAdmin answers null when its write fails. Then no morning row exists: keep the earlier rows open and fail
+  // the tick, so job health shows it (pre-push audit, tune PR). A dedupe hit answers the open row, with its id.
+  if (!posted || !posted.id) throw new Error('open-blocks row not written; earlier rows left open');
   const closed = await closeEarlier(conn, key);
-  return { status: 'raised', id: posted?.id || null, deduped: !!posted?.deduped, openMin: sum.totalMin, closed, ...(fresh ? {} : { noRun: true }) };
+  return { status: 'raised', id: posted.id, deduped: !!posted.deduped, openMin: sum.totalMin, closed, ...(fresh ? {} : { noRun: true }) };
 }
 
 module.exports = {
