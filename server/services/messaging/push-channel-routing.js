@@ -326,10 +326,27 @@ function appCheckedInStamp(anyDevice, acceptedCheckedInAt) {
 }
 
 // GATE_APP_FIRST_STALE_TEXT: a stale holder phone sends the text, but an eligible
-// contact's phone keeps its push. The caller (twilio.js) fires it as a contact-only
-// companion after the text is accepted (sendCompanionPush contactOnly). Gate off = no flag.
-function contactCompanionFlag(anyDevice) {
-  return anyDevice && staleTextFloor() ? { contactCompanion: true } : {};
+// contact's phone keeps its push. The flag is set only when the 30-day floor alone kept
+// the holder's phone from counting: a holder with no phone app gives contacts no push,
+// as before. The caller (twilio.js) fires it as a contact-only companion after the text
+// is accepted (sendCompanionPush contactOnly). Gate off, or an unreadable status = no flag.
+async function contactCompanionFlag(customerId, anyDevice) {
+  if (!anyDevice || !staleTextFloor()) return {};
+  try {
+    let stale;
+    if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
+      const status = await require('../push-notifications').customerStatus(customerId, undefined, { withReachable: true });
+      stale = status.enabled === true && status.appStale === true;
+    } else {
+      // Legacy rule (hasFreshPushDevice): with no floor any active holder device counted,
+      // and this runs only after the floored lookup found none.
+      stale = Boolean(await db('push_subscriptions').where({ customer_id: customerId, active: true })
+        .whereNull('contact_phone_key').first('id'));
+    }
+    return stale ? { contactCompanion: true } : {};
+  } catch {
+    return {};
+  }
 }
 
 // messageType → the LIVE notification_prefs channel column the actual
@@ -815,7 +832,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // A persisted in-app bell is customer-visible even when no device accepts
     // the push; callers that must not undo a seen notice read bellPersisted.
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell, ...contactCompanionFlag(anyDevice) };
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell, ...(await contactCompanionFlag(customerId, anyDevice)) };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.

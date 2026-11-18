@@ -204,6 +204,23 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockSendToCustomer).not.toHaveBeenCalled();
   });
 
+  it('no contact companion flag when the holder has no phone app at all (contacts got no push before either)', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
+    expect(await send()).not.toHaveProperty('contactCompanion');
+  });
+
+  it('app notifications gate on: the flag follows customerStatus.appStale', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: true });
+    expect(await send()).toMatchObject({ reason: 'no_fresh_device', contactCompanion: true });
+    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: false });
+    expect(await send()).not.toHaveProperty('contactCompanion');
+    mockCustomerStatus.mockRejectedValue(new Error('boom'));
+    expect(await send()).not.toHaveProperty('contactCompanion');
+  });
+
   it('no contact companion flag with the new gate off, or with the any-device gate off', async () => {
     mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
     expect(await send()).not.toHaveProperty('contactCompanion');
