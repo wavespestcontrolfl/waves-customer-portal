@@ -82,6 +82,12 @@ const OPERATIONAL_EMAIL_DOMAINS = new Set([
   // feed the Zelle notice reconciler — a money signal that must never be
   // quarantined or unsubscribed by a classifier verdict (2026-09-02).
   'capitalone.com',
+  // SiteOne, the main supplier. Its promo mail (grow.siteone.com) feeds the
+  // weekly SiteOne deals digest and its order notices come from
+  // ec.siteone.com. On 2026-05-19 one newsletter verdict unsubscribed
+  // contact@ and the promo mail stopped for six months before anyone saw
+  // it (owner 2026-11-18: opt back in, the deals digest owns that mail).
+  'siteone.com',
 ]);
 
 // Mirrors inbox-hygiene / email-actions (which mirror CLOSED_STATUSES in

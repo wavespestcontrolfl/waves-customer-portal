@@ -47,6 +47,26 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     expect(shouldSkipAutoAction('spam', 'alerts@capitalone.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
   });
 
+  test('SiteOne promo mail is operational — a verdict never unsubscribes the feed the deals digest reads (2026-05-19)', async () => {
+    // The real sender. A newsletter verdict on one of its emails unsubscribed contact@ and the promo mail stopped.
+    expect(isOperationalDomain(domainFromAddress('marketing@grow.siteone.com'))).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'marketing@grow.siteone.com', GOOG('grow.siteone.com'))).toBe(true);
+    expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', GOOG('grow.siteone.com'))).toBe(true);
+    const result = await autoUnsubscribe({
+      id: 'test',
+      from_address: 'marketing@grow.siteone.com',
+      list_unsubscribe: '<https://click.grow.siteone.com/subscription_center.aspx?jwt=x>',
+      authentication_results: GOOG('grow.siteone.com'),
+    });
+    expect(result).toMatchObject({ method: 'none', note: expect.stringContaining('operational sender') });
+    // Invoices and order notices from the same supplier still reach their handlers.
+    expect(shouldSkipAutoAction('vendor_invoice', 'counter@siteone.com', GOOG('siteone.com'))).toBe(false);
+    expect(shouldSkipAutoAction('vendor_communication', 'customersupport@ec.siteone.com', GOOG('ec.siteone.com'))).toBe(false);
+    // A spoof that fails auth, and a look-alike domain, still fall through.
+    expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'deals@siteone.com.evil.example', GOOG('siteone.com.evil.example'))).toBe(false);
+  });
+
   test('external newsletters and spam still get auto-actioned', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'deals@retailer.example.com')).toBe(false);
     expect(shouldSkipAutoAction('spam', 'winner@lottery.example.biz')).toBe(false);
