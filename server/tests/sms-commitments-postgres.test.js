@@ -3533,8 +3533,11 @@ postgres('SMS commitments on PostgreSQL', () => {
       from_phone: direction === 'inbound' ? message.from_phone : message.to_phone,
       to_phone: direction === 'inbound' ? message.to_phone : message.from_phone,
       ...(direction === 'outbound' ? { message_type: 'manual', admin_user_id: STAFF } : {}), ...over }).returning('id').then(([row]) => row.id);
-    const staleAlert = (dedupeKey) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
-      title: 'Comms — send Synthetic Fixture the report', body: 'old', metadata: JSON.stringify({ dedupeKey, triggerKey: 'sms_operational_followup' }) }).returning('id').then(([row]) => row.id);
+    // The customer's one open alert, listing the given follow-ups.
+    const staleAlert = (ids) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+      title: 'Comms — send Synthetic Fixture the report', body: 'old',
+      metadata: JSON.stringify({ dedupeKey: `sms-commitment-customer:${message.customer_id}`, triggerKey: 'sms_operational_followup',
+        customerId: message.customer_id, sms_log_id: message.id, commitment_id: ids[0], commitment_ids: ids }) }).returning('id').then(([row]) => row.id);
     // Record checks say "cannot tell"; the thread lane answers as the test sets it.
     const answer = (thread) => dispatchWithFallback.mockImplementation(async (policy, request) => (isThread(request)
       ? { ok: true, json: thread } : { ok: true, json: { verdict: 'uncertain', record_ref: null, quote: null } }));
@@ -3553,7 +3556,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       await text('Yes, get it to you tonite', { direction: 'outbound', ms: 60000 });
       await text('We sent it out this morning to the email on file', { direction: 'outbound', ms: DAY + 3600000 });
       const confirmation = await text('Got the report! Thanks for your help!', { ms: 2 * DAY });
-      const alertId = await staleAlert(`sms-commitment:${ask.id}`);
+      const alertId = await staleAlert([ask.id]);
       answer({ verdict: 'completed', record_ref: `sms:${confirmation}`, quote: 'Got the report!' });
       expect(await refreshSmsCommitments({ conn: mockPg, now: now() })).toMatchObject({ fulfilled: 2 });
       for (const row of [ask, promise]) {
@@ -3565,8 +3568,10 @@ postgres('SMS commitments on PostgreSQL', () => {
       const alert = await mockPg('notifications').where({ id: alertId }).first();
       expect(alert.done_at).not.toBeNull();
       expect(alert.resolution).toContain('The text follow-up was done');
-      // Nothing re-raised "can't tell if it was done".
-      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      // Nothing re-raised "can't tell if it was done" (a quiet refresh of the open alert while the other promise
+      // settled is not a ring).
+      expect(NotificationService.notifyAdmin.mock.calls.filter(([, , body]) => /can't tell/.test(body))).toHaveLength(0);
+      expect(NotificationService.notifyAdmin.mock.calls.every(([, , , opts]) => opts.dedupeOpenOnly === true && opts.ringOnRefresh() === false)).toBe(true);
     });
 
     test('Codex #6415 r7: inside an open window a visit event earns the check, but a later text cannot close it early', async () => {
@@ -3798,7 +3803,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       const promiseContext = { basis: 'promise', property_id: null, property_ambiguous: true, customer_id: message.customer_id, source_at: message.created_at };
       const a = await addCommitment({ kind: 'other', description: 'will come', sms_context: promiseContext });
       const b = await addCommitment({ kind: 'other', description: 'will call you', sms_context: promiseContext });
-      await staleAlert(`sms-commitment-source:${message.id}`);
+      await staleAlert([a.id, b.id]);
       NotificationService.notifyAdmin.mockClear();
       await applySmsCommitmentUpdate(mockPg, a.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
       const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
@@ -3813,7 +3818,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       // Kept, but after its deadline: the records show it done, the row has not closed yet.
       const late = await addCommitment({ kind: 'other', description: 'will call you', due_at: at(3600000),
         sms_context: { ...ctx, fulfillment_check: { verdict: 'fulfilled', matched_at: at(2 * 3600000).toISOString(), record_type: 'sms' } } });
-      await staleAlert(`sms-commitment-source:${message.id}`);
+      await staleAlert([settling.id, late.id]);
       NotificationService.notifyAdmin.mockClear();
       await applySmsCommitmentUpdate(mockPg, settling.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
       const [, , body, refreshed] = NotificationService.notifyAdmin.mock.calls[0];
@@ -3823,15 +3828,12 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(body).not.toContain('nothing on record');
     });
 
-    test('a non-settling staff update marks the shared source alert read, not done', async () => {
+    test('a non-settling staff update marks the customer alert read, not done', async () => {
       const a = await addCommitment();
-      await addCommitment({ commitment_key: randomUUID() });
-      const legacy = await staleAlert(`sms-commitment:${a.id}`);
-      const shared = await staleAlert(`sms-commitment-source:${message.id}`);
+      const b = await addCommitment({ commitment_key: randomUUID() });
+      const alert = await staleAlert([a.id, b.id]);
       await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: a.id, smsLogId: message.id, settled: false }, { read_at: trx.fn.now() }));
-      for (const id of [legacy, shared]) {
-        expect(await mockPg('notifications').where({ id }).first()).toMatchObject({ done_at: null, read_at: expect.any(Date) });
-      }
+      expect(await mockPg('notifications').where({ id: alert }).first()).toMatchObject({ done_at: null, read_at: expect.any(Date) });
     });
 
     test('one text with two promises rings one alert that names both, and closes it only when both are done', async () => {
@@ -3844,8 +3846,6 @@ postgres('SMS commitments on PostgreSQL', () => {
         evidence: JSON.stringify([{ quote: "Adam will be out there and he'll look into how we can resolve it", sms_log_id: message.id, matched: true, speaker: 'agent' }]) });
       const second = await addCommitment({ kind: 'other', description: "he'll look into how we can resolve it", sms_context: promiseContext,
         evidence: JSON.stringify([{ quote: "Adam will be out there and he'll look into how we can resolve it", sms_log_id: message.id, matched: true, speaker: 'agent' }]) });
-      const oldFirst = await staleAlert(`sms-commitment:${first.id}`);
-      const oldSecond = await staleAlert(`sms-commitment:${second.id}`);
       const customerKey = `sms-commitment-customer:${message.customer_id}`;
       // The real alert service writes the rows; the mock still records each call.
       const actual = jest.requireActual('../services/notification-service');
@@ -3864,13 +3864,10 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(opts.detail).toContain("• “he'll look into how we can resolve it”");
       expect(opts.detail).toContain('2 follow-ups from this one text are still open');
       expect(opts.metadata.commitment_ids).toEqual(expect.arrayContaining([first.id, second.id]));
-      // The alerts an older build raised, one per promise, fold into one: one takes the customer's key, the other is replaced.
-      const old = await mockPg('notifications').whereIn('id', [oldFirst, oldSecond]).select('id', 'done_at', 'resolution', 'metadata');
-      const standing = old.filter((row) => !row.done_at);
+      // One row for the customer lists both promises.
+      const standing = await mockPg('notifications').whereNull('done_at').select('id', 'metadata');
       expect(standing).toHaveLength(1);
       expect(standing[0].metadata.dedupeKey).toBe(customerKey);
-      expect(old.find((row) => row.done_at).resolution).toBe('Replaced by one alert for this customer');
-      expect(await mockPg('notifications').whereNull('done_at')).toHaveLength(1);
       const alert = standing[0].id;
       // The alert stays open until the last promise is finished.
       NotificationService.notifyAdmin.mockClear();
@@ -3915,10 +3912,12 @@ postgres('SMS commitments on PostgreSQL', () => {
       // What each write did: a ring is a fresh row, or a refresh that rang.
       const rings = async () => (await Promise.all(NotificationService.notifyAdmin.mock.results.map((result) => result.value)))
         .filter((written) => !written.deduped || written.rung).length;
-      // An alert an older build keyed on one text, as that build wrote it.
-      const textAlert = (smsLogId, ids, over = {}) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+      // An alert still keyed on the customer a text belonged to before a merge (a merge moves its link and customer
+      // to the survivor, not its key), listing promises of this customer.
+      const formerOwner = randomUUID();
+      const formerAlert = (smsLogId, ids, over = {}) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
         title: 'Comms — send Synthetic Fixture the report', body: 'old', link: `/admin/customers?customerId=${message.customer_id}&tab=comms`,
-        metadata: JSON.stringify({ dedupeKey: `sms-commitment-source:${smsLogId}`, triggerKey: 'sms_operational_followup', customerId: message.customer_id,
+        metadata: JSON.stringify({ dedupeKey: customerKey(formerOwner), triggerKey: 'sms_operational_followup', customerId: message.customer_id,
           sms_log_id: smsLogId, commitment_id: ids[0], commitment_ids: ids }), ...over }).returning('id').then(([row]) => row.id);
 
       beforeEach(() => {
@@ -3992,12 +3991,12 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(await openAlerts()).toHaveLength(0);
       });
 
-      test('alerts an older build keyed on each text fold into one without a ring: the unread one stands', async () => {
+      test('alerts still keyed on a former owner fold into one without a ring: the unread one stands', async () => {
         const first = await addCommitment();
         const { id: gateId, promise: second } = await gateText();
         // The newer alert was read; the older one was not.
-        const readAlert = await textAlert(message.id, [first.id], { read_at: new Date(), created_at: at(-HOUR) });
-        const unreadAlert = await textAlert(gateId, [second.id], { created_at: at(-2 * HOUR) });
+        const readAlert = await formerAlert(message.id, [first.id], { read_at: new Date(), created_at: at(-HOUR) });
+        const unreadAlert = await formerAlert(gateId, [second.id], { created_at: at(-2 * HOUR) });
         const before = await alertRow(unreadAlert);
         await tick(6 * HOUR);
         expect(await rings()).toBe(0);
@@ -4012,13 +4011,13 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(await alertRow(readAlert)).toMatchObject({ done_by: 'supersede', resolution: 'Replaced by one alert for this customer' });
       });
 
-      test('an unread alert of an older build keeps the customer alert unread when it folds in', async () => {
+      test('an unread alert of a former owner keeps the customer alert unread when it folds in', async () => {
         const first = await addCommitment();
         const { id: gateId, promise: second } = await gateText();
         await tick(90 * 60000);
         const [alert] = await openAlerts();
         await markRead(alert.id);
-        const old = await textAlert(gateId, [second.id]);
+        const old = await formerAlert(gateId, [second.id]);
         NotificationService.notifyAdmin.mockClear();
         await tick(6 * HOUR);
         // The second follow-up was on an open alert already, so nothing rings; the person had not read it.
@@ -4095,19 +4094,6 @@ postgres('SMS commitments on PostgreSQL', () => {
         expect(closed.done_at).not.toBeNull();
         expect(closed.link).toBe(`/admin/customers?customerId=${winner}&tab=comms`);
         expect(closed.metadata.customerId).toBe(winner);
-      });
-
-      test('Done on an alert an older build keyed on one text still settles every open follow-up from that text', async () => {
-        const first = await addCommitment();
-        const second = await addCommitment({ kind: 'callback', description: 'call them back' });
-        const { promise: other } = await gateText();
-        // The older build listed only the promise that rang.
-        const old = await textAlert(message.id, [first.id], { done_at: new Date(), done_by: STAFF, read_at: new Date() });
-        expect(await settleCommitmentsForDoneAlert(mockPg, old, { reviewedBy: STAFF })).toBe(2);
-        for (const promise of [first, second]) {
-          expect(await mockPg('call_commitments').where({ id: promise.id }).first()).toMatchObject({ status: 'fulfilled', reviewed_by: STAFF });
-        }
-        expect((await mockPg('call_commitments').where({ id: other.id }).first()).status).toBe('open');
       });
 
       test('the retention sweep holds the customer alert while a follow-up it lists is open', async () => {
@@ -4548,8 +4534,10 @@ postgres('SMS commitments on PostgreSQL', () => {
       });
 
       // An alert an earlier ring left open (the promise was overdue before the visit was booked).
-      const openAlert = (dedupeKey) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
-        title: 'Comms — follow up with Synthetic Fixture', body: 'old', metadata: JSON.stringify({ dedupeKey, triggerKey: 'sms_operational_followup' }) })
+      const openAlert = (ids) => mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert',
+        title: 'Comms — follow up with Synthetic Fixture', body: 'old',
+        metadata: JSON.stringify({ dedupeKey: `sms-commitment-customer:${message.customer_id}`, triggerKey: 'sms_operational_followup',
+          customerId: message.customer_id, sms_log_id: message.id, commitment_id: ids[0], commitment_ids: ids }) })
         .returning('id').then(([alert]) => alert.id);
       const alertOf = (id) => mockPg('notifications').where({ id }).first('done_at', 'done_by', 'resolution');
 
@@ -4557,8 +4545,8 @@ postgres('SMS commitments on PostgreSQL', () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         process.env.GATE_ALERT_RING_ONCE = 'true';
         try {
-          await staffPromise();
-          const alert = await openAlert(`sms-commitment-source:${message.id}`);
+          const held = await staffPromise();
+          const alert = await openAlert([held.id]);
           await mockPg('scheduled_services').insert(visitRow());
           await tick();
           expect(rings()).toBe(0);
@@ -4581,13 +4569,11 @@ postgres('SMS commitments on PostgreSQL', () => {
             evidence: JSON.stringify([{ quote: "I'll adjust the payment terms", sms_log_id: message.id, matched: true, speaker: 'agent' }]),
             sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
           const other = await mockPg('call_commitments').where({ kind: 'send_report' }).first('id');
-          const shared = await openAlert(`sms-commitment-source:${message.id}`);
-          const own = await openAlert(`sms-commitment:${row.id}`);
+          const shared = await openAlert([row.id, other.id]);
           await mockPg('scheduled_services').insert(visitRow());
           await tick();
-          // The two rows an older build left fold into the customer's one alert, which stays open for the other promise.
-          const rows = await mockPg('notifications').whereIn('id', [shared, own]).select('done_at', 'metadata');
-          expect(rows.filter((alert) => !alert.done_at).map((alert) => alert.metadata.dedupeKey)).toEqual([`sms-commitment-customer:${message.customer_id}`]);
+          // The customer's one alert stays open for the other promise.
+          expect((await alertOf(shared)).done_at).toBeNull();
           // The usual closer rewrites it to the promise still open: a quiet refresh, no ring.
           expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
           const [, , , refreshed] = NotificationService.notifyAdmin.mock.calls[0];
@@ -4601,13 +4587,13 @@ postgres('SMS commitments on PostgreSQL', () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         process.env.GATE_ALERT_RING_ONCE = 'true';
         try {
-          await staffPromise();
+          const held = await staffPromise();
           // A second overdue promise from the same text, of a kind rule 3 holds too.
-          await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'callback',
+          const [second] = await mockPg('call_commitments').insert({ sms_log_id: message.id, commitment_key: randomUUID(), party: 'waves', kind: 'callback',
             description: 'call them back Monday', channel: 'sms', due_at: at(1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'test',
             evidence: JSON.stringify([{ quote: 'follow up with you Monday', sms_log_id: message.id, matched: true, speaker: 'agent' }]),
-            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } });
-          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+            sms_context: { basis: 'promise', property_id: null, customer_id: message.customer_id, source_at: message.created_at } }).returning('id');
+          const shared = await openAlert([held.id, second.id]);
           await mockPg('scheduled_services').insert(visitRow());
           await tick();
           expect(rings()).toBe(0);
@@ -4645,9 +4631,9 @@ postgres('SMS commitments on PostgreSQL', () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         if (ringOnce) process.env.GATE_ALERT_RING_ONCE = ringOnce;
         try {
-          await staffPromise();
+          const held = await staffPromise();
           const report = await overdueReport(randomUUID());
-          const shared = await openAlert(`sms-commitment-source:${message.id}`);
+          const shared = await openAlert([held.id, report]);
           await mockPg('scheduled_services').insert(visitRow());
           await mockPg('call_commitments').where({ id: report }).update({ status: 'fulfilled' });
           await mockPg.transaction((trx) => closeSmsCommitmentAlerts(trx, { commitmentId: report, smsLogId: message.id, now: at(NOW) },
@@ -4660,8 +4646,8 @@ postgres('SMS commitments on PostgreSQL', () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
         process.env.GATE_ALERT_RING_ONCE = 'true';
         try {
-          await staffPromise();
-          const alert = await openAlert(`sms-commitment-source:${message.id}`);
+          const held = await staffPromise();
+          const alert = await openAlert([held.id]);
           const person = randomUUID();
           await mockPg('notifications').where({ id: alert }).update({ done_at: at(-60000), done_by: person, resolution: 'Called them' });
           await mockPg('scheduled_services').insert(visitRow());
@@ -4672,8 +4658,8 @@ postgres('SMS commitments on PostgreSQL', () => {
 
       test('gate true without GATE_ALERT_RING_ONCE: the earlier alert stays open (a closed row would absorb the next ring for a day)', async () => {
         process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
-        await staffPromise();
-        const alert = await openAlert(`sms-commitment-source:${message.id}`);
+        const held = await staffPromise();
+        const alert = await openAlert([held.id]);
         await mockPg('scheduled_services').insert(visitRow());
         await tick();
         expect(rings()).toBe(0);
@@ -4770,6 +4756,32 @@ postgres('SMS commitments on PostgreSQL', () => {
           expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
           expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe('fulfilled');
           expect(await mockPg('notifications')).toHaveLength(1);
+        } finally { delete process.env.GATE_ALERT_RING_ONCE; }
+      });
+
+      // Closed history of an older build's key: no code writes these keys any more, but a closed row still counts as
+      // having spoken for the promise's text, so the "kept late" ring stays quiet.
+      test.each([['a closed alert an older build keyed on the promise', (held) => `sms-commitment:${held.id}`, 0],
+        ['a closed alert an older build keyed on its text', () => `sms-commitment-source:${message.id}`, 0],
+        ['no earlier alert', null, 1]])('a promise kept late whose only earlier alert is %s', async (_name, olderKey, rang) => {
+        process.env.GATE_PROMISE_RECORD_EVIDENCE = 'true';
+        process.env.GATE_ALERT_RING_ONCE = 'true';
+        try {
+          const held = await staffPromise();
+          if (olderKey) {
+            await mockPg('notifications').insert({ id: randomUUID(), recipient_type: 'admin', category: 'alert', title: 'Comms — follow up with Synthetic Fixture', body: 'old',
+              done_at: at(3600000), done_by: STAFF, read_at: at(3600000),
+              metadata: JSON.stringify({ dedupeKey: olderKey(held), triggerKey: 'sms_operational_followup', customerId: message.customer_id, sms_log_id: message.id, commitment_id: held.id }) });
+          }
+          const [guide] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), message_type: 'prep_guide', admin_user_id: null,
+            message_body: 'Your treatment prep guide: portal.example.invalid/prep', created_at: at(4.5 * 3600000) }).returning('id');
+          dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${guide.id}`, quote: 'Your treatment prep guide' } });
+          NotificationService.notifyAdmin.mockClear();
+          // Quiet: the promise closes on this check. With no alert that spoke for it, the late record rings first and
+          // the row closes on a later tick.
+          expect(await refreshSmsCommitments({ conn: mockPg, now: at(5 * 3600000) })).toMatchObject({ fulfilled: 1 - rang });
+          expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(rang);
+          expect((await mockPg('call_commitments').where({ id: held.id }).first()).status).toBe(rang ? 'open' : 'fulfilled');
         } finally { delete process.env.GATE_ALERT_RING_ONCE; }
       });
 

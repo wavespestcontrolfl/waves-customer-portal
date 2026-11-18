@@ -74,7 +74,7 @@ test('without refreshOnDedupe the old behavior stands — the existing row is re
 });
 
 test('a customer merge refreshes the standing bell destination even when its wording is unchanged', async () => {
-  const opts = { dedupeKey: 'sms-commitment:fixture', refreshOnDedupe: true };
+  const opts = { dedupeKey: 'sms-commitment-customer:fixture', refreshOnDedupe: true };
   await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'Open the customer profile', {
     ...opts, link: '/admin/customers?customerId=loser', metadata: { customerId: 'loser' },
   });
@@ -89,7 +89,7 @@ test('a customer merge refreshes the standing bell destination even when its wor
 });
 
 test('a content refresh without a supplied link preserves the existing destination', async () => {
-  const opts = { dedupeKey: 'sms-commitment:fixture', refreshOnDedupe: true };
+  const opts = { dedupeKey: 'sms-commitment-customer:fixture', refreshOnDedupe: true };
   await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'Before', {
     ...opts, link: '/admin/customers?customerId=fixture',
   });

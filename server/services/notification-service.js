@@ -1278,15 +1278,22 @@ const NotificationService = {
   // 'not_found' (missing, or not done any more).
   async reopenAdminDone(notificationId, { expectedDoneAt, now = new Date() } = {}, connection = db) {
     if (expectedDoneAt == null || expectedDoneAt === '') return 'changed';
-    const updated = await connection('notifications')
-      .where({ id: notificationId, recipient_type: 'admin' })
-      .whereNotNull('done_at')
-      .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
-      .whereRaw(REOPENABLE_DONE_BY_SQL)
-      .update({
-        ...DONE_CLEARED,
-        metadata: connection.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [QUIET_HOLD_KEY]: now.toISOString() })]),
-      });
+    // One transaction with the reopen: a text follow-up alert an older build keyed on the promise or its text takes the
+    // customer's key (or folds into the customer's open alert) before anyone sees it open (adoptOlderKeyAlerts).
+    const updated = await connection.transaction(async (trx) => {
+      await require('./sms-operational-actions').lockOlderKeyAlertCustomers(trx, [notificationId]);
+      const reopened = await trx('notifications')
+        .where({ id: notificationId, recipient_type: 'admin' })
+        .whereNotNull('done_at')
+        .whereRaw('done_at = ?::timestamptz', [String(expectedDoneAt)])
+        .whereRaw(REOPENABLE_DONE_BY_SQL)
+        .update({
+          ...DONE_CLEARED,
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [QUIET_HOLD_KEY]: now.toISOString() })]),
+        });
+      if (reopened > 0) await require('./sms-operational-actions').adoptOlderKeyAlerts(trx, { notificationIds: [notificationId], now });
+      return reopened;
+    });
     if (updated > 0) return 'reopened';
     const row = await connection('notifications')
       .where({ id: notificationId, recipient_type: 'admin' })
