@@ -36,6 +36,18 @@ describe('composeWeeklyCheck', () => {
     expect(out.problem).toBe(false);
   });
 
+  test('texts the wider rules sent are counted in the detail line, and only when there are any', () => {
+    const rows = [
+      { status: 'sent', reason: null }, { status: 'sent', reason: null, reach: 'quote_promised' },
+      { status: 'skipped', reason: 'quote_promised', reach: 'quote_promised' },
+    ];
+    const out = composeWeeklyCheck({ rows, job: FRESH_JOB }, NOW);
+    expect(out.headline).toBe('Booking-link texts: 2 sent this week');
+    expect(out.detail.split('\n')[0]).toBe('Last 7 days: 3 calls checked, 2 sent (1 by the wider rules), 0 waiting to send.');
+    const none = composeWeeklyCheck({ rows: [{ status: 'sent', reason: null }], job: FRESH_JOB }, NOW);
+    expect(none.detail.split('\n')[0]).toBe('Last 7 days: 1 calls checked, 1 sent, 0 waiting to send.');
+  });
+
   test('a send is counted in the week it went out, not the week of its call', () => {
     const lastWeekCall = new Date(NOW.getTime() - 7 * 24 * 3600 * 1000 - 60 * 60 * 1000).toISOString();
     const rows = [
