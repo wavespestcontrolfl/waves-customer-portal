@@ -9,11 +9,12 @@
  * re-timing booked jobs would free under the rules being measured. The full list is in the row's detail.
  * It sends nothing to a customer and changes no visit.
  *
- * Tech-days the re-plan does not plan (no stop, or one: FEWER_THAN_2_STOPS) are counted here by the booking hour grid:
- * each whole hour from 8:00 AM to 5:00 PM that no row and no schedule block holds, for every assignable technician who
- * is not marked absent, Monday to Saturday (the picker's default days), with blackout days left out. Drive is not
- * counted on those days. A day with two or more stops that the re-plan skipped (a stop untimed, in progress or with no
- * location) is left out.
+ * Which tech-days count (the booking picker's own rules): an assignable technician who is not marked absent, on a day
+ * that is not a blackout day. A planned day counts on any weekday the technician already works, Sunday included.
+ * Tech-days the re-plan does not plan (no stop, or one: FEWER_THAN_2_STOPS) are counted here by the booking hour grid,
+ * Monday to Saturday (the picker's default days): each whole hour from 8:00 AM to 5:00 PM that no row and no schedule
+ * block holds. Drive is not counted on those days. A day with an untimed stop, or with two or more stops the re-plan
+ * skipped (a stop in progress or with no location), is left out.
  *
  * One row per morning (dedupe key open-blocks:<date>; a second run the same morning dedupes onto it). The row from an
  * earlier morning closes when a new one is raised, and every open one closes on a morning with no open hour left.
@@ -95,36 +96,44 @@ function blockHours(block) {
   return out;
 }
 
+/** The picker's rules for which tech-days count in the next 7 days: assignable technicians, absences, blackout days. */
+async function eligibility(conn, now) {
+  const from = etDateString(addETDays(now, 1));
+  const to = etDateString(addETDays(now, DAYS));
+  const { getBlackoutDates } = require('../scheduling/blackout-dates');
+  const blackout = await getBlackoutDates(from, to);
+  const techs = await applyAssignable(conn('technicians')).select('technicians.id');
+  const techIds = techs.map((t) => String(t.id));
+  const absent = techIds.length ? await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techIds }) : new Set();
+  return { from, to, blackout, techIds, absent };
+}
+
+const workable = (elig, day, techId) => !elig.blackout.has(day) && elig.techIds.includes(String(techId)) && !elig.absent.has(`${techId}:${day}`);
+
 /**
  * Open blocks of the tech-days the re-plan did not plan, by the hour grid. `planned`: the `<day>|<tech>` keys the run
  * planned. Returns [{ day, technician_id, stops, blocks }].
  */
-async function unplannedDays(conn, now, planned) {
-  const from = etDateString(addETDays(now, 1));
-  const to = etDateString(addETDays(now, DAYS));
+async function unplannedDays(conn, planned, elig) {
   const { _internals: findTime } = require('../scheduling/find-time');
-  let days = findTime.enumerateDates(from, to);
-  const { getBlackoutDates } = require('../scheduling/blackout-dates');
-  const blackout = await getBlackoutDates(from, to);
-  days = days.filter((d) => !blackout.has(d));
-  const techs = await applyAssignable(conn('technicians')).select('technicians.id');
-  if (!techs.length || !days.length) return [];
-  const absent = await absentTechDays(conn, { dateFrom: from, dateTo: to, technicianIds: techs.map((t) => t.id) });
-  const rows = await conn('scheduled_services').whereBetween('scheduled_date', [from, to])
-    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES).whereNotNull('window_start')
+  const days = findTime.enumerateDates(elig.from, elig.to);
+  if (!elig.techIds.length || !days.length) return [];
+  // Untimed rows are read too: a day with one is left out (it is not empty), and they hold no hour.
+  const rows = await conn('scheduled_services').whereBetween('scheduled_date', [elig.from, elig.to])
+    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
     .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
     .select('id', 'technician_id', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"), 'window_start', 'window_end', 'estimated_duration_minutes');
-  const blocks = await conn('tech_schedule_blocks').whereBetween('date', [from, to]).whereNot('block_type', 'available')
+  const blocks = await conn('tech_schedule_blocks').whereBetween('date', [elig.from, elig.to]).whereNot('block_type', 'available')
     .select('technician_id', conn.raw("to_char(date, 'YYYY-MM-DD') as day"), 'start_time', 'end_time');
   const techBlind = !require('../scheduling/occupancy').techScopedConfirmActive();
   const toMin = (v) => { const [h, m] = String(v).slice(0, 5).split(':').map(Number); return h * 60 + m; };
   const out = [];
   for (const day of days) {
     const dayRows = rows.filter((r) => r.day === day);
-    for (const { id: techId } of techs) {
-      if (planned.has(`${day}|${techId}`) || absent.has(`${techId}:${day}`)) continue;
+    for (const techId of elig.techIds) {
+      if (planned.has(`${day}|${techId}`) || !workable(elig, day, techId)) continue;
       const own = dayRows.filter((r) => String(r.technician_id) === String(techId));
-      if (own.length >= 2) continue;
+      if (own.length >= 2 || own.some((r) => !r.window_start)) continue;
       const held = new Set([...own.flatMap((r) => replan.rowHours(r)), ...replan.blockedHoursFor(dayRows, techId, techBlind)]);
       for (const b of blocks) {
         if (b.day !== day || (b.technician_id != null && String(b.technician_id) !== String(techId))) continue;
@@ -186,7 +195,7 @@ function alertSpec(sum) {
 
 function detailText(sum) {
   const lines = [
-    'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM; Sundays and blackout days left out):',
+    'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM; blackout days and days off left out, and Sundays unless stops are already booked):',
     ...sum.blocks.slice(0, MAX_DETAIL_BLOCKS).map((b) => `- ${blockText(b)}`),
   ];
   if (sum.blocks.length > MAX_DETAIL_BLOCKS) lines.push(`- and ${sum.blocks.length - MAX_DETAIL_BLOCKS} more.`);
@@ -235,14 +244,19 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     logger.warn('[open-blocks] no fresh re-plan run with close-gaps numbers; nothing raised');
     return { status: 'no_run' };
   }
+  // The eligibility rules filter the planned days and find the unplanned ones. Unread: the planned days are listed as
+  // planned (the night run's own technicians and days) and no unplanned day is added.
+  let planned = rows;
   let unplanned = [];
   try {
-    unplanned = await unplannedDays(conn, now, new Set(rows.map((r) => `${r.day}|${r.technician_id}`)));
+    const elig = await eligibility(conn, now);
+    planned = rows.filter((r) => workable(elig, r.day, r.technician_id));
+    unplanned = await unplannedDays(conn, new Set(rows.map((r) => `${r.day}|${r.technician_id}`)), elig);
   } catch (err) {
-    logger.warn(`[open-blocks] days without a plan unread (${err.message}); only planned days are listed`);
+    logger.warn(`[open-blocks] day rules unread (${err.message}); only the planned days are listed, unfiltered`);
   }
-  const names = await techNamesFor(conn, [...new Set([...rows, ...unplanned].map((r) => String(r.technician_id)))]);
-  const sum = summarize(rows, names, unplanned);
+  const names = await techNamesFor(conn, [...new Set([...planned, ...unplanned].map((r) => String(r.technician_id)))]);
+  const sum = summarize(planned, names, unplanned);
   const key = `${KEY_PREFIX}${etDateString(now)}`;
   if (!sum.biggest) {
     const closed = await closeEarlier(conn, null);
@@ -260,5 +274,5 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
 
 module.exports = {
   runOpenBlocksAlert,
-  _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, KEY_PREFIX },
+  _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, hourGridBlocks, unplannedDays, eligibility, workable, KEY_PREFIX },
 };

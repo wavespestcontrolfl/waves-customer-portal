@@ -66,6 +66,11 @@ function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, n
 
 beforeEach(() => jest.clearAllMocks());
 
+// Two timed stops on every working day in the window (Thu Nov 19 to Wed Nov 25, Sunday out): no day is empty, so
+// only the planned rows count.
+const busyWeek = () => ['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25']
+  .flatMap((day, i) => ['08', '09'].map((h) => ({ id: `busy-${i}-${h}`, technician_id: TECH, day, window_start: `${h}:00:00`, window_end: null, estimated_duration_minutes: 60 })));
+
 describe('the copy', () => {
   const sum = _internals.summarize([
     { technician_id: TECH, day: '2026-11-21', close_gaps: rec([wait(545, 45), tail(695, 325)]) },
@@ -119,7 +124,7 @@ describe('the copy', () => {
 describe('runOpenBlocksAlert', () => {
   test('raises one row keyed to this morning and closes an earlier morning\'s row', async () => {
     openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17', 'open-blocks:2026-11-18']);
-    const { conn, calls } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }] });
+    const { conn, calls } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(695, 325)]) }], assignable: [{ id: TECH }], services: busyWeek() });
     const out = await runOpenBlocksAlert({ conn, now: NOW });
     expect(out).toMatchObject({ status: 'raised', id: 'n1', openMin: 325, closed: 1 });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
@@ -141,7 +146,7 @@ describe('runOpenBlocksAlert', () => {
 
   test('no open hour left: nothing is raised and every open morning row closes', async () => {
     openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
-    const { conn } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([wait(545, 45)]) }] });
+    const { conn } = fakeConn({ rows: [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([wait(545, 45)]) }], assignable: [{ id: TECH }], services: busyWeek() });
     await expect(runOpenBlocksAlert({ conn, now: NOW })).resolves.toEqual({ status: 'no_open_hours', closed: 1 });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
     expect(closeAdminAlertKeys).toHaveBeenCalledWith(conn, ['open-blocks:2026-11-17'], 'next_morning_replaces', expect.any(Object));
@@ -167,7 +172,7 @@ describe('days the re-plan does not plan (no stop, or one): open hours by the bo
       services: [svc('s1', TECH, '2026-11-19', 10), svc('s2', TECH2, '2026-11-19', 8), svc('s3', TECH2, '2026-11-19', 9)],
       blocks: [{ technician_id: TECH, day: '2026-11-20', start_time: '12:00:00', end_time: '12:30:00' }],
     });
-    const out = await _internals.unplannedDays(conn, NOW, new Set([`2026-11-21|${TECH}`]));
+    const out = await _internals.unplannedDays(conn, new Set([`2026-11-21|${TECH}`]), await _internals.eligibility(conn, NOW));
     const pick = (day, tech) => out.find((d) => d.day === day && d.technician_id === tech);
     // Thu: one stop at 10 AM. While the occupancy check is tech-blind, the other technician's 8 and 9 AM stops hold
     // those hours for everyone (the app's own rule), so only 11 AM to 5 PM is open.
@@ -188,16 +193,42 @@ describe('days the re-plan does not plan (no stop, or one): open hours by the bo
       assignable: [{ id: TECH }],
       services: [svc('s1', TECH, '2026-11-19', 10), svc('s2', TECH2, '2026-11-19', 8), svc('s3', TECH2, '2026-11-19', 9)],
     });
-    const out = await _internals.unplannedDays(conn, NOW, new Set());
+    const out = await _internals.unplannedDays(conn, new Set(), await _internals.eligibility(conn, NOW));
     expect(out.find((d) => d.day === '2026-11-19')).toMatchObject({ blocks: [{ start: 480, min: 120 }, { start: 660, min: 360 }] });
   });
 
   test('a blackout day is left out', async () => {
     getBlackoutDates.mockResolvedValueOnce(new Set(['2026-11-19']));
     const { conn } = fakeConn({ assignable: [{ id: TECH }] });
-    const out = await _internals.unplannedDays(conn, NOW, new Set());
+    const out = await _internals.unplannedDays(conn, new Set(), await _internals.eligibility(conn, NOW));
     expect(out.some((d) => d.day === '2026-11-19')).toBe(false);
     expect(out.some((d) => d.day === '2026-11-20')).toBe(true);
+  });
+
+  test('a day with an untimed stop is not empty: it is left out', async () => {
+    const { conn } = fakeConn({ assignable: [{ id: TECH }], services: [{ id: 'u1', technician_id: TECH, day: '2026-11-19', window_start: null, window_end: null }] });
+    const out = await _internals.unplannedDays(conn, new Set(), await _internals.eligibility(conn, NOW));
+    expect(out.some((d) => d.day === '2026-11-19')).toBe(false);
+  });
+
+  test('planned days follow the same rules: a blackout day, a day off and a technician who is not assignable are left out; a worked Sunday stays', async () => {
+    getBlackoutDates.mockResolvedValueOnce(new Set(['2026-11-20']));
+    absentTechDays.mockResolvedValueOnce(new Set([`${TECH}:2026-11-21`]));
+    const OTHER = '00000000-0000-4000-8000-000000000009';
+    const { conn } = fakeConn({
+      assignable: [{ id: TECH }],
+      rows: [
+        { technician_id: TECH, day: '2026-11-20', close_gaps: rec([tail(600, 420)]) }, // blackout
+        { technician_id: TECH, day: '2026-11-21', close_gaps: rec([tail(600, 420)]) }, // day off
+        { technician_id: OTHER, day: '2026-11-23', close_gaps: rec([tail(600, 420)]) }, // not assignable
+        { technician_id: TECH, day: '2026-11-22', close_gaps: rec([tail(780, 240)]) }, // Sunday with stops
+      ],
+      services: ['2026-11-19', '2026-11-23', '2026-11-24', '2026-11-25'].flatMap((day, i) => [svc(`a${i}`, TECH, day, 8), svc(`b${i}`, TECH, day, 9)]),
+    });
+    await runOpenBlocksAlert({ conn, now: NOW });
+    const [, spec, opts] = raiseAdminAlert.mock.calls[0];
+    expect(spec.link).toBe('/admin/schedule?date=2026-11-22');
+    expect(opts.metadata.openMin).toBe(240);
   });
 
   test('the morning row lists those days with a note, next to the planned days', async () => {
