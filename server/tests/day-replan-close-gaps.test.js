@@ -34,6 +34,19 @@ describe('openTime', () => {
     expect(late.blocks[0]).toEqual({ kind: 'start', start: 480, min: 120, before: 'a' });
   });
 
+  test('only the working day counts: a stop booked after 5 PM opens no evening time, a stop before 8 AM no early time', () => {
+    // a ends 10:00 AM; b is a fixed 7:00 PM stop (reached 10:10 AM). Only 10:10 AM to 5:00 PM is open: 410 minutes.
+    const late = openTime(sim([arrival('a', 540, 600, 10), arrival('b', 1140, 1200, 10)]), BOUNDS);
+    expect(late.blocks).toEqual([
+      { kind: 'start', start: 480, min: 60, before: 'a' },
+      { kind: 'wait', start: 610, min: 410, before: 'b' },
+    ]);
+    expect(late).toMatchObject({ sellableMin: 470, slots: 5 });
+    // a 6:00 AM stop that ends at 6:30 AM: the open tail starts at 8:00 AM, not 6:30.
+    const early = openTime(sim([arrival('a', 360, 390, 10)], { serviceFinishMin: 390, finishMin: 390 }), BOUNDS);
+    expect(early.blocks).toEqual([{ kind: 'tail', start: 480, min: 540, before: null }]);
+  });
+
   test('a co-visit continuation (same arrival, no drive) adds no block and no negative wait', () => {
     const fig = openTime(sim([arrival('a', 480, 540, 10), arrival('a2', 480, 570, 0), arrival('b', 580, 640, 10)]), BOUNDS);
     expect(fig.waitMin).toBe(0);

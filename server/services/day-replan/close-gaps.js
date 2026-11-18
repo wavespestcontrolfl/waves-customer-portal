@@ -59,10 +59,6 @@ function minusUnavailable(blocks, unavailable = []) {
 }
 
 /**
- * The open blocks of one simulated day: the open start, each wait between stops, and the open tail, less the
- * unavailable intervals in bounds.unavailable.
- */
-/**
  * When the van sets off for the next stop: as soon as it is free, unless the drive would cross a schedule block;
  * then after that block (the simulator's own rule, route-reorder-window-fit.js advanceSim).
  */
@@ -77,6 +73,9 @@ function departAfter(freeMin, driveMin, driveBlocks) {
 }
 
 /**
+ * The open blocks of one simulated day: the open start, each wait between stops, and the open tail, less the
+ * unavailable intervals in bounds.unavailable. Every block is clipped to the working day [openMin, closeMin]: a stop
+ * booked before 8 AM or after 5 PM leaves no sellable time outside those hours (pre-push audit, tune PR).
  * driveBlocks: the schedule blocks the simulation ran with (planSims / tryStart). A drive they delay is placed where
  * the van really drives, so the open time is the time before the drive and the time after it (Codex #7935 r2).
  */
@@ -88,15 +87,15 @@ function openBlocks(sim, { departureMin, openMin, closeMin, unavailable, driveBl
     const drive = a.driveMin || 0;
     const depart = departAfter(prevDeparture, drive, sorted);
     const kind = i === 0 ? 'start' : 'wait';
-    // The first stop: the van cannot start a job before the day's first hour, so the open start counts from there.
-    const clip = (from) => (i === 0 ? Math.max(from, openMin) : from);
-    const pieces = [[clip(prevDeparture), depart], [clip(depart + drive), a.arrivalMin]];
+    // No job starts before the day's first hour or runs past its last: only the working day counts.
+    const pieces = [[prevDeparture, depart], [depart + drive, a.arrivalMin]]
+      .map(([from, to]) => [Math.max(from, openMin), Math.min(to, closeMin)]);
     for (const [from, to] of pieces) if (to > from) blocks.push({ kind, startMin: from, min: to - from, before: a.id });
     // A co-visit continuation leaves no earlier than its sibling; the clock never runs backwards.
     prevDeparture = Math.max(prevDeparture, a.departureMin);
   });
-  const tail = closeMin - sim.serviceFinishMin;
-  if (tail > 0) blocks.push({ kind: 'tail', startMin: sim.serviceFinishMin, min: tail, before: null });
+  const tailStart = Math.max(sim.serviceFinishMin, openMin);
+  if (closeMin > tailStart) blocks.push({ kind: 'tail', startMin: tailStart, min: closeMin - tailStart, before: null });
   return minusUnavailable(blocks, unavailable);
 }
 
@@ -120,7 +119,6 @@ function openTime(sim, bounds) {
   };
 }
 
-/** Simulations of the day as booked and of the planner's best plan (null where it has none). */
 /** Schedule blocks the simulator can take (it refuses the whole day on one malformed interval). */
 const serviceBlocks = (blocks) => (blocks || [])
   .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin)
