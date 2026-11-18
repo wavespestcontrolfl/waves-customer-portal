@@ -76,6 +76,8 @@ jest.mock('../models/db', () => {
           const group = {
             where(col, val) { anyOf.push((row) => row[norm(col)] === val); return group; },
             orWhere(col, val) { anyOf.push((row) => row[norm(col)] === val); return group; },
+            whereNull(col) { anyOf.push((row) => row[norm(col)] == null); return group; },
+            orWhereNotNull(col) { anyOf.push((row) => row[norm(col)] != null); return group; },
           };
           column.call(group);
           filters.push((row) => anyOf.some((match) => match(row)));

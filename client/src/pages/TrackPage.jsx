@@ -543,33 +543,25 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
 }
 
 // ── State cards ──────────────────────────────────────────────────
-function ScheduleChangeCard({ data }) {
+function AwaitingScheduleChangeCard({ data }) {
   const change = data.visitChange;
-  const waiting = change.stage === 'awaiting_customer';
-  const bookedFor = changeWindow(change);
   return (
     <Card accent={COLORS.orange}>
       <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', fontWeight: 600 }}>
         Schedule changed
       </div>
       <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
-        {waiting
-          ? `Your ${data.service?.type?.toLowerCase() || 'service'} visit needs a new time.`
-          : bookedFor
-            ? `Your new ${data.service?.type?.toLowerCase() || 'service'} visit is booked for ${bookedFor}.`
-            : 'Your visit schedule changed.'}
+        Your {data.service?.type?.toLowerCase() || 'service'} visit needs a new time.
       </h1>
       {change.reason ? (
         <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
           {change.reason}
         </div>
       ) : null}
-      {waiting ? (
-        <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
-          Sign in to Visits, choose this property if needed, and see whether online times are still available. You can also call or text us and our office will help.
-        </div>
-      ) : null}
-      {waiting && change.action?.kind === 'portal_visits' ? (
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+        Sign in to Visits, choose this property if needed, and see whether online times are still available. You can also call or text us and our office will help.
+      </div>
+      {change.action?.kind === 'portal_visits' ? (
         <a
           href={change.action.href}
           data-glass-accent=""
@@ -577,23 +569,41 @@ function ScheduleChangeCard({ data }) {
           style={{ ...TRACK_PRIMARY_CTA, width: '100%', marginTop: 20, boxSizing: 'border-box' }}
         >{change.action.label}</a>
       ) : null}
-      {waiting ? <OfficeActions /> : null}
+      <OfficeActions />
       <ClientMeta data={data} />
     </Card>
   );
 }
 
+function scheduledHeading(data, bookedChange, window) {
+  const service = data.service?.type?.toLowerCase() || 'service';
+  if (bookedChange) return window ? `Your new ${service} visit is booked for ${window}.` : 'Your visit schedule changed.';
+  const greeting = data.customerFirstName ? `Hi ${data.customerFirstName} — ` : '';
+  return `${greeting}your ${service} is booked${window ? ` for ${window}` : ''}.`;
+}
+
 function ScheduledCard({ data }) {
   if (data.visitChange?.kind === 'pending_rebook') return <PendingRebookCard data={data} />;
-  if (data.visitChange?.kind === 'customer_pick') return <ScheduleChangeCard data={data} />;
+  const customerPick = data.visitChange?.kind === 'customer_pick' ? data.visitChange : null;
+  if (customerPick?.stage === 'awaiting_customer') return <AwaitingScheduleChangeCard data={data} />;
+  const bookedChange = customerPick?.stage === 'booked' ? customerPick : null;
   const techFirst = data.tech?.firstName || 'your tech';
-  const window = formatWindow(data.window?.start);
+  const window = bookedChange ? changeWindow(bookedChange) : formatWindow(data.window?.start);
   return (
-    <Card accent={COLORS.wavesBlue}>
+    <Card accent={bookedChange ? COLORS.orange : COLORS.wavesBlue}>
+      {bookedChange ? (
+        <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', fontWeight: 600 }}>
+          Schedule changed
+        </div>
+      ) : null}
       <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
-        {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
-        your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
+        {scheduledHeading(data, bookedChange, window)}
       </h1>
+      {bookedChange?.reason ? (
+        <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+          {bookedChange.reason}
+        </div>
+      ) : null}
       <StopsAheadHero
         stopsAhead={data.stopsAhead}
         routeProgress={data.routeProgress}

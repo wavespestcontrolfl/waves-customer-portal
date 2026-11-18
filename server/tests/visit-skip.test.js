@@ -31,6 +31,8 @@ function memoryConn(rows) {
           const group = {
             where(col, val) { anyOf.push((row) => row[col] === val); return group; },
             orWhere(col, val) { anyOf.push((row) => row[col] === val); return group; },
+            whereNull(col) { anyOf.push((row) => row[col] == null); return group; },
+            orWhereNotNull(col) { anyOf.push((row) => row[col] != null); return group; },
           };
           column.call(group);
           filters.push((row) => anyOf.some((match) => match(row)));
@@ -280,6 +282,19 @@ describe('public next-visit date scope', () => {
       planVisit({ id: 'same-service-house', scheduled_date: '2027-06-21' }),
     ];
     await expect(nextPlanVisitDate(memoryConn(rows), row, '2027-03-20', { requireServiceAndProperty: true }))
+      .resolves.toBe('2027-06-21');
+  });
+
+  test('filters parked handoff placeholders before the bounded date scan', async () => {
+    const row = planVisit();
+    const parked = Array.from({ length: 12 }, (_, index) => planVisit({
+      id: `parked-${index}`,
+      scheduled_date: `2027-04-${String(index + 1).padStart(2, '0')}`,
+      customer_pick_by: '2027-03-21T18:00:00.000Z',
+      window_start: null,
+    }));
+    const booked = planVisit({ id: 'booked-next', scheduled_date: '2027-06-21', window_start: '09:00:00' });
+    await expect(nextPlanVisitDate(memoryConn([...parked, booked]), row, '2027-03-20', { requireServiceAndProperty: true }))
       .resolves.toBe('2027-06-21');
   });
 });

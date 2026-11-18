@@ -64,14 +64,23 @@ describe('TrackPage changed-visit recovery', () => {
     expect(screen.queryByText(/your lawn care is booked/i)).not.toBeInTheDocument();
   });
 
-  it('shows the replacement after the customer picks without another action', async () => {
+  it('shows the replacement with normal route and prep content, without another action', async () => {
     renderTrack(payload('scheduled', {
+      tech: { firstName: 'Mia' },
+      prepToken: 'prep-token-1',
+      stopsAhead: 2,
+      routeProgress: { yourStop: 4, totalStops: 7, currentStop: 1, atStop: false, headingToStop: false },
       visitChange: {
         kind: 'customer_pick', stage: 'booked', nextActor: 'none',
-        reason: null, current: { date: '2026-11-24', windowStart: '13:00' }, action: null,
+        reason: 'Rain interrupted the route for this visit.',
+        current: { date: '2026-11-24', windowStart: '13:00' }, action: null,
       },
     }));
     expect(await screen.findByRole('heading', { name: /Your new lawn care visit is booked/i })).toBeInTheDocument();
+    expect(screen.getByText('Rain interrupted the route for this visit.')).toBeInTheDocument();
+    expect(screen.getByText('stops before yours')).toBeInTheDocument();
+    expect(screen.getByText(/You'll get a text as soon as Mia is on the way/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View prep instructions' })).toHaveAttribute('href', '/prep/prep-token-1');
     expect(screen.queryByRole('link', { name: 'Open Visits' })).not.toBeInTheDocument();
   });
 

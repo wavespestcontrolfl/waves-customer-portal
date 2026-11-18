@@ -100,7 +100,12 @@ async function nextPlanVisitDate(conn, row, date, { requireServiceAndProperty = 
   const query = conn('scheduled_services')
     .where(function seriesRows() { this.where('recurring_parent_id', rootId).orWhere('id', rootId); })
     .whereIn('status', SKIPPABLE_FROM_STATUSES)
-    .where('scheduled_date', '>', date);
+    .where('scheduled_date', '>', date)
+    // A Quick Move handoff parks its row on a future date without a time.
+    // That date is routing state, not the next booked visit. Filter it before
+    // ordering/limiting so parked rows cannot crowd a real visit out of the
+    // bounded scan.
+    .where(function bookedVisit() { this.whereNull('customer_pick_by').orWhereNotNull('window_start'); });
   if (requireServiceAndProperty) query.where({ service_id: row.service_id, property_id: row.property_id });
   const later = await query
     .orderBy('scheduled_date', 'asc')

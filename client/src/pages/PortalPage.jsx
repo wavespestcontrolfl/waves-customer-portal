@@ -3566,9 +3566,12 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
               data-glass-accent=""
               style={{ ...dashboardPrimaryButton, marginTop: 14 }}
               onClick={() => {
-                const url = lastService.reportPdfUrl || api.getServiceReportUrl(lastService.id);
+                const url = resolveApiAssetUrl(lastService.reportPdfUrl || api.getServiceReportUrl(lastService.id));
                 const doc = { id: lastService.id, title: 'Service report', fileName: `Service_Report_${lastService.date}.pdf`, pdfUrl: url };
-                if (isNativeApp()) { openReportPdf(doc, url); return; }
+                // Match Visits: iOS can preview a fetched PDF in-app;
+                // Android WebView cannot, so fetch it and hand the bytes to
+                // the OS share/save sheet through downloadAuthedPdf.
+                if (isNativeApp() && nativePlatform() !== 'android') { openReportPdf(doc, url); return; }
                 downloadAuthedPdf(url, doc.fileName).catch(() => showCustomerAlert('Could not open this report. Please try again.'));
               }}
             >
@@ -13439,8 +13442,25 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const notes = tracker.liveNotes || [];
   const summary = tracker.serviceSummary;
   const refreshPendingReport = () => {
+    const displayedTrackerId = tracker.id;
+    const seq = ++trackerSeqRef.current;
     setReportRefreshing(true);
-    Promise.resolve(fetchTracker()).finally(() => setReportRefreshing(false));
+    // Completion lives on /today after /active stops returning terminal
+    // visits. Only refresh the report for the stop already on screen: a
+    // different or missing visit must not swap or clear the completed card.
+    api.getTodayTracker()
+      .then(d => {
+        if (seq !== trackerSeqRef.current) return;
+        const { entry, saved, named, refresh } = scopeRef.current;
+        if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
+          if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+          return;
+        }
+        if (!d?.tracker || String(d.tracker.id) !== String(displayedTrackerId)) return;
+        setTracker(d.tracker);
+      })
+      .catch(() => {})
+      .finally(() => { if (seq === trackerSeqRef.current) setReportRefreshing(false); });
   };
   const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
@@ -13922,9 +13942,10 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
               data-glass-accent=""
               style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 46, marginTop: 12 }}
               onClick={() => {
-                const doc = { id: tracker.id, title: 'Service report', fileName: 'Waves_Service_Report.pdf', pdfUrl: summary.reportPdfUrl };
-                if (isNativeApp()) { openReportPdf(doc, summary.reportPdfUrl); return; }
-                downloadAuthedPdf(summary.reportPdfUrl, doc.fileName).catch(() => {
+                const url = resolveApiAssetUrl(summary.reportPdfUrl);
+                const doc = { id: tracker.id, title: 'Service report', fileName: 'Waves_Service_Report.pdf', pdfUrl: url };
+                if (isNativeApp() && nativePlatform() !== 'android') { openReportPdf(doc, url); return; }
+                downloadAuthedPdf(url, doc.fileName).catch(() => {
                   showCustomerAlert('Could not open this report. Please try again.');
                 });
               }}
