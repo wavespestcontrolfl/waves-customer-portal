@@ -292,4 +292,13 @@ describe('days the re-plan does not plan (no stop, or one): open hours by the bo
     getBlackoutDates.mockRejectedValueOnce(new Error('settings down'));
     await expect(runOpenBlocksAlert({ conn, now: NOW })).resolves.toMatchObject({ status: 'raised', openMin: 325 });
   });
+
+  test('a failed read with no planned block measured nothing: the tick fails and the earlier rows stay open', async () => {
+    openAdminAlertKeys.mockResolvedValueOnce(['open-blocks:2026-11-17']);
+    closeAdminAlertKeys.mockClear();
+    const { conn } = fakeConn({ rows: [] });
+    getBlackoutDates.mockRejectedValueOnce(new Error('settings down'));
+    await expect(runOpenBlocksAlert({ conn, now: NOW })).rejects.toThrow('day rules unread');
+    expect(closeAdminAlertKeys).not.toHaveBeenCalled();
+  });
 });

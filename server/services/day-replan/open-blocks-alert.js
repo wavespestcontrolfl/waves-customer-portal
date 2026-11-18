@@ -255,17 +255,22 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
   // planned (the night run's own technicians and days) and no unplanned day is added.
   let planned = rows;
   let unplanned = [];
+  let rulesRead = true;
   try {
     const elig = await eligibility(conn, now);
     planned = rows.filter((r) => workable(elig, r.day, r.technician_id));
     unplanned = await unplannedDays(conn, new Set(rows.map((r) => `${r.day}|${r.technician_id}`)), elig);
   } catch (err) {
+    rulesRead = false;
     logger.warn(`[open-blocks] day rules unread (${err.message}); only the planned days are listed, unfiltered`);
   }
   const names = await techNamesFor(conn, [...new Set([...planned, ...unplanned].map((r) => String(r.technician_id)))]);
   const sum = summarize(planned, names, unplanned);
   const key = `${KEY_PREFIX}${etDateString(now)}`;
   if (!sum.biggest) {
+    // "No open hour" is a finding only when the day rules were read: else nothing was measured, so the earlier rows
+    // stay open and the tick fails (pre-push audit, tune PR).
+    if (!rulesRead) throw new Error('open-blocks day rules unread and no planned block; earlier rows left open');
     const closed = await closeEarlier(conn, null);
     return { status: 'no_open_hours', closed, ...(fresh ? {} : { noRun: true }) };
   }
