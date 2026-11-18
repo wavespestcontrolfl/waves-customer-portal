@@ -130,6 +130,18 @@ function evidenceGrounder(transcript) {
   };
 }
 
+// Schema length caps for a promise's description and each evidence quote.
+const DESCRIPTION_MAX = 240;
+const EVIDENCE_QUOTE_MAX = 300;
+// Cut an over-long string at the last word break before `max` (or at `max`
+// when the break sits in the first half). A cut quote stays a verbatim
+// prefix of what was said, so evidenceGrounder still finds it.
+function clampAtWord(text, max) {
+  if (typeof text !== 'string' || text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return (space >= max / 2 ? cut.slice(0, space) : cut).trimEnd();
+}
 function normalizeModelOutput(parsed, transcript = '') {
   if (!parsed || !Array.isArray(parsed.commitments)) return parsed;
   const grounded = evidenceGrounder(transcript);
@@ -137,6 +149,16 @@ function normalizeModelOutput(parsed, transcript = '') {
     if (!item || typeof item !== 'object') continue;
     if (typeof item.channel === 'string') item.channel = normalizeChannel(item.channel);
     if (typeof item.kind === 'string') item.kind = normalizeKind(item.kind, item.party);
+    // A promise worded past the length caps is still a promise: clamp the
+    // description and each quote rather than fail the whole response. On
+    // 11-16 and 11-17 one long field each (a description, a third quote)
+    // cost two calls every promise.
+    if (typeof item.description === 'string' && item.description.length > DESCRIPTION_MAX) {
+      item.description = `${clampAtWord(item.description, DESCRIPTION_MAX - 1)}…`;
+    }
+    if (Array.isArray(item.evidence)) {
+      for (const e of item.evidence) if (e && typeof e.quote === 'string') e.quote = clampAtWord(e.quote, EVIDENCE_QUOTE_MAX);
+    }
     // A fourth quote for the same promise is surplus evidence, not a bad
     // promise: keep three (schema maxItems) rather than fail the whole
     // response — the 2026-09-23 replay found one call lost this way. Keep
@@ -564,7 +586,7 @@ const MODEL_OUTPUT_SCHEMA = {
         properties: {
           party: { type: 'string', enum: ['waves', 'customer'] },
           kind: { type: 'string', enum: COMMITMENT_KINDS },
-          description: { type: 'string', minLength: 3, maxLength: 240 },
+          description: { type: 'string', minLength: 3, maxLength: DESCRIPTION_MAX },
           channel: { type: ['string', 'null'], enum: [...CHANNELS, null] },
           due_text: { type: ['string', 'null'], maxLength: 80 },
           due_at: { type: ['string', 'null'] },
@@ -603,7 +625,7 @@ const MODEL_OUTPUT_SCHEMA = {
               additionalProperties: false,
               required: ['quote', 'speaker'],
               properties: {
-                quote: { type: 'string', minLength: 3, maxLength: 300 },
+                quote: { type: 'string', minLength: 3, maxLength: EVIDENCE_QUOTE_MAX },
                 speaker: { type: 'string', enum: ['agent', 'caller'] },
               },
             },
