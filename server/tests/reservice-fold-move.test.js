@@ -37,7 +37,7 @@ const AppointmentReminders = require('../services/appointment-reminders');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const notice = require('../services/scheduling/self-serve-notice');
 const { openCallbackExistsForLane } = require('../services/reservice-scheduler');
-const { moveFoldTarget, moveFoldTargetForCustomer, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
+const { moveFoldTarget, moveFoldTargetForCustomer, holdReplay, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
 
 const TARGET = {
   id: 'plan-1', customer_id: 'cust-1', property_id: null, service_id: 'svc-pest', is_callback: false,
@@ -385,5 +385,56 @@ describe('moveFoldTargetForCustomer', () => {
       await expect(guard()).rejects.toMatchObject({ statusCode: 409, code: 'SELF_SERVE_NOTICE' });
       expect(notice.violatesSelfServeNotice).toHaveBeenLastCalledWith({ date: '2099-11-17', startTime: '09:00' });
     });
+  });
+});
+
+// ── A replayed pick holds the visit under its lock before it carries the words ─────────────────────────────────────────────
+describe('holdReplay', () => {
+  const FULL = {
+    id: 'plan-1', customer_id: 'cust-1', property_id: null, service_id: 'svc-1', is_callback: false,
+    scheduled_date: '2099-11-17', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Quarterly Pest Control Service', status: 'confirmed',
+  };
+  const request = { text: 'Ants', source: 'picker', pests: null, pestLabels: [] };
+  let lockRead; let trxQuery; let trx; let fakeConn;
+  beforeEach(() => {
+    lockRead = { first: jest.fn().mockResolvedValue({ id: 'plan-1' }) };
+    lockRead.where = jest.fn(() => lockRead);
+    lockRead.forUpdate = jest.fn(() => lockRead);
+    trxQuery = { update: jest.fn().mockResolvedValue(1), where: jest.fn(() => trxQuery), whereRaw: jest.fn(() => trxQuery) };
+    // The first query in the transaction is the lock read, the rest are the carry's writes.
+    trx = jest.fn().mockReturnValueOnce(lockRead).mockReturnValue(trxQuery);
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    fakeConn = { transaction: jest.fn(async (work) => work(trx)) };
+  });
+  const hold = () => holdReplay({ conn: fakeConn, target: FULL, customerRequest: request, date: '2099-11-17' });
+
+  test('the visit is still as looked up: it is read FOR UPDATE with the move fence and its start, the words are carried on the same transaction, true', async () => {
+    expect(await hold()).toBe(true);
+    expect(lockRead.where).toHaveBeenCalledWith({
+      id: 'plan-1', customer_id: 'cust-1', property_id: null, service_id: 'svc-1', service_type: FULL.service_type, is_recurring: true, is_callback: false,
+      scheduled_date: '2099-11-17', status: 'confirmed', visit_id: null, customer_pick_by: null, window_start: '09:00:00',
+    });
+    expect(lockRead.forUpdate).toHaveBeenCalledTimes(1);
+    expect(trxQuery.update.mock.calls[0][0]).toEqual({ customer_request: 'Ants', customer_request_source: 'picker' });
+    expect(trx).toHaveBeenCalledTimes(2);
+  });
+
+  test('the visit changed since the lookup (no row under the pins): nothing is carried, false', async () => {
+    lockRead.first.mockResolvedValue(undefined);
+    expect(await hold()).toBe(false);
+    expect(trxQuery.update).not.toHaveBeenCalled();
+  });
+
+  test('a failed copy rolls back but the visit stands: true, and the log has the visit id and error code, never the message', async () => {
+    trxQuery.update.mockRejectedValue(Object.assign(new Error('bindings: Ants'), { code: '23505' }));
+    expect(await hold()).toBe(true);
+    const logged = require('../services/logger').error.mock.calls.map(([m]) => m).join(' ');
+    expect(logged).toContain('[reservice-fold] replay of plan-1 could not copy the words (code 23505)');
+    expect(logged).not.toContain('bindings');
+  });
+
+  test('a failure of the lock read itself is not swallowed', async () => {
+    lockRead.first.mockRejectedValue(new Error('db down'));
+    await expect(hold()).rejects.toThrow('db down');
   });
 });

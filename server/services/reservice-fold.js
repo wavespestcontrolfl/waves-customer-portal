@@ -338,6 +338,33 @@ async function moveFoldTargetForCustomer({ conn = db, target, svc, elig, lane, d
   return { moved: true };
 }
 
+// A replayed pick (the plan visit already sits on the picked slot) moves and texts nothing, but its words still go to the visit.
+// The lookup that found the visit is an unlocked snapshot: staff can move or cancel it before the words land, and a replay answer
+// for a visit no longer there would book nothing. So the replay re-reads the row under its lock with the same pins the move's
+// write fence uses (and its start), and writes the words in that same transaction. True = the visit is still as looked up (the
+// words are carried, or the copy failed and was logged: the visit stands); false = it changed, and the caller looks again.
+async function holdReplay({ conn = db, target, customerRequest, date }) {
+  let held = false;
+  try {
+    return await conn.transaction(async (trx) => {
+      const row = await trx('scheduled_services')
+        .where({ id: target.id, ...foldExpect(target), window_start: target.window_start })
+        .forUpdate()
+        .first('id');
+      if (!row) return false;
+      held = true;
+      await carryOfficeWords(trx, target, { customerRequest, date });
+      return true;
+    });
+  } catch (err) {
+    // A throw before the row was found (the read itself) is not ours to swallow.
+    if (!held) throw err;
+    // The copy failed and rolled back: the visit stands. The visit id and the error code only (a Knex message carries bindings).
+    logger.error(`[reservice-fold] replay of ${target.id} could not copy the words (code ${err?.code || 'none'})`);
+    return true;
+  }
+}
+
 module.exports = {
   FOLD_DAYS,
   foldLaneForServiceKey,
@@ -345,5 +372,5 @@ module.exports = {
   foldOfficeNotice,
   moveFoldTarget,
   moveFoldTargetForCustomer,
-  carryOfficeWords,
+  holdReplay,
 };

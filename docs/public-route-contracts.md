@@ -7273,9 +7273,11 @@ rescheduleUrl (the plan visit's), reserviceFold: { serviceType, fromDate,
 toDate } }` with no `prepPhotos`. A repeat of the same pick finds the plan
 visit on that date and start and answers `replayed: true` (nothing moves, no
 text; `reserviceFold.fromDate` is null, since the visit's earlier date is not
-known there). The words of that request still reach the visit once (an empty
-request is filled; the same words again are not copied; different words join
-the notes) and the bell rings at most once per visit. The customer gets exactly
+known there). A replay re-reads the visit under its row lock; a visit that
+changed since the lookup (moved, cancelled) is looked up again, and then the
+re-service books as before. The words of that request still reach the visit
+once (an empty request is filled; the same words again are not copied;
+different words join the notes) and the bell rings at most once per visit. The customer gets exactly
 one text, the standard `appointment_rescheduled` notice, on the move, and the
 owner bell `reservice_self_booked` rings for the moved visit.
 No new error codes: every refusal (no plan visit in range, not eligible, no fit,

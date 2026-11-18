@@ -798,11 +798,9 @@ async function tryLinkFold({ fold, customer, lane, date, startTime, config, deta
   // Replay: the plan visit already sits on this date and start (a repeat tap after a fold, or a visit that was always there).
   // Nothing moves and nothing is texted, but this request's words still reach the visit (once) and the owner is told.
   if (target.scheduled_date === date && reschedule.hhmm(target.window_start) === startTime) {
-    try {
-      await fold.carryOfficeWords(db, target, { customerRequest, date });
-    } catch (err) {
-      logger.error(`[reservice-public] replay could not copy the words to ${target.id} (code ${err?.code || 'none'})`);
-    }
+    // The lookup is an unlocked snapshot: the replay re-reads the visit under its lock (holdReplay). A visit that changed since
+    // gets one fresh lookup, and then the re-service books as before.
+    if (!(await fold.holdReplay({ conn: db, target, customerRequest, date }))) return { retry: true };
     bell();
     const end = reschedule.hhmm(target.window_end);
     return { reply: await reply(true, { start_time: startTime, end_time: end, start_label: timeLabel12(startTime), end_label: timeLabel12(end) }) };

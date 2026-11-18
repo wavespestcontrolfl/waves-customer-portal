@@ -957,17 +957,19 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
     });
 
     test('two quick taps: the refused fold\'s retry finds the plan visit already on the slot and answers replayed, booking nothing', async () => {
+      const hold = jest.spyOn(fold, 'holdReplay').mockResolvedValue(true);
       spies.move.mockResolvedValue({ moved: false, why: 'the visit changed' });
       spies.find.mockResolvedValueOnce(PLAN).mockResolvedValueOnce({ ...PLAN, scheduled_date: POST_SLOT_DATE, window_start: '09:00:00', window_end: '11:00:00' });
       const res = await post();
       expect(csb).not.toHaveBeenCalled();
       expect(res.json.mock.calls[0][0]).toMatchObject({ success: true, replayed: true, date: POST_SLOT_DATE, window: { start: '09:00', end: '11:00' } });
+      hold.mockRestore();
     });
 
     const AT_SLOT = { ...PLAN, scheduled_date: POST_SLOT_DATE, window_start: '09:00:00', window_end: '11:00:00' };
 
-    test('a repeat of the pick answers replayed BEFORE any eligibility read: nothing moves or texts, the words still reach the visit once and the bell is offered', async () => {
-      const carry = jest.spyOn(fold, 'carryOfficeWords').mockResolvedValue();
+    test('a repeat of the pick answers replayed BEFORE any eligibility read: nothing moves or texts, the words reach the visit under its lock and the bell is offered', async () => {
+      const hold = jest.spyOn(fold, 'holdReplay').mockResolvedValue(true);
       const text = jest.spyOn(require('../services/appointment-reminders'), 'handleReschedule');
       spies.find.mockResolvedValue(AT_SLOT);
       const res = await post();
@@ -975,7 +977,9 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       expect(reply).toMatchObject({ success: true, replayed: true, startLabel: '9:00 AM', endLabel: '11:00 AM', rescheduleUrl: '/reschedule/tok-plan' });
       // The visit already moved, so its earlier date is not known on a replay.
       expect(reply.reserviceFold).toEqual({ serviceType: PLAN.service_type, fromDate: null, toDate: POST_SLOT_DATE });
-      expect(carry).toHaveBeenCalledWith(db, AT_SLOT, { customerRequest: { text: 'ants', source: 'picker', pests: null, pestLabels: [] }, date: POST_SLOT_DATE });
+      expect(hold).toHaveBeenCalledWith({
+        conn: db, target: AT_SLOT, customerRequest: { text: 'ants', source: 'picker', pests: null, pestLabels: [] }, date: POST_SLOT_DATE,
+      });
       expect(spies.ring).toHaveBeenCalledWith(expect.objectContaining({ id: CUST_ID }), {
         id: 'plan-1', serviceDate: POST_SLOT_DATE, windowStart: '09:00', pests: [], request: 'ants',
       });
@@ -983,23 +987,30 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       expect(spies.move).not.toHaveBeenCalled();
       expect(text).not.toHaveBeenCalled();
       expect(csb).not.toHaveBeenCalled();
-      carry.mockRestore();
+      hold.mockRestore();
       text.mockRestore();
     });
 
-    test('a replay with no words carries nothing but still offers the bell; a failed copy never turns the replay into an error and logs only the code', async () => {
-      const carry = jest.spyOn(fold, 'carryOfficeWords').mockResolvedValue();
+    test('a replay with no words still offers the bell and passes no request to the hold', async () => {
+      const hold = jest.spyOn(fold, 'holdReplay').mockResolvedValue(true);
       spies.find.mockResolvedValue(AT_SLOT);
       await post({ details: '', pests: [] });
-      expect(carry.mock.calls[0][2].customerRequest).toBeNull();
+      expect(hold.mock.calls[0][0].customerRequest).toBeNull();
       expect(spies.ring).toHaveBeenCalledTimes(1);
-      carry.mockRejectedValue(Object.assign(new Error('bindings: ants'), { code: '23505' }));
+      hold.mockRestore();
+    });
+
+    test('the visit changed since the lookup (the hold says no): one fresh lookup, then the re-service books; no replay answer, no bell', async () => {
+      const hold = jest.spyOn(fold, 'holdReplay').mockResolvedValue(false);
+      spies.find.mockResolvedValueOnce(AT_SLOT).mockResolvedValueOnce(null);
       const res = await post();
-      expect(res.json.mock.calls.at(-1)[0]).toMatchObject({ success: true, replayed: true });
-      const logged = require('../services/logger').error.mock.calls.map(([m]) => m).join(' ');
-      expect(logged).toContain('code 23505');
-      expect(logged).not.toContain('bindings');
-      carry.mockRestore();
+      expect(hold).toHaveBeenCalledTimes(1);
+      expect(spies.find).toHaveBeenCalledTimes(2);
+      expect(spies.move).not.toHaveBeenCalled();
+      expect(spies.ring).not.toHaveBeenCalled();
+      expect(csb).toHaveBeenCalledTimes(1);
+      expect(res.json.mock.calls[0][0]).not.toHaveProperty('reserviceFold');
+      hold.mockRestore();
     });
 
     test('a refusal the route already gives (blank details, no plan) never looks anything up', async () => {
