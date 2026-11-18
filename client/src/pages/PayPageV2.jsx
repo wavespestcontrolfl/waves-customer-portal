@@ -97,6 +97,7 @@ import {
 import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
+import PayPromoCode from '../components/billing/PayPromoCode';
 import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
@@ -3112,6 +3113,26 @@ export default function PayPageV2() {
             </div>
               );
             })()}
+
+            {/* Promo code (GATE_PAY_PROMO_CODE): the server sends the block
+                only where a code can be entered or is already on the invoice.
+                Saving one changes what is due, so the page takes the same
+                full reload a stale invoice does: /setup then posts the
+                credit and prices the payment at the new amount. */}
+            <PayPromoCode
+              promoCode={data.promoCode}
+              panelStyle={subtlePanel}
+              onSaved={() => window.location.reload()}
+              submitCode={async (code) => {
+                const response = await fetch(`${API_BASE}/pay/${token}/promo-code`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ code }),
+                });
+                const result = await response.json().catch(() => ({}));
+                return response.ok ? { ok: true } : { ok: false, error: result.error };
+              }}
+            />
 
             {invoice.notes && (
               <div data-glass="soft" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>

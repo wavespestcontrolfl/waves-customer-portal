@@ -264,14 +264,20 @@ async function invoiceCaptureNeeded(invoice) {
 // Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
 // as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
 // amount before /setup answers. 0 when the gate is off / opted out / no credit.
+// A promo code entered on this invoice and not redeemed yet
+// (GATE_PAY_PROMO_CODE) is credit /setup will post and draw too, whatever the
+// customer's automatic-credit choice, so it is projected the same way: until
+// /setup answers, the page never offers a transfer for the pre-credit amount.
 async function invoiceProjectedCreditApplied(invoice, { database = db } = {}) {
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return 0;
   if (!invoice?.customer_id || invoice?.payer_id) return 0;
+  const cappedAtDue = (credit) => Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+  const promo = await require('../services/invoice-promo-code').pendingPromoCredit(invoice, database);
+  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return cappedAtDue(promo);
   const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return 0;
-  const credit = Number(row?.account_credits) || 0;
+  if (row?.auto_apply_account_credit !== true) return cappedAtDue(promo);
+  const credit = (Number(row?.account_credits) || 0) + promo;
   if (!(credit > 0)) return 0;
-  return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+  return cappedAtDue(credit);
 }
 
 // The SINGLE eligibility predicate for offering an off-Stripe transfer
@@ -621,6 +627,13 @@ router.get('/:token', async (req, res, next) => {
     });
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
+    // A read failure hides the block and never fails the page.
+    const promoCode = await require('../services/invoice-promo-code')
+      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired })
+      .catch((err) => {
+        logger.warn(`[pay-v2] promo code block suppressed for invoice ${data.id}: ${err.code || err.message}`);
+        return null;
+      });
     // Off-Stripe tenders (see isZelleTransferEligible for the full
     // predicate and its history) — extracted so every other caller that
     // needs to know "would the pay page offer Zelle for this invoice"
@@ -812,6 +825,10 @@ router.get('/:token', async (req, res, next) => {
       // FAQ accordion under the Pay button (GATE_PAY_PAGE_FAQ). Absent when
       // the gate is off so the gate-off payload stays byte-identical.
       ...(require('../config/feature-gates').gates.payPageFaq ? { payFaq: true } : {}),
+      // Promo code (GATE_PAY_PROMO_CODE): the field while a code can be
+      // entered on this invoice, and the code already on it. Absent with the
+      // gate off, so the gate-off payload stays byte-identical. A read only.
+      ...(promoCode ? { promoCode } : {}),
     });
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
@@ -1044,6 +1061,58 @@ router.post('/:token/setup', async (req, res, next) => {
       metadata: { save_card: !!req.body?.saveCard },
     });
     next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/promo-code — the customer types a promo code on the
+// pay page (GATE_PAY_PROMO_CODE). Body { code }. A valid fixed-dollar code
+// from admin Discounts is saved on the invoice and nothing else happens
+// here: no money moves and no Stripe call is made. The page reloads, and the
+// /setup that follows posts the credit, applies it to this invoice and
+// re-prices the payment (services/invoice-promo-code.js). Dark gate = the
+// generic 404 an unknown token gets, with the limiter skipped. A refused
+// code answers 400 with `invalid_code` (never saying why) or
+// `code_already_entered`.
+// =========================================================================
+const promoCodeGateOn = () => require('../config/feature-gates').isEnabled('payPromoCode');
+// Keyed per caller and token: the cap is on guesses against one invoice.
+const promoCodeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !promoCodeGateOn(),
+  keyGenerator: (req) => `${unauthenticatedAuthLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many requests — please slow down.' },
+});
+router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
+  const notFound = () => res.status(404).json({ error: 'Invoice not found' });
+  if (!promoCodeGateOn()) return notFound();
+  // Log identity: the invoice id once resolved, never the token or the code.
+  let invoiceId = null;
+  try {
+    const invoice = await db('invoices').where({ token: req.params.token }).first('id');
+    if (!invoice) return notFound();
+    invoiceId = invoice.id;
+    if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
+    // The code is saved under the invoice row lock, the lock /setup holds
+    // when it redeems it: an invoice that was paid, voided or moved to a
+    // payer meanwhile takes no code.
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      if (!locked) return null;
+      // No code on an invoice that must save a payment method first: its
+      // credit coverage is held for the capture step, not applied at /setup.
+      if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
+      return require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+    });
+    if (!outcome) return notFound();
+    if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+    return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
+  } catch (err) {
+    logger.warn(`[pay-v2] promo-code failed (code=${err?.code || 'none'}, invoice=${invoiceId || 'unresolved'})`);
+    return res.status(503).json({ error: 'Promo code unavailable — please try again' });
   }
 });
 
