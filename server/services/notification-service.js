@@ -1281,6 +1281,7 @@ const NotificationService = {
     // One transaction with the reopen: a text follow-up alert an older build keyed on the promise or its text takes the
     // customer's key (or folds into the customer's open alert) before anyone sees it open (adoptOlderKeyAlerts).
     const updated = await connection.transaction(async (trx) => {
+      await require('./sms-operational-actions').lockOlderKeyAlertCustomers(trx, [notificationId]);
       const reopened = await trx('notifications')
         .where({ id: notificationId, recipient_type: 'admin' })
         .whereNotNull('done_at')

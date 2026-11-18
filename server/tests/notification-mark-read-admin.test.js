@@ -15,10 +15,10 @@ jest.mock('../models/db', () => {
 });
 
 // The reopen runs in one transaction with the older-key adoption; the adoption itself is tested against Postgres.
-jest.mock('../services/sms-operational-actions', () => ({ adoptOlderKeyAlerts: jest.fn(async () => 0) }));
+jest.mock('../services/sms-operational-actions', () => ({ adoptOlderKeyAlerts: jest.fn(async () => 0), lockOlderKeyAlertCustomers: jest.fn(async () => undefined) }));
 
 const db = require('../models/db');
-const { adoptOlderKeyAlerts } = require('../services/sms-operational-actions');
+const { adoptOlderKeyAlerts, lockOlderKeyAlertCustomers } = require('../services/sms-operational-actions');
 const NotificationService = require('../services/notification-service');
 
 describe('markReadAdmin', () => {
@@ -187,9 +187,14 @@ describe('reopenAdminDone', () => {
 
   test('a reopened row goes through the older-key adoption in the same transaction; a refused reopen does not', async () => {
     adoptOlderKeyAlerts.mockClear();
+    lockOlderKeyAlertCustomers.mockClear();
+    db.__q.update.mockClear();
     expect(await NotificationService.reopenAdminDone('n1', { expectedDoneAt: TOKEN })).toBe('reopened');
     expect(db.transaction).toHaveBeenCalled();
     expect(adoptOlderKeyAlerts).toHaveBeenCalledWith(db, expect.objectContaining({ notificationIds: ['n1'] }));
+    // The customer alert lock comes before the write that locks the row.
+    expect(lockOlderKeyAlertCustomers).toHaveBeenCalledWith(db, ['n1']);
+    expect(lockOlderKeyAlertCustomers.mock.invocationCallOrder[0]).toBeLessThan(db.__q.update.mock.invocationCallOrder[0]);
     adoptOlderKeyAlerts.mockClear();
     db.__q.update.mockResolvedValue(0);
     db.__q.first.mockResolvedValueOnce({ done_at: new Date(), fence_ok: true });

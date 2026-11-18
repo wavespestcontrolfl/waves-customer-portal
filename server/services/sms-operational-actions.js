@@ -1387,17 +1387,19 @@ async function closeSmsCommitmentAlerts(trx, { commitmentId, smsLogId, settled =
 const SOURCE_ALERT_PREFIX = 'sms-commitment-source:';
 const OLDER_ALERT_KEY_SQL = "(metadata->>'dedupeKey' LIKE 'sms-commitment-source:%' OR metadata->>'dedupeKey' LIKE 'sms-commitment:%')";
 const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = [], now = new Date() } = {}) {
+// The older-key rows named by the caller, grouped by the customer each one speaks for (`closed`: rows still done too).
+async function olderKeyAlertsByCustomer(trx, { notificationIds = [], commitmentIds = [], closed = false }) {
   const byId = [...new Set(notificationIds.filter(Boolean).map(String))];
   const byPromise = [...new Set(commitmentIds.filter(Boolean).map(String))];
-  if (!byId.length && !byPromise.length) return 0;
-  const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereNull('done_at').whereRaw(OLDER_ALERT_KEY_SQL)
+  const byCustomer = new Map();
+  if (!byId.length && !byPromise.length) return byCustomer;
+  const rows = await trx('notifications').where({ recipient_type: 'admin' }).whereRaw(OLDER_ALERT_KEY_SQL)
+    .modify((q) => { if (!closed) q.whereNull('done_at'); })
     .where((q) => {
       if (byId.length) q.whereIn('id', byId);
       if (byPromise.length) q.orWhereRaw(LISTS_ANY_SQL, [byPromise, byPromise]);
     })
     .orderBy('id').select('id', 'metadata');
-  const byCustomer = new Map();
   for (const row of rows) {
     const meta = alertMeta(row);
     // The promises the row spoke for: the ones it lists and, for a text's alert (`sms-commitment-source:<text id>`),
@@ -1409,13 +1411,25 @@ async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = 
     const owners = [...new Set((await alertPromises(trx, { ids: listedOn(meta) })).map((item) => item.owner_id))];
     const customerId = owners.length === 1 ? owners[0] : (!owners.length && UUID_TEXT.test(String(meta.customerId || '')) ? String(meta.customerId) : null);
     if (!customerId) {
-      logger.warn(`[sms-operations] reopened older-key alert ${row.id} left as is: ${owners.length ? 'its promises belong to more than one customer' : 'no customer to key it on'}`);
+      if (!closed) logger.warn(`[sms-operations] reopened older-key alert ${row.id} left as is: ${owners.length ? 'its promises belong to more than one customer' : 'no customer to key it on'}`);
       continue;
     }
     byCustomer.set(customerId, [...(byCustomer.get(customerId) || []), { id: row.id, meta }]);
   }
-  // One order for every caller that holds more than one of these locks. A row reopened by the caller is already locked
-  // by that write; no other writer takes an older-key row under this lock, so the two orders never meet.
+  return byCustomer;
+}
+
+// The customer alert locks for older-key rows a caller is about to reopen (`notificationIds`, still done), taken in one
+// order BEFORE its write locks those rows: a settle holds the customer's lock and then waits on the customer's rows,
+// and a batch that already holds one of them must not wait on the lock.
+async function lockOlderKeyAlertCustomers(trx, notificationIds) {
+  for (const customerId of [...(await olderKeyAlertsByCustomer(trx, { notificationIds, closed: true })).keys()].sort()) await lockCustomerAlert(trx, customerId);
+}
+
+async function adoptOlderKeyAlerts(trx, { notificationIds = [], commitmentIds = [], now = new Date() } = {}) {
+  const byCustomer = await olderKeyAlertsByCustomer(trx, { notificationIds, commitmentIds });
+  // One order for every caller that holds more than one of these locks. A caller that reopens rows took these locks
+  // before its write (lockOlderKeyAlertCustomers); taking one again changes nothing.
   const customers = [...byCustomer.keys()].sort();
   for (const customerId of customers) {
     await lockCustomerAlert(trx, customerId);
@@ -2121,4 +2135,4 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
   }, { recordHealth: false });
 }
 
-module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, restoreSmsCommitmentAlerts, adoptOlderKeyAlerts, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };
+module.exports = { findOnTrackVisit, onTrackWindowEnd, isQuietTemporaryFact, bellExceptions, reviewFieldLabel, reviewBellCopy, withTextNoteSources, smsCommitmentsEnabled, readerWritesTextFrom, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate, settleCommitmentsForDoneAlert, closeSmsCommitmentAlerts, restoreSmsCommitmentAlerts, adoptOlderKeyAlerts, lockOlderKeyAlertCustomers, sourceAlertVerdict, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS, resolveDueDeadline, ringOverdueBell, keptLate };

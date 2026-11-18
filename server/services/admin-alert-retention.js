@@ -534,6 +534,7 @@ async function undoRetentionRun({ run, execute = false, conn = db, now = new Dat
     if (!ids.length) break;
     const n = await conn.transaction(async (trx) => {
       await trx.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
+      await require('./sms-operational-actions').lockOlderKeyAlertCustomers(trx, ids);
       const back = await trx('notifications')
         .whereIn('id', ids)
         .where({ recipient_type: 'admin', done_by: RETENTION_BY })
@@ -688,6 +689,7 @@ async function reopenQuietFallOff({ since = null, run = null, apply = false, now
     if (!ids.length) break;
     const n = await conn.transaction(async (trx) => {
       await trx.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
+      await require('./sms-operational-actions').lockOlderKeyAlertCustomers(trx, ids);
       const back = await match(trx('notifications').whereIn('id', ids))
         .update({ ...DONE_CLEARED, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) })
         .returning('id');
