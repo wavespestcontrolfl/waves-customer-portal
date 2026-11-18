@@ -5,13 +5,14 @@
  * nothing: that one plan visit moves up to the re-service's time instead. Only that visit moves; the plan behind it
  * stays where it is. This module finds the plan visit and runs the move; each booking path decides when to ask.
  * Today the office's New Appointment save asks (routes/admin-schedule.js). The customer re-service link and the AI
- * booking paths join the same gate in later PRs.
+ * booking paths come in later PRs, each behind its own gate.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 const { laneForCoverageRow, applyCoverageScope } = require('./reservice-scheduler');
+const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
 
 // Owner ruling 2026-11-17: "if they are within a certain range, we should book the recurring instead of the re-service"
 // and, on the decision page, "move it up automatically". Real data: 6 of the last 37 re-services were 5 to 12 days before
@@ -61,9 +62,13 @@ async function findFoldTarget(conn, { customerId, lane, date, propertyId = null 
     .orderByRaw('s.window_start ASC NULLS LAST')
     .limit(25)
     .select('s.id', 's.customer_id', 's.property_id', 's.service_id', 's.is_callback', 's.scheduled_date', 's.window_start',
-      's.window_end', 's.service_type', 's.technician_id', 's.customer_request', 's.notes', 's.status', 'sv.category');
+      's.window_end', 's.service_type', 's.technician_id', 's.customer_request', 's.notes', 's.status', 's.source_action',
+      's.customer_confirmed', 'sv.category');
   for (const row of rows) {
     if (laneForCoverageRow({ category: row.category, serviceType: row.service_type }) !== lane) continue;
+    // A call-created booking the office has not reviewed yet (the customer's own pages hide it; the call make-up skips it)
+    // is not a plan visit the fold may move or text the customer about.
+    if (isUnreviewedDispatchOwned(row)) continue;
     return {
       id: row.id,
       customer_id: row.customer_id,

@@ -118,6 +118,19 @@ describeOrSkip('findFoldTarget', () => {
     expect(await find()).toMatchObject({ id, status: 'confirmed' });
   });
 
+  test('a call booking the office has not reviewed does not fold; once reviewed or confirmed by the customer, it does', async () => {
+    const id = await plan(5, { source_action: 'ai_call_pipeline_followup' });
+    expect(await find()).toBeNull();
+    await trx('scheduled_services').where({ id }).update({ customer_confirmed: true });
+    expect((await find()).id).toBe(id);
+    // A voice-agent booking a move left 'confirmed' but never reviewed is still hidden from the customer.
+    await trx('scheduled_services').where({ id }).update({ source_action: 'voice_agent', status: 'confirmed', customer_confirmed: false });
+    expect(await find()).toBeNull();
+    // The office's confirm of an outbound-review booking: a plain confirmed visit.
+    await trx('scheduled_services').where({ id }).update({ source_action: 'ai_call_outbound_review', status: 'confirmed' });
+    expect((await find()).id).toBe(id);
+  });
+
   describe('premise', () => {
     test('a re-service on the primary premise matches a plan visit with no property and one on the primary property', async () => {
       const unlinked = await plan(8, { property_id: null });
