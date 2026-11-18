@@ -56,6 +56,10 @@
  *   { status: 'sent', lead_id, send_at, sent_at, ... }        — texted
  *   { status: 'skipped', reason, send_at, decided_at, failed? } — was pending, blocked at send time
  *     (failed: true when delivery itself failed, not a policy block)
+ *   { ..., reach } — on a row the reach rules staged (GATE_CALL_BOOKING_LINK_REACH, see
+ *     "Reach rules A and B" below): the rule that stopped the call under today's rules. This
+ *     release never sends such a row; it ends 'skipped' with reason `reach_shadow_would_send`,
+ *     `fee_visit`, or the rule that stopped it (plus `on_file`, what the records showed).
  * A cron tick (scheduler.js, every 5 min, mirroring reschedule-link-promises)
  * calls sweep(): stage() evaluates newly-extracted calls once, dispatch()
  * claims and sends whatever is due. Every terminal send-time decision (sent
@@ -100,6 +104,11 @@ const {
   computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV,
   suppressUnsupportedModelFlags, BLOCKING_TRIAGE_FLAGS,
 } = require('./call-triage-flags');
+const { LEAD_PIPELINE_STAGES } = require('../utils/call-lead-customer-gate');
+
+// GATE_CALL_BOOKING_LINK_REACH, read at call time: 'shadow' or 'off'. `?.()`: a suite that
+// mocks feature-gates whole has no reader, and that reads as off.
+const reachMode = () => require('../config/feature-gates').callBookingLinkReachMode?.() ?? 'off';
 
 const GATE = 'callBookingLinkText';
 const METADATA_KEY = 'call_booking_link_text';
@@ -668,9 +677,14 @@ function finalTriageFlagsFor(call, extraction) {
 // priced-on-call price is checked only after service_intent already passed).
 // Every check tolerates a null `extraction` (returns null itself) — the
 // `no_extraction` entry above it in the list is what actually stops the walk.
+// `reach` (4th argument, default false) switches off rules A and B only:
+// `existing_customer` here, and the two `quote_promised` entries below. It
+// answers "does any rule that STAYS stop this call?" for the reach rules
+// (GATE_CALL_BOOKING_LINK_REACH, "Reach rules A and B" below). Every other
+// entry ignores it.
 const STAGING_CHECKS = [
   (call, extraction, leadId) => (!leadId ? 'no_lead_linkage' : null),
-  (call) => (customerPredatesThisCall(call) ? 'existing_customer' : null),
+  (call, extraction, leadId, reach) => (!reach && customerPredatesThisCall(call) ? 'existing_customer' : null),
   (call, extraction) => (!extraction ? 'no_extraction' : null),
   (call, extraction) => (extraction.meta?.is_voicemail || extraction.meta?.is_spam ? 'voicemail_or_spam' : null),
   (call, extraction) => (extraction.call_nature !== 'new_lead' ? 'not_new_lead_call' : null),
@@ -706,7 +720,7 @@ const STAGING_CHECKS = [
   // not merge it back into the persisted extraction's triage_flags, so the
   // flag check above can miss a promised quote. A quote we owe is the
   // estimate's job, never the free-visit link's.
-  (call, extraction) => (extraction.service_request?.quote_promised === true ? 'quote_promised' : null),
+  (call, extraction, leadId, reach) => (!reach && extraction.service_request?.quote_promised === true ? 'quote_promised' : null),
   (call, extraction) => (extraction.service_request?.urgency === 'no_appointment_needed' ? 'no_appointment_needed' : null),
   (call, extraction) => (extraction.scheduling?.status === 'confirmed' ? 'already_booked_on_call' : null),
   (call, extraction) => {
@@ -765,9 +779,11 @@ const STAGING_CHECKS = [
   // pipeline itself would hold for review is never eligible for an
   // automated follow-up text either, whatever the model's own raw
   // triage_flags said.
-  (call, extraction) => {
+  // Under `reach` the quote_promised flag alone is passed over (rule A); any
+  // other excluded or blocking flag on the same call still stops it.
+  (call, extraction, leadId, reach) => {
     const flags = finalTriageFlagsFor(call, extraction);
-    const hit = flags.find((f) => EXCLUDED_TRIAGE_FLAGS.has(f) || BLOCKING_TRIAGE_FLAGS.has(f));
+    const hit = flags.find((f) => !(reach && f === 'quote_promised') && (EXCLUDED_TRIAGE_FLAGS.has(f) || BLOCKING_TRIAGE_FLAGS.has(f)));
     return hit ? `triage_flag_${hit}` : null;
   },
 ];
@@ -777,10 +793,12 @@ const STAGING_CHECKS = [
  * extraction alone, at the moment extraction lands. Returns a skip reason
  * string, or null when eligible to schedule. Also reused verbatim at
  * dispatch time as one of the send-time re-checks (see DISPATCH_CHECKS).
+ * `reach: true` leaves rules A and B out (see STAGING_CHECKS); only the reach
+ * rules pass it, and only for a call those two rules alone stopped.
  */
-function stagingIneligibleReason(call, extraction, leadId) {
+function stagingIneligibleReason(call, extraction, leadId, { reach = false } = {}) {
   for (const check of STAGING_CHECKS) {
-    const reason = check(call, extraction, leadId);
+    const reason = check(call, extraction, leadId, reach);
     if (reason) return reason;
   }
   return null;
@@ -903,14 +921,24 @@ async function stageOne(conn, call, now, boundary = null) {
   }
   const leadId = linkage.leadId;
   const extraction = extractionOf(call);
-  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call));
+  // `reach` is empty for every call today's rules decide by themselves. A call
+  // that ONLY rules A and B stop is admitted (staged with the reach mark) or
+  // stopped by rule B's records test (`on_file`): see reachAtStaging.
+  const stopped = stagingIneligibleReason(call, extraction, leadId);
+  const reach = stopped ? await reachAtStaging(conn, call, extraction, leadId, stopped) : {};
+  const reason = reach.admit ? null : (stopped || (await outboundStagingReason(conn, call)));
   if (reason) {
-    await claimMetadata(conn, call, { status: 'skipped', reason, staged_at });
+    await claimMetadata(conn, call, { status: 'skipped', reason, staged_at, ...(reach.onFile ? { on_file: reach.onFile } : {}) });
     return 'skipped';
   }
+  // A call the reach rules admitted never got this far under today's rules. If
+  // one of the two later stops below ends it, it keeps today's reason: the
+  // weekly check reads `stale_at_staging` as a text that was missed, and for
+  // such a call no text was due.
+  const lateStop = (lateReason) => claimMetadata(conn, call, { status: 'skipped', reason: reach.admit ? stopped : lateReason, staged_at });
   const callEnd = callEndFor(call);
   if (!callEnd) {
-    await claimMetadata(conn, call, { status: 'skipped', reason: 'no_call_end_time', staged_at });
+    await lateStop('no_call_end_time');
     return 'skipped';
   }
   // Clamp to `now` (codex pre-push P1): a skewed duration_seconds could
@@ -944,7 +972,7 @@ async function stageOne(conn, call, now, boundary = null) {
   const nominalSendAt = new Date(send_at);
   const legalSendAt = isWithinSendWindowET(nominalSendAt) ? nominalSendAt : nextSendWindowOpenET(nominalSendAt);
   if (now.getTime() - legalSendAt.getTime() > STAGING_STALE_MS) {
-    await claimMetadata(conn, call, { status: 'skipped', reason: 'stale_at_staging', staged_at });
+    await lateStop('stale_at_staging');
     return 'skipped';
   }
   // original_send_at is set ONCE here and never overwritten by a later
@@ -953,7 +981,9 @@ async function stageOne(conn, call, now, boundary = null) {
   // same, repeatedly-advancing field would let consecutive transient
   // failures push the deadline out indefinitely. This field is the one
   // fixed anchor every retry's own give-up check reads instead.
-  await claimMetadata(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: send_at, staged_at });
+  await claimMetadata(conn, call, {
+    status: 'pending', lead_id: leadId, send_at, original_send_at: send_at, staged_at, ...(reach.admit ? { reach: stopped } : {}),
+  });
   return 'pending';
 }
 
@@ -1017,8 +1047,12 @@ async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
   // carried through every rewrite (retries, sends, dispatch skips replace the
   // whole entry), so the week a call was checked in never changes after
   // staging (codex #5358 r6 P2).
-  const stagedAt = entry.staged_at || parseMetadata(call)[METADATA_KEY]?.staged_at;
-  const kept = stagedAt ? { ...entry, staged_at: stagedAt } : entry;
+  // The reach mark rides every rewrite the same way: a deferral or a claim
+  // recovery that dropped it would hand a reach row to today's send path.
+  const prior = parseMetadata(call)[METADATA_KEY] || {};
+  const stagedAt = entry.staged_at || prior.staged_at;
+  const reach = entry.reach || prior.reach;
+  const kept = { ...entry, ...(stagedAt ? { staged_at: stagedAt } : {}), ...(reach ? { reach } : {}) };
   const stamped = entry.status === 'pending' ? kept : { ...kept, decided_at: new Date().toISOString() };
   await conn('call_log').where({ id: call.id }).update({ metadata: metadataPatch(conn, stamped), updated_at: new Date() });
   if (!logActivity) return;
@@ -1303,6 +1337,119 @@ async function leadHasOpenEstimateMirror(conn, leadId) {
   return mirror.archived_at == null && OPEN_ESTIMATE_STATUSES.includes(mirror.status);
 }
 
+// ── Reach rules A and B (GATE_CALL_BOOKING_LINK_REACH, owner 2026-11-17 "link") ──
+// Today two rules stop a caller at once: `quote_promised` (rule A: staff
+// promised a quote) and `existing_customer` (rule B: the call is tied to a
+// customer row made before it). Both also stop real new callers: a promised
+// quote nobody wrote, and a "customer" who is only the lead record an earlier
+// form or call left behind.
+//
+// With the gate on, a call that ONLY those two rules stop is staged like any
+// other call, marked `reach: <the rule that stopped it>`, and judged again at
+// send time:
+//   1. every rule that stays, unchanged (DISPATCH_CHECKS with rules A and B
+//      switched off);
+//   2. the caller must not be on file (callerOnFile): rule B's new test, and
+//      rule A's "no estimate in any state and no visit", both read at the
+//      moment the text would go;
+//   3. a caller who asked for a fee visit is left out (`fee_visit`).
+// Rule A is not judged at staging: it waits the same 2 hours the text does, so
+// staff can still write the quote. Rule B is judged at staging too, so a real
+// customer's call ends at once, as it does today.
+//
+// THIS RELEASE ONLY RECORDS the result. A marked row never reaches the link
+// builder or the sender: dispatchClaimedCall returns reachVerdict's reason as
+// a skip, and a row that passed every test ends `reach_shadow_would_send`. A
+// row without the mark runs today's path, unchanged, in every mode, and a call
+// today's rules stop for any other reason keeps today's reason.
+const REACH_RULE_REASONS = new Set(['existing_customer', 'quote_promised', 'triage_flag_quote_promised']);
+const REACH_WOULD_SEND = 'reach_shadow_would_send';
+// Visits the service list charges for. The text offers a free visit, so these
+// callers are left out on purpose (scope page, idea 3).
+const FEE_VISIT_CATEGORIES = new Set(['wdo', 'rodent', 'exclusion']);
+
+function feeVisitRequested(extraction) {
+  const request = extraction?.service_request || {};
+  const secondary = Array.isArray(request.secondary_categories) ? request.secondary_categories : [];
+  return [request.primary_service_category, ...secondary].some((category) => FEE_VISIT_CATEGORIES.has(category));
+}
+
+// Is this caller already a customer, or already quoted or booked? One answer
+// for both rules, read from the records under the number the call used.
+// Returns what it found (a word for the log), or null when nothing is on file:
+//   phone_unusable   — the call has no NANP number to judge by.
+//   other_number     — the lead's phone is not the number the call used (a
+//                      spoken alternate): two identities, so not judged here.
+//   customer_record  — a live customer row under the number is past the lead
+//                      stages (LEAD_PIPELINE_STAGES, the call processor's own
+//                      "still a lead" list). Customer rows imported from the
+//                      old system carry no visit and no estimate here, so
+//                      those two alone would read a long-time customer as a
+//                      new caller. A deleted row's stage is not a live claim
+//                      and is not read; its history below still counts.
+//   linked_elsewhere — the call or the lead is tied to a customer row that
+//                      this call did not make and that is not a live row
+//                      under the number. Not judged here; it stays a stop.
+//   visit / service_record / invoice / estimate — any visit that is not
+//                      cancelled, any completed service, any invoice, any
+//                      estimate in any state (draft, sent, expired, archived).
+// Skipping is the safe direction, so every test is broad: any customer row
+// stored under the number counts, deleted or not, whoever it belongs to. The
+// number is matched by nanpStoredPhoneClause, the same matcher as
+// bookedSinceCall. A read failure throws: staging leaves the call undecided
+// and the dispatch tick requeues it, as for every other read in this lane.
+async function callerOnFile(conn, { call, lead = null, leadId = null }) {
+  const { resolveCallContactPhone } = require('./call-recording-processor');
+  const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+  const phoneKey = phoneIdentityKey(resolveCallContactPhone(call, null));
+  if (!phoneKey || phoneKey.length !== 10) return 'phone_unusable';
+  if (lead && phoneIdentityKey(lead.phone) !== phoneKey) return 'other_number';
+  const underNumber = await conn('customers').whereRaw(nanpStoredPhoneClause('phone'), [phoneKey])
+    .select('id', 'pipeline_stage', 'deleted_at');
+  const live = underNumber.filter((row) => row.deleted_at == null);
+  if (live.some((row) => !LEAD_PIPELINE_STAGES.has(String(row.pipeline_stage || '').toLowerCase()))) return 'customer_record';
+  const createdId = parseMetadata(call).created_customer_id;
+  const known = new Set([...live.map((row) => String(row.id)), ...(createdId ? [String(createdId)] : [])]);
+  const linkedIds = [call.customer_id, lead?.customer_id].filter(Boolean).map(String);
+  if (linkedIds.some((id) => !known.has(id))) return 'linked_elsewhere';
+  const customerIds = [...new Set([...underNumber.map((row) => String(row.id)), ...known])];
+  if (customerIds.length) {
+    if (await conn('scheduled_services').whereIn('customer_id', customerIds).whereNotIn('status', ['cancelled']).first('id')) return 'visit';
+    if (await conn('service_records').whereIn('customer_id', customerIds).first('id')) return 'service_record';
+    if (await conn('invoices').whereIn('customer_id', customerIds).first('id')) return 'invoice';
+  }
+  const estimate = await conn('estimates').where((q) => {
+    q.whereRaw(nanpStoredPhoneClause('customer_phone'), [phoneKey]);
+    if (customerIds.length) q.orWhereIn('customer_id', customerIds);
+    if (leadId) q.orWhereRaw("estimate_data->>'lead_id' = ?", [String(leadId)]);
+  }).first('id');
+  return estimate ? 'estimate' : null;
+}
+
+// Staging: `stopped` is the reason today's rules gave. Returns {} when the
+// gate is off or when anything other than rules A and B also stops the call
+// (today's outcome, today's reason), { onFile } when rule B's records test
+// stops it, and { admit: true } when the call is staged under the reach rules.
+async function reachAtStaging(conn, call, extraction, leadId, stopped) {
+  if (reachMode() === 'off' || !REACH_RULE_REASONS.has(stopped)) return {};
+  if (stagingIneligibleReason(call, extraction, leadId, { reach: true }) || (await outboundStagingReason(conn, call))) return {};
+  const onFile = customerPredatesThisCall(call) ? await callerOnFile(conn, { call, leadId }) : null;
+  return onFile ? { onFile } : { admit: true };
+}
+
+// Send time, for a row the reach rules staged: the reason this call ends
+// with. Always a skip reason, because this release records and never sends.
+async function reachVerdict({ conn, call, lead, leadId, now, entry }) {
+  // The gate went off after staging: the call ends the way today's rules end it.
+  if (reachMode() === 'off') return { reason: entry.reach };
+  const stays = await dispatchIneligibleReason({ conn, call, lead, leadId, now, reach: true });
+  if (stays) return { reason: stays };
+  const onFile = await callerOnFile(conn, { call, lead, leadId });
+  if (onFile) return { reason: entry.reach, on_file: onFile };
+  if (feeVisitRequested(extractionOf(call))) return { reason: 'fee_visit' };
+  return { reason: REACH_WOULD_SEND };
+}
+
 // Table-driven send-time re-check (mirrors STAGING_CHECKS above — CLAUDE.md
 // rule 20). Order matters: `lead` is guaranteed non-null once past its own
 // entry, and the later entries lean on that. `estimate_linked` is this
@@ -1316,7 +1463,11 @@ const DISPATCH_CHECKS = [
     if (lead.estimate_id) return 'estimate_linked';
     return (await leadHasOpenEstimateMirror(conn, leadId)) ? 'estimate_linked' : null;
   },
-  ({ call, lead }) => (leadLinkedToExistingCustomer(call, lead) ? 'existing_customer' : null),
+  // `reach` (set only by reachVerdict, for a row the reach rules staged)
+  // switches rule B off here and rules A and B off in the staging re-run at
+  // the end of this table, so the table answers "does a rule that STAYS stop
+  // it?". reachVerdict then puts rule B's records test in their place.
+  ({ call, lead, reach }) => (!reach && leadLinkedToExistingCustomer(call, lead) ? 'existing_customer' : null),
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
   async ({ conn, call }) => ((await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null),
@@ -1334,7 +1485,7 @@ const DISPATCH_CHECKS = [
   // Re-run the full stage-time predicate against the row as it stands now —
   // covers a re-extraction, a status edit, or anything else that changed
   // this call's own facts between staging and dispatch.
-  ({ call, leadId }) => stagingIneligibleReason(call, extractionOf(call), leadId),
+  ({ call, leadId, reach }) => stagingIneligibleReason(call, extractionOf(call), leadId, { reach }),
   // Deliberately NOT an "outside the send window" check here — that is a
   // reason to WAIT, never a reason to give up (codex pre-push P1: a 5:59 PM
   // call is due at 7:59 PM, and a cron tick running even a few minutes late
@@ -1670,8 +1821,12 @@ async function deleteConsultationLinkAttempt(attemptId) {
 async function dispatchClaimedCall(conn, call, now) {
   const entry = parseMetadata(call)[METADATA_KEY] || {};
   const leadId = entry.lead_id;
+  // A row the reach rules staged (`entry.reach`) writes no activity_log row:
+  // under today's rules its call ended silently at staging, and while those
+  // rules only record, the office's activity feed must not change. Its record
+  // is the call's own metadata.
   const skip = async (reason, extra = {}) => {
-    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra });
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at, ...extra }, { logActivity: !entry.reach });
     return { sent: false, skipped: reason };
   };
   // The processor's own ownership fence, re-checked at send time (codex
@@ -1727,6 +1882,14 @@ async function dispatchClaimedCall(conn, call, now) {
   // text a stale follow-up and record it as a normal send.
   if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout', { failed: true });
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();
+  // A row the reach rules staged (GATE_CALL_BOOKING_LINK_REACH) ends here,
+  // always as a skip: this release records what rules A and B would send and
+  // never sends it. Nothing below this branch (the link builder, the sender)
+  // runs for such a row, whatever the gate reads now.
+  if (entry.reach) {
+    const { reason: verdict, ...found } = await reachVerdict({ conn, call, lead, leadId, now, entry });
+    return skip(verdict, found);
+  }
   const reason = await dispatchIneligibleReason({ conn, call, lead, leadId, now });
   if (reason) return skip(reason);
 
@@ -2431,5 +2594,6 @@ module.exports = {
   // export, same convention as the rest of this bag.
   _private: { isExpectedRefusal, recordDecision,
     leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision, smsDeclinedOnEarlierCall,
+    callerOnFile,
   },
 };

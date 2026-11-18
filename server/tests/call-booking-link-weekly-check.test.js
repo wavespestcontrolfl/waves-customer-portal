@@ -153,6 +153,9 @@ describe('reasonLabel', () => {
     expect(reasonLabel('sms_declined_earlier_call')).toBe('said no texts before');
     expect(reasonLabel('triage_flag_out_of_service_area')).toBe('out of service area');
     expect(reasonLabel('some_new_reason')).toBe('some new reason');
+    // GATE_CALL_BOOKING_LINK_REACH: a log-only row must not read as a plain skip in the weekly bell.
+    expect(reasonLabel('reach_shadow_would_send')).toBe('would send (log only)');
+    expect(reasonLabel('fee_visit')).toBe('fee visit');
   });
 });
 

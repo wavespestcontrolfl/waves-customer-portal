@@ -78,7 +78,7 @@ const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
 // customer_accounts (codex #5196 P1-A): ensureCustomerAccount's own account
 // row — needed once the quick-add lock-fence test below drives that real
 // function, not merely a `customers` insert.
-const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'consultation_link_send_attempts', 'estimates'];
+const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'consultation_link_send_attempts', 'estimates', 'invoices', 'service_records'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -1769,6 +1769,172 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.metadata?.call_booking_link_text).toBeUndefined(); // never stamped over the claimed row
     expect(row.processing_token).toBe('reprocess-claim'); // the reprocess's own claim survives untouched
     expect(row.v2_extraction_status).toBeNull();
+  });
+
+  // ── Reach rules A and B (GATE_CALL_BOOKING_LINK_REACH=shadow) ───────────
+  // What a mocked knex cannot prove: callerOnFile's real SQL (the NANP match
+  // on customers.phone and estimates.customer_phone, the jsonb lead mirror,
+  // five tables' real column names), and that the reach mark survives the
+  // real jsonb writes from staging through the claim to the final skip.
+  // feature-gates is not mocked in this file, so the gate is read for real.
+  describe('reach rules A and B (GATE_CALL_BOOKING_LINK_REACH=shadow)', () => {
+    const { callerOnFile } = callBookingLinkText._private;
+    const QUOTE_PROMISED = { ...eligibleExtraction(), service_request: { service_intent: 'inspection_only', quote_promised: true } };
+    const STAGED_AT = new Date('2027-01-15T15:55:00.000Z'); // send time lands ~3 minutes before NOW
+    let priorReachEnv;
+
+    beforeEach(async () => {
+      priorReachEnv = process.env.GATE_CALL_BOOKING_LINK_REACH;
+      process.env.GATE_CALL_BOOKING_LINK_REACH = 'shadow';
+      await mockPg('system_settings').insert({
+        key: callBookingLinkText.ACTIVATION_SETTINGS_KEY, value: '2027-01-13T00:00:00.000Z', category: 'call_booking_link_text',
+      });
+    });
+
+    afterEach(() => {
+      if (priorReachEnv === undefined) delete process.env.GATE_CALL_BOOKING_LINK_REACH;
+      else process.env.GATE_CALL_BOOKING_LINK_REACH = priorReachEnv;
+    });
+
+    const insertCustomer = async (overrides = {}) => {
+      const id = randomUUID();
+      await mockPg('customers').insert({
+        id, first_name: 'Earlier', last_name: 'Record', phone: '+15555550333', pipeline_stage: 'new_lead',
+        address_line1: '3 Example St', city: 'Bradenton', zip: '34205', ...overrides,
+      });
+      return id;
+    };
+    const entryOf = async (callId) => (await mockPg('call_log').where({ id: callId }).first('metadata')).metadata.call_booking_link_text;
+
+    test('callerOnFile reads the real records under the number the call used', async () => {
+      // Stored in another format than the call's ANI: only the NANP clause matches it.
+      const customerId = await insertCustomer({ phone: '(555) 555-0333' });
+      const leadId = await insertLead(mockPg, { phone: '+15555550333', customer_id: customerId });
+      const callId = await insertCall(mockPg, { from_phone: '+15555550333', customer_id: customerId, metadata: { lead_id: leadId } });
+      const call = await mockPg('call_log').where({ id: callId }).first();
+      const lead = await mockPg('leads').where({ id: leadId }).first();
+      const onFile = () => callerOnFile(mockPg, { call, lead, leadId });
+
+      expect(await onFile()).toBeNull(); // a lead record with no history
+
+      const visitId = randomUUID();
+      await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2027-01-20', service_type: 'Pest Control', status: 'cancelled' });
+      expect(await onFile()).toBeNull(); // only a cancelled visit is passed over
+      await mockPg('scheduled_services').where({ id: visitId }).update({ status: 'completed' });
+      expect(await onFile()).toBe('visit');
+      await mockPg('scheduled_services').delete();
+
+      await mockPg('service_records').insert({ id: randomUUID(), customer_id: customerId, service_date: '2026-06-01', service_type: 'Pest Control' });
+      expect(await onFile()).toBe('service_record');
+      await mockPg('service_records').delete();
+
+      await mockPg('invoices').insert({ id: randomUUID(), token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 24)}`, customer_id: customerId });
+      expect(await onFile()).toBe('invoice');
+      await mockPg('invoices').delete();
+
+      // An estimate counts in any state, and is found three ways.
+      const estimates = [
+        { customer_phone: '555-555-0333', status: 'expired' }, // by the number alone, in a third format
+        { customer_id: customerId, status: 'declined', archived_at: NOW }, // by the customer row
+        { estimate_data: { lead_id: leadId }, status: 'draft' }, // by the quote wizard's lead mirror
+      ];
+      for (const estimate of estimates) {
+        await mockPg('estimates').insert({ id: randomUUID(), created_at: NOW, ...estimate });
+        expect(await onFile()).toBe('estimate');
+        await mockPg('estimates').delete();
+      }
+
+      // A second row under the number that was deleted: its stage is not read, its history is.
+      const deletedId = await insertCustomer({ phone: '555.555.0333', pipeline_stage: 'active_customer', deleted_at: NOW });
+      expect(await onFile()).toBeNull();
+      await mockPg('invoices').insert({ id: randomUUID(), token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 24)}`, customer_id: deletedId });
+      expect(await onFile()).toBe('invoice');
+      await mockPg('invoices').delete();
+
+      await mockPg('customers').where({ id: customerId }).update({ pipeline_stage: 'active_customer' });
+      expect(await onFile()).toBe('customer_record'); // past the lead stages: a customer, with no visit and no estimate
+    });
+
+    test('rule A: a quote-promised call is staged with the mark, keeps it through the real claim, and ends as a log entry with nothing sent', async () => {
+      const leadId = await insertLead(mockPg, { phone: '+15555550444' });
+      const callId = await insertCall(mockPg, {
+        from_phone: '+15555550444', metadata: { lead_id: leadId }, ai_extraction_enriched: QUOTE_PROMISED, created_at: STAGED_AT, updated_at: STAGED_AT,
+      });
+
+      expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 1, ineligible: 0 });
+      expect(await entryOf(callId)).toMatchObject({ status: 'pending', lead_id: leadId, reach: 'quote_promised' });
+
+      expect(await callBookingLinkText.claimForDispatch(mockPg, callId)).toBe(true);
+      const claimed = await mockPg('call_log').where({ id: callId }).first();
+      expect(claimed.metadata.call_booking_link_text).toMatchObject({ status: 'claimed', reach: 'quote_promised' });
+
+      const result = await callBookingLinkText.dispatchClaimedCall(mockPg, claimed, NOW);
+      expect(result).toEqual({ sent: false, skipped: 'reach_shadow_would_send' });
+      expect(await entryOf(callId)).toMatchObject({ status: 'skipped', reason: 'reach_shadow_would_send', reach: 'quote_promised', lead_id: leadId });
+      expect(await mockPg('activity_log')).toHaveLength(0); // the record is the call's own metadata
+      expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('rule A: an estimate written under the caller\'s number before the send time ends the call quote_promised, nothing sent', async () => {
+      const leadId = await insertLead(mockPg, { phone: '+15555550445' });
+      const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+      const callId = await insertCall(mockPg, {
+        from_phone: '+15555550445', ai_extraction_enriched: QUOTE_PROMISED,
+        metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at, reach: 'quote_promised' } },
+      });
+      // Not linked to the lead in any way: the staying estimate_linked rule cannot see it.
+      await mockPg('estimates').insert({ id: randomUUID(), status: 'sent', customer_phone: '(555) 555-0445', created_at: NOW });
+
+      const call = await mockPg('call_log').where({ id: callId }).first();
+      const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+      expect(result).toEqual({ sent: false, skipped: 'quote_promised' });
+      expect(await entryOf(callId)).toMatchObject({ status: 'skipped', reason: 'quote_promised', on_file: 'estimate', reach: 'quote_promised' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('rule B at staging: an earlier lead record is staged with the mark, a customer record ends the call at once', async () => {
+      const leadRecordId = await insertCustomer({ phone: '+15555550446' });
+      const leadCallId = await insertCall(mockPg, {
+        from_phone: '+15555550446', customer_id: leadRecordId, created_at: STAGED_AT, updated_at: STAGED_AT,
+        metadata: { lead_id: await insertLead(mockPg, { phone: '+15555550446', customer_id: leadRecordId }) },
+      });
+      const customerRecordId = await insertCustomer({ phone: '+15555550447', pipeline_stage: 'active_customer' });
+      const customerCallId = await insertCall(mockPg, {
+        from_phone: '+15555550447', customer_id: customerRecordId, created_at: STAGED_AT, updated_at: STAGED_AT,
+        metadata: { lead_id: await insertLead(mockPg, { phone: '+15555550447', customer_id: customerRecordId }) },
+      });
+
+      expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 1, ineligible: 1 });
+      expect(await entryOf(leadCallId)).toMatchObject({ status: 'pending', reach: 'existing_customer' });
+      expect(await entryOf(customerCallId)).toMatchObject({ status: 'skipped', reason: 'existing_customer', on_file: 'customer_record' });
+
+      // The marked row, at send time: rule B's records test runs again and nothing is sent.
+      expect(await callBookingLinkText.claimForDispatch(mockPg, leadCallId)).toBe(true);
+      const claimed = await mockPg('call_log').where({ id: leadCallId }).first();
+      expect(await callBookingLinkText.dispatchClaimedCall(mockPg, claimed, NOW)).toEqual({ sent: false, skipped: 'reach_shadow_would_send' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate unset: the same two calls end at once with today\'s reasons', async () => {
+      delete process.env.GATE_CALL_BOOKING_LINK_REACH;
+      const quoteCallId = await insertCall(mockPg, {
+        from_phone: '+15555550448', ai_extraction_enriched: QUOTE_PROMISED, created_at: STAGED_AT, updated_at: STAGED_AT,
+        metadata: { lead_id: await insertLead(mockPg, { phone: '+15555550448' }) },
+      });
+      const leadRecordId = await insertCustomer({ phone: '+15555550449' });
+      const leadCallId = await insertCall(mockPg, {
+        from_phone: '+15555550449', customer_id: leadRecordId, created_at: STAGED_AT, updated_at: STAGED_AT,
+        metadata: { lead_id: await insertLead(mockPg, { phone: '+15555550449', customer_id: leadRecordId }) },
+      });
+
+      expect(await callBookingLinkText.stage(mockPg, { now: NOW })).toEqual({ staged: 0, ineligible: 2 });
+      const quoteEntry = await entryOf(quoteCallId);
+      expect(quoteEntry).toMatchObject({ status: 'skipped', reason: 'quote_promised' });
+      expect(quoteEntry).not.toHaveProperty('reach');
+      expect(await entryOf(leadCallId)).toMatchObject({ status: 'skipped', reason: 'existing_customer' });
+    });
   });
 
   // codex #5018 P2, closed further by its own r15/r16 follow-up: twilio.js's

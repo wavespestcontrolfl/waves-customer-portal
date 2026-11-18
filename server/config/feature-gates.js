@@ -36,6 +36,7 @@
  *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_CAGE_START_MEDIUM=true (owner 2026-11-17 "both", draft price study: the two office tools start a county-measured pool cage of 601 to 2,000 sq ft at Medium instead of the lookup's Large or Oversized. It covers the call-agent draft and the estimate tool's first fill after a property lookup. With it on, the call-agent draft also drops a cage on a home with no decided pool, as the estimate tool already does. Small, Large and Oversized stay in the estimate tool's list for hand use; a cage over 2,000 sq ft stays Oversized. Not changed: the lookup's own cage size, so the website quote, the website-lead draft and the customer price assistant are as before; the price of each size; any saved estimate. It has a gate because it changes a starting price in the estimate tool. Read at call time via cageStartMediumLive(), strict 'true', dark by default; off or unset = both tools start exactly as before.)
+ *   GATE_CALL_BOOKING_LINK_REACH=shadow (owner 2026-11-17 "link", page "Call Agent Improvements" idea 3: the booking-link text after a call gets two wider rules, and THIS RELEASE ONLY RECORDS what they would send. Rule A: a caller who was promised a quote is no longer stopped at once. The text waits its 2 hours (8 AM after a 6 PM call) and would then go only to a caller with no estimate in any state and no visit. Rule B: a caller with an earlier lead record is no longer read as a current customer. The text stops only for a caller whose record is past the lead stages, or who has a visit, an invoice or an estimate. A caller who asked for a WDO report, a rodent inspection or exclusion work is left out (reason fee_visit): those visits carry a fee and the text says free. In shadow no text goes to these callers: the call ends with the reason reach_shadow_would_send. Every caller today's rules text gets the text exactly as before. It has a gate because it decides who gets a customer text. Off = today's rules. Kill = unset, read at call time)
  *   GATE_ACH_FAILURE_EMAIL=true (owner 2026-11-16: a customer whose bank (ACH) payment fails gets one email for the stage the failure reached: the retry notice, the switch to the card on file, or the bank suspension with a link to update the bank account. The three bank-failure texts stay off (owner 2026-09-28) and get no text fallback. One email per payment intent and Stripe event; a replayed event sends it only when it is missing. Strict `=== 'true'`, read at call time via achFailureEmailLive(); dark by default. Off = no email, nothing else changes. Kill: unset)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
@@ -2676,6 +2677,9 @@ const gates = {
   // written; the call_log row carries no metadata for this lane. See
   // services/call-booking-link-text.js.
   callBookingLinkText: process.env.GATE_CALL_BOOKING_LINK_TEXT === 'true',
+  // GATE_CALL_BOOKING_LINK_REACH: read at CALL time via callBookingLinkReachMode(); this entry is for
+  // logGateStatus, so the boot log shows the flip.
+  callBookingLinkReach: String(process.env.GATE_CALL_BOOKING_LINK_REACH || '').trim().toLowerCase() === 'shadow',
   // Missed-call text-back (services/missed-call-text-back.js): an UNKNOWN
   // caller (no customer record on file) calls a Waves line,
   // nobody answers, they wait >= 15s (missed-call-bell's own floor) and
@@ -6088,6 +6092,15 @@ function cageStartMediumLive() {
   return process.env.GATE_CAGE_START_MEDIUM === 'true';
 }
 
+// GATE_CALL_BOOKING_LINK_REACH read at CALL time: 'shadow' or 'off' (owner 2026-11-17, "link").
+// services/call-booking-link-text.js: 'shadow' (exactly, trimmed, any case) runs rules A and B
+// of the booking-link text and RECORDS what they would send. No text goes to those callers.
+// Anything else, 'true' included, is off: today's rules. Live sending is a separate later
+// change. It has a gate because it decides who gets a customer text. Kill = unset.
+function callBookingLinkReachMode() {
+  return String(process.env.GATE_CALL_BOOKING_LINK_REACH || '').trim().toLowerCase() === 'shadow' ? 'shadow' : 'off';
+}
+
 // GATE_MOSQUITO_MISTING read at CALL time (gateEnvValue: '1'/'true'/'on'), dark by
 // default. The mosquito misting system pricer in the estimate engine, the
 // legacy mapper's plan and install rows, and the two public price-range rows.
@@ -9224,6 +9237,8 @@ module.exports.invoiceNotOnSparkLive = invoiceNotOnSparkLive;
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 // GATE_CAGE_START_MEDIUM reader, on its own line so gate PRs never conflict.
 module.exports.cageStartMediumLive = cageStartMediumLive;
+// GATE_CALL_BOOKING_LINK_REACH reader, on its own line so gate PRs never conflict.
+module.exports.callBookingLinkReachMode = callBookingLinkReachMode;
 // GATE_LAWN_RECLAIMED_HALF_N reader, on its own line so gate PRs never conflict.
 module.exports.lawnReclaimedHalfNLive = lawnReclaimedHalfNLive;
 // GATE_MOSQUITO_MISTING reader, on its own line so gate PRs never conflict.

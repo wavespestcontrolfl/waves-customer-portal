@@ -70,6 +70,9 @@ const REASON_LABELS = {
   voicemail_or_spam: 'voicemail or spam',
   link_sent_recently: 'link already sent',
   stale_at_staging: 'too late to send',
+  // GATE_CALL_BOOKING_LINK_REACH (log only): what rules A and B would send, and the fee visits they leave out.
+  reach_shadow_would_send: 'would send (log only)',
+  fee_visit: 'fee visit',
 };
 
 function reasonLabel(reason) {
