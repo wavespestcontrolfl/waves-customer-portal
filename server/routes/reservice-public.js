@@ -566,6 +566,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'That date is outside the online scheduling window.' });
     }
 
+    // GATE_RESERVICE_FOLD_LINK: a re-service pick within 14 days before the customer's own next plan visit of the lane moves
+    // that one plan visit to the picked slot instead of booking. Not eligible, no fit or a refused move: carry on as before.
+    const folded = await linkReserviceFold({ customer, lane, catalog, date, startTime, config, details, pests: requestedPests, pestLabels: requestedPestLabels });
+    if (folded) return res.json(folded);
+
     // Anti-forgery: the customer can only commit a slot the availability
     // engine still offers for that day AT THIS LANE's duration (route
     // feasibility, lunch reserve, whole-hour grid). Replaces the
@@ -742,6 +747,81 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   }
 });
 
+// ── Re-service fold on the link (GATE_RESERVICE_FOLD_LINK, owner 2026-11-17) ──
+// The link always books a free callback (callbackVisit: is_callback, no price, no invoice on completion), so there is no price
+// to drop. Everything below runs BEFORE the slot rebuild and createSelfBooking, and any "no" returns null: the route then
+// carries on exactly as it did. The pick folds only when the plan visit's OWN reschedule page would let the customer move it
+// (account, reviewed call booking, not a shared stop, outside the move notice) and its own one-day picker offers the picked
+// start. A repeat of the same pick finds the plan visit already on the slot and answers `replayed`: nothing moves, no text,
+// but the words still reach the visit once and the owner bell rings (at most once per visit).
+// A refused move (a clash, a raced edit) is tried once more from a fresh lookup: a second tap that raced the first then lands
+// on the replay instead of booking a re-service on top of the fold.
+async function linkReserviceFold({ customer, lane, catalog, date, startTime, config, details, pests, pestLabels: labels }) {
+  if (!require('../config/feature-gates').reserviceFoldLinkLive?.()) return null;
+  const fold = require('../services/reservice-fold');
+  if (!fold.foldLaneForServiceKey(catalog.serviceKey)) return null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const outcome = await tryLinkFold({ fold, customer, lane, date, startTime, config, details, pests, labels });
+    if (outcome.reply) return outcome.reply;
+    if (!outcome.retry) return null;
+  }
+  return null;
+}
+
+async function tryLinkFold({ fold, customer, lane, date, startTime, config, details, pests, labels }) {
+  // The link books with no property_id, so the premise is the customer's primary one.
+  const target = await fold.findFoldTarget(db, { customerId: customer.id, lane, date, propertyId: null });
+  if (!target) return {};
+  const reschedule = require('./reschedule-public')._internals;
+  const reply = async (replayed, slot) => {
+    const row = await db('scheduled_services').where({ id: target.id }).first('reschedule_token');
+    return {
+      success: true,
+      replayed,
+      lane,
+      serviceType: target.service_type,
+      date,
+      window: { start: slot.start_time, end: slot.end_time },
+      startLabel: slot.start_label,
+      endLabel: slot.end_label,
+      confirmationCode: null,
+      rescheduleUrl: row?.reschedule_token ? `/reschedule/${row.reschedule_token}` : null,
+      // On a replay the visit already moved, so its earlier date is not known here.
+      reserviceFold: { serviceType: target.service_type, fromDate: replayed ? null : target.scheduled_date, toDate: date },
+    };
+  };
+  const customerRequest = details || labels.length ? { text: details || null, source: 'picker', pests, pestLabels: labels } : null;
+  // The owner bell is keyed per visit, so a repeat is a no-op. Through router._internals so the handler tests can observe it.
+  const bell = () => void Promise.resolve().then(() => router._internals.ringReserviceVisit(customer, {
+    id: target.id, serviceDate: date, windowStart: startTime, pests: labels, request: details || null,
+  })).catch((err) => logger.warn(`[reservice-public] fold bell failed for ${target.id}: ${err.message}`));
+  // Replay: the plan visit already sits on this date and start (a repeat tap after a fold, or a visit that was always there).
+  // Nothing moves and nothing is texted, but this request's words still reach the visit (once) and the owner is told.
+  if (target.scheduled_date === date && reschedule.hhmm(target.window_start) === startTime) {
+    // The lookup is an unlocked snapshot: the replay re-reads the visit under its lock (holdReplay). A visit that changed since
+    // gets one fresh lookup, and then the re-service books as before.
+    if (!(await fold.holdReplay({ conn: db, target, customerRequest, date }))) return { retry: true };
+    bell();
+    const end = reschedule.hhmm(target.window_end);
+    return { reply: await reply(true, { start_time: startTime, end_time: end, start_label: timeLabel12(startTime), end_label: timeLabel12(end) }) };
+  }
+  const svc = await reschedule.loadById(target.id);
+  const elig = svc ? await reschedule.pageEligibility(svc) : null;
+  if (!elig?.ok) return {};
+  const availability = await reschedule.buildAvailabilityForService(svc, { rangeFrom: date, rangeTo: date, config, singleMove: true });
+  const slot = availability?.days?.find((d) => d.date === date)?.slots?.find((s) => s.start_time === startTime);
+  if (!slot) return {};
+  const moved = await fold.moveFoldTargetForCustomer({
+    conn: db, target, svc, elig, lane, date, slot, customerRequest,
+  });
+  if (!moved.moved) {
+    logger.info(`[reservice-public] fold of ${target.id} refused (${moved.why})`);
+    return { retry: true };
+  }
+  bell();
+  return { reply: await reply(false, slot) };
+}
+
 // ── Owner bell for a self-booked re-service (owner 2026-10-05) ────────────
 // A customer's re-service request used to reach nobody (the internal text
 // createSelfBooking sent is silenced by the bell policy). The bell is built
@@ -781,43 +861,54 @@ async function ringReserviceBooked(customer, conn = db) {
     .where('s.created_at', '>=', conn.raw(`now() - interval '${RESERVICE_BELL_RECOVERY_DAYS} days'`))
     .select('s.id', 's.service_type', 'sv.service_key', 's.window_start', 's.customer_request', 's.customer_request_pests',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as service_date"));
-  const { triggerNotification } = require('../services/notification-triggers');
-  const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null;
   for (const row of rows) {
     const lane = laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type });
-    const pests = Array.isArray(row.customer_request_pests) ? pestLabels(row.customer_request_pests, lane) : [];
-    const day = row.service_date
-      ? new Date(`${row.service_date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
-      : null;
-    const at = timeLabel12(row.window_start);
-    await conn.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`reservice-bell:${row.id}`]);
-      const delivered = await trx('activity_log')
-        .where({ action: RESERVICE_BELL_ACTION, customer_id: customer.id })
-        .whereRaw("metadata->>'scheduledServiceId' = ?", [String(row.id)])
-        .first('id');
-      const stats = await triggerNotification('reservice_self_booked', {
-        customerId: customer.id,
-        scheduledServiceId: row.id,
-        serviceDate: row.service_date || null,
-        name,
-        when: day && at ? `${day} at ${at}` : day,
-        pests: pests.length ? pests.join(', ') : null,
-        request: row.customer_request || null,
-      }, {
-        dedupeKey: `reservice-booked:${row.id}`,
-        beforePush: () => !delivered,
-      });
-      if (!delivered && (stats?.bellWritten || Number(stats?.push?.sent) > 0)) {
-        await trx('activity_log').insert({
-          customer_id: customer.id,
-          action: RESERVICE_BELL_ACTION,
-          description: 'Owner alerted: self-booked re-service',
-          metadata: JSON.stringify({ scheduledServiceId: row.id }),
-        });
-      }
-    });
+    await ringReserviceVisit(customer, {
+      id: row.id,
+      serviceDate: row.service_date,
+      windowStart: row.window_start,
+      pests: Array.isArray(row.customer_request_pests) ? pestLabels(row.customer_request_pests, lane) : [],
+      request: row.customer_request,
+    }, conn);
   }
+}
+
+// One visit's bell: delivered at most once (see RESERVICE_BELL_ACTION). The visit is a booked re-service, or a plan visit a
+// re-service pick folded into (GATE_RESERVICE_FOLD_LINK): `request` and `pests` are the customer's words for it.
+async function ringReserviceVisit(customer, { id, serviceDate, windowStart, pests, request }, conn = db) {
+  const { triggerNotification } = require('../services/notification-triggers');
+  const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null;
+  const day = serviceDate
+    ? new Date(`${serviceDate}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
+    : null;
+  const at = timeLabel12(windowStart);
+  await conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`reservice-bell:${id}`]);
+    const delivered = await trx('activity_log')
+      .where({ action: RESERVICE_BELL_ACTION, customer_id: customer.id })
+      .whereRaw("metadata->>'scheduledServiceId' = ?", [String(id)])
+      .first('id');
+    const stats = await triggerNotification('reservice_self_booked', {
+      customerId: customer.id,
+      scheduledServiceId: id,
+      serviceDate: serviceDate || null,
+      name,
+      when: day && at ? `${day} at ${at}` : day,
+      pests: pests.length ? pests.join(', ') : null,
+      request: request || null,
+    }, {
+      dedupeKey: `reservice-booked:${id}`,
+      beforePush: () => !delivered,
+    });
+    if (!delivered && (stats?.bellWritten || Number(stats?.push?.sent) > 0)) {
+      await trx('activity_log').insert({
+        customer_id: customer.id,
+        action: RESERVICE_BELL_ACTION,
+        description: 'Owner alerted: self-booked re-service',
+        metadata: JSON.stringify({ scheduledServiceId: id }),
+      });
+    }
+  });
 }
 
 // Fire-and-forget from a handler: the customer's answer never waits on it.
@@ -1017,7 +1108,7 @@ async function reserviceOpeningsFor(customerId, { lanes: wanted = null, database
   return availability ? { days: availability.days || [] } : null;
 }
 
-router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired, ringReserviceBooked, reserviceOpeningsFor };
+router._internals = { TOKEN_RE, pageLaneState, reserviceLocationReviewRequired, ringReserviceBooked, ringReserviceVisit, reserviceOpeningsFor };
 
 router._test = {
   TOKEN_RE,

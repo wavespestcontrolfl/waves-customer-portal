@@ -11,7 +11,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
-const { laneForCoverageRow, applyCoverageScope } = require('./reservice-scheduler');
+const { laneForCoverageRow, applyCoverageScope, RESERVICE_LANES, openCallbackExistsForLane } = require('./reservice-scheduler');
+const { visitInsideMoveNoticeWindow, violatesSelfServeNotice } = require('./scheduling/self-serve-notice');
 const { isUnreviewedDispatchOwned } = require('./call-booking-source-actions');
 
 // Owner ruling 2026-11-17: "if they are within a certain range, we should book the recurring instead of the re-service"
@@ -98,6 +99,24 @@ function foldOfficeNotice(target, newDate, windowStart) {
   return `No re-service booked: the ${target.service_type} on ${foldDateLabel(target.scheduled_date)} moved up to ${to} (within ${FOLD_DAYS} days of the next plan visit).`;
 }
 
+// The lookup's picture of the plan visit: the rebooker's write fence for both movers. A visit that changed customer, premise,
+// service, plan or callback kind, day or status, joined a stop, or entered a Quick Move hand-off since the lookup makes the
+// move miss (a 4xx), and the re-service books instead.
+function foldExpect(target) {
+  return {
+    customer_id: target.customer_id,
+    property_id: target.property_id,
+    service_id: target.service_id,
+    service_type: target.service_type,
+    is_recurring: true,
+    is_callback: target.is_callback,
+    scheduled_date: target.scheduled_date,
+    status: target.status,
+    visit_id: null,
+    customer_pick_by: null,
+  };
+}
+
 // A thrown 4xx refuses this move and wrote nothing: the planner only reads, and the rebooker raises its refusals (its
 // checks, and a write fence that missed) inside its own transaction, while its steps after the commit and the move's text
 // step catch their own errors. The reason, or null for an error that is not ours to swallow.
@@ -106,21 +125,33 @@ function moveRefusal(err) {
   return code >= 400 && code < 500 ? (err.message || 'the move was refused') : null;
 }
 
-// After the move committed: the office's words go to the moved visit so the technician knows the problem. The customer's
-// words fill customer_request only while it is empty (one guarded UPDATE: a visit that already has words, or got them
-// meanwhile, keeps them) and otherwise go into the notes line with their source, so nothing is lost or overwritten. Notes
-// are appended in SQL, never rewritten from the lookup snapshot, and the office's internal notes join the visit's own
-// internal notes the same way. No column here fires a text, a reminder or a sync trigger.
+// After the move committed: the requester's words go to the moved visit so the technician knows the problem. The words fill
+// customer_request (and the picker's pest chips) only while customer_request is empty (one guarded UPDATE: a visit that already
+// has words, or got them meanwhile, keeps them) and otherwise go into the notes line with their source, so nothing is lost or
+// overwritten. Notes are appended in SQL, never rewritten from the lookup snapshot, a line already appended is not appended
+// again, and the office's internal notes join the visit's own internal notes the same way. No column here fires a text, a
+// reminder or a sync trigger.
 async function carryOfficeWords(conn, target, { customerRequest, notes, internalNotes, date }) {
   const words = customerRequest?.text || null;
-  let wordsToNotes = false;
-  if (words) {
+  const pests = Array.isArray(customerRequest?.pests) && customerRequest.pests.length ? customerRequest.pests : null;
+  let toNotes = '';
+  if (words || pests) {
     const filled = await conn('scheduled_services').where({ id: target.id })
-      .where((q) => q.whereNull('customer_request').orWhere('customer_request', ''))
-      .update({ customer_request: words, customer_request_source: customerRequest.source });
-    wordsToNotes = filled === 0;
+      // Empty, or already these very words (a double tap: the first carry filled it): never copied into the notes again.
+      .where((q) => {
+        q.whereNull('customer_request').orWhere('customer_request', '');
+        if (words) q.orWhere('customer_request', words);
+      })
+      .update({
+        ...(words ? { customer_request: words, customer_request_source: customerRequest.source } : {}),
+        ...(pests ? { customer_request_pests: JSON.stringify(pests) } : {}),
+      });
+    if (filled === 0) {
+      const labels = customerRequest.pestLabels?.length ? `Pests: ${customerRequest.pestLabels.join(', ')}.` : '';
+      toNotes = [words ? `Customer's words (${customerRequest.source}): ${words}.` : '', labels].filter(Boolean).join(' ');
+    }
   }
-  const line = [wordsToNotes ? `Customer's words (${customerRequest.source}): ${words}.` : '', notes].filter(Boolean).join(' ');
+  const line = [toNotes, notes].filter(Boolean).join(' ');
   const stamp = `[Re-service folded in, ${foldDateLabel(date)}]`;
   const patch = {};
   if (line) patch.notes = conn.raw("concat_ws(E'\\n', nullif(notes, ''), ?::text)", [`${stamp} ${line}`]);
@@ -128,7 +159,10 @@ async function carryOfficeWords(conn, target, { customerRequest, notes, internal
     patch.internal_notes = conn.raw("concat_ws(E'\\n', nullif(internal_notes, ''), ?::text)", [`${stamp} ${internalNotes}`]);
   }
   if (!Object.keys(patch).length) return;
-  await conn('scheduled_services').where({ id: target.id }).update(patch);
+  const query = conn('scheduled_services').where({ id: target.id });
+  // A line already appended (the same words carried before) is not appended again.
+  if (line) query.whereRaw("position(?::text in coalesce(notes, '')) = 0", [`${stamp} ${line}`]);
+  await query.update(patch);
 }
 
 // Runs the planned move. A thrown refusal (moveRefusal) wrote nothing and comes back as `failure`: the re-service books.
@@ -228,22 +262,9 @@ async function planFoldMove({ target, newDate, windowStart, technicianId, custom
       actor,
       sourceSurface: FOLD_SOURCE_SURFACE,
       seriesPolicy: 'single',
-      // The lookup's picture of the visit is the rebooker's write fence: a visit that left the range, went live, joined a
-      // stop, entered a Quick Move hand-off, or changed customer, premise, service, or plan or callback kind since the
-      // lookup makes the move miss (a 409), and the re-service books instead.
+      // The lookup's picture of the visit is the rebooker's write fence (foldExpect).
       allowLive: false,
-      expect: {
-        customer_id: target.customer_id,
-        property_id: target.property_id,
-        service_id: target.service_id,
-        service_type: target.service_type,
-        is_recurring: true,
-        is_callback: target.is_callback,
-        scheduled_date: target.scheduled_date,
-        status: target.status,
-        visit_id: null,
-        customer_pick_by: null,
-      },
+      expect: foldExpect(target),
     });
     return { planned, failure: planned.plan ? null : (planned.body?.error || 'the move was refused') };
   } catch (err) {
@@ -253,10 +274,103 @@ async function planFoldMove({ target, newDate, windowStart, technicianId, custom
   }
 }
 
+// What the customer's own move re-checks under the rebooker's scheduling locks, before its first row lock (beforeMove): the
+// lane lock createSelfBooking takes ('reservice-lane', a terminal lock: only re-service commits take that namespace) and
+// the open-callback check it runs under it, then the self-serve notice on the new slot and on the plan visit, as the
+// reschedule page's own commit does. A thrown 4xx wrote nothing.
+function customerFoldGuard({ target, svc, elig, lane, date, startTime }) {
+  const refuse = (message, code) => Object.assign(new Error(message), { statusCode: 409, isOperational: true, code });
+  return async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['reservice-lane', `${target.customer_id}:${RESERVICE_LANES[lane].serviceKey}`]);
+    if (await openCallbackExistsForLane(trx, target.customer_id, lane)) throw refuse('You already have a re-service visit on the books.', 'ALREADY_BOOKED');
+    if (!elig.missed && visitInsideMoveNoticeWindow(svc)) {
+      throw refuse('This visit starts too soon to move online — call (941) 297-5749 and our team can help.', 'SELF_SERVE_NOTICE');
+    }
+    if (violatesSelfServeNotice({ date, startTime })) {
+      throw refuse('That time is too soon to book online — call (941) 297-5749 and our team can help.', 'SELF_SERVE_NOTICE');
+    }
+  };
+}
+
+// The customer's own re-service pick on the /reservice link (GATE_RESERVICE_FOLD_LINK): move the plan visit to the picked slot.
+// Modeled on the reschedule page's single move: the customer is the initiator, so blackout, season and lawn-round guards
+// apply and a clash is a hard SLOT_TAKEN (no live override, no overlap advisory, no staff window rules, no road purchase).
+// `slot` is the plan visit's own picker's slot (its end and technician); `svc` and `elig` come from loadById and
+// pageEligibility. Returns { moved: true, window } after the commit, or { moved: false, why } when a 4xx refused it before
+// any write (the caller books the re-service as before). Any other error propagates. After the commit, in this order and
+// each on its own: the customer's words and pests go to the visit, the ONE "visit moved" text goes out through the
+// reschedule page's own reminder path, and the board is told.
+async function moveFoldTargetForCustomer({ conn = db, target, svc, elig, lane, date, slot, customerRequest }) {
+  const SmartRebooker = require('./rebooker');
+  const { moveNoticeArgs, dayPromiseMoveIntent, bookingPlacesInRoute } = require('../routes/reschedule-public')._internals;
+  const newDate = dateOnlyString(date);
+  try {
+    await SmartRebooker.reschedule(target.id, newDate, { start: slot.start_time, end: slot.end_time }, 'reservice_fold', 'customer', {
+      technicianId: slot.technician_id,
+      seriesPolicy: 'single',
+      travelGap: true,
+      capacityPlacement: true,
+      placeInRoute: bookingPlacesInRoute(),
+      expect: { ...foldExpect(target), window_start: target.window_start, technician_id: target.technician_id },
+      beforeMove: customerFoldGuard({ target, svc, elig, lane, date: newDate, startTime: slot.start_time }),
+      ...dayPromiseMoveIntent(),
+    });
+  } catch (err) {
+    const why = moveRefusal(err);
+    if (!why) throw err;
+    return { moved: false, why };
+  }
+  try {
+    await carryOfficeWords(conn, target, { customerRequest, date: newDate });
+  } catch (err) {
+    logger.error(`[reservice-fold] moved ${target.id} for the customer but could not copy the words (code ${err?.code || 'none'})`);
+  }
+  try {
+    await require('./appointment-reminders').handleReschedule(target.id, `${newDate}T${slot.start_time}`, ...await moveNoticeArgs(svc, 'set_time'));
+  } catch (err) {
+    logger.error(`[reservice-fold] moved ${target.id} for the customer but the reminder sync failed (code ${err?.code || 'none'})`);
+  }
+  try {
+    await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: target.id, actorId: null });
+  } catch (err) {
+    logger.error(`[reservice-fold] board broadcast failed for ${target.id} (code ${err?.code || 'none'})`);
+  }
+  return { moved: true };
+}
+
+// A replayed pick (the plan visit already sits on the picked slot) moves and texts nothing, but its words still go to the visit.
+// The lookup that found the visit is an unlocked snapshot: staff can move or cancel it before the words land, and a replay answer
+// for a visit no longer there would book nothing. So the replay re-reads the row under its lock with the same pins the move's
+// write fence uses (and its start), and writes the words in that same transaction. True = the visit is still as looked up (the
+// words are carried, or the copy failed and was logged: the visit stands); false = it changed, and the caller looks again.
+async function holdReplay({ conn = db, target, customerRequest, date }) {
+  let held = false;
+  try {
+    return await conn.transaction(async (trx) => {
+      const row = await trx('scheduled_services')
+        .where({ id: target.id, ...foldExpect(target), window_start: target.window_start })
+        .forUpdate()
+        .first('id');
+      if (!row) return false;
+      held = true;
+      await carryOfficeWords(trx, target, { customerRequest, date });
+      return true;
+    });
+  } catch (err) {
+    // A throw before the row was found (the read itself) is not ours to swallow.
+    if (!held) throw err;
+    // The copy failed and rolled back: the visit stands. The visit id and the error code only (a Knex message carries bindings).
+    logger.error(`[reservice-fold] replay of ${target.id} could not copy the words (code ${err?.code || 'none'})`);
+    return true;
+  }
+}
+
 module.exports = {
   FOLD_DAYS,
   foldLaneForServiceKey,
   findFoldTarget,
   foldOfficeNotice,
   moveFoldTarget,
+  moveFoldTargetForCustomer,
+  holdReplay,
 };

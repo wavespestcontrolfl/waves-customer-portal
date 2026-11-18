@@ -168,6 +168,23 @@ describe('reschedule-public.js — single-visit commit persists the certified or
   });
 });
 
+describe('reservice-fold.js — the customer re-service fold is a single-visit commit that persists the certified order (GATE_RESERVICE_FOLD_LINK)', () => {
+  test('moveFoldTargetForCustomer (SmartRebooker.reschedule) opts in with capacityPlacement: true and seriesPolicy: single, and never rescheduleSeries', () => {
+    const src = read('../services/reservice-fold.js');
+    const callStart = src.indexOf('await SmartRebooker.reschedule(');
+    expect(callStart).toBeGreaterThan(-1);
+    const call = src.slice(callStart, src.indexOf('});', callStart));
+    expect(call).toContain('capacityPlacement: true');
+    expect(call).toContain("seriesPolicy: 'single'");
+    expect(src).not.toContain('rescheduleSeries');
+  });
+
+  test('the plan visit\'s own picker, built for that single move, skips the re-anchor exclusion (its singleMove flag) and keeps the visit_id exclusion', () => {
+    const call = callAfter(read('../routes/reschedule-public.js'), 'async function buildAvailabilityForService');
+    expect(call).toContain('capacityPlacement: bookInsertionOffersLive() && !svc.visit_id && !pickerMayReanchor(svc, rangeFrom, rangeTo, singleMove)');
+  });
+});
+
 describe('voice agent — commits by inserting the row with no route_order', () => {
   test('relay-booking.js never passes capacityPlacement — stays append-only', () => {
     const src = read('../services/voice-agent/relay-booking.js');

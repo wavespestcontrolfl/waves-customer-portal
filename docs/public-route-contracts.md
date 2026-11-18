@@ -7259,6 +7259,30 @@ id, gate off, a non-multipart body (answered by
 `reservicePhotosPreParserGuard` ahead of the shared body parsers), another
 customer's or a non-re-service visit, an ineligible visit — is the generic
 404. Sends nothing to a customer.
+Re-service fold (GATE_RESERVICE_FOLD_LINK, owner 2026-11-17): with the gate
+live, POST looks for the token customer's next plan visit of the lane (pending
+or confirmed, recurring, from the picked date through 14 days later, same
+premise, ungrouped) after the booking-window check and before the slot
+rebuild. When one exists, the plan visit's own reschedule page would let the
+customer move it (active account, reviewed, outside the move notice) and its
+own one-day picker offers the picked `start_time`, NOTHING is booked: that one
+plan visit moves to the picked slot (a single customer move, the rest of the
+plan stays) and the answer is 200 `{ success, replayed, lane, serviceType (the
+plan visit), date, window, startLabel, endLabel, confirmationCode: null,
+rescheduleUrl (the plan visit's), reserviceFold: { serviceType, fromDate,
+toDate } }` with no `prepPhotos`. A repeat of the same pick finds the plan
+visit on that date and start and answers `replayed: true` (nothing moves, no
+text; `reserviceFold.fromDate` is null, since the visit's earlier date is not
+known there). A replay re-reads the visit under its row lock; a visit that
+changed since the lookup (moved, cancelled) is looked up again, and then the
+re-service books as before. The words of that request still reach the visit
+once (an empty request is filled; the same words again are not copied;
+different words join the notes) and the bell rings at most once per visit. The customer gets exactly
+one text, the standard `appointment_rescheduled` notice, on the move, and the
+owner bell `reservice_self_booked` rings for the moved visit.
+No new error codes: every refusal (no plan visit in range, not eligible, no fit,
+a clash or a raced edit) books the re-service exactly as before. GET and
+`/find-slots` are unchanged. Gate off: byte-identical, with no lookup.
 `/api/public/moving/:token` (GET, plus `POST /:token/check` and
 `POST /:token/submit`; the moving page the office sends a customer who is
 moving, by email from the Customer 360 Moving card or by text from the

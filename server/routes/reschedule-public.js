@@ -372,8 +372,9 @@ function shouldReanchor(svc, targetDateStr) {
 // under-offers insertion for a non-recurring-adjacent date sharing the
 // build with a re-anchoring one; it never over-offers one the commit would
 // refuse.
-function pickerMayReanchor(svc, rangeFrom, rangeTo) {
-  if (!isSeriesVisit(svc) || awaitingCustomerPick(svc)) return false;
+// `singleMove`: the caller commits ONE visit and never a series re-anchor, so nothing here can re-anchor.
+function pickerMayReanchor(svc, rangeFrom, rangeTo, singleMove) {
+  if (singleMove || !isSeriesVisit(svc) || awaitingCustomerPick(svc)) return false;
   const currentDateStr = apptDateStr(svc.scheduled_date);
   if (collectiveAnchorActive()) {
     if (rangeFrom === currentDateStr && rangeTo === currentDateStr) return false;
@@ -881,7 +882,7 @@ async function saveVisitPin(svc, location, address) {
   }
 }
 
-async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, offer = false }) {
+async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay, offer = false, singleMove }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
 
@@ -949,7 +950,9 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     // (even a singleton group) is excluded too: rescheduleOnce skips
     // certification for any visit_id row, so it would commit append-only
     // (Codex round 2 P1 on PR #5267).
-    capacityPlacement: bookInsertionOffersLive() && !svc.visit_id && !pickerMayReanchor(svc, rangeFrom, rangeTo),
+    // singleMove: the caller commits ONE visit (never a series re-anchor), so the re-anchor exclusion does not apply
+    // (the re-service fold, services/reservice-fold.js moveFoldTargetForCustomer: a single move with capacityPlacement).
+    capacityPlacement: bookInsertionOffersLive() && !svc.visit_id && !pickerMayReanchor(svc, rangeFrom, rangeTo, singleMove),
     ...(timeOfDay ? { timeOfDay } : {}),
     // Up to 6 curated times while the customer picks (Quick Move customer pick).
     ...pickSlotCount(svc),
@@ -1724,6 +1727,11 @@ module.exports._internals = {
   // The single-or-series split for a picked date (the SMS move executor
   // commits through the same one, services/sms-scheduling-act.js).
   shouldReanchor,
+  // The re-service fold's customer move (services/reservice-fold.js) texts and routes exactly as this page's single move does.
+  moveNoticeArgs,
+  dayPromiseMoveIntent,
+  bookingPlacesInRoute,
+  hhmm,
 };
 // Shared with the logged-in schedule payload (codex #3609 r25 P2): the same
 // grouped verdict that makes this page refuse, so the portal never advertises
