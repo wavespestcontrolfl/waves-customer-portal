@@ -506,7 +506,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, holderMinUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   // signedInOnly (GATE_APP_FIRST_ANY_DEVICE): the tap opens the signed-in app tab, never a report / receipt bearer page.
   const presentation = pushPresentation(messageType);
   const { title, link, category } = signedInOnly ? presentation : await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
@@ -520,7 +520,7 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}) });
+  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}), ...(holderMinUpdatedAt ? { holderMinUpdatedAt } : {}) });
   return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null };
 }
 
@@ -567,11 +567,13 @@ function anyDeviceSend(explicitPushOnly) {
 // Which devices the push_first fan-out may count as delivery. Any-device sends
 // drop the heartbeat floor but stay on phone apps (customerStatus.reachable
 // counts phone apps only): a stale browser subscription that accepts must never
-// stand in for delivery and skip the text. Otherwise: the 72 hour floor.
+// stand in for delivery and skip the text. Otherwise: the 72 hour floor. With
+// GATE_APP_FIRST_STALE_TEXT the 30-day floor applies to the HOLDER's phones only
+// (holderMinUpdatedAt): a contact's phone keeps the reach it had.
 function fanOutReach(anyDevice) {
   if (!anyDevice) return { minUpdatedAt: heartbeatCutoff() };
   const staleFloor = staleTextFloor();
-  return staleFloor ? { nativeOnly: true, minUpdatedAt: staleFloor } : { nativeOnly: true };
+  return staleFloor ? { nativeOnly: true, holderMinUpdatedAt: staleFloor } : { nativeOnly: true };
 }
 
 // GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): the shared floor lives in

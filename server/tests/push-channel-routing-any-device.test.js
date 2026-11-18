@@ -208,8 +208,10 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect((await send()).delivered).toBe(true);
     const opts = mockSendToCustomer.mock.calls[0][2];
     expect(opts.nativeOnly).toBe(true);
-    expect(opts.minUpdatedAt).toBeInstanceOf(Date);
-    expect(Math.abs(Date.now() - opts.minUpdatedAt.getTime() - 30 * DAY_MS)).toBeLessThan(60000);
+    // Holder-only floor: a contact's phone keeps its reach (sendToCustomer filters holder rows).
+    expect(opts.minUpdatedAt).toBeUndefined();
+    expect(opts.holderMinUpdatedAt).toBeInstanceOf(Date);
+    expect(Math.abs(Date.now() - opts.holderMinUpdatedAt.getTime() - 30 * DAY_MS)).toBeLessThan(60000);
   });
 
   it('new gate off: a device last seen 40 days ago takes the push as today, no floor', async () => {

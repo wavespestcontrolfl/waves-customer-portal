@@ -30,8 +30,8 @@ test('stale-stamped pushes for one visit make one digest item (visit:<id>) with 
   expect(arg).toMatchObject({ fallOff: true, key: Check.OPS_DIGEST_KEY, dedupeKey: Check.OPS_DIGEST_KEY, refreshOnDedupe: true, itemKeys: ['visit:visit-stale-1'] });
   expect(arg.subject).toBe('FIX: 1 visit got app-only notices on an app not opened in 30+ days');
   expect(arg.text).toContain('2026-11-18 · Sample T. · reminder_72h, tech_en_route, tech_arrived · 39 days since app use');
-  expect(arg.text).toContain('/admin/customers/cust-1');
-  expect(arg.link).toBe('/admin/customers/cust-1');
+  expect(arg.text).toContain('/admin/customers?customerId=cust-1');
+  expect(arg.link).toBe('/admin/customers?customerId=cust-1');
   expect(retireIfClean).not.toHaveBeenCalled();
 });
 

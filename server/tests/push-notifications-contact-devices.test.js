@@ -224,6 +224,16 @@ describe('sendToCustomer — acceptedCheckedInAt (the stamp the push proof row c
     expect((await send('tech_en_route')).acceptedCheckedInAt.getTime()).toBe(fresh.getTime());
   });
 
+  test('holderMinUpdatedAt drops a stale HOLDER phone only: a contact phone opened 31 days ago keeps its push', async () => {
+    subs = [phone('s1', 'tok-h', daysAgo(1)), phone('s2', 'tok-h-old', daysAgo(40)), { ...CONTACT_DEVICE, updated_at: daysAgo(31) }];
+    apns.send.mockImplementation(async () => ({ ok: true }));
+    const result = await Push.sendToCustomer(HOLDER_ID, { title: 't', body: 'b', url: '/', category: 'service' },
+      { messageType: 'appointment_reminder', holderMinUpdatedAt: daysAgo(30) });
+    expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h']);
+    expect(result.sent).toBe(1);
+    expect(result.contactDevices).toMatchObject({ sent: 1 });
+  });
+
   test('an accepted contact leg never stamps; no accepted holder leg is null', async () => {
     subs = [phone('s1', 'tok-h', daysAgo(40)), { ...CONTACT_DEVICE, updated_at: daysAgo(1) }];
     apns.send.mockImplementation(async (token) => (token === 'tok-h' ? { ok: false, failed: true, reason: 'bad_device_token' } : { ok: true }));

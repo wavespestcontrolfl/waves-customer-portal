@@ -113,7 +113,7 @@ const who = (row) => {
   return initial ? `${first} ${initial.toUpperCase()}.` : first;
 };
 const lastUse = (row) => `${row.days_since_app_use} days since app use`;
-const customerUrl = (row) => (row.customer_id ? `${adminPortalUrl()}/admin/customers/${row.customer_id}` : null);
+const customerUrl = (row) => (row.customer_id ? `${adminPortalUrl()}/admin/customers?customerId=${encodeURIComponent(row.customer_id)}` : null);
 const lineFor = (row) => `${row.scheduled_date || 'no date'} · ${who(row)} · ${(row.notice_types || []).join(', ')} · ${lastUse(row)}`;
 
 // The email fallback goes to an internal address only. A guard failure returns
@@ -164,7 +164,7 @@ async function postStaleAppNoticeDigest(rows) {
       subject,
       html,
       text,
-      link: rows.length === 1 && rows[0].customer_id ? `${LINK}/${rows[0].customer_id}` : LINK,
+      link: rows.length === 1 && rows[0].customer_id ? `${LINK}?customerId=${encodeURIComponent(rows[0].customer_id)}` : LINK,
       metadata: { visits: rows.length },
       itemKeys: rows.map((r) => r.key),
       dedupeKey: OPS_DIGEST_KEY,

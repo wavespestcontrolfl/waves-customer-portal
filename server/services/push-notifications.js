@@ -306,7 +306,13 @@ class PushNotificationService {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      subs = await contactDevicesAllowed(await query, contactPurpose, customerId);
+      // opts.holderMinUpdatedAt: a floor for the account HOLDER's devices only
+      // (GATE_APP_FIRST_STALE_TEXT, push-channel-routing fanOutReach). The 30-day
+      // rule decides whether the holder gets the text; a contact's phone keeps its reach.
+      // Unset = NaN = no floor.
+      const holderFloor = new Date(opts.holderMinUpdatedAt).getTime();
+      subs = (await contactDevicesAllowed(await query, contactPurpose, customerId))
+        .filter((sub) => Number.isNaN(holderFloor) || sub.contact_phone_key || new Date(sub.updated_at).getTime() >= holderFloor);
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };
