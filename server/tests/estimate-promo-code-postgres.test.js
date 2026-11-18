@@ -253,6 +253,35 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     expect(await usesOf(disc.id)).toBe(1);
   });
 
+  test('a credit the accept step did not post is redeemed by the hourly sweep, once', async () => {
+    const cust = await customer();
+    const disc = await discount();
+    const est = await estimate({ customer_id: cust.id });
+    await enter(est, disc.promo_code);
+    // The accept committed but its credit step never ran (a failure, or the gate was off then).
+    await db('estimates').where({ id: est.id }).update({ status: 'accepted' });
+    const stillOpen = await estimate();
+    await enter(stillOpen, disc.promo_code);
+
+    expect(await promo.sweepAcceptedPromoCodes()).toMatchObject({ redeemed: 1 });
+    expect((await promo.sweepAcceptedPromoCodes()).redeemed).toBe(0);
+    expect(await balanceOf(cust.id)).toBe(25);
+    expect(await ledgerOf(cust.id)).toHaveLength(1);
+    expect((await db('estimate_promo_codes').where({ estimate_id: stillOpen.id }).first()).status).toBe('entered');
+  });
+
+  test('the office promo path refuses a code this customer already redeemed as a credit', async () => {
+    const cust = await customer();
+    const disc = await discount();
+    const est = await estimate({ customer_id: cust.id });
+    await enter(est, disc.promo_code);
+    await accept(est, cust.id);
+    expect(await require('../services/discount-engine').applyPromoCode(cust.id, disc.promo_code))
+      .toEqual({ success: false, error: 'Promo code already applied to this account' });
+    expect(await usesOf(disc.id)).toBe(1);
+    expect(await db('customer_discounts').where({ customer_id: cust.id })).toHaveLength(0);
+  });
+
   test('gate off: no field, and an accepted estimate posts nothing and keeps its code', async () => {
     const cust = await customer();
     const disc = await discount();
@@ -261,6 +290,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     mockGate.on = false;
     expect(await promo.promoCodeViewForEstimate(est, { open: true })).toBeNull();
     expect(await accept(est, cust.id)).toBe('off');
+    expect(await promo.sweepAcceptedPromoCodes()).toEqual({ checked: 0, redeemed: 0 });
     expect(await balanceOf(cust.id)).toBe(0);
     expect((await db('estimate_promo_codes').where({ estimate_id: est.id }).first()).status).toBe('entered');
   });

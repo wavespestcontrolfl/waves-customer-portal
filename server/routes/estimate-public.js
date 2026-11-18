@@ -19311,7 +19311,16 @@ const promoCodeLimiter = rateLimit({
 // 404 covers dark gate / staff preview / malformed or unknown token / an
 // estimate that cannot be accepted. A refused code answers 400 with one of
 // three reasons; 'invalid_code' never says why.
-router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
+// Privacy headers first, so the limiter's 429 and every handler answer carry
+// them (the token-route baseline).
+function stampPromoCodeHeaders(req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  res.set('Pragma', 'no-cache');
+  res.set('X-Robots-Tag', 'noindex');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+}
+router.post('/:token/promo-code', stampPromoCodeHeaders, promoCodeLimiter, async (req, res) => {
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
   if (!featureGates.isEnabled('estimatePromoCode')) return notFound();
   // The field is inert in the staff "Customer View": staff never enter a
@@ -19328,7 +19337,16 @@ router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
     }
     if (!estimate || !isEstimateAcceptActive(estimate) || estimate.price_locked_at) return notFound();
     if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
-    const outcome = await require('../services/estimate-promo-code').enterPromoCode({ estimate, rawCode: req.body.code });
+    // Entry and acceptance are serialized on the estimate row (the accept
+    // takes the same lock): the open state is checked again on the locked
+    // row, so a code can never be saved onto an estimate that was accepted
+    // while this request ran.
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      if (!locked || !isEstimateAcceptActive(locked) || locked.price_locked_at) return null;
+      return require('../services/estimate-promo-code').enterPromoCode({ estimate: locked, rawCode: req.body.code }, trx);
+    });
+    if (!outcome) return notFound();
     if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
     return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
   } catch (err) {

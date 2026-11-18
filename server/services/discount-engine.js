@@ -376,7 +376,11 @@ const DiscountEngine = {
     const existing = await db('customer_discounts')
       .where({ customer_id: customerId, discount_id: disc.id })
       .first();
-    if (existing) return { success: false, error: 'Promo code already applied to this account' };
+    // A code the customer already redeemed as an account credit on an
+    // accepted estimate counts as applied (services/estimate-promo-code.js).
+    if (existing || await require('./estimate-promo-code').customerRedeemedPromoCredit(db, customerId, disc.id)) {
+      return { success: false, error: 'Promo code already applied to this account' };
+    }
 
     // Assign to customer
     await db('customer_discounts').insert({

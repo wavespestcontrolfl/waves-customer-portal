@@ -86,12 +86,18 @@ async function customerHasCompletedService(conn, customerId) {
   return Boolean(row);
 }
 
+// Did this customer redeem this discount's code as an account credit? The
+// office promo path (DiscountEngine.applyPromoCode) reads it too, so a code
+// is good once per customer whichever way it is used.
+async function customerRedeemedPromoCredit(conn, customerId, discountId) {
+  return Boolean(await conn('estimate_promo_codes')
+    .where({ discount_id: discountId, redeemed_customer_id: customerId, status: 'redeemed' }).first('id'));
+}
+
 // Has this customer had this discount before: redeemed here, or assigned by
 // the office (customer_discounts, the admin promo path)?
 async function customerAlreadyUsed(conn, customerId, discountId) {
-  const redeemed = await conn('estimate_promo_codes')
-    .where({ discount_id: discountId, redeemed_customer_id: customerId, status: 'redeemed' }).first('id');
-  if (redeemed) return true;
+  if (await customerRedeemedPromoCredit(conn, customerId, discountId)) return true;
   return Boolean(await conn('customer_discounts').where({ customer_id: customerId, discount_id: discountId }).first('id'));
 }
 
@@ -131,7 +137,10 @@ async function promoCodeViewForEstimate(estimate, { open = false, conn = db } = 
 
 /**
  * Record `rawCode` on an open estimate. The caller owns the gate, the token
- * and the estimate's open state. Returns { ok: true, applied } or
+ * and the estimate's open state, and passes its transaction holding the
+ * estimate row lock as `conn`, so the code and its audit row are saved
+ * together and never onto an estimate accepted meanwhile.
+ * Returns { ok: true, applied } or
  * { ok: false, reason }: 'discount_already_applied', 'code_already_entered'
  * or the one generic 'invalid_code' for everything else, so the answer never
  * says why a code failed.
@@ -169,7 +178,7 @@ async function enterPromoCode({ estimate, rawCode }, conn = db) {
     action: 'estimate_promo_code_entered',
     description: `Customer entered promo code ${code} on their estimate ($${creditAmount.toFixed(2)} account credit when accepted).`,
     metadata: JSON.stringify({ code, discountId: discount.id, creditAmount }),
-  }).catch((err) => logger.warn(`[estimate-promo-code] activity row not written for estimate ${estimate.id}: ${err.code || err.message}`));
+  });
   return { ok: true, applied: appliedView(row) };
 }
 
@@ -266,7 +275,33 @@ async function redeemPromoCodeForAcceptedEstimate({ estimateId }) {
   }
 }
 
+const SWEEP_LIMIT = 100;
+
+/**
+ * Recovery for the post-accept credit step (hourly, services/scheduler.js).
+ * That step runs after the accept commits and is a fast path, not the
+ * guarantee: a failure there, or an accept made while the gate was off,
+ * leaves the code waiting on an accepted estimate. This redeems every such
+ * row through the same idempotent step. Nothing is sent.
+ */
+async function sweepAcceptedPromoCodes() {
+  if (!gateOn()) return { checked: 0, redeemed: 0 };
+  const waiting = await db('estimate_promo_codes as p')
+    .join('estimates as e', 'e.id', 'p.estimate_id')
+    .where({ 'p.status': 'entered', 'e.status': 'accepted' })
+    .orderBy('p.created_at', 'asc')
+    .limit(SWEEP_LIMIT)
+    .pluck('p.estimate_id');
+  let redeemed = 0;
+  for (const estimateId of waiting) {
+    if (await redeemPromoCodeForAcceptedEstimate({ estimateId }) === 'redeemed') redeemed += 1;
+  }
+  return { checked: waiting.length, redeemed };
+}
+
 module.exports = {
+  sweepAcceptedPromoCodes,
+  customerRedeemedPromoCredit,
   normalizeCode,
   creditAmountOf,
   estimateHasStaffDiscount,
