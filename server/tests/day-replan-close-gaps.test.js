@@ -1,12 +1,12 @@
 /**
  * Close-gaps measurement (services/day-replan/close-gaps.js, owner 2026-11-18): the open time of a simulated day,
- * the packed-day verdict (P1), the replay of a new booking over its day's hours (S1), and the per-home count of the
- * same-customer lock (P2, services/day-replan/index.js fixedReason). Pure; synthetic ids only.
+ * the packed-day verdict (P1), the replay of a new booking over its day's hours (S1) and job slots. Pure; synthetic
+ * ids only.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const { openTime, planSims, packVerdict, hourChanges, lockedGaps, _internals } = require('../services/day-replan/close-gaps');
+const { openTime, planSims, packVerdict, hourChanges, lockedGaps, SLOT_MIN, _internals } = require('../services/day-replan/close-gaps');
 const { _internals: replan } = require('../services/day-replan');
 
 const BOUNDS = { departureMin: 7 * 60 + 30, openMin: 8 * 60, closeMin: 17 * 60 };
@@ -84,6 +84,13 @@ describe('openTime', () => {
     expect(_internals.departAfter(590, 20, [])).toBe(590);
   });
 
+  test('job slots: each block holds one new job for every 80 open minutes (a 1-hour job and its drive)', () => {
+    // Waits of 115 and 175 minutes and a 60-minute tail: 1 + 2 + 0 slots.
+    const fig = openTime(sim([arrival('a', 480, 540, 10), arrival('b', 660, 720, 5), arrival('c', 900, 960, 5)]), BOUNDS);
+    expect(fig.slots).toBe(3);
+    expect(SLOT_MIN).toBe(80);
+  });
+
   test('no simulation, no figures', () => {
     expect(openTime(null, BOUNDS)).toBeNull();
   });
@@ -145,6 +152,15 @@ describe('S1 replay of a new booking', () => {
     expect(out.differs).toBe(true);
   });
 
+  test('S1 ranks job slots first, then the least waiting: two hours that leave the same room pick the earlier one', () => {
+    // One stop at 8 AM. A new job at 9 AM leaves 10 AM to 5 PM open; at 4 PM it leaves 9 AM to 4 PM open. Each is
+    // one block of about 7 hours (5 slots), so the rank falls to waiting: 9 AM front-loads the day.
+    const groups = [[stop('x', 8)], [stop('n', 14, { offset: 0.002 })]];
+    const out = replay(groups, groups[1]);
+    expect(out.s1).toMatchObject({ start: '09:00', waitMin: 0 });
+    expect(out.s1.slots).toBe(5);
+  });
+
   test('a customer time window limits the hours tried; the booked hour is still measured', () => {
     const groups = [[stop('x', 8)], [stop('n', 14, { offset: 0.002 })]];
     const out = replay(groups, groups[1], { pref: { startMin: 13 * 60, endMin: 16 * 60 } });
@@ -186,7 +202,10 @@ describe('S1 replay of a new booking', () => {
 
   test('hours held by other rows and schedule blocks are never offered', () => {
     const groups = [[stop('x', 8)], [stop('n', 14, { offset: 0.002 })]];
-    const out = replay(groups, groups[1], { blockedHours: [9], blocks: [{ startMin: 600, endMin: 660 }] });
+    const block = { startMin: 600, endMin: 660 };
+    // As the night run builds them: the bounds cut the schedule block and the held hour out of the open time.
+    const bounds = { ...BOUNDS, unavailable: [block, { startMin: 540, endMin: 600 }], driveBlocks: [block] };
+    const out = replay(groups, groups[1], { blockedHours: [9], blocks: [block], bounds });
     expect(out.s1.start).toBe('11:00');
     expect(_internals.hourFree({ group: groups[1], groups, rowHours: replan.rowHours }, 8)).toBe(false);
     expect(_internals.hourFree({ group: groups[1], groups, rowHours: replan.rowHours, blockedHours: [9] }, 9)).toBe(false);
@@ -199,37 +218,5 @@ describe('S1 replay of a new booking', () => {
     expect(_internals.recentlyBooked(g({ created_at: '2026-11-17T10:00:00Z' }), now)).toBe(false);
     expect(_internals.recentlyBooked(g({ is_recurring: true, recurring_parent_id: 'root' }), now)).toBe(false);
     expect(_internals.recentlyBooked(g({ created_at: null }), now)).toBe(false);
-  });
-});
-
-describe('same-customer lock per home (P2)', () => {
-  const NOW = new Date('2026-11-03T12:00:00Z');
-  const row = (id, extra = {}) => ({
-    id, customer_id: 'c1', visit_id: null, status: 'confirmed', window_start: '09:00:00', property_id: `prop-${id}`,
-    auto_dispatch_locked: false, auto_dispatch_excluded: false, reservation_expires_at: null, ...extra,
-  });
-  const ctx = (rows, extra = {}) => ({
-    dateStr: '2026-11-06', now: NOW, visitCounts: new Map(), customerCounts: new Map([['c1', rows.length]]), sent24: new Set(), ...extra,
-  });
-  const homeCounts = (rows) => rows.reduce((m, r) => m.set(replan.homeKey(r), (m.get(replan.homeKey(r)) || 0) + 1), new Map());
-
-  test('the live lock (no homeCounts) still fixes every stop of a customer with two stops that day', () => {
-    const rows = [row('a'), row('b')];
-    expect(rows.map((r) => replan.fixedReason(r, ctx(rows)))).toEqual(['same_customer', 'same_customer']);
-  });
-
-  test('counted per home, stops at two homes are free and two stops at one home stay fixed', () => {
-    const twoHomes = [row('a'), row('b')];
-    expect(twoHomes.map((r) => replan.fixedReason(r, ctx(twoHomes, { homeCounts: homeCounts(twoHomes) })))).toEqual([null, null]);
-    const oneHome = [row('a', { property_id: 'p1' }), row('b', { property_id: 'p1' })];
-    expect(oneHome.map((r) => replan.fixedReason(r, ctx(oneHome, { homeCounts: homeCounts(oneHome) })))).toEqual(['same_customer', 'same_customer']);
-  });
-
-  test('with no property id the service address names the home', () => {
-    const a = row('a', { property_id: null, service_address_line1: '1 Test Ln', service_address_zip: '34219' });
-    const b = row('b', { property_id: null, service_address_line1: ' 1 TEST LN ', service_address_zip: '34219' });
-    const c = row('c', { property_id: null, service_address_line1: '3 Test Ln', service_address_zip: '34219' });
-    expect(replan.homeKey(a)).toBe(replan.homeKey(b));
-    expect(replan.homeKey(a)).not.toBe(replan.homeKey(c));
   });
 });

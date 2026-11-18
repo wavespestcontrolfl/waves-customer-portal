@@ -24,7 +24,7 @@ const logger = require('../logger');
 const { raiseAdminAlert } = require('../admin-alert-compose');
 const { closeAdminAlertKeys, openAdminAlertKeys } = require('../admin-alert-episodes');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { SELLABLE_MIN } = require('./close-gaps');
+const { SELLABLE_MIN, SLOT_MIN } = require('./close-gaps');
 const { _internals: replan } = require('./index');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -67,15 +67,17 @@ const parse = (value) => (typeof value === 'string' ? JSON.parse(value) : value)
  */
 const standing = (row, rec) => (row.apply_status === 'applied' && rec.packed ? rec.packed : rec.now);
 
-/** Extra sellable minutes one tech-day would gain from a measured rule (the larger of P1 and P2), 0 when none. */
+/**
+ * Extra sellable minutes one tech-day would gain from the measured P1 rule, 0 when none. P1's plan is p1.packed
+ * (record v2); a v1 record measured P1 on the drive-best plan (packed).
+ */
 function freedMin(rec) {
-  const base = rec.now ? rec.now.sellableMin : 0;
-  const gains = [0];
-  if (rec.p1 && rec.p1.wouldAccept && rec.packed) gains.push(rec.packed.sellableMin - base);
-  const p2 = rec.p2;
-  if (p2 && p2.packed && (p2.driveRuleAccepts || (p2.pack && p2.pack.wouldAccept))) gains.push(p2.packed.sellableMin - base);
-  return Math.max(...gains);
+  const fig = rec.p1 && rec.p1.wouldAccept ? (rec.p1.packed || rec.packed) : null;
+  return fig && rec.now ? Math.max(0, fig.sellableMin - rec.now.sellableMin) : 0;
 }
+
+/** New jobs a block has room for (close-gaps SLOT_MIN: a 1-hour job and the drive it adds). */
+const jobsIn = (b) => Math.floor(b.min / SLOT_MIN);
 
 /** Runs of whole free hours as open blocks, by the booking hour grid (pure). */
 function hourGridBlocks(heldHours) {
@@ -168,11 +170,15 @@ function summarize(rows, techNames, unplanned = []) {
   }
   blocks.sort((a, b) => a.day.localeCompare(b.day) || a.start - b.start);
   const biggest = blocks.reduce((best, b) => (!best || b.min > best.min ? b : best), null);
-  return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), biggest, freedMin: freed, replayed, pickDiffers };
+  return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), slots: blocks.reduce((n, b) => n + jobsIn(b), 0), biggest, freedMin: freed, replayed, pickDiffers };
 }
 
 const gridNote = (b) => (b.grid ? (b.stops ? ', 1 stop that day, drive not counted' : ', no stops booked') : '');
-const blockText = (b) => `${dayLabel(b.day)}${b.tech ? `, ${b.tech}` : ''}: ${clock(b.start)} to ${clock(b.start + b.min)} (${span(b.min)}${gridNote(b)})`;
+const jobsNote = (b) => {
+  const n = jobsIn(b);
+  return n ? `, room for ${n} job${n === 1 ? '' : 's'}` : ', short of a job and its drive';
+};
+const blockText = (b) => `${dayLabel(b.day)}${b.tech ? `, ${b.tech}` : ''}: ${clock(b.start)} to ${clock(b.start + b.min)} (${span(b.min)}${jobsNote(b)}${gridNote(b)})`;
 
 function alertSpec(sum) {
   const hours = Math.round(sum.totalMin / 60);
@@ -195,6 +201,7 @@ function alertSpec(sum) {
 
 function detailText(sum) {
   const lines = [
+    `Room for ${sum.slots} new job${sum.slots === 1 ? '' : 's'}: each needs ${SLOT_MIN} free minutes (a 1-hour job and its drive).`,
     'Open blocks a new job could fill (an hour or more with no job, inside 8:00 AM to 5:00 PM; blackout days and days off left out, and Sundays unless stops are already booked):',
     ...sum.blocks.slice(0, MAX_DETAIL_BLOCKS).map((b) => `- ${blockText(b)}`),
   ];
@@ -266,7 +273,7 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
     bell: true,
     dedupeKey: key,
     detail: fresh ? detailText(sum) : `${detailText(sum)}\nThe night re-plan left no numbers this morning, so days with two or more stops are not listed.`,
-    metadata: { openMin: sum.totalMin, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers },
+    metadata: { openMin: sum.totalMin, slots: sum.slots, freedMin: sum.freedMin, blocks: sum.blocks.length, replayed: sum.replayed, pickDiffers: sum.pickDiffers },
   });
   const closed = await closeEarlier(conn, key);
   return { status: 'raised', id: posted?.id || null, deduped: !!posted?.deduped, openMin: sum.totalMin, closed, ...(fresh ? {} : { noRun: true }) };

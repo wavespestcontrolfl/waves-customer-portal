@@ -509,3 +509,42 @@ function mulberry(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+describe('pack objective (packAllowanceMin; the close-gaps P1 measurement only)', () => {
+  // Drive minutes by table: A and B sit 50 minutes apart, everything else is 10. F is fixed at noon.
+  const T = { o: { A: 10, B: 10, F: 10 }, A: { o: 10, B: 50, F: 10 }, B: { o: 10, A: 50, F: 10 }, F: { o: 10, A: 10, B: 10 } };
+  const key = (p) => p.id || 'o';
+  const tableLeg = (a, b) => (key(a) === key(b) ? 0 : T[key(a)][key(b)]);
+  const day = () => [stop('F', 0, 12, { movable: false }), stop('A', 0, 15), stop('B', 0, 16)];
+  const run = (options = {}) => planDay({ stops: day(), origin, departureMin: 8 * 60, legMin: tableLeg, options });
+
+  test('unset (the live rule): the least drive wins, even when it ends later', () => {
+    const result = run();
+    // The current route (slot order F, A, B) drives 80; A, F, B drives 40 and ends after noon.
+    expect(result.current.driveMin).toBe(80);
+    expect(result.best).toMatchObject({ driveMin: 40, order: ['A', 'F', 'B'] });
+    expect(result.best.endMin).toBeGreaterThan(12 * 60 + 30);
+    expect(result.accepted).toBe(true);
+  });
+
+  test('set to 0: the plan that ends earliest with no more drive than the current route', () => {
+    const result = run({ packAllowanceMin: 0 });
+    expect(result.best.driveMin).toBe(80);
+    expect(result.best.endMin).toBe(12 * 60 + 30);
+    expect(result.best.order.at(-1)).toBe('F');
+    // Its own drive rule never takes it (no saving): the measurement judges it with packVerdict instead.
+    expect(result.accepted).toBe(false);
+  });
+
+  test('a plan over the drive limit never wins, however early it ends', () => {
+    // Two one-way legs the current route (F, A, B) never drives: the start to B, and B to F. Both orders that end at
+    // 12:30 (A, B, F and B, A, F) now drive 110, over the current 80, so the earliest end within the limit is A, F, B.
+    T.o.B = 40; T.B.F = 40;
+    try {
+      const result = run({ packAllowanceMin: 0 });
+      expect(result.current.driveMin).toBe(80);
+      expect(result.best.order).toEqual(['A', 'F', 'B']);
+      expect(result.best.driveMin).toBeLessThanOrEqual(80);
+    } finally { T.o.B = 10; T.B.F = 10; }
+  });
+});
