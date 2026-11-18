@@ -528,11 +528,9 @@ async function appFirstDisplayActive(req) {
   if (req.contactSession || !appFirstAnyDeviceLive() || !appPreferencesAvailable(req)
     || !gateEnvValue('GATE_PUSH_CHANNEL_ROUTING')) return false;
   try {
-    // The page shows what routing will do: with GATE_APP_FIRST_STALE_TEXT on, a phone
-    // not opened in 30 days is not reachable (routing sends the text), so it shows Text.
-    const routing = require('../services/messaging/push-channel-routing');
-    const reachableSince = typeof routing.staleTextFloor === 'function' ? routing.staleTextFloor() : null;
-    const status = await require('../services/push-notifications').customerStatus(req.customerId, db, { withReachable: true, ...(reachableSince ? { reachableSince } : {}) });
+    // customerStatus applies routing's stale-app floor itself (GATE_APP_FIRST_STALE_TEXT),
+    // so a phone not opened in 30 days shows the stored Text, as routing will send it.
+    const status = await require('../services/push-notifications').customerStatus(req.customerId, db, { withReachable: true });
     return status.enabled === true && status.reachable === true;
   } catch {
     return false;

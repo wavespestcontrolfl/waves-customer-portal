@@ -19,7 +19,7 @@ function subscriptionQuery() {
       return q;
     },
     whereNull(col) { filters.push((row) => row[col] == null); return q; },
-    async select() { return mockDevices.filter((device) => filters.every((f) => f(device))).map((d) => ({ platform: d.platform, updated_at: d.updated_at })); },
+    whereIn(col, values) { filters.push((row) => values.includes(row[col])); return q; },
     async first() {
       const row = mockDevices.find((device) => filters.every((f) => f(device)));
       return row ? { id: row.id } : undefined;
@@ -68,6 +68,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/push-notifications', () => ({
   PUSH_HEARTBEAT_HOURS: 72,
   customerStatus: (...args) => mockCustomerStatus(...args),
+  appFirstStaleFloor: () => (process.env.GATE_APP_FIRST_STALE_TEXT === 'true' ? new Date(Date.now() - 30 * 24 * 3600000) : null),
   sendToCustomer: (...args) => mockSendToCustomer(...args),
 }));
 jest.mock('../services/notification-service', () => ({ notifyCustomer: (...args) => mockNotifyCustomer(...args) }));
@@ -238,33 +239,27 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
   });
 
-  it('account device status: both gates on pass the 30-day reachableSince; gate off passes none', async () => {
+  it('account device status: routing asks plainly; the floor is customerStatus\'s own', async () => {
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
-    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-    await send();
-    const arg = mockCustomerStatus.mock.calls[0][2];
-    expect(arg.withReachable).toBe(true);
-    expect(Math.abs(Date.now() - arg.reachableSince.getTime() - 30 * DAY_MS)).toBeLessThan(60000);
-    mockCustomerStatus.mockClear();
-    delete process.env.GATE_APP_FIRST_STALE_TEXT;
+    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
     await send();
     expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
   });
 
-  it('the proof row carries the phone app\'s newest check-in as app_checked_in_at, with the new gate off too', async () => {
+  it('the proof row carries the check-in of the phone that accepted the push, with the new gate off too', async () => {
     const checkedIn = hoursAgo(40 * 24);
     mockDevices.push(device({ updated_at: checkedIn }));
+    mockSendToCustomer.mockResolvedValue({ sent: 1, acceptedCheckedInAt: checkedIn });
     expect((await send()).delivered).toBe(true);
     expect(JSON.parse(mockProofRows[0].metadata)).toMatchObject({ requestedChannel: 'sms', app_checked_in_at: checkedIn.toISOString() });
   });
 
-  it('the account device status path stamps reachableCheckedInAt', async () => {
-    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
-    const checkedIn = hoursAgo(3 * 24);
-    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true, reachableCheckedInAt: checkedIn });
+  it('no accepted holder leg with a check-in (unknown): no stamp', async () => {
+    mockDevices.push(device());
+    mockSendToCustomer.mockResolvedValue({ sent: 1 });
     expect((await send()).delivered).toBe(true);
-    expect(JSON.parse(mockProofRows[0].metadata).app_checked_in_at).toBe(checkedIn.toISOString());
+    expect(JSON.parse(mockProofRows[0].metadata)).not.toHaveProperty('app_checked_in_at');
   });
 
   it('an explicit App send carries no stamp', async () => {

@@ -9418,7 +9418,7 @@ function appFirstAnyDeviceLive() {
 module.exports.appFirstAnyDeviceLive = appFirstAnyDeviceLive;
 // GATE_APP_FIRST_STALE_TEXT read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-18: with GATE_APP_FIRST_ANY_DEVICE on, a phone app not opened in 30 days no longer takes the notice;
-// the text goes (services/messaging/push-channel-routing.js, staleTextFloor).
+// the text goes (services/push-notifications.js appFirstStaleFloor, applied inside customerStatus).
 function appFirstStaleTextLive() {
   return process.env.GATE_APP_FIRST_STALE_TEXT === 'true';
 }

@@ -63,7 +63,8 @@
  *      fallback is unchanged: when no device accepts the push, the text goes.
  *      With GATE_APP_FIRST_STALE_TEXT also on (owner 2026-11-18), a device
  *      counts only if the app checked in within the last 30 days
- *      (APP_FIRST_STALE_DAYS); a phone not opened for that long gets the text.
+ *      (APP_FIRST_STALE_DAYS in push-notifications.js, applied inside customerStatus so the settings
+ *      page and make-room follow it too); a phone not opened for that long gets the text.
  *   c. Only the customer switches back to text: a stored 'sms' vetoes the app
  *      notice when the customer saved it (the *_channel_explicit marker the
  *      notifications route stamps); the seeded default 'sms' does not. Email
@@ -75,7 +76,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { gateEnvValue, appFirstAnyDeviceLive, appFirstStaleTextLive } = require('../../config/feature-gates');
+const { gateEnvValue, appFirstAnyDeviceLive } = require('../../config/feature-gates');
 const { BILLING_MESSAGE_CATEGORIES } = require('./billing-channel-routing');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 
@@ -295,57 +296,33 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
 // push_and_sms is exempt: its SMS goes regardless.
 const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
-// The any-device reach read (GATE_APP_FIRST_ANY_DEVICE): is the holder reachable by
-// push, and when did their phone app last check in? checkedInAt is the newest
-// holder phone-app check-in (never a browser row); routing stamps it on the push
-// proof row as app_checked_in_at so the daily stale-app check reads what routing
-// saw. With GATE_APP_FIRST_STALE_TEXT on (staleTextFloor), only a phone app that
-// checked in since the floor counts; floor unset = any active holder device.
-async function anyDeviceReach(customerId, knex = db) {
-  const staleFloor = staleTextFloor();
-  if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId, undefined, { withReachable: true, ...(staleFloor ? { reachableSince: staleFloor } : {}) });
-    return { reachable: Boolean(status.enabled && status.reachable === true), checkedInAt: status.reachableCheckedInAt || null };
-  }
-  let rows = [];
-  try {
-    // A contact's device (contact login) is never proof the HOLDER has the app.
-    rows = await knex('push_subscriptions').where({ customer_id: customerId, active: true }).whereNull('contact_phone_key').select('platform', 'updated_at');
-  } catch {
-    rows = [];
-  }
-  const native = rows.filter((row) => row.platform === 'ios' || row.platform === 'android');
-  const newest = native.reduce((max, row) => Math.max(max, new Date(row.updated_at).getTime() || 0), 0);
-  const reachable = staleFloor ? newest >= staleFloor.getTime() && newest > 0 : rows.length > 0;
-  return { reachable, checkedInAt: newest ? new Date(newest) : null };
-}
-
+// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with any
+// active device on a configured provider, however long ago it checked in. With
+// GATE_APP_FIRST_STALE_TEXT also on, only a phone app that checked in within the
+// last 30 days counts (staleTextFloor): customerStatus applies it itself, so every
+// reachability reader follows it; the legacy query below uses the same floor and
+// phone apps only (a fresh browser subscription must not pass it).
 async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
-  if (anyDevice) return (await anyDeviceReach(customerId, knex)).reachable;
+  const staleFloor = anyDevice ? staleTextFloor() : null;
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
-    const status = await require('../push-notifications').customerStatus(customerId, undefined, undefined);
-    return status.enabled && status.fresh;
+    const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
+    return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
   }
-  const row = await knex('push_subscriptions')
+  const query = knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
     // A contact's device (contact login) is never proof the HOLDER has the app.
-    .whereNull('contact_phone_key')
-    .where('updated_at', '>=', heartbeatCutoff())
-    .first('id').catch(() => null);
+    .whereNull('contact_phone_key');
+  if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
+  else if (staleFloor) query.whereIn('platform', ['ios', 'android']).where('updated_at', '>=', staleFloor);
+  const row = await query.first('id').catch(() => null);
   return Boolean(row);
 }
 
-// attemptPushFirst's reach read: the any-device path also hands back the check-in
-// it saw, for the proof row's app_checked_in_at stamp.
-async function routedReach(customerId, anyDevice) {
-  if (!anyDevice) return { fresh: await hasFreshPushDevice(customerId, db, {}), checkedInAt: null };
-  const reach = await anyDeviceReach(customerId, db);
-  return { fresh: reach.reachable, checkedInAt: reach.checkedInAt };
-}
-
-// Internal log metadata only (no customer effect): written whenever the check-in is known.
-function appCheckedInStamp(checkedInAt) {
-  return checkedInAt ? { app_checked_in_at: new Date(checkedInAt).toISOString() } : {};
+// The proof row's app_checked_in_at: the check-in of the phone that accepted the push
+// (any-device sends only; unknown = no stamp). Internal log metadata, no customer effect.
+// The daily stale-app check reads it.
+function appCheckedInStamp(anyDevice, acceptedCheckedInAt) {
+  return anyDevice && acceptedCheckedInAt ? { app_checked_in_at: new Date(acceptedCheckedInAt).toISOString() } : {};
 }
 
 // messageType → the LIVE notification_prefs channel column the actual
@@ -544,7 +521,7 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
   }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}) });
-  return { stats, delivered: Number(stats && stats.sent) > 0 };
+  return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null };
 }
 
 // The push's collapse tag (APNs apns-collapse-id, hashed when long; the Android
@@ -597,14 +574,12 @@ function fanOutReach(anyDevice) {
   return staleFloor ? { nativeOnly: true, minUpdatedAt: staleFloor } : { nativeOnly: true };
 }
 
-// GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): an any-device phone counts only if the
-// app checked in (push_subscriptions.updated_at, bumped on every launch) within the last
-// 30 days. A phone not opened since gets the text, not a push nobody sees. A fixed
-// bound, not the refresh-token life. Called only on the any-device path; gate off = null.
-const APP_FIRST_STALE_DAYS = 30;
+// GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): the shared floor lives in
+// push-notifications (appFirstStaleFloor, which customerStatus applies too); null
+// while the gate is off, or for a suite that mocks push-notifications without it.
 function staleTextFloor() {
-  if (typeof appFirstStaleTextLive !== 'function' || !appFirstStaleTextLive()) return null;
-  return new Date(Date.now() - APP_FIRST_STALE_DAYS * 24 * 3600 * 1000);
+  const floor = require('../push-notifications').appFirstStaleFloor;
+  return typeof floor === 'function' ? floor() : null;
 }
 
 function heartbeatCutoff() {
@@ -753,7 +728,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // keeps its own path and the 72 hour rule.
     const anyDevice = anyDeviceSend(explicitPushOnly);
     const routedBody = pushBodyFor(anyDevice, body);
-    const { fresh, checkedInAt: appCheckedInAt } = await routedReach(customerId, anyDevice);
+    const fresh = await hasFreshPushDevice(customerId, db, { anyDevice });
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49).
@@ -836,7 +811,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
     deliveryOutcome = 'uncertain';
-    const { delivered } = explicitPushOnly
+    const { delivered, acceptedCheckedInAt } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, routedBody, {
         shouldContinue: windowGuardFrom(preSendCheck),
@@ -880,9 +855,9 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // history reader can correlate this proof with its keyed ledger
         // episode instead of counting the same contact twice.
         ...(notificationEventKey ? { notificationEventKey } : {}),
-        // What routing saw at send time (any-device sends): the holder phone app's
-        // newest check-in. The daily stale-app check reads this stamp, not a guess.
-        ...appCheckedInStamp(appCheckedInAt),
+        // The check-in of the phone that accepted the push (any-device sends): what the
+        // daily stale-app check reads, not a guess made afterward.
+        ...appCheckedInStamp(anyDevice, acceptedCheckedInAt),
         // The visit this notice is about, like the SMS path's metadata:
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
@@ -1051,8 +1026,6 @@ module.exports = {
   PUSH_ROUTING_POLICY,
   APP_FIRST_ANY_DEVICE_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
-  // the settings page shares routing's stale-app floor (null while GATE_APP_FIRST_STALE_TEXT is off)
-  staleTextFloor,
   // exported for tests
-  _test: { APP_FIRST_STALE_DAYS, pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
+  _test: { pushTag, linkFreeBody, pushPresentation, resolvePushDestination, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };
