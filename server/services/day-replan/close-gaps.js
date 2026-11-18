@@ -33,8 +33,30 @@ const toMin = (value) => {
 };
 const sum = (list, pick) => list.reduce((total, item) => total + pick(item), 0);
 
-/** The open blocks of one simulated day: the open start, each wait between stops, and the open tail. */
-function openBlocks(sim, { departureMin, openMin, closeMin }) {
+/**
+ * Blocks with every unavailable interval cut out: the technician's schedule blocks and the hours other rows hold
+ * (the planner's own blockedHours). A block split by one becomes two pieces of the same kind.
+ */
+function minusUnavailable(blocks, unavailable = []) {
+  let out = blocks;
+  for (const u of unavailable) {
+    out = out.flatMap((b) => {
+      const end = b.startMin + b.min;
+      if (u.endMin <= b.startMin || u.startMin >= end) return [b];
+      const pieces = [];
+      if (u.startMin > b.startMin) pieces.push({ ...b, min: u.startMin - b.startMin });
+      if (u.endMin < end) pieces.push({ ...b, startMin: u.endMin, min: end - u.endMin });
+      return pieces;
+    });
+  }
+  return out;
+}
+
+/**
+ * The open blocks of one simulated day: the open start, each wait between stops, and the open tail, less the
+ * unavailable intervals in bounds.unavailable.
+ */
+function openBlocks(sim, { departureMin, openMin, closeMin, unavailable }) {
   const blocks = [];
   let prevDeparture = departureMin;
   sim.arrivals.forEach((a, i) => {
@@ -48,7 +70,7 @@ function openBlocks(sim, { departureMin, openMin, closeMin }) {
   });
   const tail = closeMin - sim.serviceFinishMin;
   if (tail > 0) blocks.push({ kind: 'tail', startMin: sim.serviceFinishMin, min: tail, before: null });
-  return blocks;
+  return minusUnavailable(blocks, unavailable);
 }
 
 const lunchOverlap = (b) => Math.min(b.startMin + b.min, LUNCH.endMin) - Math.max(b.startMin, LUNCH.startMin);
@@ -111,10 +133,26 @@ function lockedGaps(now, whyById) {
     .map((b) => ({ before: b.before, start: b.start, min: b.min, why: whyById.get(String(b.before)) || null }));
 }
 
+/** The stop's booked window width in minutes (no booked end: 60), at least an hour. */
+const widthOf = (row) => (row.window_end ? Math.max(60, toMin(row.window_end) - toMin(row.window_start)) : 60);
+
 /** Last whole start hour whose window (the stop's booked width) still ends by the day's close. */
 function lastHour(row, closeMin) {
-  const width = row.window_end ? Math.max(60, toMin(row.window_end) - toMin(row.window_start)) : 60;
-  return Math.floor((closeMin - width) / 60);
+  return Math.floor((closeMin - widthOf(row)) / 60);
+}
+
+/**
+ * Whether the replayed stop may take `hour`, by the planner's own occupancy rule: every hour its window covers is free
+ * of the hours the day's other stops hold (rowHours, their whole windows) and of the hours other rows hold
+ * (blockedHours), and the window does not run into a schedule block.
+ */
+function hourFree(input, hour) {
+  const { group, groups, rowHours, blockedHours = [], blocks = [] } = input;
+  const held = new Set(blockedHours);
+  for (const g of groups) if (g !== group) for (const r of g) for (const h of rowHours(r)) held.add(h);
+  const width = widthOf(group[0]);
+  for (let h = hour; h < hour + Math.ceil(width / 60); h += 1) if (held.has(h)) return false;
+  return !blocks.some((b) => hour * 60 < b.endMin && hour * 60 + width > b.startMin);
 }
 
 /** The replayed stop at startMin with the rest of the day as booked, in time order; null when a promise breaks. */
@@ -137,7 +175,8 @@ const strip = (fit) => (fit ? {
 
 /**
  * S1 for one stop booked in the last 24 hours, with the rest of the day as booked: the time it was booked at, the
- * whole hour with the least drive (today's picker ranks by added drive), and the hour a block-aware picker would
+ * whole hour with the least drive (today's picker ranks by added drive; only hours the planner's occupancy rule
+ * leaves free, see hourFree), and the hour a block-aware picker would
  * offer, which is, within S1_DRIVE_ALLOWANCE_MIN of that least drive, the hour that front-loads the day ("even front
  * load jobs"): the least waiting between stops, then the biggest open block, then less drive, then earlier. Waiting
  * comes first because the biggest block alone would push a job to the end of the day and leave the wait at midday;
@@ -151,7 +190,7 @@ function replayBooking(input) {
   const bookedMin = toMin(lead.window_start);
   const tried = [];
   for (let hour = Math.ceil(bounds.openMin / 60); hour <= lastHour(lead, bounds.closeMin); hour += 1) {
-    const fit = prefOk(pref, hour * 60) ? run(hour * 60) : null;
+    const fit = prefOk(pref, hour * 60) && hourFree(input, hour) ? run(hour * 60) : null;
     if (fit) tried.push(fit);
   }
   const asBooked = tried.find((t) => t.startMin === bookedMin) || run(bookedMin);
@@ -172,14 +211,20 @@ function recentlyBooked(group, now) {
   return !(lead.is_recurring === true && lead.recurring_parent_id != null);
 }
 
-/** S1 for every stop of the day booked in the last 24 hours (empty when none). */
+/** The co-visit groups of the day booked in the last 24 hours. */
+const recentGroups = (groups, now) => groups.filter((g) => recentlyBooked(g, now));
+
+/**
+ * S1 for every stop of the day booked in the last 24 hours (empty when none). prefById: each leader's customer window
+ * (null = none); `false` = the window could not be read, and that booking is not replayed.
+ */
 function replayRecentBookings({ groups, prefById, now, ...rest }) {
-  return groups.filter((g) => recentlyBooked(g, now))
+  return recentGroups(groups, now).filter((g) => prefById.get(String(g[0].id)) !== false)
     .map((group) => replayBooking({ ...rest, groups, group, pref: prefById.get(String(group[0].id)) || null }));
 }
 
 module.exports = {
-  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings,
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups,
   SELLABLE_MIN, P1_MIN_GAIN, S1_DRIVE_ALLOWANCE_MIN,
-  _internals: { openBlocks, replayBooking, recentlyBooked, lastHour, tryStart },
+  _internals: { openBlocks, minusUnavailable, replayBooking, recentlyBooked, lastHour, tryStart, hourFree },
 };

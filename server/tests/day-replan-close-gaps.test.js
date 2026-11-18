@@ -47,6 +47,20 @@ describe('openTime', () => {
     expect(fig.sellableMin).toBe(0);
   });
 
+  test('schedule blocks and hours other rows hold are cut out of the open time', () => {
+    // As booked: one stop 8 to 9 AM, open 9:05 AM to 5 PM. A schedule block 12 to 1 PM and another row's 3 PM hour.
+    const unavailable = [{ startMin: 720, endMin: 780 }, { startMin: 900, endMin: 960 }];
+    const fig = openTime(sim([arrival('a', 480, 540, 10)]), { ...BOUNDS, unavailable });
+    expect(fig.blocks).toEqual([
+      { kind: 'tail', start: 540, min: 180, before: null },
+      { kind: 'tail', start: 780, min: 120, before: null },
+      { kind: 'tail', start: 960, min: 60, before: null },
+    ]);
+    expect(fig).toMatchObject({ biggestMin: 180, sellableMin: 360 });
+    // A block that covers the whole open time leaves nothing to sell.
+    expect(openTime(sim([arrival('a', 480, 540, 10)]), { ...BOUNDS, unavailable: [{ startMin: 540, endMin: 1020 }] }).sellableMin).toBe(0);
+  });
+
   test('no simulation, no figures', () => {
     expect(openTime(null, BOUNDS)).toBeNull();
   });
@@ -91,14 +105,17 @@ describe('S1 replay of a new booking', () => {
     estimated_duration_minutes: 60, lat: HQ.lat, lng: HQ.lng + 0.02 + (extra.offset || 0), ...extra,
   });
 
+  const replay = (groups, group, extra = {}) => _internals.replayBooking({
+    groups, group, pref: null, origin: HQ, marginMin: 15, bounds: BOUNDS, rowHours: replan.rowHours, ...extra,
+  });
+
   test('a job booked mid-afternoon is replayed: the block-aware hour front-loads it with the morning stops', () => {
     const groups = [[stop('x', 8)], [stop('y', 9, { offset: 0.001 })], [stop('n', 14, { offset: 0.002 })]];
-    const out = _internals.replayBooking({
-      groups, group: groups[2], pref: null, origin: HQ, marginMin: 15, bounds: BOUNDS,
-    });
+    const out = replay(groups, groups[2]);
     expect(out.booked).toMatchObject({ start: '14:00' });
     expect(out.booked.waitMin).toBeGreaterThan(120);
-    expect(out.s1.start < '11:00').toBe(true);
+    // 8 and 9 AM are held by the other stops (the planner's occupancy rule), so 10 AM is the first free hour.
+    expect(out.s1.start).toBe('10:00');
     expect(out.s1.waitMin).toBe(0);
     expect(out.s1.biggestMin).toBeGreaterThan(out.booked.biggestMin);
     expect(out.s1.driveMin).toBeLessThanOrEqual(out.leastDrive.driveMin + 5);
@@ -107,11 +124,17 @@ describe('S1 replay of a new booking', () => {
 
   test('a customer time window limits the hours tried; the booked hour is still measured', () => {
     const groups = [[stop('x', 8)], [stop('n', 14, { offset: 0.002 })]];
-    const out = _internals.replayBooking({
-      groups, group: groups[1], pref: { startMin: 13 * 60, endMin: 16 * 60 }, origin: HQ, marginMin: 15, bounds: BOUNDS,
-    });
+    const out = replay(groups, groups[1], { pref: { startMin: 13 * 60, endMin: 16 * 60 } });
     expect(out.s1.start).toBe('13:00');
     expect(out.booked.start).toBe('14:00');
+  });
+
+  test('hours held by other rows and schedule blocks are never offered', () => {
+    const groups = [[stop('x', 8)], [stop('n', 14, { offset: 0.002 })]];
+    const out = replay(groups, groups[1], { blockedHours: [9], blocks: [{ startMin: 600, endMin: 660 }] });
+    expect(out.s1.start).toBe('11:00');
+    expect(_internals.hourFree({ group: groups[1], groups, rowHours: replan.rowHours }, 8)).toBe(false);
+    expect(_internals.hourFree({ group: groups[1], groups, rowHours: replan.rowHours, blockedHours: [9] }, 9)).toBe(false);
   });
 
   test('only stops booked in the last 24 hours are replayed, never a series visit made from a plan', () => {

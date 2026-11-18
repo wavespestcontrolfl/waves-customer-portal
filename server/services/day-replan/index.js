@@ -50,7 +50,7 @@ const RouteOptimizer = require('../route-optimizer');
 const { planDay, DEFAULT_OPTIONS } = require('./planner');
 const { coVisitGroups, coVisitMinutes, appSimCheck, finalVerdict } = require('./app-sim');
 const {
-  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings,
+  openTime, planSims, packVerdict, hourChanges, lockedGaps, replayRecentBookings, recentGroups,
 } = require('./close-gaps');
 const { applyAcceptedDay, reconcileApplied } = require('./apply');
 
@@ -537,22 +537,32 @@ function countHomes(rows) {
   return counts;
 }
 
-const boundsOf = (env) => ({ departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin });
+/**
+ * The day's bounds for the open-time figures, with what is not open time cut out: the technician's schedule blocks
+ * and the hours other rows hold (the planner's blockedHours).
+ */
+function boundsOf(env, plan, techId) {
+  const held = blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 }));
+  return { departureMin: env.departureMin, openMin: env.openMin, closeMin: env.closeMin, unavailable: [...plan.blocks, ...held] };
+}
 const simsOf = (env, plan) => planSims({
   groups: plan.rowGroups, currentOrder: plan.result.current.order, best: plan.result.best, origin: plan.origin, departureMin: env.departureMin,
 });
 
 /** P2: the same-customer lock counted per home. Null when no stop of the day had that lock. */
-function measureSameHome(env, plan, { rows, techId, nowFig }) {
+async function measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }) {
   const locked = (i) => plan.entries[i].why === 'same_customer';
   if (!plan.entries.some((e, i) => locked(i))) return null;
   const homeCtx = { ...plan.dayContext, homeCounts: countHomes(plan.dayContext.allRows) };
   const entries = plan.entries.map((e, i) => (locked(i) ? { ...e, why: fixedReason(e.row, homeCtx) } : e));
+  // A fixed stop's customer window was never read (attachPrefs skips fixed stops); a freed one needs it, and an
+  // unreadable one stays fixed (pref_unknown), as in the live run.
+  await attachPrefs(conn, entries.filter((e, i) => locked(i) && !e.why));
   const freed = entries.filter((e, i) => locked(i) && !e.why).map((e) => e.row.id);
   const still = entries.filter((e, i) => locked(i) && e.why).map((e) => ({ id: e.row.id, why: e.why }));
   if (!freed.length) return { freed, still, driveRuleAccepts: false, pack: null, packed: null, changes: [] };
   const alt = { ...planEntries(env, { rows, entries, blocks: plan.blocks, origin: plan.origin, techId, dayContext: plan.dayContext }), origin: plan.origin };
-  const packed = openTime(simsOf(env, alt).planned, boundsOf(env));
+  const packed = openTime(simsOf(env, alt).planned, bounds);
   const pack = packVerdict({ now: nowFig, packed, kept: alt.check.planned?.kept === true, driveRuleAccepts: false });
   const driveRuleAccepts = alt.verdict.accepted;
   const changes = driveRuleAccepts || pack.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
@@ -560,12 +570,32 @@ function measureSameHome(env, plan, { rows, techId, nowFig }) {
 }
 
 /**
+ * Each replayed booking's customer window. A movable stop's was read by the live run; a fixed one's is read here, and
+ * one that cannot be read is marked false so the replay leaves that booking out.
+ */
+async function replayPrefs(conn, plan) {
+  const prefs = new Map(plan.entries.map((e) => [String(e.row.id), e.pref]));
+  const byId = new Map(plan.entries.map((e) => [String(e.row.id), e]));
+  for (const group of recentGroups(plan.rowGroups, plan.dayContext.now)) {
+    const entry = byId.get(String(group[0].id));
+    if (!entry || !entry.why) continue;
+    try {
+      prefs.set(String(entry.row.id), await loadPref(conn, entry.row));
+    } catch (err) {
+      prefs.set(String(entry.row.id), false);
+      logger.warn(`[day-replan] close-gaps: a replayed booking's preference read failed (${err.message}); it is not replayed`);
+    }
+  }
+  return prefs;
+}
+
+/**
  * The close-gaps measurement for one planned tech-day (./close-gaps.js; owner 2026-11-18). It measures only and never
  * throws: a failure leaves the row's close_gaps null, and the night's plan row is written either way.
  */
-function measureCloseGaps(env, plan, { rows, techId }) {
+async function measureCloseGaps(conn, env, plan, { rows, techId }) {
   try {
-    const bounds = boundsOf(env);
+    const bounds = boundsOf(env, plan, techId);
     const sims = simsOf(env, plan);
     const nowFig = openTime(sims.current, bounds);
     const packed = openTime(sims.planned, bounds);
@@ -576,10 +606,11 @@ function measureCloseGaps(env, plan, { rows, techId }) {
       now: nowFig,
       packed,
       p1: { ...p1, lunchLost, changes: p1.wouldAccept ? hourChanges(plan.rowGroups, plan.result.best) : [] },
-      p2: measureSameHome(env, plan, { rows, techId, nowFig }),
+      p2: await measureSameHome(conn, env, plan, { rows, techId, nowFig, bounds }),
       s1: replayRecentBookings({
-        groups: plan.rowGroups, prefById: new Map(plan.entries.map((e) => [String(e.row.id), e.pref])),
-        now: plan.dayContext.now, origin: plan.origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds,
+        groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
+        marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
+        blockedHours: blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind), blocks: plan.blocks,
       }),
       gaps: lockedGaps(nowFig, new Map(plan.entries.map((e) => [String(e.row.id), e.why]))),
     };
@@ -632,7 +663,7 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const { entries, check, verdict, staleReasons, result, plannerResult } = plan;
   const apply = env.mode === 'apply';
   const planId = apply ? crypto.randomUUID() : null;
-  const closeGaps = measureCloseGaps(env, plan, { rows, techId });
+  const closeGaps = await measureCloseGaps(conn, env, plan, { rows, techId });
   await conn(PLAN_TABLE).insert(planRow({
     runId: env.runId, techId, dateStr, entries, result, check, verdict, closeGaps, ...(apply ? { mode: 'apply', planId } : {}),
   }));

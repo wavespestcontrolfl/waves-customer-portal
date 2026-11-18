@@ -50,6 +50,12 @@ function span(min) {
 
 const parse = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
 
+/**
+ * The day as it stands after the 04:40 run: a day the run re-timed (apply_status 'applied'; the writer writes exactly
+ * the plan's changes or skips the day) is its planned figures, any other day is the day as booked.
+ */
+const standing = (row, rec) => (row.apply_status === 'applied' && rec.packed ? rec.packed : rec.now);
+
 /** Extra sellable minutes one tech-day would gain from a measured rule (the larger of P1 and P2), 0 when none. */
 function freedMin(rec) {
   const base = rec.now ? rec.now.sellableMin : 0;
@@ -69,10 +75,11 @@ function summarize(rows, techNames) {
   for (const row of rows) {
     const rec = parse(row.close_gaps);
     if (!rec || !rec.now) continue;
-    for (const b of rec.now.blocks || []) {
+    for (const b of standing(row, rec).blocks || []) {
       if (b.min >= SELLABLE_MIN) blocks.push({ day: row.day, tech: techNames.get(String(row.technician_id)) || null, ...b });
     }
-    freed += freedMin(rec);
+    // An applied day already has the re-plan's hours; the measured rules' gains were counted from the day as booked.
+    if (row.apply_status !== 'applied') freed += freedMin(rec);
     replayed += (rec.s1 || []).length;
     pickDiffers += (rec.s1 || []).filter((s) => s.differs).length;
   }
@@ -136,7 +143,7 @@ async function latestRows(conn, now) {
   if (!run) return null;
   return conn('day_replan_plans').where({ run_id: run.run_id }).whereNotNull('close_gaps')
     .whereBetween('service_date', [etDateString(addETDays(now, 1)), etDateString(addETDays(now, DAYS))])
-    .select('technician_id', conn.raw("to_char(service_date, 'YYYY-MM-DD') as day"), 'close_gaps');
+    .select('technician_id', conn.raw("to_char(service_date, 'YYYY-MM-DD') as day"), 'close_gaps', 'apply_status');
 }
 
 async function closeEarlier(conn, keepKey) {
@@ -167,4 +174,4 @@ async function runOpenBlocksAlert({ conn = db, now = new Date() } = {}) {
   return { status: 'raised', id: posted?.id || null, deduped: !!posted?.deduped, openMin: sum.totalMin, closed };
 }
 
-module.exports = { runOpenBlocksAlert, _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, KEY_PREFIX } };
+module.exports = { runOpenBlocksAlert, _internals: { summarize, alertSpec, detailText, dayLabel, clock, span, freedMin, standing, KEY_PREFIX } };

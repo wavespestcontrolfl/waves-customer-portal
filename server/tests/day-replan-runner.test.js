@@ -558,13 +558,42 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     expect(rec.p2.still.map((s) => s.why)).toEqual(['same_customer', 'same_customer']);
   });
 
+  test('P2: a freed stop\'s customer window is read before the day is re-planned; an unreadable one stays fixed', async () => {
+    const twoHomes = [
+      row('a', 0.020, 8, { customer_id: 'cust-x', property_id: 'prop-1' }),
+      row('b', 0.021, 14, { customer_id: 'cust-x', property_id: 'prop-2' }),
+      row('c', 0.022, 10),
+    ];
+    getCustomerSchedulingPreferences.mockImplementation(async (customerId) => (customerId === 'cust-x'
+      ? { preferred_time_window: { startMin: 13 * 60, endMin: 17 * 60 } } : { preferred_time_window: null }));
+    let { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes } });
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    let rec = JSON.parse(inserts[0].row.close_gaps);
+    expect(getCustomerSchedulingPreferences.mock.calls.filter(([id]) => id === 'cust-x')).toHaveLength(2);
+    // The afternoon-only customer's stops are never moved into the morning (stop c has no window).
+    const theirs = rec.p2.changes.filter((c) => ['a', 'b'].includes(c.id));
+    expect(theirs.length).toBeGreaterThan(0);
+    for (const c of theirs) expect(Number(c.to.slice(0, 2))).toBeGreaterThanOrEqual(13);
+
+    getCustomerSchedulingPreferences.mockImplementation(async (customerId) => {
+      if (customerId === 'cust-x') throw new Error('prefs down');
+      return { preferred_time_window: null };
+    });
+    ({ conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: twoHomes } }));
+    await runDayReplanIfEnabled({ now: NOW, conn });
+    rec = JSON.parse(inserts[0].row.close_gaps);
+    expect(rec.p2).toMatchObject({ freed: [], packed: null });
+    expect(rec.p2.still.map((x) => x.why)).toEqual(['pref_unknown', 'pref_unknown']);
+  });
+
   test('a stop booked in the last 24 hours is replayed over its day\'s hours', async () => {
     const rows = [row('a', 0.020, 8), row('n', 0.021, 14, { created_at: new Date(NOW.getTime() - 2 * 3600 * 1000).toISOString(), source_action: 'online_booking' })];
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
     await runDayReplanIfEnabled({ now: NOW, conn });
     const [replay] = record(inserts[0]).s1;
     expect(replay).toMatchObject({ id: 'n', source: 'online_booking', booked: { start: '14:00' } });
-    expect(replay.s1.start).toBe('08:00');
+    // 8 AM is held by stop a (the planner's occupancy rule), so the first free hour is 9.
+    expect(replay.s1.start).toBe('09:00');
     expect(replay.differs).toBe(true);
   });
 

@@ -80,6 +80,16 @@ describe('the copy', () => {
     expect(composeAdminAlert(_internals.alertSpec(withGain)).why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM; re-timing booked jobs could free 1 h 35 min more.');
   });
 
+  test('a day the 04:40 run re-timed is read as re-timed: its planned blocks, and no gain counted twice', () => {
+    const packed = { ...rec([tail(600, 420)]).now };
+    const applied = _internals.summarize([{
+      technician_id: TECH, day: '2026-11-21', apply_status: 'applied',
+      close_gaps: rec([tail(695, 325)], { packed, p1: { wouldAccept: false, reason: 'drive_rule_accepts', gainMin: 95, lunchLost: false, changes: [] } }),
+    }], new Map());
+    expect(applied.blocks.map((b) => [b.start, b.min])).toEqual([[600, 420]]);
+    expect(applied.freedMin).toBe(0);
+  });
+
   test('the detail lists each block with its technician and the measuring line', () => {
     const text = _internals.detailText(sum);
     expect(text).toContain('- Thu Nov 19, Pat: 1:35 PM to 5:00 PM (3 h 25 min)');
