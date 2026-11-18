@@ -621,3 +621,29 @@ describe('ReservicePage photos (GATE_RESERVICE_PHOTOS)', () => {
     expect(opts.body.getAll('photos')).toHaveLength(1);
   });
 });
+
+// Re-service fold (GATE_RESERVICE_FOLD_LINK, owner 2026-11-17): the pick landed within 14 days before the customer's own plan
+// visit, so that visit moved up and no re-service was booked. The reply carries `reserviceFold`; the page says so and offers
+// the plan visit's own reschedule link, and never the photo form.
+describe('ReservicePage fold (GATE_RESERVICE_FOLD_LINK)', () => {
+  const FOLDED = {
+    success: true, replayed: false, lane: 'lawn', serviceType: 'Lawn Care Service',
+    date: '2026-07-12', window: { start: '13:00', end: '14:00' },
+    startLabel: '1:00 PM', endLabel: '2:00 PM', confirmationCode: null,
+    rescheduleUrl: '/reschedule/planvisittoken',
+    reserviceFold: { serviceType: 'Lawn Care Service', fromDate: '2026-07-20', toDate: '2026-07-12' },
+  };
+
+  it('says the regular visit moved up, links its reschedule page, and shows no photo form', async () => {
+    stubFetch({ post: jsonResponse(FOLDED) });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    expect(screen.getByText(/was coming up\s+soon, so we moved it up to/)).toBeInTheDocument();
+    expect(screen.getByText(/so there's no extra visit/)).toBeInTheDocument();
+    expect(screen.queryByText(/Your free/)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Need a different time\? Reschedule it/ })).toHaveAttribute('href', '/reschedule/planvisittoken');
+    expect(screen.queryByTestId('reservice-photos-card')).not.toBeInTheDocument();
+  });
+});

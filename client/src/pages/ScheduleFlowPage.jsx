@@ -1157,9 +1157,32 @@ async function submitReservicePhotos(token, visitId, formData) {
   throw err;
 }
 
+// GATE_RESERVICE_FOLD_LINK: the pick landed within 14 days before the customer's own plan visit, so that visit moved up
+// and no re-service was booked. No photo offer (there is no re-service visit to attach photos to).
+function ReserviceFoldCard({ result }) {
+  return (
+    <Card>
+      <CardTitle>You&apos;re all set</CardTitle>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.6 }}>
+        Your regular <strong style={{ color: S.text }}>{result.lane === 'lawn' ? 'lawn' : 'pest'}</strong> visit was coming up
+        soon, so we moved it up to <strong style={{ color: S.text }}>{formatDateLabel(result.date)}</strong>, arrival window{' '}
+        <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
+        {' '}Your tech will take care of what you told us then, so there&apos;s no extra visit.
+        {' '}We&apos;ll text you a confirmation shortly.
+      </div>
+      {result.rescheduleUrl ? (
+        <a href={result.rescheduleUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+          Need a different time? Reschedule it
+        </a>
+      ) : null}
+    </Card>
+  );
+}
+
 function ReserviceSuccessCard({ result }) {
   const { token } = useParams();
   const prepPhotos = result.prepPhotos;
+  if (result.reserviceFold) return <ReserviceFoldCard result={result} />;
   return (
     <>
       <Card>

@@ -36,6 +36,8 @@ jest.mock('../config/feature-gates', () => ({
   // GATE_RESERVICE_PHOTOS canonical reader (already ANDed with
   // GATE_VISIT_PREP_PHOTOS in the real module), driven by gateState.
   reservicePhotosLive: jest.fn(() => gateState.reservicePhotos === true),
+  // GATE_RESERVICE_FOLD_LINK canonical reader, driven by gateState.
+  reserviceFoldLinkLive: jest.fn(() => gateState.reserviceFoldLink === true),
 }));
 
 // Re-service photos reuse appointment-public.js's visit-prep helpers and
@@ -855,6 +857,143 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       gateState.reserviceDetailsRequired = true;
       const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' });
       expect(arg.customer_notes).toBe('Re-service request: ants');
+    });
+  });
+
+  // GATE_RESERVICE_FOLD_LINK (owner 2026-11-17): a pick within 14 days before the customer's own next plan visit of the lane
+  // moves that one plan visit instead of booking. Pinned here: the route's wiring and every "no" that books as before. The
+  // lookup (reservice-fold-postgres.test.js) and the move (reservice-fold-move.test.js) have their own suites.
+  describe('GATE_RESERVICE_FOLD_LINK', () => {
+    const fold = require('../services/reservice-fold');
+    const reschedule = require('../routes/reschedule-public')._internals;
+    const PLAN = {
+      id: 'plan-1', customer_id: CUST_ID, scheduled_date: etDateString(addETDays(new Date(), 9)), window_start: '13:00:00', window_end: '14:00:00',
+      service_type: 'Quarterly Pest Control Service',
+    };
+    const SLOT = { start_time: '09:00', end_time: '11:00', start_label: '9:00 AM', end_label: '11:00 AM', technician_id: 'tech-1' };
+    const SVC = { id: 'plan-1', customer_active: true };
+    const flush = () => new Promise((r) => setImmediate(r));
+    let spies;
+    let csb;
+
+    beforeEach(() => {
+      gateState.reserviceFoldLink = true;
+      const ring = jest.spyOn(reservicePublicRouter._internals, 'ringReserviceVisit').mockResolvedValue();
+      spies = {
+        find: jest.spyOn(fold, 'findFoldTarget').mockResolvedValue(PLAN),
+        move: jest.spyOn(fold, 'moveFoldTargetForCustomer').mockResolvedValue({ moved: true }),
+        load: jest.spyOn(reschedule, 'loadById').mockResolvedValue(SVC),
+        elig: jest.spyOn(reschedule, 'pageEligibility').mockResolvedValue({ ok: true }),
+        avail: jest.spyOn(reschedule, 'buildAvailabilityForService').mockResolvedValue({ days: [{ date: POST_SLOT_DATE, slots: [SLOT] }] }),
+        ring,
+      };
+      csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue({
+        ok: true, body: { booking: { id: 'booking-1' }, confirmationCode: 'ABC123' },
+      });
+      firstResults.scheduled_services = { id: 'plan-1', reschedule_token: 'tok-plan' };
+    });
+    afterEach(() => {
+      delete gateState.reserviceFoldLink;
+      Object.values(spies).forEach((spy) => spy.mockRestore());
+      csb.mockRestore();
+    });
+
+    const body = { date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants', pests: ['ants'] };
+    async function post(extra = {}) {
+      const res = await callHandler(postHandler(), { params: { token: 'a'.repeat(64) }, body: { ...body, ...extra } });
+      await flush();
+      return res;
+    }
+    const booked = () => expect(csb).toHaveBeenCalledTimes(1);
+
+    test('gate off: no lookup at all, the re-service books as before', async () => {
+      gateState.reserviceFoldLink = false;
+      await post();
+      expect(spies.find).not.toHaveBeenCalled();
+      booked();
+    });
+
+    test('a fold answers without booking: the fold reply, the plan visit\'s own reschedule link, the owner bell with this request\'s words', async () => {
+      const res = await post();
+      expect(csb).not.toHaveBeenCalled();
+      expect(res.json.mock.calls[0][0]).toEqual({
+        success: true, replayed: false, lane: 'pest', serviceType: PLAN.service_type, date: POST_SLOT_DATE,
+        window: { start: '09:00', end: '11:00' }, startLabel: '9:00 AM', endLabel: '11:00 AM', confirmationCode: null,
+        rescheduleUrl: '/reschedule/tok-plan',
+        reserviceFold: { serviceType: PLAN.service_type, fromDate: PLAN.scheduled_date, toDate: POST_SLOT_DATE },
+      });
+      // The link books with no property, and the plan visit's own one-day picker judges the fit as a single move.
+      expect(spies.find).toHaveBeenCalledWith(db, { customerId: CUST_ID, lane: 'pest', date: POST_SLOT_DATE, propertyId: null });
+      expect(spies.avail).toHaveBeenCalledWith(SVC, expect.objectContaining({ rangeFrom: POST_SLOT_DATE, rangeTo: POST_SLOT_DATE, singleMove: true }));
+      expect(spies.move).toHaveBeenCalledWith(expect.objectContaining({
+        target: PLAN, svc: SVC, lane: 'pest', date: POST_SLOT_DATE, slot: SLOT,
+        customerRequest: { text: 'ants', source: 'picker', pests: null, pestLabels: [] },
+      }));
+      expect(spies.ring).toHaveBeenCalledWith(expect.objectContaining({ id: CUST_ID }), {
+        id: 'plan-1', serviceDate: POST_SLOT_DATE, windowStart: '09:00', pests: [], request: 'ants',
+      });
+    });
+
+    test.each([
+      ['no plan visit in range', () => spies.find.mockResolvedValue(null)],
+      ['the plan visit is not eligible for the customer\'s own move', () => spies.elig.mockResolvedValue({ ok: false, reason: 'grouped' })],
+      ['the plan visit is gone', () => spies.load.mockResolvedValue(null)],
+      ['the plan visit\'s own picker does not offer the start', () => spies.avail.mockResolvedValue({ days: [{ date: POST_SLOT_DATE, slots: [{ ...SLOT, start_time: '10:00' }] }] })],
+      ['the picker answers nothing', () => spies.avail.mockResolvedValue(null)],
+    ])('%s: the re-service books as before and nothing moves', async (_label, arrange) => {
+      arrange();
+      await post();
+      expect(spies.move).not.toHaveBeenCalled();
+      booked();
+    });
+
+    test('a refused move is tried once more from a fresh lookup, then the re-service books', async () => {
+      spies.move.mockResolvedValue({ moved: false, why: 'taken' });
+      await post();
+      expect(spies.find).toHaveBeenCalledTimes(2);
+      expect(spies.move).toHaveBeenCalledTimes(2);
+      booked();
+      expect(spies.ring).not.toHaveBeenCalled();
+    });
+
+    test('two quick taps: the refused fold\'s retry finds the plan visit already on the slot and answers replayed, booking nothing', async () => {
+      spies.move.mockResolvedValue({ moved: false, why: 'the visit changed' });
+      spies.find.mockResolvedValueOnce(PLAN).mockResolvedValueOnce({ ...PLAN, scheduled_date: POST_SLOT_DATE, window_start: '09:00:00', window_end: '11:00:00' });
+      const res = await post();
+      expect(csb).not.toHaveBeenCalled();
+      expect(res.json.mock.calls[0][0]).toMatchObject({ success: true, replayed: true, date: POST_SLOT_DATE, window: { start: '09:00', end: '11:00' } });
+    });
+
+    test('a repeat of the pick answers replayed BEFORE any eligibility read, move, text or bell', async () => {
+      spies.find.mockResolvedValue({ ...PLAN, scheduled_date: POST_SLOT_DATE, window_start: '09:00:00', window_end: '11:00:00' });
+      const res = await post();
+      expect(res.json.mock.calls[0][0]).toMatchObject({ success: true, replayed: true, startLabel: '9:00 AM', endLabel: '11:00 AM', rescheduleUrl: '/reschedule/tok-plan' });
+      expect(spies.load).not.toHaveBeenCalled();
+      expect(spies.move).not.toHaveBeenCalled();
+      expect(spies.ring).not.toHaveBeenCalled();
+      expect(csb).not.toHaveBeenCalled();
+    });
+
+    test('a refusal the route already gives (blank details, no plan) never looks anything up', async () => {
+      gateState.reserviceDetailsRequired = true;
+      const blank = await post({ details: '', pests: [] });
+      expect(blank.status).toHaveBeenCalledWith(400);
+      delete gateState.reserviceDetailsRequired;
+      listResults['scheduled_services as s'] = [];
+      const none = await post();
+      expect(none.status).toHaveBeenCalledWith(409);
+      expect(none.json.mock.calls[0][0].code).toBe('NOT_ELIGIBLE');
+      expect(spies.find).not.toHaveBeenCalled();
+    });
+
+    test('the fold runs after every eligibility, dedupe, location and window refusal and before the slot rebuild (source order)', () => {
+      const src = fs.readFileSync(path.join(__dirname, '../routes/reservice-public.js'), 'utf8');
+      const post = src.slice(src.indexOf("router.post('/:token', commitLimiter"));
+      const at = (needle) => post.indexOf(needle);
+      const order = ["code: 'DETAILS_REQUIRED'", "code: 'NOT_ELIGIBLE'", "code: 'ALREADY_BOOKED'", 'locationReviewFailure()',
+        'outside the online scheduling window', 'await linkReserviceFold(', 'const dayAvailability = await buildAvailabilityForCustomer('];
+      order.forEach((needle) => expect(at(needle)).toBeGreaterThan(-1));
+      order.slice(1).forEach((needle, i) => expect(at(needle)).toBeGreaterThan(at(order[i])));
     });
   });
 

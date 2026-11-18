@@ -10,9 +10,34 @@ jest.mock('../routes/admin-dispatch', () => ({
   planVisitMoveForStaff: jest.fn(),
   runPlannedVisitMove: jest.fn(),
 }));
+// The customer's own move (moveFoldTargetForCustomer): the rebooker, the reschedule page's text and routing helpers, the
+// reminder path and the board broadcast are mocked; the lane check and the notice rules are the module's own inputs.
+jest.mock('../services/rebooker', () => ({ reschedule: jest.fn() }));
+jest.mock('../routes/reschedule-public', () => ({
+  _internals: {
+    moveNoticeArgs: jest.fn(async () => [{ timePromise: 'set_time' }]),
+    dayPromiseMoveIntent: jest.fn(() => ({ customerAskedTime: true })),
+    bookingPlacesInRoute: jest.fn(() => true),
+  },
+}));
+jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn(async () => ({})) }));
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => {}) }));
+jest.mock('../services/scheduling/self-serve-notice', () => ({
+  visitInsideMoveNoticeWindow: jest.fn(() => false),
+  violatesSelfServeNotice: jest.fn(() => false),
+}));
+jest.mock('../services/reservice-scheduler', () => ({
+  ...jest.requireActual('../services/reservice-scheduler'),
+  openCallbackExistsForLane: jest.fn(async () => false),
+}));
 
 const dispatch = require('../routes/admin-dispatch');
-const { moveFoldTarget, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
+const SmartRebooker = require('../services/rebooker');
+const AppointmentReminders = require('../services/appointment-reminders');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const notice = require('../services/scheduling/self-serve-notice');
+const { openCallbackExistsForLane } = require('../services/reservice-scheduler');
+const { moveFoldTarget, moveFoldTargetForCustomer, foldOfficeNotice, foldLaneForServiceKey, FOLD_DAYS } = require('../services/reservice-fold');
 
 const TARGET = {
   id: 'plan-1', customer_id: 'cust-1', property_id: null, service_id: 'svc-pest', is_callback: false,
@@ -29,6 +54,7 @@ beforeEach(() => {
   // Only the office-words copy writes; there is no other read or write on the connection.
   const query = { update };
   query.where = jest.fn(() => query);
+  query.whereRaw = jest.fn(() => query);
   conn = jest.fn(() => query);
   conn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   dispatch.planVisitMoveForStaff.mockResolvedValue(PLAN);
@@ -238,4 +264,112 @@ test('only the pest and lawn re-service keys fold; a rodent follow-up never does
   expect(foldLaneForServiceKey('rodent_trapping_followup')).toBeNull();
   expect(foldLaneForServiceKey('pest_control_quarterly')).toBeNull();
   expect(foldLaneForServiceKey(undefined)).toBeNull();
+});
+
+// ── The customer's own pick on the /reservice link (GATE_RESERVICE_FOLD_LINK) ─────────────────────────────────────────────
+describe('moveFoldTargetForCustomer', () => {
+  const FULL = {
+    id: 'plan-1', customer_id: 'cust-1', property_id: null, service_id: 'svc-1', is_callback: false,
+    scheduled_date: '2099-11-29', window_start: '13:00:00', window_end: '14:00:00', technician_id: 'tech-2',
+    service_type: 'Quarterly Pest Control Service', status: 'confirmed',
+  };
+  const SLOT = { start_time: '09:00', end_time: '11:00', technician_id: 'tech-1' };
+  const SVC = { id: 'plan-1' };
+  const customerRun = (extra = {}) => moveFoldTargetForCustomer({
+    conn, target: FULL, svc: SVC, elig: { ok: true }, lane: 'pest', date: '2099-11-17', slot: SLOT,
+    customerRequest: { text: 'Ants', source: 'picker', pests: ['ants'], pestLabels: ['Ants'] }, ...extra,
+  });
+  beforeEach(() => { SmartRebooker.reschedule.mockResolvedValue({}); });
+
+  test('moves ONE visit as the customer: the picker slot, its technician, the fold fence, and none of the staff options', async () => {
+    const out = await customerRun();
+    expect(out).toEqual({ moved: true });
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    const [id, date, window, reason, initiator, options] = SmartRebooker.reschedule.mock.calls[0];
+    expect([id, date, window, reason, initiator]).toEqual(['plan-1', '2099-11-17', { start: '09:00', end: '11:00' }, 'reservice_fold', 'customer']);
+    expect(options).toEqual({
+      technicianId: 'tech-1', seriesPolicy: 'single', travelGap: true, capacityPlacement: true, placeInRoute: true,
+      customerAskedTime: true,
+      expect: {
+        customer_id: 'cust-1', property_id: null, service_id: 'svc-1', service_type: FULL.service_type, is_recurring: true, is_callback: false,
+        scheduled_date: '2099-11-29', status: 'confirmed', visit_id: null, customer_pick_by: null,
+        window_start: '13:00:00', technician_id: 'tech-2',
+      },
+      beforeMove: expect.any(Function),
+    });
+    for (const staffOption of ['allowLive', 'overlapAdvisory', 'adminWindowRules', 'roadSpender']) expect(options).not.toHaveProperty(staffOption);
+    // reason_code is varchar(30) and initiated_by varchar(20) on reschedule_log.
+    expect(reason.length).toBeLessThanOrEqual(30);
+    expect(initiator.length).toBeLessThanOrEqual(20);
+  });
+
+  test('after the commit: the words and pests are carried once, exactly one reschedule text goes out, the board is told', async () => {
+    await customerRun();
+    expect(update.mock.calls[0][0]).toEqual({ customer_request: 'Ants', customer_request_source: 'picker', customer_request_pests: '["ants"]' });
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(1);
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('plan-1', '2099-11-17T09:00', { timePromise: 'set_time' });
+    expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'plan-1', actorId: null });
+  });
+
+  test('a visit that already has words keeps them; the new words and pests go into the notes line', async () => {
+    update.mockResolvedValueOnce(0);
+    await customerRun();
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1][0].notes.bindings[0]).toBe("[Re-service folded in, Tue, Nov 17] Customer's words (picker): Ants. Pests: Ants.");
+  });
+
+  test('a 4xx refusal wrote nothing: moved false, and nothing is carried, texted or broadcast', async () => {
+    SmartRebooker.reschedule.mockRejectedValue(Object.assign(new Error('That time is no longer open.'), { statusCode: 409, code: 'SLOT_TAKEN' }));
+    expect(await customerRun()).toEqual({ moved: false, why: 'That time is no longer open.' });
+    expect(update).not.toHaveBeenCalled();
+    expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+    expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
+  });
+
+  test('any other error is not swallowed', async () => {
+    SmartRebooker.reschedule.mockRejectedValue(new Error('boom'));
+    await expect(customerRun()).rejects.toThrow('boom');
+    expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+  });
+
+  test('a failure in the words, the text or the broadcast never undoes the move', async () => {
+    update.mockRejectedValue(Object.assign(new Error('bindings: Ants'), { code: '23505' }));
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('twilio down'));
+    emitDispatchJobUpdate.mockRejectedValueOnce(new Error('socket'));
+    expect(await customerRun()).toEqual({ moved: true });
+    // The log names the visit and the error code, never the message (it can carry the customer's words).
+    const logged = require('../services/logger').error.mock.calls.map(([m]) => m).join(' ');
+    expect(logged).toContain('code 23505');
+    expect(logged).not.toContain('bindings');
+  });
+
+  describe('beforeMove (inside the rebooker\'s locks)', () => {
+    const guard = async ({ trx = { raw: jest.fn(async () => ({})) }, ...extra } = {}) => {
+      await customerRun(extra);
+      const { beforeMove } = SmartRebooker.reschedule.mock.calls.at(-1)[5];
+      await beforeMove(trx);
+      return trx;
+    };
+
+    test('takes the same reservice-lane lock createSelfBooking takes, then passes when nothing is open', async () => {
+      const trx = await guard();
+      expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['reservice-lane', 'cust-1:pest_re_service']);
+      expect(openCallbackExistsForLane).toHaveBeenCalledWith(trx, 'cust-1', 'pest');
+    });
+
+    test('refuses with an open re-service on the lane (ALREADY_BOOKED, a 4xx: the caller books/replays)', async () => {
+      openCallbackExistsForLane.mockResolvedValueOnce(true);
+      await expect(guard()).rejects.toMatchObject({ statusCode: 409, code: 'ALREADY_BOOKED' });
+    });
+
+    test('refuses a plan visit inside the move notice (unless the visit is a missed one) and a slot inside the booking notice', async () => {
+      notice.visitInsideMoveNoticeWindow.mockReturnValueOnce(true);
+      await expect(guard()).rejects.toMatchObject({ statusCode: 409, code: 'SELF_SERVE_NOTICE' });
+      notice.visitInsideMoveNoticeWindow.mockReturnValueOnce(true);
+      await expect(guard({ elig: { ok: true, missed: true } })).resolves.toBeDefined();
+      notice.violatesSelfServeNotice.mockReturnValueOnce(true);
+      await expect(guard()).rejects.toMatchObject({ statusCode: 409, code: 'SELF_SERVE_NOTICE' });
+      expect(notice.violatesSelfServeNotice).toHaveBeenLastCalledWith({ date: '2099-11-17', startTime: '09:00' });
+    });
+  });
 });
