@@ -30,6 +30,7 @@ jest.setTimeout(30000);
     await database.schema.createTable('seo_llm_mentions', (t) => {
       t.increments('id'); t.date('check_date'); t.integer('measurement_version');
       t.boolean('answer_available'); t.boolean('citations_complete'); t.jsonb('waves_cited_urls');
+      t.uuid('query_id'); t.string('llm_platform', 40);
     });
     await database.schema.createTable('content_optimization_impact', (t) => {
       t.increments('id'); t.string('bucket', 40); t.text('page_url');
@@ -46,9 +47,9 @@ jest.setTimeout(30000);
     await database('content_optimization_impact').del();
   });
 
-  const answers = (date, n, urls) => Array.from({ length: n }, () => ({
+  const answers = (date, n, urls, extra = {}) => Array.from({ length: n }, () => ({
     check_date: date, measurement_version: 2, answer_available: true, citations_complete: true,
-    waves_cited_urls: JSON.stringify(urls),
+    waves_cited_urls: JSON.stringify(urls), ...extra,
   }));
 
   test('migration adds the five columns, is safe to run twice, and down removes exactly them', async () => {
@@ -79,6 +80,24 @@ jest.setTimeout(30000);
     expect(row.ai_change_checked_at).toBeInstanceOf(Date);
     expect(row.ai_change_alerted_at).toBeNull();
     expect(await tracker.checkAiChange({ db: database, now: NOW })).toMatchObject({ checked: 0, scanned: 0 });
+  });
+
+  test('a page whose question now cites another Waves page grades moved, not lost', async () => {
+    const question = { query_id: randomUUID(), llm_platform: 'perplexity' };
+    const [{ id }] = await database('content_optimization_impact').insert({
+      bucket: 'aeo_question_gap', page_url: page, deployed_at: new Date('2026-10-27T18:00:00Z'),
+    }).returning('id');
+    await database('seo_llm_mentions').insert([
+      ...answers('2026-10-20', 3, [page], question), ...answers('2026-10-21', 3, [], question),
+      ...answers('2026-10-22', 30, [other]), ...answers('2026-10-23', 30, []),
+      ...answers('2026-11-02', 6, [other], question),
+      ...answers('2026-11-03', 30, [other]), ...answers('2026-11-04', 30, []),
+    ]);
+    expect(await tracker.checkAiChange({ db: database, now: NOW })).toMatchObject({ checked: 1, lost: 0, moved: 1 });
+    const row = await database('content_optimization_impact').where({ id }).first();
+    expect(row.ai_change_verdict).toBe('moved');
+    expect(row.ai_change_pre).toMatchObject({ cites: 3, pairAnswers: 6, pairSiteCites: 3 });
+    expect(row.ai_change_post).toMatchObject({ cites: 0, pairAnswers: 6, pairSiteCites: 6 });
   });
 
   test('a change younger than 17 days, or with no deploy date or page, is left alone', async () => {

@@ -100,6 +100,10 @@ const AI_CHANGE_LOST_MIN_PRE_CITES = 3;
 const AI_CHANGE_LOST_RATIO = 0.5;     // control-adjusted ratio at or below = lost
 const AI_CHANGE_GAINED_MIN_POST_CITES = 3;
 const AI_CHANGE_GAINED_RATIO = 2;     // control-adjusted ratio at or above = gained
+// A would-be loss reads 'moved' when the page's own questions (the query +
+// engine pairs that cited it before) still cite Waves after, at more than
+// AI_CHANGE_LOST_RATIO of their old rate, over this many measured answers.
+const AI_CHANGE_MOVED_MIN_PAIR_ANSWERS = 3;
 const AI_CHANGE_BATCH = 50;           // rows judged per daily tick
 
 // ── pure verdict core ───────────────────────────────────────────────
@@ -124,12 +128,17 @@ function aeoVerdict({ observedDays, wavesHitDays, minObservations = AEO_MIN_OBSE
  * side, i.e. no Waves citation anywhere in that window). A page cite is also a
  * site cite, so that only happens when the page itself had none; a site-wide
  * blackout is a prober problem, not a verdict on one page, so it reads flat.
+ *
+ * A loss whose questions still cite Waves through another page reads 'moved'
+ * (see answersMovedOnSite): the site kept the answer, so nothing is alerted.
  */
 function aiChangeVerdict({ pre, post } = {}) {
   const w = (x) => ({
     answers: Number(x?.answers) || 0,
     cites: Number(x?.cites) || 0,
     siteCites: Number(x?.siteCites) || 0,
+    pairAnswers: Number(x?.pairAnswers) || 0,
+    pairSiteCites: Number(x?.pairSiteCites) || 0,
   });
   const a = w(pre);
   const b = w(post);
@@ -143,12 +152,26 @@ function aiChangeVerdict({ pre, post } = {}) {
   const ratio = rPre > 0 && sPre > 0 && sPost > 0 ? (rPost / rPre) / (sPost / sPre) : null;
 
   if (a.cites >= AI_CHANGE_LOST_MIN_PRE_CITES && ratio != null && ratio <= AI_CHANGE_LOST_RATIO) {
-    return { verdict: 'lost', ratio };
+    return { verdict: answersMovedOnSite(a, b) ? 'moved' : 'lost', ratio };
   }
   if (b.cites >= AI_CHANGE_GAINED_MIN_POST_CITES && (a.cites === 0 || (ratio != null && ratio >= AI_CHANGE_GAINED_RATIO))) {
     return { verdict: 'gained', ratio };
   }
   return { verdict: 'flat', ratio };
+}
+
+/**
+ * Pure: did the answers that cited this page before keep citing Waves after?
+ * pairAnswers / pairSiteCites count only the page's own questions (see
+ * tallyAiChangeWindows). If their Waves rate held above AI_CHANGE_LOST_RATIO
+ * of its old value, the engine now cites a different Waves page for them.
+ * Rows stored before these counts existed carry none and stay a plain loss.
+ */
+function answersMovedOnSite(pre, post) {
+  if (pre.pairAnswers === 0 || post.pairAnswers < AI_CHANGE_MOVED_MIN_PAIR_ANSWERS) return false;
+  const before = pre.pairSiteCites / pre.pairAnswers;
+  const after = post.pairSiteCites / post.pairAnswers;
+  return before > 0 && after / before > AI_CHANGE_LOST_RATIO;
 }
 
 /**
@@ -169,11 +192,17 @@ function aiChangeWindows(deployedAt) {
 /**
  * Pure: one pass over the stored answers, counted into the two windows.
  * Same measured-answer and citation rules as checkAeoVisibility.
+ *
+ * pairAnswers / pairSiteCites repeat answers / siteCites for the page's own
+ * questions only: the (query_id, llm_platform) pairs that cited this page in
+ * the pre window. An answer with no query id or engine joins no pair.
  */
 function tallyAiChangeWindows(observations, page, windows) {
-  const empty = (win) => ({ from: win.from, to: win.to, answers: 0, cites: 0, siteCites: 0 });
+  const empty = (win) => ({ from: win.from, to: win.to, answers: 0, cites: 0, siteCites: 0, pairAnswers: 0, pairSiteCites: 0 });
   const pre = empty(windows.pre);
   const post = empty(windows.post);
+  const pagePairs = new Set();
+  const counted = [];
   for (const o of observations || []) {
     if (!isMeasuredAnswer(o)) continue;
     const d = observationDate(o.check_date);
@@ -181,8 +210,17 @@ function tallyAiChangeWindows(observations, page, windows) {
     if (!target) continue;
     target.answers += 1;
     const owned = ownedCitations(o);
+    const citesPage = owned.some((url) => citationMatchesPage(url, page));
     if (owned.length) target.siteCites += 1;
-    if (owned.some((url) => citationMatchesPage(url, page))) target.cites += 1;
+    if (citesPage) target.cites += 1;
+    const pair = o.query_id && o.llm_platform ? `${o.query_id}|${o.llm_platform}` : null;
+    if (pair && citesPage && target === pre) pagePairs.add(pair);
+    if (pair) counted.push({ target, pair, cited: owned.length > 0 });
+  }
+  for (const c of counted) {
+    if (!pagePairs.has(c.pair)) continue;
+    c.target.pairAnswers += 1;
+    if (c.cited) c.target.pairSiteCites += 1;
   }
   return { pre, post };
 }
@@ -902,7 +940,7 @@ async function evaluateAiChange(database, row) {
   const windows = aiChangeWindows(row.deployed_at);
   const observations = await database('seo_llm_mentions')
     .whereBetween('check_date', [windows.pre.from, windows.post.to])
-    .select('check_date', 'measurement_version', 'answer_available', 'citations_complete', 'waves_cited_urls');
+    .select('check_date', 'measurement_version', 'answer_available', 'citations_complete', 'waves_cited_urls', 'query_id', 'llm_platform');
   const { pre, post } = tallyAiChangeWindows(observations, row.page_url, windows);
   const { verdict, ratio } = aiChangeVerdict({ pre, post });
   return { deploy: windows.deploy, pre, post, verdict, ratio };
@@ -931,7 +969,7 @@ async function checkAiChange({ db: database = db, now = new Date(), limit = AI_C
     return { checked: 0, error: err.message };
   }
 
-  const counts = { gained: 0, lost: 0, flat: 0, no_data: 0 };
+  const counts = { gained: 0, lost: 0, moved: 0, flat: 0, no_data: 0 };
   let checked = 0;
   for (const row of pending) {
     try {
@@ -1001,6 +1039,6 @@ module.exports = {
     LIFT_POSITION_REGRESSED, LIFT_CLICKS_REGRESSED_PCT, REGRESSION_PAUSE_THRESHOLD,
     LAUNCH_MIN_IMPRESSIONS, LAUNCH_RANKED_POSITION,
     AI_CHANGE_SETTLE_DAYS, AI_CHANGE_MIN_CITES_TOTAL, AI_CHANGE_LOST_MIN_PRE_CITES, AI_CHANGE_LOST_RATIO,
-    AI_CHANGE_GAINED_MIN_POST_CITES, AI_CHANGE_GAINED_RATIO, AI_CHANGE_BATCH,
+    AI_CHANGE_GAINED_MIN_POST_CITES, AI_CHANGE_GAINED_RATIO, AI_CHANGE_MOVED_MIN_PAIR_ANSWERS, AI_CHANGE_BATCH,
   },
 };

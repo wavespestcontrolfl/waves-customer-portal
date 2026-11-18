@@ -671,6 +671,31 @@ describe('aiChangeVerdict — before-and-after AI citations, control-adjusted', 
     expect(out.verdict).toBe('flat');
     expect(out.ratio).toBeNull();
   });
+
+  // The 11-17 false alarm: one question on one engine cited the page 3 times
+  // in 11 answers before; after, it cited another Waves page in 14 of 14.
+  const pairs = (w, pairAnswers, pairSiteCites) => ({ ...w, pairAnswers, pairSiteCites });
+
+  test('a loss whose questions now cite another Waves page reads moved, not lost', () => {
+    const out = aiChangeVerdict({ pre: pairs(win(2187, 3, 765), 11, 9), post: pairs(win(3484, 0, 1024), 14, 14) });
+    expect(out.verdict).toBe('moved');
+    expect(out.ratio).toBe(0);
+  });
+
+  test('the questions lost Waves too (rate at or below half) -> still lost', () => {
+    expect(aiChangeVerdict({ pre: pairs(win(100, 10, 40), 20, 10), post: pairs(win(100, 2, 40), 20, 5) }).verdict).toBe('lost');
+    expect(aiChangeVerdict({ pre: pairs(win(100, 10, 40), 20, 10), post: pairs(win(100, 2, 40), 20, 6) }).verdict).toBe('moved');
+  });
+
+  test('moved needs 3 measured answers on those questions after; rows with no pair counts stay lost', () => {
+    expect(aiChangeVerdict({ pre: pairs(win(100, 10, 40), 20, 10), post: pairs(win(100, 2, 40), 2, 2) }).verdict).toBe('lost');
+    expect(aiChangeVerdict({ pre: win(100, 10, 40), post: win(100, 2, 40) }).verdict).toBe('lost');
+  });
+
+  test('pair counts never turn a flat or gained page into moved', () => {
+    expect(aiChangeVerdict({ pre: pairs(win(100, 10, 40), 20, 10), post: pairs(win(100, 6, 40), 20, 20) }).verdict).toBe('flat');
+    expect(aiChangeVerdict({ pre: pairs(win(100, 5, 40), 10, 5), post: pairs(win(100, 10, 40), 10, 10) }).verdict).toBe('gained');
+  });
 });
 
 describe('aiChangeWindows — ET calendar days around the deploy', () => {
@@ -739,6 +764,22 @@ describe('tallyAiChangeWindows', () => {
       obs(new Date('2026-10-21T00:00:00Z'), [page]),
     ], page, windows);
     expect(out.pre).toMatchObject({ answers: 2, cites: 1, siteCites: 1 });
+  });
+
+  test('pair counts cover only the query + engine pairs that cited the page before', () => {
+    const sibling = 'https://www.wavespestcontrol.com/pest-control/one-time-vs-plan/';
+    const q = (query_id, llm_platform) => ({ query_id, llm_platform });
+    const out = tallyAiChangeWindows([
+      obs('2026-10-20', [page], q('q1', 'perplexity')),
+      obs('2026-10-21', [], q('q1', 'perplexity')),
+      obs('2026-10-21', [sibling], q('q1', 'gemini')), // same query, other engine: not a pair
+      obs('2026-10-22', [page], q(null, 'perplexity')), // no query id: joins no pair
+      obs('2026-11-01', [sibling], q('q1', 'perplexity')),
+      obs('2026-11-02', [sibling], q('q1', 'perplexity')),
+      obs('2026-11-03', [], q('q2', 'perplexity')),
+    ], page, windows);
+    expect(out.pre).toMatchObject({ answers: 4, cites: 2, siteCites: 3, pairAnswers: 2, pairSiteCites: 1 });
+    expect(out.post).toMatchObject({ answers: 3, cites: 0, siteCites: 2, pairAnswers: 2, pairSiteCites: 2 });
   });
 });
 
