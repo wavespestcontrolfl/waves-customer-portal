@@ -402,6 +402,8 @@ postgres('hold grace + extend (real Postgres)', () => {
         await ctx.trx('scheduled_services').insert({
           id: stopId, customer_id: stopCustomer, scheduled_date: ctx.date, window_start: '13:00:00', window_end: '14:00:00',
           estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service', status: 'confirmed', reservation_expires_at: null,
+          // A recurring child: the night told-lock keeps a first or one-time visit fixed, so the accept would refuse it.
+          is_recurring: true, recurring_parent_id: randomUUID(),
         });
         const chain = (shiftMin = 60) => ({ v: 1, date: ctx.date, techId: null, shiftMin, moves: [{ id: stopId, from: '13:00', to: '14:00', widthMin: 60 }] });
         await ctx.trx('scheduled_services').where({ id: ctx.holdId }).update({ make_room_moves: chain() });
