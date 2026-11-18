@@ -226,6 +226,20 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     expect(await promo.promoCodeViewForEstimate(est)).toBeNull();
   });
 
+  test('an estimate accepted with no customer account closes its code with an activity row; one not accepted is left alone', async () => {
+    const disc = await discount();
+    const open = await estimate();
+    await enter(open, disc.promo_code);
+    expect(await promo.redeemPromoCodeForAcceptedEstimate({ estimateId: open.id })).toBe('none');
+    expect((await db('estimate_promo_codes').where({ estimate_id: open.id }).first()).status).toBe('entered');
+
+    expect(await accept(open, null)).toBe('void');
+    expect(await db('estimate_promo_codes').where({ estimate_id: open.id }).first())
+      .toMatchObject({ status: 'void', void_reason: 'no_customer' });
+    expect(await db('activity_log').where({ estimate_id: open.id, action: 'estimate_promo_code_not_credited' })).toHaveLength(1);
+    expect(await usesOf(disc.id)).toBe(0);
+  });
+
   test('a customer redeems a code once: a second accepted estimate with it posts nothing', async () => {
     const cust = await customer();
     const disc = await discount();

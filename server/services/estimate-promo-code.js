@@ -42,6 +42,7 @@ const VOID_REASONS = {
   code_inactive: 'the code was switched off',
   customer_not_eligible: 'this customer is not eligible for the code or already used it',
   uses_exhausted: 'the code ran out of uses',
+  no_customer: 'the accepted estimate has no customer account',
 };
 
 const gateOn = () => isEnabled('estimatePromoCode');
@@ -196,8 +197,11 @@ async function redeemInTransaction(trx, estimateId) {
   const row = await trx('estimate_promo_codes').where({ estimate_id: estimateId, status: 'entered' }).forUpdate().first();
   if (!row) return 'none';
   const accepted = await trx('estimates').where({ id: estimateId, status: 'accepted' }).first('customer_id');
-  const customerId = accepted?.customer_id;
-  if (!customerId) return 'none';
+  if (!accepted) return 'none';
+  const customerId = accepted.customer_id;
+  // Accepted with no customer account to credit: closed with its audit row so
+  // the office sees the promise, never left waiting on a step that will not run.
+  if (!customerId) return voidRow(trx, { row, customerId: null, reason: 'no_customer' });
   const discount = await trx('discounts').where({ id: row.discount_id }).first();
   if (!discount || discount.is_active !== true) return voidRow(trx, { row, customerId, reason: 'code_inactive' });
   if (await customerBlocked(trx, customerId, discount)) return voidRow(trx, { row, customerId, reason: 'customer_not_eligible' });
