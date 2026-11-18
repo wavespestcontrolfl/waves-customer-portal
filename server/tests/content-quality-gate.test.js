@@ -374,6 +374,11 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(checkRedactionPassed({
       body: '## How Much Sphagnum Peat Moss to Use\n\nUF/IFAS says stress relief comes first. Spread the peat in Sarasota as a thin layer.',
     }).ok).toBe(true);
+    // The attribution the Q03 brief prescribes for its Texas source: this
+    // sentence opening passes the body name scan.
+    expect(checkRedactionPassed({
+      body: 'Texas A&M researchers found that peat moss reduced symptoms. Spread it in Bradenton as a thin layer over the lawn.',
+    }).ok).toBe(true);
     const kate = checkRedactionPassed({ body: '## Kate Moss\n\nOur treatment schedule is weekly.' });
     expect(kate.ok).toBe(false);
     expect(kate.reason).toBe('unredacted_name_in_heading');
