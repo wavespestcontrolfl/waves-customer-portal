@@ -464,7 +464,7 @@ Object.assign(api, {
       ...(historyProperty ? { historyProperty, historyCustomerId: CUSTOMER.id } : {}),
       ...(SAVED_PROPERTIES && propertyScoped ? { propertyScope: savedScopeEcho() } : {}),
       services: records.slice(offset, offset + limit).map(v => ({
-        ...v, propertyAddress: SAVED_ENTRIES.find(entry => entry.propertyId === v.propertyId)?.address.line1 || null,
+        ...v, ...(propertyScoped ? { homeSummary: v.notes || null } : {}), propertyAddress: SAVED_ENTRIES.find(entry => entry.propertyId === v.propertyId)?.address.line1 || null,
       })),
       total: records.length, limit, offset,
     };

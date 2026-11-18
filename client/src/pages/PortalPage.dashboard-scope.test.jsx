@@ -91,7 +91,7 @@ describe('Home under a saved-property selection', () => {
   it('Last Visit follows the echo: a read the server scoped to ANOTHER house is withheld and the list is re-read; a matching echo renders the card', async () => {
     const visit = {
       id: 'svc-9', type: 'Quarterly Pest Control', date: '2026-09-01', status: 'completed',
-      notes: 'Reviewed closeout for this home.', technician_notes: 'raw internal note',
+      homeSummary: 'Reviewed closeout for this home.', notes: 'Unabridged project recommendations.', technician_notes: 'raw internal note',
       reportUrl: '/report/report-9', reportAvailable: true,
     };
     const refresh = vi.fn();
@@ -106,6 +106,7 @@ describe('Home under a saved-property selection', () => {
     expect(await screen.findByText('Last Visit')).toBeInTheDocument();
     expect(screen.getByText('Reviewed closeout for this home.')).toBeInTheDocument();
     expect(screen.queryByText('raw internal note')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unabridged project recommendations.')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'View service report' })).toHaveAttribute('href', '/report/report-9?source=portal_home');
     expect(screen.queryByText(/Open Visits/i)).not.toBeInTheDocument();
   });

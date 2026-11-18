@@ -3542,14 +3542,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
               </div>
             </div>
           </div>
-          {lastService.notes?.length > 220 ? (
-            <details style={{ marginTop: 12, color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
-              <summary>Visit summary</summary>
-              <p>{lastService.notes}</p>
-            </details>
-          ) : lastService.notes ? (
+          {lastService.homeSummary ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
-              {lastService.notes}
+              {lastService.homeSummary}
             </p>
           ) : lastService.reportAvailable !== false ? (
             <div style={{ marginTop: 12 }}>
@@ -3747,15 +3742,56 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
 // =========================================================================
 // SERVICES TAB
 // =========================================================================
-function ServicesTab({ historyProperty = null, customerId = null }) {
+function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUnavailable = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const reportPanelIdPrefix = useId();
   const [services, setServices] = useState([]);
+  const historyScopeKey = `${customerId || 'customer'}:${historyProperty || 'profile'}`;
+  const mountedRef = useRef(false);
+  const activeHistoryScopeRef = useRef(historyScopeKey);
+  const scopeRefreshRequestedRef = useRef(null);
+  if (activeHistoryScopeRef.current !== historyScopeKey) {
+    activeHistoryScopeRef.current = historyScopeKey;
+    scopeRefreshRequestedRef.current = null;
+  }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const requestPropertyRefresh = (requestedScopeKey) => {
+    if (!mountedRef.current
+      || activeHistoryScopeRef.current !== requestedScopeKey
+      || scopeRefreshRequestedRef.current === requestedScopeKey
+      || typeof onSavedScopeUnavailable !== 'function') return;
+    scopeRefreshRequestedRef.current = requestedScopeKey;
+    // Start on a microtask so an unmount/property switch caused by the same
+    // response can invalidate this request first. A failed picker refresh
+    // leaves the history error visible and is not retried in a loop.
+    Promise.resolve()
+      .then(() => {
+        if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return undefined;
+        return onSavedScopeUnavailable();
+      })
+      .catch(() => {});
+  };
   const readPage = async (pagination) => {
-    const result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
+    const requestedScopeKey = historyScopeKey;
+    let result;
+    try {
+      result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
+    } catch (error) {
+      if (historyProperty && error?.status === 409) requestPropertyRefresh(requestedScopeKey);
+      throw error;
+    }
+    if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) {
+      throw new Error('This service-history request is no longer current.');
+    }
     if (historyProperty && (result.historyProperty !== historyProperty || result.historyCustomerId !== customerId)) {
-      throw new Error('Your selected property changed. Reopen Visits to see its history.');
+      requestPropertyRefresh(requestedScopeKey);
+      const mismatch = new Error('Your selected property changed. Reopen Visits to see its history.');
+      mismatch.status = 409;
+      throw mismatch;
     }
     return result;
   };
@@ -17469,7 +17505,7 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
               </CustomerSelect>
             </label>
           )}
-          <ServicesTab key={historyProperty || 'profile'} historyProperty={historyProperty} customerId={customer?.id} />
+          <ServicesTab key={historyProperty || 'profile'} historyProperty={historyProperty} customerId={customer?.id} onSavedScopeUnavailable={onSavedScopeUnavailable} />
         </>
       )}
     </div>

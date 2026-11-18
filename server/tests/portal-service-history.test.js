@@ -100,3 +100,13 @@ test('GET /api/services asks for completed visits only', () => {
   const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/services.js'), 'utf8');
   expect(source).toMatch(/listPortalServiceHistory\(req\.customerId, \{\s*limit, offset, type, scope, completedOnly: true,/);
 });
+
+test('history uses the address frozen on the report before later property data', async () => {
+  wire({ service_records: [{
+    id: 'completed', customer_id: 'homeowner', visit_customer_id: 'homeowner',
+    property_line1: '100 New Road', service_address_line1: '200 Rescheduled Road',
+    service_data: { reportIdentitySnapshot: { version: 1, address: { line1: '300 Report Road', city: 'Sample' } } },
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
+  expect(services[0].propertyAddress).toBe('300 Report Road, Sample');
+});

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => {
@@ -54,9 +54,38 @@ describe('Completed visits by property', () => {
   });
 
   it('withholds records served for another property or by an older server', async () => {
+    const refreshProperties = vi.fn();
     api.getServices.mockResolvedValue({ services: [{ id: 'wrong', type: 'Wrong house' }], historyProperty: 'pb', historyCustomerId: customer.id });
-    openCompleted();
+    openCompleted({ onSavedScopeUnavailable: refreshProperties });
     expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Wrong house')).not.toBeInTheDocument();
+  });
+
+  it('refreshes a 409 property conflict once and retains the safe error fallback when that refresh fails', async () => {
+    const conflict = Object.assign(new Error('Your selected property changed.'), { status: 409 });
+    const refreshProperties = vi.fn(() => Promise.reject(new Error('property list unavailable')));
+    api.getServices.mockRejectedValue(conflict);
+    openCompleted({ onSavedScopeUnavailable: refreshProperties });
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    await waitFor(() => expect(api.getServices).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    expect(refreshProperties).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not refresh the picker or publish stale history after the page unmounts', async () => {
+    let resolveHistory;
+    const refreshProperties = vi.fn();
+    api.getServices.mockImplementation(() => new Promise(resolve => { resolveHistory = resolve; }));
+    const view = openCompleted({ onSavedScopeUnavailable: refreshProperties });
+    await waitFor(() => expect(api.getServices).toHaveBeenCalledTimes(1));
+    view.unmount();
+    await act(async () => {
+      resolveHistory({ services: [{ id: 'wrong', type: 'Wrong house' }], historyProperty: 'pb', historyCustomerId: customer.id });
+    });
+    expect(refreshProperties).not.toHaveBeenCalled();
     expect(screen.queryByText('Wrong house')).not.toBeInTheDocument();
   });
 

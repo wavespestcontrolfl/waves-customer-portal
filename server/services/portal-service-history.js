@@ -11,6 +11,7 @@ const db = require('../models/db');
 // legacy inspection-fee scrub on top (owner ruling 2026-10-01; codex #2817).
 const { customerSafeVisitNotes } = require('./context-aggregator');
 const { applyPropertyPredicate } = require('./account-properties');
+const { readReportIdentitySnapshot } = require('./service-report/report-identity-snapshot');
 const { formatAddress } = require('../utils/address-normalizer');
 
 // Saved-property scope (GATE_APP_PROPERTY_SCOPE) on a service-record query
@@ -22,6 +23,16 @@ function scopeRecordsToProperty(query, scope) {
   if (!scope || !scope.enabled || !scope.scoped) return query;
   if (scope.closed || !scope.property) return query.whereRaw('1 = 0');
   return applyPropertyPredicate(query, scope, 'scheduled_services');
+}
+
+function historyAddress(record, customerId) {
+  const frozen = readReportIdentitySnapshot(record)?.address;
+  if (frozen && typeof frozen === 'object') return formatAddress(frozen) || null;
+  if (String(record.visit_customer_id) !== String(customerId)) return null;
+  const address = record.service_address_line1
+    ? { line1: record.service_address_line1, line2: record.service_address_line2, city: record.service_address_city }
+    : { line1: record.property_line1, line2: record.property_line2, city: record.property_city };
+  return formatAddress(address) || null;
 }
 
 function parseJsonObject(value) {
@@ -151,16 +162,9 @@ async function listPortalServiceHistory(customerId, {
     // Any typed delivery posture other than auto_send (internal_only
     // shadow, disabled kill switch) keeps report links off customer surfaces.
     const internalOnlyReport = suppressCustomerArtifacts;
-    // Use the booking-time address as a unit. Current property details are
-    // only a fallback for linked visits that predate the address stamp.
-    const historyAddress = historyProperty && String(svc.visit_customer_id) === String(customerId)
-      ? formatAddress(svc.service_address_line1
-        ? { line1: svc.service_address_line1, line2: svc.service_address_line2, city: svc.service_address_city }
-        : { line1: svc.property_line1, line2: svc.property_line2, city: svc.property_city })
-      : null;
     return {
       id: svc.id,
-      ...(historyProperty ? { propertyAddress: historyAddress || null } : {}),
+      ...(historyProperty ? { propertyAddress: historyAddress(svc, customerId) } : {}),
       date: svc.service_date,
       type: svc.service_type,
       status: svc.status || null,

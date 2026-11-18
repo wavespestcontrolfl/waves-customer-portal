@@ -120,3 +120,7 @@ test('withholds an excerpt when the qualifier falls outside the displayed senten
   expect(require('../services/service-report/technician-report-copy').customerCopyViolations(reviewed)).toEqual([]);
   expect(sentence(reviewed)).toBeNull();
 });
+
+test('screens the full source even when a project’s opening sentence can be shown alone', () => {
+  expect(sentence('Your project is complete. The treatment is completely safe.')).toBeNull();
+});

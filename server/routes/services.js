@@ -21,6 +21,7 @@ const CUSTOMER_PRODUCT_COLUMNS = [
 const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const applicationLimits = require('../services/application-limits');
+const { completionSummarySentence } = require('../services/service-report/technician-report-copy');
 const { appPropertyScopeEnabled, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 // Contact session (GATE_CONTACT_LOGIN): a contact the report rule withholds
 // from (a tenant, an occupant on a managed account) reads the visit list and
@@ -84,7 +85,9 @@ router.get('/', async (req, res, next) => {
       // on a mismatch (uncapped codex r1v P1) — same echo as /schedule.
       ...(propertyScoped && scope ? { propertyScope: resolvedScopePayload(scope) } : {}),
       ...(historyProperty ? { historyProperty, historyCustomerId: req.customerId } : {}),
-      services: enriched,
+      services: propertyScoped
+        ? enriched.map((row) => ({ ...row, homeSummary: completionSummarySentence(row.notes) }))
+        : enriched,
       total,
       limit: parseInt(limit),
       offset: parseInt(offset),

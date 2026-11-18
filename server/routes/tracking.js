@@ -13,7 +13,7 @@ const {
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { computeStopsAhead } = require('../services/stops-ahead');
 const { listPortalServiceHistory } = require('../services/portal-service-history');
-const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
+const { completionSummarySentence } = require('../services/service-report/technician-report-copy');
 // Contact session (GATE_CONTACT_LOGIN): no public /track bearer, the
 // holder's primary property's visits only (whatever GATE_APP_PROPERTY_SCOPE
 // says — codex #6363 r16 security P1), and the scope echo the contact app
@@ -236,14 +236,6 @@ function formatScheduledTracker(service, tech, customer) {
     customerLocation: custLat != null && custLng != null ? { lat: custLat, lng: custLng } : null,
     techPosition: null,
   };
-}
-
-function completionSummarySentence(value) {
-  const firstLine = String(value || '').trim().split(/\r?\n/, 1)[0].trim();
-  if (!firstLine) return null;
-  const sentence = firstLine.match(/^.*?[.!?](?=\s|$)/)?.[0] || firstLine;
-  const excerpt = sentence.length > 280 ? `${sentence.slice(0, 277).trimEnd()}...` : sentence;
-  return customerCopyViolations(excerpt).length ? null : excerpt;
 }
 
 // End the signed-in visit tracker with the report for this exact stop. The
