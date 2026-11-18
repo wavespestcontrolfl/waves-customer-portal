@@ -9,13 +9,13 @@ jest.mock('../services/account-properties', () => ({ applyPropertyPredicate: jes
 const db = require('../models/db');
 const { listPortalServiceHistory } = require('../services/portal-service-history');
 
-function wire() {
+function wire(rows = {}) {
   const builders = [];
   db.mockImplementation((table) => {
     const b = { table };
     for (const m of ['where', 'leftJoin', 'select', 'orderBy', 'limit', 'offset', 'count', 'whereRaw']) b[m] = jest.fn(() => b);
     b.first = jest.fn(async () => ({ count: '0' }));
-    b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+    b.then = (resolve, reject) => Promise.resolve(rows[table] || []).then(resolve, reject);
     builders.push(b);
     return b;
   });
@@ -45,6 +45,38 @@ test('without completedOnly every record is listed', async () => {
   await listPortalServiceHistory('cust-1', { limit: 20 });
   expect(statusFilters(builders)).toEqual([0, 0]);
   expect(siblingFilters(builders)).toEqual([0, 0]);
+});
+
+test('scheduledServiceId fences both the canonical list and its count to one stop', async () => {
+  const builders = wire();
+  await listPortalServiceHistory('cust-1', { scheduledServiceId: 'visit-1', completedOnly: true });
+  const records = builders.filter((b) => b.table === 'service_records');
+  expect(records).toHaveLength(2);
+  for (const builder of records) {
+    expect(builder.where).toHaveBeenCalledWith('service_records.scheduled_service_id', 'visit-1');
+  }
+  expect(siblingFilters(builders)).toEqual([1, 1]);
+});
+
+test.each(['internal_only', 'disabled'])('a project URL stays suppressed when portalAttached conflicts with %s delivery', async (typedReportDelivery) => {
+  const projectUrl = '/api/projects/private-report.pdf';
+  wire({
+    service_records: [{
+      id: 'project-record', customer_id: 'cust-1', completion_source: 'project_completion',
+      structured_notes: { typedReportDelivery, projectCompletion: true, portalAttached: true, projectReport: { url: projectUrl } },
+    }],
+  });
+  const { services } = await listPortalServiceHistory('cust-1');
+  expect(services[0]).toMatchObject({
+    projectReportPortalAttached: false,
+    reportUrl: null,
+    reportPdfUrl: null,
+    reportToken: null,
+    reportGeneratedAt: null,
+    reportViewedAt: null,
+    reportAvailable: false,
+  });
+  expect(JSON.stringify(services[0])).not.toContain(projectUrl);
 });
 
 test('a legacy NULL-status record counts as completed in the list, the total and the sibling pick', () => {

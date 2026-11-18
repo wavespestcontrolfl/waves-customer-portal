@@ -80,6 +80,11 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const portalHomeReportUrl = (url) => {
+  if (!url || !String(url).startsWith('/report/')) return url;
+  const join = String(url).includes('?') ? '&' : '?';
+  return `${url}${join}source=portal_home`;
+};
 
 // Authenticated fetch → blob download for Bearer-only report endpoints. A
 // bare <a href> to these endpoints opens a raw 401 JSON page (no cookie
@@ -2798,6 +2803,7 @@ function SavedVisitDetails({ visits }) {
   return <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
     {visits.map(visit => <li key={visit.id} style={{ marginBottom: 12 }}>
       <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
+      {visit.propertyAddress && <div>{visit.propertyAddress}</div>}
       <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
       {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
       {/* GATE_DAY_ONLY_PROMISE: the customer was told only the day; the server sends no hour. */}
@@ -2839,6 +2845,9 @@ function rememberPetNameAskDone(customerId) {
 }
 
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
+  const { preview: reportPreview, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+    () => showCustomerAlert('Could not open this report. Please try again.'),
+  );
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -3164,6 +3173,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {reportPreview && <DocumentPreviewOverlay preview={reportPreview} onClose={closeReportPreview} onError={() => showCustomerAlert('Could not save this report. Please try again.')} />}
       {/* Service-day tracker leads the dashboard (owner ruling 2026-08-14):
           on the day of service, where the tech is matters more than the
           greeting. ServiceTracker renders null on every other day, so
@@ -3532,20 +3542,42 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
               </div>
             </div>
           </div>
-          {(lastService.notes || lastService.technician_notes) ? (
+          {lastService.notes ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
-              {((lastService.notes || lastService.technician_notes) || '').slice(0, 220)}
-              {((lastService.notes || lastService.technician_notes) || '').length > 220 ? '...' : ''}
+              {lastService.notes.slice(0, 220)}
+              {lastService.notes.length > 220 ? '...' : ''}
             </p>
-          ) : (
+          ) : lastService.reportAvailable !== false ? (
             <div style={{ marginTop: 12 }}>
               <PortalInlineState
                 icon="document"
                 title="Report available"
-                message="Open Visits for the full service summary and documents."
+                message="Your full service report is ready below."
               />
             </div>
-          )}
+          ) : null}
+          {lastService.reportUrl ? (
+            <a href={portalHomeReportUrl(lastService.reportUrl)} data-glass-accent="" style={{ ...dashboardPrimaryButton, display: 'inline-flex', marginTop: 14, textDecoration: 'none' }}>
+              View service report
+            </a>
+          ) : lastService.reportAvailable !== false ? (
+            <button
+              type="button"
+              data-glass-accent=""
+              style={{ ...dashboardPrimaryButton, marginTop: 14 }}
+              onClick={() => {
+                const url = resolveApiAssetUrl(lastService.reportPdfUrl || api.getServiceReportUrl(lastService.id));
+                const doc = { id: lastService.id, title: 'Service report', fileName: `Service_Report_${lastService.date}.pdf`, pdfUrl: url };
+                // Match Visits: iOS can preview a fetched PDF in-app;
+                // Android WebView cannot, so fetch it and hand the bytes to
+                // the OS share/save sheet through downloadAuthedPdf.
+                if (isNativeApp() && nativePlatform() !== 'android') { openReportPdf(doc, url); return; }
+                downloadAuthedPdf(url, doc.fileName).catch(() => showCustomerAlert('Could not open this report. Please try again.'));
+              }}
+            >
+              View service report
+            </button>
+          ) : null}
         </section>
       ) : (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -3688,16 +3720,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
 // =========================================================================
 // SERVICES TAB
 // =========================================================================
-function ServicesTab() {
+function ServicesTab({ historyProperty = null, customerId = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const reportPanelIdPrefix = useId();
   const [services, setServices] = useState([]);
-  // The Completed list stays CUSTOMER-wide by ruling (PR 2 r1f; kept in PR 4
-  // after review): a retired house has no picker entry left to reach its
-  // visits and reports, and pre-linkage visits must stay reachable when the
-  // primary itself is retired. The disclosure below says so.
-  const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
+  const readPage = async (pagination) => {
+    const result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
+    if (historyProperty && (result.historyProperty !== historyProperty || result.historyCustomerId !== customerId)) {
+      throw new Error('Your selected property changed. Reopen Visits to see its history.');
+    }
+    return result;
+  };
+  const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, () => readPage({ limit: 100 }));
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
@@ -3738,7 +3773,7 @@ function ServicesTab() {
     if (loadingMore) return;
     setLoadingMore(true);
     const attempt = ++moreSequence.current;
-    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
+    readPage({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
       .then(d => {
         if (moreSequence.current !== attempt) return;
         // The offset runs against a live newest-first query — a visit
@@ -3866,7 +3901,7 @@ function ServicesTab() {
     }
     if (searchTerm.trim()) {
       const q = searchTerm.toLowerCase();
-      const haystack = [s.notes, s.type, s.technician].filter(Boolean).join(' ').toLowerCase();
+      const haystack = [s.notes, s.type, s.technician, s.propertyAddress].filter(Boolean).join(' ').toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     return true;
@@ -4002,7 +4037,7 @@ function ServicesTab() {
           eyebrow="Completed Visits"
           title={services.length === 0 ? 'No completed visits yet' : 'No visits match those filters'}
           message={services.length === 0
-            ? "Your completed service reports will appear here after your first appointment."
+            ? (historyProperty && historyProperty !== 'all' ? 'No completed visits are linked to this property. Choose “All properties on this profile” to see older visits.' : 'Your completed service reports will appear here after your first appointment.')
             : 'Try clearing the year, type, or search filters to see more visit history.'}
           actionLabel={services.length === 0 ? undefined : 'Clear Filters'}
           onAction={services.length === 0 ? undefined : () => { setTypeFilter('All'); setYearFilter('All'); setSearchTerm(''); }}
@@ -4061,6 +4096,7 @@ function ServicesTab() {
                           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                           </div>
+                          {historyProperty && <div style={{ fontSize: 14, color: muted }}>{s.propertyAddress || 'Address unavailable'}</div>}
                         </div>
                       </div>
                       {/* Every row in this list is a finished visit — a
@@ -13303,6 +13339,10 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
 function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const [tracker, setTracker] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [reportRefreshing, setReportRefreshing] = useState(false);
+  const { preview: reportPreview, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+    () => showCustomerAlert('Could not open this report. Please try again.'),
+  );
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);
   // Monotonic sequence for tracker fetches: the 15s poll overlaps the initial
@@ -13345,7 +13385,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
 
   const fetchTracker = useCallback(() => {
     const seq = ++trackerSeqRef.current;
-    api.getActiveTracker()
+    return api.getActiveTracker()
       .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) setLoading(false); });
   }, [adoptTracker]);
@@ -13397,6 +13437,32 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const eta = tracker.etaMinutes;
   const notes = tracker.liveNotes || [];
   const summary = tracker.serviceSummary;
+  const refreshPendingReport = () => {
+    const displayedTrackerId = tracker.id;
+    const seq = ++trackerSeqRef.current;
+    setReportRefreshing(true);
+    // Completion lives on /today after /active stops returning terminal
+    // visits. Only refresh the report for the stop already on screen: a
+    // different or missing visit must not swap or clear the completed card.
+    api.getTodayTracker()
+      .then(d => {
+        if (seq !== trackerSeqRef.current) return;
+        const { entry, saved, named, refresh } = scopeRef.current;
+        if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
+          // The server honored another property (or stopped scoping). Drop
+          // the stale completed card immediately, exactly like adoptTracker;
+          // a picker refresh failure must not leave house A's report under
+          // house B's label.
+          setTracker(null);
+          if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+          return;
+        }
+        if (!d?.tracker || String(d.tracker.id) !== String(displayedTrackerId)) return;
+        setTracker(d.tracker);
+      })
+      .catch(() => {})
+      .finally(() => { if (seq === trackerSeqRef.current) setReportRefreshing(false); });
+  };
   const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
   const isLawn = svcType.toLowerCase().includes('lawn') || svcType.toLowerCase().includes('turf');
@@ -13469,6 +13535,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     <div style={{
       display: 'flex', flexDirection: 'column', gap: 12,
     }}>
+      {reportPreview && <DocumentPreviewOverlay preview={reportPreview} onClose={closeReportPreview} onError={() => showCustomerAlert('Could not save this report. Please try again.')} />}
       {/* Status pill + weather strip. The pill is the authoritative
           state read; the weather chip is informational context.
           Replaces the gradient header + 6-step chevron bar. */}
@@ -13831,9 +13898,14 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
 
       {/* Completion summary at step 7 — never for a cancelled visit, where
           any summary data would describe work that didn't happen */}
-      {step === 7 && tracker.state !== 'cancelled' && summary && (
+      {step === 7 && tracker.state === 'complete' && summary && !summary.reportWithheld && (
         <div data-glass="soft" style={{ ...subCardBase, background: GLASS_SUBTLE, borderColor: '#E7E2D7' }}>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
+          {summary.customerSummary && (
+            <div style={{ fontSize: 15, color: B.textBody, lineHeight: 1.55, marginBottom: 12 }}>
+              {summary.customerSummary}
+            </div>
+          )}
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -13857,6 +13929,43 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
               Next visit: {parseDate(summary.nextVisitDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </div>
           )}
+          {summary.reportUrl ? (
+            <a
+              href={portalHomeReportUrl(summary.reportUrl)}
+              data-glass-accent=""
+              style={{ ...PORTAL_PRIMARY_ACTION, display: 'flex', width: '100%', minHeight: 46, marginTop: 12, boxSizing: 'border-box', textDecoration: 'none' }}
+            >
+              View today&apos;s report
+            </a>
+          ) : summary.reportPdfUrl ? (
+            <button
+              type="button"
+              data-glass-accent=""
+              style={{ ...PORTAL_PRIMARY_ACTION, width: '100%', minHeight: 46, marginTop: 12 }}
+              onClick={() => {
+                const url = resolveApiAssetUrl(summary.reportPdfUrl);
+                const doc = { id: tracker.id, title: 'Service report', fileName: 'Waves_Service_Report.pdf', pdfUrl: url };
+                if (isNativeApp() && nativePlatform() !== 'android') { openReportPdf(doc, url); return; }
+                downloadAuthedPdf(url, doc.fileName).catch(() => {
+                  showCustomerAlert('Could not open this report. Please try again.');
+                });
+              }}
+            >
+              View today&apos;s report
+            </button>
+          ) : summary.reportPending ? (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 14, color: B.textCaption, lineHeight: 1.45 }}>Your report is still being prepared.</div>
+              <button
+                type="button"
+                disabled={reportRefreshing}
+                style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, marginTop: 8 }}
+                onClick={refreshPendingReport}
+              >
+                {reportRefreshing ? 'Checking...' : 'Check for report'}
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </div>
@@ -17230,6 +17339,11 @@ function HelpSheet({ onClose, onChat, onOpenPhotoId, unread = 0 }) {
 function VisitsTab({ customer, properties = [], activePropertyId, selectedProperty = null, subTab, onSubTabChange, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
+  const [showAllProperties, setShowAllProperties] = useState(false);
+  const entry = properties.find(p => p.id === activePropertyId);
+  const historyPropertyId = selectedProperty?.propertyId || entry?.propertyId;
+  const canFilterHistory = historyPropertyId && customer?.actor?.kind !== 'contact' && !customer?.cancelled;
+  const historyProperty = canFilterHistory ? (showAllProperties ? 'all' : historyPropertyId) : null;
   const card = {
     background: B.white,
     border: '1px solid #E7E2D7',
@@ -17296,18 +17410,16 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
       </section>
       {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
         <>
-          {/* Completed visits and reports read /services, which is
-              customer-wide (per-property history is PR 4 of the lane): under
-              the saved-property MODEL say so — whenever the list is
-              saved-shaped, not only with 2+ active entries (GitHub codex r8
-              P2): a profile whose other houses were retired still lists their
-              visits and reports here, under the remaining house's address. */}
-          {properties.some((p) => p.key) && (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-profile-wide-notice">
-              Completed visits and reports are listed for this whole profile, including any property that is no longer active.
-            </div>
+          {canFilterHistory && (
+            <label style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 4, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
+              Show completed visits for
+              <CustomerSelect fullWidth style={{ textOverflow: 'ellipsis' }} value={showAllProperties ? 'all' : 'selected'} onChange={e => setShowAllProperties(e.target.value === 'all')}>
+                <option value="selected">This property{entry?.propertyId === historyPropertyId && entry.address?.line1 ? ` · ${formatAddress(entry.address)}` : ''}</option>
+                <option value="all">All properties on this profile</option>
+              </CustomerSelect>
+            </label>
           )}
-          <ServicesTab />
+          <ServicesTab key={historyProperty || 'profile'} historyProperty={historyProperty} customerId={customer?.id} />
         </>
       )}
     </div>

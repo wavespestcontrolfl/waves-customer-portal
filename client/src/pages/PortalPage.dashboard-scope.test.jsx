@@ -5,8 +5,14 @@
 // (uncapped codex #4207 r1t P1); under the primary they render as today.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const nativeState = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../native/platform', () => ({
+  isNativeApp: () => nativeState.enabled,
+  nativePlatform: () => (nativeState.enabled ? 'ios' : 'web'),
+}));
 
 vi.mock('../utils/api', () => {
   const target = {};
@@ -27,9 +33,15 @@ import { DashboardTab } from './PortalPage';
 const customer = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', phone: '9415551234', email: 'pat@example.com', tier: 'Silver', monthlyRate: 89, property: {} };
 const primary = { id: 'cust-1:pa', key: 'cust-1:pa', customerId: 'cust-1', propertyId: 'pa', isPrimaryProperty: true, isPrimaryProfile: true, address: { line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' } };
 const secondary = { id: 'cust-1:pb', key: 'cust-1:pb', customerId: 'cust-1', propertyId: 'pb', isPrimaryProperty: false, isPrimaryProfile: false, address: { line1: '418 Oak Ave', city: 'Bradenton', state: 'FL', zip: '34205' } };
+const BrowserURL = globalThis.URL;
 
 beforeEach(() => {
+  nativeState.enabled = false;
   vi.clearAllMocks();
+  vi.stubGlobal('URL', class extends BrowserURL {
+    static createObjectURL = vi.fn(() => 'blob:dashboard-report');
+    static revokeObjectURL = vi.fn();
+  });
   vi.spyOn(console, 'error').mockImplementation(() => {});
   api.getNextService.mockResolvedValue({ next: null });
   api.getServices.mockResolvedValue({ services: [] });
@@ -77,7 +89,11 @@ describe('Home under a saved-property selection', () => {
   });
 
   it('Last Visit follows the echo: a read the server scoped to ANOTHER house is withheld and the list is re-read; a matching echo renders the card', async () => {
-    const visit = { id: 'svc-9', type: 'Quarterly Pest Control', date: '2026-09-01', status: 'completed' };
+    const visit = {
+      id: 'svc-9', type: 'Quarterly Pest Control', date: '2026-09-01', status: 'completed',
+      notes: 'Reviewed closeout for this home.', technician_notes: 'raw internal note',
+      reportUrl: '/report/report-9', reportAvailable: true,
+    };
     const refresh = vi.fn();
     // The selected secondary was retired: the server fell back to the primary.
     api.getServices.mockResolvedValue({ services: [visit], propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
@@ -88,6 +104,28 @@ describe('Home under a saved-property selection', () => {
     api.getServices.mockResolvedValue({ services: [visit], propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
     render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
     expect(await screen.findByText('Last Visit')).toBeInTheDocument();
+    expect(screen.getByText('Reviewed closeout for this home.')).toBeInTheDocument();
+    expect(screen.queryByText('raw internal note')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'View service report' })).toHaveAttribute('href', '/report/report-9?source=portal_home');
+    expect(screen.queryByText(/Open Visits/i)).not.toBeInTheDocument();
+  });
+
+  it('renders its authenticated PDF fallback in a native preview', async () => {
+    nativeState.enabled = true;
+    api.getServices.mockResolvedValue({
+      services: [{ id: 'svc-pdf', type: 'Quarterly Pest Control', date: '2026-09-01', status: 'completed', reportAvailable: true }],
+      propertyScope: { enabled: true, propertyId: 'pb', closed: false },
+    });
+    api.getServiceReportUrl.mockReturnValue('/api/documents/service-report/svc-pdf');
+    api.fetchRaw.mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/pdf' },
+      blob: async () => new Blob(['report'], { type: 'application/pdf' }),
+    });
+    render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'View service report' }));
+    expect(await screen.findByRole('dialog', { name: 'Service report' })).toBeInTheDocument();
+    expect(api.fetchRaw).toHaveBeenCalledWith(expect.stringContaining('/api/documents/service-report/svc-pdf'));
   });
 
   it('a selection with NO listed entry (the list read failed while /auth/me resolved a house) withholds the primary\'s facts until confirmed (uncapped codex r1x P1); profile mode shows them', async () => {

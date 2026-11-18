@@ -1142,7 +1142,7 @@ describe('ReportViewPage — staff-view event suppression tracks the CURRENT loa
   // order on purpose; the second depends on the first having marked the token.
   const TOKEN = 'staff-then-customer-token';
 
-  function renderToken(payload, { staffToken = null } = {}) {
+  function renderToken(payload, { staffToken = null, source = null } = {}) {
     if (staffToken) localStorage.setItem('waves_admin_token', staffToken);
     else localStorage.removeItem('waves_admin_token');
     const posts = [];
@@ -1154,7 +1154,7 @@ describe('ReportViewPage — staff-view event suppression tracks the CURRENT loa
       return { ok: true, status: 200, json: async () => payload };
     }));
     render(
-      <MemoryRouter initialEntries={[`/report/${TOKEN}`]}>
+      <MemoryRouter initialEntries={[`/report/${TOKEN}${source ? `?source=${source}` : ''}`]}>
         <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
       </MemoryRouter>,
     );
@@ -1178,6 +1178,13 @@ describe('ReportViewPage — staff-view event suppression tracks the CURRENT loa
     await waitFor(() => expect(posts.length).toBeGreaterThan(0));
     expect(posts.map((p) => p.body.eventName)).toContain('service_report_viewed');
     expect(posts[0].url).toContain(`/reports/${TOKEN}/events`);
+  });
+
+  it('tags the existing report-view event when Home opened the report', async () => {
+    const posts = renderToken(legacyLawnReport, { source: 'portal_home' });
+    await screen.findByText('Visit Summary');
+    await waitFor(() => expect(posts.some((p) => p.body.eventName === 'service_report_viewed')).toBe(true));
+    expect(posts.find((p) => p.body.eventName === 'service_report_viewed').body.metadata).toEqual({ source: 'portal_home' });
   });
 
   it('a superseded staff response cannot re-suppress the load that replaced it', async () => {
