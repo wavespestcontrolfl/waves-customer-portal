@@ -499,17 +499,26 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
-  test('the restart freezes the setup fee its quote discloses, where the accept bills it (codex pre-push P0)', async () => {
-    recompute.mockResolvedValueOnce({
+  test('the restart freezes the setup fee its quote discloses, where the accept bills it; a quote minted before the freeze is re-minted (codex pre-push P0s)', async () => {
+    recompute.mockResolvedValue({
       recomputed: true,
       serverResult: { engineVersion: 'v9.9', lineItems: [], oneTime: { membershipFee: 79, total: 79 } },
       rawEngineResult: { waveGuard: { tier: 'Silver' }, lineItems: [] },
       serverTotals: { monthlyTotal: 138, annualTotal: 1656, onetimeTotal: 79 },
     });
-    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
-    const stored = JSON.parse(tables.estimates[0].estimate_data);
-    expect(stored.setupFeeQuote).toEqual({ amount: 79, kind: 'waveguard_membership' });
-    expect(require('../services/estimate-converter').frozenSetupFeeAmount(stored)).toBe(79);
+    const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const { setupFeeQuote, ...preChange } = JSON.parse(tables.estimates[0].estimate_data);
+    expect(setupFeeQuote).toEqual({ amount: 79, kind: 'waveguard_membership' });
+    // The public accept stamps and invoices the fee through this resolver; without the freeze it bills the $99 constant.
+    const { frozenSetupFeeAmount } = require('../services/estimate-converter');
+    expect(frozenSetupFeeAmount({ ...preChange, setupFeeQuote })).toBe(79);
+    expect(frozenSetupFeeAmount(preChange)).toBe(99);
+    // A live quote minted before the freeze, otherwise today's offer, is never handed back.
+    tables.estimates[0].estimate_data = JSON.stringify(preChange);
+    const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
+    expect(again.reused).toBe(false);
+    expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).not.toBeNull();
+    expect(JSON.parse(tables.estimates.find((r) => r.id === again.estimateId).estimate_data).setupFeeQuote).toEqual(setupFeeQuote);
   });
 
   test('a Tree & Shrub restart on a seed whose zero tree count is ambiguous is priced by hand (codex pre-push P0)', async () => {

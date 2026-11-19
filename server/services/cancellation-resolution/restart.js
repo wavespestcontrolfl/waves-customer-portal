@@ -71,9 +71,10 @@ function planStartOptionBookable(serviceKey, option) {
 //     per-application price the page's price card leads with.
 //   - One-time money is the card's setup, one-time and WaveGuard setup-fee
 //     amounts, on the row and in the stored result (the fee is
-//     result.oneTime.membershipFee, frozen as setupFeeQuote.amount, the
-//     amount the accept bills), and itemized on the page (the fee on its own
-//     waveguard_setup line).
+//     result.oneTime.membershipFee; the core freezes it as
+//     setupFeeQuote.amount, the amount the accept bills, and reuses a quote
+//     only when its freeze is today's), and itemized on the page (the fee on
+//     its own waveguard_setup line).
 //   - The page serves this snapshot as is (its own sentSnapshotServesAsIs).
 function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }) {
   if (!bundle) return 'no page snapshot';
@@ -98,7 +99,6 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
     [toCents(stored.total), cardOneTime + setupFee],
     [toCents(breakdown.total), cardOneTime + setupFee],
     [toCents(stored.membershipFee), setupFee],
-    [toCents(data?.setupFeeQuote?.amount), setupFee],
     [toCents(bundle.setupFee?.amount), setupFee],
     [itemized(true), setupFee],
     [itemized(false), cardOneTime],
@@ -636,6 +636,24 @@ async function singlePremisesStreet(dbh, customer, premisesProof) {
   return (await proof(dbh, customer.id, customer, street)) ? street : null;
 }
 
+// True when an engine result must be priced by hand, never shown as an
+// online price: a line the CANONICAL review predicates flag (draft-builder,
+// the trio proposal generation gates on, codex GH r12 P1: a hand-rolled
+// subset missed heuristic turf BASES, such as plausibleMaxTurfCap at MEDIUM
+// confidence, and the other markers lineRequiresReview covers:
+// requiresMeasurement, manualReviewReasons, the zero-tree underquote, ...),
+// a line graded low confidence, or a result asking for field verification.
+// The mint refuses on it, and the plan-start hint runs it on its own engine
+// result, so the card never offers what the mint refuses (codex pre-push P1).
+function engineResultNeedsReview(raw) {
+  const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
+  return (raw?.lineItems || []).some((l) => l && (
+    lineRequiresReview(l)
+    || lineHasHeuristicTurf(l)
+    || String(l.pricingConfidence || '').toLowerCase() === 'low'
+  )) || (Array.isArray(raw?.fieldVerify) && raw.fieldVerify.length > 0);
+}
+
 // THE shared mint core (plan restart + plan start — one mechanism, two
 // entries). Runs inside the caller's transaction, under the locks the entry
 // already took (comms advisory lock, then the customers row FOR UPDATE), with
@@ -837,20 +855,7 @@ async function mintPricedEstimate({
   // own tree guard (codex pre-push P0) — never becomes a customer-visible
   // price. The customer gets the priced-by-hand 409.
   const raw = recomputed.rawEngineResult || {};
-  // The CANONICAL review predicates (draft-builder, same trio proposal
-  // generation gates on — codex GH r12 P1): a hand-rolled subset missed
-  // heuristic turf BASES (plausibleMaxTurfCap reports MEDIUM confidence
-  // yet means "capped at the parcel's plausible maximum") and the other
-  // review markers lineRequiresReview covers (requiresMeasurement,
-  // manualReviewReasons, the zero-tree underquote, …).
-  const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
-  const flaggedLine = (raw.lineItems || []).some((l) => l && (
-    lineRequiresReview(l)
-    || lineHasHeuristicTurf(l)
-    || String(l.pricingConfidence || '').toLowerCase() === 'low'
-  ));
-  if (flaggedLine
-    || (Array.isArray(raw.fieldVerify) && raw.fieldVerify.length > 0)
+  if (engineResultNeedsReview(raw)
     || propertySeed?.requiresFieldVerification === true
     || (toPrice.includes('tree_shrub') && propertySeed?.zeroTreeCountAmbiguous === true)) {
     throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
@@ -898,10 +903,14 @@ async function mintPricedEstimate({
     // option drifted — and acceptance converts the STORED estimate_data,
     // so reuse requires the stored offer to EQUAL today's recompute:
     // engine inputs, qualifiers, and the full server result.
+    // The frozen setup fee is part of the offer (codex pre-push P0): a quote
+    // minted before the freeze carries none, so its accept would bill the
+    // code constant instead of the fee its page shows.
     const offerFingerprint = (data) => stableStringify({
       engineInputs: data?.engineInputs ?? null,
       priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
       result: data?.result ?? null,
+      setupFeeQuote: data?.setupFeeQuote ?? null,
     });
     // Same premises (codex pre-push P1): the offer fingerprint carries the
     // property facts, not the street, so a quote minted before the account's
@@ -1355,8 +1364,11 @@ async function assertRestartAcceptEligible(trx, estimate) {
 // not deleted) and owns NO live recurring family. ANY family refuses, not only
 // a quoted one: the mint priced the option standalone (no WaveGuard
 // qualifiers), so a plan added since, of any family, changes the price this
-// estimate froze (members keep the request flow). FAIL CLOSED: drift or an
-// unreadable state is the 409 the estimate page renders.
+// estimate froze (members keep the request flow). The account must still have
+// one provable premises, the one this estimate is addressed to: a move or a
+// second property since the mint is a different home (codex pre-push P1).
+// FAIL CLOSED: drift or an unreadable state is the 409 the estimate page
+// renders.
 async function assertPlanStartAcceptEligible(trx, estimate) {
   const refuse = (message) => {
     const err = new Error(message);
@@ -1365,20 +1377,24 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     return err;
   };
   let quoted;
+  let quotedStreet;
   let fresh;
   let ownsPlan;
+  let premisesStreet;
   try {
-    const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
+    const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data', 'address');
     const planStart = parseJson(row?.estimate_data, {})?.planStart;
     quoted = Array.isArray(planStart?.families) ? planStart.families : null;
+    quotedStreet = require('../estimate-property-linkage').normalizedEstimateStreet(row?.address);
     // Same lock order as the restart accept: comms advisory key, then the
-    // customers row FOR UPDATE, then the reads.
+    // customers row FOR UPDATE, then the reads. The whole row, as the mint
+    // reads it: the premises proof needs the address and the multi-home flag.
     await lockCustomerComms(trx, row?.customer_id);
     fresh = row?.customer_id
-      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate()
-        .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'billing_mode', 'monthly_rate')
+      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first()
       : null;
     ownsPlan = fresh ? await ownsAnyRecurringService(trx, fresh.id) : false;
+    premisesStreet = fresh ? await singlePremisesStreet(trx, fresh) : null;
   } catch (err) {
     logger.warn(`[plan-start] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
     throw refuse('We could not re-verify this estimate just now — please try again in a moment.');
@@ -1387,8 +1403,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
   if (!quoted || !quoted.length || !fresh) throw changed();
   // The mint's bar again (the price was standalone): no plan membership on the
-  // row and no live recurring service of any kind.
-  if (!planStartAccountOpen(fresh) || ownsPlan) throw changed();
+  // row, no live recurring service of any kind, and the one premises the
+  // estimate is addressed to.
+  if (!planStartAccountOpen(fresh) || ownsPlan || !premisesStreet || quotedStreet !== premisesStreet) throw changed();
 }
 
 module.exports = {
@@ -1405,6 +1422,7 @@ module.exports = {
   planStartOptionBookable,
   ownsAnyRecurringService,
   singlePremisesStreet,
+  engineResultNeedsReview,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },

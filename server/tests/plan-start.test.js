@@ -694,7 +694,7 @@ describe('mintPlanStartEstimate', () => {
       expect(require('../services/estimate-converter').frozenSetupFeeAmount(stored)).toBe(79);
     });
 
-    test('a live quote that does not freeze the card\'s setup fee is archived and re-minted, never handed back (codex pre-push P0)', async () => {
+    test('a live quote minted before the setup-fee freeze is archived and re-minted, never handed back (codex pre-push P0s)', async () => {
       recompute.mockResolvedValue(withSetupFee);
       const first = await mint(pestWithFee);
       const { setupFeeQuote, ...unfrozen } = JSON.parse(tables.estimates[0].estimate_data);
@@ -816,18 +816,46 @@ describe('mintPlanStartEstimate', () => {
 });
 
 describe('assertPlanStartAcceptEligible', () => {
-  const trx = fakeTrx();
+  // Reads return only the columns they name, as Postgres does, so a column the check needs and
+  // does not select reads as missing here too.
+  const namedColumns = (table) => {
+    const b = builder(table);
+    const first = b.first;
+    b.first = async (...cols) => {
+      const row = await first();
+      return row && cols.length ? Object.fromEntries(cols.filter((c) => c in row).map((c) => [c, row[c]])) : row;
+    };
+    return b;
+  };
+  const trx = fakeTrx(null, namedColumns);
   const ESTIMATE = { id: 'est-ps1' };
   beforeEach(() => {
     tables.customers = [{ ...LEAD }];
+    tables.customer_properties = [];
     tables.estimates = [{
-      id: 'est-ps1', customer_id: 'cust-1', source: 'plan_start', status: 'sent', token: 'tok-ps1',
+      id: 'est-ps1', customer_id: 'cust-1', source: 'plan_start', status: 'sent', token: 'tok-ps1', address: '1 Main St, Parrish, FL 34219',
       estimate_data: JSON.stringify({ planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly' } }),
     }];
   });
 
   test('a still-plain account owning no recurring service accepts', async () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).resolves.toBeUndefined();
+  });
+
+  test.each([
+    ['moved since the mint: the quote is addressed to another home', () => { tables.customers = [{ ...LEAD, address_line1: '9 Oak Ave' }]; }],
+    ['is flagged multi-home since the mint', () => { tables.customers = [{ ...LEAD, has_multi_home: true }]; }],
+    ['added a second property since the mint', () => {
+      tables.customer_properties = [
+        { customer_id: 'cust-1', address_line1: '1 Main St', city: 'Parrish', zip: '34219' },
+        { customer_id: 'cust-1', address_line1: '9 Oak Ave', city: 'Parrish', zip: '34219' },
+      ];
+    }],
+    ['has no street with a city or zip', () => { tables.customers = [{ ...LEAD, city: null, zip: null }]; }],
+    ['has an estimate with no stored address', () => { delete tables.estimates[0].address; }],
+  ])('an account that %s refuses: the mint\'s single-premises bar again (codex pre-push P1)', async (_label, arrange) => {
+    arrange();
+    await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });
 
   test('a quoted family that went live since the mint refuses (409 PLAN_START_STATE_CHANGED)', async () => {

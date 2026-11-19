@@ -1315,6 +1315,9 @@ async function buildCustomerPricingResponse({
   const quoteBaselineMonthly = modeledCurrentMonthly || 0;
 
   const options = [];
+  // Each option's raw engine result, kept beside the options (never in the answer): the
+  // plan-start hint runs the mint's own review check on it (codex pre-push P1).
+  const engineResults = new Map();
   const generic = !text;
   // Composed BEFORE the option loop so every priced option carries the owned
   // half of a mixed request into what staff receive (codex #3253 r2).
@@ -1374,7 +1377,10 @@ async function buildCustomerPricingResponse({
           },
         };
       }
-      if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
+      if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) {
+        options.push(quoted);
+        engineResults.set(quoted.id, estimate);
+      }
     }
   }
 
@@ -1404,7 +1410,7 @@ async function buildCustomerPricingResponse({
     // Hint only (GATE_PORTAL_PLAN_START): the options the card may offer as "See my price
     // and book". The start-plan route re-decides under its locks; absent when the gate is
     // off or nothing qualifies, so every other response stays byte-identical.
-    ...(await planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys)),
+    ...(await planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys, engineResults)),
   };
 }
 
@@ -1413,17 +1419,18 @@ async function buildCustomerPricingResponse({
 // its locks: an account with no plan (planStartAccountOpen), no live recurring service
 // of any kind and one provable premises (singlePremisesStreet: a multi-home account keeps
 // the request, codex pre-push P1), and per option an id on today's ladder that the route books
-// (planStartOptionBookable: pest quarterly only), a monthly price, no review marker and
-// no low confidence (the mint refuses a low-confidence line, codex pre-push P1).
-async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys) {
+// (planStartOptionBookable: pest quarterly only), a monthly price, and an engine result the
+// mint's own review check passes (engineResultNeedsReview: review markers, heuristic turf,
+// low confidence, field verification; codex pre-push P1s).
+async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys, engineResults) {
   // Optional call: hundreds of suites mock feature-gates whole; a bare mock reads as off.
   if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
   const restart = require('./cancellation-resolution/restart');
   if (!restart.planStartAccountOpen(customer) || currentServiceKeys.length || ownedServiceKeys.length) return {};
   const optionIds = options
     .filter((option) => restart.PLAN_START_SERVICE_KEYS.includes(option.serviceKey)
-      && Number(option.monthly) > 0 && option.manualReview !== true
-      && String(option.confidence || '').toLowerCase() !== 'low'
+      && Number(option.monthly) > 0
+      && engineResults.has(option.id) && !restart.engineResultNeedsReview(engineResults.get(option.id))
       && restart.planStartOptionBookable(option.serviceKey,
         variantsForService(option.serviceKey, '', false).find((variant) => variant?.id === option.id)))
     .map((option) => option.id);

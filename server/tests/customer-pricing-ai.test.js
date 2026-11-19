@@ -2198,6 +2198,27 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     }
   });
 
+  test.each([
+    ['a heuristic turf basis at medium confidence', (line) => { line.turfBasis = 'plausibleMaxTurfCap'; line.pricingConfidence = 'medium'; }],
+    ['a measurement the line still needs', (line) => { line.requiresMeasurement = true; }],
+  ])('never lists an option the mint\'s review check refuses, with no manual-review flag on the card: %s (codex pre-push P1)', async (_label, mark) => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const engine = require('../services/pricing-engine');
+    const real = engine.generateEstimate;
+    const spy = jest.spyOn(engine, 'generateEstimate').mockImplementation((...args) => {
+      const estimate = real(...args);
+      for (const line of estimate?.lineItems || []) if (line) mark(line);
+      return estimate;
+    });
+    try {
+      const result = await ask(plain());
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence !== 'low')).toBe(true);
+      expect('planStart' in result).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
     const result = await ask(plain());
     expect('planStart' in result).toBe(false);
