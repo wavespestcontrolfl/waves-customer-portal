@@ -160,11 +160,33 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Nov 1–30 sale', received)).toBe('2026-11-30');
     expect(extractDeadline('Valid Nov 1-30 for Partners Program members', received)).toBe('2026-11-30');
     expect(extractDeadline('Fall pricing Nov 1&nbsp;&#8211;&nbsp;Nov 30', received)).toBe('2026-11-30');
+    // HTML-to-text puts a line break between blocks; a price's decimal point ends no sentence.
+    expect(extractDeadline('Offers valid\nNovember 1 – November 30, 2026', received)).toBe('2026-11-30');
+    expect(extractDeadline('Sale price $24.99/bag Nov 1 – Nov 30', received)).toBe('2026-11-30');
     expect(extractDeadline('Fall program Nov 2 to Dec 15; order by Nov 20', received)).toBe('2026-11-20');
+    // In a deal email a range is the offer's window, with or without an offer word next to it.
+    expect(extractDeadline('Free shipping Nov 1 – Nov 30', received)).toBe('2026-11-30');
+    expect(extractDeadline('Buy 10 cases Nov 1 - Nov 30, get 1 free', received)).toBe('2026-11-30');
+    expect(extractDeadline('Purchases made between November 1, 2026 and November 30, 2026 qualify.', received)).toBe('2026-11-30');
+    // A spaced day counts before a year or at a clause's end.
+    expect(extractDeadline('Offer valid Nov 1 - 30, while supplies last', received)).toBe('2026-11-30');
+    expect(extractDeadline('Sale Nov 1 – 30', received)).toBe('2026-11-30');
+    // The text stops after the opening day: the end is unknown, so no deadline.
+    expect(extractDeadline('Fall specials. Offer valid Nov 1 – ', received)).toBeNull();
   });
 
-  test('a range outside an offer sentence, or a dash with no later date or day, keeps the first date', () => {
+  test('a date the text calls an end, time off, a closed branch, or a spaced number with words after it keeps the first date', () => {
     expect(extractDeadline("I'll be on PTO Thursday Nov 19-Tuesday Nov 24.", received)).toBe('2026-11-19');
+    // A range inside a line reads that line only, not the next paragraph's deal words.
+    expect(extractDeadline("I'll be on PTO Thursday Nov 19-Tuesday Nov 24\n\nPest specials attached", received)).toBe('2026-11-19');
+    expect(extractDeadline("I'll be on PTO\nNov 19 - Nov 24", received)).toBe('2026-11-19');
+    expect(extractDeadline("I'm out of the office Nov 19-24.", received)).toBe('2026-11-19');
+    // HTML-to-text leaves a blank line between two <p> blocks; the time off one block up still counts.
+    expect(extractDeadline('I’m out\n\n Nov 19 – Nov 24', received)).toBe('2026-11-19');
+    expect(extractDeadline('Branch closed Nov 26-27 for Thanksgiving.', received)).toBe('2026-11-26');
+    expect(extractDeadline('Order by Nov 20 – Nov 25 delivery', received)).toBe('2026-11-20');
+    expect(extractDeadline('Nov 1 - 2 free cases with any order', received)).toBe('2026-11-01');
+    expect(extractDeadline('Sale ends Nov 1 - 25-lb bags only', received)).toBe('2026-11-01');
     expect(extractDeadline('Sale ends Nov 20 - 25% off select items', received)).toBe('2026-11-20');
     // A quantity after the dash is no day, even when it is higher than the date's day.
     expect(extractDeadline('Promo through Nov 1 - 2 free cases', received)).toBe('2026-11-01');
