@@ -1187,6 +1187,20 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(mockLegBodies[1]).toMatch(/^Ana Ruiz · Pest Control · /);
   });
 
+  test('a tech who left field work before the held push goes hears nothing, and the bundle closes (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    const was = techs['tech-1'];
+    techs['tech-1'] = { ...TECH, field_dispatchable: false };
+    try {
+      expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 0 });
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
+      for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+    } finally {
+      techs['tech-1'] = was;
+    }
+  });
+
   test('a single unverified visit gets its own first line only', async () => {
     await officeMove('v-1', { kind: 'assigned' });
     Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });

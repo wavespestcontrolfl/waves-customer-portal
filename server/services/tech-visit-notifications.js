@@ -1163,6 +1163,13 @@ async function heldOutsideBundle(technicianId, ids) {
     .first('id'));
 }
 
+// A held push can wait minutes: its tech may have left field work since the
+// card was written (office-only, inactive). Such a tech hears nothing, as at
+// card time (isAssignable).
+async function stillAssignable(technicianId, conn) {
+  return isAssignable(await conn('technicians').where({ id: technicianId }).first('id', 'employment_status', 'field_dispatchable'));
+}
+
 // ONE push for one tech's claimed cards. Resolves true when a device got it,
 // false when nothing is left to say (the bundle closes). Throws when it must
 // be tried again: the provider failed, every device refused, or the bundle
@@ -1187,12 +1194,17 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   let delivered = 0;
   let changed = false;
   let lost = false;
+  let dropped = false;
   let verified = new Map();
   const beforeHandoff = async () => {
     verified = new Map();
     try {
       if (!(await renewHeld(ids, token))) {
         lost = true;
+        return false;
+      }
+      if (!(await stillAssignable(technicianId, db))) {
+        dropped = true;
         return false;
       }
       const fresh = await bundlePlan(technicianId, rows, db);
@@ -1219,6 +1231,8 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
     onDelivered: () => { delivered += 1; },
   });
   if (lost) throw new BundleLost('a later sweep took the cards over');
+  // No longer a field tech: nothing is left to say, and the bundle closes.
+  if (dropped) return delivered > 0;
   if (changed) throw new BundleChanged('the bundle changed before any device had it');
   // Stopped part-way: done either way, and pushed when a device has it.
   if (result?.superseded) return delivered > 0;
