@@ -9,6 +9,7 @@ const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { isV2Extraction } = require('../../utils/extraction-compat');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { nanpNationalDigits } = require('../../utils/phone');
+const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes } = require('./weekly-call-outcomes');
 
 
 let TwilioService;
@@ -880,7 +881,10 @@ Return JSON:
     const fixableRevenue = fixableLosses.reduce((sum, s) => sum + parseFloat(s.estimated_job_value || 0), 0);
     const totaled = scores.filter(s => s.total_score != null);
 
+    const weeklyCallOutcomes = await loadWeeklyCallOutcomesFailSoft();
+
     return {
+      weeklyCallOutcomes,
       csrStats,
       teamTotals: {
         calls: scores.length,
@@ -994,6 +998,18 @@ Return JSON:
       ],
       csrs,
     };
+  }
+}
+
+// How this week's new-customer calls ended (booked on the call, estimate sent), from the calls' own
+// dispositions. A secondary figure: a failed read gives null and never fails the overview.
+async function loadWeeklyCallOutcomesFailSoft() {
+  try {
+    const outcomes = await loadWeeklyCallOutcomes();
+    return { ...outcomes, text: formatWeeklyCallOutcomes(outcomes) };
+  } catch (err) {
+    logger.warn(`[csr-coach] weekly call outcomes unavailable (${err?.code || 'error'})`);
+    return null;
   }
 }
 

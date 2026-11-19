@@ -8263,11 +8263,14 @@ function initScheduledJobs() {
       // (services/owner-alerts.js). One row per week.
       if (rec.recommendation) {
         const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip.
+        const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes } = require('./csr/weekly-call-outcomes');
+        const outcomesLine = await loadWeeklyCallOutcomes().then(formatWeeklyCallOutcomes).catch(() => '');
         await recordOwnerAlert('csr-weekly-tip', {
           action: 'read the weekly call coaching tip',
           why: whyFromFreeText(rec.recommendation),
           subject: { type: 'check', id: 'csr-weekly-tip' },
-          text: `Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
+          text: `Weekly CSR Tip:\n\n${outcomesLine ? `${outcomesLine}\n\n` : ''}${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
           link: '/admin/communications',
           dedupeKey: `owner-alert:csr-weekly-tip:${etDateString()}`,
         });
