@@ -195,6 +195,9 @@ function stubTables({
       return q;
     });
     q.whereNotIn = jest.fn(() => q);
+    // The pay-page lane asks whether an invoice row carries a recorded payment.
+    let notNullCol = null;
+    q.whereNotNull = jest.fn((col) => { notNullCol = col; return q; });
     q.whereIn = jest.fn((col, vals) => {
       stubTables.whereIns.push({ table, col, vals });
       return q;
@@ -241,7 +244,8 @@ function stubTables({
         if (byVisit) return liveOnVisit;
         const rows = Array.isArray(invoices) ? invoices : [];
         if (whereId != null) {
-          return rows.find((r) => String(r.id) === String(whereId)) || invoicesById[String(whereId)];
+          const row = rows.find((r) => String(r.id) === String(whereId)) || invoicesById[String(whereId)];
+          return notNullCol && row && row[notNullCol] == null ? undefined : row;
         }
         return rows[0];
       }
@@ -999,6 +1003,19 @@ describe('invoice pay page plan choice — the switch with payPageInvoiceId', ()
       sourceEstimateId: 'est-1', prepayInvoiceId: 'inv-prepay', termStart: PAST_DATE, coverageVisitCount: 4,
     });
     expect(mockSendInvoice).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a paid payments row', { recordedPayment: { id: 'pay-1' } }],
+    ['an out-of-band part payment stamped on the row (amount_paid still 0)', { invoices: [{ ...DELIVERED_INVOICE, payment_recorded_at: '2026-11-10T15:00:00Z' }] }],
+  ])('%s on the first invoice refuses the pick and mints nothing', async (_label, stub) => {
+    stubTables({ visit: COMPLETED_VISIT, invoices: [DELIVERED_INVOICE], ...stub });
+    const out = await router.runPrepaySwitch({
+      visitId: 'svc-1', acknowledgeNoticedAmount: false, actor: {}, auditSource: 'invoice pay page', ...payPage,
+    });
+    expect(out.httpStatus).toBe(409);
+    expect(out.httpBody.error).toMatch(/recorded payment/i);
+    expect(mockCreateInvoice).not.toHaveBeenCalled();
   });
 });
 

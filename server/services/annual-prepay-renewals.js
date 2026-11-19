@@ -3483,7 +3483,8 @@ async function stampCompletedVisitCoveredByTerm(term, scheduledServiceId) {
 async function closeAcceptInvoiceReplacedByPaidTerm(termSnapshot) {
   // Cheap exit for every term no estimate accept produced, before any read.
   if (!termSnapshot?.id || !termSnapshot.source_estimate_id) return { closed: false };
-  const found = await acceptInvoiceReplacedByPaidTerm(termSnapshot.id);
+  const termId = termSnapshot.id;
+  const found = await acceptInvoiceReplacedByPaidTerm(termId);
   if (!found) return { closed: false };
   const { term, prepay, first, marker } = found;
   if (first.status !== 'void') {
@@ -3506,6 +3507,21 @@ async function closeAcceptInvoiceReplacedByPaidTerm(termSnapshot) {
       await db('invoices').where({ id: first.id }).whereNot({ status: 'void' })
         .update({ notes: db.raw('replace(notes, ?, ?)', [marker, '']), updated_at: new Date() });
       throw err;
+    }
+    // A refund or void of the prepay can cancel the term while this close
+    // runs: cancelTermWithRestorations writes the term row and restores the
+    // invoices carrying its marker in ONE transaction, and its restore read
+    // may have run before the void above committed. Re-read the term under
+    // its row lock (which waits out such a cancel): if it is no longer
+    // covered, the invoice just voided is put back by that same restore,
+    // which is idempotent and finds it by the marker written above. A cancel
+    // that starts after this read sees the committed void and restores it
+    // itself.
+    const after = await db.transaction((lockTrx) => lockTrx('annual_prepay_terms').where({ id: term.id }).forUpdate().first('status'));
+    if (!ACTIVE_STATUSES.includes(String(after?.status || ''))) {
+      await InvoiceService.restoreSwitchSupersededInvoicesForPrepay(prepay.id);
+      logger.warn(`[annual-prepay] term ${term.id} was cancelled while its replaced invoice ${first.id} closed — the invoice was restored`);
+      return { closed: false };
     }
     await db('activity_log').insert({
       customer_id: term.customer_id,

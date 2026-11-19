@@ -26135,7 +26135,7 @@ async function runPrepaySwitch({
         err.switchDrift = true;
         throw err;
       }
-      for (const inv of payPageInvoiceId ? [] : resolved.supersedes) {
+      for (const inv of resolved.supersedes) {
         // Mirror voidInvoice's money guards under the lock (Codex P0 r20):
         // a manually recorded payment rides payment_recorded_at or a
         // paid/processing payments-ledger row (metadata linkage), neither
@@ -26145,11 +26145,19 @@ async function runPrepaySwitch({
           .whereIn('status', ['paid', 'processing'])
           .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(inv.id)])
           .first('id');
-        if (recordedPayment) {
+        // The pay page's invoice may also carry an out-of-band part payment
+        // (Charge Now's prepaid credit lowers the total and stamps
+        // payment_recorded_at, leaving amount_paid at 0).
+        const recordedOnRow = payPageInvoiceId
+          ? await trx('invoices').where({ id: inv.id }).whereNotNull('payment_recorded_at').first('id')
+          : null;
+        if (recordedPayment || recordedOnRow) {
           const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} has a recorded payment — resolve it from Invoices, never a switch`);
           err.switchConflict = true;
           throw err;
         }
+        // The pay page keeps its invoice payable: checked like any other, never voided here.
+        if (payPageInvoiceId) continue;
         const retired = await trx('invoices')
           .where({ id: inv.id, status: 'draft' })
           .whereNull('sent_at')

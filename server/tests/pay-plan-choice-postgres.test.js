@@ -197,6 +197,36 @@ postgres('plan choice on the first invoice of an accepted per-application plan',
     expect((await trx('customers').where({ id: f.customerId }).first()).billing_mode).toBe('per_application');
   });
 
+  test('a prepay cancelled while its first invoice is closing leaves that invoice restored, not lost', async () => {
+    const f = await acceptedPlan();
+    await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
+    const [prepay] = await prepayInvoices(f);
+    // The race: the refund's cancel commits just as the close's void lands,
+    // after its own restore looked for (and did not find) a voided invoice.
+    const InvoiceService = require('../services/invoice');
+    const realVoid = InvoiceService.voidInvoice.bind(InvoiceService);
+    const spy = jest.spyOn(InvoiceService, 'voidInvoice').mockImplementation(async (id, opts) => {
+      const out = await realVoid(id, opts);
+      if (id === f.invoiceId) {
+        await trx('invoices').where({ id: prepay.id }).update({ status: 'refunded' });
+        await trx('annual_prepay_terms').where({ prepay_invoice_id: prepay.id }).update({ status: 'cancelled' });
+      }
+      return out;
+    });
+    try {
+      await payPrepay(prepay.id);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await firstInvoice(f)).status).toBe('void');
+    const restored = await trx('invoices').where({ customer_id: f.customerId })
+      .where('notes', 'like', `%[prepay-switch-restore:${f.invoiceId}]%`);
+    expect(restored).toHaveLength(1);
+    expect(Number(restored[0].total)).toBe(SETUP_FEE + PER_VISIT);
+    // Not logged as covered: the year it would belong to is gone.
+    expect((await visit(f.visitId)).prepaid_method).toBeNull();
+  });
+
   test('a first visit still on the schedule is covered like the rest once the prepay is paid', async () => {
     const f = await acceptedPlan({ firstVisitStatus: 'confirmed', firstVisitDay: 5 });
     await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
@@ -248,6 +278,32 @@ postgres('plan choice on the first invoice of an accepted per-application plan',
     expect(open.status).toBe('viewed');
     expect(open.notes).not.toContain('prepay-switch-superseded-by');
     expect((await visit(f.visitId)).prepaid_method).toBeNull();
+  });
+
+  test('the prepay\'s own pay page never adds the first invoice as a previous balance: they are alternatives', async () => {
+    const f = await acceptedPlan();
+    await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
+    const [prepay] = await prepayInvoices(f);
+    const gates = require('../config/feature-gates').gates;
+    const before = gates.payIncludeBalance;
+    gates.payIncludeBalance = true;
+    try {
+      const { combinedEligibleSiblings } = require('../services/pay-combined');
+      // Control: an unrelated anchor for this customer does pick the first invoice up.
+      const other = { ...prepay, id: randomUUID(), notes: null };
+      expect((await combinedEligibleSiblings(other, { readOnly: true }) || []).map((inv) => inv.id)).toEqual([f.invoiceId]);
+      expect(await combinedEligibleSiblings(prepay, { readOnly: true })).toBeNull();
+    } finally {
+      gates.payIncludeBalance = before;
+    }
+  });
+
+  test('money recorded on the first invoice outside its pay page withholds the choice', async () => {
+    const f = await acceptedPlan();
+    await trx('invoices').where({ id: f.invoiceId }).update({ payment_recorded_at: new Date(), total: 177 });
+    expect(await PayPlanChoice.planChoiceForInvoice(await firstInvoice(f))).toBeNull();
+    expect(await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f))).toEqual({ refused: true });
+    expect(await prepayInvoices(f)).toHaveLength(0);
   });
 
   test('with the gate off the page carries no choice and the pick is refused', async () => {
