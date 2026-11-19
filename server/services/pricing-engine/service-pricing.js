@@ -7062,12 +7062,16 @@ function resolveTrenchDepthPriceMultiplier(cfg = {}, trenchDepthFt) {
 // prices, aliases included. Fipronil checks are unchanged.
 const BIFENTHRIN_LABEL_BOTTLE = 'lesco_crosscheck_plus';
 const BIFENTHRIN_TERMITICIDE_KEYS = new Set(['talstar_p', 'bifen_it']);
+// The names this bottle goes by, letters and digits only: its catalog row ("LESCO Crosscheck Plus"), the code label ("Crosscheck
+// Plus - Bifenthrin") and the inventory spelling ("LESCO Cross Check Plus"). Another Crosscheck product is not this bottle.
+const CROSSCHECK_PLUS_NAMES = new Set(['crosscheckplus', 'lescocrosscheckplus', 'crosscheckplusbifenthrin', 'lescocrosscheckplusbifenthrin']);
 // The bottle a configured product names: every name it carries, its catalog link (pre-slab) and its label (a trenching product
 // has no link). Each comes from pricing_config over the code field by field, so a partial overlay can mix them (a Talak label over
-// the code's Crosscheck Plus link): every name present must name Crosscheck Plus.
+// the code's Crosscheck Plus link): every name present must be one of this bottle's.
 const namesCrosscheckPlus = (product = {}) => {
-  const names = [product.catalogProductName, product.label].filter((name) => String(name ?? '').trim() !== '');
-  return names.length > 0 && names.every((name) => /crosscheck/i.test(String(name)));
+  const names = [product.catalogProductName, product.label]
+    .map((name) => String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')).filter(Boolean);
+  return names.length > 0 && names.every((name) => CROSSCHECK_PLUS_NAMES.has(name));
 };
 function labelCheckCounts(options, productKey, product) {
   if (!optionBooleanTrue(options.labelConfirmed)) return false;

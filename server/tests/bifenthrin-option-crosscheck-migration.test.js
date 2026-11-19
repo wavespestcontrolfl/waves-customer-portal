@@ -419,6 +419,10 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       ['a vendor row not priced per oz', { vendors: [vendorRow({ unit_normalized: 'count' })] }, true],
       ['a vendor row with shipping (the landed cost would need it)', { vendors: [vendorRow({ shipping_cost: '5.00' })] }, true],
       ['a vendor row with tax (the landed cost would need it)', { vendors: [vendorRow({ tax_rate: '0.07' })] }, true],
+      ['a vendor row with a shipping estimate', { vendors: [vendorRow({ shipping_estimate: '5.00' })] }, true],
+      // The price sync can store freight in landed_unit_price with no shipping column (pre-push audit 11).
+      ['a vendor row whose landed unit price holds freight', { vendors: [vendorRow({ landed_unit_price: '0.5000' })] }, true],
+      ['a vendor row whose landed cost is not its price', { vendors: [vendorRow({ landed_cost: '63.42' })] }, true],
     ])('%s: the price is left alone with a warning', async (_name, overrides, marked) => {
       const db = world(overrides);
       const before = JSON.stringify([db.vendor_pricing, db.price_history]);

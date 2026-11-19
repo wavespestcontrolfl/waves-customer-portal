@@ -27,8 +27,9 @@
  * needs-pricing mark included: the pre-slab and mosquito links read only an unmarked row, and job costing reads best_price
  * directly (calculateInventoryCost), so the catalog must not keep $58.42 or a mark. Step P acts only while the SiteOne row still
  * looks exactly as read on 2026-11-18, its price_amount (what costing reads first), its own pack (1 gal, priced per oz: the handler
- * derives the unit cost from it) and an open quote (no expires_at passed: the inventory price rules skip an expired row) included;
- * a row that differs (an edit, shipping or tax: its landed cost would need them) is left alone with a warning.
+ * derives the unit cost from it), an open quote (no expires_at passed: the inventory price rules skip an expired row) and its landed
+ * and per-oz figures (the stale price's own: the price sync can store freight in landed_unit_price) included; a row that differs
+ * (an edit, shipping or tax: its landed cost would need them) is left alone with a warning.
  * server/data/pricing.csv, the sheet the admin pricing import reads first, lists the same gallon at $30.90, so a re-import keeps it.
  *
  * Stale mark: a catalog row named LESCO Crosscheck Plus that still holds the stale $58.42 for 128 oz after Step P (Step P had to
@@ -83,6 +84,7 @@ const STALE_SIZE_OZ = 128;
 const STALE_QUANTITY = '1 gal';
 const NEW_PRICE = 30.9;
 const NEW_PER_OZ = Math.round((NEW_PRICE / STALE_SIZE_OZ) * 10000) / 10000; // 0.2414, rounded as the price handler does
+const STALE_PER_OZ = Math.round((STALE_PRICE / STALE_SIZE_OZ) * 10000) / 10000; // 0.4564
 
 const PEST_COSTS_KEY = 'pest_service_costs';
 const TALAK_PEST_LINE = { bottle_oz: 128, bottle_price: 41.57, oz_per_service: 4, cost_per_service: 1.3 };
@@ -194,10 +196,14 @@ async function lockProduct(knex, productId) {
 const filled = (v) => v !== null && v !== undefined && v !== '';
 // A shipping or tax amount on the row: the handler would fold it into the landed cost, and Step P writes the bare price.
 const carries = (v) => filled(v) && Number(v) !== 0;
+// The landed and per-oz figures of the stale entry itself. A row holding others (the price sync can store freight in
+// landed_unit_price with no shipping column) has a cost Step P cannot see, so it is left alone.
+const STALE_FIGURES = { landed_cost: STALE_PRICE, landed_unit_price: STALE_PER_OZ, price_per_oz: STALE_PER_OZ, normalized_unit_price: STALE_PER_OZ };
 
 // The SiteOne row Step P may correct: active, approved, unexpired (vendor-pricing-eligibility: expires_at null or later than now),
 // at the stale price (price_amount too, when set: costing reads it first), the 1 gal pack priced per oz (the handler derives the
-// unit cost from the row's own quantity), with no shipping or tax. Returns null when it is, else the reason it is not.
+// unit cost from the row's own quantity), with no shipping or tax and the stale entry's own landed and per-oz figures. Returns null
+// when it is, else the reason it is not.
 function vendorRowBlocker(row, now) {
   if (row.is_active !== true || row.approval_status !== 'approved' || !same(row.price, STALE_PRICE)
     || (filled(row.price_amount) && !same(row.price_amount, STALE_PRICE))) {
@@ -210,9 +216,11 @@ function vendorRowBlocker(row, now) {
   if (String(row.quantity ?? '').trim().toLowerCase() !== STALE_QUANTITY || ('unit_normalized' in row && row.unit_normalized !== 'oz')) {
     return `the vendor row is not the ${STALE_QUANTITY} pack priced per oz (quantity ${row.quantity}, unit ${row.unit_normalized})`;
   }
-  if (carries(row.shipping_cost) || carries(row.tax_rate)) {
-    return `the vendor row carries shipping (${row.shipping_cost}) or tax (${row.tax_rate}) - enter the price in the app`;
+  if (carries(row.shipping_cost) || carries(row.shipping_estimate) || carries(row.tax_rate)) {
+    return `the vendor row carries shipping (${row.shipping_cost ?? row.shipping_estimate}) or tax (${row.tax_rate}) - enter the price in the app`;
   }
+  const changed = Object.keys(STALE_FIGURES).filter((column) => filled(row[column]) && !same(row[column], STALE_FIGURES[column]));
+  if (changed.length) return `the vendor row's ${changed.join(', ')} differ from the $${STALE_PRICE} entry's own - enter the price in the app`;
   return null;
 }
 

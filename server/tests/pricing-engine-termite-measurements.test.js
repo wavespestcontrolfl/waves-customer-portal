@@ -1018,6 +1018,13 @@ describe('saved bifenthrin label checks follow the bottle on server replay', () 
       Object.assign(pre, { catalogProductName: 'Atticus Talak 7.9 F' });
       Object.assign(trench, { label: 'Talak 7.9 F - Bifenthrin' });
       expect(counts()).toEqual([false, false]);
+      // A name counts only when it is this bottle's (pre-push audit 11): the inventory spelling does, another Crosscheck product does not.
+      Object.assign(pre, saved[0], { catalogProductName: 'LESCO Cross Check Plus' });
+      Object.assign(trench, saved[1], { label: 'LESCO Cross Check Plus' });
+      expect(counts()).toEqual([true, true]);
+      Object.assign(pre, { catalogProductName: 'LESCO Crosscheck G' });
+      Object.assign(trench, { label: 'Crosscheck G - Bifenthrin' });
+      expect(counts()).toEqual([false, false]);
     } finally {
       Object.assign(pre, saved[0]);
       Object.assign(trench, saved[1]);
