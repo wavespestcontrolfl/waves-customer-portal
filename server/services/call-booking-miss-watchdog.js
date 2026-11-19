@@ -758,8 +758,9 @@ function callFacts(call) {
 // is null when only the old bell's slot is known. Headline and why follow
 // docs/admin-notifications.md (composeAdminAlert checks them).
 // A held call (holdReason, owner 2026-11-18) says why the call agent held it and asks staff to
-// check the call first (HELD_CHECK_STEP).
-function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason = null }) {
+// review the call first (HELD_CHECK_STEP); reviewOnly (a stamped slot whose call's new decision
+// holds it) asks the same, naming no reason.
+function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason = null, reviewOnly = false }) {
   const agreedAt = spokenSlot(slot.dateET, slot.minutes);
   const bookedAt = spokenSlot(mismatch.date, windowStartMinutes(mismatch.time));
   const { callAtET, contactPhone, direction } = callFacts(call);
@@ -768,9 +769,8 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason
     why: `Booked ${bookedAt}; the call agreed ${agreedAt}.`,
     detail: `${name || 'The caller'} (${contactPhone || 'no number'}) agreed ${service || 'a visit'} for ${agreedAt} ` +
       `on a ${direction} call at ${callAtET} ET. The visit on the calendar is ${bookedAt}. ` +
-      (holdReason
-        ? `The call agent held this visit and did not book it, because ${holdReason}. ${HELD_CHECK_STEP}`
-        : 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.'),
+      (holdReason ? `The call agent held this visit and did not book it, because ${holdReason}. ` : '') +
+      (holdReason || reviewOnly ? HELD_CHECK_STEP : 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.'),
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(mismatch.date)}`,
   };
 }
@@ -781,7 +781,9 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason
 function bookItAlert(m, repeat) {
   const { callAtET, contactPhone, direction } = callFacts(m.call);
   const confirmed = `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call`;
-  const verb = m.holdReason ? 'review' : 'book';
+  // reviewOnly: a stamped slot whose call's new decision holds it (planOpenBookingMissBells).
+  const held = Boolean(m.holdReason || m.reviewOnly);
+  const verb = held ? 'review' : 'book';
   return {
     // A held visit is one to check before booking (HELD_STEP), so its headline says review.
     action: `${verb} ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - `Schedule — ${verb} `.length)}`,
@@ -792,7 +794,7 @@ function bookItAlert(m, repeat) {
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
       (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
-      (m.holdReason ? HELD_STEP : 'Book it in dispatch or call back to reset expectations.') +
+      (held ? HELD_STEP : 'Book it in dispatch or call back to reset expectations.') +
       (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
   };
 }
@@ -847,15 +849,18 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
     });
     // The hold reason belongs to the decision made on the extraction that confirmed the slot:
     // a stamped slot stands in for a reprocessed call whose new decision is about another
-    // reading of the call, so it carries none. callHoldReason itself needs a finished pass
-    // ('processed'), so a call still in processing carries none either.
-    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? callHoldReason(call) : null });
+    // reading of the call, so it carries none. But when that new decision holds the call (it
+    // can restrict contact), the stamped slot's bell still asks only for a review (reviewOnly).
+    // callHoldReason itself needs a finished pass ('processed'), so a call still in processing
+    // carries neither.
+    const held = callHoldReason(call);
+    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? held : null, reviewOnly: !ownSlot && Boolean(held) });
   }
   if (!entries.length) return [];
 
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
-  return entries.map(({ call, slot, rows, holdReason }) => ({ call, slot, holdReason, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+  return entries.map(({ call, slot, rows, holdReason, reviewOnly }) => ({ call, slot, holdReason, reviewOnly, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
 }
 
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): a person decided not to book the
@@ -891,14 +896,14 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
   const closeRows = ({ ids, resolution }, callId) => NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
     .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
     .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${callId}: ${err.message}`); return 0; });
-  for (const { call, slot, holdReason, plan } of plans) {
+  for (const { call, slot, holdReason, reviewOnly, plan } of plans) {
     if (plan.ring) {
       // One alert budget per run (MAX_ALERTS_PER_RUN), shared with the ring path: past
       // it, a plan that needs a new bell waits for the next tick with its old bells open;
       // plain closes still run.
       if (raised >= MAX_ALERTS_PER_RUN) { waiting += 1; continue; }
       // A replacement bell for a call the call agent held says why and asks for a review, as its first bell did.
-      const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason };
+      const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason, reviewOnly };
       const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey, repeat: false })
         .catch((err) => { logger.warn(`[call-booking-miss] failed to raise the replacement bell for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the replacement stands ('rung' or an
@@ -1064,7 +1069,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
-    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason })
+    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason, reviewOnly: m.reviewOnly })
     : bookItAlert(m, repeat);
   const created = await raiseAdminAlert(
     'alert',

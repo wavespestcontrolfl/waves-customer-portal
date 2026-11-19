@@ -397,18 +397,23 @@ describe('close pass', () => {
     expect(opts.dedupeKey).toBe(`call-booking-miss-rebook:${CALL_ID}:d1`);
   });
 
-  // Pre-push P1 (2026-11-18): a reprocessed call that no longer confirms a slot has a new
-  // decision about another reading of the call; it must not explain the stamped slot.
-  test('a reprocessed held call whose stamped slot stands in: the replacement bell names no hold reason', async () => {
-    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, live_decision: { ...HELD_DECISION, blocked_reasons: ['low_confidence'] } })];
+  // Pre-push P1s (2026-11-18): a reprocessed call that no longer confirms a slot has a new
+  // decision about another reading of the call, so it must not explain the stamped slot; but
+  // when that decision holds the call (here an opt-out) and the visit was then cancelled, the
+  // replacement still asks only for a review, never "book it or call back".
+  test('a reprocessed held call whose stamped slot stands in: the replacement asks for a review and names no reason', async () => {
+    const optOut = { ...HELD_DECISION, blocked_reasons: ['do_not_contact_requested'] };
+    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, live_decision: optOut })];
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(title).toBe("Schedule — book Sam Sample's Waves Assessment");
+    expect(title).toBe("Schedule — review Sam Sample's Waves Assessment");
     expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; nothing is on the calendar.');
     expect(opts.detail).not.toContain('The call agent held');
+    expect(opts.detail).toMatch(/Review the call before booking it\.$/);
+    expect(opts.detail).not.toContain('call back');
   });
 
   // Pre-push P1s (2026-11-18): mid-(re)processing, a pass has written its new extraction but not
