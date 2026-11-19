@@ -314,18 +314,21 @@ function fitBody(text) {
 // web-push endpoint can stay active under two staff accounts on a shared
 // browser, and its page shows a push whoever is signed in, so it is never in
 // it; nor is a token a customer registration re-pointed. That index compares
-// letter case, so a token another active row holds in any case is ambiguous
-// and is not in it either.
+// letter case, so a token another row holds in any case, active or not, is
+// ambiguous and is not in it either (a sign-out of one row must not make the
+// other count). The sender's two-step filter (staffMfaPushFilter) applies
+// again here, as on its own lookup.
 async function namedDevices(technicianId, conn) {
   const { STAFF_APP_BUNDLE_ID } = require('./apns');
-  const rows = await conn('push_subscriptions as ps')
+  const { staffMfaPushFilter } = require('./push-notifications');
+  const rows = await staffMfaPushFilter(conn('push_subscriptions as ps')
     .join('technicians as t', 'ps.admin_user_id', 't.id')
     .where({ 'ps.admin_user_id': technicianId, 'ps.active': true, 'ps.platform': 'ios', 't.active': true })
     .whereIn('t.role', ['admin', 'technician'])
     .whereNull('ps.customer_id')
     .whereRaw('ps.staff_token_version = t.auth_token_version')
     .whereRaw("ps.subscription_data::jsonb->>'topic' = ?", [STAFF_APP_BUNDLE_ID])
-    .whereRaw('NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND o.active AND lower(o.device_token) = lower(ps.device_token))')
+    .whereRaw('NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))'))
     .select('ps.id', 'ps.device_token');
   return new Map(rows.map((row) => [String(row.id), row.device_token]));
 }

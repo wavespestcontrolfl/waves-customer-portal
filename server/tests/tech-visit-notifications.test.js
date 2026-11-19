@@ -35,7 +35,10 @@ let mockAfterCheck = null;
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The sender's two-step filter, as namedDevices reapplies it: none by default.
+let mockMfaFilter = (query) => query;
 jest.mock('../services/push-notifications', () => ({
+  staffMfaPushFilter: (query) => mockMfaFilter(query),
   // Options are recorded apart, so the copy assertions below stay about the
   // notification itself. Like the real sender, beforeHandoff runs at the
   // device's final boundary; false sends nothing.
@@ -813,6 +816,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     mockLegsSent = [];
     mockLegBodies = [];
     mockStaffAppRows = null;
+    mockMfaFilter = (query) => query;
     mockAfterCheck = null;
     bundleLeaseCutoff = null;
     mockClearFailures = 0;
@@ -1164,8 +1168,8 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
       ['whereNull', 'ps.customer_id'],
       ['whereRaw', 'ps.staff_token_version = t.auth_token_version'],
       ['whereRaw', "ps.subscription_data::jsonb->>'topic' = ?", ['com.wavespestcontrol.wavespay']],
-      // A token another active row holds, in any letter case, is ambiguous.
-      ['whereRaw', expect.stringContaining('lower(o.device_token) = lower(ps.device_token)')],
+      // A token another row holds, in any letter case and any state, is ambiguous.
+      ['whereRaw', 'NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))'],
     ]));
   });
 
@@ -1233,6 +1237,14 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
       title: 'A visit was moved off your route',
       body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
+  });
+
+  test('the handoff device read reapplies the sender\'s two-step filter (pre-push audit P0)', async () => {
+    mockMfaFilter = (query) => query.whereRaw('(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)');
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(lastStaffAppQuery.calls).toEqual(expect.arrayContaining([
+      ['whereRaw', '(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)'],
+    ]));
   });
 
   test('a single unverified visit gets its own first line only', async () => {
