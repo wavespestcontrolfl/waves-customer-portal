@@ -267,13 +267,19 @@ const IMAGE_STYLES = Object.freeze({
   },
 });
 // One style permutation per post: the hero takes the first entry and body
-// slot k takes the k-th, so the hero and the first two body images never share
-// a style (Codex r1 P2 on #3964). The hero still leans photo (search
+// slot k takes the k-th, so the hero and the two body images never share a
+// style (Codex r1 P2 on #3964). The hero still leans photo (search
 // thumbnails): two posts in three put photo first.
-const STYLE_KEYS = Object.freeze(Object.keys(IMAGE_STYLES));
+// The shuffle still runs over the four keys the planner had before
+// 2026-11-19, so every slot keeps the style it was given then: a refresh
+// that keeps an older picture and adds one beside it still gives the two
+// different styles. The retired infographic key's place goes to the fourth,
+// unused style, which is where the old planner sent a slot whose
+// infographic had no caption.
+const ROTATION_KEYS = Object.freeze(['photo', 'illustration', 'cartoon', 'infographic']);
 function stylePermutation(slug) {
   const seed = hashString(`${slug || 'post'}:styles`);
-  const pool = [...STYLE_KEYS];
+  const pool = [...ROTATION_KEYS];
   const out = [];
   let h = seed;
   while (pool.length) {
@@ -284,7 +290,7 @@ function stylePermutation(slug) {
     out.splice(out.indexOf('photo'), 1);
     out.unshift('photo');
   }
-  return out;
+  return out.slice(0, 3).map((style) => (style === 'infographic' ? out[3] : style));
 }
 // Settings carry NO time-of-day wording (time is chosen separately below), and
 // the pool is chosen by what the article is ABOUT: a yard/turf/plant post

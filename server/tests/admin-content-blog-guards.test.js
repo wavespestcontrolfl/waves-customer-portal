@@ -248,6 +248,44 @@ describe('regenerate-image publish guard (codex r10)', () => {
     expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'blog-hero', index: 0, slug: 'pest-control/ghost-ants-sarasota', title: 'Ghost Ants In Sarasota', keyword: 'ghost ants' }));
     expect(calls.updates.at(-1).updates.featured_image_url).toBe('data:image/png;base64,QUJD');
   });
+
+  test('a post type changed while the picture was made refuses the save; the check is null-safe (pre-push audit P1 on 5608d79a6a)', async () => {
+    const AstroPublisher = require('../services/content-astro/astro-publisher');
+    AstroPublisher.generatePlannedImage.mockResolvedValue({ dataUrl: 'data:image/png;base64,QUJD', model: 'gpt-image-2', plan: { style: 'cartoon', setting: 'in a backyard, dew on the grass' }, screen: { checked: true, ok: true, reasons: [] } });
+    // The fake reads `readRow` and checks the save's post_type predicate against
+    // `writeRow`, the row as an editor left it during the slow picture call.
+    const fakeDb = (readRow, writeRow) => {
+      db.mockImplementation(() => {
+        const preds = [];
+        const sub = {
+          whereNull: (col) => { preds.push([col, null]); return sub; },
+          where: (col, ...rest) => { if (rest.length === 1) preds.push([col, rest[0]]); return sub; },
+          orWhere: () => sub,
+          orWhereNot: () => sub,
+        };
+        const q = {
+          where: jest.fn((a) => { if (typeof a === 'function') a(sub); return q; }),
+          first: jest.fn(() => Promise.resolve(readRow)),
+          update: jest.fn((u) => ({
+            returning: () => Promise.resolve(preds.filter(([col]) => col === 'post_type').every(([, v]) => (writeRow.post_type ?? null) === v) ? [{ ...writeRow, ...u }] : []),
+          })),
+        };
+        return q;
+      });
+    };
+    const send = async () => (await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } })).statusCode;
+    const typed = { id: POST_ID, status: 'draft', title: 'Ghost Ants In Sarasota', slug: 'pest-control/ghost-ants-sarasota', keyword: 'ghost ants', post_type: 'how-to' };
+    fakeDb(typed, { ...typed, post_type: 'diagnostic' });
+    expect(await send()).toBe(409);
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenLastCalledWith(expect.objectContaining({ identification: false }));
+    fakeDb(typed, typed);
+    expect(await send()).toBe(200);
+    const untyped = { ...typed, post_type: null };
+    fakeDb(untyped, untyped);
+    expect(await send()).toBe(200);
+    fakeDb(untyped, { ...untyped, post_type: 'diagnostic' });
+    expect(await send()).toBe(409);
+  });
 });
 
 describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invisible to pages-poll)', () => {

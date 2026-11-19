@@ -58,6 +58,41 @@ describe('planFor — deterministic variation per post and slot', () => {
     expect(photoHeroes / slugs.length).toBeGreaterThan(0.6); // the hero still leans photo: two posts in three
   });
 
+  test('every slot keeps the style the four-style planner gave it, so a kept older picture and its new sibling differ (pre-push audit P1 on 5608d79a6a)', () => {
+    // A frozen copy of the rotation before 2026-11-19 (photo, illustration, cartoon, infographic).
+    const before = (slug) => {
+      const seed = gen.hashString(`${slug || 'post'}:styles`);
+      const pool = ['photo', 'illustration', 'cartoon', 'infographic'];
+      const out = [];
+      let h = seed;
+      while (pool.length) {
+        h = Math.imul(h ^ (h >>> 13), 16777619) >>> 0;
+        out.push(pool.splice(h % pool.length, 1)[0]);
+      }
+      if (seed % 3 !== 0) {
+        out.splice(out.indexOf('photo'), 1);
+        out.unshift('photo');
+      }
+      return out;
+    };
+    const now = (slug, slot) => gen.planFor({ slug, mode: slot ? 'blog-body' : 'blog-hero', index: slot }).style;
+    for (let i = 0; i < 600; i++) {
+      const slug = `section/post-${i}`;
+      const old = before(slug);
+      for (const slot of [0, 1, 2]) {
+        // A slot keeps its style; the infographic slot takes the fourth style no other slot uses.
+        expect(now(slug, slot)).toBe(old[slot] === 'infographic' ? old[3] : old[slot]);
+      }
+      // A refresh that keeps an older picture in one body slot and adds the other: two styles.
+      for (const [kept, added] of [[1, 2], [2, 1]]) {
+        if (old[kept] !== 'infographic') expect(now(slug, added)).not.toBe(old[kept]);
+      }
+    }
+    // The audit's example: this post's older body-1 is an illustration, and a new body-2 is not.
+    expect(before('pest-control/my-post')[1]).toBe('illustration');
+    expect(now('pest-control/my-post', 2)).not.toBe('illustration');
+  });
+
   test('a screen retry (index + 1000) keeps the slot\'s style and cast under a fresh scene seed (Codex r2 P2 on #3964)', () => {
     let freshScenes = 0;
     for (let i = 0; i < 40; i += 1) {

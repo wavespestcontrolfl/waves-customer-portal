@@ -766,15 +766,18 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
     });
 
     // Same predicates ATOMICALLY on the write (the image call above is slow —
-    // a publish can start during it).
+    // a publish can start during it), plus the post type the picture was
+    // planned for: a post made an identification post mid-call must not save
+    // a hero planned without that post type's picture limits.
     const [updated] = await whereNoLivePublishClaim(
       db('blog_posts')
         .where('id', req.params.id)
-        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing')),
+        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+        .where((q) => (post.post_type == null ? q.whereNull('post_type') : q.where('post_type', post.post_type))),
     )
       .update({ featured_image_url: url, updated_at: new Date() })
       .returning('*');
-    if (!updated) return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
+    if (!updated) return res.status(409).json({ error: 'The post changed while the picture was made (a publish started, or its post type changed) — retry.' });
 
     res.json({ success: true, post: updated });
   } catch (err) {
