@@ -1004,7 +1004,14 @@ async function voiceOriginCallLogId(estimateId) {
   }
 }
 
-const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
+// Same pattern as lead-intake.js: a joined pair ("123 Main St, pest and
+// lawn") is one tail, so the service answer is "pest and lawn" and the
+// street line keeps no "pest and".
+const SERVICE_TAIL_WORD = '(?:quarterly\\s+|monthly\\s+|recurring\\s+|one[-\\s]?time\\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\\s+(?:control|care|service|treatment|program|removal))?';
+const SERVICE_TAIL_RE = new RegExp(
+  `[,\\s]+(${SERVICE_TAIL_WORD}(?:\\s*(?:,\\s*)?(?:\\s(?:and|plus)\\s|[&+/])\\s*${SERVICE_TAIL_WORD})*)\\s*$`,
+  'i',
+);
 function stripServiceTail(address) {
   let out = String(address || '').trim();
   let tailParts = [];

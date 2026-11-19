@@ -13,7 +13,7 @@ beforeEach(() => {
   mockDispatch.mockResolvedValue({ ok: true, json: { interest: 'unknown', confidence: 0.4 } });
 });
 
-describe('an explicit pest + lawn pair classifies as both, with no model call', () => {
+describe('a reply that is the pest + lawn pair classifies as both, with no model call', () => {
   test.each([
     'Residential pest & lawn care',
     'Lawn and pest',
@@ -22,14 +22,21 @@ describe('an explicit pest + lawn pair classifies as both, with no model call', 
     'pest control, and lawn care',
     'Pest + lawn please',
     'pest/lawn',
+    // Polite filler and a form reference around the pair.
+    'Pest and lawn as per form I filled out',
+    'Both pest and lawn',
+    "I'd like pest and lawn.",
   ])('%j => pest_lawn', async (body) => {
     await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: 'pest_lawn', confidence: 0.9, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 
-describe('both keyword sets without an explicit pair still go to the model', () => {
+describe('a pair inside other words, or both keyword sets without a pair, goes to the model', () => {
   test.each([
+    // The pair inside a longer reply: only the context tells the request.
+    ['I already have pest and lawn care. I only need mosquitoes.', 'pest'],
+    ['100 Palm Ave, pest and lawn', 'pest_lawn'],
     // One service, worded with words from both lists.
     ['I have got bugs in my yard', 'pest'],
     ['chinch bugs in the lawn', 'lawn'],

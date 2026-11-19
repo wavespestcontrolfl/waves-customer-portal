@@ -63,8 +63,14 @@ function looksLikeAddress(body) {
 // the awaiting_address state still handles a follow-up reply.
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // belongs to the service, not the address — the classifier reads the full
-// body separately, so the tail is simply dropped here.
-const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
+// body separately, so the tail is simply dropped here. A joined pair
+// ("123 Main St, pest and lawn") is one tail, so "pest and" never stays on
+// the street line. estimate-clarify-asks.js keeps the same pattern.
+const SERVICE_TAIL_WORD = '(?:quarterly\\s+|monthly\\s+|recurring\\s+|one[-\\s]?time\\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\\s+(?:control|care|service|treatment|program|removal))?';
+const SERVICE_TAIL_RE = new RegExp(
+  `[,\\s]+(${SERVICE_TAIL_WORD}(?:\\s*(?:,\\s*)?(?:\\s(?:and|plus)\\s|[&+/])\\s*${SERVICE_TAIL_WORD})*)\\s*$`,
+  'i',
+);
 function stripServiceTailFromAddress(address) {
   let out = String(address || '').trim();
   while (SERVICE_TAIL_RE.test(out)) {
