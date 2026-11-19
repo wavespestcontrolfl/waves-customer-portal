@@ -127,18 +127,21 @@ export function termiticideProductOptions(kind, selectedKey) {
 // The bottle the bifenthrin keys name. Since 2026-11-18 talstar_p and bifen_it are LESCO Crosscheck Plus (was Atticus Talak
 // 7.9 F under the same keys), so every form carries this mark and a saved estimate shows which bottle its label checks were
 // made for. An estimate saved without the mark predates the swap: its bifenthrin label check was made for the earlier bottle,
-// so a reopen clears it and the quote asks for the Crosscheck Plus label again.
+// so a reopen clears it and the quote asks for the Crosscheck Plus label again. Choosing another product also clears its label
+// check (the form's set()), so on a marked form a check is always for the product selected.
 export const BIFENTHRIN_LABEL_BOTTLE = "lesco_crosscheck_plus";
 const BIFENTHRIN_OPTION_KEYS = new Set(["talstar_p", "bifen_it"]);
-const BIFENTHRIN_LABEL_CHECKS = [
+// Each termiticide product field and the label check made for the product it selects.
+const LABEL_CHECKS = [
   { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab" },
   { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching" },
 ];
+const LABEL_CHECK_FOR_PRODUCT = Object.fromEntries(LABEL_CHECKS.map(({ productField, checkField }) => [productField, checkField]));
 
 // savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it.
 export function clearPriorBottleLabelChecks(savedInputs, form) {
   if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form, cleared: [] };
-  const stale = BIFENTHRIN_LABEL_CHECKS.filter(({ productField, checkField }) =>
+  const stale = LABEL_CHECKS.filter(({ productField, checkField }) =>
     BIFENTHRIN_OPTION_KEYS.has(form[productField]) && !!form[checkField]);
   if (stale.length === 0) return { form, cleared: [] };
   const next = { ...form };
@@ -2653,6 +2656,8 @@ export default function EstimateToolViewV2({
         ...(key === "trenchingPerimeterLF" ? { _trenchingPerimeterAuto: false } : {}),
         ...(key === "boracareSqft" ? { _boracareSqftAuto: false } : {}),
         ...(key === "preslabSqft" ? { _preslabSqftAuto: false } : {}),
+        // A label check is for the product chosen when it was ticked: choosing another product clears it.
+        ...(LABEL_CHECK_FOR_PRODUCT[key] ? { [LABEL_CHECK_FOR_PRODUCT[key]]: false } : {}),
         // palmCount ONLY: the auto flag tracks the PROPERTY count's
           // provenance — a treatment-count edit says nothing about it, and
           // flipping the flag there would leave a stale property prefill

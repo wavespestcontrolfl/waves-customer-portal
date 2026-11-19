@@ -134,4 +134,15 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
     expect(reviewAndSend()).toBeEnabled();
   });
+
+  it('clears a label check when another product is chosen, so a check is never carried to a bottle it was not made for', async () => {
+    reopen({ ...PRESLAB, preslabProductKey: 'termidor_sc', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.change(document.getElementById('estimate-preslabProductKey'), { target: { value: 'talstar_p' } });
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    const options = JSON.parse(callsTo('/calculate-estimate')[0][1].body).options;
+    expect(options).toMatchObject({ preslabProductKey: 'talstar_p', preslabLabelConfirmed: false });
+  });
 });

@@ -19,15 +19,22 @@
  * row and the catalog best price exactly the way the inventory price handler does for a manual entry with no shipping or tax
  * (PUT /:productId/pricing + recalcBestPriceLocked: previous price, price, price_amount, landed cost, per-oz figures, last_checked_at,
  * a price_history row holding the OLD price, and the catalog best_price / best_price_amount_cached / best_price_updated_at). It acts
- * only when the rows still look exactly as read on 2026-11-18, the vendor row's own pack included (1 gal, priced per oz: the
- * handler derives the unit cost from it); anything else (a second vendor row, a vendor row carrying shipping or tax: its landed
- * cost would need them) is left alone with a warning. It does not import the route.
+ * only when the rows still look exactly as read on 2026-11-18, the vendor row's price_amount (what costing reads first) and its own
+ * pack (1 gal, priced per oz: the handler derives the unit cost from it) included; anything else (a second vendor row, a vendor
+ * row carrying shipping or tax: its landed cost would need them) is left alone with a warning. It does not import the route.
+ * server/data/pricing.csv, the sheet the admin pricing import reads first, lists the same gallon at $30.90, so a re-import keeps it.
  *
  * Pre-slab hold: while a catalog row named LESCO Crosscheck Plus still holds the stale $58.42 for 128 oz after Step P (Step P had
- * to leave it), the onetime_preslab products stay on Talak (label, cost and catalog link as today, so slab quotes do not move)
- * and the deploy log says how to finish. Otherwise pre-slab links to the Crosscheck Plus catalog row: a price Step P leaves alone
- * is then a later entry, and the quote follows the catalog price (owner 2026-07-10) inside the bridge's band. Trenching has no
- * catalog link, so it moves either way.
+ * to leave it), each pre-slab bifenthrin option this migration moves, and each one that would take the code default link (no
+ * link of its own, as in the admin seed, or no product), links to the Atticus Talak 7.9 F catalog row instead. Its quote keeps
+ * today's cost (db-bridge takes the Talak catalog price, as before this change), while its label and copy name the Crosscheck Plus
+ * bottle the trucks now carry (#7984). An option with a link of its own is the admin's and stays. The deploy log says how to
+ * finish. Otherwise pre-slab links to the Crosscheck Plus catalog row: a price Step P leaves alone is then a later entry, and the
+ * quote follows the catalog price (owner 2026-07-10) inside the bridge's band. Trenching has no catalog link, so it moves either way.
+ *
+ * pest_service_costs (the admin Pricing Logic panel's Pest Service Cost Breakdown; display only, pestVisitCostModel prices the
+ * visit): its Talak line, 4 fl oz a visit at 41.57 / 128, becomes Crosscheck Plus at the engine's 0.97 (4 fl oz at 30.90 / 128) in
+ * the same place, and each total that held the Talak line moves by the same 0.33. Only while that line holds the Talak values.
  *
  * db-bridge reads `catalogProductName ?? catalog_product_name`, `containerCost ?? container_cost ?? bottleCost ?? bottle_cost`, and so
  * on, so a camelCase or bottle alias would win over the snake_case value written here: the rewrite drops those aliases.
@@ -36,8 +43,9 @@
  * pricing_changelog row when it changed anything; with no pricing_config_audit table it writes nothing (down() could not find its
  * writes). down() restores a product only when this migration's audit row for its row exists
  * AND the product still deep-equals what up() wrote (an admin edit since then is kept); it restores the catalog price only when its
- * audit row exists AND the vendor row and catalog row still hold exactly what up() wrote; then it deletes this migration's price_history
- * row, audit rows and changelog row.
+ * audit row exists AND the vendor row and catalog row still hold exactly what up() wrote; it restores the pest breakdown only when
+ * its audit row exists AND the row still deep-equals what up() wrote; then it deletes this migration's price_history row, audit rows
+ * and changelog row.
  *
  * The CROSSCHECK_* values are inlined (a pushed migration is frozen): server/tests/bifenthrin-option-crosscheck-migration.test.js asserts
  * they equal the talstar_p and bifen_it products in constants.js, so a later constant change fails that test instead of silently
@@ -54,7 +62,7 @@ const CHANGELOG = {
   version_to: 'v4.6',
   changed_by: TAG,
   category: 'cost',
-  summary: 'Pre-slab + trenching: the talstar_p and bifen_it options are LESCO Crosscheck Plus (1 gal = 128 fl oz, $30.90).',
+  summary: 'Pre-slab + trenching: the talstar_p and bifen_it options are LESCO Crosscheck Plus (1 gal = 128 fl oz, $30.90); the pest cost breakdown follows.',
 };
 const CATALOG_AUDIT_KEY = 'inventory:lesco_crosscheck_plus_price';
 
@@ -65,6 +73,16 @@ const STALE_SIZE_OZ = 128;
 const STALE_QUANTITY = '1 gal';
 const NEW_PRICE = 30.9;
 const NEW_PER_OZ = Math.round((NEW_PRICE / STALE_SIZE_OZ) * 10000) / 10000; // 0.2414, rounded as the price handler does
+// The catalog row the Talak products link to (production, 2026-11-18), and the one the pre-slab hold keeps.
+const TALAK_LINK = 'Atticus Talak 7.9 F';
+
+const PEST_COSTS_KEY = 'pest_service_costs';
+const TALAK_PEST_LINE = { bottle_oz: 128, bottle_price: 41.57, oz_per_service: 4, cost_per_service: 1.3 };
+const CROSSCHECK_PEST_LINE = { bottle_oz: 128, bottle_price: 30.9, oz_per_service: 4, cost_per_service: 0.97 };
+const PEST_LINE_KEY = 'crosscheck_plus';
+// The totals the known breakdown shapes carry, each of which holds the bifenthrin line (production: chemical + total; the admin
+// seed: direct + fully allocated; the 2026-04-26 seed: total).
+const PEST_TOTALS = ['chemical_cost_per_service', 'total_cost_per_service', 'direct_service_cost', 'fully_allocated_cost'];
 
 const PRODUCT_WARNING = 'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).';
 const CROSSCHECK_PRESLAB = {
@@ -93,7 +111,7 @@ const CROSSCHECK_TRENCH = {
 const TALAK_WARNING = 'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).';
 const TALAK_PRESLAB = {
   label: 'Talak 7.9 F - Bifenthrin',
-  catalog_product_name: 'Atticus Talak 7.9 F',
+  catalog_product_name: TALAK_LINK,
   package_label: '96 fl oz',
   positioning: 'standard_repellent',
   container_cost: 41.57,
@@ -159,14 +177,18 @@ async function lockProduct(knex, productId) {
 
 // ── Step P: the catalog price ────────────────────────────────────────────────
 
+const filled = (v) => v !== null && v !== undefined && v !== '';
 // A shipping or tax amount on the row: the handler would fold it into the landed cost, and Step P writes the bare price.
-const carries = (v) => v !== null && v !== undefined && v !== '' && Number(v) !== 0;
+const carries = (v) => filled(v) && Number(v) !== 0;
 
-// The one vendor row Step P may correct: active, approved, at the stale price, the 1 gal pack priced per oz (the handler derives
-// the unit cost from the row's own quantity), with no shipping or tax. Returns null when it is, else the reason it is not.
+// The one vendor row Step P may correct: active, approved, at the stale price (price_amount too, when set: costing reads it
+// first), the 1 gal pack priced per oz (the handler derives the unit cost from the row's own quantity), with no shipping or tax.
+// Returns null when it is, else the reason it is not.
 function vendorRowBlocker(row) {
-  if (row.is_active !== true || row.approval_status !== 'approved' || !same(row.price, STALE_PRICE)) {
-    return `the vendor row is not the active, approved $${STALE_PRICE} row (price ${row.price}) - an admin changed it`;
+  if (row.is_active !== true || row.approval_status !== 'approved' || !same(row.price, STALE_PRICE)
+    || (filled(row.price_amount) && !same(row.price_amount, STALE_PRICE))) {
+    return `the vendor row is not the active, approved $${STALE_PRICE} row (price ${row.price}, price_amount ${row.price_amount})`
+      + ' - an admin changed it';
   }
   if (String(row.quantity ?? '').trim().toLowerCase() !== STALE_QUANTITY || ('unit_normalized' in row && row.unit_normalized !== 'oz')) {
     return `the vendor row is not the ${STALE_QUANTITY} pack priced per oz (quantity ${row.quantity}, unit ${row.unit_normalized})`;
@@ -259,7 +281,7 @@ async function fixCatalogPrice(knex) {
 // True while a catalog row named LESCO Crosscheck Plus still holds the stale price for 128 oz after Step P (it had to leave the
 // rows: a second vendor row, an edited or inactive row, another pack, shipping or tax). db-bridge's pre-slab link would take that
 // price over the config's 30.90 (1.89x sits inside its [0.5x, 2x] band) and RAISE slab quotes, now or on the day an inactive
-// backing row comes back, so the pre-slab products stay on Talak until the price is fixed in the app.
+// backing row comes back, so the pre-slab options keep the Talak catalog link until the price is fixed in the app.
 async function catalogStillStale(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return false;
   const rows = await knex('products_catalog').where({ name: CATALOG_NAME });
@@ -319,20 +341,47 @@ function rewriteRow(configKey, data, plan) {
   return changed ? { ...data, products } : null;
 }
 
+// The catalog row db-bridge links a pre-slab product to: its own catalogProductName ?? catalog_product_name when that is a
+// non-blank string (setString), else the code default, which is now LESCO Crosscheck Plus.
+function ownLink(product) {
+  const name = product && typeof product === 'object' ? product.catalogProductName ?? product.catalog_product_name : null;
+  return typeof name === 'string' && name.trim() ? name.trim() : null;
+}
+
+// The pre-slab hold (see the header): each option this migration moves (`moved` = rewriteRow's result), and each one with no link
+// of its own, gets the Talak catalog link. Returns the new data, or null when nothing changes.
+function holdPreSlabLinks(data, moved) {
+  const base = moved || data;
+  const products = { ...base.products };
+  let changed = !!moved;
+  for (const key of OPTION_KEYS) {
+    const ours = !!moved && !isDeepStrictEqual(moved.products[key], data.products[key]);
+    if (!ours && ownLink(products[key])) continue;
+    const current = products[key] && typeof products[key] === 'object' ? products[key] : {};
+    const { catalogProductName: _blankAlias, ...product } = current;
+    products[key] = { ...product, catalog_product_name: TALAK_LINK };
+    changed = true;
+  }
+  return changed ? { ...base, products } : null;
+}
+
+// Returns the config keys it wrote.
 async function rewriteConfigRows(knex, holdPreSlab) {
   const rewritten = [];
   for (const [key, plan] of Object.entries(PLANS)) {
     const row = await knex('pricing_config').where({ config_key: key }).forUpdate().first('data');
     const data = row && parse(row.data);
     if (!data || !data.products || typeof data.products !== 'object') continue;
-    const next = rewriteRow(key, data, plan);
-    if (!next) continue;
-    if (key === 'onetime_preslab' && holdPreSlab) {
-      console.warn(`${LOG} onetime_preslab stays on Talak, so slab quotes do not move: the ${CATALOG_NAME} catalog row still holds `
-        + `the stale $${STALE_PRICE.toFixed(2)}, which the pre-slab link would take over $${NEW_PRICE.toFixed(2)}. Enter `
-        + `$${NEW_PRICE.toFixed(2)} for it in Inventory, then move the pre-slab talstar_p and bifen_it products to Crosscheck Plus.`);
-      continue;
+    const held = key === 'onetime_preslab' && holdPreSlab;
+    const moved = rewriteRow(key, data, plan);
+    const next = held ? holdPreSlabLinks(data, moved) : moved;
+    if (held) {
+      console.warn(`${LOG} onetime_preslab: the ${CATALOG_NAME} catalog row still holds the stale $${STALE_PRICE.toFixed(2)}, which `
+        + `the pre-slab link would take over $${NEW_PRICE.toFixed(2)}, so the pre-slab bifenthrin options link to ${TALAK_LINK} and `
+        + `slab quotes do not move. Enter $${NEW_PRICE.toFixed(2)} for ${CATALOG_NAME} in Inventory, then set their catalog link to `
+        + `${CATALOG_NAME}.`);
     }
+    if (!next) continue;
     await knex('pricing_config').where({ config_key: key }).update({ data: JSON.stringify(next), updated_at: knex.fn.now() });
     await knex('pricing_config_audit').insert({
       config_key: key,
@@ -369,6 +418,58 @@ async function restoreConfigRows(knex) {
   }
 }
 
+// ── pest_service_costs (display) ─────────────────────────────────────────────
+
+// The breakdown with its Talak line replaced in place and each known total moved by the same amount; null when the line does not
+// hold the Talak values (an admin's edit, or already moved).
+function pestCostsRewrite(data) {
+  const chemicals = data && data.chemicals;
+  if (!chemicals || typeof chemicals !== 'object' || PEST_LINE_KEY in chemicals || !isDeepStrictEqual(chemicals.talak, TALAK_PEST_LINE)) {
+    return null;
+  }
+  const delta = CROSSCHECK_PEST_LINE.cost_per_service - TALAK_PEST_LINE.cost_per_service;
+  const next = {
+    ...data,
+    chemicals: Object.fromEntries(Object.entries(chemicals).map(([k, v]) => (k === 'talak' ? [PEST_LINE_KEY, CROSSCHECK_PEST_LINE] : [k, v]))),
+  };
+  for (const field of PEST_TOTALS) {
+    if (typeof data[field] === 'number') next[field] = Math.round((data[field] + delta) * 100) / 100;
+  }
+  return next;
+}
+
+async function rewritePestCosts(knex) {
+  const row = await knex('pricing_config').where({ config_key: PEST_COSTS_KEY }).forUpdate().first('data');
+  const data = row && parse(row.data);
+  const next = pestCostsRewrite(data);
+  if (!next) {
+    if (data && data.chemicals && data.chemicals.talak) console.warn(`${LOG} ${PEST_COSTS_KEY}.chemicals.talak was edited - leaving it alone`);
+    return false;
+  }
+  await knex('pricing_config').where({ config_key: PEST_COSTS_KEY }).update({ data: JSON.stringify(next), updated_at: knex.fn.now() });
+  await knex('pricing_config_audit').insert({
+    config_key: PEST_COSTS_KEY,
+    old_value: JSON.stringify(data),
+    new_value: JSON.stringify(next),
+    changed_by: TAG,
+    reason: REASON,
+  });
+  return true;
+}
+
+async function restorePestCosts(knex) {
+  const own = await knex('pricing_config_audit').where({ config_key: PEST_COSTS_KEY, changed_by: TAG }).first('old_value', 'new_value');
+  if (!own) return;
+  const before = parse(own.old_value);
+  const row = await knex('pricing_config').where({ config_key: PEST_COSTS_KEY }).forUpdate().first('data');
+  const current = row && parse(row.data);
+  if (!before || !current || !isDeepStrictEqual(current, parse(own.new_value))) {
+    console.warn(`${LOG} down: ${PEST_COSTS_KEY} changed since this migration - leaving it alone`);
+    return;
+  }
+  await knex('pricing_config').where({ config_key: PEST_COSTS_KEY }).update({ data: JSON.stringify(before), updated_at: knex.fn.now() });
+}
+
 exports.TAG = TAG;
 exports.CHANGELOG = CHANGELOG;
 exports.CROSSCHECK_PRESLAB = CROSSCHECK_PRESLAB;
@@ -378,6 +479,19 @@ exports.TALAK_TRENCH = TALAK_TRENCH;
 exports.REASON = REASON;
 exports.CATALOG_REASON = CATALOG_REASON;
 exports.CATALOG_AUDIT_KEY = CATALOG_AUDIT_KEY;
+exports.NEW_PRICE = NEW_PRICE;
+exports.TALAK_LINK = TALAK_LINK;
+exports.TALAK_PEST_LINE = TALAK_PEST_LINE;
+exports.CROSSCHECK_PEST_LINE = CROSSCHECK_PEST_LINE;
+
+function changelogAfter(rewritten, holdPreSlab) {
+  if (!rewritten.includes('onetime_preslab')) {
+    return 'LESCO Crosscheck Plus: 128 fl oz at $30.90; the pre-slab products did not move (see the deploy log)';
+  }
+  return holdPreSlab
+    ? `LESCO Crosscheck Plus: 128 fl oz at $30.90; the pre-slab catalog link stays on ${TALAK_LINK} until the ${CATALOG_NAME} catalog price is fixed (see the deploy log)`
+    : 'LESCO Crosscheck Plus: 128 fl oz at $30.90 (pre-slab links to the Crosscheck Plus catalog row)';
+}
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('pricing_config_audit'))) {
@@ -386,17 +500,16 @@ exports.up = async function up(knex) {
   }
   const priceFixed = await fixCatalogPrice(knex);
   const holdPreSlab = await catalogStillStale(knex);
-  const rewritten = await knex.schema.hasTable('pricing_config') ? await rewriteConfigRows(knex, holdPreSlab) : [];
-  if ((rewritten.length || priceFixed) && await knex.schema.hasTable('pricing_changelog')
+  const hasConfig = await knex.schema.hasTable('pricing_config');
+  const rewritten = hasConfig ? await rewriteConfigRows(knex, holdPreSlab) : [];
+  const pestMoved = hasConfig ? await rewritePestCosts(knex) : false;
+  if ((rewritten.length || priceFixed || pestMoved) && await knex.schema.hasTable('pricing_changelog')
     && !(await knex('pricing_changelog').where(CHANGELOG).first('id'))) {
-    const after = rewritten.includes('onetime_preslab')
-      ? 'LESCO Crosscheck Plus: 128 fl oz at $30.90 (pre-slab links to the Crosscheck Plus catalog row)'
-      : 'LESCO Crosscheck Plus: 128 fl oz at $30.90; the pre-slab products did not move (see the deploy log)';
     await knex('pricing_changelog').insert({
       ...CHANGELOG,
-      affected_services: JSON.stringify(['pre_slab_termiticide', 'trenching', 'mosquito']),
+      affected_services: JSON.stringify(['pre_slab_termiticide', 'trenching', 'mosquito', 'pest_control']),
       before_value: JSON.stringify({ bifenthrin: 'Atticus Talak 7.9 F: 96 fl oz at $41.57; LESCO Crosscheck Plus catalog price $58.42 per 1 gal (stale)' }),
-      after_value: JSON.stringify({ bifenthrin: after }),
+      after_value: JSON.stringify({ bifenthrin: changelogAfter(rewritten, holdPreSlab) }),
       rationale: REASON,
     });
   }
@@ -405,7 +518,10 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
   await restoreCatalogPrice(knex);
-  if (await knex.schema.hasTable('pricing_config')) await restoreConfigRows(knex);
+  if (await knex.schema.hasTable('pricing_config')) {
+    await restoreConfigRows(knex);
+    await restorePestCosts(knex);
+  }
   await knex('pricing_config_audit').where({ changed_by: TAG }).del();
   if (await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG).del();
