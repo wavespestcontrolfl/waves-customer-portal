@@ -93,6 +93,20 @@ describe('Field view preference', () => {
     expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['customers'] });
     expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['customers']);
   });
+  // Pre-push P1 (round 3): full storage still reads, but every write fails.
+  it("keeps this tab's unsaved change when the phone's storage is full", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = () => { throw new Error('QuotaExceededError'); };
+    try {
+      act(() => navigation.setFieldView(true));
+      act(() => navigation.togglePin('today'));
+      act(() => { navigation.togglePin('customers'); navigation.toggleGroup(navigation.groups[0].id); });
+    } finally { Storage.prototype.setItem = setItem; }
+    expect(navigation.fieldView).toBe(true);
+    expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['today', 'customers']);
+    expect(saved('acct-1')).toBeNull();
+  });
   it("another tab's pins show here at once", () => {
     mount({ id: 'acct-1', role: 'admin' });
     otherTabSaved({ pins: ['today'] });

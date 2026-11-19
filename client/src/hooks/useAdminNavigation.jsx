@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { adminNavigationPreferenceKey as preferenceKey } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
@@ -59,23 +59,34 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
 
   // Every tab on this phone saves to the same record. A change applies to the
   // newest saved settings (this tab's own when storage cannot be read), so a
-  // tab that missed another tab's change never writes an old value back. The
-  // read and the write stay outside the state update: StrictMode runs a queued
-  // update twice in development, and a second pin toggle would undo the first.
+  // tab that missed another tab's change never writes an old value back. A
+  // write can fail while reads still work (full storage): until a write
+  // succeeds, this tab's unsaved settings stay the base, so a later change
+  // keeps them. The read and the write stay outside the state update:
+  // StrictMode runs a queued update twice in development, and a second pin
+  // toggle would undo the first.
+  const unsaved = useRef(null);
   const updatePreferences = (update) => {
-    const next = update((user?.id && readSavedPreferences(user.id)) || preferences);
+    const next = update(unsaved.current || (user?.id && readSavedPreferences(user.id)) || preferences);
+    unsaved.current = next;
     if (user?.id) {
-      try { localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION })); } catch { /* optional preference */ }
+      try {
+        localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
+        unsaved.current = null;
+      } catch { /* full or blocked storage: this tab's change stays the base */ }
     }
     setPreferences(next);
   };
   // Another tab's save shows here at once: pins, groups and the switch the
-  // tabs and the /admin landing read. A cleared storage reads as nothing saved.
+  // tabs and the /admin landing read. It is newer than anything this tab
+  // could not save. A cleared storage reads as nothing saved.
   useEffect(() => {
     if (!user?.id) return undefined;
     const key = preferenceKey(user.id);
     const onStorage = (event) => {
-      if (event.key === null || event.key === key) setPreferences(readPreferences(user.id));
+      if (event.key !== null && event.key !== key) return;
+      unsaved.current = null;
+      setPreferences(readPreferences(user.id));
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);

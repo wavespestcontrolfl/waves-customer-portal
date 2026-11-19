@@ -33,8 +33,10 @@ import TechNavigationLock from "./tech/TechNavigationLock";
 import { saveStaffOfflinePass } from "../lib/adminAuth";
 
 const ADMIN = { id: "acct-1", name: "Fixture Admin", role: "admin" };
-// The full shell signs out in a few steps; a loaded CI runner can pass 1 s.
-const SIGN_IN_WAIT = { timeout: 5000 };
+// The full shell signs out in a few steps, and a fresh sign-in mounts it
+// twice; a loaded runner can pass vitest's 5 s default for one test.
+const SIGN_IN_WAIT = { timeout: 15000 };
+const SHELL_TEST_TIMEOUT = 20000;
 
 function LoginProbe() {
   const location = useLocation();
@@ -97,7 +99,7 @@ it("a 401 from the login check after a Field view landing returns the sign-in to
   vi.stubGlobal("fetch", vi.fn(async () => response(401, { error: "revoked" })));
   openAt("/admin");
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
-});
+}, SHELL_TEST_TIMEOUT);
 
 it("a 401 from a Today request after a Field view landing returns the sign-in to /admin (session guard)", async () => {
   signedIn();
@@ -108,7 +110,7 @@ it("a 401 from a Today request after a Field view landing returns the sign-in to
   }));
   openAt("/admin");
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
-});
+}, SHELL_TEST_TIMEOUT);
 
 it("another tab signing out after a Field view landing returns this tab's sign-in to /admin", async () => {
   signedIn();
@@ -118,7 +120,7 @@ it("another tab signing out after a Field view landing returns this tab's sign-i
   localStorage.removeItem("waves_admin_token");
   await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
-});
+}, SHELL_TEST_TIMEOUT);
 
 // Pre-push P1 (round 2): no pass yet, so the shell checks at /admin and its
 // own index rule lands on Today; that landing is marked too.
@@ -131,18 +133,18 @@ it("after a fresh sign-in (no offline pass yet) the shell's own Today landing re
   }));
   openAt("/admin");
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
-});
+}, SHELL_TEST_TIMEOUT);
 
 it("Today opened by hand still returns the sign-in to Today", async () => {
   signedIn();
   vi.stubGlobal("fetch", vi.fn(async () => response(401, { error: "revoked" })));
   openAt("/admin/today");
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin%2Ftoday", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
-});
+}, SHELL_TEST_TIMEOUT);
 
 it("an expired token is checked at /admin, so its sign-in returns there", async () => {
   signedIn(staffJwt(Math.floor(Date.now() / 1000) - 60));
   vi.stubGlobal("fetch", vi.fn(async () => response(401, { error: "expired" })));
   openAt("/admin");
   expect(await screen.findByText("Staff login /admin/login?next=%2Fadmin", undefined, SIGN_IN_WAIT)).toBeInTheDocument();
-});
+}, SHELL_TEST_TIMEOUT);
