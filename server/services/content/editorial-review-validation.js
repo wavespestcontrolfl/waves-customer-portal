@@ -49,11 +49,15 @@ function validateChecks(checks, document, title, sources) {
 // are removed for the figure test only: an attributed quote is detected on the passage as written.
 const DOCUMENT_CODE_RE = /\b(?:EENY|ENY|ENH|LH|SL|IN|CIR)-?\d+[A-Z]?\b/g;
 const FIGURE_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
+// A link's destination is not read as prose ("[guide](/pest-control/2026-roach-guide/)"); its text is.
+const LINK_DESTINATION_RE = /\]\([^)\s]*(?:\([^)\s]*\)[^)\s]*)*(?:\s+"[^"]*")?\)/g;
+const BARE_URL_RE = /https?:\/\/\S+/g;
 function deterministicClaimKind(passage) {
   const text = String(passage || '');
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
-  if (FIGURE_RE.test(text.replace(DOCUMENT_CODE_RE, ' '))) return 'quantitative';
+  const prose = text.replace(LINK_DESTINATION_RE, '] ').replace(BARE_URL_RE, ' ').replace(DOCUMENT_CODE_RE, ' ');
+  if (FIGURE_RE.test(prose)) return 'quantitative';
   return null;
 }
 

@@ -60,6 +60,13 @@ describe('editorial review coverage validation', () => {
   });
 
   test.each([
+    'Read the [cockroach guide](/pest-control/cockroach-types-2026/) next.',
+    'The [UF/IFAS page](https://edis.ifas.ufl.edu/publication/IN917 "Woods roach") has photos.',
+  ])('does not read digits in a link destination as a figure: %s', (passage) => {
+    expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
+  });
+
+  test.each([
     'Here is what EENY-514 says about the spray:',
     'UF/IFAS fact sheets ENH5 and LH010 cover St. Augustine grass.',
   ])('allows a UF/IFAS publication number that names a source: %s', (passage) => {
