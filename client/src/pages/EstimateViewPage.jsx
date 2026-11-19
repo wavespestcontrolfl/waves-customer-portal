@@ -4790,29 +4790,51 @@ export function EstimateErrorBanner({ error }) {
 // re-checks every conflict, so a time someone else took still refuses). Answers
 // { held } with the new hold, { taken } when the time is gone, { review } when the
 // office parked the estimate, or { failed } for anything else (the caller then reopens the time list). Never throws.
+// A signed time offer lapses 45 minutes after its list was built, and reserve then
+// refuses even a free time. That refusal carries a fresh signed list: when the same
+// time is on it, hold it once more with its new id. The page keeps its own id:
+// accept finds the hold by date, time and technician, not by the signature.
 export async function holdSameTimeAgain({ token, slotId, serviceMode, selectedFrequency, serviceCadences }) {
   if (!token || !slotId) return { failed: true };
   const payload = { slotId, serviceMode };
   if (serviceMode !== 'one_time' && selectedFrequency) payload.selectedFrequency = selectedFrequency;
   if (serviceMode !== 'one_time' && serviceCadences) payload.serviceCadences = serviceCadences;
   try {
-    const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (r.status === 409) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (r.status !== 409) {
+        if (!r.ok) return { failed: true };
+        const body = await r.json();
+        return body.scheduledServiceId && body.expiresAt ? { held: body } : { failed: true };
+      }
       const body = await r.json().catch(() => ({}));
       // Parked for the office (B18): the caller takes it through the one transition.
       if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') return { review: body };
-      return /slot no longer available/i.test(body.error || '') ? { taken: true } : { failed: true };
+      if (!/slot no longer available/i.test(body.error || '')) return { failed: true };
+      const fresh = attempt === 0 ? sameTimeOnFreshList(body.availableSlots, slotId) : null;
+      if (!fresh) return { taken: true };
+      payload.slotId = fresh;
     }
-    if (!r.ok) return { failed: true };
-    const body = await r.json();
-    return body.scheduledServiceId && body.expiresAt ? { held: body } : { failed: true };
+    return { taken: true };
   } catch {
     return { failed: true };
   }
+}
+
+// The same time on a fresh signed list, or null. A slot id is date, start time and
+// technician, then the offer's signature segments after the first '.'.
+function sameTimeOnFreshList(list, slotId) {
+  const base = String(slotId).split('.')[0];
+  const slots = [
+    ...(Array.isArray(list?.primary) ? list.primary : []),
+    ...(Array.isArray(list?.expander) ? list.expander : []),
+  ];
+  const same = slots.find((s) => typeof s?.slotId === 'string' && s.slotId !== slotId && s.slotId.split('.')[0] === base);
+  return same ? same.slotId : null;
 }
 
 export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
@@ -10848,7 +10870,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
-        bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        // The flow shows only reviewContent while reviewing, so the banner rides on
+        // both steps: the held-again notice belongs to the review step.
+        bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={<>{slotIssueBanner}{reviewContent}</>}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
           <HoldCountdownBarWhenTimed

@@ -63,6 +63,17 @@ function recurringPayload() {
   };
 }
 
+// The website quote offers its Book button only when every price row has an amount.
+function websitePayload() {
+  const payload = recurringPayload();
+  payload.pricing.services[0].frequencies[0] = {
+    ...payload.pricing.services[0].frequencies[0],
+    visitsPerYear: 4,
+    perServiceTreatments: [{ service: 'pest_control', displayPrice: 50, visitsPerYear: 4, monthly: 17 }],
+  };
+  return payload;
+}
+
 const slotsPayload = () => ({
   primary: [
     { slotId: 'slot-1', date: '2026-07-15', windowStart: '09:00', windowEnd: '11:00' },
@@ -78,7 +89,7 @@ const EXPIRED_409 = () => jsonResponse(
 );
 
 // reserveImpl(n) answers the n-th POST /reserve (1 = the first pick); acceptImpl(n) the n-th PUT /accept.
-function makeFetchMock({ reserveImpl, acceptImpl }) {
+function makeFetchMock({ reserveImpl, acceptImpl, data = recurringPayload }) {
   let reserves = 0;
   let accepts = 0;
   return vi.fn(async (url, init = {}) => {
@@ -88,7 +99,7 @@ function makeFetchMock({ reserveImpl, acceptImpl }) {
     if (u.includes('/reserve/') && init.method === 'DELETE') return jsonResponse({}, { ok: true, status: 200 });
     if (u.includes('/extend')) return jsonResponse({ expiresAt: inFifteenMinutes() });
     if (u.includes('/accept')) { accepts += 1; return acceptImpl(accepts); }
-    if (u.includes('/data')) return jsonResponse(recurringPayload());
+    if (u.includes('/data')) return jsonResponse(data());
     return jsonResponse({});
   });
 }
@@ -109,9 +120,12 @@ beforeAll(() => {
   window.scrollTo = vi.fn();
 });
 
+const setQuery = (query) => window.history.pushState({}, '', query ? `/?${query}` : '/');
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  setQuery('');
 });
 
 // The page's first render is heavy; give each step room on a loaded runner.
@@ -155,6 +169,53 @@ describe('the accept says the hold expired', () => {
     await waitFor(() => expect(screen.queryByText(REHELD)).toBeNull(), SLOW);
     const accepts = fetchMock.mock.calls.filter(([url]) => String(url).includes('/accept'));
     expect(accepts).toHaveLength(2);
+  }, TEST_TIMEOUT_MS);
+
+  it('the website checkout shows the same notice on its review step', async () => {
+    stubLocalStorage();
+    setQuery('website=1');
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => jsonResponse({ scheduledServiceId: `ss-${n}`, expiresAt: inFifteenMinutes() }),
+      acceptImpl: (n) => (n === 1 ? EXPIRED_409() : jsonResponse({ success: true })),
+      data: websitePayload,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    // The website flow starts on the quote; its Book button opens the times.
+    fireEvent.click(await screen.findByRole('button', { name: /^Book My Service/ }, SLOW));
+    await pickTimeAndConfirm();
+
+    const banner = await screen.findByText(REHELD, {}, SLOW);
+    expect(banner.closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByText(/Your visit is not booked yet/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeInTheDocument();
+    expect(reserveCalls(fetchMock)).toHaveLength(2);
+  }, TEST_TIMEOUT_MS);
+
+  it('an offer that lapsed while the time is still free: holds it with the fresh signed id from the refusal', async () => {
+    stubLocalStorage();
+    const fresh = 'slot-1.1767216000000.90.freshsig';
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => {
+        if (n === 2) {
+          return jsonResponse({
+            error: 'slot no longer available',
+            availableSlots: { primary: [{ slotId: 'slot-2.1767216000000.90.othersig' }, { slotId: fresh }], expander: [] },
+          }, { ok: false, status: 409 });
+        }
+        return jsonResponse({ scheduledServiceId: `ss-${n}`, expiresAt: inFifteenMinutes() });
+      },
+      acceptImpl: (n) => (n === 1 ? EXPIRED_409() : jsonResponse({ success: true })),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+
+    expect(await screen.findByText(REHELD, {}, SLOW)).toBeInTheDocument();
+    expect(reserveCalls(fetchMock).map(([, init]) => JSON.parse(init.body).slotId)).toEqual(['slot-1', 'slot-1', fresh]);
+    expect(screen.queryByText(/just taken/i)).toBeNull();
   }, TEST_TIMEOUT_MS);
 
   it('says the time was taken, in plain words, and reopens the time list when the time is gone', async () => {
@@ -224,6 +285,40 @@ describe('holdSameTimeAgain', () => {
   ])('answers %s', async (_label, answer, expected) => {
     vi.stubGlobal('fetch', vi.fn(async () => answer()));
     expect(await holdSameTimeAgain(base)).toEqual(expected);
+  });
+
+  const OLD = '2026-07-15_09-00_tech-1.1767210000000.90.oldsig';
+  const FRESH = '2026-07-15_09-00_tech-1.1767216000000.90.newsig';
+  const refusal = (primary, expander = []) => jsonResponse(
+    { error: 'slot no longer available', availableSlots: { primary, expander } },
+    { ok: false, status: 409 },
+  );
+
+  it('a lapsed offer for a time still free: holds it once more with the fresh signed id', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(refusal([{ slotId: '2026-07-15_10-00_tech-1.1767216000000.90.othersig' }], [{ slotId: FRESH }]))
+      .mockResolvedValueOnce(jsonResponse({ scheduledServiceId: 'ss-3', expiresAt: 'soon' }));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ held: { scheduledServiceId: 'ss-3', expiresAt: 'soon' } });
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).slotId)).toEqual([OLD, FRESH]);
+  });
+
+  it.each([
+    ['another technician at the same time is not the same time', [{ slotId: '2026-07-15_09-00_tech-2.1767216000000.90.x' }], 1],
+    ['a fresh list without the time', [{ slotId: '2026-07-15_10-00_tech-1.1767216000000.90.x' }], 1],
+    ['a list that is not a list', 'oops', 1],
+  ])('answers taken: %s', async (_label, primary, calls) => {
+    const fetchMock = vi.fn(async () => refusal(primary));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ taken: true });
+    expect(fetchMock).toHaveBeenCalledTimes(calls);
+  });
+
+  it('retries only once: a second refusal is taken', async () => {
+    const fetchMock = vi.fn(async () => refusal([{ slotId: FRESH }]));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await holdSameTimeAgain({ ...base, slotId: OLD })).toEqual({ taken: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('never throws on a network error, and sends nothing without a slot', async () => {
