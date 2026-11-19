@@ -36,10 +36,12 @@ function queryFor(rows) {
         result = result.filter((row) => row.customer_id == null || String(row.customer_id) === String(bindings[0]));
       }
       if (/LOWER\(TRIM\(from_address\)\)/.test(sql)) {
-        const [sender, mailboxPattern, mailbox, senderPattern] = bindings;
-        const includes = (value, pattern) => String(value || '').toLowerCase().includes(String(pattern).replaceAll('%', ''));
+        const [sender, mailboxPattern, taggedPattern, mailbox, senderPattern] = bindings;
+        const like = (value, pattern) => new RegExp(String(pattern).replace(/[.+*?^${}()|[\]\\]/g, '\\$&').replaceAll('%', '.*'), 'i').test(String(value || ''));
+        const includes = (value, pattern) => like(value, pattern);
         result = result.filter((row) => (
-          String(row.from_address || '').toLowerCase() === sender && includes(row.to_address, mailboxPattern)
+          String(row.from_address || '').toLowerCase() === sender
+          && (includes(row.to_address, mailboxPattern) || includes(row.to_address, taggedPattern))
         ) || (
           String(row.from_address || '').toLowerCase() === mailbox && includes(row.to_address, senderPattern)
         ));
@@ -124,6 +126,33 @@ describe('assembleEmailReplyContext', () => {
       database, aggregator, mailboxAddress: MAILBOX, mode: 'replay',
     })).resolves.toMatchObject({ ok: false, reason: 'historical_context_unavailable' });
     expect(aggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('treats a plus-tagged website address as the mailbox, in the trigger and the thread', async () => {
+    const tagged = { ...EMAIL, to_address: 'Waves <Contact+GBP-Sarasota_home@wavespestcontrol.com>' };
+    const reply = {
+      ...EMAIL, id: 'email-reply', from_address: MAILBOX, to_address: CUSTOMER.email,
+      label_ids: ['SENT'], body_text: 'We can do Tuesday.', received_at: '2026-09-09T16:00:00Z',
+    };
+    const earlier = { ...tagged, id: 'email-earlier', body_text: 'First ask', received_at: '2026-09-08T16:00:00Z' };
+    const aggregator = { getContextForCustomer: jest.fn(async () => aggregatorContext()) };
+    const result = await assembleEmailReplyContext(tagged, {
+      customer: CUSTOMER, database: fakeDatabase({ emails: [earlier, reply, tagged] }), aggregator,
+      mailboxAddress: MAILBOX, now: '2026-09-10T17:00:00Z',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.untrusted.emailThread.messages.map((m) => [m.id, m.direction])).toEqual([
+      ['email-earlier', 'inbound'], ['email-reply', 'outbound'], ['email-current', 'inbound'],
+    ]);
+  });
+
+  test('a tag on another mailbox or a foreign domain is still not inbound', async () => {
+    const aggregator = { getContextForCustomer: jest.fn() };
+    for (const to of ['info+gads_home@wavespestcontrol.com', 'contact+gads_home@example.test']) {
+      await expect(assembleEmailReplyContext({ ...EMAIL, to_address: to }, {
+        database: fakeDatabase(), aggregator, mailboxAddress: MAILBOX,
+      })).resolves.toMatchObject({ ok: false, reason: 'not_inbound' });
+    }
   });
 
   test.each([

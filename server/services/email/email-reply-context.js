@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const contextAggregator = require('../context-aggregator');
 const { extractTopReplyText, htmlReplyToText } = require('../newsletter-proof');
 const { normalizeAddress, domainFromAddress } = require('./spam-blocker');
+const { ownMailboxAddress } = require('./email-source-tag');
 const { hasAlignedAuth } = require('./inbox-hygiene');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { savepointRead } = require('../../utils/savepoint-read');
@@ -116,16 +117,18 @@ function emailBody(row) {
   return { text: String(row.snippet || ''), status: 'unavailable_snippet' };
 }
 
+// Our own tagged website address (contact+gbp-sarasota_home@) is the mailbox;
+// every other address, customers included, is compared as written.
 function addressesOf(value) {
   return (String(value || '').match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [])
-    .map(normalizeAddress);
+    .map(ownMailboxAddress);
 }
 
 function belongsToConversation(row, email, mailboxAddress, customerId) {
   if (row.customer_id && String(row.customer_id) !== String(customerId)) return false;
   const sender = normalizeAddress(email.from_address);
-  if (labelsOf(row).includes('SENT') || normalizeAddress(row.from_address) === mailboxAddress) {
-    return normalizeAddress(row.from_address) === mailboxAddress && addressesOf(row.to_address).includes(sender);
+  if (labelsOf(row).includes('SENT') || ownMailboxAddress(row.from_address) === mailboxAddress) {
+    return ownMailboxAddress(row.from_address) === mailboxAddress && addressesOf(row.to_address).includes(sender);
   }
   return normalizeAddress(row.from_address) === sender && addressesOf(row.to_address).includes(mailboxAddress);
 }
@@ -133,7 +136,7 @@ function belongsToConversation(row, email, mailboxAddress, customerId) {
 function emailDirection(row, mailboxAddress, triggerId) {
   if (String(row.id) === String(triggerId)) return 'inbound';
   const labels = labelsOf(row);
-  return labels.includes('SENT') || normalizeAddress(row.from_address) === mailboxAddress ? 'outbound' : 'inbound';
+  return labels.includes('SENT') || ownMailboxAddress(row.from_address) === mailboxAddress ? 'outbound' : 'inbound';
 }
 
 function shapeEmail(row, email, mailboxAddress) {
@@ -148,6 +151,12 @@ function shapeEmail(row, email, mailboxAddress) {
   };
 }
 
+// LIKE pattern for the mailbox's tagged form: contact@x.com -> %contact+%@x.com%.
+function taggedMailboxLike(mailboxAddress) {
+  const at = mailboxAddress.lastIndexOf('@');
+  return `%${mailboxAddress.slice(0, at)}+%${mailboxAddress.slice(at)}%`;
+}
+
 async function loadThread(email, database, mailboxAddress, customerId) {
   try {
     const sender = normalizeAddress(email.from_address);
@@ -157,9 +166,9 @@ async function loadThread(email, database, mailboxAddress, customerId) {
       .whereRaw("NOT jsonb_exists(COALESCE(label_ids, '[]'::jsonb), 'DRAFT')")
       .whereRaw('(customer_id IS NULL OR customer_id = ?)', [customerId])
       .whereRaw(
-        '((LOWER(TRIM(from_address)) = ? AND LOWER(COALESCE(to_address, \'\')) LIKE ?) '
+        '((LOWER(TRIM(from_address)) = ? AND (LOWER(COALESCE(to_address, \'\')) LIKE ? OR LOWER(COALESCE(to_address, \'\')) LIKE ?)) '
         + 'OR (LOWER(TRIM(from_address)) = ? AND LOWER(COALESCE(to_address, \'\')) LIKE ?))',
-        [sender, `%${mailboxAddress}%`, mailboxAddress, `%${sender}%`],
+        [sender, `%${mailboxAddress}%`, taggedMailboxLike(mailboxAddress), mailboxAddress, `%${sender}%`],
       )
       .orderBy('received_at', 'desc')
       .limit(LIMITS.email + 1)
