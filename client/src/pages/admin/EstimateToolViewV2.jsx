@@ -47,6 +47,7 @@ import {
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
+import { COMMERCIAL_SUITE_SOURCE_LABELS, sizedSuite } from "../../lib/commercialSuiteSize";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import AreaAddOnsGroup, { PerApplicationPrice } from "../../components/admin/AreaAddOnsGroup";
 import { isFootprintFreeSelection } from "../../lib/estimate-footprint";
@@ -384,18 +385,11 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // Home Sq Ft field when the lookup sized a suite instead of the whole
 // building — where the number came from, and the building total for
 // context. Returns null when the lookup carries no suite-size result.
-// Only two sizing sources exist (a web-search leg is never a size source —
-// AGENTS.md: an LLM proposes intent, it never picks a price/size field).
-const COMMERCIAL_SUITE_SOURCE_LABELS = {
-  listing_verified_text: "a public listing for this suite",
-  license_seats: "state restaurant license",
-  verified: "tech-verified measurement",
-  suite_type_default: "typical size for this business type",
-};
-
+// The source labels live in lib/commercialSuiteSize.js, shared with the
+// property card.
 function commercialSuiteSizeNote(enrichedProfile) {
-  const suite = enrichedProfile?.suiteSize;
-  if (!suite || !(Number(suite.value) > 0)) return null;
+  const suite = sizedSuite(enrichedProfile);
+  if (!suite) return null;
   const sourceLabel = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || suite.source;
   const seatsNote = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
   const buildingNote = Number(enrichedProfile?.suiteBuildingTotalSqFt) > 0
