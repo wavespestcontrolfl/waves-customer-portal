@@ -62,6 +62,13 @@ test('a dark gate, a malformed token and an unknown invoice all answer the gener
   expect(mockChoice.selectAnnualPrepay).not.toHaveBeenCalled();
 });
 
+test('a dark route never answers 429: it skips the shared pay limiter (60 a minute per caller)', async () => {
+  isEnabled.mockReturnValue(false);
+  const statuses = new Set();
+  for (let i = 0; i < 70; i++) statuses.add((await post(`/api/pay/${token}/plan-choice`, { plan: 'prepay_annual' })).status);
+  expect([...statuses]).toEqual([404]);
+});
+
 test('only prepay_annual is a pick; the service decides from the invoice row and the route relays its answer', async () => {
   expect(await post(`/api/pay/${token}/plan-choice`, { plan: 'per_application', amount: 1 }))
     .toEqual({ status: 400, body: { error: 'invalid_plan' } });

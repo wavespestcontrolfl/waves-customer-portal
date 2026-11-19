@@ -41,6 +41,10 @@ const payLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: unauthenticatedAuthLimitKey,
+  // AGENTS.md: a dark GATE_* route skips its limiter, so a probe never sees
+  // a revealing 429 or spends the caller's quota for the live pay routes.
+  skip: (req) => req.method === 'POST' && /\/plan-choice\/?$/.test(req.path)
+    && !require('../config/feature-gates').isEnabled('payPlanChoice'),
   message: { error: 'Too many requests — please slow down.' },
 });
 router.use(payLimiter);
