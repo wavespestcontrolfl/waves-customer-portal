@@ -11033,7 +11033,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const selected = options.find((option) => option.id === selectedId) || options[0] || null;
   // GATE_PORTAL_PLAN_START: a customer with no recurring plan books through a real estimate instead of
   // filing a request. The server hint lists the options it can book; the start-plan route decides.
-  const canStartPlan = (result?.planStart?.optionIds || []).includes(selected?.id);
+  const canStartPlan = Boolean(selected) && (result.planStart?.optionIds || []).includes(selected.id);
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();

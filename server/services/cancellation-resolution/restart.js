@@ -85,18 +85,24 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
   }
   const setupFee = toCents(shown.setupFee);
   const cardOneTime = toCents(shown.dueAtStart) + toCents(shown.oneTime);
+  const stored = data?.result?.oneTime || {};
   const breakdown = bundle.oneTimeBreakdown || {};
   const items = Array.isArray(breakdown.items) ? breakdown.items : [];
   const itemized = (setup) => items
     .filter((item) => (item?.service === 'waveguard_setup') === setup)
     .reduce((sum, item) => sum + toCents(item?.amount), 0);
-  if ([row.onetime_total, data?.result?.oneTime?.total, breakdown.total]
-    .some((amount) => toCents(amount) !== cardOneTime + setupFee)
-    || toCents(data?.result?.oneTime?.membershipFee) !== setupFee
-    || breakdown.quoteRequired === true
-    || items.some((item) => item?.kind !== 'charge' || item?.quoteRequired === true)
-    || itemized(true) !== setupFee || itemized(false) !== cardOneTime
-    || toCents(bundle.setupFee?.amount) !== setupFee) {
+  // Each one-time amount in cents beside what the card showed.
+  const amounts = [
+    [toCents(row.onetime_total), cardOneTime + setupFee],
+    [toCents(stored.total), cardOneTime + setupFee],
+    [toCents(breakdown.total), cardOneTime + setupFee],
+    [toCents(stored.membershipFee), setupFee],
+    [toCents(bundle.setupFee?.amount), setupFee],
+    [itemized(true), setupFee],
+    [itemized(false), cardOneTime],
+  ];
+  if (amounts.some(([amount, card]) => amount !== card) || breakdown.quoteRequired === true
+    || items.some((item) => item?.kind !== 'charge' || item?.quoteRequired === true)) {
     return 'one-time charges differ from the card';
   }
   return servesAsIs(bundle, row, data) ? null : 'the page would rebuild the snapshot';

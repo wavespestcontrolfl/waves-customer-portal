@@ -471,15 +471,15 @@ function oneTapPurchaseRefusal(estimate) {
     : null;
 }
 
-// A portal plan-start quote (GATE_PORTAL_PLAN_START) is the customer's own
-// booking (codex pre-push P0). Only the public accept re-runs the plan-start
-// eligibility under its locks (assertPlanStartAcceptEligible), and the mint
-// priced the option standalone, for an account with no plan. A staff accept
-// could convert that price after the account gained a plan, and the
-// scheduler's accept-on-book runs after its own visits exist. An accepted one
-// still answers as already accepted (the check runs after that return).
+// An open portal plan-start quote (GATE_PORTAL_PLAN_START) is the customer's
+// own booking (codex pre-push P0). Only the public accept re-runs the
+// plan-start eligibility under its locks (assertPlanStartAcceptEligible), and
+// the mint priced the option standalone, for an account with no plan. A staff
+// accept could convert that price after the account gained a plan, and the
+// scheduler's accept-on-book runs after its own visits exist. One the customer
+// accepted is not refused here: it answers as already accepted and still books.
 function planStartManualAcceptRefusal(estimate) {
-  return estimate.source === 'plan_start'
+  return estimate.source === 'plan_start' && estimate.status !== 'accepted'
     ? refusal('Only the customer can accept this portal plan-start quote, on its estimate page. Book without it, or send a new estimate.', 409, 'plan_start_self_serve')
     : null;
 }

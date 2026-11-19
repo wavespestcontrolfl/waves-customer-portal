@@ -8915,10 +8915,8 @@ async function scheduleCreateHandler(req, res, next) {
       // An open portal plan-start quote books only through the customer's own
       // accept (codex pre-push P0). Refuse it here, before any rows exist: the
       // accept-on-book failure handler below keeps the booking.
-      if (linkedEstimate.status !== 'accepted') {
-        const planStartRefusal = require('../services/estimate-manual-acceptance').planStartManualAcceptRefusal(linkedEstimate);
-        if (planStartRefusal) return res.status(planStartRefusal.statusCode).json({ error: planStartRefusal.message, code: planStartRefusal.code });
-      }
+      const planStartRefusal = require('../services/estimate-manual-acceptance').planStartManualAcceptRefusal(linkedEstimate);
+      if (planStartRefusal) return res.status(planStartRefusal.statusCode).json({ error: planStartRefusal.message, code: planStartRefusal.code });
       // A Bill-by-invoice proposal's Net term reaches a bill only once the proposal is won, so a visit booked from it
       // earlier would bill due on the visit day (and Auto Pay could charge it). Refuse until Mark won.
       if (billByInvoiceProposalAwaitingWin(linkedEstimate)) {
