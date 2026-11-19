@@ -165,7 +165,7 @@ async function bookingExpectedMinutes(conn, serviceKey, durationMinutes, service
   }
   return durationMinutes;
 }
-const { fallbackCenterZoneName, funnelOfferPool, offerFunnelDays, onZoneDay, perTruckLive } = require('../services/scheduling/zone-day-funnel');
+const { fallbackCenterZoneName, funnelOfferPool } = require('../services/scheduling/zone-day-funnel');
 const {
   CUSTOMER_HOUR_GRID, pastCustomerLastStart, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
@@ -461,26 +461,6 @@ function orderByLineRank(slots, ranking) {
 // A slot's line rank: 0 when no ranking is in play (every claim then ties, as today).
 function lineRankOf(ranking, slot) {
   return ranking ? ranking.rankOf(slot.technician.id) : 0;
-}
-
-// Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): 1 for a find-time slot on a far-south zone
-// day that belongs to another truck (the per-truck funnel drops it), else 0. `truckDays` = the address's
-// offerFunnelDays (zone-day-funnel.js). It outweighs every line rank (a line rank counts mapped service lines),
-// so the truck whose zone day it is claims a start both trucks have, as the funnel would keep it.
-const TRUCK_RANK_WEIGHT = 1000;
-function truckRankOf(truckDays, slot) {
-  if (!truckDays || !truckDays.techDays || !truckDays.days.has(slot.date)) return 0;
-  return onZoneDay(slot.date, slot.technician && slot.technician.id, truckDays.days, truckDays.techDays) ? 0 : 1;
-}
-
-// The find-time slots with the zone-day truck's first (stable: the line rank and score order hold inside a truck
-// rank). Without a per-truck view: `slots` itself.
-function orderByTruckRank(slots, truckDays) {
-  if (!truckDays || !truckDays.techDays) return slots;
-  return slots
-    .map((slot) => ({ slot, rank: truckRankOf(truckDays, slot) }))
-    .sort((a, b) => a.rank - b.rank)
-    .map((entry) => entry.slot);
 }
 
 // Whether `candidate` (line rank `rank`) takes a date+start `existing` (rank
@@ -1720,20 +1700,11 @@ function detachVoiceRouteCheck(plan, candidates) {
 // that already has a technician keeps that technician.
 // `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
-// `zoneTruckAddress`: opt-in address text for a confirmation rebuild of such an offer (no funnel). With
-// GATE_MULTI_TECH_CONFIRM on, both claim each start for the truck whose zone day it is (truckRankOf), so the
-// rebuild books the truck the list offered.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneTruckAddress }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
   const lineRanking = await loadLineOfferRanking(serviceLines, { lat, lng });
-  // Per truck (GATE_MULTI_TECH_CONFIRM): the address's far-south zone days, read before the claims below so
-  // the zone-day truck claims each start first. Gate off: undefined, nothing read here, and the funnel
-  // below reads its own days as before.
-  const truckDays = perTruckLive()
-    ? await offerFunnelDays({ address: zoneFunnelAddress || zoneTruckAddress, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
-    : undefined;
   // The signed-offer policy tag for this build (minted inside addCandidate
   // below; createSelfBooking verifies with the same mapping). An offer built
   // with mid-route insertion carries it, so a GATE_BOOK_CAPACITY_COMMIT /
@@ -2063,13 +2034,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
       end: minToTime12(endMin),
-    }, truckRankOf(truckDays, slot) * TRUCK_RANK_WEIGHT + lineRankOf(lineRanking, slot));
+    }, lineRankOf(lineRanking, slot));
   };
 
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
-  const offerSlots = orderByTruckRank(orderByLineRank(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), lineRanking), truckDays);
+  const offerSlots = orderByLineRank(graceBuild ? (result.slots || []).filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : (result.slots || []), lineRanking);
   for (const slot of offerSlots) {
     if (capacityEnabled()) {
       // Capacity evaluates each start against the whole route and live blocks.
@@ -2135,17 +2106,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
   // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
   const funneledCandidates = await funnelOfferPool(stampedCandidates, {
-    address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db, view: truckDays,
+    address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db,
   });
-  let candidates = await applyRouteCheck(routeCheck, funneledCandidates);
-  // Per truck only (truckDays read): the route check dropped every funneled opening. Funnel the route-checked rest
-  // again, as the estimate page does, so another truck's opening can still seed a day.
-  if (truckDays?.techDays && funneledCandidates.length && !candidates.length) {
-    const tried = new Set(funneledCandidates);
-    candidates = await funnelOfferPool(await applyRouteCheck(routeCheck, stampedCandidates.filter((slot) => !tried.has(slot))), {
-      address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db, view: truckDays,
-    });
-  }
+  const candidates = await applyRouteCheck(routeCheck, funneledCandidates);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible, bestSlotCount,

@@ -790,10 +790,8 @@ const customerAddressFields = (cust) => ({
 });
 
 // `address`: the booking address ({line1, line2, city, state, zip}) on every list a customer is OFFERED; the
-// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. Commit and re-validation rebuilds omit it and
-// pass `truckAddress` instead: no funnel, but with GATE_MULTI_TECH_CONFIRM on the zone-day truck claims each
-// start, as on the offered list, so the commit books the truck the list offered.
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, truckAddress = null }) {
+// south-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL) reads it. Commit and re-validation rebuilds omit it.
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   return buildBookingAvailability({
@@ -832,7 +830,6 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
     ...(zoneFunnelText(address) ? { zoneFunnelAddress: zoneFunnelText(address) } : {}),
-    ...(zoneFunnelText(truckAddress) ? { zoneTruckAddress: zoneFunnelText(truckAddress) } : {}),
   });
 }
 
@@ -2225,11 +2222,11 @@ async function sendSlotTaken(res, { location, address = null, range, config, cat
 // The picked slot re-checked at a location that differs from the one it
 // was offered for — the MATCHED slot object (technician/end_time can differ
 // by location), or null when it is not open there.
-async function revalidateSlotAt(location, { date, time, config, catalog, leadId, address = null }) {
+async function revalidateSlotAt(location, { date, time, config, catalog, leadId }) {
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, truckAddress: address,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
@@ -2288,32 +2285,7 @@ function parseCommitBody(body) {
   const addressInput = typeof body?.address === 'string' ? body.address.trim() : '';
   const notes = typeof body?.notes === 'string' ? body.notes.trim().slice(0, MAX_NOTES_LENGTH) : '';
   const invalid = !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^([01]\d|2[0-3]):00$/.test(time);
-  // The offered slot's technician (optional: a page loaded before 2026-11-19 sends none). Only compared
-  // (zoneTruckGone), never booked: the booked technician is always the rebuild's.
-  const rawTech = typeof body?.technician_id === 'string' ? body.technician_id.trim() : '';
-  const offeredTechnicianId = rawTech && rawTech.length <= 64 ? rawTech : null;
-  return { date, time, addressInput, notes, invalid, offeredTechnicianId };
-}
-
-// Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): true when the commit's rebuild names another truck than the
-// list offered, the date is still a far-south zone day for some truck, and the rebuilt truck is not on its own zone
-// day there. The rebuild claims each start for a zone-day truck first, so no zone-day truck can serve the hour: answer
-// SLOT_TAKEN rather than send a second truck south. Only the zone stops as they are now count, so a stop that moved
-// since the offer counts where it is now. False with the gate off, no offered technician (a page loaded before
-// 2026-11-19), the same truck (one truck books as today), a date with no zone stop left (every truck makes the same
-// lone trip, and the fleet view books it too), or any lookup failure (logged, fail open).
-async function zoneTruckGone({ date, offeredTechnicianId, slot, address }) {
-  if (!offeredTechnicianId || !slot || String(slot.technician_id) === String(offeredTechnicianId)) return false;
-  try {
-    const funnel = require('../services/scheduling/zone-day-funnel');
-    if (!funnel.perTruckLive()) return false;
-    const view = await funnel.offerFunnelDays({ address: zoneFunnelText(address), dateFrom: date, dateTo: date, conn: db });
-    if (!view || !view.techDays) return false;
-    return view.days.has(date) && !funnel.onZoneDay(date, slot.technician_id, view.days, view.techDays);
-  } catch (err) {
-    logger.warn(`[inspection-public] zone-day truck check failed (failing open): ${err.message}`);
-    return false;
-  }
+  return { date, time, addressInput, notes, invalid };
 }
 
 // Phase 2 — createSelfBooking with the assessment's internal callbackVisit
@@ -2613,7 +2585,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const verified = verifyLeadConsultationToken(req.params.token);
   if (!verified) return res.status(404).json({ error: 'not_found' });
 
-  const { date, time, addressInput, notes, invalid, offeredTechnicianId } = parseCommitBody(req.body);
+  const { date, time, addressInput, notes, invalid } = parseCommitBody(req.body);
   if (invalid) return res.status(400).json({ error: 'date (YYYY-MM-DD) and time (HH:00) required' });
 
   try {
@@ -2646,12 +2618,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // Anti-forgery: re-validate against a fresh single-day availability
     // build at the CATALOG's real duration (reservice-public's model).
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, truckAddress: resolved.address,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
     });
     const slot = findSlotIn(dayAvailability, date, time);
-    if (!slot || await zoneTruckGone({ date, offeredTechnicianId, slot, address: resolved.address })) {
-      return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
-    }
+    if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
 
     // Phase 1 — lock, re-read the lead's customer_id FRESH (a concurrent
     // commit's phase 1 may have just linked one), re-run eligibility, then
@@ -2706,11 +2676,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
     const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: customerAddressFields(custRow) })
+      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id })
       : slot;
-    if (!bookingSlot || (locationMoved && await zoneTruckGone({ date, offeredTechnicianId, slot: bookingSlot, address: customerAddressFields(custRow) }))) {
-      return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
-    }
+    if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
 
     // Phase 2 — createSelfBooking's OWN atomic per-customer lane dedupe
     // (dedupeLane, left at its true default — no transaction of ours wraps
@@ -2876,7 +2844,6 @@ router._internals = {
 };
 
 router._test = {
-  zoneTruckGone,
   tokenMayUseProfile,
   outrightProspect,
   loadTrustedCustomer,

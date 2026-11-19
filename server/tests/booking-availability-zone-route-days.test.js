@@ -184,58 +184,14 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(datesOf(await buildLead(VENICE))).toEqual([D, D1, D2]);
   });
 
-  test('every list the route OFFERS passes the address; the commit and re-validation rebuilds pass it only as truckAddress', () => {
+  test('every list the route OFFERS passes the address; the commit and re-validation rebuilds omit it', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
     const calls = [...src.matchAll(/await buildAvailabilityForLead\(([^;]*?)\);/gs)].map((m) => m[1]);
-    const rebuilds = calls.filter((c) => /\btruckAddress:/.test(c));
-    const offered = calls.filter((c) => !/\btruckAddress:/.test(c));
-    // GET, /availability, /find-slots, the email block's slots and the SLOT_TAKEN refresh: funneled.
-    expect(offered).toHaveLength(5);
-    expect(offered.every((c) => /\baddress\b/.test(c))).toBe(true);
-    // The commit's single-day anti-forgery build and revalidateSlotAt: unfunneled (no `address`), like the estimate
-    // page's redeem side. `truckAddress` only lets the zone-day truck claim the start (GATE_MULTI_TECH_CONFIRM, owner
-    // 2026-11-19), so the commit books the truck the offered list showed.
-    expect(rebuilds).toHaveLength(2);
-    expect(rebuilds.every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
-    expect(rebuilds.some((c) => /\baddress\b/.test(c.replace(/truckAddress:\s*[\w.]+/g, '')))).toBe(false);
-    // Both the commit's slot and a moved location's re-validated slot pass the offered-truck check.
-    expect(src.match(/await zoneTruckGone\(\{ date, offeredTechnicianId, slot/g) || []).toHaveLength(2);
-  });
-
-  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): the commit answers SLOT_TAKEN when it would book another
-  // truck than the list offered, off its own zone day, on a date some truck still goes south.
-  test('zoneTruckGone: true only when another truck, off its own zone day, would take a zone day\'s hour', async () => {
-    const { zoneTruckGone } = require('../routes/inspection-public')._test;
-    const { parseCommitBody } = require('../routes/inspection-public')._internals;
-    const saved = process.env.GATE_MULTI_TECH_CONFIRM;
-    const zoneStop = (technicianId) => [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null, technician_id: technicianId }];
-    const check = (offered, slotTech, { date = D1, address = VENICE } = {}) => zoneTruckGone({
-      date, offeredTechnicianId: offered, slot: { technician_id: slotTech }, address,
-    });
-    process.env.GATE_MULTI_TECH_CONFIRM = 'true';
-    try {
-      stopRows = zoneStop('tech-2');
-      expect(await check('tech-2', 'tech-1')).toBe(true); // the zone-day truck lost the hour
-      expect(await check('tech-1', 'tech-3')).toBe(true); // a seeded offer's truck lost it on another truck's zone day
-      expect(await check('tech-2', 'tech-2')).toBe(false); // the same truck still holds it
-      expect(await check(null, 'tech-1')).toBe(false); // a page from before this change sends no technician
-      expect(await check('tech-2', 'tech-1', { date: D })).toBe(false); // no zone stop that day: any truck
-      expect(await check('tech-2', 'tech-1', { address: SARASOTA })).toBe(false); // outside the funneled zones
-      stopRows = zoneStop('tech-3');
-      expect(await check('tech-2', 'tech-1')).toBe(true); // the offered truck's stop moved to another truck since
-      stopRows = [...zoneStop('tech-2'), ...zoneStop('tech-1')];
-      expect(await check('tech-2', 'tech-1')).toBe(false); // the other truck goes south that day too
-      stopRows = zoneStop(null);
-      expect(await check('tech-2', 'tech-1')).toBe(false); // an unassigned zone stop: every truck's zone day
-      stopRows = zoneStop('tech-2');
-      delete process.env.GATE_MULTI_TECH_CONFIRM;
-      expect(await check('tech-2', 'tech-1')).toBe(false); // gate off: today's commit
-    } finally {
-      if (saved === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = saved;
-    }
-    // The commit body carries the offered technician as a plain string, compared only.
-    expect(parseCommitBody({ date: D, time: '10:00', technician_id: ' tech-2 ' }).offeredTechnicianId).toBe('tech-2');
-    expect(parseCommitBody({ date: D, time: '10:00' }).offeredTechnicianId).toBeNull();
-    expect(parseCommitBody({ date: D, time: '10:00', technician_id: 'x'.repeat(65) }).offeredTechnicianId).toBeNull();
+    const withAddress = calls.filter((c) => /\baddress\b/.test(c));
+    // GET, /availability, /find-slots, the email block's slots and the SLOT_TAKEN refresh.
+    expect(withAddress).toHaveLength(5);
+    // The commit's single-day anti-forgery build and revalidateSlotAt: unfunneled, like the estimate page's redeem side.
+    expect(calls.filter((c) => !/\baddress\b/.test(c))).toHaveLength(2);
+    expect(calls.filter((c) => !/\baddress\b/.test(c)).every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
   });
 });

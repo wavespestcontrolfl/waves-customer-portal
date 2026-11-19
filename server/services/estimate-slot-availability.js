@@ -2168,7 +2168,8 @@ function routeCheckModeFor(userOpts) {
 // ONE check per request, over the FINAL eligible pool: after the collision, lead-time,
 // season, time-of-day and zone-day filters, right before the display selection. It sees
 // only slots the customer could be shown, so its floor is judged on that set and a
-// removal can never leave an empty picker (the floor returns the pool whole). The helper
+// removal can never leave an empty picker (the floor returns the pool whole). Per truck
+// (GATE_MULTI_TECH_CONFIRM) the coords path runs it just before the zone-day filter instead. The helper
 // returns the input's own objects in input order. Returns the pool unchanged with the
 // gate off or on any error.
 async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
@@ -2776,22 +2777,24 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
-  const { slots: funneledEligible, funnel: poolFunnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
   // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another customer late,
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
   const routeCheckArgs = { coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode };
-  let routeChecked = await routeCheckedPool(funneledEligible, routeCheckArgs);
-  let funnel = poolFunnel;
-  // Per truck only: the route check dropped every funneled opening (the zone-day truck's, or the seed day's). Funnel
-  // the route-checked rest again, as if those openings never existed, so another truck's opening can still seed a day
-  // (Codex pre-push P1 on 068130b3fc). The fleet view keeps today's list.
-  if (funnelTechDays && funneledEligible.length && !routeChecked.length) {
-    const tried = new Set(funneledEligible);
-    const rest = await routeCheckedPool(allBookable.filter((slot) => !tried.has(slot)), routeCheckArgs);
-    const refunneled = applyZoneDayFunnel(rest, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
-    if (refunneled.slots.length) ({ slots: routeChecked, funnel } = refunneled);
+  // Per truck (funnelTechDays) the check runs BEFORE the day funnel, over every truck's openings. A zone day keeps only
+  // its own truck's openings, so a check after the funnel would judge its floor on that truck alone, and keep openings
+  // that make another customer late while another truck has a feasible one. The funnel then chooses among what the
+  // check kept. The zone-day truck's openings go first, inside the check's time budget. The fleet view keeps today's
+  // order: funnel, then check.
+  const checkFirst = !!funnelTechDays && routeCheckMode !== 'off';
+  let routeFeasible = allBookable;
+  if (checkFirst) {
+    const ownDay = (slot) => onZoneDay(slot.date, slot.techId, funnelDays, funnelTechDays);
+    const kept = new Set(await routeCheckedPool([...allBookable.filter(ownDay), ...allBookable.filter((slot) => !ownDay(slot))], routeCheckArgs));
+    routeFeasible = allBookable.filter((slot) => kept.has(slot));
   }
+  const { slots: funneledEligible, funnel } = applyZoneDayFunnel(routeFeasible, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
+  const routeChecked = checkFirst ? funneledEligible : await routeCheckedPool(funneledEligible, routeCheckArgs);
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   const makeRoomArgs = {
     estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, candidateExpectedMinutes, dateFrom, dateTo,

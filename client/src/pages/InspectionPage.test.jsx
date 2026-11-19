@@ -345,8 +345,7 @@ describe('InspectionPage booking', () => {
     const commit = fetchMock.mock.calls.find(([url, opts]) => opts?.method === 'POST'
       && !String(url).includes('find-slots') && !String(url).includes('availability') && !String(url).includes('waitlist'));
     const body = JSON.parse(commit[1].body);
-    // The offered slot's technician rides along for the server's per-truck check (never what gets booked).
-    expect(body).toMatchObject({ date: '2026-07-12', time: '13:00', technician_id: 'tech-1' });
+    expect(body).toMatchObject({ date: '2026-07-12', time: '13:00' });
   });
 
   it('optional notes ride the commit payload', async () => {

@@ -229,9 +229,6 @@ async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
   }
 }
 
-// An offer slot's technician: the estimate page's slots carry `techId`, the /book pool's `technician_id`.
-const slotTechId = (slot) => slot?.techId ?? slot?.technician_id ?? null;
-
 // Is `date` a zone day for technician `techId`? `days` = the zone-stop dates, `techDays` = their per-truck view
 // (getZoneFunnelDays). Fleet-wide (techDays null) or no technician: any zone stop that day. Per truck: a stop of
 // that technician, or an unassigned stop (any truck may take it).
@@ -256,7 +253,7 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [], tec
   const pool = Array.isArray(bookable) ? bookable : [];
   if (!funnelDays || !pool.length) return { slots: pool, funnel: null };
 
-  const clustered = pool.filter((s) => s?.date && onZoneDay(s.date, slotTechId(s), funnelDays, techDays));
+  const clustered = pool.filter((s) => s?.date && onZoneDay(s.date, s.techId ?? null, funnelDays, techDays));
   if (clustered.length) return { slots: clustered, funnel: { mode: 'clustered' } };
 
   const poolDates = new Set(pool.map((s) => s?.date).filter(Boolean));
@@ -269,24 +266,6 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [], tec
   };
 }
 
-// The funnel's zone days for an offer address over [dateFrom, dateTo]:
-// { days, techDays } (getZoneFunnelDays), or null when the funnel does not
-// apply (gate off, no address, no funneled zone) or cannot be resolved (zone
-// or lookup failure: logged, fail open). The zone resolves from the address
-// text through resolveEstimateZone (a service_zones read, no geocoding).
-async function offerFunnelDays({ address, dateFrom, dateTo, conn }) {
-  if (!address || !isEnabled('southZoneDayFunnel')) return null;
-  let estimateZone = null;
-  try {
-    estimateZone = await resolveEstimateZone(conn, { address });
-  } catch (err) {
-    logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
-    return null;
-  }
-  const { days, techDays } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
-  return days ? { days, techDays } : null;
-}
-
 // The same funnel for an offer pool that is not built by the estimate page
 // (the lead assessment link: routes/booking.js buildBookingAvailability, fed
 // the lead's address text). Same helpers, same rules: the zone resolves from
@@ -296,13 +275,21 @@ async function offerFunnelDays({ address, dateFrom, dateTo, conn }) {
 // Returns `pool` itself — same array — whenever the funnel does not apply
 // (gate off, no address, no funneled zone) or cannot be resolved (zone or
 // lookup failure: logged, fail open, exactly as the estimate page does).
-// `view`: the address's offerFunnelDays, when the caller already read it
-// (null = the funnel does not apply); undefined reads it here.
-async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn, view }) {
-  if (!address || !Array.isArray(pool) || !pool.length) return pool;
-  const funnel = view === undefined ? await offerFunnelDays({ address, dateFrom, dateTo, conn }) : view;
-  if (!funnel) return pool;
-  const { days, techDays } = funnel;
+// The zone days stay the fleet's here, also with GATE_MULTI_TECH_CONFIRM on:
+// /book keeps one technician per date and start before this funnel and the
+// customer route check run, so a per-truck filter could hide the other
+// truck's feasible start (follow-up: per-truck candidates in that builder).
+async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn }) {
+  if (!address || !Array.isArray(pool) || !pool.length || !isEnabled('southZoneDayFunnel')) return pool;
+  let estimateZone = null;
+  try {
+    estimateZone = await resolveEstimateZone(conn, { address });
+  } catch (err) {
+    logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
+    return pool;
+  }
+  const { days } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
+  if (!days) return pool;
   let preferredSeedDates = [...new Set(pool.map((s) => s?.date).filter(Boolean))];
   if (routeDaySlug) {
     const { preferRouteDayDates, readZoneRouteDays } = require('./zone-route-days');
@@ -310,7 +297,7 @@ async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug =
       zoneSlug: routeDaySlug, config: await readZoneRouteDays(conn),
     });
   }
-  return applyZoneDayFunnel(pool, days, { preferredSeedDates, techDays }).slots;
+  return applyZoneDayFunnel(pool, days, { preferredSeedDates }).slots;
 }
 
 // The service_zones rows the funnel applies to right now (isFunnelZone: gate on AND slug in the funnel list). []
@@ -336,8 +323,6 @@ module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
   funnelOfferPool,
-  offerFunnelDays,
-  perTruckLive,
   funnelZoneRows,
   rowInFunnelZones,
   onZoneDay,
@@ -345,5 +330,5 @@ module.exports = {
   funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.
-  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDays },
+  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDays, perTruckLive },
 };

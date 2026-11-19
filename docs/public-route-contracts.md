@@ -1393,16 +1393,15 @@ above. The estimate surface follows the same rule in hour mode: the offer filter
 (`filterCollidingSlots`), the ASAP packing dates and the hold/commit probes in
 `slot-reservation.js` count only the slot technician's rows plus unassigned ones
 while the gate is on, so an offered estimate hour reserves and commits.
-The south-zone day funnel follows it too (owner 2026-11-19): on the estimate
-picker and the lead assessment link's offered lists, a far-south slot is on a
-cluster day only when its own technician has a zone stop that day or the day
-has an unassigned zone stop (`zone-day-funnel.js` `onZoneDay`); a slot with no
-technician counts any zone stop. One opening per start is chosen after that
-filter (the estimate picker's collapse waits for it; /book claims the start for
-the zone-day truck, see the assessment link below). When the customer route
-check drops every funneled opening, the picker runs the funnel again over the
-route-checked rest, so another truck's opening can seed a day. Off, every zone
-day is the fleet's, byte for byte.
+The estimate picker's south-zone day funnel follows it too (owner 2026-11-19):
+a far-south slot is on a cluster day only when its own technician has a zone
+stop that day or the day has an unassigned zone stop (`zone-day-funnel.js`
+`onZoneDay`); a slot with no technician counts any zone stop. One opening per
+start is chosen after that filter (the collapse waits for it), and the customer
+route check runs before it, over every truck's openings, so the check's floor
+never keeps an opening that makes another customer late while another truck has
+a feasible one. The lead assessment link keeps the fleet's zone days (see that
+link below). Off, every zone day is the fleet's, byte for byte.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7549,23 +7548,11 @@ can see fewer days, or one. A lead outside those zones, a gate-off request and
 any zone or stop lookup failure get the unfunneled list. The funnel is
 offer-time only, like the route check: the commit's single-day anti-forgery
 build and the location re-validation omit the address and are not funneled, so
-a time the funnel hid can still be committed by a request built by hand. Per
-truck (`GATE_MULTI_TECH_CONFIRM` on, owner 2026-11-19): the builder keeps one
-technician per date and start, so the truck whose zone day it is claims a start
-both trucks have before the funnel runs (`routes/booking.js` `truckRankOf`, ahead
-of the line-map rank); the commit build and the re-validation pass the address
-as `zoneTruckAddress` (the same claim, no funnel), so the commit books the truck
-the list offered. The page also sends the offered slot's `technician_id`
-(optional; compared only, never booked). When the rebuild names another truck,
-the date is still a far-south zone day for some truck (the zone stops as they
-are at commit), and that truck is not on its own zone day there, the commit
-answers the existing 409 `SLOT_TAKEN` with fresh times instead of sending a
-second truck south (`zoneTruckGone`). The same truck, a date with no zone stop
-left and a request with no `technician_id` book as before. When the route check
-drops every funneled opening of an offered list, the funnel runs again over the
-route-checked rest, so another truck's opening can seed a day. Gate off: no zone
-read before the claims, no check and no second funnel. One optional request
-field (`technician_id`); no status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
+a time the funnel hid can still be committed by a request built by hand. With
+`GATE_MULTI_TECH_CONFIRM` on, this funnel keeps the fleet's zone days: the
+builder keeps one technician per date and start before the funnel and the route
+check run, so a per-truck filter here could hide the other truck's feasible
+start. No field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address

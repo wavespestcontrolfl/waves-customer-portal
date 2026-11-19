@@ -32,7 +32,6 @@ const {
   getZoneFunnelDays,
   onZoneDay,
   funnelOfferPool,
-  offerFunnelDays,
   funnelZoneRows,
   rowInFunnelZones,
   isFunnelZone,
@@ -194,13 +193,11 @@ describe('per truck: onZoneDay and applyZoneDayFunnel with techDays', () => {
     expect(onZoneDay('2027-05-20', 'tech-1', DAYS, null)).toBe(true);
   });
 
-  test('clustered keeps only slots on their own truck\'s zone day; the /book pool\'s technician_id reads the same', () => {
+  test('clustered keeps only slots on their own truck\'s zone day', () => {
     const pool = [slot('2027-05-20', '10:00', 'tech-1'), slot('2027-05-20', '13:00', 'tech-2'), slot('2027-05-21', '10:00', 'tech-1'), slot('2027-05-22')];
     const out = applyZoneDayFunnel(pool, DAYS, { techDays: TECH_DAYS });
     expect(out.slots.map((s) => `${s.date} ${s.techId}`)).toEqual(['2027-05-20 tech-2', '2027-05-21 tech-1']);
     expect(out.funnel).toEqual({ mode: 'clustered' });
-    const bookPool = [{ date: '2027-05-20', technician_id: 'tech-1' }, { date: '2027-05-20', technician_id: 'tech-2' }];
-    expect(applyZoneDayFunnel(bookPool, DAYS, { techDays: TECH_DAYS }).slots).toEqual([bookPool[1]]);
     // No techDays (the gate off): the same pool clusters on the dates, as before.
     expect(applyZoneDayFunnel(pool, DAYS).slots.map((s) => s.date)).toEqual(['2027-05-20', '2027-05-20', '2027-05-21']);
   });
@@ -317,7 +314,7 @@ describe('isFunnelZone / zone matching', () => {
     });
     jest.dontMock('../config/feature-gates');
     const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
-    expect(fresh.perTruckLive()).toBe(false);
+    expect(fresh._internals.perTruckLive()).toBe(false);
     expect(await fresh.getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }))
       .toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
   });
@@ -426,19 +423,23 @@ describe('getAvailableSlots — funnel end to end', () => {
     }
   });
 
-  // The route check drops every opening of the zone-day truck (each would make another customer late). Per truck the
-  // funnel then runs again over the route-checked rest, so the other truck's opening seeds the day; the fleet view
-  // keeps it as a cluster day. Either way the customer still sees times (Codex pre-push P1 on 068130b3fc).
-  test.each([
-    [undefined, { mode: 'clustered' }, 1],
-    ['true', { mode: 'seeded', seedDate: '2027-05-20' }, 2],
-  ])('route check drops every zone-day opening, GATE_MULTI_TECH_CONFIRM=%s: the other truck still offers the day', async (gate, funnel, checks) => {
+  // The real customer route check (GATE_CUSTOMER_ROUTE_CHECK on): only the arrival-route evaluation is a fixture.
+  // Its floor keeps the whole list when a removal would leave nothing in the next six days, so per truck it must judge
+  // every truck's openings, not the zone-day truck's alone (Codex pre-push P1 on 71cda75025).
+  async function withRealRouteCheck(gate, lateTechs, run) {
     const prev = process.env.GATE_MULTI_TECH_CONFIRM;
     if (gate) process.env.GATE_MULTI_TECH_CONFIRM = gate; else delete process.env.GATE_MULTI_TECH_CONFIRM;
     const routeCheck = require('../services/scheduling/customer-route-check');
-    const mode = jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('on');
-    const check = jest.spyOn(routeCheck, 'filterOfferedSlots')
-      .mockImplementation(async ({ slots }) => ({ slots: slots.filter((s) => s.techId !== 'tech-2') }));
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const spies = [
+      jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('on'),
+      jest.spyOn(arrivalRoute, 'arrivalWindowRoutingEnabled').mockReturnValue(true),
+      jest.spyOn(arrivalRoute, 'loadArrivalRouteContext').mockImplementation(async ({ technicianId }) => ({ rows: [], technicianId })),
+      // A late-making placement: another customer, on time without this visit, would arrive late.
+      jest.spyOn(arrivalRoute, 'evaluateArrivalPlacement').mockImplementation((context) => (lateTechs.includes(context.technicianId)
+        ? { feasible: false, reason: 'arrival_window', lateness: { newlyLateStopIds: ['visit-late'] } }
+        : { feasible: true })),
+    ];
     try {
       mockDb({
         scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })],
@@ -450,16 +451,34 @@ describe('getAvailableSlots — funnel end to end', () => {
       });
       findAvailableSlots.mockResolvedValue({ slots: [routeSlot('tech-2', 2), routeSlot('tech-1', 4)], evaluated: 2, total_feasible: 2 });
       const result = await getAvailableSlots('est-funnel-1', { ...WINDOW, offer: true });
-      const slots = [...(result.primary || []), ...(result.expander || [])];
+      return run(result, [...(result.primary || []), ...(result.expander || [])]);
+    } finally {
+      spies.forEach((spy) => spy.mockRestore());
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
+  }
+
+  // Every opening of the zone-day truck (tech-2) would make another customer late. Per truck the check runs before
+  // the funnel, so the other truck's feasible opening seeds the day; checked after the funnel, the floor would keep
+  // tech-2's late-making openings. The fleet view keeps the day as a cluster day either way.
+  test.each([
+    [undefined, { mode: 'clustered' }],
+    ['true', { mode: 'seeded', seedDate: '2027-05-20' }],
+  ])('route check, the zone-day truck would make a customer late, GATE_MULTI_TECH_CONFIRM=%s: the other truck offers the day', async (gate, funnel) => {
+    await withRealRouteCheck(gate, ['tech-2'], (result, slots) => {
       expect(slots.length).toBeGreaterThan(0);
       expect(new Set(slots.map((s) => `${s.date} ${s.techId}`))).toEqual(new Set(['2027-05-20 tech-1']));
       expect(result.metadata.zoneDayFunnel).toEqual(funnel);
-      expect(check).toHaveBeenCalledTimes(checks);
-    } finally {
-      mode.mockRestore();
-      check.mockRestore();
-      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
-    }
+    });
+  });
+
+  // No feasible opening at all: the floor still keeps the list (fail open), and per truck the funnel keeps the
+  // zone-day truck's own day, as before the check.
+  test('route check, every opening would make a customer late, per truck: the floor keeps the zone-day truck\'s day', async () => {
+    await withRealRouteCheck('true', ['tech-1', 'tech-2'], (result, slots) => {
+      expect(new Set(slots.map((s) => `${s.date} ${s.techId}`))).toEqual(new Set(['2027-05-20 tech-2']));
+      expect(result.metadata.zoneDayFunnel).toEqual({ mode: 'clustered' });
+    });
   });
 
   test.each([false, true])('capacity preserves south-zone day filtering (clustered=%s)', async clustered => {
@@ -622,7 +641,9 @@ describe('funnelOfferPool (assessment link pool, same helpers as the estimate pa
     expect(out.map((s) => s.date)).toEqual(['2027-05-21']);
   });
 
-  test('per truck (GATE_MULTI_TECH_CONFIRM on): only the stop technician\'s slots on that day are a cluster day', async () => {
+  // /book keeps one technician per date and start before this funnel and the customer route check, so the assessment
+  // link keeps the fleet's zone days also with GATE_MULTI_TECH_CONFIRM on (per truck there needs that builder changed).
+  test('per truck (GATE_MULTI_TECH_CONFIRM on): the assessment pool keeps the fleet\'s zone day, every truck on it', async () => {
     const prev = process.env.GATE_MULTI_TECH_CONFIRM;
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
     try {
@@ -632,22 +653,10 @@ describe('funnelOfferPool (assessment link pool, same helpers as the estimate pa
         { date: '2027-05-20', technician_id: 'tech-1' },
         { date: '2027-05-20', technician_id: 'tech-2' },
       ];
-      expect(await funnelOfferPool(bookPool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toEqual([bookPool[2]]);
+      expect(await funnelOfferPool(bookPool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db })).toEqual([bookPool[1], bookPool[2]]);
     } finally {
       if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
     }
-  });
-
-  test('offerFunnelDays reads the address\'s zone days once; funnelOfferPool reuses a view it is handed, null leaves the pool', async () => {
-    mockDb({ scheduledRows: [zoneStopRow()] });
-    const view = await offerFunnelDays({ address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db });
-    expect(view).toEqual({ days: new Set(['2027-05-20']), techDays: null });
-    expect(await offerFunnelDays({ address: '55 Main St, Sarasota, FL, 34231', ...WINDOW_ARGS, conn: db })).toBeNull();
-    db.mockClear();
-    const out = await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db, view });
-    expect(new Set(out.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
-    expect(await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db, view: null })).toBe(pool);
-    expect(db).not.toHaveBeenCalled();
   });
 
   test('a lead outside the funneled zones gets the very same pool, and no zone-stop query runs', async () => {
