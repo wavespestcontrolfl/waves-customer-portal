@@ -156,7 +156,7 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
   const attempt = (id) => app('stripe_invoice_charge_attempts').where({ id }).first();
 
   test.each([
-    ['paid', 'paid', false, true, true],
+    ['paid', 'paid', false, false, true],
     ['disputed', 'overdue', true, false, false],
     ['refunded', 'refunded', false, true, false],
   ])('repairs exact locally settled %s evidence after the invoice is %s', async (
@@ -181,7 +181,7 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
   });
 
   test.each([
-    ['paid', 'overdue'],
+    ['paid', 'paid'],
     ['disputed', 'overdue'],
     ['refunded', 'refunded'],
   ])('repairs an exact durable PI binding with %s ledger evidence after event expiry', async (
@@ -202,6 +202,51 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
       stripe_payment_intent_id: ids.piId,
       decline_code: null,
       error_message: null,
+    });
+  });
+
+  test.each([false, true])('keeps a paid ledger row held while its invoice is open (PI bound: %s)', async (bound) => {
+    const ids = await fixture({
+      paymentStatus: 'paid',
+      invoiceStatus: 'overdue',
+      bindAttemptToIntent: bound,
+      includeEvent: !bound,
+    });
+
+    await migration.up(app);
+
+    expect(await attempt(ids.attemptId)).toMatchObject({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: bound ? ids.piId : null,
+    });
+  });
+
+  test('keeps a paid ledger row held when the invoice was reopened but still carries the old PI', async () => {
+    const ids = await fixture({ paymentStatus: 'paid', invoiceStatus: 'overdue' });
+    await app('invoices').where({ id: ids.invoiceId }).update({ stripe_payment_intent_id: ids.piId });
+
+    await migration.up(app);
+
+    expect(await attempt(ids.attemptId)).toMatchObject({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: null,
+    });
+  });
+
+  test('keeps a paid ledger row held when the paid invoice points to a different PI', async () => {
+    const ids = await fixture({ paymentStatus: 'paid', invoiceStatus: 'paid' });
+    await app('invoices').where({ id: ids.invoiceId }).update({
+      stripe_payment_intent_id: `pi_${randomUUID().replaceAll('-', '')}`,
+    });
+
+    await migration.up(app);
+
+    expect(await attempt(ids.attemptId)).toMatchObject({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: null,
     });
   });
 

@@ -2,14 +2,16 @@
  * Repair historical off-session authentication challenges that succeeded and
  * settled locally before recordAuthenticationSettlement existed.
  *
- * A later dispute or refund can reopen/unbind the invoice, so the current
- * invoice status and PI pointer are not settlement evidence. Every repair
- * requires an exact, non-conflicting Stripe payment ledger row for the same
- * PI, customer and invoice. Paid, disputed and refunded rows all prove that
- * the charge settled locally. The attempt's durable PI binding is sufficient
- * identity after webhook retention expires; only an unbound attempt requires
- * a processed retained payment_intent.succeeded event whose immutable
- * attempt/invoice/customer metadata and saved method match it.
+ * A paid payment row alone is insufficient: the historical webhook could
+ * commit that row before the invoice/payment transaction failed. Paid evidence
+ * therefore also requires the invoice to be paid and bound to the same PI.
+ * A later dispute or refund can legitimately reopen/unbind the invoice, so an
+ * exact disputed/refunded ledger row remains independent settlement evidence.
+ * Every repair still requires an exact, non-conflicting Stripe payment ledger
+ * row for the same PI, customer and invoice. The attempt's durable PI binding
+ * is sufficient identity after webhook retention expires; only an unbound
+ * attempt requires a processed retained payment_intent.succeeded event whose
+ * immutable attempt/invoice/customer metadata and saved method match it.
  *
  * Multiple candidate PIs or any conflicting local linkage fail closed. The
  * update mirrors recordAuthenticationSettlement and is idempotent.
@@ -80,7 +82,20 @@ exports.up = async function up(knex) {
         ON payment.stripe_payment_intent_id = candidate.pi_id
        AND payment.customer_id = candidate.customer_id
        AND payment.processor = 'stripe'
-       AND payment.status IN ('paid', 'disputed', 'refunded')
+       AND (
+         payment.status IN ('disputed', 'refunded')
+         OR (
+           payment.status = 'paid'
+           AND EXISTS (
+             SELECT 1
+             FROM invoices completed_invoice
+             WHERE completed_invoice.id = candidate.invoice_id
+               AND completed_invoice.customer_id = candidate.customer_id
+               AND completed_invoice.status = 'paid'
+               AND completed_invoice.stripe_payment_intent_id = candidate.pi_id
+           )
+         )
+       )
        AND payment.metadata->>'invoice_id' = candidate.invoice_id::text
        AND (
          payment.payment_method_id IS NULL
