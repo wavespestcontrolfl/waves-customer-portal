@@ -49,6 +49,9 @@ const STAFFED_DAYS = 3;
 const DEMAND_DAYS = 7;
 // How far ahead to look for STAFFED_DAYS staffed days (a holiday week can close several in a row).
 const SCAN_DAYS = 14;
+// The booked part of a job slot (close-gaps SLOT_MIN: a 60-minute median job and its drive). Tech-blind, one booking
+// holds this time for every technician; the drive is the technician's own.
+const BOOKED_MIN = 60;
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
 const toMin = (value) => {
@@ -141,16 +144,22 @@ function hourSlots(o) {
 
 /**
  * Dispatch jobs across several technicians' openings when one booking holds its time for all of them (pure): each job
- * starts on the hour, fits wholly inside one opening, and no two overlap in time. Earliest-finish placement.
+ * starts on the hour and fits a whole SLOT_MIN slot inside one opening (its drive included), after that opening's
+ * last job; no two bookings (BOOKED_MIN from the start) overlap in time. Earliest booked-end placement.
  */
 function blindSlots(openings) {
-  let cursor = -Infinity;
+  let shared = -Infinity;
+  const after = openings.map(() => -Infinity);
   let count = 0;
   for (;;) {
-    const finishes = openings.map((o) => ceilHour(Math.max(o.start, cursor)) + SLOT_MIN).filter((f, i) => f <= openings[i].start + openings[i].min);
-    if (!finishes.length) return count;
+    const fits = openings
+      .map((o, i) => ({ i, at: ceilHour(Math.max(o.start, shared, after[i])) }))
+      .filter(({ i, at }) => at + SLOT_MIN <= openings[i].start + openings[i].min);
+    if (!fits.length) return count;
+    const pick = fits.reduce((best, f) => (f.at < best.at ? f : best));
     count += 1;
-    cursor = Math.min(...finishes);
+    shared = pick.at + BOOKED_MIN;
+    after[pick.i] = pick.at + SLOT_MIN;
   }
 }
 
@@ -288,8 +297,8 @@ async function liveAdModes(conn) {
 }
 
 /**
- * Today's stops done or on site, per technician (the van's progress): a completed stop's place and finish, and an
- * on-site stop's arrival (its other fields come from the live rows). Finish and arrival follow the completion
+ * Today's stops done, on site or en route, per technician (the van's progress): a completed stop's place and finish,
+ * an on-site stop's arrival, and when the van set off for the stop en route (its other fields come from the live rows). Finish and arrival follow the completion
  * writer's own precedence (service-duration-capture.js): the dispatch end/start fields first, then the tracker's,
  * so a completion whose tracker update failed still has its finish.
  */
@@ -298,13 +307,13 @@ async function loadProgress(conn, day) {
   const rows = await conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.scheduled_date', day)
-    .whereIn('scheduled_services.status', ['completed', 'on_site'])
+    .whereIn('scheduled_services.status', ['completed', 'on_site', 'en_route'])
     .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.status',
       'scheduled_services.completed_at', 'scheduled_services.actual_end_time', 'scheduled_services.check_out_time',
       'scheduled_services.arrived_at', 'scheduled_services.actual_start_time', 'scheduled_services.check_in_time',
-      ...guardedCoordSelects(conn));
+      'scheduled_services.en_route_at', ...guardedCoordSelects(conn));
   return rows.map((r) => ({
-    id: r.id, technician_id: r.technician_id, status: r.status, lat: r.lat, lng: r.lng,
+    id: r.id, technician_id: r.technician_id, status: r.status, lat: r.lat, lng: r.lng, en_route_at: r.en_route_at,
     completed_at: firstFiniteDate(r.actual_end_time, r.check_out_time, r.completed_at),
     arrived_at: firstFiniteDate(r.actual_start_time, r.check_in_time, r.arrived_at),
   }));
@@ -340,13 +349,13 @@ const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map
 /**
  * Today for one technician: the stops still to do, split into the physical stop on site now, the one the van is
  * driving to, and the rest. The progress read comes after the rows' read, so its status wins by id: a stop finished in
- * between is done (never simulated again), one reached in between is on site. A physical stop is on site (or en
+ * between is done (never simulated again), one reached in between is on site (or en route). A physical stop is on site (or en
  * route) when any of its rows is: tracking moves rows one at a time.
  */
 function todaysStops(own, mine) {
   const now = new Map(mine.map((p) => [String(p.id), p.status]));
   const live = own.filter((r) => now.get(String(r.id)) !== 'completed')
-    .map((r) => (now.get(String(r.id)) === 'on_site' ? { ...r, status: 'on_site' } : r));
+    .map((r) => (['on_site', 'en_route'].includes(now.get(String(r.id))) ? { ...r, status: now.get(String(r.id)) } : r));
   const stops = physicalStops(live);
   const has = (stop, status) => stop.flat().some((r) => r.status === status);
   const onSite = stops.filter((s) => has(s, 'on_site'));
@@ -373,23 +382,30 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
     }
     if (!progress) return { stops: own.length, skip: 'FAILED' };
     const mine = progress.filter((p) => String(p.technician_id) === techId);
-    // A stop put on site for this technician after the rows' read: its place and length are not in hand.
+    // A stop put on site or en route for this technician after the rows' read: its place and length are not in hand.
     const ownIds = new Set(own.map((r) => String(r.id)));
-    if (mine.some((p) => p.status === 'on_site' && !ownIds.has(String(p.id)))) return { stops: own.length, skip: 'ON_SITE_NOT_IN_ROUTE' };
+    const active = (p) => p.status === 'on_site' || p.status === 'en_route';
+    if (mine.some((p) => active(p) && !ownIds.has(String(p.id)))) return { stops: own.length, skip: 'ACTIVE_STOP_NOT_IN_ROUTE' };
     const { live, onSite, enRoute, rest } = todaysStops(own, mine);
     // The van is at the stop on site, so one with no place leaves the day unmeasured (never free time from home).
     if (onSite.flat(2).some((r) => !hasCoords(r))) return { stops: live.length, skip: 'ON_SITE_WITHOUT_COORDINATES' };
+    // The statuses must name one place for the van: never two stops on site, two en route, or one of each.
     if (onSite.length > 1) return { stops: live.length, skip: 'SEVERAL_ON_SITE' };
     if (enRoute.length > 1) return { stops: live.length, skip: 'SEVERAL_EN_ROUTE' };
+    if (onSite.length && enRoute.length) return { stops: live.length, skip: 'ON_SITE_AND_EN_ROUTE' };
     const van = vanNow({
       completed: mine.filter((p) => p.status === 'completed'),
       onSite: onSiteStays(onSite, new Map(mine.map((p) => [String(p.id), p.arrived_at]))),
       home, departureMin: env.departureMin, nowMin: env.nowMin, day,
     });
     if (!van.origin) return { stops: live.length, skip: 'LAST_STOP_WITHOUT_COORDINATES' };
+    // En route: the van set off at en_route_at, so the drive under way is simulated from then, not again from now
+    // (openings still start at now).
+    const first = enRoute.flatMap((s) => s.flat());
+    const setOff = first.map((r) => etMinuteOn(mine.find((p) => String(p.id) === String(r.id))?.en_route_at, env.today)).filter((m) => m != null);
+    const departureMin = setOff.length ? Math.max(van.clockMin, Math.min(env.nowMin, ...setOff)) : Math.max(env.nowMin, van.clockMin);
     const fig = measureTechDay({
-      ...common, rows: rest, first: enRoute.flatMap((s) => s.flat()), origin: van.origin, end: home,
-      departureMin: Math.max(env.nowMin, van.clockMin), openMin: Math.max(DAY_OPEN, env.nowMin),
+      ...common, rows: rest, first, origin: van.origin, end: home, departureMin, openMin: Math.max(DAY_OPEN, env.nowMin),
     });
     return { ...fig, van: van.source };
   } catch (err) {
