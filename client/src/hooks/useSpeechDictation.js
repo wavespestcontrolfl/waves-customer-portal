@@ -107,6 +107,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [liveText, setLiveText] = useState("");
   const liveRef = useRef(null);
   const liveKeyRef = useRef(null);
+  // The login the preview streams under (the tap's): its words show under no other login.
+  const liveTokenRef = useRef(null);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
   // Ends the live recording's own bookkeeping (hidden-page guard, the app-wide
@@ -196,6 +198,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     const session = liveRef.current;
     liveRef.current = null;
     liveKeyRef.current = null;
+    liveTokenRef.current = null;
     session?.abort();
     if (mountedRef.current) setLiveText("");
   }, []);
@@ -211,17 +214,21 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       context: clip,
       token,
       onText: (text) => {
-        if (liveRef.current === session && mountedRef.current && targetRef.current.key === clip.key) setLiveText(text);
+        if (liveRef.current === session && mountedRef.current && targetRef.current.key === clip.key && readToken() === token) {
+          setLiveText(text);
+        }
       },
       onEnd: (failed) => {
         if (liveRef.current !== session || !failed) return;
         liveRef.current = null;
         liveKeyRef.current = null;
+        liveTokenRef.current = null;
         if (mountedRef.current) setLiveText("");
       },
     });
     liveRef.current = session;
     liveKeyRef.current = clip.key;
+    liveTokenRef.current = token;
   }, []);
 
   // Live words never gate the recording: only a server-mode mic whose server said yes starts a preview.
@@ -236,6 +243,16 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   useEffect(() => {
     if (liveRef.current && liveKeyRef.current !== target.key) clearLive();
   }, [target.key, clearLive]);
+
+  // Another tab signed out or switched staff: the preview is for the old login, also after Stop
+  // while the final words are on the way (the recording itself stops on its own watch).
+  useEffect(() => {
+    const onStorage = () => {
+      if (liveRef.current && liveTokenRef.current !== readToken()) clearLive();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [clearLive]);
 
   const settleUpload = useCallback(() => {
     if (mountedRef.current) setUploading(false);
