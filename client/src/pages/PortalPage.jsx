@@ -8024,7 +8024,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {p.recoveryInvoice ? (
                     <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
-                      Pay {money(p.recoveryInvoice.amountDue)} now
+                      Review invoice
                     </a>
                   ) : primaryOpenInvoice ? (
                     <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>

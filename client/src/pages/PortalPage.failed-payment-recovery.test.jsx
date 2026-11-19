@@ -59,7 +59,7 @@ afterEach(() => {
 });
 
 describe('failed payment recovery', () => {
-  it('pays the invoice linked to the failed row, even when an older invoice is open', async () => {
+  it('reviews the invoice linked to the failed row, even when an older invoice is open', async () => {
     api.getPayments.mockResolvedValue({
       payments: [failedPayment({
         recoveryInvoice: { payUrl: '/pay/tok-failed', amountDue: 95, invoiceNumber: 'WPC-200' },
@@ -70,8 +70,8 @@ describe('failed payment recovery', () => {
     render(<BillingTab customer={customer} />);
 
     const row = paymentRow(await screen.findByText('November pest visit'));
-    expect(within(row).getByRole('link', { name: 'Pay $95.00 now' })).toHaveAttribute('href', '/pay/tok-failed');
-    expect(within(row).queryByRole('link', { name: 'Pay $60.00 now' })).not.toBeInTheDocument();
+    expect(within(row).getByRole('link', { name: 'Review invoice' })).toHaveAttribute('href', '/pay/tok-failed');
+    expect(within(row).queryByRole('link', { name: /^Pay / })).not.toBeInTheDocument();
   });
 
   it('sends an unlinked legacy failure to the invoice list without guessing', async () => {

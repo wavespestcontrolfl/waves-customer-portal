@@ -1,12 +1,24 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
-jest.mock('../services/stripe', () => ({ getPaymentHistory: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  getPaymentHistory: jest.fn(),
+  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
+}));
 jest.mock('../services/invoice-payer-ownership', () => ({
   liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })),
+}));
+jest.mock('../services/estimate-deposits', () => ({
+  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+}));
+jest.mock('../services/visit-completion-packets', () => ({
+  invoicePayerOwnedNow: jest.fn(async () => false),
 }));
 
 const { recoveryInvoiceIndexFor } = require('../services/portal-payment-history');
 const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
+const { assertNoInvoiceChargeReconciliationPending } = require('../services/stripe');
+const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
+const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
 const INV_B = '22222222-2222-4222-8222-222222222222';
@@ -24,6 +36,7 @@ function invoice(overrides = {}) {
     payer_id: null,
     payer_statement_id: null,
     scheduled_send_error: null,
+    visit_completion_packet_id: null,
     stripe_payment_intent_id: 'pi-a',
     stripe_charge_id: null,
     ...overrides,
@@ -31,7 +44,11 @@ function invoice(overrides = {}) {
 }
 
 beforeEach(() => {
+  jest.clearAllMocks();
   liveInvoiceOwnership.mockResolvedValue({ ownedIds: new Set(), unverifiable: false });
+  assertNoInvoiceChargeReconciliationPending.mockResolvedValue();
+  assertInvoiceDepositSettlementReady.mockResolvedValue();
+  invoicePayerOwnedNow.mockResolvedValue(false);
 });
 
 function reader(rows) {
@@ -189,6 +206,39 @@ test('an explicit settled invoice id never falls through to a different payable 
 
 test('a live-resolved payer invoice never exposes its bearer pay link', async () => {
   liveInvoiceOwnership.mockResolvedValueOnce({ ownedIds: new Set([INV_A]), unverifiable: false });
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+  }], reader([invoice()]));
+
+  expect(recovery.has('pay-a')).toBe(false);
+});
+
+test('a packet owned by any billed payer member never exposes its bearer pay link', async () => {
+  invoicePayerOwnedNow.mockResolvedValueOnce(true);
+  const database = reader([invoice({ visit_completion_packet_id: 'packet-1' })]);
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+  }], database);
+
+  expect(recovery.has('pay-a')).toBe(false);
+  expect(invoicePayerOwnedNow).toHaveBeenCalledWith(INV_A, database);
+  expect(assertInvoiceDepositSettlementReady).not.toHaveBeenCalled();
+});
+
+test('unverifiable packet ownership withholds the recovery link', async () => {
+  invoicePayerOwnedNow.mockRejectedValueOnce(new Error('ownership unavailable'));
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+  }], reader([invoice({ visit_completion_packet_id: 'packet-1' })]));
+
+  expect(recovery.has('pay-a')).toBe(false);
+});
+
+test.each([
+  ['deposit settlement', assertInvoiceDepositSettlementReady, 'DEPOSIT_RECONCILIATION_REQUIRED'],
+  ['saved-card reconciliation', assertNoInvoiceChargeReconciliationPending, 'STRIPE_AMBIGUOUS_OUTCOME'],
+])('%s holds suppress the recovery link', async (_label, guard, code) => {
+  guard.mockRejectedValueOnce(Object.assign(new Error('collection pending'), { code }));
   const recovery = await recoveryInvoiceIndexFor('cust-1', [{
     id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
   }], reader([invoice()]));

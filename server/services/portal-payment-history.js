@@ -8,7 +8,7 @@ const { excludeHoldDeferralPlaceholders } = require('./collections/collection-ho
 const StripeService = require('./stripe');
 const logger = require('./logger');
 const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
-const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, isCollectionPendingFenceError } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
 
@@ -103,6 +103,26 @@ async function receiptIndexFor(customerId, visiblePayments, database = db) {
   return { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber };
 }
 
+async function recoveryInvoiceAvailableNow(invoice, database) {
+  try {
+    // A packet invoice's representative visit is not enough: any billed
+    // member can move the whole packet to a third-party payer.
+    if (invoice.visit_completion_packet_id
+      && await require('./visit-completion-packets').invoicePayerOwnedNow(invoice.id, database)) return false;
+    // Match checkout's read-only money fences. A deposit or saved-card attempt
+    // may already be settling even though an older failed row remains visible.
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(database, invoice, { lock: false });
+    const stripe = await StripeService;
+    await stripe.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
+    return true;
+  } catch (err) {
+    if (!isCollectionPendingFenceError(err)) {
+      logger.warn(`[billing] failed-payment invoice ${invoice.id} is not safely collectible: ${err.message}`);
+    }
+    return false;
+  }
+}
+
 // A failed history row may offer a Pay action only for the invoice that the
 // attempt itself identifies. The account's oldest open invoice is unrelated
 // when a customer has more than one balance, and using it here can put a $60
@@ -130,9 +150,10 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
         if (invoiceNumbers.length) this.orWhereIn('invoice_number', invoiceNumbers);
       })
       .select(
-        'id', 'customer_id', 'scheduled_service_id', 'service_record_id',
+        'id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id',
         'token', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid',
         'payer_id', 'payer_statement_id', 'scheduled_send_error',
+        'notes', 'line_items',
         'stripe_payment_intent_id', 'stripe_charge_id',
       );
   } catch (err) {
@@ -201,13 +222,18 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   );
   if (ownership.unverifiable) return new Map();
 
-  const recoveryByPaymentId = new Map();
-  for (const [paymentId, invoice] of invoiceByPaymentId) {
+  const availableInvoiceIds = new Set();
+  for (const invoice of identifiedInvoices) {
     const ownDraft = String(invoice.status || '').toLowerCase() === 'draft'
       && !invoice.payer_id && !invoice.payer_statement_id && !invoiceWithdrawnFromCustomer(invoice);
-    const payable = !ownership.ownedIds.has(String(invoice.id))
+    const basePayable = !ownership.ownedIds.has(String(invoice.id))
       && invoice.token && (ownDraft || isCollectibleOwnInvoice(invoice)) && invoiceAmountDue(invoice) > 0;
-    if (!payable) continue;
+    if (basePayable && await recoveryInvoiceAvailableNow(invoice, database)) availableInvoiceIds.add(String(invoice.id));
+  }
+
+  const recoveryByPaymentId = new Map();
+  for (const [paymentId, invoice] of invoiceByPaymentId) {
+    if (!availableInvoiceIds.has(String(invoice.id))) continue;
     recoveryByPaymentId.set(paymentId, {
       payUrl: `/pay/${invoice.token}`,
       amountDue: invoiceAmountDue(invoice),
