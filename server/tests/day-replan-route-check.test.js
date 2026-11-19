@@ -103,6 +103,15 @@ describe('online count: the customer booking rules', () => {
     expect(blind).toEqual([{ startMin: 780, endMin: 840 }]);
   });
 
+  test("dispatch held time: other rows' booked spans, never this technician's own", () => {
+    const rows = [
+      { id: 'o1', technician_id: TECH, customer_id: 'c1', scheduled_date: MONDAY, window_start: '09:00:00', window_end: '10:00:00' },
+      { id: 'u1', technician_id: null, customer_id: 'c2', scheduled_date: MONDAY, window_start: '13:00:00', window_end: '14:00:00' },
+    ];
+    expect(rc.bookedSpans(rows, TECH, false, { own: false })).toEqual([{ startMin: 780, endMin: 840 }]);
+    expect(rc.bookedSpans(rows, TECH, false, { own: true })).toHaveLength(2);
+  });
+
   test('a version-2 allocation holds its whole combined span (occupiedRows), not each service alone', () => {
     const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
     const pair = ['a1', 'a2'].map((id) => ({
@@ -112,6 +121,21 @@ describe('online count: the customer booking rules', () => {
     const busy = rc.onlineBusy({ techId: TECH, techBlind: false, occupancy: pair, interviews: [] });
     expect(busy[0]).toEqual({ startMin: 540, endMin: 660 });
     expect(rc.onlineStarts({ startMin: 540, min: 240 }, rc.onlineAdmit(MONDAY, AHEAD, busy, CONFIG))).toEqual([660]); // 10 AM is held
+  });
+
+  test('no online room while self-booking is closed; dispatch room is unchanged', () => {
+    expect(rc.onlineAdmit(MONDAY, AHEAD, [], { ...CONFIG, enabled: false })).toBeNull();
+    const fig = rc.measureTechDay({ ...open, rows: [], admit: rc.onlineAdmit(MONDAY, AHEAD, [], { ...CONFIG, enabled: false }) });
+    expect(fig).toMatchObject({ slots: 6, online: 0 });
+  });
+
+  test('a /book visit longer than the job slot must fit the opening and spaces the online starts', () => {
+    const long = { ...CONFIG, slot_duration_minutes: 90 };
+    expect(rc.onlineNeedMin(CONFIG)).toBe(80);
+    expect(rc.onlineNeedMin(long)).toBe(90);
+    const admit = rc.onlineAdmit(MONDAY, AHEAD, [], long);
+    expect(rc.onlineStarts({ startMin: 540, min: 80 }, admit, 90)).toEqual([]); // 80 open minutes, a 90-minute visit
+    expect(rc.spaced([540, 600, 660], 90)).toEqual([540, 660]);
   });
 
   test("booking_config's day end bounds the customer's visit", async () => {
@@ -352,6 +376,19 @@ describe('runRouteCheck', () => {
     expect(days[0]).toMatchObject({ date: '2026-11-19', online: 0 });
     expect(days[0].slots).toBeGreaterThan(0);
     expect(days[1].online).toBeGreaterThan(0); // tomorrow is bookable
+  });
+
+  test("an unassigned version-2 allocation holds its combined span against dispatch openings too", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
+    const pair = ['a1', 'a2'].map((id) => ({
+      id, technician_id: null, customer_id: 'cust-2', scheduled_date: '2026-11-20', window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60, reservation_service_mix: mix,
+    }));
+    const { conn, writes } = fakeConn({ occupancy: pair });
+    await runRouteCheck({ conn, now: NOW });
+    const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
+    expect(friday.openings.map((o) => [o.start, o.min])).toEqual([[660, 360]]); // 8-9 is under a job slot; 9-11 is held
   });
 
   test('an unreadable interview list holds no time and the run still completes', async () => {
