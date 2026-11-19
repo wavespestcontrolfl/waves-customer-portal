@@ -341,6 +341,7 @@ async function restoreConfigRows(knex) {
         console.warn(`${LOG} down: ${key}.products.${option} changed since this migration - leaving it alone`);
       }
     }
+    if (isDeepStrictEqual(products, current.products)) continue; // nothing restored: leave the row (and its updated_at) alone
     await knex('pricing_config').where({ config_key: key }).update({ data: JSON.stringify({ ...current, products }), updated_at: knex.fn.now() });
   }
 }

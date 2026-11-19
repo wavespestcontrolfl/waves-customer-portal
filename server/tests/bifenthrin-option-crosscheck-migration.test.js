@@ -414,6 +414,19 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PROD_PRESLAB_PRODUCT);
     });
 
+    test('down() leaves a row alone, updated_at included, when every product in it was edited since up()', async () => {
+      const db = world();
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      const trench = rowOf(db, 'onetime_trenching');
+      for (const key of ['talstar_p', 'bifen_it']) trench.products[key] = { ...trench.products[key], container_cost: 44 };
+      db.pricing_config = db.pricing_config.map((r) => (r.config_key === 'onetime_trenching' ? { ...r, data: JSON.stringify(trench), updated_at: 'office-edit' } : r));
+      await migration.down(knex);
+      expect(db.pricing_config.find((r) => r.config_key === 'onetime_trenching').updated_at).toBe('office-edit');
+      expect(productOf(db, 'onetime_trenching', 'talstar_p').container_cost).toBe(44);
+      expect(productOf(db, 'onetime_preslab', 'bifen_it')).toEqual(PROD_PRESLAB_PRODUCT);
+    });
+
     test('after a guard-failed up(), down() restores trenching and leaves the untouched pre-slab and price rows alone', async () => {
       const db = world({ vendors: [vendorRow({ price: '45.00' })], catalog: [catalogRow({ best_price: '45.00' })] });
       const knex = fakeKnex(db);
