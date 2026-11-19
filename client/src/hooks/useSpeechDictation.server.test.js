@@ -277,68 +277,75 @@ describe("useSpeechDictation with server dictation on", () => {
     await waitFor(() => expect(result.current.mode).toBe("speech"));
   });
 
-  it("a clip POST that dies with no response (iOS 'Load failed') is sent again and the words still land", async () => {
-    // Owner 2026-11-06 10:49: the server got the headers and no audio, and the IB mic showed "Load failed".
-    const onTranscript = vi.fn();
-    const fetchMock = stubServer();
+  // Owner 2026-11-06 10:49: the server got the request headers and no audio, and the IB mic showed "Load failed".
+  // The recording is kept and the person is asked; it is never sent again on its own (a lost answer was already paid).
+  const failFirstPost = (fetchMock, failure) => {
     const answer = fetchMock.getMockImplementation();
     let posts = 0;
     fetchMock.mockImplementation(async (url, opts) => {
-      if (opts?.method === "POST" && ++posts === 1) throw new TypeError("Load failed");
+      if (opts?.method === "POST" && ++posts === 1) return failure();
       return answer(url, opts);
     });
+  };
+  const recordAndStop = async (onTranscript) => {
     const { result } = renderHook(() => useSpeechDictation(onTranscript));
     await waitFor(() => expect(result.current.mode).toBe("upload"));
     await act(async () => { result.current.toggle(); });
     await waitFor(() => expect(result.current.listening).toBe(true));
     await act(async () => { result.current.toggle(); });
-    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."), { timeout: 3000 });
+    return result;
+  };
+
+  it("a send with no answer (iOS 'Load failed') asks to send the same recording again; yes sends it and the words land", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    await recordAndStop(onTranscript);
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+    expect(confirm).toHaveBeenCalledWith("The recording did not go through. Send it again?");
+    const [first, second] = postsTo(fetchMock).map(([, o]) => o.body.get("audio"));
+    expect(second.size).toBe(first.size);
     expect(postsTo(fetchMock)).toHaveLength(2);
     expect(onTranscript).toHaveBeenCalledTimes(1);
     expect(alert).not.toHaveBeenCalled();
   });
 
-  it("a 2xx answer cut off before its words is sent again, never read as silence", async () => {
+  it("a 2xx answer cut off before its words is not read as silence: it asks the same way", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
     const onTranscript = vi.fn();
     const fetchMock = stubServer();
-    const answer = fetchMock.getMockImplementation();
-    let posts = 0;
-    fetchMock.mockImplementation(async (url, opts) => {
-      if (opts?.method === "POST" && ++posts === 1) {
-        return { ok: true, status: 200, json: async () => { throw new TypeError("Load failed"); } };
-      }
-      return answer(url, opts);
-    });
-    const { result } = renderHook(() => useSpeechDictation(onTranscript));
-    await waitFor(() => expect(result.current.mode).toBe("upload"));
-    await act(async () => { result.current.toggle(); });
-    await waitFor(() => expect(result.current.listening).toBe(true));
-    await act(async () => { result.current.toggle(); });
-    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."), { timeout: 3000 });
+    failFirstPost(fetchMock, () => ({ ok: true, status: 200, json: async () => { throw new TypeError("Load failed"); } }));
+    await recordAndStop(onTranscript);
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+    expect(confirm).toHaveBeenCalledTimes(1);
     expect(postsTo(fetchMock)).toHaveLength(2);
     expect(alert).not.toHaveBeenCalled();
   });
 
-  it("no connection after the retries: a plain message, not the browser's bare 'Load failed'", async () => {
+  it("no to the question: no second send, no words and no error box", async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
     const onTranscript = vi.fn();
     const fetchMock = stubServer();
-    const answer = fetchMock.getMockImplementation();
-    fetchMock.mockImplementation(async (url, opts) => {
-      if (opts?.method === "POST") throw new TypeError("Load failed");
-      return answer(url, opts);
-    });
-    const { result } = renderHook(() => useSpeechDictation(onTranscript));
-    await waitFor(() => expect(result.current.mode).toBe("upload"));
-    await act(async () => { result.current.toggle(); });
-    await waitFor(() => expect(result.current.listening).toBe(true));
-    await act(async () => { result.current.toggle(); });
-    await waitFor(
-      () => expect(alert).toHaveBeenCalledWith("Dictation error: The recording did not go through. Check the connection and try again."),
-      { timeout: 4000 },
-    );
-    expect(postsTo(fetchMock)).toHaveLength(3);
-    expect(onTranscript).not.toHaveBeenCalled();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    const result = await recordAndStop(onTranscript);
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(postsTo(fetchMock)).toHaveLength(1);
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("a refusal (the server answered) is shown and never offers a resend", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    stubServer({ clip: { ok: false, status: 502, json: async () => ({ error: "Transcription unavailable. Type instead." }) } });
+    await recordAndStop(vi.fn());
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: Transcription unavailable. Type instead."));
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("a speech session started before the server answered is stopped by its own tap", async () => {

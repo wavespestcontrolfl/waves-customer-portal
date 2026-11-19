@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopQuietly, transcribeClip,
+  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopQuietly, transcribeClipWithResend,
 } from "./serverDictation";
 import useServerDictationMode, { readToken } from "./useServerDictationMode";
 import { startLiveWords } from "./liveDictation";
@@ -249,11 +249,14 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       const token = readToken();
       if (!token) return;
       setUploading(true);
+      // The round trip can outlive the field: unmounted, or the mic now
+      // belongs to another customer or visit. Never append into the wrong field.
+      const stillWanted = () => mountedRef.current && targetRef.current.key === clip.key;
       try {
-        const { text, money } = await transcribeClip(blob, durationSeconds, clip, token);
-        // The round trip can outlive the field: unmounted, or the mic now
-        // belongs to another customer or visit. Never append into the wrong field.
-        if (!mountedRef.current || targetRef.current.key !== clip.key) return;
+        // A send with no answer asks to send the same recording again (null = the person said no).
+        const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, stillWanted);
+        if (!answer || !stillWanted()) return;
+        const { text, money } = answer;
         if (text && onTranscriptRef.current) {
           if (money) onTranscriptRef.current(text, { money });
           else onTranscriptRef.current(text);

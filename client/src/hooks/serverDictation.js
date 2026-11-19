@@ -2,8 +2,6 @@
 // our server transcribes it (POST /api/tech/dictation) instead of the browser's
 // speech recognition. This module is the client half of that endpoint: the
 // per-session availability answer and the clip upload. See useSpeechDictation.js.
-import { withNetworkRetry } from "../lib/fetchRetry";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 // One answer per session (per login token): { token, value, liveWords } once the server has
@@ -80,26 +78,27 @@ function clipForm(blob, durationSeconds) {
   return form;
 }
 
-// iOS 18 sends a POST on a connection the server already closed and never resends it: the clip
-// failed with a bare "Load failed" (owner 2026-11-06 10:49, the IB mic; the server got the
-// headers and no audio). The clip is sent again when no answer arrived, or when a 2xx answer
-// was cut off before its words (reading `{}` there used to drop the recording without a word).
-// Both routes only transcribe, and the server shares the first transcription with a resend
-// (transcribeClipOnce, server/services/dictation-upload.js), so a resend never pays twice.
+// A send that got no answer: fetch() rejected (iOS shows a bare "Load failed"; owner 2026-11-06
+// 10:49, the IB mic: the server got the request headers and no audio), or a 2xx answer was cut
+// off before its words (reading `{}` there used to drop the recording without a word).
+// `unsent` lets the hook offer to send the same recording again.
+export const UNSENT_MESSAGE = "The recording did not go through.";
+function unsentError() {
+  const err = new Error(UNSENT_MESSAGE);
+  err.unsent = true;
+  return err;
+}
+
 async function postClip(url, blob, durationSeconds, token) {
-  const init = { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) };
   let r;
-  let data;
   try {
-    ({ r, data } = await withNetworkRetry(async () => {
-      const res = await fetch(url, init);
-      // A refusal's body is optional; a 2xx body that cannot be read is a failed send.
-      return { r: res, data: res.ok ? await res.json() : await res.json().catch(() => ({})) };
-    }));
+    r = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) });
   } catch (e) {
     if (e?.name === "AbortError") throw e;
-    throw new Error("The recording did not go through. Check the connection and try again.");
+    throw unsentError();
   }
+  // A refusal's body is optional; a 2xx body that cannot be read is a send with no answer.
+  const data = r.ok ? await r.json().catch(() => { throw unsentError(); }) : await r.json().catch(() => ({}));
   if (!r.ok) {
     const err = new Error(data?.error || `Transcription failed (HTTP ${r.status})`);
     err.status = r.status;
@@ -128,6 +127,25 @@ export function transcribeClip(blob, durationSeconds, clip, token) {
   return clip.server
     ? transcribeOnServer(blob, durationSeconds, clip, token)
     : transcribeServiceClip(blob, durationSeconds, clip.serviceId, token);
+}
+
+export const RESEND_QUESTION = `${UNSENT_MESSAGE} Send it again?`;
+
+/**
+ * transcribeClip, and when a send got no answer while `stillWanted()` holds (the field is still
+ * there and still this recording's), asks to send the SAME recording again. Never automatic:
+ * when only the answer was lost, the server already paid for those words. Resolves null when the
+ * person says no; throws the unsent error when the field moved on.
+ */
+export async function transcribeClipWithResend(blob, durationSeconds, clip, token, stillWanted) {
+  for (;;) {
+    try {
+      return await transcribeClip(blob, durationSeconds, clip, token);
+    } catch (e) {
+      if (!e?.unsent || !stillWanted()) throw e;
+      if (!window.confirm(RESEND_QUESTION)) return null;
+    }
+  }
 }
 
 /** The older per-visit upload (GATE_TECH_DICTATION_UPLOAD): the same clip, the visit's own route. */

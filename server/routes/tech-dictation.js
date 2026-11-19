@@ -45,7 +45,7 @@ const express = require('express');
 
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { dictationAudioUpload, dictationClipType, dictationLimiter, transcribeClipOnce } = require('../services/dictation-upload');
+const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('../services/dictation-upload');
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { normalizeSpokenMoney } = require('../utils/spoken-money');
@@ -109,8 +109,7 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
 
       const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');
       const voiceFill = require('../services/fast-complete-voice-fill');
-      // A resent clip (the first answer never reached the phone) shares the first transcription.
-      const result = await transcribeClipOnce(`server|${req.technicianId}|${customerId || ''}|${serviceId || ''}`, req.file.buffer, () => transcribeWithOpenAI(req.file.buffer, {
+      const result = await transcribeWithOpenAI(req.file.buffer, {
         model: process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL || voiceFill.VOICE_FILL_TRANSCRIBE_MODEL,
         prompt,
         ...(keywords ? { keywords } : {}),
@@ -118,7 +117,7 @@ router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(N
         filename,
         // silence is an answer ({ text: '' }), not a provider failure
         emptyOk: true,
-      }));
+      });
       const heard = String(result?.text || '').trim();
       const context = serviceId ? 'service' : customerId ? 'customer' : 'none';
       logger.info(`[server-dictation] tech=${req.technicianId} bytes=${req.file.buffer.length} type=${baseType} context=${context} promptChars=${prompt.length} ok=${Boolean(result)} chars=${heard.length}`);

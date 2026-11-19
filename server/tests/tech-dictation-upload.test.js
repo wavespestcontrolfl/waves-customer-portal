@@ -80,7 +80,6 @@ describe('tech dictation upload', () => {
   const original = process.env.GATE_TECH_DICTATION_UPLOAD;
   beforeEach(() => {
     jest.clearAllMocks();
-    require('../services/dictation-upload').__resetRecentClips();
     process.env.GATE_TECH_DICTATION_UPLOAD = 'true';
     process.env.OPENAI_API_KEY = 'test-key';
     mockFirst.mockResolvedValue({ id: 'svc-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()) });
@@ -135,19 +134,6 @@ describe('tech dictation upload', () => {
     });
   });
 
-  test('a resent clip (the phone never got the first answer) shares one transcription; other bytes are heard again', async () => {
-    await withServer(async (baseUrl) => {
-      const [first, again] = await Promise.all([clip(baseUrl), clip(baseUrl)]);
-      for (const res of [first, again]) {
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ text: 'Treated the exterior perimeter.' });
-      }
-      expect(mockTranscribe).toHaveBeenCalledTimes(1);
-      expect((await clip(baseUrl, { bytes: 'other-opus-bytes' })).status).toBe(200);
-      expect(mockTranscribe).toHaveBeenCalledTimes(2);
-    });
-  });
-
   test('unsupported audio type → 415; empty body → 400; transcriber miss → 502 with no fake text', async () => {
     await withServer(async (baseUrl) => {
       expect((await clip(baseUrl, { type: 'video/mp4' })).status).toBe(415);
@@ -175,10 +161,8 @@ describe('tech dictation upload', () => {
   test('paid endpoint is rate-limited per caller bucket', async () => {
     await withServer(async (baseUrl) => {
       let last;
-      // Distinct recordings: a resend of the same bytes would share one transcription and prove nothing.
-      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl, { bytes: `opus-bytes-${i}` });
+      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl);
       expect(last.status).toBe(429);
-      expect(mockTranscribe.mock.calls.length).toBeGreaterThan(0);
       expect(mockTranscribe.mock.calls.length).toBeLessThanOrEqual(40);
     });
   });

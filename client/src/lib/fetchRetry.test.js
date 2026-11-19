@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchWithNetworkRetry, NETWORK_RETRY_DELAYS_MS, withNetworkRetry } from './fetchRetry';
+import { fetchWithNetworkRetry, NETWORK_RETRY_DELAYS_MS } from './fetchRetry';
 
 describe('fetchWithNetworkRetry', () => {
   beforeEach(() => {
@@ -75,32 +75,5 @@ describe('fetchWithNetworkRetry', () => {
 
     await expect(fetchWithNetworkRetry('/api/pay/t')).rejects.toBe(abortErr);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('withNetworkRetry', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('repeats the whole exchange, so a body cut off after the headers is sent again', async () => {
-    const send = vi.fn()
-      .mockRejectedValueOnce(new TypeError('Load failed'))
-      .mockResolvedValueOnce({ text: 'ok' });
-    const promise = withNetworkRetry(send);
-    await vi.advanceTimersByTimeAsync(NETWORK_RETRY_DELAYS_MS[0]);
-    await expect(promise).resolves.toEqual({ text: 'ok' });
-    expect(send).toHaveBeenCalledTimes(2);
-  });
-
-  it('never repeats a caller abort', async () => {
-    const abort = Object.assign(new Error('aborted'), { name: 'AbortError' });
-    const send = vi.fn().mockRejectedValue(abort);
-    await expect(withNetworkRetry(send)).rejects.toBe(abort);
-    expect(send).toHaveBeenCalledTimes(1);
   });
 });

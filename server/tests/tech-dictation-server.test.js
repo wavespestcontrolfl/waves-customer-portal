@@ -72,9 +72,9 @@ async function withServer(fn) {
   try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
 }
 
-function clip(baseUrl, { token = 'tech', type = 'audio/webm;codecs=opus', bytes = 'opus-bytes', fields = {}, query = {} } = {}) {
+function clip(baseUrl, { token = 'tech', type = 'audio/webm;codecs=opus', fields = {}, query = {} } = {}) {
   const form = new FormData();
-  form.append('audio', new Blob([bytes], { type }), 'dictation.webm');
+  form.append('audio', new Blob(['opus-bytes'], { type }), 'dictation.webm');
   for (const [key, value] of Object.entries(fields)) form.append(key, value);
   const qs = new URLSearchParams(query).toString();
   return fetch(`${baseUrl}/api/tech/dictation${qs ? `?${qs}` : ''}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form });
@@ -95,7 +95,6 @@ describe('server dictation endpoint', () => {
   const originalModel = process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL;
   beforeEach(() => {
     jest.clearAllMocks();
-    require('../services/dictation-upload').__resetRecentClips();
     process.env.GATE_SERVER_DICTATION = 'true';
     process.env.OPENAI_API_KEY = 'test-key';
     delete process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL;
@@ -349,8 +348,7 @@ describe('server dictation endpoint', () => {
   describe('GATE_DICTATION_MONEY_NORMALIZE', () => {
     const say = async (baseUrl, words) => {
       mockTranscribe.mockResolvedValue({ text: words });
-      // Each phrase is its own recording: the same bytes again would share the first transcription.
-      const res = await clip(baseUrl, { bytes: `opus:${words}` });
+      const res = await clip(baseUrl);
       expect(res.status).toBe(200);
       return res.json();
     };
@@ -398,89 +396,11 @@ describe('server dictation endpoint', () => {
     });
   });
 
-  describe('a resent clip (the phone never got the first answer)', () => {
-    test('the same login, context and bytes share one transcription; the words come back both times', async () => {
-      await withServer(async (baseUrl) => {
-        const send = () => clip(baseUrl, { token: 'tech', query: { customer_id: CUSTOMER_ID } });
-        const [first, again] = await Promise.all([send(), send()]);
-        const third = await send();
-        for (const res of [first, again, third]) {
-          expect(res.status).toBe(200);
-          expect(await res.json()).toEqual({ text: 'Treated the lanai for roaches.' });
-        }
-        expect(mockTranscribe).toHaveBeenCalledTimes(1);
-      });
-    });
-
-    test('other bytes, another login or another customer is a new recording and is heard again', async () => {
-      await withServer(async (baseUrl) => {
-        await clip(baseUrl, { token: 'tech' });
-        await clip(baseUrl, { token: 'tech', bytes: 'other-opus-bytes' });
-        await clip(baseUrl, { token: 'admin' });
-        await clip(baseUrl, { token: 'tech', query: { customer_id: CUSTOMER_ID } });
-        expect(mockTranscribe).toHaveBeenCalledTimes(4);
-      });
-    });
-
-    test('a transcriber miss or throw is not kept: the resend tries the transcriber again', async () => {
-      await withServer(async (baseUrl) => {
-        mockTranscribe.mockResolvedValueOnce(null);
-        expect((await clip(baseUrl)).status).toBe(502);
-        mockTranscribe.mockRejectedValueOnce(new Error('provider down'));
-        expect((await clip(baseUrl)).status).toBe(500);
-        const ok = await clip(baseUrl);
-        expect(ok.status).toBe(200);
-        expect(await ok.json()).toEqual({ text: 'Treated the lanai for roaches.' });
-        expect(mockTranscribe).toHaveBeenCalledTimes(3);
-      });
-    });
-
-    test('a call still running is kept past RECENT_CLIP_MS: a late resend waits on it instead of paying again', async () => {
-      const t0 = Date.now();
-      const now = jest.spyOn(Date, 'now');
-      let finish;
-      mockTranscribe.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-      try {
-        await withServer(async (baseUrl) => {
-          now.mockReturnValue(t0);
-          const first = clip(baseUrl);
-          await new Promise((resolve) => { const wait = () => (finish ? resolve() : setTimeout(wait, 5)); wait(); });
-          now.mockReturnValue(t0 + 5 * 60 * 1000);
-          const late = clip(baseUrl);
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          finish({ text: 'Long clip.' });
-          for (const res of await Promise.all([first, late])) expect(await res.json()).toEqual({ text: 'Long clip.' });
-          expect(mockTranscribe).toHaveBeenCalledTimes(1);
-        });
-      } finally {
-        now.mockRestore();
-      }
-    });
-
-    test('after RECENT_CLIP_MS the same bytes are heard again', async () => {
-      const t0 = Date.now();
-      const now = jest.spyOn(Date, 'now');
-      try {
-        await withServer(async (baseUrl) => {
-          now.mockReturnValue(t0);
-          await clip(baseUrl);
-          now.mockReturnValue(t0 + 2 * 60 * 1000);
-          await clip(baseUrl);
-          expect(mockTranscribe).toHaveBeenCalledTimes(2);
-        });
-      } finally {
-        now.mockRestore();
-      }
-    });
-  });
-
   test('paid endpoint is rate-limited per caller bucket', async () => {
     await withServer(async (baseUrl) => {
       let last;
-      // Distinct recordings: a resend of the same bytes would share one transcription and prove nothing.
-      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl, { bytes: `opus-bytes-${i}` });
+      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl);
       expect(last.status).toBe(429);
-      expect(mockTranscribe.mock.calls.length).toBeGreaterThan(0);
       expect(mockTranscribe.mock.calls.length).toBeLessThanOrEqual(40);
     });
   });

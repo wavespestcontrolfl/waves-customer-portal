@@ -7,33 +7,25 @@
 // 2026-07-28 and 2026-08-25. Retry only when fetch() itself rejects, i.e. no
 // HTTP response was ever received, so the server can't have half-processed
 // anything ambiguous. Reserved for calls that are idempotent server-side
-// (/update-amount, /quote, /setup, the invoice GET, the dictation clip POSTs,
-// which only transcribe) — never money-moving ones
+// (/update-amount, /quote, /setup, the invoice GET) — never money-moving ones
 // (/finalize, /setup-complete), where a lost response could hide a completed
 // charge. An AbortError is the CALLER cancelling (unmount/token change), not
 // a network failure — rethrow it immediately, or a retry would refetch after
 // unmount and setState against a dead page.
 export const NETWORK_RETRY_DELAYS_MS = [400, 1200];
 
-// `send` is the whole exchange to repeat: a fetch, or a fetch plus reading its
-// body when a body cut off after the headers must be resent too (the dictation
-// clip, whose server shares the first transcription with a resend).
-export async function withNetworkRetry(send) {
+export async function fetchWithNetworkRetry(url, options) {
   let lastErr;
   for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS_MS.length; attempt += 1) {
     if (attempt > 0) {
       await new Promise((resolve) => setTimeout(resolve, NETWORK_RETRY_DELAYS_MS[attempt - 1]));
     }
     try {
-      return await send();
+      return await fetch(url, options);
     } catch (err) {
       if (err?.name === 'AbortError') throw err;
       lastErr = err;
     }
   }
   throw lastErr;
-}
-
-export function fetchWithNetworkRetry(url, options) {
-  return withNetworkRetry(() => fetch(url, options));
 }

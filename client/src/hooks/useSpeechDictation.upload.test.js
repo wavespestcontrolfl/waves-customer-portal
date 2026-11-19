@@ -38,9 +38,7 @@ beforeEach(() => {
     configurable: true,
     value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [track] })) },
   });
-  // A request a test does not queue gets a real-shaped refusal: a bare vi.fn() resolves undefined, which no
-  // fetch() ever does, and the clip upload resends after a failed exchange, so that resend would land in a later test.
-  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) })));
+  vi.stubGlobal("fetch", vi.fn());
   vi.stubGlobal("alert", vi.fn());
 });
 
