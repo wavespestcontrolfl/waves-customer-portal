@@ -63,6 +63,10 @@ describe("the caller's words", () => {
       .toEqual(notPlain("Don't bill me each time yet."));
     expect(callerWordsOf(evidence(choice('bill me each time')), twice('Bill me each time.', 'Yes, bill me each time.')))
       .toEqual(plain('Yes, bill me each time.'));
+    // A short quote is grounded by a whole turn; a longer turn that says it later is screened too.
+    expect(callerWordsOf(evidence(choice('Per application')), twice('Per application.', 'Actually, not per application.')))
+      .toEqual(notPlain('Actually, not per application.'));
+    expect(callerWordsOf(evidence(choice('Per application')), twice('I guess so.', 'Actually, not per application.'))).toBeNull();
   });
 
   test('a quote across two sentences is screened with both', () => {

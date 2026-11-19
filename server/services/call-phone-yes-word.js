@@ -33,8 +33,9 @@ const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time
 // processor's own rules (pendingCandidatesQuery without its 10-minute settle gates; the retry budget in
 // config/call-extraction-retry): a recording over 10 seconds that is not started, queued, waiting for its transcript,
 // or failed with retries left; or a masked transcript (card-number quarantine) not started, queued or failed with
-// retries left. A row the processor will not read again is never waited on. The DB test holds this to
-// pendingCandidatesQuery row for row. Never NULL, so NOT owed is the read calls exactly.
+// retries left. A row the processor will not read again is never waited on: a 'processed' row waiting for its
+// transcript is selected by the sweep, but processRecording's dedup guard skips it. The DB test holds this to
+// pendingCandidatesQuery, less those rows, row for row. Never NULL, so NOT owed is the read calls exactly.
 function owedReadSql(t) {
   const underCap = `COALESCE(${t}.extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
   const failedRetry = `(${t}.processing_status = 'extraction_failed' AND ${underCap}`
@@ -43,7 +44,8 @@ function owedReadSql(t) {
   const unstarted = `(${t}.processing_status IS NULL OR ${t}.processing_status = 'pending')`;
   const recorded = `(COALESCE(${t}.recording_url, '') <> ''`
     + ` AND (COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) > 10 OR ${masked})`
-    + ` AND (${unstarted} OR (${t}.transcription_status = 'pending' AND ${t}.transcription IS NULL)`
+    + ` AND (${unstarted} OR (${t}.transcription_status = 'pending' AND ${t}.transcription IS NULL`
+    + ` AND ${t}.processing_status IS DISTINCT FROM 'processed')`
     + ` OR (${t}.processing_status = 'no_transcription' AND ${underCap}) OR ${failedRetry}))`;
   const quarantined = `(${masked} AND ${t}.transcription IS NOT NULL AND (${unstarted} OR ${failedRetry}))`;
   return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
@@ -74,9 +76,10 @@ function excerptOf(text, [qs, qe]) {
 
 // The caller's own words for the plan choice, from the caller turns that hold an evidence quote for billing_choice
 // (labeled the caller's) word for word, with outbound labels oriented the way the triage flags read them:
-// { words, plain }. plain = every such turn, whole, passes the shared plain-statement screen. words = the first turn
-// that does not (so the office sees the "no"), else the latest turn, cut around the quote. Null when no caller turn
-// holds a quote; an unlabeled or one-speaker transcript grounds nothing.
+// { words, plain }. The shared tools ground the quote (a short one must be a whole caller turn); then every caller turn
+// that says it, at any length, is screened. plain = every such turn, whole, passes the shared plain-statement screen.
+// words = the first turn that does not (so the office sees the "no"), else the latest turn, cut around the quote. Null
+// when no caller turn holds a quote; an unlabeled or one-speaker transcript grounds nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
@@ -85,10 +88,11 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
   const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
+  const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length);
   const held = [];
-  for (const turn of turns) {
+  for (const turn of turns.filter((t) => !t.agent)) {
     const text = String(turn.raw || '');
-    const quote = quotes.find((e) => turnsHolding([turn], e.quote, 'caller').length && spanOf(text, e.quote));
+    const quote = grounded.find((e) => spanOf(text, e.quote));
     if (quote) held.push({ words: excerptOf(text, spanOf(text, quote.quote)), plain: quoteIsPlainStatement(text) });
   }
   if (!held.length) return null;

@@ -103,10 +103,18 @@ describeDb("the caller's word (PostgreSQL)", () => {
     for (const state of states) ids.push(await call(customerId, null, { created_at: settled, updated_at: settled, ...state }));
     const owed = await trx('call_log').whereIn('id', ids).whereRaw(owedReadSql('call_log')).pluck('id');
     const read = await trx('call_log').whereIn('id', ids).whereRaw(`NOT ${owedReadSql('call_log')}`).pluck('id');
-    const candidates = await processor.pendingCandidatesQuery().whereIn('id', ids).pluck('id');
+    // The sweep also selects a 'processed' row waiting for its transcript, but processRecording skips it (dedup guard).
+    const candidates = await processor.pendingCandidatesQuery().whereIn('id', ids)
+      .whereRaw("processing_status IS DISTINCT FROM 'processed'").pluck('id');
     expect(candidates.length).toBeGreaterThan(5);
     expect([...owed].sort()).toEqual([...candidates].sort());
     expect(owed.length + read.length).toBe(states.length);
+  });
+
+  test("a 'processed' call waiting for its transcript is not owed: the processor will not read it again", async () => {
+    const customerId = await customer();
+    await call(customerId, null, { processing_status: 'processed', transcription_status: 'pending', transcription: null, ...RECORDED });
+    await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(false);
   });
 
   test('a call being read is owed; so is one inside the settle window', async () => {
