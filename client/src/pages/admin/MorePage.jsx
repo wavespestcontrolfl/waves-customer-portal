@@ -1,4 +1,6 @@
+import { useState, useSyncExternalStore } from "react";
 import { clearStaffDeviceData } from "../../lib/adminAuth";
+import { fieldViewReadiness, subscribeFieldViewReadiness, warmFieldViewLanding } from "../../lib/fieldView";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
@@ -16,7 +18,7 @@ import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS, getAdminMobileTabs } fro
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
 import { clearEmailDrafts } from "../../lib/emailDrafts";
 import { clearScheduleSaveNotices } from "../../components/schedule/ScheduleSaveNotice";
-import { UiSurface } from "../../components/ui";
+import { Switch, UiSurface } from "../../components/ui";
 import { PinnedWorkspaceLinks, WorkspaceGroup, WorkspaceLink } from "../../components/admin/AdminWorkspaceNavigation";
 import useAdminNavigation from "../../hooks/useAdminNavigation";
 import { releaseInAppPush } from "../../native/wavesAdminPush";
@@ -34,6 +36,39 @@ const NAV_PATHS = new Set(
 const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
   (sec) => !NAV_PATHS.has(sec.to.split("?")[0]) || sec.to.includes("?tab="),
 );
+
+// The Field view switch (owner 2026-11-19), for an admin login. It moves
+// only when this phone saved it (setFieldView returns false when it could
+// not). Turning it on also readies Today's code on the phone for a later
+// open with no signal (warmFieldViewLanding). The row says when either
+// failed. While the switch is on, the Today line shows this page's newest
+// try: the tap's own, or a later automatic one (the signal returning, a
+// worker taking control), whose success clears it.
+function FieldViewRow({ navigation }) {
+  const fieldView = navigation.fieldView === true;
+  const [notSaved, setNotSaved] = useState(false);
+  const readiness = useSyncExternalStore(subscribeFieldViewReadiness, fieldViewReadiness, fieldViewReadiness);
+  const change = (on) => {
+    const saved = navigation.setFieldView(on);
+    setNotSaved(saved === false);
+    if (saved === true && on) void warmFieldViewLanding({ again: true });
+  };
+  return (
+    <section className="mt-2">
+      <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+        <li className="flex items-center gap-3 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div id="field-view-label" className="text-14 text-zinc-900">Field view</div>
+            <div id="field-view-hint" className="text-14 text-zinc-500">Opens on Today. Today takes the Dashboard tab.</div>
+            {notSaved && <div role="alert" className="text-14 text-alert-fg">Not saved on this phone: its storage is full or blocked. Field view stays {fieldView ? "on" : "off"}.</div>}
+            {fieldView && readiness === false && <div role="status" className="text-14 text-zinc-700">Today is not ready for no signal yet. Open Today once with signal.</div>}
+          </div>
+          <Switch checked={fieldView} onChange={change} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
+        </li>
+      </ul>
+    </section>
+  );
+}
 
 export default function MorePage() {
   const navigate = useNavigate();
@@ -72,7 +107,8 @@ export default function MorePage() {
   // Today tab, so Today is listed). A group whose main page is a tab
   // (Schedule, Customers) shows its other pages as plain rows, so no row
   // repeats a tab's name.
-  const tabIds = new Set(getAdminMobileTabs(currentRole).map(({ id }) => id));
+  const fieldView = navigation?.fieldView === true;
+  const tabIds = new Set(getAdminMobileTabs(currentRole, { fieldView }).map(({ id }) => id));
   const mobileWorkspaces = navigation?.groups.filter(({ id }) => id !== 'settings').map((group) => {
     const items = group.items.filter(({ id }) => !tabIds.has(id));
     const flat = Boolean(group.target && tabIds.has(group.target.id));
@@ -95,6 +131,7 @@ export default function MorePage() {
           </WorkspaceLink>;
         }) : <WorkspaceGroup key={group.id} group={group} source="more" />))}
       </UiSurface>}
+      {navigation && currentRole === "admin" && <FieldViewRow navigation={navigation} />}
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
           {" "}
