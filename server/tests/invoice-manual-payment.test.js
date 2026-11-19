@@ -784,6 +784,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       ['another payment row tagged to the invoice', {}, { id: 'pay-0' }],
       ['applied credit', { credit_applied: '10.00' }, null],
       ['an estimate deposit credit', { line_items: JSON.stringify([{ category: 'deposit_credit', amount: -20 }]) }, null],
+      // A disputed card payment reopens the invoice and keeps the card: the receipt would print it as the payment method.
+      ['card details left from a disputed card payment', { card_brand: 'visa', card_last_four: '4242' }, null],
     ])('checkoutTender with %s: recorded, no automatic receipt (manual)', async (_why, over, taggedPayment) => {
       const inv = card(over);
       const owed = Math.round((117 - Number(over.credit_applied || 0)) * 100);

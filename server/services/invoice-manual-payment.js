@@ -200,9 +200,12 @@ function owedChangedMessage(nowCents) {
 
 // Whether a checkout tender is the invoice's only money (see checkoutTender above), read on the LOCKED row and in the settlement
 // transaction, after this payment's ledger row is inserted (paymentId, excluded). Only money rows count (paid, refunded,
-// processing: the statuses the receipt reader considers); a declined card attempt's failed row is no money.
+// processing: the statuses the receipt reader considers); a declined card attempt's failed row is no money. Card details left
+// on the invoice (card_brand / card_last_four: a disputed card payment reopens the invoice and keeps them) are earlier card
+// history the receipt text, PDF and page would print as the payment method, so they count too.
 async function checkoutTenderIsSoleMoney(trx, locked, paymentId) {
   if (Number(locked.amount_paid) > 0 || Number(locked.credit_applied) > 0 || invoiceDepositCreditCents(locked) > 0) return false;
+  if (locked.card_brand || locked.card_last_four) return false;
   const other = await trx('payments').where({ customer_id: locked.customer_id })
     .whereIn('status', ['paid', 'refunded', 'processing'])
     .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(locked.id)])
