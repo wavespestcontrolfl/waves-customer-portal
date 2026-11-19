@@ -195,6 +195,9 @@ const DOMAIN_TERM_PAIRS = new Set([
   'early summer', 'late spring', 'early spring', 'late fall', 'early fall',
   'late winter', 'early winter', 'winter dormancy', 'winter weeds',
   'summer patch', 'summer heat',
+  // Lawn amendment. 'Moss' is a real surname, so it is cleared only as
+  // this exact pair: "Peat Moss" passes, "Kate Moss" still blocks.
+  'peat moss', 'sphagnum peat', 'sphagnum moss',
 ]);
 
 function looksLikeFalsePositiveName(first, last, allowPairs) {
