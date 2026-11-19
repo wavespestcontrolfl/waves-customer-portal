@@ -581,6 +581,11 @@ async function getOrRenderServiceReportPdf(recordId, {
     // without them lookup computes no label while the render stores one.
     .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', 'service_date',
       'client_pest_rating', 'client_pest_rating_source', 'client_pest_rating_defaulted',
+      // The joined technician name rides along for the summary component: a
+      // technician's own note prints signed with their first name, and
+      // renderAndStore's row (loadServiceRecordForPdf) carries this name.
+      // summaryCopySignature reads both rows through the identity snapshot.
+      knex.raw('(SELECT technicians.name FROM technicians WHERE technicians.id = service_records.technician_id) AS technician_name'),
       ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still

@@ -4105,9 +4105,10 @@ function trapScreenAcceptsBody({ typedSnapshot, companionSnapshots = [], staffVi
 // r58); so do the governing typed story and the trapping screens above.
 // report-data passes the snapshots it already normalised (the dark
 // four-section transform above); everyone else reads them off service_data
-// through the same transform.
+// through the same transform. `ownNote`: the body is the technician's own
+// note (structured_notes.reportNote, technician-report-copy.js).
 function technicianReportDrivesSummary({
-  serviceData = {}, body, staffViewer = false, typedSnapshot, companionSnapshots,
+  serviceData = {}, body, staffViewer = false, typedSnapshot, companionSnapshots, ownNote = false,
 } = {}) {
   const sd = serviceData && typeof serviceData === 'object' ? serviceData : {};
   if (!body || sd.technicianReportBodyRejected) return false;
@@ -4115,6 +4116,10 @@ function technicianReportDrivesSummary({
   const companions = companionSnapshots === undefined
     ? frozenCompanionSnapshots(sd).map(withoutDarkFourSectionBody)
     : companionSnapshots;
+  // The technician's own note stands only on a visit with no frozen typed
+  // card, primary or companion: no card checked that text against its typed
+  // values (stations, counts, activity), so none may approve it.
+  if (ownNote) return !typed && !companions.length;
   return governingStoryAcceptsBody(typed, companions)
     && trapScreenAcceptsBody({ typedSnapshot: typed, companionSnapshots: companions, staffViewer, body });
 }

@@ -748,7 +748,10 @@ raw note). The invoice keeps the note as it stood when billed, which on older
 invoices is the raw note, so the route screens it on the way out against the
 visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
-missing record returns null.
+missing record returns null. So does a visit whose record carries the
+technician's own note (`structured_notes.reportNote`, `carriesReportNote`): its
+invoice kept the raw note, and the note on the record is not the copy that was
+billed.
 
 Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
 `invoice.amountPaid`, the money the office already recorded on this
@@ -3029,6 +3032,33 @@ built in the other state (a rolling restart's overlap), or by a page bundle or
 server from before this key, never matches: the render times out and nothing
 is stored. Every other record renders the same in both states and waits for
 the report root alone.
+
+The technician's own note (owner 2026-11-19, the report speed plan; reader
+`visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
+carry `structured_notes.reportNote = { v: 1, text, source: 'cleaned' | 'fixed' }`.
+Nothing writes it yet (its writer ships later, behind `GATE_REPORT_OWN_NOTE`). A
+render reads it from the record whatever a gate says, so a report already sent
+keeps its text. On such a record `technician_notes` holds the technician's raw
+note, and no reader below shows a line of it. (The lawn and tree & shrub
+technician paragraphs, each under its own gate, still take that note as their
+input, as they do on any visit today.) The payload changes only existing
+fields, never its shape: `summary` is the note when the summary rule accepts it
+(only on a visit with no frozen typed card, primary or companion), a `cleaned`
+note signed ` — <first name>` (the identity snapshot's name, never a generic
+label). Otherwise it is what the report builds with no free text (the lawn visit
+summary, or on a live view a narrative of the typed card under that narrative's
+own gate, which reads an empty recap) or empty, never `customerRecap`. A
+refused or malformed note is no text, and the raw column is never its fallback.
+Stored notes that cannot be read (a top-level value that is not an object)
+count as a note on every reader below too. Every frozen card's `todaysResult` drops a body it took from
+report text (`bodySource: 'technician_report'`) and keeps its headline. The
+protocol lists (`actions`, `observations`, `recommendations`) carry only what the
+completion form recorded (`structured_notes.formProtocolActions`,
+`formObservations`, `formRecommendations`), never tagged lines of the raw note.
+The PDF key hashes the summary as it prints. The visit notes on the other
+surfaces (`customerSafeVisitNotes`) run the same rule. No key is added, and no
+query parameter. A record whose stored notes are an object without
+`reportNote` renders exactly as before.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

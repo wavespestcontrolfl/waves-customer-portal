@@ -508,7 +508,7 @@ function renderWriterRulesState() {
 
 function summaryCopySignature(service = {}) {
   const serviceData = recordServiceData(service);
-  const parsed = technicianReportCustomerCopy(service.technician_notes);
+  const parsed = visitReportCustomerCopy(service);
   // THE summary rule, as the report runs it for a customer (a PDF is
   // customer-facing): technicianReportDrivesSummary on the frozen snapshots,
   // through the dark four-section transform, with the completion's rejection
@@ -517,8 +517,13 @@ function summaryCopySignature(service = {}) {
   // summary the live report dropped (codex r35 #3420).
   let state = '';
   if (reportDependsOnWriterRules(service)) state = reportWriterRulesLive() ? '-fson' : '-fsoff';
-  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({ serviceData, body: parsed.body })) return state;
-  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}${state}`;
+  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({
+    serviceData, body: parsed.body, ownNote: carriesReportNote(service.structured_notes),
+  })) return state;
+  // The key hashes the summary as the report prints it (a note in the
+  // technician's own words signed), so every other summary keeps its key:
+  // its body.
+  return `-tr${crypto.createHash('sha256').update(printedReportSummary(parsed, service)).digest('hex').slice(0, 8)}${state}`;
 }
 
 // The full customer-copy screen the notes parser applies — shared banned

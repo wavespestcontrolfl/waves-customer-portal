@@ -35,7 +35,10 @@ jest.mock('../services/project-types', () => ({ customerSafeServiceNotes: jest.f
 // as an approving parse so the scrub assertions below still read naturally; the
 // REJECTING case (an unreviewed note) has its own test.
 jest.mock('../services/service-report/technician-report-copy', () => ({
-  technicianReportCustomerCopy: jest.fn((notes) => (notes ? { body: String(notes) } : null)),
+  // The record's reader (the technician's own note, else the titled report)
+  // is the parse customerSafeVisitNotes calls.
+  visitReportCustomerCopy: jest.fn((record) => (record?.technician_notes ? { body: String(record.technician_notes) } : null)),
+  carriesReportNote: jest.fn(() => false),
 }));
 jest.mock('../services/call-booking-source-actions', () => ({ DISPATCH_OWNED_PENDING_SOURCE_ACTIONS: ['call_followup'] }));
 jest.mock('../utils/service-normalizer', () => ({ normalizeServiceType: jest.fn((v) => v) }));
@@ -770,8 +773,8 @@ describe('GATE ON — account tools', () => {
   // technicianReportCustomerCopy's reviewed parse may be spoken; anything else
   // parses to null and is simply not said, exactly as get_service_report does.
   test('an UNREVIEWED technician note is not spoken at all (parser-approved copy only)', async () => {
-    const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
-    technicianReportCustomerCopy.mockReturnValue(null); // not the reviewed two-section draft
+    const { visitReportCustomerCopy } = require('../services/service-report/technician-report-copy');
+    visitReportCustomerCopy.mockReturnValue(null); // not the reviewed two-section draft
     primeDb({
       records: [{
         service_date: '2026-07-31', service_type: 'Lawn Care',
@@ -783,7 +786,7 @@ describe('GATE ON — account tools', () => {
     expect(out).not.toContain('4482');         // the note is not
     expect(out).not.toContain('disputes');
     expect(out).not.toContain('SAFE:');
-    technicianReportCustomerCopy.mockImplementation((notes) => (notes ? { body: String(notes) } : null));
+    visitReportCustomerCopy.mockImplementation((record) => (record?.technician_notes ? { body: String(record.technician_notes) } : null));
   });
 
   // ⭐ PARSER-APPROVED IS NOT CODE-FREE: a valid reviewed section can still

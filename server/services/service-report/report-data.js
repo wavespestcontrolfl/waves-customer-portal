@@ -45,7 +45,7 @@ const {
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
-const { technicianReportCustomerCopy } = require('./technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote, printedReportSummary } = require('./technician-report-copy');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
 } = require('./same-line-visit');
@@ -2084,13 +2084,19 @@ function buildProtocolPayload(record) {
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
   const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
+  // A record that carries the technician's own note keeps the raw note in
+  // technician_notes, and the merged lists fold in its tagged lines and the
+  // parked [Next] lines: such a record's lists hold only what the completion
+  // form recorded (formProtocolActions, formObservations, formRecommendations;
+  // docs/public-route-contracts.md).
+  const formOnly = carriesReportNote(record.structured_notes);
   return {
-    actions: withoutAccessCodeLines(uniqueStrings([
+    actions: withoutAccessCodeLines(uniqueStrings(formOnly ? parseJsonArray(structured.formProtocolActions) : [
       ...parseJsonArray(protocol.actions),
       ...parseJsonArray(structured.protocolActionsCompleted),
       ...taggedNoteLines(record.technician_notes, ['protocol', 'protocol optional', 'action']),
     ])),
-    observations: withoutAccessCodeLines(uniqueStrings([
+    observations: withoutAccessCodeLines(formOnly ? structuredObservations : uniqueStrings([
       ...parseJsonArray(protocol.observations),
       ...parseJsonArray(structured.observations),
       ...taggedNoteLines(record.technician_notes, ['found']),
@@ -2107,7 +2113,7 @@ function buildProtocolPayload(record) {
     ...(structuredObservations.length ? {
       structuredObservationsProvenance: 'completion_form_snapshot',
     } : {}),
-    recommendations: withoutAccessCodeLines(uniqueStrings([
+    recommendations: withoutAccessCodeLines(uniqueStrings(formOnly ? parseJsonArray(structured.formRecommendations) : [
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
@@ -2224,6 +2230,20 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
     .sort((a, b) => (b.customers - a.customers) || a.label.localeCompare(b.label));
   const pest = top ? LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS.get(top.label) : null;
   return pest ? { city: nearYouCity, pest } : null;
+}
+
+// On a record that carries the technician's own note, no Today's Result card
+// carries report text: the note never stands on a typed visit (activity-
+// indicators technicianReportDrivesSummary, ownNote), and a body a card froze
+// from report text beside it is not customer copy. Such a card keeps its
+// headline, as the dark four-section transform leaves one.
+function withoutReportTextBody(snapshot) {
+  const result = snapshot?.todaysResult;
+  if (result?.bodySource !== 'technician_report') return snapshot;
+  const {
+    body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, reconcileConfirmed: _reconcileConfirmed, ...rest
+  } = result;
+  return { ...snapshot, todaysResult: rest };
 }
 
 // The report's next-appointment shape for a scheduled_services row.
@@ -4502,8 +4522,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
   // The dark four-section transform (the kill switch), shared with every
-  // other reader of the summary rule (activity-indicators.js).
+  // other reader of the summary rule (activity-indicators.js), and on a
+  // record that carries the technician's own note the report-text transform
+  // (withoutReportTextBody): every frozen card below goes through both.
   const { withoutDarkFourSectionBody } = require('./activity-indicators');
+  // The stored value, not `structured`: stored notes that cannot be read
+  // count as a note (carriesReportNote), and parseJsonObject reads them as {}.
+  const ownNote = carriesReportNote(service.structured_notes);
+  const reportCard = (snapshot) => {
+    const card = withoutDarkFourSectionBody(snapshot);
+    return ownNote ? withoutReportTextBody(card) : card;
+  };
   // Typed specialty completion snapshot (persisted at completion — the
   // immutable source for Today's Result + customer-labeled findings). Its
   // presence suppresses Pest Pressure for this report and swaps in the
@@ -4511,7 +4540,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const typedSnapshot = serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
-    ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
+    ? reportCard(serviceData.typedReportSnapshot)
     : null;
 
   // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions for a tree &
@@ -4964,7 +4993,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // bad history must not take down the report.
   const staffViewer = opts.staffViewer === true;
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(reportCard)
     : [];
   const companionReports = await Promise.all(
     companionSnapshots
@@ -7178,7 +7207,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   //  - typed specialty reports (cockroach cleanout etc.) keep the plain
   //    recap, same as the pressure card.
   // Best-effort: never blocks the report.
-  let visitSummary = structured.customerRecap || '';
+  // A record that carries the technician's own note never falls back to the
+  // recap: completion writes the recap from the raw note, and it can repeat a
+  // note the screens refuse. Its summary is the note, the lawn visit summary
+  // (fixed sentences) or empty.
+  let visitSummary = (ownNote ? '' : structured.customerRecap) || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
   // The typed narrative is the fixed fallback, not model prose (isTypedNarrativeFallback).
   let typedNarrativeIsFallback = false;
@@ -7210,21 +7243,25 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // (Codex P2 #2709) — and a body the snapshot rejected (zero state, old
   // snapshot) never resurfaces via the summary.
   {
-    const technicianReport = technicianReportCustomerCopy(service.technician_notes);
+    // The technician's own note when the record carries one (structured_notes
+    // .reportNote, owner 2026-11-19; a refused or malformed one is no text),
+    // else the titled report (visitReportCustomerCopy).
+    const technicianReport = visitReportCustomerCopy(service);
     // THE rule (activity-indicators technicianReportDrivesSummary): the
     // completion-time rejection frozen into service_data (codex r58), the
     // governing typed story's acceptance (codex r26/r42/r78/r80) and the
     // rodent trapping screens for this viewer (codex P1 r18; pre-push P1 on
-    // 256c1f9), on the snapshots this report already normalised. Every
-    // other customer render of the note (context-aggregator.js
-    // customerSafeVisitNotes) runs the same rule, so none can show a body
-    // this report refuses.
+    // 256c1f9), on the snapshots this report already normalised; the own
+    // note only on a visit with no typed card. Every other customer render
+    // of the note (context-aggregator.js customerSafeVisitNotes) runs the
+    // same rule, so none can show a body this report refuses.
     const drivesSummary = technicianReport?.body
       && require('./activity-indicators').technicianReportDrivesSummary({
-        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots,
+        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots, ownNote,
       });
     if (drivesSummary) {
-      visitSummary = technicianReport.body;
+      // Signed with the technician's first name when it is their own words.
+      visitSummary = printedReportSummary(technicianReport, service);
       visitSummarySource = 'technician_report';
       reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
     }
@@ -7909,8 +7946,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path
-      // to customer copy is technicianReportCustomerCopy's reviewed parse,
-      // which already feeds the summary slot. The client never read this key.
+      // to customer copy is visitReportCustomerCopy (the stored own note on a
+      // record that carries one, else technicianReportCustomerCopy's reviewed
+      // parse), which already feeds the summary slot. The client never read
+      // this key.
       measurements: {
         soilTemp: service.soil_temp,
         thatch: service.thatch_measurement,

@@ -14,7 +14,7 @@ const {
   OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS, isUncountedPartialDueInvoice,
 } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
-const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote } = require('./service-report/technician-report-copy');
 const { etDateString, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -230,15 +230,21 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
     if (suppressesCustomerArtifacts(structured)) return null;
     const { customerSafeServiceNotes } = require('./project-types');
     let copy = null;
-    if (projectLine && (record.completion_source === 'project_completion' || structured.projectCompletion === true)) {
+    // A record that carries the technician's own note keeps the raw note in
+    // technician_notes, so it never takes the project path (which reads that
+    // column): its notes are the note or nothing. Both read the stored value,
+    // not `structured`: stored notes that cannot be read count as a note
+    // (carriesReportNote), and visitStructuredNotes reads them as {}.
+    const ownNote = carriesReportNote(record.structured_notes);
+    if (projectLine && !ownNote && (record.completion_source === 'project_completion' || structured.projectCompletion === true)) {
       copy = customerSafeServiceNotes(record.technician_notes, structured);
     } else {
       const serviceData = typeof record.service_data === 'string'
         ? JSON.parse(record.service_data || '{}')
         : (record.service_data || {});
-      const body = technicianReportCustomerCopy(record.technician_notes)?.body || null;
+      const body = visitReportCustomerCopy(record)?.body || null;
       const { technicianReportDrivesSummary } = require('./service-report/activity-indicators');
-      if (!technicianReportDrivesSummary({ serviceData, body })) return null;
+      if (!technicianReportDrivesSummary({ serviceData, body, ownNote })) return null;
       copy = customerSafeServiceNotes(body, structured);
     }
     const safe = copy ? redactAccessCodes(copy) : null;

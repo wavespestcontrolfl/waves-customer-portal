@@ -111,6 +111,52 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     expect(customerSafeVisitNotes(record({ service_data: '{not json' }))).toBeNull();
   });
 
+  // The technician's own note (structured_notes.reportNote): the record's
+  // customer text, with the raw note in the notes column.
+  test("a record with the technician's own note returns that note, never the raw note beside it", () => {
+    const reportNote = { v: 1, text: 'I treated the lanai and swept the webs.', source: 'cleaned' };
+    const own = record({ technician_notes: 'treated lanai swept webs, gate code 4545', structured_notes: { reportNote } });
+    expect(customerSafeVisitNotes(own)).toBe('I treated the lanai and swept the webs.');
+    expect(customerSafeVisitNotes({ ...own, structured_notes: JSON.stringify({ reportNote }) })).toBe('I treated the lanai and swept the webs.');
+    // A refused note shows nothing: the raw note is never the fallback, and
+    // neither is a titled report left in the notes column.
+    const refused = { reportNote: { ...reportNote, text: 'I treated the lanai. It is safe for pets now.' } };
+    expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: refused }))).toBeNull();
+    // Nor is a note in any other shape.
+    expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: { reportNote: { ...reportNote, v: 2 } } }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: { reportNote: null } }))).toBeNull();
+    // Stored notes that cannot be read count as a note (carriesReportNote):
+    // a cut-off serialized note, and decoded JSONB values that are not an
+    // object. The parse inside reads them as {}, which carries no note.
+    for (const unreadable of ['{"reportNote":', '"text"', 42, true, [{ reportNote }]]) {
+      expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: unreadable }))).toBeNull();
+    }
+    // The completion's frozen rejection holds for a note as for a report.
+    expect(customerSafeVisitNotes({ ...own, service_data: { technicianReportBodyRejected: 'trade_name' } })).toBeNull();
+  });
+
+  test("a record with the technician's own note never takes the project path, whatever shape the note is in", () => {
+    const reportNote = { v: 1, text: 'I sealed the gap under the garage door.', source: 'cleaned' };
+    const project = (structured) => record({
+      technician_notes: 'sealed gap under garage door, side gate code 4545', completion_source: 'project_completion', structured_notes: structured,
+    });
+    expect(customerSafeVisitNotes(project({ reportNote }), { projectLine: true })).toBe('I sealed the gap under the garage door.');
+    expect(customerSafeVisitNotes(project({ reportNote: { ...reportNote, v: 2 } }), { projectLine: true })).toBeNull();
+    expect(customerSafeVisitNotes(project({ projectCompletion: true, reportNote: null }), { projectLine: true })).toBeNull();
+    expect(customerSafeVisitNotes(project('{"reportNote":'), { projectLine: true })).toBeNull();
+    expect(customerSafeVisitNotes(project(42), { projectLine: true })).toBeNull();
+  });
+
+  test("the technician's own note never stands on a typed visit, as on the web report", () => {
+    const reportNote = { v: 1, text: 'I treated the lanai and swept the webs.', source: 'cleaned' };
+    const card = { type: 'one_time_pest', visitSequence: 1, values: {}, todaysResult: { headline: 'Service completed.', body: 'I treated the lanai and swept the webs.', bodySource: 'technician_report' } };
+    const typed = (service_data) => record({ technician_notes: 'treated lanai', structured_notes: { reportNote }, service_data });
+    expect(customerSafeVisitNotes(typed({ typedReportSnapshot: card }))).toBeNull();
+    expect(customerSafeVisitNotes(typed({ companionReportSnapshots: [{ ...card, type: 'rodent_trapping', delivery: 'internal_only' }] }))).toBeNull();
+    // A record with no note keeps today's rule on the same card.
+    expect(customerSafeVisitNotes(record({ service_data: { typedReportSnapshot: card } }))).toBe('Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.');
+  });
+
   test('a typed report held from customers shows nothing', () => {
     expect(customerSafeVisitNotes(record({ structured_notes: { typedReportDelivery: 'internal_only' } }))).toBeNull();
     expect(customerSafeVisitNotes(record({ structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }) }))).toBeNull();
@@ -151,7 +197,7 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     // #5522: the legacy public report and its PDF went through it directly).
     // The readers of the technician's own note (reportNoteCustomerCopy, and
     // visitReportCustomerCopy: the note, else the titled report) are held to
-    // a list too: no customer render calls them yet.
+    // a list too: only the visit notes here and the web report call them.
     const fs = require('fs');
     const path = require('path');
     const root = path.join(__dirname, '../..');
@@ -175,12 +221,14 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
       'technicianReportCustomerCopy(': [
         'server/routes/admin-schedule.js',
         'server/services/complete-scheduled-service.js',
-        'server/services/context-aggregator.js',
-        'server/services/service-report/report-data.js',
         'server/services/service-report/report-reconciliation.js',
         'server/services/service-report/technician-report-copy.js',
       ],
-      'visitReportCustomerCopy(': ['server/services/service-report/technician-report-copy.js'],
+      'visitReportCustomerCopy(': [
+        'server/services/context-aggregator.js',
+        'server/services/service-report/report-data.js',
+        'server/services/service-report/technician-report-copy.js',
+      ],
       'reportNoteCustomerCopy(': ['server/services/service-report/technician-report-copy.js'],
     });
   });

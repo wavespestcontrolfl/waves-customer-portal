@@ -712,12 +712,17 @@ router.get('/:token', async (req, res, next) => {
     // text only. The invoice
     // keeps the note as it stood when billed (the raw note, on older
     // invoices), so it is screened here with the visit record's own flags; a
-    // combined-visit invoice keeps none and shows none.
+    // combined-visit invoice keeps none and shows none. A visit that carries
+    // the technician's own note shows none: its invoice kept the raw note,
+    // and the note on the record is not the copy that was billed.
+    const { carriesReportNote } = require('../services/service-report/technician-report-copy');
     const techNotes = data.tech_notes && data.service_record_id
       ? await db('service_records')
         .where({ id: data.service_record_id, customer_id: data.customer_id })
         .first('structured_notes', 'service_data', 'completion_source')
-        .then((record) => (record ? customerSafeVisitNotes({ ...record, technician_notes: data.tech_notes }, { projectLine: true }) : null))
+        .then((record) => (record && !carriesReportNote(record.structured_notes)
+          ? customerSafeVisitNotes({ ...record, technician_notes: data.tech_notes }, { projectLine: true })
+          : null))
         .catch(() => null)
       : null;
 

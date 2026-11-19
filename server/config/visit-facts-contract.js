@@ -560,12 +560,12 @@ function genericCompletionFacts(opts = {}) {
         },
         {
           file: REPORT_DATA,
-          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse; the raw column never egresses',
-          readerSymbol: 'technicianReportCustomerCopy',
+          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse, or on a record that carries structured_notes.reportNote the stored own note; the raw column never egresses',
+          readerSymbol: 'visitReportCustomerCopy',
         },
       ]),
       whenMissing: 'fallback',
-      notes: 'The raw column is INTERNAL (it can hold access or billing notes; AGENTS.md: raw technician_notes never egress on any report path) and is never a customer-facing fact. Customer exposure is only via the AI writer, with redaction: generate-report reads the tech\'s notes box through redactAccessCodes, its two-section draft is written back into the box, and the report shows only technicianReportCustomerCopy\'s re-screened parse of that draft (any extra line, banned copy or access code rejects it and the report falls back to its deterministic summary). Tagged [found]/[next] lines feed the internal merged protocol lists, which the report document never renders. Parked [Next] lines travel as internalRecommendations, not in the writer\'s Service Notes, and the planned voice-fill OFFICE note is a different field that must never reach the report writer (owner ruling 2026-09-28).',
+      notes: 'The raw column is INTERNAL (it can hold access or billing notes; AGENTS.md: raw technician_notes never egress on any report path) and is never a customer-facing fact. Customer exposure is only via the AI writer, with redaction: generate-report reads the tech\'s notes box through redactAccessCodes, its two-section draft is written back into the box, and the report shows only technicianReportCustomerCopy\'s re-screened parse of that draft (any extra line, banned copy or access code rejects it and the report falls back to its deterministic summary). On a record that carries structured_notes.reportNote (the technician\'s own note, owner 2026-11-19) the column holds the raw note and never reaches customer copy: the report shows the stored note (visitReportCustomerCopy, screened on every read) or nothing, and its protocol lists read only the form fields. Tagged [found]/[next] lines feed the internal merged protocol lists, which the report document never renders. Parked [Next] lines travel as internalRecommendations, not in the writer\'s Service Notes, and the planned voice-fill OFFICE note is a different field that must never reach the report writer (owner ruling 2026-09-28).',
     },
     {
       key: 'customer_concern_text',
