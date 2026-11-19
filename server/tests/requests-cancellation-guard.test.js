@@ -421,9 +421,10 @@ describe('POST /api/requests cancellation guard', () => {
     // reply — without them the screen read a one-service cancel as whole-plan.
     expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: false, scope: ['mosquito'], remaining: ['pest_control'] }));
 
-    // Same 60 s dedupe, but the account went inactive since the first submit:
-    // the reply says churned even though the replayed scoped run did not churn.
-    mockAuthInactive = true;
+    // Same 60 s dedupe, but a whole-plan cancel committed after auth read the
+    // account (the snapshot still says active): the route re-reads the row,
+    // so the reply says churned though the replayed scoped run did not churn.
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'churned' }];
     mockState.service_requests = [{
       id: 'req-portal-dedupe-inactive', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 10 * 1000),
@@ -438,7 +439,9 @@ describe('POST /api/requests cancellation guard', () => {
 
     // Inactive for another reason (not a processed cancellation): the reply
     // keeps the run's own churn state and the scoped copy.
+    mockAuthInactive = true;
     mockAuthStage = 'won';
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'won' }];
     mockState.service_requests = [{
       id: 'req-portal-dedupe-inactive-other', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 10 * 1000),
@@ -471,6 +474,7 @@ describe('POST /api/requests cancellation guard', () => {
 
     // Inactive-account repair: the row is hours old and the account is churned.
     mockAuthInactive = true;
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'churned' }];
     mockState.service_requests = [{
       id: 'req-portal-2', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
@@ -484,7 +488,7 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
-    // The route knows this account is inactive: the reply says so even though
+    // The account row says cancelled: the reply says so even though
     // the replayed SCOPED run reports churned:false, so the screen refreshes
     // and never claims other services continue.
     expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));

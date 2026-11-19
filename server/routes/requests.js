@@ -74,6 +74,19 @@ function cancellationConfirmedToCustomer(result) {
   return cancellationCompleted(result) || !!(result && result.churned && onlyStaleVisitErrorsLeft(result));
 }
 
+// The account's state AFTER a retry ran: req.customer is the auth-time
+// snapshot, and a whole-plan cancel may have committed since. A failed or
+// empty read falls back to the snapshot.
+async function accountCancelledNow(customer) {
+  try {
+    const row = await db('customers').where({ id: customer.id }).first('active', 'pipeline_stage');
+    return isCancelledCustomerRow(row || customer);
+  } catch (err) {
+    logger.warn(`[requests] account state re-read failed: ${err.message}`);
+    return isCancelledCustomerRow(customer);
+  }
+}
+
 // accountCancelled: the route KNOWS the account is a processed cancellation
 // (auth's isCancelledCustomerRow: active false + churned). A retry may replay
 // an older SCOPED request whose result says churned:false, so the reply
@@ -433,7 +446,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // from this branch — the original request's already went out.
         // An account cancelled since the original submit says so
         // (accountCancelled), like the inactive-account branch below.
-        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at, [], { accountCancelled: isCancelledCustomerRow(req.customer) }) } : {}),
+        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at, [], { accountCancelled: await accountCancelledNow(req.customer) }) } : {}),
       });
     }
 
@@ -533,7 +546,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           photoCount: 0,
           createdAt: priorCancellation.created_at,
         },
-        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at, [], { accountCancelled: isCancelledCustomerRow(req.customer) }),
+        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at, [], { accountCancelled: await accountCancelledNow(req.customer) }),
       });
     }
 
