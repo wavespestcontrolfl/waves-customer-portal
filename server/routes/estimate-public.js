@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, paidEstimateVisitsQuery } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -13726,12 +13726,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // where createTermForAnnualPrepay defaults the start). Guarding with
         // bare "today" 409'd a legitimate next-term renewal whose current
         // term ends before the booked first visit.
-        const reservedStartRow = await trx('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
-          .orderBy('scheduled_date', 'asc')
-          .first('scheduled_date');
+        const reservedStartRow = await paidEstimateVisitsQuery(trx, {
+          estimateId: estimate.id,
+          customerId,
+        }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
         try {

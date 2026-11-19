@@ -94,6 +94,7 @@ const {
   isManualAnnualPrepayEligibleServiceMix,
   prepayBookingEligibility,
   markEstimateManuallyAccepted,
+  estimateLinkedVisitsQuery,
 } = require('../services/estimate-manual-acceptance');
 
 function makeDb(estimate, claimedOverrides = null) {
@@ -2141,6 +2142,20 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
     customerBilling: 'per_application|49||active_customer|',
   };
+
+  test('the no-linked-visit pin includes a booked row with an old hold stamp', () => {
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereNotNull = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    const conn = jest.fn(() => query);
+
+    estimateLinkedVisitsQuery(conn, 'estimate-pins');
+
+    expect(query.where).toHaveBeenCalledWith({ source_estimate_id: 'estimate-pins' });
+    expect(query.whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(query.whereNull).not.toHaveBeenCalled();
+  });
   function dbWith(estimate, customer, { linkedVisit = null, bookedRows = [], addon = null } = {}) {
     const made = makeDb(estimate);
     const inner = made.database;

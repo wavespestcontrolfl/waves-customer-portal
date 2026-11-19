@@ -549,11 +549,12 @@ function cardChanged() {
   return err;
 }
 
-// Visits linked to an estimate: the rows the converter's reservation path
-// starts from (estimate-converter.js reservation lookup — any status).
+// Every customer-linked row stamped to an estimate, including a booked visit
+// that retains an old hold expiry. This is the converter's separate refusal
+// pin, before paid-visit eligibility is applied.
 function estimateLinkedVisitsQuery(conn, estimateId) {
   return conn('scheduled_services').where({ source_estimate_id: estimateId })
-    .whereNotNull('customer_id').whereNull('reservation_expires_at');
+    .whereNotNull('customer_id');
 }
 
 // The customer billing fields the accept reads and rewrites; the converter
