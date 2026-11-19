@@ -8,10 +8,12 @@
  * module adds no word lists of its own (a list cannot keep up with free speech). It checks that the choice's evidence
  * quote is the caller's, word for word in a caller turn of that call's transcript. It gives the office that whole
  * turn, cut around the quote, so any condition or "no" the caller said is in front of the person who decides. It
- * calls the choice a yes only when the sentences around the quote pass the triage flags' shared plain-statement screen
- * (quoteIsPlainStatement) as it is; a choice that fails it is no yes (yes_not_plain: any "if", "when", "not" or
- * question there fails closed, and the office reads the call). And it waits for any call the processor still owes a
- * read, by the processor's own rules (owedReadSql).
+ * calls the choice a yes only when every caller turn that says the quote passes the triage flags' shared
+ * plain-statement screen (quoteIsPlainStatement) as it is, whole: a turn is the unit the grounding tools trust, so no
+ * sentence split decides it. A choice that fails is no yes (yes_not_plain): any "if", "when", "not" or question in
+ * those turns fails closed, and the office reads the call. A later word that does not repeat the quote is the call
+ * reader's to judge (billing_choice reads the whole call). And it waits for any call the processor still owes a read,
+ * by the processor's own rules (owedReadSql).
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
@@ -47,10 +49,17 @@ function owedReadSql(t) {
   return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
 }
 
-// A sentence break: end punctuation, then a space, then a capital letter, never after a time or a title ("8 a.m.
-// Thursday", "Dr. Lee"); "$49.99" stays one sentence. A longer sentence only fails closed.
-const SENTENCE_BREAK = /(?<!\b(?:[aApP]\.[mM]|[Mm]rs?|[Mm]s|[Dd]r|[Ss]t))[.!?]+\s+(?=[A-Z])/g;
 const wordsOf = (text) => [...String(text || '').matchAll(/[a-z0-9]+/gi)].map((m) => ({ w: m[0].toLowerCase(), at: m.index, end: m.index + m[0].length }));
+
+// Where a turn first says the quote, as [start, end] in its text, or null.
+function spanOf(text, quote) {
+  const tokens = wordsOf(text);
+  const q = wordsOf(quote).map((t) => t.w);
+  for (let i = 0; q.length && i + q.length <= tokens.length; i += 1) {
+    if (q.every((w, k) => tokens[i + k].w === w)) return [tokens[i].at, tokens[i + q.length - 1].end];
+  }
+  return null;
+}
 
 // The words to show: the caller's whole turn, or, past CALLER_WORDS_CHARS, a cut around the quote. The quote's own
 // words are never cut, so the office always sees what the caller chose.
@@ -63,27 +72,11 @@ function excerptOf(text, [qs, qe]) {
   return `${start > 0 ? '…' : ''}${tidy(text.slice(start, end))}${end < text.length ? '…' : ''}`;
 }
 
-// Each place a turn says the quote: the whole sentences around it (a fragment is read with its "don't"), and its span.
-function placesOf(text, quote) {
-  const tokens = wordsOf(text);
-  const q = wordsOf(quote).map((t) => t.w);
-  const breaks = [...text.matchAll(SENTENCE_BREAK)].map((m) => m.index + m[0].length);
-  const places = [];
-  for (let i = 0; q.length && i + q.length <= tokens.length; i += 1) {
-    if (!q.every((w, k) => tokens[i + k].w === w)) continue;
-    const span = [tokens[i].at, tokens[i + q.length - 1].end];
-    const from = Math.max(0, ...breaks.filter((b) => b <= span[0]));
-    const to = Math.min(text.length, ...breaks.filter((b) => b >= span[1]));
-    places.push({ said: text.slice(from, to).trim(), span });
-  }
-  return places;
-}
-
-// The caller's own words for the plan choice, from a caller turn that holds an evidence quote for billing_choice
+// The caller's own words for the plan choice, from the caller turns that hold an evidence quote for billing_choice
 // (labeled the caller's) word for word, with outbound labels oriented the way the triage flags read them:
-// { words, plain }. words = the whole turn, cut around the quote; plain = the sentences around the quote pass the
-// shared plain-statement screen. A plain place wins over one that is not. Null when no caller turn holds a quote; an
-// unlabeled or one-speaker transcript grounds nothing.
+// { words, plain }. plain = every such turn, whole, passes the shared plain-statement screen. words = the first turn
+// that does not (so the office sees the "no"), else the latest turn, cut around the quote. Null when no caller turn
+// holds a quote; an unlabeled or one-speaker transcript grounds nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
@@ -92,18 +85,14 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
   const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  let found = null;
-  for (const e of quotes) {
-    for (const turn of turnsHolding(turns, e.quote, 'caller')) {
-      const text = String(turn.raw || '');
-      for (const place of placesOf(text, e.quote)) {
-        const heard = { words: excerptOf(text, place.span), plain: quoteIsPlainStatement(place.said) };
-        if (heard.plain) return heard;
-        found = found || heard;
-      }
-    }
+  const held = [];
+  for (const turn of turns) {
+    const text = String(turn.raw || '');
+    const quote = quotes.find((e) => turnsHolding([turn], e.quote, 'caller').length && spanOf(text, e.quote));
+    if (quote) held.push({ words: excerptOf(text, spanOf(text, quote.quote)), plain: quoteIsPlainStatement(text) });
   }
-  return found;
+  if (!held.length) return null;
+  return held.find((h) => !h.plain) || held[held.length - 1];
 }
 
 // One call's word (row: WORD_COLUMNS, one read): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a

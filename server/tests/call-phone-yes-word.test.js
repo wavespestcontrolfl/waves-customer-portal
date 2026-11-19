@@ -43,20 +43,26 @@ describe("the caller's words", () => {
     ['a condition with a time and a day', 'If you come at 8 a.m. Thursday, bill me each time.'],
     // The shared screen as it is: any "when" fails closed, and the office reads the words (by design, no phrase list).
     ['a "when"', 'Just bill me each time when you come out.'],
+    ['a turn with a condition after it', 'Bill me each time. Only if the price stays the same.'],
+    ['a turn with a question before it', 'Can you just bill me each time? Okay then. Yes, just bill me each time.'],
+    ['a turn that turns down another plan first', "I don't want the annual. Just bill me each time."],
   ])('a quote inside %s is shown, and is not plain', (_name, line) => {
     expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toEqual(notPlain(line));
   });
 
-  test('a later plain sentence with the same words wins', () => {
-    const line = 'Can you just bill me each time? Okay then. Yes, just bill me each time.';
-    expect(callerWordsOf(evidence(choice('just bill me each time')), talk(line))).toEqual(plain(line));
-  });
-
-  test('an earlier sentence with a price or a "no" is shown but not screened with the quote', () => {
+  test('a price in the turn is fine', () => {
     expect(callerWordsOf(evidence(choice('just bill me each time')), talk("It's $49.99 a visit. Just bill me each time.")))
       .toEqual(plain("It's $49.99 a visit. Just bill me each time."));
-    expect(callerWordsOf(evidence(choice('just bill me each time')), talk("I don't want the annual. Just bill me each time.")))
-      .toEqual(plain("I don't want the annual. Just bill me each time."));
+  });
+
+  test('every caller turn that says it must be plain; the office sees the one that is not', () => {
+    const twice = (first, second) => ({ transcript: `Agent: Thanks for calling Waves.\nCaller: ${first}\nAgent: Okay.\nCaller: ${second}\nAgent: Got it.` });
+    expect(callerWordsOf(evidence(choice('bill me each time')), twice('Bill me each time.', "Actually, don't bill me each time.")))
+      .toEqual(notPlain("Actually, don't bill me each time."));
+    expect(callerWordsOf(evidence(choice('bill me each time')), twice("Don't bill me each time yet.", 'Okay, bill me each time.')))
+      .toEqual(notPlain("Don't bill me each time yet."));
+    expect(callerWordsOf(evidence(choice('bill me each time')), twice('Bill me each time.', 'Yes, bill me each time.')))
+      .toEqual(plain('Yes, bill me each time.'));
   });
 
   test('a quote across two sentences is screened with both', () => {
