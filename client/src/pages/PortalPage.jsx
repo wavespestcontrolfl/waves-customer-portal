@@ -3795,10 +3795,13 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     try {
       result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
     } catch (error) {
-      if (requestIsCurrent() && historyProperty
-        && (error?.status === 409 || (error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE'))) {
+      const authorizationDenied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+      const propertyUnavailable = historyProperty && error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE';
+      const propertyConflict = historyProperty && error?.status === 409;
+      if (requestIsCurrent() && (authorizationDenied || propertyConflict)) {
         invalidateHistoryScopeRef.current(requestedScopeKey, error?.message, {
-          clearAll: error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE',
+          clearAll: authorizationDenied,
+          refreshPicker: propertyUnavailable || propertyConflict,
         });
       }
       throw error;
@@ -3812,6 +3815,9 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
       invalidateHistoryScopeRef.current(requestedScopeKey, mismatch.message);
       throw mismatch;
     }
+    // A verified response ends the previous conflict episode. A later scope
+    // conflict must be allowed to refresh the picker again automatically.
+    scopeRefreshRequestedRef.current = null;
     return result;
   };
   const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, ({ isCurrent }) => readPage({ limit: 100 }, { isCurrent }));
@@ -3837,7 +3843,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
 
-  invalidateHistoryScopeRef.current = (requestedScopeKey, message, { clearAll = false } = {}) => {
+  invalidateHistoryScopeRef.current = (requestedScopeKey, message, { clearAll = false, refreshPicker = true } = {}) => {
     if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return;
     moreSequence.current += 1;
     setLoadingMore(false);
@@ -3846,7 +3852,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     setLightbox(null);
     closePreview();
     historyRead.invalidate(message || 'Your property selection changed. Refresh it before reopening completed visits.', { clearAll });
-    requestPropertyRefresh(requestedScopeKey);
+    if (refreshPicker) requestPropertyRefresh(requestedScopeKey);
   };
 
   const retryHistory = () => {

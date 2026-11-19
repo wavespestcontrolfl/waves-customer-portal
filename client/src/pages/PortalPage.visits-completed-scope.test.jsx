@@ -111,6 +111,56 @@ describe('Completed visits by property', () => {
     await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(2));
   });
 
+  it.each([401, 403])('clears cached rows and actions after pagination loses authorization (%s) without refreshing the picker', async status => {
+    const refreshProperties = vi.fn();
+    api.getServices
+      .mockResolvedValueOnce({
+        historyProperty: 'pa', historyCustomerId: customer.id, total: 2,
+        services: [{ id: 'old', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Cached authorized house', reportUrl: '/report/old' }],
+      })
+      .mockRejectedValueOnce(Object.assign(new Error('Authorization denied'), { status }));
+    render(<RemountableCompleted visitsProps={{ onSavedScopeUnavailable: refreshProperties }} />);
+    expect(await screen.findByText('Cached authorized house')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Pest/ }));
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load More Visits' }));
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    expect(screen.queryByText('Cached authorized house')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
+    expect(refreshProperties).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close completed visits' }));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen completed visits' }));
+    expect(screen.queryByText('Cached authorized house')).not.toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
+  });
+
+  it('rearms automatic picker recovery after wrong echo, matching verification, then another wrong echo', async () => {
+    const refreshProperties = vi.fn();
+    api.getServices
+      .mockResolvedValueOnce({ services: [{ id: 'wrong-1', type: 'Wrong first house' }], historyProperty: 'pb', historyCustomerId: customer.id })
+      .mockResolvedValueOnce({
+        historyProperty: 'pa', historyCustomerId: customer.id, total: 1,
+        services: [{ id: 'verified', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Verified selected house' }],
+      })
+      .mockResolvedValueOnce({ services: [{ id: 'wrong-2', type: 'Wrong later house' }], historyProperty: 'pb', historyCustomerId: customer.id });
+    openCompletedWithCache({ onSavedScopeUnavailable: refreshProperties });
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh portal reads' }));
+    expect(await screen.findByText('Verified selected house')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh portal reads' }));
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    expect(screen.queryByText('Wrong later house')).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(2));
+  });
+
   it('refreshes the picker only for the distinct property-history 403 code', async () => {
     const refreshProperties = vi.fn();
     const unavailable = Object.assign(new Error('Property history is unavailable for this session.'), {

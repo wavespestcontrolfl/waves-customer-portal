@@ -71,6 +71,12 @@ const propertyPredicates = (calls) => calls.filter((c) => (c[0] === 'where(fn)' 
 describe('explicit Completed history filter', () => {
   const id = '22222222-2222-4222-8222-222222222222';
   const priorGate = process.env.GATE_APP_PROPERTY_SCOPE;
+  test('rejects contradictory all-properties and selected-property filters before reading visits', async () => {
+    const res = await fetch(`${base}/services?historyProperty=all&propertyScoped=1`);
+    expect(res.status).toBe(400);
+    expect(recordChains()).toEqual([]);
+  });
+
   beforeEach(() => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     global.__SCOPE__ = { ...PRIMARY, property: { ...PRIMARY.property, id } };

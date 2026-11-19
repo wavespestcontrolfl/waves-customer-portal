@@ -59,6 +59,9 @@ router.get('/', async (req, res, next) => {
     if (historyProperty && (req.contactSession || req.customerInactive || !appPropertyScopeEnabled())) {
       return res.status(403).json({ error: 'Property history is unavailable for this session.', code: 'PROPERTY_HISTORY_UNAVAILABLE' });
     }
+    if (propertyScoped && historyProperty) {
+      return res.status(400).json({ error: 'Choose one property filter for this request.' });
+    }
     const selectedHistory = historyProperty && historyProperty !== 'all';
     const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped || selectedHistory ? await resolveSessionScope(req) : null);
     if (selectedHistory && String(scope?.property?.id) !== historyProperty) {
