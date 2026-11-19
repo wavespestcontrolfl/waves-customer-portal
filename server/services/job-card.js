@@ -1897,7 +1897,10 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
     issues.push({ kind: 'stock', status: 'hold', label: 'Company stock short' });
   } else if (stock.some(item => item.inventory?.status === 'low')) {
     issues.push({ kind: 'stock', status: 'hold', label: 'Company stock low' });
-  } else if (stock.some(item => item.inventory?.plannedAmountInventoryUnit == null || item.inventory?.onHand == null)) {
+  } else if (stock.some(item => item.inventory?.onHand == null)) {
+    // Only a product with no stock count (owner 2026-11-19: "no stock count, that is a part of that protocol").
+    // A missing planned amount, or a planned unit that does not convert to the stock unit, is the protocol's
+    // to state: the product card still shows the on-hand figure and the unit note (buildProductCards stockNote).
     issues.push({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
   }
   // Not a rig requirement: only when neither a rig nor the protocol window

@@ -4,6 +4,7 @@ const logger = require('../logger');
 const { isOperationalDomain, isGovernmentDomain, domainFromAddress, domainMatches, normalizeAddress } = require('./spam-blocker');
 const { whereLiveCustomer } = require('../customer-stages');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
+const { emailSourceEvidence, ownMailboxAddress } = require('./email-source-tag');
 
 /**
  * Destructive auto-actions (trash, archive, one-click UNSUBSCRIBE) must
@@ -1024,6 +1025,10 @@ async function handleLeadInquiry(email, classification) {
   const lastName = nameParts.slice(1).join(' ') || '';
 
   const emailLeadSourceId = await findEmailLeadSourceId();
+  // A tagged website email link (contact+<code>_<page>@) says which page and
+  // channel the sender came from; an untagged spoke address says which site.
+  // Null keeps the plain "Email inquiry" label.
+  const sourceEvidence = emailSourceEvidence(email);
 
   const [lead] = await db('leads').insert({
     first_name: firstName,
@@ -1039,6 +1044,7 @@ async function handleLeadInquiry(email, classification) {
     status: 'new',
     first_contact_at: email.received_at,
     first_contact_channel: 'email',
+    ...(sourceEvidence ? { extracted_data: JSON.stringify({ source_evidence: sourceEvidence }) } : {}),
   }).returning('*');
 
   await db('emails').where({ id: email.id }).update({
@@ -1195,8 +1201,10 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
   labels = Array.isArray(labels) ? labels : [];
   if (labels.includes('SENT') || labels.includes('DRAFT')) return null;
-  const ownAddress = normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
-  if (normalizeAddress(email.from_address) === ownAddress) return null;
+  // Both sides read as the base mailbox: a tag on the sender or on the
+  // configured address is the same contact@ mailbox.
+  const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  if (ownMailboxAddress(email.from_address) === ownAddress) return null;
   // ATOMIC idempotency claim in Postgres — the in-memory row is stale by the
   // time reclassification (which runs auto-actions twice with the same
   // object) or a concurrent worker gets here. Only the caller that flips

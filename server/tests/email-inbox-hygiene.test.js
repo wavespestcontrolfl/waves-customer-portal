@@ -483,8 +483,25 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     setupDb();
     expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, label_ids: JSON.stringify(['SENT']) })).toBeNull();
     expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, from_address: 'contact@wavespestcontrol.com' })).toBeNull();
+    expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, from_address: 'contact+gads_home@wavespestcontrol.com' })).toBeNull();
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
+  test('a +tag on the configured mailbox address still reads as our own mailbox', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const saved = process.env.GMAIL_USER_EMAIL;
+    process.env.GMAIL_USER_EMAIL = 'contact+ops@wavespestcontrol.com';
+    try {
+      setupDb();
+      expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, from_address: 'contact@wavespestcontrol.com' })).toBeNull();
+      expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, from_address: 'contact+ops@wavespestcontrol.com' })).toBeNull();
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+      expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.GMAIL_USER_EMAIL;
+      else process.env.GMAIL_USER_EMAIL = saved;
+    }
   });
 
   test('gate off → no draft, no LLM call', async () => {

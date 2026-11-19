@@ -1,0 +1,211 @@
+/**
+ * taurus-yearly-count
+ *
+ * Taurus SC (EPA 53883-279): the perimeter pest label allows the 0.03% rate on
+ * up to 4 applications per home per calendar year, or fewer when a 0.06%
+ * application was used (label scenarios below). Owner ruling 2026-11-19, "A":
+ * the house mix is 1.6 fl oz per 4-gal tank = 0.03%. The close-out surfaces
+ * leave Taurus out of the house mix when another 0.03% application does not fit;
+ * this answers that for ONE visit.
+ *
+ * The source is the compliance LEDGER (property_application_history), the
+ * record of what was applied where and on what day:
+ *   - rows that are not retracted (retracted_at IS NULL), whose product is a
+ *     catalog row named Taurus SC (the close-out picker's name rule: case and
+ *     spacing are ignored; a retired catalog row still counts as history);
+ *   - application_date in the ET calendar year of today (the completion writers
+ *     disagree on the day they record), the home being pah.property_id (frozen at completion),
+ *     else the visit's property_id, else no property; a visit with no property_id
+ *     counts the whole customer, a visit with one also counts the customer's
+ *     applications with no recorded property (over-counting only leaves Taurus
+ *     off the mix);
+ *   - leaving out the rows of the visit being completed;
+ *   - one application = one distinct service record (a record with several
+ *     Taurus rows is one application, at its highest concentration).
+ *
+ * Concentrations: before TAURUS_LOW_RATE_SINCE the owner mixed 3.2 fl oz in a
+ * 4-gal tank (0.06%), so those rows count as 0.06% ("high"). Later rows count as
+ * 0.03% ("low") unless the row says otherwise (a fl_oz/gal rate over 0.4, or a
+ * dilution_rate of 0.06% or more).
+ *
+ * A visit scheduled in a different ET year than today (a December visit closed in
+ * January) is checked against BOTH years and counts as eligible only when both say
+ * so: no per-writer date rules, the conservative answer.
+ *
+ * Read only, one query per year (one in the usual case), no row locks.
+ */
+const db = require('../models/db');
+const logger = require('./logger');
+const { etDateString, dateOnlyString } = require('../utils/datetime-et');
+
+// The owner's 2026 mix (3.2 fl oz per 4 gal, 0.06%) ran until ruling "A" (2026-11-19) set 1.6 fl oz; the first
+// application date counted at 0.03% unless the row says otherwise.
+const TAURUS_LOW_RATE_SINCE = '2026-11-20';
+
+// 1.6 fl oz per 4 gal = 0.4 fl oz/gal = 0.03%; a fl_oz/gal rate above that is the 0.06% mix.
+const LOW_RATE_MAX_FL_OZ_PER_GAL = 0.4;
+// The house mix's Taurus amount (fl oz). Assumes one 4-gal tank per home (owner mix: 1.6 fl oz per 4 gal): a larger
+// amount is read as the old 0.06% tank (3.2 fl oz), even when the row carries no rate or dilution.
+const HOUSE_TAURUS_FL_OZ = 1.6;
+const HIGH_DILUTION_PERCENT = 0.06;
+
+// The close-out picker's own identity rule (client lib/taurus-yearly-limit.js: /^taurus\s*sc\b/i on the trimmed name).
+const TAURUS_NAME_PATTERN = '^\\s*taurus\\s*sc\\M';
+
+const LEDGER_SQL = `
+  SELECT pah.id,
+         pah.service_record_id,
+         to_char(pah.application_date, 'YYYY-MM-DD') AS application_date,
+         pah.application_rate,
+         pah.rate_unit,
+         pah.quantity_applied,
+         pah.quantity_unit,
+         pah.dilution_rate
+  FROM property_application_history pah
+  LEFT JOIN service_records sr ON sr.id = pah.service_record_id
+  LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+  WHERE pah.retracted_at IS NULL
+    AND pah.application_date >= CAST(:yearStart AS date)
+    AND pah.application_date < CAST(:nextYearStart AS date)
+    AND (
+      pah.product_id IN (SELECT pc.id FROM products_catalog pc WHERE pc.name ~* :namePattern)
+      OR EXISTS (
+        SELECT 1 FROM service_products sp
+        WHERE sp.id = pah.service_product_id AND sp.product_name ~* :namePattern
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM service_records cur
+      WHERE cur.id = pah.service_record_id AND cur.scheduled_service_id = CAST(:visitId AS uuid)
+    )
+    -- The label limit is per structure: with a known home, every account's applications at that property
+    -- count (a home that changed hands); this customer's rows with no property recorded count too.
+    AND (
+      (CAST(:propertyId AS uuid) IS NOT NULL AND COALESCE(pah.property_id, ss.property_id) = CAST(:propertyId AS uuid))
+      OR (pah.customer_id = :customerId
+          AND (CAST(:propertyId AS uuid) IS NULL OR COALESCE(pah.property_id, ss.property_id) IS NULL))
+    )
+`;
+
+/** The first day of a calendar year and of the next, as YYYY-MM-DD. */
+const yearBoundsOf = (year) => ({ year, yearStart: `${year}-01-01`, nextYearStart: `${year + 1}-01-01` });
+
+/** The ET calendar year of `now`, with its bounds. */
+function etYearBounds(now = new Date()) {
+  return yearBoundsOf(Number(etDateString(now).slice(0, 4)));
+}
+
+const unitKey = (unit) => String(unit || '').trim().toLowerCase().replace(/[\s.]+/g, '_');
+const isFlOz = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
+// A recorded tank concentration in fl oz per gallon: "fl_oz/gal" / "oz/gal", or the per-100-gallon units the
+// completion API also accepts ("fl_oz/100gal" / "oz/100gal"), divided by 100. null for any other unit.
+const PER_GAL_UNITS = { 'fl_oz/gal': 1, 'oz/gal': 1, 'floz/gal': 1, 'fl_oz/100gal': 100, 'oz/100gal': 100, 'floz/100gal': 100 };
+const flOzPerGal = (value, unit) => {
+  const divisor = PER_GAL_UNITS[unitKey(unit)];
+  const n = Number(value);
+  return divisor && Number.isFinite(n) && n > 0 ? n / divisor : null;
+};
+const TSP_PER_FL_OZ = 6;
+const flOzAmount = (value, unit) => {
+  if (unitKey(unit) === 'tsp') { const t = Number(value); return Number.isFinite(t) && t > 0 ? t / TSP_PER_FL_OZ : 0; }
+  const n = Number(value);
+  return isFlOz(unit) && Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+/** 'high' (a 0.06% application) or 'low' (0.03%) for one ledger row. */
+function applicationConcentration(row) {
+  // A recorded concentration decides when the row has one, on any date: a dilution, else a fl oz per gallon
+  // rate (a visit closed out on the rollout day at 0.4 fl oz/gal is 0.03%).
+  // Only an explicit percentage ("0.06%") is a dilution: the column is text, and other text ("0.4 fl oz/gal",
+  // a range, a bare number) is not read as a percent; the recorded rate decides then.
+  const percent = /^\s*(\d+(?:\.\d+)?)\s*%\s*$/.exec(String(row.dilution_rate ?? ''));
+  const dilution = percent ? Number(percent[1]) : NaN;
+  if (Number.isFinite(dilution) && dilution > 0) return dilution >= HIGH_DILUTION_PERCENT ? 'high' : 'low';
+  const perGal = flOzPerGal(row.application_rate, row.rate_unit);
+  if (perGal != null) return perGal > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
+  // No recorded concentration: a row before the 0.03% ruling is the owner's earlier 0.06% mix.
+  if ((dateOnlyString(row.application_date) || '') < TAURUS_LOW_RATE_SINCE) return 'high';
+  // Later, an amount above the house mix (a bare oz / fl oz quantity, or a bare oz rate
+  // that is the tank amount) is read as the old 0.06% tank (one 4-gal tank per home).
+  const amounts = [flOzAmount(row.quantity_applied, row.quantity_unit), flOzAmount(row.application_rate, row.rate_unit)];
+  return amounts.some((amount) => amount > HOUSE_TAURUS_FL_OZ) ? 'high' : 'low';
+}
+
+/**
+ * Label scenarios for the perimeter rate in a calendar year, as the applications
+ * already made: another 0.03% application fits when
+ *   - no 0.06% application was made and fewer than 4 at 0.03% (4 x 0.03%), or
+ *   - one 0.06% application was made and fewer than 2 at 0.03%.
+ * Two or more at 0.06% use the year up. With { rate: 'high' }, whether another 0.06%
+ * application fits instead: no 0.03% and fewer than 2 at 0.06%, or no 0.06% and at most
+ * 2 at 0.03%.
+ */
+function taurusEligible({ high, low }, { rate = 'low' } = {}) {
+  // Another 0.06% application: none yet and up to 2 at 0.03%, or one already and no 0.03%.
+  if (rate === 'high') return (low === 0 && high < 2) || (high === 0 && low <= 2);
+  if (high >= 2) return false;
+  if (high === 1) return low < 2;
+  return low < 4;
+}
+
+/** The ledger answer for one calendar year. Rejects when the read fails. */
+async function yearAnswer(knex, visit, bounds) {
+  const result = await knex.raw(LEDGER_SQL, {
+    customerId: visit.customer_id,
+    propertyId: visit.property_id || null,
+    visitId: visit.id || null,
+    yearStart: bounds.yearStart,
+    nextYearStart: bounds.nextYearStart,
+    namePattern: TAURUS_NAME_PATTERN,
+  });
+  const rows = result?.rows;
+  if (!Array.isArray(rows)) throw new Error('no rows');
+  // One application per service record (a row with no record is its own application), at its highest concentration.
+  const byApplication = new Map();
+  for (const row of rows) {
+    const key = row.service_record_id ? `record:${row.service_record_id}` : `row:${row.id}`;
+    const concentration = applicationConcentration(row);
+    if (byApplication.get(key) !== 'high') byApplication.set(key, concentration);
+  }
+  const kinds = [...byApplication.values()];
+  const high = kinds.filter((kind) => kind === 'high').length;
+  const low = kinds.length - high;
+  return {
+    high, low, count: kinds.length, year: bounds.year,
+    eligible: taurusEligible({ high, low }), eligibleHigh: taurusEligible({ high, low }, { rate: 'high' }),
+  };
+}
+
+/**
+ * @param {{ id?: string|null, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }} visit
+ *   the scheduled_services row being completed
+ * @returns {Promise<{ high: number, low: number, count: number, eligible: boolean, eligibleHigh: boolean, year: number } | null>}
+ *   `eligible`: another 0.03% application fits; `eligibleHigh`: another 0.06% one fits. null when the history is
+ *   unknown (no customer, or the read failed): the close-outs then leave Taurus off the house mix and say so; none blocks.
+ */
+async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
+  const customerId = visit?.customer_id || null;
+  if (!customerId) return null;
+  const nowBounds = etYearBounds(now);
+  const day = dateOnlyString(visit.scheduled_date);
+  const visitYear = /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? Number(day.slice(0, 4)) : nowBounds.year;
+  const years = visitYear === nowBounds.year ? [nowBounds] : [yearBoundsOf(visitYear), nowBounds];
+  try {
+    const answers = await Promise.all(years.map((bounds) => yearAnswer(knex, visit, bounds)));
+    const shown = answers.find((a) => !a.eligible) || answers.find((a) => !a.eligibleHigh) || answers[0];
+    return {
+      ...shown,
+      eligible: answers.every((a) => a.eligible),
+      eligibleHigh: answers.every((a) => a.eligibleHigh),
+    };
+  } catch (err) {
+    // No driver message: it can echo SQL and bound values.
+    logger.warn(`[taurus-yearly] count unavailable: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+}
+
+module.exports = {
+  taurusYearlyCount, taurusEligible, applicationConcentration, etYearBounds,
+  TAURUS_LOW_RATE_SINCE, TAURUS_NAME_PATTERN,
+};

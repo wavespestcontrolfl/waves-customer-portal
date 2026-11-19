@@ -42,6 +42,7 @@ const {
   preserveSoleAcceptedReplyReceipts,
 } = require('./messaging/review-ask-reservation');
 const { phoneIdentityKey } = require('../utils/phone');
+const { redactOfferLinks } = require('../utils/offer-link-redaction');
 const { phoneIdentitySql } = require('./sms-response-policy');
 
 // The graduation ladder. 'auto_send' is the top rung — its delivery path
@@ -994,7 +995,7 @@ async function createReplyHoldingReservation(dbh, {
       direction: 'outbound',
       from_phone: fromNumber,
       to_phone: to,
-      message_body: body,
+      message_body: redactOfferLinks(body),
       status: 'sending',
       message_type: messageType || (reservationKind === 'auto' ? 'ai_autosent' : 'manual'),
       admin_user_id: adminUserId,
@@ -1050,7 +1051,7 @@ async function settleReplyHoldingReservation({ reservationId, uncertain = false,
           ...(validProviderAcceptedAt ? { created_at: validProviderAcceptedAt } : {}),
           ...(context.fromNumber ? { from_phone: context.fromNumber } : {}),
           ...(context.to ? { to_phone: context.to } : {}),
-          ...(Object.prototype.hasOwnProperty.call(context, 'body') ? { message_body: context.body } : {}),
+          ...(Object.prototype.hasOwnProperty.call(context, 'body') ? { message_body: redactOfferLinks(context.body) } : {}),
           ...(context.messageType ? { message_type: context.messageType } : {}),
           metadata: db.raw(
             "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
