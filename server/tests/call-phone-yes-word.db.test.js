@@ -146,6 +146,9 @@ describeDb("the caller's word (PostgreSQL)", () => {
       processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED,
     }]], { yes: null, noYes: 'no_yes_heard' }],
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
+    ["the caller's words carry a condition", [['per_application', {
+      transcription: `Agent: Thanks for calling Waves.\nCaller: If the price is $49.99, ${WORDS}\nAgent: Okay.`,
+    }]], { yes: null, noYes: 'yes_not_plain' }],
   ])('%s', async (_name, calls, expected) => {
     const customerId = await customer();
     for (const [choice, over, intent] of calls) await call(customerId, choice, over, intent);

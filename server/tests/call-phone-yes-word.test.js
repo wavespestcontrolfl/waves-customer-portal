@@ -20,16 +20,18 @@ describe("the caller's words", () => {
   const evidence = (...entries) => ({ evidence: entries });
   const choice = (quote, speaker = 'caller', fieldPath = '/service_request/billing_choice') => ({ field_path: fieldPath, quote, speaker, transcript_offset_ms: 100 });
   const talk = (callerLine, agentLine = 'You are all set.') => ({ transcript: `Agent: Thanks for calling Waves.\nCaller: ${callerLine}\nAgent: ${agentLine}` });
+  const plain = (words) => ({ words, plain: true });
+  const notPlain = (words) => ({ words, plain: false });
 
-  test("the caller's whole sentence that holds the quote, from a caller turn; never staff's, never another field's", () => {
+  test("the caller's whole turn that holds the quote; never staff's words, never another field's", () => {
     const transcript = talk('Okay. Just bill me each time, that works.');
     expect(callerWordsOf(evidence(
       choice('We bill after each visit.', 'agent'),
       choice('Bill me each time.', 'caller', '/scheduling/status'),
       choice('  Just   bill me\neach time  '),
-    ), transcript)).toBe('Just bill me each time, that works.');
+    ), transcript)).toEqual(plain('Okay. Just bill me each time, that works.'));
     expect(callerWordsOf(evidence(choice('just bill me each time', 'caller', 'service_request.billing_choice')), transcript))
-      .toBe('Just bill me each time, that works.');
+      .toEqual(plain('Okay. Just bill me each time, that works.'));
   });
 
   test.each([
@@ -38,25 +40,30 @@ describe("the caller's words", () => {
     ['a question', 'Can you just bill me each time?'],
     ['a condition with a price', 'If the price is $49.99, bill me each time.'],
     ['a condition with a time', 'If you come at 8 a.m. bill me each time.'],
-  ])('a quote inside %s is no yes', (_name, line) => {
-    expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toBeNull();
+    ['a condition with a time and a day', 'If you come at 8 a.m. Thursday, bill me each time.'],
+    // The shared screen as it is: any "when" fails closed, and the office reads the words (by design, no phrase list).
+    ['a "when"', 'Just bill me each time when you come out.'],
+  ])('a quote inside %s is shown, and is not plain', (_name, line) => {
+    expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toEqual(notPlain(line));
   });
 
-  test('a later plain sentence with the same words still counts', () => {
-    const transcript = talk('Can you just bill me each time? Okay then. Yes, just bill me each time.');
-    expect(callerWordsOf(evidence(choice('just bill me each time')), transcript)).toBe('Yes, just bill me each time.');
+  test('a later plain sentence with the same words wins', () => {
+    const line = 'Can you just bill me each time? Okay then. Yes, just bill me each time.';
+    expect(callerWordsOf(evidence(choice('just bill me each time')), talk(line))).toEqual(plain(line));
   });
 
-  test('a price in an earlier sentence does not join it to the quote', () => {
+  test('an earlier sentence with a price or a "no" is shown but not screened with the quote', () => {
     expect(callerWordsOf(evidence(choice('just bill me each time')), talk("It's $49.99 a visit. Just bill me each time.")))
-      .toBe('Just bill me each time.');
+      .toEqual(plain("It's $49.99 a visit. Just bill me each time."));
+    expect(callerWordsOf(evidence(choice('just bill me each time')), talk("I don't want the annual. Just bill me each time.")))
+      .toEqual(plain("I don't want the annual. Just bill me each time."));
   });
 
-  test('a quote across two sentences is read with both', () => {
+  test('a quote across two sentences is screened with both', () => {
     expect(callerWordsOf(evidence(choice('the quarterly. Bill me each time')), talk("Let's do the quarterly. Bill me each time, please.")))
-      .toBe("Let's do the quarterly. Bill me each time, please.");
-    expect(callerWordsOf(evidence(choice('the quarterly. Bill me each time')), talk("Let's do the quarterly. Don't bill me each time.")))
-      .toBeNull();
+      .toEqual(plain("Let's do the quarterly. Bill me each time, please."));
+    expect(callerWordsOf(evidence(choice('the quarterly. Bill me each time')), talk("Maybe the quarterly. Bill me each time, please.")))
+      .toEqual(notPlain("Maybe the quarterly. Bill me each time, please."));
   });
 
   test('a quote the transcript does not hold in a caller turn is no words', () => {
@@ -69,7 +76,7 @@ describe("the caller's words", () => {
 
   test('an outbound call with swapped labels is read the way the triage flags read it', () => {
     const swapped = { transcript: 'Caller: Hi, this is Sam with Waves, calling about your quote.\nAgent: Just bill me each time.\nCaller: Will do.', outbound: true };
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), swapped)).toBe('Just bill me each time.');
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), swapped)).toEqual(plain('Just bill me each time.'));
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), { ...swapped, outbound: false })).toBeNull();
   });
 
@@ -80,9 +87,10 @@ describe("the caller's words", () => {
     expect(callerWordsOf({ evidence: 'not a list' }, talk('x'))).toBeNull();
   });
 
-  test('a long sentence is cut around the quote, so the choice always shows', () => {
+  test('a long turn is cut around the quote, so the choice always shows', () => {
     const line = `${'so we talked about it and '.repeat(10)}just bill me each time${' and that is fine'.repeat(6)}.`;
-    const words = callerWordsOf(evidence(choice('just bill me each time')), talk(line));
+    const { words, plain: isPlain } = callerWordsOf(evidence(choice('just bill me each time')), talk(line));
+    expect(isPlain).toBe(true);
     expect(words).toContain('just bill me each time');
     expect(words.length).toBeLessThanOrEqual(202);
     expect(words.startsWith('…')).toBe(true);
@@ -91,6 +99,6 @@ describe("the caller's words", () => {
 
   test('a quote longer than the cut is shown whole', () => {
     const long = `${'word '.repeat(80)}done`;
-    expect(callerWordsOf(evidence(choice(long)), talk(long))).toBe(long);
+    expect(callerWordsOf(evidence(choice(long)), talk(long))).toEqual(plain(long));
   });
 });

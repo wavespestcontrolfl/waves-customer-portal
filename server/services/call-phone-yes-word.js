@@ -5,15 +5,20 @@
  *
  * The call reader (the V2 extraction) judges what the caller chose: service_request.billing_choice (never consent on
  * its own, the extraction schema says so), and a cancellation or one-time ask in service_request.service_intent. This
- * module does not judge the conversation again. It keeps a choice's words only when its evidence quote is the
- * caller's, found word for word in a caller turn of that call's transcript, inside a sentence the triage flags' shared
- * screen reads as a plain statement (quoteIsPlainStatement). And it waits for any call the processor still owes a
+ * module adds no word lists of its own (a list cannot keep up with free speech). It checks that the choice's evidence
+ * quote is the caller's, word for word in a caller turn of that call's transcript. It gives the office that whole
+ * turn, cut around the quote, so any condition or "no" the caller said is in front of the person who decides. It
+ * calls the choice a yes only when the sentences around the quote pass the triage flags' shared plain-statement screen
+ * (quoteIsPlainStatement) as it is; a choice that fails it is no yes (yes_not_plain: any "if", "when", "not" or
+ * question there fails closed, and the office reads the call). And it waits for any call the processor still owes a
  * read, by the processor's own rules (owedReadSql).
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
 
 const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+// A call's columns for its word: the extraction and the transcript come from one row read.
+const WORD_COLUMNS = [...CALL_COLUMNS, 'transcription'];
 // The extraction's evidence pointer for the caller's plan choice (JSON pointer; a dotted path in older rows).
 const BILLING_CHOICE_PATHS = new Set(['/service_request/billing_choice', 'service_request.billing_choice']);
 const CALLER_WORDS_CHARS = 200;
@@ -42,26 +47,24 @@ function owedReadSql(t) {
   return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
 }
 
-// A sentence break: end punctuation, then a space, then a capital letter. "$49.99" and "8 a.m. bill me" stay one
-// sentence, so a condition before them is screened with the quote (a longer sentence only fails closed).
-const SENTENCE_BREAK = /[.!?]+\s+(?=[A-Z])/g;
+// A sentence break: end punctuation, then a space, then a capital letter, never after a time or a title ("8 a.m.
+// Thursday", "Dr. Lee"); "$49.99" stays one sentence. A longer sentence only fails closed.
+const SENTENCE_BREAK = /(?<!\b(?:[aApP]\.[mM]|[Mm]rs?|[Mm]s|[Dd]r|[Ss]t))[.!?]+\s+(?=[A-Z])/g;
 const wordsOf = (text) => [...String(text || '').matchAll(/[a-z0-9]+/gi)].map((m) => ({ w: m[0].toLowerCase(), at: m.index, end: m.index + m[0].length }));
 
-// The words to show: the whole sentences, or, when they run past CALLER_WORDS_CHARS, a cut around the quote. The
-// quote's own words are never cut, so the office always sees what the caller chose.
-function excerptOf(text, [from, to], [qs, qe]) {
+// The words to show: the caller's whole turn, or, past CALLER_WORDS_CHARS, a cut around the quote. The quote's own
+// words are never cut, so the office always sees what the caller chose.
+function excerptOf(text, [qs, qe]) {
   const tidy = (x) => x.replace(/\s+/g, ' ').trim();
-  if (tidy(text.slice(from, to)).length <= CALLER_WORDS_CHARS) return tidy(text.slice(from, to));
+  if (tidy(text).length <= CALLER_WORDS_CHARS) return tidy(text);
   const room = Math.max(0, CALLER_WORDS_CHARS - 2 - (qe - qs));
-  const start = Math.max(from, qs - Math.floor(room / 2));
-  const end = Math.min(to, Math.max(qe, start + (qe - qs) + room));
-  return `${start > from ? '…' : ''}${tidy(text.slice(start, end))}${end < to ? '…' : ''}`;
+  const start = Math.max(0, qs - Math.floor(room / 2));
+  const end = Math.min(text.length, Math.max(qe, start + (qe - qs) + room));
+  return `${start > 0 ? '…' : ''}${tidy(text.slice(start, end))}${end < text.length ? '…' : ''}`;
 }
 
-// Each place the quote is said in a turn: the whole sentences that hold it (a fragment is read with its "don't"), and
-// the words to show.
-function placesOf(turnText, quote) {
-  const text = String(turnText || '');
+// Each place a turn says the quote: the whole sentences around it (a fragment is read with its "don't"), and its span.
+function placesOf(text, quote) {
   const tokens = wordsOf(text);
   const q = wordsOf(quote).map((t) => t.w);
   const breaks = [...text.matchAll(SENTENCE_BREAK)].map((m) => m.index + m[0].length);
@@ -71,15 +74,16 @@ function placesOf(turnText, quote) {
     const span = [tokens[i].at, tokens[i + q.length - 1].end];
     const from = Math.max(0, ...breaks.filter((b) => b <= span[0]));
     const to = Math.min(text.length, ...breaks.filter((b) => b >= span[1]));
-    places.push({ said: text.slice(from, to).trim(), shown: excerptOf(text, [from, to], span) });
+    places.push({ said: text.slice(from, to).trim(), span });
   }
   return places;
 }
 
-// The caller's own words choosing the plan: an evidence quote for billing_choice labeled as the caller's AND found
-// word for word in a caller turn of the transcript (outbound labels oriented the way the triage flags read them), in
-// whole sentences that are a plain statement; given as those sentences, cut around the quote to fit. Null when no
-// quote is. An unlabeled or one-speaker transcript grounds nothing.
+// The caller's own words for the plan choice, from a caller turn that holds an evidence quote for billing_choice
+// (labeled the caller's) word for word, with outbound labels oriented the way the triage flags read them:
+// { words, plain }. words = the whole turn, cut around the quote; plain = the sentences around the quote pass the
+// shared plain-statement screen. A plain place wins over one that is not. Null when no caller turn holds a quote; an
+// unlabeled or one-speaker transcript grounds nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
@@ -88,20 +92,25 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
   const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
+  let found = null;
   for (const e of quotes) {
     for (const turn of turnsHolding(turns, e.quote, 'caller')) {
-      const place = placesOf(turn.raw, e.quote).find((x) => quoteIsPlainStatement(x.said));
-      if (place) return place.shown;
+      const text = String(turn.raw || '');
+      for (const place of placesOf(text, e.quote)) {
+        const heard = { words: excerptOf(text, place.span), plain: quoteIsPlainStatement(place.said) };
+        if (heard.plain) return heard;
+        found = found || heard;
+      }
     }
   }
-  return null;
+  return found;
 }
 
-// One call's word (row: CALL_COLUMNS): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing
-// choice with the caller's own words ({ choice, callLogId, at, quote }; quote = callerWordsOf, null without them), or
-// null (no word, not a two-party conversation, or not read: only a 'processed' row's extraction is its last read, as
-// a failed re-read keeps the old one).
-async function wordOfCall(conn, row) {
+// One call's word (row: WORD_COLUMNS, one read): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a
+// billing choice with the caller's words ({ choice, callLogId, at, quote, plain }; quote and plain from callerWordsOf,
+// quote null without words), or null (no word, not a two-party conversation, or not read: only a 'processed' row's
+// extraction is its last read, as a failed re-read keeps the old one).
+function wordOfCall(row) {
   if (row.processing_status !== 'processed' || row.v2_extraction_status !== 'valid') return null;
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   const extraction = parseExtraction(row.ai_extraction_enriched);
@@ -110,9 +119,8 @@ async function wordOfCall(conn, row) {
   if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!choice) return null;
-  const { transcription } = (await conn('call_log').where({ id: row.id }).first('transcription')) || {};
-  const quote = callerWordsOf(extraction, { transcript: transcription, outbound: String(row.direction || '').startsWith('outbound') });
-  return { choice, callLogId: row.id, at: row.created_at, quote };
+  const heard = callerWordsOf(extraction, { transcript: row.transcription, outbound: String(row.direction || '').startsWith('outbound') });
+  return { choice, callLogId: row.id, at: row.created_at, quote: heard?.words || null, plain: heard?.plain === true };
 }
 
 // The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
@@ -131,11 +139,11 @@ async function latestBillingChoice(conn, { customerId, since }) {
       .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]]))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .select(CALL_COLUMNS);
+    .select(WORD_COLUMNS);
   for (let offset = 0; ; offset += CHOICE_SCAN_LIMIT) {
     const rows = await query.clone().offset(offset).limit(CHOICE_SCAN_LIMIT);
     for (const row of rows) {
-      const word = await wordOfCall(conn, row);
+      const word = wordOfCall(row);
       if (word) return word;
     }
     if (rows.length < CHOICE_SCAN_LIMIT) return null;
@@ -175,19 +183,21 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
 
 // The customer's word since `since`, as the cards read it: a reason for no card ({ skip: 'took_back' |
 // 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
-// 'yes_without_words' }). A yes is the caller's pay-per-application choice WITH the caller's own words
-// ({ yes: { callLogId, at, quote }, noYes: null }); a choice without them is no yes a card can show.
+// 'yes_without_words' | 'yes_not_plain' }). A yes is the caller's pay-per-application choice WITH the caller's own
+// words in a plain statement ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
 async function callerWord(conn, { customerId, since }) {
   const word = await latestBillingChoice(conn, { customerId, since });
   if (word?.contrary) return { skip: 'took_back' };
   if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
   if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };
   if (!word.quote) return { yes: null, noYes: 'yes_without_words' };
+  if (!word.plain) return { yes: null, noYes: 'yes_not_plain' };
   return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };
 }
 
 module.exports = {
   CALL_COLUMNS,
+  WORD_COLUMNS,
   owedReadSql,
   callerWordsOf,
   wordOfCall,
