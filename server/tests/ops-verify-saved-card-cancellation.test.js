@@ -24,7 +24,10 @@ function withEnv(values, fn) {
 }
 
 test('databaseConfig uses PGHOST for an empty URL host and keeps loopback synthetic Postgres plain', () => {
-  const config = withEnv({ PGHOST: '127.0.0.1', PGPORT: '55432' }, () =>
+  const config = withEnv({
+    PGHOST: '127.0.0.1', PGPORT: '55432', PG_CA_FILE: undefined,
+    PGSSLROOTCERT: undefined, PGSSL_SERVER_NAME: undefined,
+  }, () =>
     databaseConfig('postgres://url-user:url-password@/synthetic?ssl=false&options=-c%20search_path%3Dsynthetic'));
 
   expect(config.connection).toMatchObject({ host: '127.0.0.1', port: 55432, user: 'url-user', database: 'synthetic', ssl: false });
@@ -51,24 +54,28 @@ test('a provider root can come from PGSSLROOTCERT or URL sslrootcert', () => {
   const root = path.join(os.tmpdir(), `verify-saved-card-root-${process.pid}.pem`);
   fs.writeFileSync(root, 'synthetic provider root\n');
   try {
-    const fromEnv = withEnv({ PG_CA_FILE: undefined, PGSSLROOTCERT: root }, () =>
-      databaseConfig('postgres://u:p@db.example/app'));
-    expect(fromEnv.connection.ssl.ca).toBe('synthetic provider root\n');
+    const fromEnv = withEnv({ PG_CA_FILE: undefined, PGSSLROOTCERT: root, PGSSL_SERVER_NAME: undefined }, () =>
+      databaseConfig('postgres://u:p@127.0.0.1/app?ssl=false'));
+    expect(fromEnv.connection.ssl).toMatchObject({
+      ca: 'synthetic provider root\n', rejectUnauthorized: true,
+    });
 
-    const fromUrl = withEnv({ PG_CA_FILE: undefined, PGSSLROOTCERT: undefined }, () =>
-      databaseConfig(`postgres://u:p@db.example/app?sslrootcert=${encodeURIComponent(root)}`));
-    expect(fromUrl.connection.ssl.ca).toBe('synthetic provider root\n');
+    const fromUrl = withEnv({ PG_CA_FILE: undefined, PGSSLROOTCERT: undefined, PGSSL_SERVER_NAME: undefined }, () =>
+      databaseConfig(`postgres://u:p@localhost/app?sslrootcert=${encodeURIComponent(root)}`));
+    expect(fromUrl.connection.ssl).toMatchObject({
+      ca: 'synthetic provider root\n', rejectUnauthorized: true,
+    });
   } finally {
     fs.unlinkSync(root);
   }
 });
 
-test('a provider proxy can verify its database certificate name without weakening the chain', () => {
+test('a loopback provider proxy honors explicit trust instead of URL plaintext', () => {
   const root = path.join(os.tmpdir(), `verify-saved-card-proxy-root-${process.pid}.pem`);
   fs.writeFileSync(root, 'synthetic provider root\n');
   try {
     const config = withEnv({ PG_CA_FILE: undefined, PGSSLROOTCERT: root, PGSSL_SERVER_NAME: 'database.provider.test' }, () =>
-      databaseConfig('postgres://u:p@proxy.provider.test/app'));
+      databaseConfig('postgres://u:p@127.0.0.1/app?ssl=false'));
 
     expect(config.connection.ssl).toMatchObject({
       ca: 'synthetic provider root\n',
@@ -85,7 +92,10 @@ test('a provider proxy can verify its database certificate name without weakenin
   }
 });
 
-test('the PostgreSQL handshake through a DNS proxy sends the requested database hostname', async () => {
+test.each([
+  ['DNS proxy', 'proxy.provider.test', true],
+  ['loopback TCP proxy', '127.0.0.1', false],
+])('the PostgreSQL handshake through a %s sends the requested database hostname', async (_label, proxyHost, resolvesDns) => {
   const tls = require('node:tls');
   const net = require('node:net');
   const { Client } = require('pg');
@@ -105,11 +115,12 @@ test('the PostgreSQL handshake through a DNS proxy sends the requested database 
   try {
     const resolveProxy = jest.fn(async () => ({ address: '127.0.0.1' }));
     const config = await withEnv({ PGSSL_SERVER_NAME: 'database.provider.test' }, () =>
-      databaseDriverConfig(`postgres://synthetic:synthetic@proxy.provider.test:${gateway.address().port}/billing`, resolveProxy));
+      databaseDriverConfig(`postgres://synthetic:synthetic@${proxyHost}:${gateway.address().port}/billing?ssl=false`, resolveProxy));
     const client = new Client({ ...config.connection, connectionTimeoutMillis: 5000 });
     try {
       await expect(client.connect()).rejects.toThrow();
-      expect(resolveProxy).toHaveBeenCalledWith('proxy.provider.test');
+      if (resolvesDns) expect(resolveProxy).toHaveBeenCalledWith('proxy.provider.test');
+      else expect(resolveProxy).not.toHaveBeenCalled();
       expect(receivedName).toHaveBeenCalledWith('database.provider.test');
     } finally {
       await client.end();

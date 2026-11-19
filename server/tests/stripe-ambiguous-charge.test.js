@@ -308,6 +308,64 @@ describe('saved-card charge claim', () => {
 });
 
 describe('saved-card attempt state updates', () => {
+  test('atomically records worker provenance with a create-returned PaymentIntent', async () => {
+    const updates = [];
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereIn = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    query.update = jest.fn(async (payload) => {
+      updates.push(payload);
+      return 1;
+    });
+    const database = jest.fn(() => query);
+
+    await markInvoiceSavedCardChargeAttempt(
+      'attempt-worker',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-worker', resolved_at: null },
+      database,
+    );
+
+    expect(updates).toEqual([expect.objectContaining({
+      status: 'ambiguous',
+      stripe_payment_intent_id: 'pi-worker',
+      stripe_payment_intent_bound_at: expect.any(Date),
+    })]);
+  });
+
+  test('adds only worker provenance when an exact failure webhook wins the ordering race', async () => {
+    const queries = [];
+    const updateResults = [0, 1];
+    const database = jest.fn(() => {
+      const query = {};
+      ['where', 'whereIn', 'whereNull', 'whereNotNull'].forEach((method) => {
+        query[method] = jest.fn(() => query);
+      });
+      query.update = jest.fn(async (payload) => {
+        query.payload = payload;
+        return updateResults.shift();
+      });
+      queries.push(query);
+      return query;
+    });
+
+    await expect(markInvoiceSavedCardChargeAttempt(
+      'attempt-webhook-first',
+      { status: 'ambiguous', stripe_payment_intent_id: 'pi-failed-first', resolved_at: null },
+      database,
+    )).resolves.toBeUndefined();
+
+    expect(queries).toHaveLength(2);
+    expect(queries[1].where).toHaveBeenCalledWith({
+      id: 'attempt-webhook-first', stripe_payment_intent_id: 'pi-failed-first',
+    });
+    expect(queries[1].whereNotNull).toHaveBeenCalledWith('resolved_at');
+    expect(queries[1].payload).toEqual({
+      stripe_payment_intent_bound_at: expect.any(Date),
+      updated_at: expect.any(Date),
+    });
+  });
+
   test('guards bookkeeping writes so a final webhook cannot be reopened', async () => {
     const query = {};
     query.where = jest.fn(() => query);
@@ -516,6 +574,8 @@ describe('saved-card failed-webhook attempt repair', () => {
         stripe_payment_intent_id: 'pi-failed',
       }),
     }));
+    const attemptUpdate = state.updates.find((entry) => entry.table === 'stripe_invoice_charge_attempts');
+    expect(attemptUpdate.payload).not.toHaveProperty('stripe_payment_intent_bound_at');
     expect(state.updates).toContainEqual(expect.objectContaining({
       table: 'stripe_orphan_charges',
       payload: expect.objectContaining({

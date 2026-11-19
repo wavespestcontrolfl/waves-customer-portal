@@ -370,11 +370,32 @@ async function claimInvoiceSavedCardCharge({
 }
 
 async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = db) {
+  const workerPaymentIntentId = updates.stripe_payment_intent_id || null;
+  const updatedAt = new Date();
   const updated = await database('stripe_invoice_charge_attempts')
     .where({ id: attemptId })
     .whereIn('status', ['claimed', 'ambiguous'])
     .whereNull('resolved_at')
-    .update({ ...updates, updated_at: new Date() });
+    .update({
+      ...updates,
+      // Every caller of this helper runs in the original charge worker. Stamp
+      // provenance in the same write that attaches a PI returned by create;
+      // webhook resolvers deliberately write the ID through their own paths
+      // and must never manufacture this evidence.
+      ...(workerPaymentIntentId ? { stripe_payment_intent_bound_at: updatedAt } : {}),
+      updated_at: updatedAt,
+    });
+  if (!updated && workerPaymentIntentId) {
+    // A final failure/cancellation webhook can win after create returns but
+    // before this worker records the response. Preserve the terminal outcome,
+    // and add worker provenance only when that webhook already attached the
+    // exact same PI. A webhook-only or mismatched PI remains untrusted.
+    const provenanceStamped = await database('stripe_invoice_charge_attempts')
+      .where({ id: attemptId, stripe_payment_intent_id: workerPaymentIntentId })
+      .whereNotNull('resolved_at')
+      .update({ stripe_payment_intent_bound_at: updatedAt, updated_at: updatedAt });
+    if (provenanceStamped) return;
+  }
   if (!updated) {
     const err = new Error(`Saved-card charge attempt ${attemptId} could not be updated`);
     err.code = 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST';

@@ -300,6 +300,56 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect(await worker(intent.id)).toBe(false);
   });
 
+  test('a create-returned nonterminal PI binds in one write and can bind after its exact webhook wins', async () => {
+    const workerFirst = await authenticationFixture(app);
+    const workerFirstAttempt = () => app('stripe_invoice_charge_attempts').where({ id: workerFirst.attemptId });
+    await workerFirstAttempt().update({
+      status: 'claimed', decline_code: null, resolved_at: null,
+      stripe_payment_intent_id: null, stripe_payment_intent_bound_at: null,
+    });
+    await StripeService.markInvoiceSavedCardChargeAttempt(workerFirst.attemptId, {
+      status: 'ambiguous',
+      stripe_payment_intent_id: workerFirst.intent.id,
+      resolved_at: null,
+    }, app);
+    expect(await workerFirstAttempt().first()).toMatchObject({
+      status: 'ambiguous',
+      stripe_payment_intent_id: workerFirst.intent.id,
+      stripe_payment_intent_bound_at: expect.any(Date),
+    });
+
+    const webhookFirst = await authenticationFixture(app);
+    const webhookFirstAttempt = () => app('stripe_invoice_charge_attempts').where({ id: webhookFirst.attemptId });
+    await webhookFirstAttempt().update({
+      stripe_payment_intent_id: webhookFirst.intent.id,
+      stripe_payment_intent_bound_at: null,
+    });
+    await StripeService.markInvoiceSavedCardChargeAttempt(webhookFirst.attemptId, {
+      status: 'ambiguous',
+      stripe_payment_intent_id: webhookFirst.intent.id,
+      resolved_at: null,
+    }, app);
+    expect(await webhookFirstAttempt().first()).toMatchObject({
+      status: 'failed',
+      stripe_payment_intent_id: webhookFirst.intent.id,
+      stripe_payment_intent_bound_at: expect.any(Date),
+      resolved_at: expect.any(Date),
+    });
+
+    const webhookOnly = await authenticationFixture(app);
+    await app('stripe_invoice_charge_attempts').where({ id: webhookOnly.attemptId }).update({
+      stripe_payment_intent_id: 'pi_webhook_only',
+      stripe_payment_intent_bound_at: null,
+    });
+    await expect(StripeService.markInvoiceSavedCardChargeAttempt(webhookOnly.attemptId, {
+      status: 'ambiguous',
+      stripe_payment_intent_id: 'pi_different_worker_response',
+      resolved_at: null,
+    }, app)).rejects.toMatchObject({ code: 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST' });
+    expect(await app('stripe_invoice_charge_attempts').where({ id: webhookOnly.attemptId }).first())
+      .toMatchObject({ stripe_payment_intent_id: 'pi_webhook_only', stripe_payment_intent_bound_at: null });
+  });
+
   test('a signed cancellation follows the active row-precise invoice merge chain', async () => {
     const oldOwner = randomUUID();
     const middleOwner = randomUUID();

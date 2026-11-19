@@ -27,15 +27,18 @@ function databaseConfig(connectionString) {
   const port = Number(firstPresent(parsed.port, process.env.PGPORT, 5432));
   const database = firstPresent(parsed.database, process.env.PGDATABASE, user);
   const caFile = firstPresent(process.env.PG_CA_FILE, process.env.PGSSLROOTCERT, parsed.sslrootcert);
-  const certificateHost = firstPresent(String(process.env.PGSSL_SERVER_NAME || '').trim(), host);
+  const requestedCertificateHost = String(process.env.PGSSL_SERVER_NAME || '').trim();
+  const certificateHost = firstPresent(requestedCertificateHost, host);
   const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('/');
+  const trustedLoopbackProxy = !host.startsWith('/') && Boolean(requestedCertificateHost || caFile);
   // pg-connection-string leaves the literal URL value ssl=false as a string;
   // normalize it before handing the local config back to node-postgres.
   const localSsl = parsed.ssl === 'false' ? false : parsed.ssl === 'true' ? true : parsed.ssl;
-  const ssl = local ? localSsl : {
+  const ssl = local && !trustedLoopbackProxy ? localSsl : {
     // Do not carry sslmode/no-verify/ssl=false from the URL into pg. A remote
-    // connection always verifies the certificate and hostname; with no ca,
-    // Node uses its public trust store.
+    // connection always verifies the certificate and hostname. Explicit trust
+    // inputs do the same for a TCP loopback proxy; with no ca, Node uses its
+    // public trust store. Ordinary local development remains unchanged.
     ...(typeof parsed.ssl === 'object' ? parsed.ssl : {}),
     rejectUnauthorized: true,
     ...(caFile ? { ca: fs.readFileSync(caFile, 'utf8') } : {}),
