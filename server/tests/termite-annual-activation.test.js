@@ -79,7 +79,7 @@ describe('termite annual plan activation on sign', () => {
   // actually matches the row (the pre-transaction attempt stamp is
   // conditioned on awaiting_signature). The same handle serves as both the
   // outer conn and the transaction.
-  function makeTrx({ contract, estimate }) {
+  function makeTrx({ contract, estimate, paidVisit = null }) {
     const estimateUpdate = jest.fn().mockResolvedValue(1);
     const termUpdate = jest.fn().mockResolvedValue(1);
     const trx = jest.fn((table) => {
@@ -106,6 +106,19 @@ describe('termite annual plan activation on sign', () => {
       if (table === 'annual_prepay_terms') {
         return { where: jest.fn().mockReturnThis(), update: termUpdate };
       }
+      if (table === 'scheduled_services') {
+        const builder = {
+          leftJoin: jest.fn(() => builder),
+          where: jest.fn(() => builder),
+          whereNotNull: jest.fn(() => builder),
+          whereRaw: jest.fn(() => builder),
+          whereNotIn: jest.fn(() => builder),
+          orderBy: jest.fn(() => builder),
+          select: jest.fn(() => builder),
+          first: jest.fn().mockResolvedValue(paidVisit),
+        };
+        return builder;
+      }
       throw new Error(`Unexpected table ${table}`);
     });
     return { trx, estimateUpdate, termUpdate };
@@ -118,8 +131,9 @@ describe('termite annual plan activation on sign', () => {
     chargeImpl,
     overlapImpl,
     notifyAdminImpl,
+    paidVisit,
   } = {}) {
-    const { trx, estimateUpdate, termUpdate } = makeTrx({ contract, estimate });
+    const { trx, estimateUpdate, termUpdate } = makeTrx({ contract, estimate, paidVisit });
     const conn = trx;
     conn.transaction = jest.fn(async (cb) => cb(trx));
     const notifyAdmin = jest.fn(notifyAdminImpl || (async () => ({ id: 'notification-1', deduped: false })));
@@ -291,6 +305,30 @@ describe('termite annual plan activation on sign', () => {
       'estimate', expect.stringContaining('needs manual follow-up'), expect.any(String),
       expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:activation_error` }),
     );
+  });
+
+  test('a booked future paid visit anchors signature activation before the parked-date fallback', async () => {
+    const bookedStart = '2027-02-10';
+    const parkedStart = '2027-01-15';
+    const contract = makeContract();
+    const estimate = makeEstimate({
+      annual_plan_deferred_invoice: makeAcceptContext({ annualPrepayTermStart: parkedStart }),
+    });
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, trx,
+      lockAndAssertNoAnnualPrepayOverlap, convertEstimate,
+    } = setup({ contract, estimate, paidVisit: { scheduled_date: bookedStart } });
+
+    await expect(activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn }))
+      .resolves.toMatchObject({ activated: true });
+
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
+      trx, 'customer-1', bookedStart, false, expect.any(String), ESTIMATE_ID,
+    );
+    expect(lockAndAssertNoAnnualPrepayOverlap).not.toHaveBeenCalledWith(
+      trx, 'customer-1', parkedStart, false, expect.any(String), ESTIMATE_ID,
+    );
+    expect(convertEstimate).toHaveBeenCalledTimes(1);
   });
 
   test('the converter final-start verifier rejects a moved linked visit under the activation lock', async () => {

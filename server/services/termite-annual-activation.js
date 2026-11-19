@@ -39,6 +39,7 @@ const logger = require('./logger');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
 const { addMonthsSameDay, dateOnlyString } = require('../utils/date-only');
+const { paidEstimateVisitsQuery } = require('./assessment-booking');
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const DEFAULT_ANNUAL_PLAN_VERSION = 'v3';
@@ -428,7 +429,18 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
           throw overlapErr;
         }
       };
-      const overlapTermStart = dateOnlyString(acceptContext.annualPrepayTermStart) || etDateString();
+      // Public acceptance can already have claimed the estimate's paid
+      // installation without parking a term start. Resolve that canonical
+      // appointment while the estimate row is locked, before falling back to
+      // the accept snapshot or today, so an ordinary future renewal is not
+      // rejected merely because the customer's current term is still live.
+      const firstPaidVisit = await paidEstimateVisitsQuery(trx, {
+        estimateId,
+        customerId: estimate.customer_id,
+      }).first('scheduled_services.scheduled_date');
+      const overlapTermStart = dateOnlyString(firstPaidVisit?.scheduled_date)
+        || dateOnlyString(acceptContext.annualPrepayTermStart)
+        || etDateString();
       await assertAnnualPrepayStart(overlapTermStart);
 
       // Codex P1 (round 2): the ordinary prepay_annual path owns invoice

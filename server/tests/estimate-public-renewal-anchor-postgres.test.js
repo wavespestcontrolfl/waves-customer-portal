@@ -186,15 +186,18 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
       .toMatchObject({ count: '0' });
   });
 
-  test('a signed termite activation rejects a linked visit moved inside locked existing coverage', async () => {
+  test('signed activation uses its future paid visit, then rejects that visit moving inside locked coverage', async () => {
     const initialStart = '2098-02-10';
     const movedStart = '2098-01-15';
+    const paidVisitId = await visit({ scheduled_date: initialStart });
     await trx('estimates').where({ id: estimateId }).update({
       annual_plan_activation_status: 'awaiting_signature',
       annual_plan_deferred_invoice: JSON.stringify({
         version: 1,
         parkedAt: '2097-12-01T12:00:00.000Z',
-        annualPrepayTermStart: initialStart,
+        // Deliberately stale/unsafe: the canonical paid visit above must win
+        // at signature-time preflight, or activation stops before conversion.
+        annualPrepayTermStart: movedStart,
       }),
     });
     const contractId = randomUUID();
@@ -220,6 +223,7 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
 
     const convertEstimate = jest.fn(async (_id, opts) => {
       expect(opts.database.isTransaction).toBe(true);
+      await opts.database('scheduled_services').where({ id: paidVisitId }).update({ scheduled_date: movedStart });
       await opts.verifyAnnualPrepayTermStart(movedStart);
       throw new Error('conversion should stop at the final-start verifier');
     });
