@@ -16,12 +16,17 @@ let mockRecentBell = null;
 // sms_log row (the triggering text's Twilio SID) for the placeholder link anchor.
 let mockSmsLogRow = null;
 let mockSmsLogThrows = false;
+// customers row (first/last name) the sender naming loads by id.
+let mockCustomerRow = null;
+// Every where clause the cooldown query applied (table notifications).
+let mockCooldownWheres = [];
 jest.mock('../models/db', () => {
   let table = null;
   const chain = {
-    whereRaw: () => chain,
-    where: () => chain,
+    whereRaw: (...a) => { if (table === 'notifications') mockCooldownWheres.push(['whereRaw', ...a]); return chain; },
+    where: (...a) => { if (table === 'notifications') mockCooldownWheres.push(['where', ...a]); return chain; },
     orderBy: () => chain,
+    whereNull: () => chain,
     select: () => chain,
     timeout: () => chain,
     first: async () => {
@@ -29,6 +34,7 @@ jest.mock('../models/db', () => {
         if (mockSmsLogThrows) throw new Error('sms_log down');
         return mockSmsLogRow;
       }
+      if (table === 'customers') return mockCustomerRow;
       return mockRecentBell;
     },
   };
@@ -61,10 +67,13 @@ jest.mock('../services/estimator-engine/index', () => ({
 }));
 
 const mockBuildSmsThreadContext = jest.fn();
-const mockLoadCustomerByPhone = jest.fn();
 jest.mock('../services/estimator-engine/context-builder', () => ({
   buildSmsThreadContext: (...args) => mockBuildSmsThreadContext(...args),
-  loadCustomerByPhone: (...args) => mockLoadCustomerByPhone(...args),
+}));
+// The ONE rule that says who a sender identity belongs to (also used by the relevance sweep).
+const mockCustomerIdsBySenderIdentity = jest.fn();
+jest.mock('../services/sender-identity-customers', () => ({
+  customerIdsBySenderIdentity: (...args) => mockCustomerIdsBySenderIdentity(...args),
 }));
 
 // Scope guards (GATE_ESTIMATOR_SCOPE_GUARDS) — controllable per test; the
@@ -108,7 +117,9 @@ beforeEach(() => {
   mockBuildSmsThreadContext.mockResolvedValue({ call: null, transcript: 'x'.repeat(60), phone: PHONE });
   mockRunDraftPipeline.mockImplementation(async ({ result }) => ({ ...result, lane: 'yellow', created: true }));
   mockNotify.mockResolvedValue(true);
-  mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+  mockCustomerIdsBySenderIdentity.mockImplementation(async (_conn, identities) => new Map(identities.map((i) => [i, new Set()])));
+  mockCustomerRow = null;
+  mockCooldownWheres = [];
 });
 
 afterAll(() => {
@@ -178,7 +189,9 @@ describe('startSmsThreadDraft', () => {
     const BARE = '/admin/communications';
     const TEXT = 'what would a quote for pest control run me?';
     const placeholderArgs = () => mockNotify.mock.calls[0][0];
-    const named = (extra = {}) => ({ customer: { id: 'cust-42', first_name: 'Jane', last_name: 'Doe', ...extra }, ambiguous: false });
+    // The identity -> customer ids rule answers `ids`; the named customer's row is loaded by id.
+    const idsFor = (...ids) => mockCustomerIdsBySenderIdentity.mockImplementation(async (_c, identities) => new Map(identities.map((i) => [i, new Set(ids)])));
+    const named = () => { idsFor('cust-42'); mockCustomerRow = { first_name: 'Jane', last_name: 'Doe' }; };
     const noDigits = (link) => {
       expect(link).not.toMatch(/9415550123/);
       expect(link).not.toMatch(/phone=/);
@@ -186,11 +199,11 @@ describe('startSmsThreadDraft', () => {
     };
 
     test('one unambiguous customer: name in the body, thread + message anchor, placeholder marker', async () => {
-      mockLoadCustomerByPhone.mockResolvedValue(named());
+      named();
       mockSmsLogRow = { twilio_sid: 'SM123abc' };
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
-      // Service-contact numbers are included so a shared number reads ambiguous.
-      expect(mockLoadCustomerByPhone).toHaveBeenCalledWith(PHONE, null, { timeoutMs: 1000, includeServiceContacts: true });
+      // Named by the canonical sender identity (the sweep's rule), bounded by the short timeout.
+      expect(mockCustomerIdsBySenderIdentity).toHaveBeenCalledWith(expect.anything(), ['9415550123'], { timeoutMs: 1000 });
       const args = placeholderArgs();
       expect(args.title).toBe('Quote asked by text — send it');
       expect(args.body).toMatch(/^Jane Doe asked for a quote by text\./);
@@ -200,7 +213,7 @@ describe('startSmsThreadDraft', () => {
       await result.draftPromise;
       // The outcome bells reuse the same link: one lookup only.
       expect(mockRunDraftPipeline.mock.calls[0][0].origin.bellLink).toBe(args.link);
-      expect(mockLoadCustomerByPhone).toHaveBeenCalledTimes(1);
+      expect(mockCustomerIdsBySenderIdentity).toHaveBeenCalledTimes(1);
     });
 
     test('the placeholder and the unreadable-thread red bell carry the canonical sender identity', async () => {
@@ -219,8 +232,33 @@ describe('startSmsThreadDraft', () => {
       expect(mockRunDraftPipeline.mock.calls[0][0].origin.senderIdentity).toBe('+447700900123');
     });
 
+    test('exactly one customer names the sender; none or two keep the masked label (an international sender is looked up by +digits, never the last 10)', async () => {
+      idsFor();
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      mockNotify.mockClear();
+      mockCustomerRow = { first_name: 'Jane', last_name: 'Doe' };
+      idsFor('cust-1', 'cust-2');
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      mockNotify.mockClear();
+      mockCustomerIdsBySenderIdentity.mockClear();
+      await startSmsThreadDraft({ phone: '+447700900123', triggerBody: TEXT });
+      expect(mockCustomerIdsBySenderIdentity.mock.calls[0][1]).toEqual(['+447700900123']);
+      // A US customer with the same last 10 digits is never returned for it, so it stays masked.
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+    });
+
+    test('the one matching customer must also be live and have a name, else masked', async () => {
+      idsFor('cust-42');
+      mockCustomerRow = null;
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      expect(placeholderArgs().link).toBe('/admin/communications');
+    });
+
     test('a known customer with no triggering text id gets the bare thread link', async () => {
-      mockLoadCustomerByPhone.mockResolvedValue(named());
+      named();
       await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
       expect(placeholderArgs().link).toBe('/admin/communications?thread=cust-42');
     });
@@ -242,7 +280,8 @@ describe('startSmsThreadDraft', () => {
     });
 
     test('an ambiguous shared line (service-contact overlap) is not named and keeps the sid anchor only', async () => {
-      mockLoadCustomerByPhone.mockResolvedValue({ ...named(), ambiguous: true });
+      idsFor('cust-1', 'cust-2');
+      mockCustomerRow = { first_name: 'Jane', last_name: 'Doe' };
       mockSmsLogRow = { twilio_sid: 'SM5' };
       await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(placeholderArgs().body).toMatch(/^Texter …0123/);
@@ -252,13 +291,13 @@ describe('startSmsThreadDraft', () => {
     });
 
     test('lookup unavailable or throwing: phone-free copy and link, bell still written', async () => {
-      mockLoadCustomerByPhone.mockResolvedValueOnce({ customer: null, ambiguous: false, unavailable: true });
+      mockCustomerIdsBySenderIdentity.mockRejectedValueOnce(new Error('identity read failed'));
       let result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
       expect(result.started).toBe(true);
       expect(placeholderArgs().body).toMatch(/^Texter …0123/);
       expect(placeholderArgs().link).toBe(BARE);
       mockNotify.mockClear();
-      mockLoadCustomerByPhone.mockRejectedValueOnce(new Error('db down'));
+      mockCustomerIdsBySenderIdentity.mockRejectedValueOnce(new Error('db down'));
       mockSmsLogRow = { twilio_sid: 'SM7' };
       result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(result.started).toBe(true);
@@ -269,7 +308,7 @@ describe('startSmsThreadDraft', () => {
     });
 
     test('a failed sms_log read only drops the anchor; the customer is still named', async () => {
-      mockLoadCustomerByPhone.mockResolvedValue(named());
+      named();
       mockSmsLogThrows = true;
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(result.started).toBe(true);
@@ -278,7 +317,7 @@ describe('startSmsThreadDraft', () => {
     });
 
     test('a lookup that never answers is cut off and the bell is still written', async () => {
-      mockLoadCustomerByPhone.mockReturnValueOnce(new Promise(() => {}));
+      mockCustomerIdsBySenderIdentity.mockReturnValueOnce(new Promise(() => {}));
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(result.started).toBe(true);
       expect(placeholderArgs().body).toMatch(/^Texter …0123/);
@@ -287,7 +326,7 @@ describe('startSmsThreadDraft', () => {
 
     test('a dry run writes no bell and does no lookup', async () => {
       await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, dryRun: true });
-      expect(mockLoadCustomerByPhone).not.toHaveBeenCalled();
+      expect(mockCustomerIdsBySenderIdentity).not.toHaveBeenCalled();
       expect(mockNotify).not.toHaveBeenCalled();
     });
 
@@ -353,6 +392,26 @@ describe('startSmsThreadDraft', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  describe('cooldown counts only an OPEN bell of THIS sender', () => {
+    test('the cooldown query requires an open row (done_at IS NULL) and the sender identity', async () => {
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      const raws = mockCooldownWheres.filter(([m]) => m === 'whereRaw').map(([, sql, bind]) => `${sql} ${JSON.stringify(bind || '')}`);
+      expect(raws.join(' | ')).toContain('done_at IS NULL');
+      expect(raws.join(' | ')).toContain("metadata->>'senderIdentity' = ?");
+      expect(raws.join(' | ')).toContain('9415550123');
+    });
+
+    test('an open recent bell blocks the paid run; with none (a closed bell is not returned by the query) a new ask proceeds', async () => {
+      mockRecentBell = { id: 'bell-open' };
+      let result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(result.skipped).toBe('cooldown');
+      expect(mockDispatch).not.toHaveBeenCalled();
+      mockRecentBell = null;
+      result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(result.started).toBe(true);
+    });
   });
 
   test('a failed durable bell reports not-started — callers keep their fallback', async () => {

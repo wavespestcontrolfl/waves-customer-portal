@@ -15,9 +15,11 @@
 
 let mockRow = null;
 let mockAffectedRows = 1;
+let mockUpdateThrows = false;
 const mockUpdates = [];
 // Every where clause applied to the builder that ran each update, in order.
 const mockUpdateWheres = [];
+const mockFirstWheres = [];
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'bell-new' }));
 
 jest.mock('../models/db', () => {
@@ -30,14 +32,23 @@ jest.mock('../models/db', () => {
         return b;
       };
     }
-    b.first = async () => (table === 'notifications' ? mockRow : null);
+    b.first = async () => {
+      if (table !== 'notifications') return null;
+      mockFirstWheres.push(log.slice());
+      // The dedupe read honors the sender-identity condition like the SQL would.
+      const identity = log.find((w) => w.m === 'whereRaw' && String(w.args[0]).includes("metadata->>'senderIdentity'"));
+      if (identity && mockRow && JSON.parse(mockRow.metadata).senderIdentity !== identity.args[1][0]) return null;
+      return mockRow;
+    };
     b.update = async (row) => {
+      if (mockUpdateThrows) throw new Error('update failed');
       mockUpdates.push(row);
       mockUpdateWheres.push(log.slice());
       return mockAffectedRows;
     };
     return b;
   };
+  db.raw = (sql, bindings) => ({ sql, bindings });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -52,6 +63,16 @@ const THREAD_KEY = 'sms:9415550123';
 // Links carry a customer id and the text's SID, never the phone number.
 const SENDER_LINK = '/admin/communications?message=SM0abc';
 const PLACEHOLDER_TITLE = 'Quote asked by text — send it';
+
+// A new ask on an open bell writes ONLY a quiet askedAt stamp (a jsonb key set in SQL, conditional on open).
+function expectOnlyAskedAtStamp() {
+  expect(mockUpdates).toHaveLength(1);
+  expect(Object.keys(mockUpdates[0])).toEqual(['metadata']);
+  expect(mockUpdates[0].metadata.sql).toMatch(/jsonb_set\(.*'\{askedAt\}'/);
+  expect(new Date(mockUpdates[0].metadata.bindings[0]).toString()).not.toBe('Invalid Date');
+  expect(mockUpdateWheres[0].some((w) => w.m === 'whereRaw' && w.args[0] === 'done_at IS NULL')).toBe(true);
+  expect(mockNotifyAdmin).not.toHaveBeenCalled();
+}
 
 function bellRow(meta = {}, overrides = {}) {
   return {
@@ -103,7 +124,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockUpdates.length = 0;
   mockUpdateWheres.length = 0;
+  mockFirstWheres.length = 0;
   mockAffectedRows = 1;
+  mockUpdateThrows = false;
   mockRow = null;
 });
 
@@ -177,14 +200,14 @@ describe('notify() with a thread key', () => {
   test('a LATER placeholder never overwrites an outcome bell', async () => {
     mockRow = bellRow({ placeholder: false });
     expect(await notify(placeholderCall())).toBe(true);
-    expect(mockUpdates).toHaveLength(0);
-    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    // Only the quiet askedAt stamp: title, body, link and read state are untouched.
+    expectOnlyAskedAtStamp();
   });
 
   test('two placeholders stand (a repeated text never rewrites the row)', async () => {
     mockRow = bellRow();
     expect(await notify(placeholderCall())).toBe(true);
-    expect(mockUpdates).toHaveLength(0);
+    expectOnlyAskedAtStamp();
   });
 
   test('an outcome after an outcome (no estimate on either side) still stands', async () => {
@@ -274,13 +297,14 @@ describe('a new ask after a CLOSED thread bell gets its own row', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('an OPEN bell plus a placeholder still stands: no insert, no update', async () => {
+  test('an OPEN bell plus a placeholder still stands: no insert, only the askedAt stamp', async () => {
     for (const meta of [{ placeholder: false }, {}]) {
+      mockUpdates.length = 0;
+      mockUpdateWheres.length = 0;
       mockRow = bellRow(meta);
       expect(await notify(placeholderCall())).toBe(true);
+      expectOnlyAskedAtStamp();
     }
-    expect(mockNotifyAdmin).not.toHaveBeenCalled();
-    expect(mockUpdates).toHaveLength(0);
   });
 
   test('an outcome against a closed placeholder still stands', async () => {
@@ -288,6 +312,79 @@ describe('a new ask after a CLOSED thread bell gets its own row', () => {
     expect(await notify(outcomeCall())).toBe(true);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(0);
+  });
+});
+
+describe('dedupe is by sender identity', () => {
+  const dedupeSql = () => mockFirstWheres[0].filter((w) => w.m === 'whereRaw').map((w) => `${w.args[0]} ${JSON.stringify(w.args[1] || '')}`).join(' | ');
+
+  test('the dedupe read requires the same sender identity when one is given', async () => {
+    mockRow = bellRow({ senderIdentity: '9415550123' });
+    await notify(placeholderCall({ senderIdentity: '9415550123' }));
+    expect(dedupeSql()).toContain("metadata->>'senderIdentity' = ? [\"9415550123\"]");
+  });
+
+  test('a legacy row with no identity is never reused: a new ask gets a fresh insert, and the legacy row is untouched', async () => {
+    mockRow = bellRow({ senderIdentity: undefined });
+    await notify(placeholderCall({ senderIdentity: '9415550123' }));
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockUpdates).toHaveLength(0);
+  });
+
+  test('another sender with the same last 10 digits (a different identity) never reuses or rewrites the bell', async () => {
+    mockRow = bellRow({ senderIdentity: '9415550123' });
+    await notify(outcomeCall({ senderIdentity: '+19415550123x' }));
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('without an identity the read has no identity condition (call path and identity-less callers unchanged)', async () => {
+    mockRow = bellRow();
+    await notify(placeholderCall());
+    expect(dedupeSql()).not.toContain('senderIdentity');
+    mockFirstWheres.length = 0;
+    await notify({
+      call: { twilio_call_sid: 'CA-id-9' }, context: null, lane: 'red', quotePromised: true, title: 'Quote promised on call — send it', body: 'x', senderIdentity: '9415550123',
+    });
+    expect(dedupeSql()).not.toContain('senderIdentity');
+    expect(dedupeSql()).toContain("metadata->>'callSid' = ?");
+  });
+});
+
+describe('a new ask on an open bell stamps askedAt', () => {
+  test('the stamp is conditional on open and writes only the metadata key', async () => {
+    mockRow = bellRow();
+    await notify(placeholderCall());
+    expectOnlyAskedAtStamp();
+  });
+
+  test('a stamp that matches 0 rows (closed meanwhile) or throws never fails the bell: notify still returns true', async () => {
+    mockRow = bellRow();
+    mockAffectedRows = 0;
+    expect(await notify(placeholderCall())).toBe(true);
+    mockUpdateThrows = true;
+    expect(await notify(placeholderCall())).toBe(true);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a rewrite keeps askedAt through the metadata merge (gives-way and draft upgrade)', async () => {
+    mockRow = bellRow({ askedAt: '2026-11-19T12:00:00.000Z' });
+    await notify(outcomeCall());
+    expect(JSON.parse(mockUpdates[0].metadata).askedAt).toBe('2026-11-19T12:00:00.000Z');
+    mockUpdates.length = 0;
+    mockRow = bellRow({ askedAt: '2026-11-19T12:00:00.000Z' });
+    await notify(outcomeCall({ estimateId: 'est-5', link: undefined }));
+    expect(JSON.parse(mockUpdates[0].metadata).askedAt).toBe('2026-11-19T12:00:00.000Z');
+  });
+
+  test('an outcome never stamps askedAt, and a placeholder on a CLOSED bell inserts a fresh row with no stamp', async () => {
+    mockRow = bellRow({ placeholder: false });
+    await notify(outcomeCall());
+    expect(mockUpdates).toHaveLength(0);
+    mockRow = bellRow({ placeholder: false }, { done_at: new Date('2026-11-18T12:00:00Z') });
+    await notify(placeholderCall());
+    expect(mockUpdates).toHaveLength(0);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 });
 

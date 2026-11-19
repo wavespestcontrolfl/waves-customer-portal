@@ -929,6 +929,34 @@ describe('class rules', () => {
       }
     });
 
+    test('the boundary is the LATEST ask: metadata.askedAt when valid, else created_at; a quote or visit between the two does not settle', async () => {
+      const ASKED_AGAIN = '2026-09-27T12:20:00.000Z';
+      onPhone(CUST);
+      // A quote handed off 10 minutes after the first ask but BEFORE the second ask does not settle it.
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      const witness = jest.spyOn(require('../services/call-commitments'), 'handedOffWithin');
+      try {
+        expect((await reasonFor(textBell({ askedAt: ASKED_AGAIN }))).reason).toBe('Estimate was sent');
+        // The witness is asked from the second ask: the real SQL decides (proved in the Postgres suite).
+        expect(witness.mock.calls.map(([, after]) => after.toISOString())).toEqual([ASKED_AGAIN]);
+        witness.mockClear();
+        // A garbage askedAt falls back to created_at.
+        await reasonFor(textBell({ askedAt: 'not a date' }));
+        expect(witness.mock.calls.map(([, after]) => after.toISOString())).toEqual([ASK.toISOString()]);
+      } finally {
+        witness.mockRestore();
+      }
+      // A visit booked between created_at and askedAt does not settle; one after askedAt does.
+      mockTables.estimates = [];
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-27T12:10:00Z') }];
+      expect((await reasonFor(textBell({ askedAt: ASKED_AGAIN }))).reason).toBeNull();
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-27T12:30:00Z') }];
+      expect((await reasonFor(textBell({ askedAt: ASKED_AGAIN }))).reason).toBe('A visit was booked');
+      // With no askedAt the first visit settles (created_at is the boundary).
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: new Date('2026-09-27T12:10:00Z') }];
+      expect((await reasonFor(textBell())).reason).toBe('A visit was booked');
+    });
+
     test('the customer on the phone also counts through a live lead with that phone; a deleted lead or a deleted customer adds nobody', async () => {
       const row = textBell();
       mockTables.estimates = [{ id: uid(533), customer_id: CUST }];

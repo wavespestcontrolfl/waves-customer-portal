@@ -367,6 +367,33 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     expect((await verdicts(visitBell))[0].done_at).toBeNull();
   });
 
+  test('an estimator TEXT bell is judged from the LATEST ask (metadata.askedAt, else created_at): a quote or visit between the first ask and the second does not settle it', async () => {
+    const now = new Date();
+    const hour = 60 * 60 * 1000;
+    const askAt = new Date(now.getTime() - 3 * hour);
+    const quoteAt = new Date(askAt.getTime() + 10 * 60 * 1000);
+    const askedAgainAt = new Date(askAt.getTime() + 30 * 60 * 1000);
+    const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
+    const textBell = (digits, over = {}) => bell({ category: 'lead', created_at: askAt, link: '/admin/leads',
+      metadata: { smsThreadKey: `sms:${digits.slice(-10)}`, senderIdentity: digits, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over } });
+    const verdicts = async (...bells) => {
+      await relevance.runAdminAlertRelevanceSweep({ now });
+      return Promise.all(bells.map((b) => get(b.id)));
+    };
+    const person = await insert('customers', { first_name: 'Textasked', phone: '+15555557071' });
+    await insert('estimates', { status: 'sent', customer_id: person.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    const plain = await textBell('5555557071');
+    const askedAgain = await textBell('5555557071', { askedAt: askedAgainAt.toISOString() });
+    const askedBefore = await textBell('5555557071', { askedAt: new Date(askAt.getTime() + 5 * 60 * 1000).toISOString() });
+    const rows = await verdicts(plain, askedAgain, askedBefore);
+    // The quote came 10 minutes after the first ask: it settles the plain bell and the one re-asked BEFORE the quote, not the one re-asked after it.
+    expect(rows.map((r) => r.done_at != null)).toEqual([true, false, true]);
+    // A visit booked after the second ask settles it.
+    const visitDay = etDateString(new Date(now.getTime() + 3 * DAY));
+    await insert('scheduled_services', { customer_id: person.id, scheduled_date: visitDay, service_type: 'General Pest Control', status: 'confirmed', created_at: new Date(askedAgainAt.getTime() + 10 * 60 * 1000) });
+    expect((await verdicts(askedAgain))[0].done_at).not.toBeNull();
+  });
+
   test('an estimator call bell with no call customer and no lead of its own follows the lead the call is stamped with (metadata lead_id or relay_lead_id) or that carries the call\'s sid; a deleted one leaves it open', async () => {
     const now = new Date();
     const hour = 60 * 60 * 1000;

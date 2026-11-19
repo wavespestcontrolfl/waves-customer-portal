@@ -154,14 +154,14 @@
  *
  * The estimator's TEXT bells (owner 2026-11-19, admin notification faults check: "fix if you rec"; the same
  * estimator-engine notify with an `smsThreadKey` of `sms:<10 digits>` and no callSid: "Quote asked by text", "estimate
- * already open", "AI estimate draft needs review", the commercial scaffold) close by the same two facts. Boundary: the
- * bell's created_at, the ask. A new ask after a closed bell gets its own row and its own created_at (estimator-engine
- * notify inserts a fresh bell when the newest thread bell is already Done), so an old closure is never inherited; an
- * in-place upgrade of an open bell does not move it. Subject: the sender identity the estimator stored on the bell
+ * already open", "AI estimate draft needs review", the commercial scaffold) close by the same two facts. Boundary = the
+ * latest ask (metadata.askedAt, else created_at): a new ask that reuses an open bell stamps askedAt on it, and a new ask
+ * after a closed bell gets its own row and its own created_at (estimator-engine notify inserts a fresh bell when the
+ * newest thread bell of that sender is already Done), so an old closure or an earlier quote is never inherited; an
+ * in-place upgrade of an open bell keeps its askedAt. Subject: the sender identity the estimator stored on the bell
  * (`metadata.senderIdentity`, phoneIdentityKey: 10 digits for a NANP number, `+<digits>` for any other country), NOT
  * the smsThreadKey, whose last-10 digits would let an international sender match a US customer. The ONE live customer
- * with that phone identity on `phone` or any service-contact phone (shared phone identity SQL, the estimator's own sender
- * lookup), plus the customer of a live lead with that phone, is judged.
+ * with that phone identity on `phone` or any service-contact phone (customerIdsBySenderIdentity, the rule the estimator names the sender by), plus the customer of a live lead with that phone, is judged.
  * No identity (a bell written before it was stored), no customer, or two or more (a shared phone) is no verdict and
  * the bell stays open for the 72 hour fall-off. A failed read is no verdict and keeps the re-arm pass from putting
  * one back.
@@ -174,6 +174,7 @@ const { adminAlertRelevanceLive } = require('../config/feature-gates');
 // feature-gates without it reads off.
 const promisePhoneMatchCloseMode = () => require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off';
 const { etDateString } = require('../utils/datetime-et');
+const { customerIdsBySenderIdentity } = require('./sender-identity-customers');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
 // The dedupeKey prefix call-last-name-lookup.js gives its suggestion (its
 // SUGGESTION_KEY_PREFIX). Repeated here, not imported: that module pulls in
@@ -660,45 +661,18 @@ function isTextQuoteBell(meta, row) {
 // bell written before the estimator stored it) is never judged: no verdict, no read, the 72 hour fall-off keeps it.
 const textSenderIdentity = (meta) => (typeof meta.senderIdentity === 'string' && meta.senderIdentity.trim() ? meta.senderIdentity.trim() : null);
 
-// The columns of a customer that hold a phone the estimator's sender lookup matches (loadCustomerByPhone with
-// includeServiceContacts): a number that is primary on one account and a service contact on another is shared there.
-const TEXT_QUOTE_PHONE_COLUMNS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
-
-// The live customers each sender identity belongs to (phone identity -> Set of customer ids): customers by the
-// shared phone identity SQL on any of the four phone columns (one query), plus the customer of a live lead with that
-// phone (that customer must be live too).
-async function textQuotePeers(conn, identities) {
-  const { phoneIdentitySql } = require('./sms-response-policy');
-  const peers = new Map(identities.map((d) => [d, new Set()]));
-  const tie = (peer, id) => { if (id && peers.has(peer)) peers.get(peer).add(String(id)); };
-  const identity = (column) => phoneIdentitySql(`customers.${column}`);
-  for (const c of await conn('customers').whereNull('deleted_at')
-    .whereRaw(`(${TEXT_QUOTE_PHONE_COLUMNS.map((column) => `${identity(column)} = ANY(?)`).join(' OR ')})`, TEXT_QUOTE_PHONE_COLUMNS.map(() => identities))
-    .select('id', conn.raw(`ARRAY[${TEXT_QUOTE_PHONE_COLUMNS.map(identity).join(', ')}]::text[] as peers`))) {
-    for (const peer of new Set(c.peers || [])) tie(peer, c.id);
-  }
-  const leads = await conn('leads').whereNull('deleted_at').whereNotNull('customer_id').whereRaw(`${phoneIdentitySql('leads.phone')} = ANY(?)`, [identities])
-    .select('customer_id', conn.raw(`${phoneIdentitySql('leads.phone')} as peer`));
-  const leadCustomerIds = [...new Set(leads.map((l) => String(l.customer_id)))];
-  const live = new Set(leadCustomerIds.length
-    ? (await conn('customers').whereIn('id', leadCustomerIds).whereNull('deleted_at').select('id')).map((c) => String(c.id))
-    : []);
-  for (const l of leads) if (live.has(String(l.customer_id))) tie(l.peer, l.customer_id);
-  return peers;
-}
-
 // Each estimator text bell (owner 2026-11-19): did a quote reach the one customer the thread's phone belongs to, or a
-// visit get booked for them, AFTER THE ASK (the bell's created_at)? The same witnesses as the call class
+// visit get booked for them, AFTER THE LATEST ASK (askedAtOf: metadata.askedAt, else created_at)? The same witnesses as the call class
 // (handedOffWithin inside the ownership fence, never sent_at; bookedVisitsByCustomer's live top-level visit). Loaded
 // into data.textQuoteMovedOn (bell id -> the reason in words). A failed read is no verdict: it leaves the bell open and
 // keeps the re-arm pass from putting one back (textQuoteFailed).
 async function loadTextQuoteMovedOn(rows, data, conn) {
   const bells = rows.map((row) => ({ row, meta: parseMeta(row.metadata) })).filter(({ row, meta }) => isTextQuoteBell(meta, row))
-    .map(({ row, meta }) => ({ id: String(row.id), identity: textSenderIdentity(meta), askedAt: row.created_at ? new Date(row.created_at) : null }))
+    .map(({ row, meta }) => ({ id: String(row.id), identity: textSenderIdentity(meta), askedAt: askedAtOf(row, meta) ? new Date(askedAtOf(row, meta)) : null }))
     .filter((b) => b.identity && b.askedAt && !Number.isNaN(b.askedAt.getTime()));
   if (!bells.length) return;
   try {
-    const peers = await textQuotePeers(conn, [...new Set(bells.map((b) => b.identity))]);
+    const peers = await customerIdsBySenderIdentity(conn, [...new Set(bells.map((b) => b.identity))]);
     const subjects = bells.map((b) => ({ ...b, customerIds: [...peers.get(b.identity)] })).filter((b) => b.customerIds.length === 1);
     const booked = await bookedVisitsByCustomer(conn, [...new Set(subjects.flatMap((b) => b.customerIds))]);
     const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
@@ -871,7 +845,7 @@ function subjectFor(row, data, todayET) {
     // Why an estimator call bell's quote is out or a visit is booked, after the call started (those bells only), else null.
     callQuoteReason: data.callQuoteMovedOn.get(String(row.id)) || null,
     callQuoteUnknown: data.callQuoteFailed,
-    // The same for an estimator text bell, judged from the ask (the bell's created_at).
+    // The same for an estimator text bell, judged from the latest ask (askedAtOf: metadata.askedAt, else created_at).
     textQuoteReason: data.textQuoteMovedOn.get(String(row.id)) || null,
     textQuoteUnknown: data.textQuoteFailed,
     // Why an unfinished-booking bell's booking is finished (loaded for those bells only), else null.
