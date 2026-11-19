@@ -351,6 +351,13 @@ customer's message by this rule.
    a visit auto-dispatch leaves in conflict more than 14 days out is a line on one standing
    Activity row (ops digest `auto-dispatch-far-conflicts`, audience fyi), outside the allowance
    and off the bell; it rings as the ordinary needs-a-person notice once it is within 14 days.
+   Same-time visits (owner 2026-11-19, "build check"): the schedule watchdog's same-start class
+   rings last, within what the rest of the run left of the allowance. What it holds back is one
+   standing count, `same-start-visits-held:<episode id>` (`server/services/same-start-visits-check.js`):
+   one quiet Activity-only row that lists each held customer and its days, rewritten while the
+   list changes and closed at zero. A count a person or a sweep closed stays closed while it lists
+   every item that waits; a new item starts a new quiet row (a quiet rewrite never reopens a done
+   row). The finder leaves today out, so a pair held tomorrow would otherwise never get a row.
 4. **Retention.** An `fyi` fact lives on its page for 7 days at most. A `needs-you` row
    unread for 14 days belongs in the Monday summary, not in the bell.
    Built (owner 2026-10-26, `server/services/admin-alert-retention.js`,

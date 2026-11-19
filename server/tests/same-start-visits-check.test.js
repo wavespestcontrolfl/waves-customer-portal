@@ -9,7 +9,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { SAME_START_PREFIX, sameStartVisitAlerts, _timeWords } = require('../services/same-start-visits-check');
+const {
+  SAME_START_PREFIX, SAME_START_HELD_PREFIX, sameStartVisitAlerts, _sameStartHeldCount, _timeWords,
+} = require('../services/same-start-visits-check');
 const { MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
 
 const TODAY = '2026-11-19';
@@ -224,6 +226,70 @@ test('forDays rebuilds the same bell from only some of its days: why, detail, li
   expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2027-01-12&appointment=j2');
   expect(metadata).toMatchObject({ first_date: '2027-01-12', day_count: 1, itemKeys: ['2027-01-12'], visit_ids: ['j1', 'j2'] });
   expect(alert[4].forDays(['2026-11-30'])).toBeNull();
+});
+
+test('heldEntry: only the days that wait, as one line of the standing count; none still a finding = null', async () => {
+  finderReturns([
+    visit(), visit({ id: 'visit-b', service_type: 'Pest Control Service' }),
+    visit({ id: 'visit-c', scheduled_date: day('2026-12-10') }), visit({ id: 'visit-d', scheduled_date: day('2026-12-10'), service_type: 'Pest Control Service' }),
+    visit({ id: 'visit-e', scheduled_date: day('2027-01-07') }), visit({ id: 'visit-f', scheduled_date: day('2027-01-07'), service_type: 'Pest Control Service' }),
+  ]);
+  const [[, , , , opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  // A standing bell shows Dec 3: Dec 10 and Jan 7 wait.
+  expect(opts.heldEntry(['2026-12-10', '2027-01-07'])).toEqual({
+    customerId: 'cust-1',
+    order: '2026-12-10 11:00',
+    firstDate: '2026-12-10',
+    line: 'Pat Example — Dec 10 at 11 AM: Lawn Care Service and Pest Control Service. And 1 more day.',
+    link: '/admin/dispatch?tab=schedule&date=2026-12-10&appointment=visit-d',
+    itemKeys: ['cust-1:2026-12-10', 'cust-1:2027-01-07'],
+    visitIds: ['visit-c', 'visit-d', 'visit-e', 'visit-f'],
+  });
+  expect(opts.heldEntry(['2027-01-07']).line).toBe('Pat Example — Jan 7, 2027 at 11 AM: Lawn Care Service and Pest Control Service.');
+  expect(opts.heldEntry(['2026-12-24'])).toBeNull();
+  expect(opts.heldEntry([])).toBeNull();
+});
+
+test('the standing count: one quiet Activity-only row, earliest first, linked to the first; past fifteen it counts the rest', async () => {
+  finderReturns([
+    visit({ customer_id: 'cust-2', first_name: 'Sam', last_name: 'Sample', scheduled_date: day('2027-01-07') }),
+    visit({ id: 'visit-b', customer_id: 'cust-2', first_name: 'Sam', last_name: 'Sample', scheduled_date: day('2027-01-07'), service_type: 'Pest Control Service' }),
+    visit({ id: 'visit-c' }), visit({ id: 'visit-d', service_type: 'Pest Control Service' }),
+  ]);
+  const { alerts, heldCount } = await sameStartVisitAlerts(TODAY);
+  const entries = alerts.map((alert) => alert[4].heldEntry(alert[3].itemKeys)).reverse();
+  const [title, why, metadata, opts] = heldCount(entries);
+  expect(title).toBe('Schedule — split same-time visits for 2 customers');
+  expect(why).toBe('2 customers have visits at the same time, first Dec 3; the bell limit held them.');
+  expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-03&appointment=visit-d');
+  expect(opts.detail).toBe('Pat Example — Dec 3 at 11 AM: Lawn Care Service and Pest Control Service. '
+    + 'Sam Sample — Jan 7, 2027 at 11 AM: Lawn Care Service and Pest Control Service.');
+  expect(metadata).toMatchObject({
+    count: 2, itemKeys: ['cust-1:2026-12-03', 'cust-2:2027-01-07'], feed: 'activity', quiet: true,
+    area: 'Schedule', severity: 'needs-you', subject: { type: 'check', id: 'same-start-visits-held' }, doneWhen: 'count_zero', who: 'person',
+  });
+  expect(metadata.itemSetHash).toMatch(/^[0-9a-f]{64}$/);
+  expect(opts.refreshOnDedupe).toBe(true);
+  expect(opts.ringOnRefresh({}, { itemKeys: [] })).toBe(false);
+  expect(heldCount([])).toBeNull();
+  expect(heldCount([null])).toBeNull();
+  expect(SAME_START_HELD_PREFIX.startsWith(SAME_START_PREFIX)).toBe(false);
+
+  // 999 customers: fifteen lines, then a count; the copy still fits the rules.
+  const many = Array.from({ length: 999 }, (_, i) => ({
+    customerId: `c-${String(i).padStart(3, '0')}`, order: '2027-01-15 10:00', firstDate: '2027-01-15',
+    line: `Customer ${i} — Jan 15, 2027 at 10 AM: Lawn Care Service and Pest Control Service.`,
+    link: `/admin/dispatch?tab=schedule&date=2027-01-15&appointment=v-${i}`, itemKeys: [`c-${i}:2027-01-15`], visitIds: [`v-${i}`],
+  }));
+  const [manyTitle, manyWhy, , manyOpts] = _sameStartHeldCount(many, TODAY);
+  expect(manyTitle).toBe('Schedule — split same-time visits for 999 customers');
+  expect(manyTitle.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  expect(manyWhy).toBe('999 customers have visits at the same time, first Jan 15, 2027; the bell limit held them.');
+  expect(manyWhy.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+  expect(manyOpts.detail.split(' — ')).toHaveLength(16);
+  expect(manyOpts.detail.endsWith('And 984 more customers.')).toBe(true);
+  const [oneTitle, oneWhy] = _sameStartHeldCount(many.slice(0, 1), TODAY);
+  expect([oneTitle, oneWhy]).toEqual(['Schedule — split same-time visits for 1 customer', '1 customer has visits at the same time, first Jan 15, 2027; the bell limit held them.']);
 });
 
 test('the bells come earliest first day first, whatever the customer order, so a capped run rings the nearest days', async () => {

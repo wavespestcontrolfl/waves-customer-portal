@@ -90,7 +90,7 @@
  */
 
 const db = require('../models/db');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const alertEpisodes = require('./admin-alert-episodes');
@@ -112,7 +112,7 @@ const LAWN_GAP_PREFIX = 'lawn-email-gap:';
 const PREPAY_PREFIX = 'prepay-coverage:';
 const ACCEPTED_PREFIX = 'accepted-schedule:';
 const CHURNED_PREFIX = 'churned-live-work:';
-const { SAME_START_PREFIX, sameStartVisitAlerts } = require('./same-start-visits-check');
+const { SAME_START_PREFIX, SAME_START_HELD_PREFIX, sameStartVisitAlerts } = require('./same-start-visits-check');
 // Invoice statuses that have not reached the customer (the status column has no
 // CHECK; 'send_failed' is an estimate status, never an invoice one).
 const UNSENT_INVOICE_STATUSES = ['draft', 'scheduled'];
@@ -827,7 +827,10 @@ async function runInner({ now = new Date() } = {}) {
   }
 
   // Last: two visits at one start, within what is left of the shared budget.
-  const late = await ringWithinBudget(sameStart.alerts, { episodes, now, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX });
+  const late = await ringWithinBudget(sameStart.alerts, {
+    episodes, now, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX,
+    failed: sameStart.failed, heldCount: sameStart.heldCount,
+  });
 
   return {
     skipped: false,
@@ -847,6 +850,9 @@ async function runInner({ now = new Date() } = {}) {
     combinedBookingCheckFailed,
     // Same-start bells closed past the budget, none of their days still a finding.
     sameStartClosed: late.closed,
+    // Customers on the class's standing count (0 = none, or closed at zero);
+    // null when it was not judged (killed, or a failed check).
+    sameStartHeld: late.held,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
     alerted: delivered.alerted + late.rang,
@@ -945,13 +951,17 @@ async function standingBellDays(prefix) {
 // new one later). A finding with no standing bell, or an auto-cleared one (a
 // delivery would reopen it), waits. Only a real wait (a new bell, a reopen, or
 // a day not shown yet) logs the cap hit: a standing bell that carries all its
-// days gets its whole update. Killed: the given order, and past the budget the
-// rest wait. Returns the real rings and the bells closed.
+// days gets its whole update. What waits is listed on the class's standing
+// count (syncHeldCount), so a pair tomorrow is never left with no row: the next
+// run cannot see it. Killed: the given order, and past the budget the rest
+// wait, with no standing count. Returns the real rings, the bells closed and
+// the customers on the standing count.
 const NO_NEW_DAY = '9999-12-31';
-async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
+async function ringWithinBudget(alerts, { episodes, now, budget, prefix, failed = false, heldCount = null }) {
   let rang = 0;
   let held = 0;
   const over = [];
+  const waiting = [];
   const standing = episodes && alerts.length ? await standingBellDays(prefix) : new Map();
   const firstNewDay = (alert) => {
     const carried = standing.get(alert[0]) || [];
@@ -966,7 +976,10 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
     if (rang >= budget) {
       if (!episodes) { held += 1; break; }
       const carried = standing.get(alert[0]);
-      if (!carried || day !== NO_NEW_DAY) held += 1;
+      if (!carried || day !== NO_NEW_DAY) {
+        held += 1;
+        waiting.push(heldEntryFor(alert, carried));
+      }
       if (!carried) continue;
       const kept = typeof alert[4]?.forDays === 'function' ? alert[4].forDays(carried) : null;
       if (!kept) { over.push(alert[0]); continue; }
@@ -976,7 +989,60 @@ async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
   }
   if (held) capHit();
   const closed = over.length ? await alertEpisodes.closeAdminAlertKeys(db, over, 'its days no longer start together', { now }) : 0;
-  return { rang, closed };
+  // A failed check leaves the standing count as it is, as it does the bells.
+  const listed = episodes && !failed ? await syncHeldCount(waiting.filter(Boolean), { heldCount, now }) : null;
+  return { rang, closed, held: listed };
+}
+
+// One held finding's entry on the standing count: the days no bell shows yet
+// (all of them without a standing bell, or with an auto-cleared one).
+function heldEntryFor(alert, carried) {
+  if (typeof alert[4]?.heldEntry !== 'function') return null;
+  const shown = carried || [];
+  return alert[4].heldEntry((alert[3].itemKeys || []).filter((day) => !shown.includes(day)));
+}
+
+// The newest standing count row: its key, whether it is still open, whether
+// the episodes closed it, and the items it lists. Null when there is none.
+async function latestHeldCount() {
+  const rows = await db('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [SAME_START_HELD_PREFIX])
+    .orderBy('created_at', 'desc')
+    .limit(1)
+    .select(db.raw("metadata->>'dedupeKey' as dedupe_key"), db.raw("metadata->>'autoCleared' as auto_cleared"), db.raw("metadata->'itemKeys' as item_keys"), 'done_at');
+  const row = rows.find((r) => String(r.dedupe_key || '').startsWith(SAME_START_HELD_PREFIX));
+  if (!row) return null;
+  const autoCleared = row.auto_cleared === 'true';
+  return {
+    key: row.dedupe_key,
+    open: !autoCleared && row.done_at == null,
+    autoCleared,
+    itemKeys: Array.isArray(row.item_keys) ? row.item_keys.map(String) : [],
+  };
+}
+
+// The class's standing count (docs/admin-notifications.md rule 3, as in
+// bid-kit-expiry.js): one Activity-only row that lists every held finding,
+// raised quietly, rewritten while its list changes, and closed at zero. It
+// never rings, so it never counts toward the budget (the 24-hour budget read
+// skips Activity rows). One key per episode: a count that closed and comes back
+// is a new quiet row, since reopening a closed one would ring it. A count that
+// a person, the retention sweep or the quiet fall-off closed stays closed while
+// it already lists every item that waits; a new item starts a new quiet row (a
+// quiet rewrite never reopens a done row, so it would stay hidden). Returns how
+// many customers wait.
+async function syncHeldCount(entries, { heldCount, now }) {
+  const latest = await latestHeldCount();
+  const count = entries.length && typeof heldCount === 'function' ? heldCount(entries) : null;
+  if (!count) {
+    if (latest?.open) await alertEpisodes.closeAdminAlertKeys(db, [latest.key], 'count_zero', { now, resolution: 'Cleared: no same-time visits wait without a bell' });
+    return 0;
+  }
+  const [title, why, metadata, opts] = count;
+  const dismissed = latest && !latest.open && !latest.autoCleared;
+  if (dismissed && metadata.itemKeys.every((key) => latest.itemKeys.includes(key))) return metadata.count;
+  await ringAlert(true, latest?.open ? latest.key : `${SAME_START_HELD_PREFIX}${randomUUID()}`, title, why, metadata, opts);
+  return metadata.count;
 }
 
 // Delivers one run's findings: rings them in order, capped at

@@ -61,6 +61,7 @@ jest.mock('../services/combined-booking-check', () => ({
 // (and its SQL on Postgres); here only how the watchdog rings and closes its bells.
 jest.mock('../services/same-start-visits-check', () => ({
   SAME_START_PREFIX: 'same-start-visits:',
+  SAME_START_HELD_PREFIX: 'same-start-visits-held:',
   sameStartVisitAlerts: jest.fn(async () => ({ alerts: [], failed: false })),
 }));
 
@@ -138,7 +139,7 @@ function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], comp
     let completedCheck = false;
     const c = {};
     if (table === 'customers as c') churnedChain = c;
-    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereExists', 'whereNotExists', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first']) {
+    for (const m of ['whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereExists', 'whereNotExists', 'leftJoin', 'join', 'select', 'count', 'as', 'orderBy', 'orderByRaw', 'whereRaw', 'first', 'limit']) {
       c[m] = jest.fn(() => c);
     }
     c.where = jest.fn((...args) => { if (args[0] === 'ss.status' && args[1] === 'completed') completedCheck = true; return c; });
@@ -1315,6 +1316,125 @@ describe('same-start visits (class 5)', () => {
     expect(result).toMatchObject({ sameStartVisits: 1, alerted: 0 });
     // Nothing waited, so the run logs no cap hit.
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('per-run alert cap hit'));
+  });
+
+  // The standing count stand-in: what the check's heldCount builds from heldEntry results.
+  const heldCountOf = (entries) => ['Schedule — split same-time visits for N customers', 'N customers have visits at the same time.',
+    { count: entries.length, itemKeys: entries.map((e) => e.key), feed: 'activity', quiet: true },
+    { link: '/admin/dispatch?tab=schedule', detail: entries.map((e) => e.key).join(' '), refreshOnDedupe: true, ringOnRefresh: () => false }];
+  const withHeldEntry = (alert) => {
+    alert[4] = { ...alert[4], heldEntry: jest.fn((days) => (days.length ? { key: `${alert[3].customer_id}:${days.join('+')}` } : null)) };
+    return alert;
+  };
+  const countCalls = () => episodeHelpers.raiseAdminAlertWithReopen.mock.calls.filter((c) => c[3].dedupeKey.startsWith('same-start-visits-held:'));
+  // A standing count row as the watchdog reads it (newest first).
+  const countRow = (key, itemKeys) => ({ dedupe_key: key, auto_cleared: null, item_keys: itemKeys, done_at: null });
+
+  test('past the budget what waits is one quiet standing count: a new bell, an auto-cleared one, and the days a standing bell does not show', async () => {
+    const known = withHeldEntry(pairAlert('cust-pair-1'));
+    known[3] = { ...known[3], itemKeys: ['2026-08-05', '2026-09-14'] };
+    known[4] = { ...known[4], forDays: jest.fn(() => pairAlert('cust-pair-1')) };
+    const fresh = withHeldEntry(pairAlert('cust-pair-2'));
+    fresh[3] = { ...fresh[3], itemKeys: ['2026-08-06'] };
+    const cleared = withHeldEntry(pairAlert('cust-pair-3'));
+    // All its days shown: its whole update goes out, and it is not on the count.
+    const shown = withHeldEntry(pairAlert('cust-pair-4'));
+    shown[4] = { ...shown[4], forDays: jest.fn(() => pairAlert('cust-pair-4')) };
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [known, fresh, cleared, shown], failed: false, heldCount: jest.fn(heldCountOf) });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({
+      bellRows: [
+        { dedupe_key: 'same-start-visits:cust-pair-1', auto_cleared: null, item_keys: ['2026-08-05'] },
+        { dedupe_key: 'same-start-visits:cust-pair-3', auto_cleared: 'true', item_keys: ['2026-08-10'] },
+        { dedupe_key: 'same-start-visits:cust-pair-4', auto_cleared: null, item_keys: ['2026-08-10'] },
+      ],
+      alertedKeys: new Set(['same-start-visits:cust-pair-1', 'same-start-visits:cust-pair-4']),
+    });
+    const result = await runInner({ now: NOW });
+    expect(known[4].heldEntry).toHaveBeenCalledWith(['2026-09-14']);
+    expect(fresh[4].heldEntry).toHaveBeenCalledWith(['2026-08-06']);
+    expect(cleared[4].heldEntry).toHaveBeenCalledWith(['2026-08-10']);
+    expect(shown[4].heldEntry).not.toHaveBeenCalled();
+    const counts = countCalls();
+    expect(counts).toHaveLength(1);
+    const [[category, title, why, opts]] = counts;
+    expect([category, title, why]).toEqual(['alert', 'Schedule — split same-time visits for N customers', 'N customers have visits at the same time.']);
+    expect(opts.dedupeKey).toMatch(/^same-start-visits-held:[0-9a-f-]{36}$/);
+    expect(opts).toMatchObject({ bell: true, refreshOnDedupe: true, link: '/admin/dispatch?tab=schedule' });
+    expect(opts.metadata).toMatchObject({
+      dedupeKey: opts.dedupeKey, feed: 'activity', quiet: true, count: 3,
+      // In ring order: earliest new day first.
+      itemKeys: ['cust-pair-2:2026-08-06', 'cust-pair-3:2026-08-10', 'cust-pair-1:2026-09-14'],
+    });
+    expect(opts.ringOnRefresh({}, { itemKeys: [] })).toBe(false);
+    // The count never rings, so it is not a ring of the run.
+    expect(result).toMatchObject({ sameStartVisits: 4, sameStartHeld: 3, alerted: 0 });
+  });
+
+  test('a pair tomorrow held by a spent budget is on the standing count; the next day it is gone and the count closes at zero', async () => {
+    const tomorrow = withHeldEntry(pairAlert('cust-pair-1'));
+    tomorrow[3] = { ...tomorrow[3], itemKeys: ['2026-08-05'] };
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [tomorrow], failed: false, heldCount: jest.fn(heldCountOf) });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({ bellRows: [] });
+    const first = await runInner({ now: NOW });
+    expect(first).toMatchObject({ sameStartHeld: 1, alerted: 0 });
+    const [[, , , raised]] = countCalls();
+    expect(raised.metadata.itemKeys).toEqual(['cust-pair-1:2026-08-05']);
+
+    // The next ET day: that pair is today's, so the finder no longer returns it. The open count closes.
+    jest.clearAllMocks();
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: false, heldCount: jest.fn(heldCountOf) });
+    makeDbMock({ bellRows: [countRow(raised.dedupeKey, ['cust-pair-1:2026-08-05'])] });
+    const next = await runInner({ now: new Date(NOW.getTime() + 24 * 3600 * 1000) });
+    expect(next).toMatchObject({ sameStartHeld: 0 });
+    expect(countCalls()).toHaveLength(0);
+    expect(episodeHelpers.closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), [raised.dedupeKey], 'count_zero',
+      expect.objectContaining({ resolution: 'Cleared: no same-time visits wait without a bell' }));
+  });
+
+  test('an open standing count is rewritten under its own key, quietly', async () => {
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [withHeldEntry(pairAlert('cust-pair-2'))], failed: false, heldCount: jest.fn(heldCountOf) });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({ bellRows: [countRow('same-start-visits-held:episode-1', ['cust-pair-9:2026-08-20'])] });
+    await runInner({ now: NOW });
+    expect(countCalls().map((c) => c[3].dedupeKey)).toEqual(['same-start-visits-held:episode-1']);
+    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), 'count_zero', expect.anything());
+  });
+
+  test('a count someone closed stays closed while it lists every item that waits; a new item starts a new quiet row', async () => {
+    const closedCount = { ...countRow('same-start-visits-held:episode-1', ['cust-pair-2:2026-08-10']), done_at: new Date('2026-08-03T12:00:00Z') };
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [withHeldEntry(pairAlert('cust-pair-2'))], failed: false, heldCount: jest.fn(heldCountOf) });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({ bellRows: [closedCount] });
+    expect(await runInner({ now: NOW })).toMatchObject({ sameStartHeld: 1 });
+    expect(countCalls()).toHaveLength(0);
+
+    // Another customer waits too: a new episode lists both; the closed row is left as it is.
+    sameStartVisitAlerts.mockResolvedValueOnce({
+      alerts: [withHeldEntry(pairAlert('cust-pair-2')), withHeldEntry(pairAlert('cust-pair-3'))], failed: false, heldCount: jest.fn(heldCountOf),
+    });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({ bellRows: [closedCount] });
+    expect(await runInner({ now: NOW })).toMatchObject({ sameStartHeld: 2 });
+    const [[, , , opts]] = countCalls();
+    expect(opts.dedupeKey).toMatch(/^same-start-visits-held:[0-9a-f-]{36}$/);
+    expect(opts.metadata.itemKeys).toEqual(['cust-pair-2:2026-08-10', 'cust-pair-3:2026-08-10']);
+    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), 'count_zero', expect.anything());
+  });
+
+  test('a failed check, or the kill switch, leaves the standing count as it is', async () => {
+    const open = countRow('same-start-visits-held:episode-1', ['cust-pair-2:2026-08-10']);
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: true });
+    makeDbMock({ bellRows: [open] });
+    expect(await runInner({ now: NOW })).toMatchObject({ sameStartCheckFailed: true, sameStartHeld: null });
+    alertEpisodesLive.mockReturnValue(false);
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [withHeldEntry(pairAlert('cust-pair-2'))], failed: false, heldCount: jest.fn(heldCountOf) });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 10, problems: 10, rings: 10 });
+    makeDbMock({ bellRows: [open] });
+    expect(await runInner({ now: NOW })).toMatchObject({ sameStartHeld: null });
+    expect(countCalls()).toHaveLength(0);
+    expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), 'count_zero', expect.anything());
   });
 
   test('with one ring left, a new pair tomorrow rings ahead of a standing bell whose new day is next month', async () => {

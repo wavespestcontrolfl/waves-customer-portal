@@ -44,8 +44,10 @@
  * ALERT: one needs-you Schedule bell per customer (docs/admin-notifications.md),
  * raised by the schedule-integrity watchdog's daily 6:40 ET run, under its gate,
  * its shared ring budget (this class rings after every other one, the
- * combined-booking check included, earliest first day first) and its alert
- * episodes. The bell names the
+ * combined-booking check included, earliest new day first) and its alert
+ * episodes. What the budget holds back is one standing count
+ * (docs/admin-notifications.md rule 3): one quiet Activity-only row that lists
+ * each held customer and the days that wait, closed at zero. The bell names the
  * first day and the number of days, links to the first day's schedule, and
  * lists the days and their groups in its detail. Its itemKeys are every day,
  * listed in the detail or not, so a day that joins a standing bell rings it
@@ -66,6 +68,12 @@ const SAME_START_PREFIX = 'same-start-visits:';
 const LIVE_STATUSES = ['pending', 'confirmed'];
 // Days named in the bell's detail; any more are counted, not listed.
 const DETAIL_DAYS = 10;
+// The standing count's dedupe-key prefix: one key per episode (`<prefix><uuid>`),
+// so a count that closed and comes back is a new quiet row (a reopen rings).
+// Not under SAME_START_PREFIX, so the class's close pass never judges it.
+const SAME_START_HELD_PREFIX = 'same-start-visits-held:';
+// Customers named in the standing count's detail; any more are counted, not listed.
+const HELD_LIST_MAX = 15;
 
 // Every live visit after `todayET` (YYYY-MM-DD, Eastern) that shares its
 // customer, day and arrival start with another live visit for the same
@@ -200,6 +208,14 @@ function detailText(days, todayET) {
   return [...listed, ...(more > 0 ? [`And ${more} more ${more === 1 ? 'day' : 'days'}.`] : [])].join(' ');
 }
 
+// That day's schedule, opened on the visit the office moves: the last visit of
+// its first group.
+function scheduleLink(day) {
+  const [firstGroup] = day.groups;
+  const moveId = firstGroup.visits[firstGroup.visits.length - 1].id;
+  return `/admin/dispatch?tab=schedule&date=${encodeURIComponent(day.date)}&appointment=${encodeURIComponent(moveId)}`;
+}
+
 // One finding's bell copy under docs/admin-notifications.md: the customer in the
 // headline, the first day and time in the why, that day's schedule behind the
 // link. A rule violation (an odd name) never costs the alert: it falls back to
@@ -217,9 +233,7 @@ function sameStartCopy(finding, todayET) {
   } else if (finding.days.length === 1) {
     why = `${visitCount} visits on ${day} share a start time with another visit; split them so they run back to back.`;
   }
-  // The visit the office moves: the last of the first day's first group.
-  const moveId = firstGroup.visits[firstGroup.visits.length - 1].id;
-  const link = `/admin/dispatch?tab=schedule&date=${encodeURIComponent(first.date)}&appointment=${encodeURIComponent(moveId)}`;
+  const link = scheduleLink(first);
   const detail = detailText(finding.days, todayET);
   const spec = {
     area: 'Schedule',
@@ -284,16 +298,88 @@ function sameStartAlert(finding, todayET) {
         const days = finding.days.filter((day) => keep.includes(day.date));
         return days.length ? sameStartAlert({ ...finding, days }, todayET) : null;
       },
+      // The days of it that wait past the watchdog's budget (YYYY-MM-DD), as one
+      // entry of the class's standing count. Null when none is still a finding.
+      heldEntry: (wait) => {
+        const days = finding.days.filter((day) => wait.includes(day.date));
+        return days.length ? heldEntryOf({ ...finding, days }, todayET) : null;
+      },
     },
   ];
 }
 
-// The class's alerts, or a failed flag when the check threw (an unknown live
-// set: the watchdog's close pass then leaves this class's standing bells alone).
+// One held finding on the standing count: the customer, its first day that
+// waits with that day's groups, and how many more days wait.
+function heldEntryOf(finding, todayET) {
+  const [first] = finding.days;
+  const more = finding.days.length - 1;
+  return {
+    customerId: finding.customerId,
+    order: `${first.date} ${first.groups[0].start}`,
+    firstDate: first.date,
+    line: `${finding.name || 'A customer'} — ${dayDetail(first, todayET)}${more ? ` And ${more} more ${more === 1 ? 'day' : 'days'}.` : ''}`,
+    link: scheduleLink(first),
+    itemKeys: finding.days.map((day) => `${finding.customerId}:${day.date}`),
+    visitIds: finding.days.flatMap((day) => day.groups.flatMap((group) => group.visits.map((v) => v.id))),
+  };
+}
+
+// docs/admin-notifications.md rule 3: what the watchdog's shared ring budget
+// holds back becomes one standing count, as in bid-kit-expiry.js. `entries` are
+// heldEntry results; the count lists them earliest first and links to the
+// first. The watchdog raises it as one quiet Activity-only row: never rung,
+// rewritten while its list changes, closed at zero. [title, why, metadata,
+// options], or null when nothing waits.
+function sameStartHeldCount(entries, todayET) {
+  const compose = require('./admin-alert-compose');
+  const { itemSetHashFor } = require('./ops-digest');
+  const list = (entries || []).filter(Boolean)
+    .sort((a, b) => byText(a.order, b.order) || byText(a.customerId, b.customerId));
+  if (!list.length) return null;
+  const n = list.length;
+  const listed = list.slice(0, HELD_LIST_MAX).map((entry) => entry.line);
+  const more = n - listed.length;
+  const composed = compose.composeAdminAlert({
+    area: 'Schedule',
+    action: `split same-time visits for ${n} ${n === 1 ? 'customer' : 'customers'}`,
+    why: `${n} ${n === 1 ? 'customer has' : 'customers have'} visits at the same time, first ${dayWords(list[0].firstDate, todayET)}; the bell limit held them.`,
+    severity: 'needs-you',
+    link: list[0].link,
+    subject: { type: 'check', id: 'same-start-visits-held' },
+    doneWhen: 'count_zero',
+    who: 'person',
+  });
+  return [
+    composed.headline,
+    composed.why,
+    {
+      ...composed.metadata,
+      count: n,
+      itemKeys: list.flatMap((entry) => entry.itemKeys).sort(),
+      itemSetHash: itemSetHashFor(list.flatMap((entry) => entry.visitIds)),
+      feed: 'activity',
+      quiet: true,
+    },
+    {
+      link: composed.link,
+      detail: [...listed, ...(more > 0 ? [`And ${more} more ${more === 1 ? 'customer' : 'customers'}.`] : [])].join(' '),
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
+    },
+  ];
+}
+
+// The class's alerts and its standing count's builder, or a failed flag when
+// the check threw (an unknown live set: the watchdog's close pass then leaves
+// this class's standing bells and its standing count alone).
 async function sameStartVisitAlerts(todayET) {
   try {
     const findings = groupByCustomer(await findSameStartVisits(todayET));
-    return { alerts: findings.map((finding) => sameStartAlert(finding, todayET)), failed: false };
+    return {
+      alerts: findings.map((finding) => sameStartAlert(finding, todayET)),
+      failed: false,
+      heldCount: (entries) => sameStartHeldCount(entries, todayET),
+    };
   } catch (err) {
     logger.error(`[schedule-integrity] same-start visit check failed: ${err.message}`);
     return { alerts: [], failed: true };
@@ -302,7 +388,9 @@ async function sameStartVisitAlerts(todayET) {
 
 module.exports = {
   SAME_START_PREFIX,
+  SAME_START_HELD_PREFIX,
   sameStartVisitAlerts,
+  _sameStartHeldCount: sameStartHeldCount,
   _findSameStartVisits: findSameStartVisits,
   _groupByCustomer: groupByCustomer,
   _sameStartCopy: sameStartCopy,
