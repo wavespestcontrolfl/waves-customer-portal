@@ -111,13 +111,19 @@ async function loadPayerLinkage(customerId, dbh = db, { propagateCancellation = 
 // Codex round-50 P2: a customer with a DEFAULT payer makes every unstamped invoice a candidate; lookups are memoized per candidate
 // payer (byCandidatePayer), so each row costs only its read - the row bound is a sanity bound (1000 ≈ 80 years of monthly visits),
 // and LIVE_SCAN_MAX_RESOLUTIONS bounds the actual resolver lookups (distinct payers).
+// A combined-visit invoice is always a candidate: its representative visit can be self-pay while another BILLED packet member has
+// a per-job payer. The packet's saved billing snapshot, member overrides and customer fallback are judged only by the canonical
+// liveThirdPartyPayerForPacket reader. LIVE_PACKET_SCAN_MAX_PACKETS bounds those additional packet reads; crossing it is UNKNOWN.
 const LIVE_SCAN_MAX_INVOICES = 1000;
 const LIVE_CANDIDATE_PAYER_SQL = `(EXISTS (SELECT 1 FROM customers c WHERE c.id = invoices.customer_id AND c.payer_id IS NOT NULL)
   OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = invoices.scheduled_service_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL)
   OR EXISTS (SELECT 1 FROM service_records sr JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
-    WHERE invoices.scheduled_service_id IS NULL AND sr.id = invoices.service_record_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL))`;
+    WHERE invoices.scheduled_service_id IS NULL AND sr.id = invoices.service_record_id AND ss.customer_id = invoices.customer_id AND ss.payer_id IS NOT NULL)
+  OR invoices.visit_completion_packet_id IS NOT NULL)`;
 const LIVE_SCAN_MAX_RESOLUTIONS = 30;
+const LIVE_PACKET_SCAN_MAX_PACKETS = 30;
 const LIVE_SETTLED_EXCLUSION_SQL = "lower(coalesce(invoices.status, '')) NOT IN ('paid', 'prepaid', 'refunded', 'partially_refunded', 'void', 'voided', 'canceled', 'cancelled', 'written_off')";
+const LIVE_ANNUAL_PREPAY_MARKER_SQL = 'EXISTS (SELECT 1 FROM annual_prepay_terms apt WHERE apt.prepay_invoice_id = invoices.id) AS annual_prepay_linked';
 async function loadLivePayerLinkage(customerId, dbh = db) {
   const base = await loadPayerLinkage(customerId, dbh);
   if (base.failed) return { ...base, liveOwnedIds: new Set(), liveOwnedRows: [] };
@@ -129,26 +135,64 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
     .where(function notWithdrawn() {
       this.whereNull('scheduled_send_error').orWhere('scheduled_send_error', 'not like', 'payer_billed:%');
     })
-    // Codex round-48 P2: only invoices that CAN resolve to a payer count against the bound - the account has a default payer, or the
-    // invoice's own visit names one (payer.resolveForInvoice's only two sources). Every other row is self-pay for certain, so a long
-    // self-pay history never makes the account unverifiable.
+    // Codex round-48 P2: only invoices that CAN resolve to a payer count against the bound - the account has a default payer, the
+    // invoice's own visit names one, or a combined packet can name one on another billed member. Every other row is self-pay for
+    // certain, so a long self-pay history never makes the account unverifiable.
     .whereRaw(LIVE_CANDIDATE_PAYER_SQL)
     // Codex round-76 P2: only UNSETTLED invoices are re-resolved live - a settled self-pay invoice keeps the ownership it was paid under
     // (a payer assigned to the account later must not take the customer's own payment history with it)
     .whereRaw(LIVE_SETTLED_EXCLUSION_SQL)
-    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
+    .select('id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number',
+      typeof dbh.client?.raw === 'function' ? dbh.client.raw(LIVE_ANNUAL_PREPAY_MARKER_SQL) : LIVE_ANNUAL_PREPAY_MARKER_SQL)
     .orderBy('created_at', 'desc')
     .limit(LIVE_SCAN_MAX_INVOICES + 1)
     .catch(() => { failed = true; return []; });
   if (rows.length > LIVE_SCAN_MAX_INVOICES) failed = true; // more history than the bounded scan can judge => unknown
   if (failed) return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  // Annual-prepay invoices obey the TERM's Bill-To scope, not a visit link
+  // the invoice may also carry. Some legacy/renewal rows have no
+  // invoices.annual_prepay_term_id and are identifiable only through
+  // annual_prepay_terms.prepay_invoice_id. The bounded invoice read above
+  // projects that indexed EXISTS marker, so no extra round trip or per-row
+  // lookup is needed. Remove visit/record scope before asking the canonical
+  // live resolver. The customer default payer still applies; a payer assigned
+  // only to the linked visit does not take ownership of the homeowner's year.
+  const annualPrepayIds = new Set(rows.filter((row) => row.annual_prepay_linked).map((row) => String(row.id)));
+  const ownershipRows = rows.map((row) => (annualPrepayIds.has(String(row.id))
+    ? { ...row, scheduled_service_id: null, service_record_id: null }
+    : row));
   let verdict;
   try {
-    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, rows, dbh, { maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS, byCandidatePayer: true });
+    verdict = await require('./invoice-payer-ownership').liveInvoiceOwnership(customerId, ownershipRows, dbh, { maxResolutions: LIVE_SCAN_MAX_RESOLUTIONS, byCandidatePayer: true });
   } catch {
     return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
   }
   if (verdict.unverifiable) return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+
+  // A packet's representative invoice link is not its whole Bill-To verdict.
+  // Check each still-unowned packet once through the canonical packet reader;
+  // it consults only the saved billed-member snapshot and applies each
+  // member's payer/self-pay override before the customer fallback. `dbh` is
+  // the caller's read-only repeatable-read transaction on the Billing route,
+  // so the packet, members and later balance/token queries share one snapshot.
+  const packetRows = rows.filter((row) => !annualPrepayIds.has(String(row.id)) && row.visit_completion_packet_id
+    && !verdict.ownedIds.has(String(row.id)));
+  const packetIds = [...new Set(packetRows.map((row) => String(row.visit_completion_packet_id)))];
+  if (packetIds.length > LIVE_PACKET_SCAN_MAX_PACKETS) {
+    return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  }
+  try {
+    const ownedPacketIds = new Set();
+    const Packets = require('./visit-completion-packets');
+    for (const packetId of packetIds) {
+      if (await Packets.liveThirdPartyPayerForPacket(packetId, dbh)) ownedPacketIds.add(packetId);
+    }
+    for (const row of packetRows) {
+      if (ownedPacketIds.has(String(row.visit_completion_packet_id))) verdict.ownedIds.add(String(row.id));
+    }
+  } catch {
+    return { ...base, failed: true, liveOwnedIds: new Set(), liveOwnedRows: [] };
+  }
   const liveOwned = rows.filter((r) => verdict.ownedIds.has(String(r.id)));
   const linkage = buildPayerLinkage([...base.payerInvRows, ...liveOwned]);
   return { ...linkage, liveOwnedIds: verdict.ownedIds, liveOwnedRows: liveOwned };
@@ -158,27 +202,38 @@ async function loadLivePayerLinkage(customerId, dbh = db) {
 // uuid PRIMARY KEY (20260401000082_invoices), so comparing the uuid directly lets the planner
 // use the key instead of casting the indexed column to text; the CASE guarantees the cast is
 // only evaluated for a well-formed value (a malformed metadata string can never throw).
-function uuidFromMetadata(alias) {
-  const v = `${alias}.metadata->>'invoice_id'`;
+function uuidFromMetadata(alias, key = 'invoice_id') {
+  const v = `${alias}.metadata->>'${key}'`;
   return `(CASE WHEN ${v} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (${v})::uuid END)`;
 }
 
 function excludeLiveOwnedPayerPayments(qb, linkage) {
-  const rows = linkage.liveOwnedRows || [];
+  // SQL twin of buildPayerLinkage/isPayerLinked for rows whose invoice is
+  // already known. loadLivePayerLinkage folds stamped and live-owned invoices
+  // into payerInvRows, so filtering all of them here keeps row limits/order
+  // from being consumed by AP history. Direct payer stamps are handled by
+  // excludeDirectPayerPayments before this helper is called.
+  const rows = linkage.payerInvRows?.length ? linkage.payerInvRows : (linkage.liveOwnedRows || []);
   if (!rows.length) return qb;
   const ph = (n) => Array.from({ length: n }, () => '?').join(', ');
   const ids = rows.map((r) => String(r.id));
-  const mdId = uuidFromMetadata('payments');
-  qb.whereRaw(`(${mdId} IS NULL OR ${mdId}::text NOT IN (${ph(ids.length)}))`, ids);
+  for (const key of ['invoice_id', 'dispute_invoice_id', 'waves_invoice_id']) {
+    const mdId = uuidFromMetadata('payments', key);
+    qb.whereRaw(`(${mdId} IS NULL OR ${mdId}::text NOT IN (${ph(ids.length)}))`, ids);
+  }
   const pis = rows.map((r) => r.stripe_payment_intent_id).filter(Boolean);
   if (pis.length) qb.whereRaw(`(payments.stripe_payment_intent_id IS NULL OR payments.stripe_payment_intent_id NOT IN (${ph(pis.length)}))`, pis);
   const chs = rows.map((r) => r.stripe_charge_id).filter(Boolean);
   if (chs.length) qb.whereRaw(`(payments.stripe_charge_id IS NULL OR payments.stripe_charge_id NOT IN (${ph(chs.length)}))`, chs);
+  const nums = rows.map((r) => r.invoice_number).filter(Boolean);
+  if (nums.length) {
+    qb.whereRaw(`COALESCE(substring(payments.description from '^Invoice\\s+([A-Za-z0-9-]+)\\s+—'), '') NOT IN (${ph(nums.length)})`, nums);
+  }
   return qb;
 }
 
 module.exports = {
-  LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL,
-  LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
+  LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL, LIVE_ANNUAL_PREPAY_MARKER_SQL,
+  LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, LIVE_PACKET_SCAN_MAX_PACKETS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
   invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage, excludeDirectPayerPayments,
 };
