@@ -19,8 +19,10 @@ const { invoiceAmountDue } = require('../services/invoice-helpers');
 const {
   UUID_SHAPE,
   loadFailedPaymentFacts,
+  standaloneFailedRows,
   standaloneFailedTotal,
   isNeverAttemptedDeferral,
+  metadataInvoiceId,
 } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
 const { removePaymentMethod } = require('../services/payment-method-removal');
@@ -709,7 +711,7 @@ router.get('/balance', async (req, res, next) => {
     // (isNeverAttemptedDeferral and the canonical unsuperseded-failed query live in services/failed-payments.js — the SMS
     // grounding balance reads the same code; Codex round-35 P1.)
     const failedFacts = await loadFailedPaymentFacts(req.customerId, balanceDb);
-    const { failedInvoiceIds, balanceCarryingInvoiceIds } = failedFacts;
+    const eligibleFailedRows = standaloneFailedRows(failedFacts, isPayerLinked);
     const failedTotal = standaloneFailedTotal(failedFacts, isPayerLinked);
 
     // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
@@ -748,10 +750,10 @@ router.get('/balance', async (req, res, next) => {
     // completed attempt failed — not when there's any failed row in history.
     // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
     // banner.
-    // Bounded scan: page in small batches (capped) past payer rows and
-    // never-attempted deferrals so this billing-page load never scales with
-    // the customer's full ledger — the common case still resolves on the
-    // first page.
+    // Bounded pages: advance past payer rows and never-attempted deferrals
+    // until a homeowner attempt or actual ledger exhaustion. Each query stays
+    // bounded and the repeatable-read snapshot plus unique id tiebreaker makes
+    // offset paging stable; the common case still resolves on the first page.
     // A never-attempted deferral (see isNeverAttemptedDeferral) is not an
     // attempt either — it must not raise the "last payment failed" banner.
     const isRealAttempt = (p) => !isPayerLinked(p) && !isNeverAttemptedDeferral(p);
@@ -765,7 +767,7 @@ router.get('/balance', async (req, res, next) => {
       .select('id', 'status', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'retry_count', 'next_retry_at');
     let mostRecentAttempt = null;
     const PAGE = 50;
-    for (let offset = 0; offset < 500; offset += PAGE) {
+    for (let offset = 0; ; offset += PAGE) {
       const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
       if (!batch.length) break;
       mostRecentAttempt = batch.find(isRealAttempt) || null;
@@ -793,10 +795,10 @@ router.get('/balance', async (req, res, next) => {
       // Postgres throw on the cast and 500 the whole Billing tab for that
       // customer (Codex round-6 P2). Shape-filter before querying — a
       // malformed id simply doesn't get a pay link.
-      const failedDraftInvoiceIds = failedInvoiceIds
-        .filter((id) => !balanceCarryingInvoiceIds.has(id.toLowerCase()))
-        .filter((id) => !failedFacts.unresolvedInvoiceIds.has(id.toLowerCase()))
-        .filter((id) => UUID_SHAPE.test(id));
+      const failedDraftInvoiceIds = [...new Set(eligibleFailedRows
+        .map(metadataInvoiceId)
+        .filter(Boolean)
+        .filter((id) => UUID_SHAPE.test(id)))];
       const openInvoicesQuery = balanceDb('invoices')
         .where({ customer_id: req.customerId })
         .where(function () {

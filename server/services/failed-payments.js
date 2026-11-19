@@ -85,14 +85,24 @@ async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['faile
   let carrying = [];
   let invoiceLookupFailed = false;
   if (validFailedInvoiceIds.length) {
-    const lookup = dbh('invoices').whereIn('id', validFailedInvoiceIds).whereNot({ status: 'draft' }).select('id');
-    if (strict) {
-      carrying = await lookup;
-    } else {
-      carrying = await lookup.catch(() => {
-        invoiceLookupFailed = true;
-        return [];
-      });
+    const lookup = (connection) => connection('invoices')
+      .whereIn('id', validFailedInvoiceIds)
+      .whereNot({ status: 'draft' })
+      .select('id');
+    try {
+      if (!strict && dbh?.isTransaction === true && typeof dbh.transaction === 'function') {
+        // The portal balance runs in a read-only PostgreSQL snapshot. A bare
+        // caught statement error poisons that transaction (25P02), so contain
+        // this explicitly recoverable status lookup in Knex's nested-transaction
+        // SAVEPOINT before continuing with upcoming/open-invoice reads.
+        carrying = await dbh.transaction((savepoint) => lookup(savepoint));
+      } else {
+        carrying = await lookup(dbh);
+      }
+    } catch (err) {
+      if (strict) throw err;
+      invoiceLookupFailed = true;
+      carrying = [];
     }
   }
   const balanceCarryingInvoiceIds = new Set(carrying.map((r) => String(r.id).toLowerCase()));
@@ -106,7 +116,7 @@ async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['faile
 }
 
 // `isPayerPayment(row)` — the caller's payer-ownership predicate.
-function standaloneFailedTotal({ rows, balanceCarryingInvoiceIds, unresolvedInvoiceIds = new Set() }, isPayerPayment = () => false) {
+function standaloneFailedRows({ rows, balanceCarryingInvoiceIds, unresolvedInvoiceIds = new Set() }, isPayerPayment = () => false) {
   return rows
     .filter((p) => !isPayerPayment(p))
     .filter((p) => !isNeverAttemptedDeferral(p))
@@ -115,13 +125,18 @@ function standaloneFailedTotal({ rows, balanceCarryingInvoiceIds, unresolvedInvo
       if (!invId) return true;
       const canonicalId = invId.toLowerCase();
       return !balanceCarryingInvoiceIds.has(canonicalId) && !unresolvedInvoiceIds.has(canonicalId);
-    })
+    });
+}
+
+function standaloneFailedTotal(facts, isPayerPayment = () => false) {
+  return standaloneFailedRows(facts, isPayerPayment)
     .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 }
 
 module.exports = {
   UUID_SHAPE,
   loadFailedPaymentFacts,
+  standaloneFailedRows,
   standaloneFailedTotal,
   isNeverAttemptedDeferral,
   excludeNeverAttemptedDeferrals,

@@ -52,6 +52,7 @@ const tableResults = {
   linkedNonDraftInvoices: [],
 };
 const invoiceQueryCalls = [];
+const recentAttemptQueryCalls = [];
 
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
@@ -103,7 +104,10 @@ jest.mock('../models/db', () => {
       if (whereArg.status === 'upcoming') return project(tableResults.upcomingRows);
       // recent-attempts scan (whereIn statuses)
       if (wantFirst) return tableResults.recentAttempts[0] || null;
-      return project(tableResults.recentAttempts);
+      recentAttemptQueryCalls.push(calls);
+      const limit = (calls.find(([method]) => method === 'limit') || [null, [tableResults.recentAttempts.length]])[1][0];
+      const offset = (calls.find(([method]) => method === 'offset') || [null, [0]])[1][0];
+      return project(tableResults.recentAttempts.slice(offset, offset + limit));
     }
     throw new Error(`Unexpected table ${table}`);
   }));
@@ -150,6 +154,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     jest.clearAllMocks();
     mockPortalPayNow = false;
     invoiceQueryCalls.length = 0;
+    recentAttemptQueryCalls.length = 0;
     tableResults.payerInvoices = [];
     tableResults.failedRows = [];
     tableResults.upcomingRows = [];
@@ -216,6 +221,38 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     });
     tableResults.recentAttempts.push({ id: 'own', status: 'failed' });
     expect(await getBalance()).toMatchObject({ lastPaymentFailed: true, lastPaymentAttemptId: 'own' });
+  });
+
+  test('the latest-attempt scan pages through every ineligible payer row before the homeowner attempt', async () => {
+    const payerInvoiceId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
+    tableResults.payerInvoices = [{ id: payerInvoiceId }];
+    tableResults.recentAttempts = [
+      ...Array.from({ length: 550 }, (_, index) => ({
+        id: `payer-${String(index).padStart(3, '0')}`,
+        status: 'failed',
+        metadata: { waves_invoice_id: payerInvoiceId },
+      })),
+      { id: 'homeowner-visible', status: 'failed', metadata: null },
+    ];
+
+    const body = await getBalance();
+
+    expect(body).toMatchObject({
+      lastPaymentFailed: true,
+      lastPaymentAttemptId: 'homeowner-visible',
+    });
+    expect(recentAttemptQueryCalls).toHaveLength(12);
+    expect(recentAttemptQueryCalls[0]).toEqual(expect.arrayContaining([
+      ['orderBy', ['payment_date', 'desc']],
+      ['orderBy', ['created_at', 'desc']],
+      ['orderBy', ['id', 'desc']],
+      ['limit', [50]],
+      ['offset', [0]],
+    ]));
+    expect(recentAttemptQueryCalls[11]).toEqual(expect.arrayContaining([
+      ['limit', [50]],
+      ['offset', [550]],
+    ]));
   });
 
   test('live default/visit payer ownership is excluded from failed, upcoming, balance, next-charge, and Pay now surfaces', async () => {

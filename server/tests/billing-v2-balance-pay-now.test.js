@@ -100,7 +100,9 @@ jest.mock('../models/db', () => {
       if (whereArg.status === 'failed') return tableResults.failedRows;
       if (whereArg.status === 'upcoming') return tableResults.upcomingRows;
       if (wantFirst) return tableResults.recentAttempts[0] || null;
-      return tableResults.recentAttempts;
+      const limit = (calls.find(([method]) => method === 'limit') || [null, [tableResults.recentAttempts.length]])[1][0];
+      const offset = (calls.find(([method]) => method === 'offset') || [null, [0]])[1][0];
+      return tableResults.recentAttempts.slice(offset, offset + limit);
     }
     throw new Error(`Unexpected table ${table}`);
   }));
@@ -203,6 +205,34 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     expect(body.openInvoices).toEqual([
       { payUrl: '/pay/tok-draft', amountDue: 89, invoiceNumber: 'INV-DRAFT-1', dueDate: null },
     ]);
+  });
+
+  test('payer-owned and never-attempted failures cannot admit a homeowner draft token', async () => {
+    const payerLinkedDraftId = '22222222-2222-4222-8222-222222222222';
+    const deferredDraftId = '33333333-3333-4333-8333-333333333333';
+    tableResults.failedRows = [
+      {
+        id: 'payer-failure', amount: '89.00', payer_id: '44444444-4444-4444-8444-444444444444',
+        metadata: { invoice_id: payerLinkedDraftId },
+      },
+      {
+        id: 'never-attempted', amount: '55.00', stripe_payment_intent_id: null,
+        retry_count: 0, next_retry_at: '2026-11-20T15:00:00Z',
+        metadata: { invoice_id: deferredDraftId, deferred_reason: 'lock_contention' },
+      },
+    ];
+    tableResults.openInvoiceRows = [
+      { id: payerLinkedDraftId, status: 'draft', token: 'payer-leak', invoice_number: 'INV-PAYER', total: '89.00' },
+      { id: deferredDraftId, status: 'draft', token: 'deferral-leak', invoice_number: 'INV-DEFERRED', total: '55.00' },
+    ];
+
+    const body = await getBalance();
+
+    expect(body.currentBalance).toBe(0);
+    expect(body.openInvoices).toEqual([]);
+    expect(tableResults.lastOpenInvoicesCalls.filter(
+      ([method, args]) => method === 'whereIn' && args[0] === 'id',
+    )).toEqual([]);
   });
 
   test('the failed-id shortcut rechecks draft status before returning a bearer token', async () => {
