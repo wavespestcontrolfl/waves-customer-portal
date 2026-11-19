@@ -39,6 +39,9 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: ({ onViewDetails }) => <div data-testid="tree-sheet" data-details={details(onViewDetails)} /> }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: ({ onViewDetails }) => <div data-testid="lawn-sheet" data-details={details(onViewDetails)} /> }));
+vi.mock('../../components/tech/FastCompleteAssessmentSheet', () => ({
+  default: ({ service, onViewDetails }) => <div data-testid="assessment-sheet" data-service={JSON.stringify(service)} data-details={details(onViewDetails)} />,
+}));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
   default: ({ service, catalog, catalogError, onViewDetails }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} data-details={details(onViewDetails)} />,
 }));
@@ -381,6 +384,7 @@ it.each([
   ['tree & shrub', { idempotencyKey: 'k-ts', structuredFindings: { type: 'tree_shrub', values: {} } }, undefined, 'tree-sheet'],
   ['lawn re-service', { idempotencyKey: 'k-lr', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } }, undefined, 'lawn-sheet'],
   ['lawn visit', { idempotencyKey: 'k-lv', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } }, 'lawn_visit', 'lawn-visit-sheet'],
+  ['assessment', { idempotencyKey: 'k-as', technicianNotes: 'Assessment work' }, 'assessment', 'assessment-sheet'],
 ])('an off-route saved %s attempt opens its sheet with no Details pill', async (_label, body, sheet, testId) => {
   mocks.attempts.set('svc-off', { body, summary: 'Saved visit', ...(sheet ? { sheet } : {}) });
   rows = [];
@@ -453,4 +457,28 @@ it('a recovery read failure on an offline route says so on the tool and opens no
   // The Tools page shows no route notice; the tool's own line says why.
   expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+// The Waves Assessment sheet's saved attempt reopens in that sheet, to retry
+// or discard alone (`recoveryOnly`: a fresh assessment completes on
+// Dispatch's sheet), never in the pest sheet. Its tag decides; an older
+// untagged one reads by the consultation outcome only that sheet sends, or,
+// with none (a converted consultation), by its Waves Assessment visit. The
+// first two stand on a pest row: the attempt, not the row, decides.
+it.each([
+  ['tagged', { idempotencyKey: 'as-1', technicianNotes: 'Assessment work' }, 'assessment', {}],
+  ['untagged, with its outcome', { idempotencyKey: 'as-2', technicianNotes: 'Assessment work', consultationOutcome: { outcome: 'warm' } }, undefined, {}],
+  ['untagged, on a Waves Assessment visit', { idempotencyKey: 'as-3', technicianNotes: 'Assessment work' }, undefined, {
+    serviceType: 'Waves Assessment', completionProfile: { category: 'inspection', serviceKey: 'lawn_inspection' },
+  }],
+])('a saved assessment attempt (%s) reopens in the assessment sheet, to retry or discard alone', async (_label, body, sheet, overrides) => {
+  mocks.attempts.set('svc-as', { body, summary: 'Waves Assessment', ...(sheet ? { sheet } : {}) });
+  rows = [row('svc-as', { status: 'completed', ...overrides })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const opened = await screen.findByTestId('assessment-sheet');
+  expect(JSON.parse(opened.getAttribute('data-service'))).toMatchObject({ id: 'svc-as', recoveryOnly: true });
+  expect(opened).toHaveAttribute('data-details', 'no');
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });

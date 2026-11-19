@@ -9,6 +9,7 @@ import FastCompleteSheet from './FastCompleteSheet';
 import FastCompleteLawnReserviceSheet from './FastCompleteLawnReserviceSheet';
 import FastCompleteTreeShrubSheet from './FastCompleteTreeShrubSheet';
 import FastCompleteLawnSheet from './FastCompleteLawnSheet';
+import FastCompleteAssessmentSheet from './FastCompleteAssessmentSheet';
 import { getFastCompletionAttempt, putFastCompletionAttempt } from '../../lib/completion-resume-store';
 
 beforeEach(() => {
@@ -22,6 +23,7 @@ for (const [name, Sheet, reportFlow] of [
   ['lawn', FastCompleteLawnReserviceSheet, false],
   ['tree/shrub', FastCompleteTreeShrubSheet, false],
   ['lawn visit', FastCompleteLawnSheet, false],
+  ['assessment', FastCompleteAssessmentSheet, false],
 ]) {
   test.each(['receipt', 'already_saved'])(`${name} recovery shows the saved result for %s while context is unavailable`, async (outcome) => {
     const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
@@ -304,4 +306,123 @@ test('the lawn visit sheet on an off-route saved attempt shows a notice after a 
   expect(onFullForm).not.toHaveBeenCalled();
   expect(screen.queryByRole('button', { name: /Complete/ })).not.toBeInTheDocument();
   expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
+});
+
+// A visit the lawn sheet hands to the full form (its context says the sheet
+// does not take it): the server's refusal of a saved attempt's retry stays on
+// screen instead of the hand-off hiding it. A correctable rejection with no
+// copy left opens the full form on a tap, to fix it there; a request refused
+// for good offers no form.
+test.each([
+  ['a correctable rejection', 422, 'invalid_product', 'A product on this completion is not on the lawn list.', true],
+  ['refused for good', 409, 'visit_closed', 'This visit is closed.', false],
+])('the lawn visit sheet keeps %s of a saved retry on screen on a visit it hands to the full form', async (_label, status, code, message, fixable) => {
+  const body = { idempotencyKey: `lawn-held-${status}`, technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-h', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const request = vi.fn(async (path) => {
+    if (!path.endsWith('/complete')) throw Object.assign(new Error('Not this sheet'), { status: 404 });
+    throw Object.assign(new Error(message), { status, code });
+  });
+  const onFullForm = vi.fn();
+  render(<FastCompleteLawnSheet service={{ id: 'visit-h' }} operatorId="tech-a" request={request} catalog={[]}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+  expect(await screen.findByText(message)).toBeInTheDocument();
+  await waitFor(async () => expect((await getFastCompletionAttempt('visit-h', 'tech-a')).attempt).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(onFullForm).not.toHaveBeenCalled();
+  expect(screen.getByText(message)).toBeInTheDocument();
+  expect(screen.queryByText(/Opening the full form/)).not.toBeInTheDocument();
+  if (fixable) {
+    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
+    expect(onFullForm).toHaveBeenCalledTimes(1);
+  } else {
+    expect(screen.queryByRole('button', { name: 'Full form' })).not.toBeInTheDocument();
+  }
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});
+
+// The same hand-off visit, with a rejected copy this device could not clear:
+// the copy waits to be discarded (never retried) under the server's reason,
+// and the hand-off runs only once the discard lands.
+test('the lawn visit sheet hands a visit to the full form only after a rejected copy that would not clear is discarded', async () => {
+  const body = { idempotencyKey: 'lawn-held-kept', technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-h', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const message = 'A product on this completion is not on the lawn list.';
+  let rejectSend;
+  const request = vi.fn((path) => {
+    if (!path.endsWith('/complete')) return Promise.reject(Object.assign(new Error('Not this sheet'), { status: 404 }));
+    return new Promise((_resolve, reject) => { rejectSend = () => reject(Object.assign(new Error(message), { status: 422, code: 'invalid_product' })); });
+  });
+  const onFullForm = vi.fn();
+  render(<FastCompleteLawnSheet service={{ id: 'visit-h' }} operatorId="tech-a" request={request} catalog={[]}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+  await waitFor(() => expect(rejectSend).toBeTypeOf('function'));
+  const store = globalThis.indexedDB;
+  globalThis.indexedDB = undefined;
+  try {
+    rejectSend();
+    expect(await screen.findByText(/could not clear its saved copy of this completion/)).toBeInTheDocument();
+  } finally { globalThis.indexedDB = store; }
+  expect(screen.getByText(message)).toBeInTheDocument();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(onFullForm).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Full form' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry', exact: true })).not.toBeInTheDocument();
+  expect((await getFastCompletionAttempt('visit-h', 'tech-a')).attempt.body).toEqual(body);
+  fireEvent.click(screen.getByRole('button', { name: 'Discard saved retry' }));
+  await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+  expect((await getFastCompletionAttempt('visit-h', 'tech-a')).attempt).toBeNull();
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});
+
+// The Waves Assessment sheet saves its attempt under its own tag, so the Today
+// page reopens it in this sheet (useSavedFastCompletions), not the pest one.
+test('the assessment sheet tags its saved attempt as its own', async () => {
+  const request = vi.fn(async (path) => {
+    if (path.endsWith('/outcome')) throw Object.assign(new Error('No outcome recorded for that visit'), { status: 404 });
+    // The send's outcome is unknown: the saved copy stays for a same-key retry.
+    if (path.endsWith('/complete')) throw new TypeError('Failed to fetch');
+    return {};
+  });
+  render(<FastCompleteAssessmentSheet service={{ id: 'visit-as', serviceType: 'Waves Assessment' }} operatorId="tech-a" request={request}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Warm' }));
+  fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Walked the yard with the owner.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Complete assessment' }));
+  expect(await screen.findByRole('button', { name: 'Retry', exact: true })).toBeInTheDocument();
+  const saved = (await getFastCompletionAttempt('visit-as', 'tech-a')).attempt;
+  expect(saved.sheet).toBe('assessment');
+  expect(saved.body.technicianNotes).toBe('Walked the yard with the owner.');
+});
+
+// The Today page opens the assessment sheet for a saved attempt alone
+// (`recoveryOnly`): no Full form, and once the attempt is gone, the notice
+// instead of a fresh form; a rejected retry keeps the server's reason.
+test.each([
+  ['a discard', null],
+  ['a correctable rejection of its retry', 422],
+])('the assessment sheet for a saved attempt alone shows no fresh form after %s', async (_label, status) => {
+  const body = { idempotencyKey: `as-alone-${status}`, technicianNotes: 'Assessment work' };
+  await putFastCompletionAttempt('visit-as', 'tech-a', { body, summary: 'Waves Assessment', sheet: 'assessment' });
+  const message = 'Pick how the visit went.';
+  const request = vi.fn(async (path) => {
+    if (path.endsWith('/outcome')) throw Object.assign(new Error('No outcome recorded for that visit'), { status: 404 });
+    if (path.endsWith('/complete')) throw Object.assign(new Error(message), { status, code: 'consultation_outcome_invalid' });
+    return {};
+  });
+  render(<FastCompleteAssessmentSheet service={{ id: 'visit-as', recoveryOnly: true }} operatorId="tech-a" request={request}
+    onClose={vi.fn()} onCompleted={vi.fn()} />);
+  expect(await screen.findByRole('button', { name: 'Retry', exact: true })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Full form' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: status ? 'Retry' : 'Discard saved retry', exact: true }));
+  expect(await screen.findByText(/No saved completion is left for this visit/)).toBeInTheDocument();
+  await waitFor(async () => expect((await getFastCompletionAttempt('visit-as', 'tech-a')).attempt).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  if (status) expect(screen.getByText(message)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Warm' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Complete assessment' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Full form' })).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(status ? 1 : 0);
 });

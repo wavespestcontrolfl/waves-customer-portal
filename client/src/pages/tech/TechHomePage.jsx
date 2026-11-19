@@ -57,6 +57,7 @@ import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import FastCompleteLawnSheet from '../../components/tech/FastCompleteLawnSheet';
+import FastCompleteAssessmentSheet from '../../components/tech/FastCompleteAssessmentSheet';
 import {
   fastCompleteSheetFor, isProjectBackedCompletion, projectReportClosed,
 } from '../../lib/dispatchCompletionRouting';
@@ -194,6 +195,21 @@ function openTypedCompletion(service, { sheet = false } = {}) {
   // and a Today page left open past midnight would send it to the next day.
   const asComplete = sheet ? '&completeSheet=1' : '';
   window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&completeService=${encodeURIComponent(service.id)}${asComplete}`);
+}
+
+// The assessment sheet opened here for a saved attempt alone (`recoveryOnly`):
+// a fresh assessment completes on Dispatch's sheet. The retry resends the saved
+// body, which carries the visit it was made for, so only the header is built.
+function assessmentRecoveryService(row) {
+  return {
+    id: row.id,
+    customerName: row.customer_name || row.customerName,
+    serviceType: row.service_type || row.serviceType,
+    address: shortAddress(row.address) || row.address || '',
+    ...accessSheetFields(row),
+    timeLabel: serviceWindowLabel(row) || '',
+    recoveryOnly: true,
+  };
 }
 
 // The day a Dispatch deep link opens for a visit: its own date, else today.
@@ -430,8 +446,10 @@ export default function TechHomePage({ section = 'today' }) {
   // with (openLawnSheet below).
   const [lawnFast, setLawnFast] = useState(null);
   const lawnFastService = lawnFast?.service;
+  // A saved Waves Assessment attempt, to retry or discard (assessmentRecoveryService).
+  const [assessmentRecovery, setAssessmentRecovery] = useState(null);
   // The one-screen Fast Complete sheets (each null while closed).
-  const fastSheets = [fastCompleteService, treeShrubFastService, lawnReserviceFastService, lawnFastService];
+  const fastSheets = [fastCompleteService, treeShrubFastService, lawnReserviceFastService, lawnFastService, assessmentRecovery];
   // The appointment details sheet (quick move, cancel, reschedule, price
   // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
   // the same sheet Dispatch opens, over the same /admin/schedule row.
@@ -449,6 +467,7 @@ export default function TechHomePage({ section = 'today' }) {
     setTreeShrubFastService(null);
     setLawnReserviceFastService(null);
     setLawnFast(null);
+    setAssessmentRecovery(null);
   };
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -946,6 +965,7 @@ export default function TechHomePage({ section = 'today' }) {
     if (tap.kind) {
       const savedSheet = {
         tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService, lawn_visit: openLawnSheet,
+        assessment: setAssessmentRecovery,
       }[tap.kind] || setFastCompleteService;
       savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
       return;
@@ -1356,6 +1376,20 @@ export default function TechHomePage({ section = 'today' }) {
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
           onViewDetails={detailsFor(lawnFastService)}
           suspended={!!detailService}
+        />
+      )}
+
+      {assessmentRecovery && (
+        <FastCompleteAssessmentSheet
+          key={assessmentRecovery.id}
+          service={assessmentRecoveryService(assessmentRecovery)}
+          request={sheetRequest}
+          operatorId={staffIdForDevice}
+          onClose={(options) => {
+            setAssessmentRecovery(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setAssessmentRecovery(null); fetchSchedule(); }}
         />
       )}
 

@@ -102,8 +102,9 @@
 // context): `expectedVisit` is the context's WHOLE `service` object,
 // `lawnFast.visitType` its visit type, `lawnAssessmentId` the confirmed
 // assessment. A visit the server calls ineligible (or 404/409 on the context)
-// is handed to the parent once through `onFullForm`; the sheet itself never
-// shows a Full form button.
+// is handed to the parent once through `onFullForm`; the sheet shows a Full
+// form button only when the server refused a saved attempt's retry there
+// (HandoffHeldView).
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -123,7 +124,7 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  RecoveredCompletion, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
+  RecoveredCompletion, RecoveryOnlyView, SavedView, SheetAccessCodes, TimeOnSite, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, startMethodFor, submissionHolds,
   methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CollectPayment, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
@@ -183,9 +184,8 @@ const PROPERTY_CHECK_MESSAGE = 'We could not check this lawn assessment against 
 const STOCK_LOCKOUT_MESSAGE = 'A product is out of stock. Update inventory, tap Check stock, then complete again.';
 const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.';
 const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
-// An off-route saved attempt's row once that attempt is gone (discarded, or finished elsewhere).
-const RECOVERY_ONLY_NOTICE = 'No saved completion is left for this visit. To complete it, close this and open the visit from its day on the schedule.';
-const REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here, then open the visit from its day on the schedule.';
+// A refused retry on a visit the sheet hands to the full form (HandoffHeldView).
+const HANDOFF_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here. The full form opens next.';
 const REFUSAL_MESSAGES = {
   lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
   lawn_fast_not_eligible: NOT_ON_THIS_SHEET_MESSAGE,
@@ -1438,18 +1438,21 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const [wrapChecking, setWrapChecking] = useState(false);
 
   // The server says this visit does not use this sheet: the parent opens the
-  // full form, once. (No button on the sheet leads there.) Not while a saved
-  // attempt is checked for or shown: a fresh full-form completion would race it.
+  // full form, once. Not while a saved attempt is checked for or shown: a
+  // fresh full-form completion would race it. Not while the server's refusal
+  // of that attempt's retry is shown, or its copy this device could not clear
+  // waits to be discarded (HandoffHeldView): the hand-off would hide them.
   // Never for an off-route saved attempt's row (`recoveryOnly`): it holds no
   // day or premise to open the full form on.
   const handedOff = useRef(false);
   const holdsSaved = submission.recovering || submission.restored;
+  const holdsRefusal = !!submission.error || submission.rejectedCopy;
   useEffect(() => {
-    if (ctx.handoff && !handedOff.current && !holdsSaved && !service?.recoveryOnly) {
+    if (ctx.handoff && !handedOff.current && !holdsSaved && !holdsRefusal && !service?.recoveryOnly) {
       handedOff.current = true;
       onFullForm?.();
     }
-  }, [ctx.handoff, holdsSaved, service?.recoveryOnly, onFullForm]);
+  }, [ctx.handoff, holdsSaved, holdsRefusal, service?.recoveryOnly, onFullForm]);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
@@ -1473,23 +1476,27 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   );
 }
 
-// An off-route saved attempt's row holds only the visit id and the attempt's
-// summary: no customer, day, property or billing facts for a fresh completion.
-// Past the saved-attempt view, an error is the server's refusal of its retry
-// (refused for good, or a correctable rejection): its reason stays above the
-// way back to the schedule. A rejected copy this device could not clear
-// (`rejectedCopy`) stays here to discard, never to retry: with no form to fix
-// it, nothing else would remove it.
-function RecoveryOnlyView({ submission }) {
+// A visit the sheet hands to the full form (`ctx.handoff`) whose saved retry
+// the server refused: the refusal stays here instead of the hand-off hiding
+// it. A rejected copy this device could not clear is discarded first, and the
+// hand-off then runs. A correctable rejection with no copy left opens the full
+// form on a tap, to fix it there. A request refused for good offers no form.
+function HandoffHeldView({ submission, onFullForm }) {
+  const fixable = !submission.rejectedCopy && submission.failure !== 'terminal';
   return (
     <div className="tech-visit-body">
       {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
-      <ActionFeedback className="tech-visit-feedback">{submission.rejectedCopy ? REJECTED_COPY_NOTICE : RECOVERY_ONLY_NOTICE}</ActionFeedback>
+      {submission.rejectedCopy && <ActionFeedback className="tech-visit-feedback">{HANDOFF_REJECTED_COPY_NOTICE}</ActionFeedback>}
       {submission.rejectedCopy && (
         <div className="tech-visit-actions">
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={submission.submitting} onClick={submission.discard}>
             Discard saved retry
           </Button>
+        </div>
+      )}
+      {fixable && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={() => onFullForm?.()}>Full form</Button>
         </div>
       )}
     </div>
@@ -1510,6 +1517,7 @@ function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas
   const refusal = refusalWithoutContext(submission, ctx);
   if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
+  if (ctx.handoff && (submission.error || submission.rejectedCopy)) return <HandoffHeldView submission={submission} onFullForm={onFullForm} />;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
   if (ctx.loadError) {
     return (
