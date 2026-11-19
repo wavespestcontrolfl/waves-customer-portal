@@ -31,6 +31,7 @@ const {
   applyZoneDayFunnel,
   getZoneFunnelDays,
   onZoneDay,
+  perTruckLive,
   funnelOfferPool,
   funnelZoneRows,
   rowInFunnelZones,
@@ -293,7 +294,7 @@ describe('isFunnelZone / zone matching', () => {
     });
     try {
       const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
-      expect(funnelInternals.perTruckLive()).toBe(false);
+      expect(perTruckLive()).toBe(false);
       expect(await getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }))
         .toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
     } finally {

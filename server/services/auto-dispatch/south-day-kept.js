@@ -25,7 +25,8 @@
  *     conflict moves, the 05:00 catch-up run (same job) and the dry-window starts all pass candidateFromSlot.
  *     The far-south dates are read ONCE per run (SouthDays, the run's store), not per visit or candidate.
  *   - apply time (apply.js makeMoveGuard -> assertDestinationClear): the move transaction reads the target
- *     date's far-south stops again.
+ *     date's far-south stops again. Per truck, a grouped unit's siblings are checked before its first write
+ *     too (makeMemberGuard -> assertUnitClear), so the primary never commits ahead of a sibling the rule holds.
  */
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
@@ -122,4 +123,27 @@ async function assertDestinationClear(trx, row, service, dateStr, refuse, techId
   if (held) throw refuse(row.id, `would land on ${dateStr}, a day that already holds a far-south stop`);
 }
 
-module.exports = { CODE, SouthDays, ruleFor, blocks, assertDestinationClear };
+// Apply time, before a grouped unit's first write (apply.js makeMemberGuard), per truck only: each sibling against
+// the destination date's far-south stops, for the receiving technician and its own current one (the unit move
+// commits its date there first). A far-south stop that reached a sibling's technician after ranking would otherwise
+// let the primary commit and the sibling refuse, splitting the visit across dates. Each member's own write still
+// rechecks (assertDestinationClear). With the fleet view (techDays null) the primary's own check decides for the
+// unit: the same date and address, whoever drives. Same fail-open as the other checks.
+async function assertUnitClear(trx, rows, service, dateStr, refuse, receiving) {
+  let held = null;
+  try {
+    const moving = (rows || []).filter((row) => dateStr !== toDateStr(row.scheduled_date));
+    // Per truck off: no read at all.
+    if (!moving.length || !funnel().perTruckLive()) return;
+    const state = await readSouth(trx, () => [dateStr, dateStr]);
+    if (!state || !state.zones.length || !state.techDays) return;
+    held = moving.find((row) => funnel().rowInFunnelZones(zoneFields(row, service), state.zones) === false
+      && [receiving, row.technician_id ?? null].some((techId) => funnel().onZoneDay(dateStr, techId, state.dates, state.techDays)));
+  } catch (err) {
+    logger.warn(`[auto-dispatch] south-day unit check off (failing open): ${err.message}`);
+    return;
+  }
+  if (held) throw refuse(held.id, `would land on ${dateStr}, a day that already holds a far-south stop`);
+}
+
+module.exports = { CODE, SouthDays, ruleFor, blocks, assertDestinationClear, assertUnitClear };

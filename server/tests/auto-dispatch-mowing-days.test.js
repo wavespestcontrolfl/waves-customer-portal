@@ -472,7 +472,7 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
   const plain = () => normalizePreferences({ mowing_days: ['Mon'] }, LAWN);
 
   // service_zones rows, the funnel's stop read (the only chain that calls andWhere) and the mowing preferences row.
-  function southDb({ stops = [], zonesFail = false, prefs } = {}) {
+  function southDb({ stops = [], zonesFail = false, prefs, memberRows = [] } = {}) {
     const counters = { stopReads: 0 };
     const fn = jest.fn((name) => {
       const c = {};
@@ -482,6 +482,8 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       c.select = async () => {
         if (name === 'service_zones') { if (zonesFail) throw new Error('zones down'); return [VENICE]; }
         if (name === 'scheduled_services' && c.funnel) { counters.stopReads += 1; return stops; }
+        // makeMemberGuard's read of the grouped siblings' committed rows.
+        if (name === 'scheduled_services as ss') return memberRows;
         return [];
       };
       c.pluck = async () => [];
@@ -685,6 +687,40 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       await expect(check({ ...NORTH, zone: null, customer_city: null }, WED, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED, zonesFail: true }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
+    });
+
+    test('per truck: the member guard checks each sibling before the first write, for its own and the receiving technician', async () => {
+      const { assertUnitClear } = require('../services/auto-dispatch/south-day-kept');
+      const { makeMemberGuard } = require('../services/auto-dispatch/apply');
+      const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+      const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED', id });
+      const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+      const sibling = (techId, over = {}) => ({ ...NORTH, id: 's2', technician_id: techId, ...over });
+      const unit = (stops, rows) => assertUnitClear(southDb({ stops }), rows, NORTH, WED, refuse, 't1');
+      try {
+        techScopedConfirmActive.mockReturnValue(true);
+        // A sibling still on t3 commits its date there first, so t3's far-south day holds the unit; so does the
+        // receiving technician's (t1), and any far-south stop holds an unassigned sibling.
+        await expect(unit(stopOf('t3'), [sibling('t3')])).rejects.toMatchObject({ code: 'REFUSED', id: 's2' });
+        await expect(unit(stopOf('t1'), [sibling('t3')])).rejects.toMatchObject({ code: 'REFUSED', id: 's2' });
+        await expect(unit(stopOf('t3'), [sibling(null)])).rejects.toMatchObject({ code: 'REFUSED', id: 's2' });
+        await expect(unit(stopOf('t2'), [sibling('t3')])).resolves.toBeUndefined();
+        // A sibling already on that date, or a far-south one, is not held.
+        await expect(unit(stopOf('t3'), [sibling('t3', { scheduled_date: WED })])).resolves.toBeUndefined();
+        await expect(unit(stopOf('t3'), [sibling('t3', { zone: 'venice', customer_city: 'Venice' })])).resolves.toBeUndefined();
+        // makeMemberGuard runs it on the siblings' committed rows, before any member's write.
+        const guard = makeMemberGuard({ service: NORTH, best: { date: WED, start_time: '08:00', technician_id: 't1' } });
+        const members = [{ id: 's1', status: 'confirmed' }, { id: 's2', status: 'confirmed' }];
+        await expect(guard({ trx: southDb({ stops: stopOf('t3'), memberRows: [sibling('t3')] }), members, targets: [] }))
+          .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('far-south stop') });
+        // Off (the fleet view): no read at all; the primary's own check decides for the unit.
+        techScopedConfirmActive.mockReturnValue(false);
+        const offDb = southDb({ stops: stopOf('t3') });
+        await expect(assertUnitClear(offDb, [sibling('t3')], NORTH, WED, refuse, 't1')).resolves.toBeUndefined();
+        expect(offDb).not.toHaveBeenCalled();
+      } finally {
+        techScopedConfirmActive.mockImplementation(() => true);
+      }
     });
 
     test('per truck (GATE_MULTI_TECH_CONFIRM on): each technician the visit can sit with decides, and the move guard passes them', async () => {

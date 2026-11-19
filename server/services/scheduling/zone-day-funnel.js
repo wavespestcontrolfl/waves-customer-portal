@@ -327,9 +327,10 @@ module.exports = {
   funnelZoneRows,
   rowInFunnelZones,
   onZoneDay,
+  perTruckLive,
   isFunnelZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.
-  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDays, perTruckLive },
+  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDays },
 };

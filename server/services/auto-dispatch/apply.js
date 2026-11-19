@@ -578,6 +578,10 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
         'c.address_line1 as customer_address_line1', 'c.city as customer_city', 'c.zip as customer_zip',
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
+    // GATE_SOUTH_ZONE_DAY_FUNNEL, per truck: every sibling against the destination's far-south stops before the first
+    // write, for the receiving technician and its own current one (south-day-kept.js assertUnitClear). Each member's
+    // own write still rechecks it (makeMoveGuard).
+    await southDayKept.assertUnitClear(trx, rows, service, best.date, refuse, best.technician_id || service.technician_id || null);
     const memberIds = (members || []).map((m) => m.id);
     const today = etDateString(new Date());
     const { guardMode } = config;
