@@ -800,7 +800,7 @@ async function runInner({ now = new Date() } = {}) {
   // combined-booking check below, with what is left of the shared budget.
   const sameStart = await sameStartVisitAlerts(todayET);
 
-  const delivered = await deliverAlerts({
+  const { rings: classRings, ...delivered } = await deliverAlerts({
     alerts, lateAlerts: sameStart.alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed,
     acceptedScheduleCheckFailed, churnedWorkCheckFailed: churned.failed, sameStartCheckFailed: sameStart.failed,
   });
@@ -825,7 +825,7 @@ async function runInner({ now = new Date() } = {}) {
   }
 
   // Last: two visits at one start, within what is left of the shared budget.
-  const sameStartRang = await ringWithinBudget(sameStart.alerts, { episodes, budget: lateBudget(delivered, combinedBooking) });
+  const sameStartRang = await ringWithinBudget(sameStart.alerts, { episodes, budget: lateBudget(classRings, combinedBooking) });
 
   return {
     skipped: false,
@@ -890,23 +890,23 @@ async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/
 // cap slot from a real one. Under episodes the cap counts a row created or
 // re-rung (a reopen, or a refresh that rang) — never a silent dedupe onto a
 // standing row. Killed, the classes rung by deliverAlerts keep the
-// pre-episode rule (a deduped result never counts: a pure kill switch); a
-// class with no pre-episode behavior counts a refresh that rang as well
-// (`countRefreshRings`), so its new-day re-rings stay inside the cap.
+// pre-episode rule for their own cap (a deduped result never counts: a pure
+// kill switch). `countRefreshRings` counts a refresh that rang as well: the
+// late class's own rings, and the earlier rings its budget subtracts.
 function realRing(created, episodes, { countRefreshRings = false } = {}) {
   if (created.suppressed) return false;
   if (episodes) return Boolean(created.rang);
   return !created.deduped || (countRefreshRings && Boolean(created.refreshed && created.rung));
 }
 
-// What the classes rung so far and the combined-booking check left of the run's
-// shared budget. The check's time-critical problems ring whatever the budget,
-// and those rings count here too. A check that failed (null) may have rung
-// some bells before it threw, so its rings are unknown: nothing is left, and
-// the late class rings on a later run.
-function lateBudget(delivered, combinedBooking) {
+// What the classes' real rings so far (`classRings`, deliverAlerts) and the
+// combined-booking check left of the run's shared budget. The check's
+// time-critical problems ring whatever the budget, and those rings count here
+// too. A check that failed (null) may have rung some bells before it threw, so
+// its rings are unknown: nothing is left, and the late class rings on a later run.
+function lateBudget(classRings, combinedBooking) {
   if (!combinedBooking) return 0;
-  return Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted - (Number(combinedBooking.rings) || 0));
+  return Math.max(0, MAX_ALERTS_PER_RUN - classRings - (Number(combinedBooking.rings) || 0));
 }
 
 const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
@@ -930,6 +930,10 @@ async function ringWithinBudget(alerts, { episodes, budget }) {
 // standing, but this pass does not ring them.
 async function deliverAlerts({ alerts, lateAlerts = [], episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed, sameStartCheckFailed }) {
   let alerted = 0;
+  // Every real ring this pass made, a refresh that rang included. Under
+  // episodes it equals `alerted`; killed, `alerted` keeps the pre-episode count
+  // and the cap, and `rings` is what the late class's budget subtracts.
+  let rings = 0;
   // Live keys per class, from the COMPLETE findings — computed before the
   // loop so the per-run cap (which only limits new rings) never changes
   // what the close pass judges.
@@ -939,10 +943,12 @@ async function deliverAlerts({ alerts, lateAlerts = [], episodes, now, horizonDa
   const deliveredKeys = new Set();
   for (const alert of alerts) {
     if (alerted >= MAX_ALERTS_PER_RUN) { capHit(); break; }
-    if (realRing(await ringAlert(episodes, ...alert), episodes)) alerted += 1;
+    const created = await ringAlert(episodes, ...alert);
+    if (realRing(created, episodes)) alerted += 1;
+    if (realRing(created, episodes, { countRefreshRings: true })) rings += 1;
     deliveredKeys.add(alert[0]);
   }
-  if (!episodes) return { alerted };
+  if (!episodes) return { alerted, rings };
   // A class whose check failed has an unknown live set: closing on it would
   // clear every standing bell of the class.
   const skipPrefixes = [];
@@ -951,10 +957,10 @@ async function deliverAlerts({ alerts, lateAlerts = [], episodes, now, horizonDa
   if (churnedWorkCheckFailed) skipPrefixes.push(CHURNED_PREFIX);
   if (sameStartCheckFailed) skipPrefixes.push(SAME_START_PREFIX);
   try {
-    return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
+    return { alerted, rings, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
     logger.error(`[schedule-integrity] alert close pass failed: ${err.message}`);
-    return { alerted, closed: 0, closePassFailed: true };
+    return { alerted, rings, closed: 0, closePassFailed: true };
   }
 }
 

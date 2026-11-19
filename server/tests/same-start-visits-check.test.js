@@ -195,6 +195,23 @@ test('two technicians at one start: each pair is its own group; an unassigned vi
   expect(pairMeta.visit_ids).toEqual(['a1', 'a2']);
 });
 
+test('the services of one legacy visit group are one stop: alone they never ring; beside a separate visit they count once', async () => {
+  finderReturns([visit({ id: 'g1', visit_id: 'stop-1' }), visit({ id: 'g2', visit_id: 'stop-1', service_type: 'Pest Control Service' })]);
+  expect((await sameStartVisitAlerts(TODAY)).alerts).toEqual([]);
+
+  finderReturns([
+    visit({ id: 'g1', visit_id: 'stop-1' }),
+    visit({ id: 'g2', visit_id: 'stop-1', service_type: 'Pest Control Service' }),
+    visit({ id: 's1', service_type: 'Mosquito Service' }),
+  ]);
+  const [[, , body, metadata, opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect(body).toBe('2 visits start at 11 AM on Dec 3; split them so they run back to back.');
+  expect(opts.detail).toBe('Dec 3 at 11 AM: Lawn Care Service, Mosquito Service and Pest Control Service.');
+  expect(metadata.visit_ids).toEqual(['g1', 's1', 'g2']);
+  // The visit to move is the separate one, not a service of the group.
+  expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-03&appointment=s1');
+});
+
 test('the bells come earliest first day first, whatever the customer order, so a capped run rings the nearest days', async () => {
   finderReturns([
     visit({ id: 'c1', customer_id: 'cust-a', scheduled_date: day('2027-03-01') }),

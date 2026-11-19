@@ -123,6 +123,29 @@ postgres('same-start visits check on Postgres', () => {
       + ' Jan 24 at 10 AM: Lawn Care Service and Pest Control Service; at 10 AM, another technician: Lawn Care Service and Pest Control Service.');
   });
 
+  test('a legacy visit group is one stop: its own services never pair, but a separate visit at its start does', async () => {
+    const { _findSameStartVisits, sameStartVisitAlerts, SAME_START_PREFIX } = require('../services/same-start-visits-check');
+    const stop = async (customerId, date) => {
+      const id = randomUUID();
+      await trx('service_visits').insert({ id, customer_id: customerId, scheduled_date: date, stop_base_key: `fixture-${id}`, created_by: 'test' });
+      return id;
+    };
+    const alone = await customer();
+    const beside = await customer();
+    await pair(alone, { scheduled_date: '2040-01-15', visit_id: await stop(alone, '2040-01-15') });
+    const grouped = await pair(beside, { scheduled_date: '2040-01-15', visit_id: await stop(beside, '2040-01-15') });
+    const separate = await visit(beside, { scheduled_date: '2040-01-15', service_type: 'Mosquito Service' });
+
+    const mine = new Set([alone, beside]);
+    const rows = (await _findSameStartVisits(TODAY)).filter((r) => mine.has(String(r.customer_id)));
+    expect(ids(rows)).toEqual(ids([...grouped, separate]));
+    const ours = (await sameStartVisitAlerts(TODAY)).alerts.filter((a) => mine.has(String(a[3].customer_id)));
+    expect(ours.map((a) => a[0])).toEqual([`${SAME_START_PREFIX}${beside}`]);
+    expect(ours[0][2]).toBe('2 visits start at 10 AM on Jan 15; split them so they run back to back.');
+    expect(ours[0][4].detail).toBe('Jan 15 at 10 AM: Lawn Care Service, Mosquito Service and Pest Control Service.');
+    expect(ours[0][4].link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-15&appointment=${separate.id}`);
+  });
+
   test('one bell through the watchdog: raised, a new day rings, a fixed day is quiet, the split closes it, a comeback rings', async () => {
     const { runInner } = require('../services/schedule-integrity-watchdog');
     const tech = await technician();

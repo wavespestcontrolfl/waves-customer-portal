@@ -1243,6 +1243,23 @@ describe('same-start visits (class 5)', () => {
     expect(episodeHelpers.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 
+  test('kill switch off: an earlier class\'s refresh that rang still takes a slot from the same-start budget', async () => {
+    alertEpisodesLive.mockReturnValue(false);
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1'), pairAlert('cust-pair-2')], failed: false });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 8, problems: 8, rings: 8 });
+    makeDbMock({ coverageRows: [unpricedChild()] });
+    // The unpriced-series bell was standing and changed: notifyAdmin refreshes it and rings.
+    // Its class keeps the pre-episode count (a deduped result never counts), but the bell rang.
+    NotificationService.notifyAdmin.mockImplementation(async (_c, _t, _b, opts) => (opts.dedupeKey.startsWith('unpriced-series:')
+      ? { id: 1, deduped: true, refreshed: true, rung: true } : { id: 5 }));
+    const result = await runInner({ now: NOW });
+    // 10 - 1 earlier ring - 8 combined-booking rings = 1 slot: one customer rings.
+    expect(NotificationService.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey))
+      .toEqual(['unpriced-series:ss-parent-1', 'same-start-visits:cust-pair-1']);
+    expect(result).toMatchObject({ alerted: 1 });
+    expect(result.rings).toBeUndefined();
+  });
+
   test('a customer with no same-time day left has its bell closed; a customer still listed keeps it', async () => {
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1')], failed: false });
     makeDbMock();
