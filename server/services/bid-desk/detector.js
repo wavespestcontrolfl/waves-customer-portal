@@ -233,11 +233,12 @@ function detectBidEmail(email = {}) {
 // Senders whose bid-word mail is government mail (Charlotte County keeps its source; the template adds only keys).
 const GOV_SENDERS = new Set(['gov_email', 'charlotte_county', 'mfmp']);
 
-// The notice's own type decides. A notice that no longer parses (the template changed) is read as plain government
-// mail: bid words in the subject file it, so a real bid is never lost.
+// The notice's own Advertisement Type decides, read on its own (the other labels are needed only for the fields). A
+// notice with no type line (the template changed) is read as plain government mail: bid words in the subject file
+// it, so a real bid is never lost.
 function mfmpSource(email, bidWords) {
-  const notice = mfmpNotice(bodyLines(email));
-  if (notice) return MFMP_SOLICITATION.test(notice.type) ? { source: 'gov_email' } : { reason: 'not_solicitation' };
+  const type = labelledValues(bodyLines(email), 'Advertisement Type')[0]?.value;
+  if (type) return MFMP_SOLICITATION.test(type) ? { source: 'gov_email' } : { reason: 'not_solicitation' };
   return bidWords ? { source: 'gov_email' } : { reason: 'not_bid' };
 }
 

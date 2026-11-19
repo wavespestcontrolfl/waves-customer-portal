@@ -572,6 +572,28 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(sub).toMatchObject({ created: false, bidId: newer.bidId });
     });
 
+    test('a keyless legacy Agency Decision of the same number never takes a real solicitation', async () => {
+      const notice = (threadId, type) => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17700', body_text: [
+          ' Organization: Sample Water Management District', ' Advertisement Number: ITB-17700', ` Advertisement Type: ${type}`,
+          ' Title: Sample Lake Weed Control', ' Close Date: Oct 29, 2026',
+        ].join('\n'),
+      });
+      // As the old subject rule filed a decision notice: a keyless row, declined. (Filed here as an ITB, then its stored
+      // notice is set to the decision.)
+      const decisionEmail = await notice('t-mfmp-dec-1', 'Invitation to Bid');
+      const decision = await service.ingestEmail(decisionEmail);
+      await mockPg('emails').where({ id: decisionEmail.id }).update({ body_text: decisionEmail.body_text.replace('Invitation to Bid', 'Agency Decision') });
+      await mockPg('bid_opportunities').where({ id: decision.bidId }).update({ group_key: null, status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      const real = await service.ingestEmail(await notice('t-mfmp-dec-2', 'Invitation to Bid'));
+      expect(real.created).toBe(true);
+      expect(real.bidId).not.toBe(decision.bidId);
+      expect(rung('new')).toHaveLength(1);
+    });
+
     test('of two open copies of one advertisement, an older keyless one and a newer keyed one, a repeat joins the older', async () => {
       const body = (number) => [
         ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ' Advertisement Type: Invitation to Bid',

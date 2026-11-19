@@ -117,9 +117,12 @@ async function mfmpRepeatBid(trx, groupKey) {
     .join('bid_opportunity_emails as l', 'l.bid_id', 'b.id').join('emails as e', 'e.id', 'l.email_id')
     .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%${MFMP_SENDER_DOMAIN}`])
     .select('b.id', 'b.status', 'b.created_at', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
+  // A legacy notice counts only as a solicitation of this advertisement (an Agency Decision the old subject rule
+  // filed is not one, so a real solicitation never joins it).
   const legacy = keyless.filter((row) => {
-    const parsed = parseBidEmail(withProviderCheck(row));
-    return parsed.template === 'mfmp' && parsed.group_key === groupKey;
+    const checked = withProviderCheck(row);
+    const parsed = parseBidEmail(checked);
+    return parsed.template === 'mfmp' && parsed.group_key === groupKey && detectBidEmail(checked).bid === true;
   });
   const all = [...keyed, ...legacy].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const hit = all.find((row) => OPEN_STATUSES.includes(row.status)) || all[all.length - 1];

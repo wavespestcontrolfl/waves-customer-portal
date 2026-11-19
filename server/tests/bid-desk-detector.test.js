@@ -561,6 +561,9 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     const walk = mfmpNotice({ subject: 'Advertisement Posted - ITB-1', body_text: 'Job Walk: Dec 1, 2026' });
     expect(parseBidEmail(walk)).toMatchObject({ source: 'gov_email', job_walk_at: null, due_at: null });
     expect(parseBidEmail(mfmpNotice({ body_text: `${MFMP_BODY()}\n Job Walk: Dec 1, 2026` })).job_walk_at).toBeNull();
+    // The type decides on its own: an Agency Decision missing other labels is still not a bid, even with ITB in the subject.
+    const noOrg = MFMP_BODY({ type: 'Agency Decision' }).replace(/^ Organization:.*\n/m, '');
+    expect(detectBidEmail(mfmpNotice({ body_text: noOrg }))).toMatchObject({ bid: false, reason: 'not_solicitation' });
     // Missing the type line is also a changed template.
     expect(detectBidEmail(mfmpNotice({ body_text: MFMP_BODY().replace(/^ Advertisement Type:.*\n/m, '') })))
       .toMatchObject({ bid: true, source: 'gov_email' });
