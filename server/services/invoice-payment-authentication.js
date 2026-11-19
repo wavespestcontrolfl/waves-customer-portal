@@ -42,14 +42,32 @@ function whereProvenInvoiceOwner(query, { invoiceAlias, invoiceId, metadataCusto
   });
 }
 
-// Both the signed webhook and the operator's server-side Stripe retrieval
-// must identify the same saved-card attempt, invoice, owner and tender.
-function matchingCancellation(intent, database, lockInvoice = false) {
+// Validate every provider-controlled identity field before opening a
+// transaction or reading the database. Unrelated cancellation payloads remain
+// a no-op without consuming a connection.
+function cancellationIdentity(intent) {
   const meta = intent.metadata || {};
   if (intent.status !== 'canceled' || !intent.id || meta.source !== 'admin_card_on_file') return;
   if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(isUuid)) return;
   const methodId = (typeof intent.payment_method === 'string' ? intent.payment_method : intent.payment_method?.id)
     || intent.last_payment_error?.payment_method?.id || null;
+  return {
+    intent,
+    meta,
+    methodId,
+    evidence: {
+      authentication_canceled_intent_id: intent.id,
+      ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),
+    },
+  };
+}
+
+// Both the signed webhook and the operator's server-side Stripe retrieval
+// must identify the same saved-card attempt, invoice, owner and tender. For a
+// writer this query is built only AFTER the invoice lock statement completes,
+// so its ownership journal read receives a fresh READ COMMITTED snapshot.
+function matchingCancellation(identity, database) {
+  const { intent, meta, methodId, evidence } = identity;
   const invoiceAlias = 'cancellation_invoice';
   const invoice = database(`invoices as ${invoiceAlias}`).select(`${invoiceAlias}.id`)
     .where(`${invoiceAlias}.id`, meta.waves_invoice_id);
@@ -58,7 +76,6 @@ function matchingCancellation(intent, database, lockInvoice = false) {
     invoiceId: meta.waves_invoice_id,
     metadataCustomerId: meta.waves_customer_id,
   });
-  if (lockInvoice) invoice.forShare();
   const query = database('stripe_invoice_charge_attempts')
     .where({ id: meta.saved_card_attempt_id, invoice_id: meta.waves_invoice_id })
     .whereIn('invoice_id', invoice)
@@ -69,18 +86,32 @@ function matchingCancellation(intent, database, lockInvoice = false) {
       this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', intent.id);
     });
   if (methodId) query.where({ stripe_payment_method_id: methodId });
-  const evidence = {
-    authentication_canceled_intent_id: intent.id,
-    ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),
-  };
   return { query, evidence };
+}
+
+async function withCancellationInvoiceLock(database, identity, write) {
+  const run = async (trx) => {
+    // ID only: ownership can change while this statement waits. The separate
+    // write below must re-read both the invoice and its journal after the lock.
+    const invoice = await trx('invoices')
+      .where({ id: identity.meta.waves_invoice_id })
+      .forShare()
+      .first('id');
+    if (!invoice) return 0;
+    return write(trx);
+  };
+  return database?.isTransaction === true ? run(database) : database.transaction(run);
 }
 
 // A webhook can arrive before the worker records the decline. Without a
 // method, its candidate clears the hold only if the worker binds the same PI.
 async function recordAuthenticationCancellation(intent, database) {
-  const match = matchingCancellation(intent, database, true);
-  if (match) await match.query.update(match.evidence);
+  const identity = cancellationIdentity(intent);
+  if (!identity) return;
+  await withCancellationInvoiceLock(database, identity, async (trx) => {
+    const match = matchingCancellation(identity, trx);
+    return match.query.update(match.evidence);
+  });
 }
 
 async function verifySavedCardCancellation({ attemptId, intentId, stripe, database, execute = false }) {
@@ -91,19 +122,30 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
   if (intent?.id !== intentId || intent.metadata?.saved_card_attempt_id !== attemptId.toLowerCase()) {
     throw new Error('Stripe did not return the requested PaymentIntent for this saved-card attempt.');
   }
-  const match = matchingCancellation(intent, database, execute);
-  if (!match) throw new Error('Stripe did not verify a canceled saved-card payment for this invoice.');
+  const identity = cancellationIdentity(intent);
+  if (!identity) throw new Error('Stripe did not verify a canceled saved-card payment for this invoice.');
 
-  // Historical recovery is for a finished authentication decline only. The
-  // UPDATE repeats every identity check, including any intervening binding.
-  const { query, evidence } = match;
-  query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
-    .where(function compatibleEvidence() {
-      this.whereNull('authentication_canceled_intent_id').orWhere('authentication_canceled_intent_id', intentId);
-    });
-  if (!evidence.stripe_payment_intent_id) query.where({ stripe_payment_intent_id: intentId });
+  const historicalMatch = (conn) => {
+    // Historical recovery is for a finished authentication decline only. The
+    // UPDATE repeats every identity check, including any intervening binding.
+    const match = matchingCancellation(identity, conn);
+    const { query, evidence } = match;
+    query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
+      .where(function compatibleEvidence() {
+        this.whereNull('authentication_canceled_intent_id').orWhere('authentication_canceled_intent_id', intentId);
+      });
+    if (!evidence.stripe_payment_intent_id) query.where({ stripe_payment_intent_id: intentId });
+    return match;
+  };
 
-  const verified = execute ? await query.update(evidence) : await query.first('id');
+  // Preview deliberately remains one read-only query with no lock or write.
+  // Execute locks in one statement, then rebuilds every proof on the trx.
+  const verified = execute
+    ? await withCancellationInvoiceLock(database, identity, async (trx) => {
+      const { query, evidence } = historicalMatch(trx);
+      return query.update(evidence);
+    })
+    : await historicalMatch(database).query.first('id');
   if (!verified) throw new Error('The local authentication decline or its payment identity does not match the Stripe cancellation.');
   return { attemptId, intentId, result: execute ? 'cancellation_recorded' : 'cancellation_verified' };
 }

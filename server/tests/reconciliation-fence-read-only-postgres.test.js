@@ -413,6 +413,26 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
   }, 15000);
 
+  test.each([
+    ['an operator', 'operator'],
+    ['a signed webhook', 'signed webhook'],
+  ])('%s cancellation waits for a row-precise merge, then records against its committed owner', async (_label, source) => {
+    const { invoiceId, attemptId, intent, customerId } = await authenticationFixture(app);
+    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
+    const merge = await app.transaction();
+    try {
+      await recordInvoiceMerge(merge, { invoiceId, loserId: customerId, winnerId: randomUUID() });
+      await commitWithWaitingCheckout(merge, (database) => source === 'operator'
+        ? verifySavedCardCancellation({ database, stripe, attemptId, intentId: intent.id, execute: true })
+        : recordAuthenticationCancellation(intent, database));
+    } finally {
+      if (!merge.isCompleted()) await merge.rollback();
+    }
+    expect(await app('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ authentication_canceled_intent_id: intent.id, stripe_payment_intent_id: intent.id });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+  }, 15000);
+
   test('combined checkout waiting for a sibling lock sees the new authentication decline before collection', async () => {
     const { verifyAllocationLocked } = require('../services/pay-combined');
     const sibling = await authenticationFixture(app);
