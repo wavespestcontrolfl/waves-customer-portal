@@ -47,7 +47,7 @@ describe('offer helpers', () => {
   });
 
   it('turns each 409 code into a plain sentence', () => {
-    for (const code of ['TERMS_NOT_ISSUED', 'DRAFT_CHANGED', 'DRAFT_HASH_REQUIRED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED']) {
+    for (const code of ['TERMS_NOT_ISSUED', 'DRAFT_CHANGED', 'OFFER_CHANGED', 'DRAFT_HASH_REQUIRED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED']) {
       const text = offerErrorMessage({ message: 'HTTP 409', body: { code } });
       expect(text).not.toBe('HTTP 409');
       expect(text).not.toContain(code);

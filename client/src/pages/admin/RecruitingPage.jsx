@@ -825,13 +825,16 @@ function SamePhoneBlock({ records, onOpenApplication }) {
 // own right (derives contact/screen from `detail`, owns the interview-block
 // branching) rather than a one-use helper — moving it out is what actually
 // removes those decisions from RecruitingPage.
+const CLOSED_STATUSES = ["hired", "rejected", "withdrawn"];
+
 // The Offer button opens the Offer form while the offer flow is on for a
 // technician application, and is today's status-only move only when the
 // server said the flow is off (or for a non-technician).
 function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
   const technician = detail.role === "technician";
-  const offerForm = offerFlow.enabled && technician;
+  // A closed application cannot take an offer: Offer is the plain status move there.
+  const offerForm = offerFlow.enabled && technician && !CLOSED_STATUSES.includes(detail.status);
   // Until the offer read confirms on or off, a technician has no Offer move.
   const offerPending = technician && (offerFlow.loading || Boolean(offerFlow.error) || Boolean(offerFlow.refreshError));
   const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));

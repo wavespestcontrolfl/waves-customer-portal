@@ -16,7 +16,7 @@ import {
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
 import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
-import { formatDay, formatTimelineTime, money, offerErrorMessage } from "./offerLogic";
+import { formatDay, formatTimelineTime, isStaleWrite, money, offerErrorMessage } from "./offerLogic";
 
 const STATUS_LABEL = {
   draft: "Draft",
@@ -112,6 +112,12 @@ function CloseOfferDialog({ copy, busy, error, onCancel, onConfirm }) {
       </DialogFooter>
     </Dialog>
   );
+}
+
+// What the owner saw when they pressed Withdraw or Discard: the status, and for
+// a draft its hash, so the server can refuse if either has moved on.
+function expectedState(target) {
+  return target.status === "draft" ? { expectedStatus: "draft", draftHash: target.draftHash } : { expectedStatus: target.status };
 }
 
 // Words for closing one offer record. A draft is never sent, so discarding it
@@ -242,15 +248,18 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   const stale = Boolean(refreshError);
   const canAct = ownerActions === true && !stale;
 
+  // A refused stale write changed nothing: re-read so the card shows what is true now.
   const act = async (work) => {
     setBusy(true);
     setError(null);
     try {
       await work();
-      return true;
+      return "ok";
     } catch (err) {
       setError(offerErrorMessage(err));
-      return false;
+      if (!isStaleWrite(err)) return "failed";
+      await onChanged();
+      return "stale";
     } finally {
       setBusy(false);
     }
@@ -258,7 +267,7 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
 
   const revise = (startDate) =>
     act(async () => {
-      const { offer: draft } = await reviseOffer(applicationId, offer.id, startDate);
+      const { offer: draft } = await reviseOffer(applicationId, offer.id, offer.status, startDate);
       // Open the new draft only after a read that holds it; on a failed read the
       // section's Try again stays on screen.
       const next = await onChanged();
@@ -267,11 +276,12 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
     });
 
   const closeTarget = async () => {
-    const ok = await act(async () => {
-      await withdrawOffer(applicationId, closing.id);
+    const outcome = await act(async () => {
+      await withdrawOffer(applicationId, closing.id, expectedState(closing));
       await onChanged();
     });
-    if (ok) setClosing(null);
+    // A refused stale write also closes the confirm: the card now shows the truth.
+    if (outcome !== "failed") setClosing(null);
   };
 
   const viewSigned = (target) =>

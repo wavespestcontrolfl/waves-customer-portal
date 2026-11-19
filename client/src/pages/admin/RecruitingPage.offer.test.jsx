@@ -43,18 +43,27 @@ const DEFAULTS = {
 };
 
 function offerPayload(overrides = {}) {
-  return {
+  const payload = {
     enabled: true,
     termsIssued: true,
     terms: { templateId: 't1', versionId: 'v1', title: 'Offer Letter: Technician Terms', issuedAt: '2026-11-11T02:30:00Z' },
     termsBlockers: [],
     viewer: { ownerActions: true },
     defaults: DEFAULTS,
-    letterPreview: { markdown: '# Your job offer\n\nStart: **Monday, January 4, 2027**.\n\n<script>alert(1)</script>' },
     current: null,
+    draft: null,
     history: [],
     ...overrides,
   };
+  // The server builds the letter for the open draft and names it (offerId + draftHash).
+  const open = [payload.draft, payload.current].find((o) => o && o.status === 'draft');
+  payload.letterPreview = {
+    offerId: open ? open.id : null,
+    draftHash: open ? open.draftHash : null,
+    markdown: '# Your job offer\n\nStart: **Monday, January 4, 2027**.\n\n<script>alert(1)</script>',
+    ...(overrides.letterPreview || {}),
+  };
+  return payload;
 }
 
 function offerRecord(overrides = {}) {
@@ -156,11 +165,24 @@ describe('RecruitingPage offer flow: form', () => {
     expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
     expect(screen.getByText(/Offer Letter: Technician Terms/)).toBeInTheDocument();
     expect(screen.getByText('Text (941) ***-0123 · Email j***@example.com')).toBeInTheDocument();
+    // No saved draft yet: no letter (the server's defaults letter names no draft).
+    expect(screen.getByText('Save the draft to see the letter.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
+  });
+
+  it('shows the saved draft letter as safe text, and never another offer letter', async () => {
+    setupFetch({}, { offer: offerPayload({ current: offerRecord() }) });
+    await openForm();
     const preview = screen.getByText('Letter preview').parentElement;
     expect(within(preview).getByRole('heading', { name: 'Your job offer' })).toBeInTheDocument();
     expect(preview.querySelector('script')).toBeNull();
     expect(preview).toHaveTextContent('<script>alert(1)</script>');
-    expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
+    cleanup();
+    // A letter built for a different offer (or another hash) is never shown.
+    setupFetch({}, { offer: offerPayload({ current: offerRecord(), letterPreview: { offerId: 'old-offer', draftHash: 'old' } }) });
+    await openForm();
+    expect(screen.getByText('Save the draft to see the letter.')).toBeInTheDocument();
+    expect(screen.queryByText('Your job offer')).toBeNull();
   });
 
   it('recomputes the step date when the start date changes and refuses Friday to Sunday', async () => {
@@ -406,7 +428,7 @@ describe('RecruitingPage offer flow: timeline card', () => {
     fireEvent.click(within(card).getByRole('button', { name: 'Revise' }));
     await screen.findByLabelText('Hourly rate ($)');
     expect(screen.getByLabelText('Start date')).toHaveValue('2027-01-11');
-    expect(calls.find((c) => c.path.endsWith('/revise')).body).toEqual({});
+    expect(calls.find((c) => c.path.endsWith('/revise')).body).toEqual({ expectedStatus: 'sent' });
   });
 
   it('Withdraw asks first, then posts', async () => {
@@ -439,7 +461,7 @@ describe('RecruitingPage offer flow: timeline card', () => {
     expect(within(card).getByText(/Need two more weeks/)).toBeInTheDocument();
     fireEvent.click(within(card).getByRole('button', { name: 'Make an updated offer for Mon, Jan 11, 2027' }));
     await screen.findByLabelText('Hourly rate ($)');
-    expect(calls.find((c) => c.path.endsWith('/revise')).body).toEqual({ startDate: '2027-01-11' });
+    expect(calls.find((c) => c.path.endsWith('/revise')).body).toEqual({ expectedStatus: 'date_requested', startDate: '2027-01-11' });
   });
 
   it('shows the signed copy in a modal and keeps earlier offers collapsed', async () => {
@@ -869,5 +891,94 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     await screen.findByText(/Offer sent to Jordan/);
     releaseB();
     expect(await screen.findByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
+  });
+
+  it('Discard sends the draft status and hash, Withdraw the sent status', async () => {
+    const sentOffer = offerRecord({ status: 'sent', timeline: [] });
+    const theDraft = offerRecord({ id: 'offer-2', draftHash: 'hash-draft', supersedesId: 'offer-1' });
+    const { calls } = setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-2/withdraw': () => res(200, { offer: { ...theDraft, status: 'withdrawn' } }),
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => res(200, { offer: { ...sentOffer, status: 'withdrawn' } }),
+      },
+      { offer: offerPayload({ current: sentOffer, draft: theDraft }), detail: detailFixture({ status: 'offer' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Discard this draft — the offer you sent stays open' }));
+    let dialog = (await screen.findByText(/Discard this draft\?/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard draft' }));
+    await waitFor(() => expect(calls.some((c) => c.path.endsWith('/offer-2/withdraw'))).toBe(true));
+    expect(calls.find((c) => c.path.endsWith('/offer-2/withdraw')).body).toEqual({ expectedStatus: 'draft', draftHash: 'hash-draft' });
+    fireEvent.click(await within(await screen.findByTestId('offer-card')).findByRole('button', { name: 'Withdraw offer' }));
+    dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(calls.some((c) => c.path.endsWith('/offer-1/withdraw'))).toBe(true));
+    expect(calls.find((c) => c.path.endsWith('/offer-1/withdraw')).body).toEqual({ expectedStatus: 'sent' });
+  });
+
+  it('OFFER_CHANGED on withdraw closes the confirm, shows the message and re-reads', async () => {
+    let current = offerRecord({ status: 'sent', timeline: [] });
+    const { calls } = setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { current = offerRecord({ status: 'accepted', signedAt: '2026-12-12T13:15:00Z', timeline: [{ at: '2026-12-12T13:15:00Z', kind: 'signed', label: 'Signed just now' }] }); return res(409, { error: 'x', code: 'OFFER_CHANGED' }); } },
+      { offer: () => res(200, offerPayload({ current })), detail: detailFixture({ status: 'offer' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    expect(await screen.findByText('Signed just now')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull());
+    expect(screen.getByText('This offer changed after you opened it. Review it again.')).toBeInTheDocument();
+    expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull();
+    expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a background read with a different draft hash makes the form read-only until the owner loads it', async () => {
+    let current = offerRecord({ draftHash: 'h1' });
+    await openDraftForm(
+      { 'PATCH /admin/careers/app-1/status': () => { current = offerRecord({ draftHash: 'h2', hourlyRate: 24 }); return res(200, { application: detailFixture({ status: 'reviewed' }), sent: {} }); } },
+      () => res(200, offerPayload({ current })),
+    );
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    // A stage change elsewhere triggers a background re-read of the offer.
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
+    const stage = (await screen.findByRole('heading', { name: 'Move to Reviewed' })).closest('[role="dialog"]');
+    const confirmButton = within(stage).getByRole('button', { name: 'Confirm' });
+    await waitFor(() => expect(confirmButton).not.toBeDisabled());
+    fireEvent.click(confirmButton);
+    expect(await screen.findByText('This draft changed. Review the new version.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    expect(screen.getByLabelText('Hourly rate ($)')).not.toBeDisabled();
+    expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
+  });
+
+  it('a past start date shows the date error and stays editable', async () => {
+    await openDraftForm({}, () => res(200, offerPayload({ current: offerRecord({ startDate: '2020-01-06', stepEffectiveOn: '2020-04-13' }) })));
+    expect(screen.getByText('Pick a date in the future.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Start date')).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send offer' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    expect(screen.queryByText('Pick a date in the future.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled();
+  });
+
+  it.each(['hired', 'rejected', 'withdrawn'])('a %s application does not open the Offer form', async (status) => {
+    setupFetch({}, { detail: detailFixture({ status }) });
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    const offerButton = screen.getByRole('button', { name: 'Offer' });
+    await waitFor(() => expect(offerButton).not.toBeDisabled());
+    fireEvent.click(offerButton);
+    expect(await screen.findByRole('heading', { name: 'Move to Offer' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
   });
 });

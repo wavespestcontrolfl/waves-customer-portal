@@ -25,12 +25,14 @@ import {
   expiryLabel,
   formatIssued,
   isStartWeekday,
+  isStaleWrite,
   isValidDay,
   maskEmail,
   maskPhone,
   offerErrorMessage,
   sendChannels,
   stepDateFor,
+  todayET,
 } from "./offerLogic";
 
 const FIELD_KEYS = ["jobTitle", "startDate", "hourlyRate", "stepRate", "stepEffectiveOn", "hoursLine"];
@@ -163,15 +165,19 @@ function initialDraftId(draft, data) {
   return data.current?.status === "draft" ? data.current.id : null;
 }
 
-function isLocked(needRead, draftId, reviewed) {
-  return needRead || Boolean(draftId && !reviewed);
+// The letter belongs to the form only when the read says it was built for this very
+// draft (offer id and hash); otherwise another offer's letter must not show.
+function letterFor(data, pinned) {
+  const letter = data.letterPreview;
+  return pinned && letter && letter.offerId === pinned.id && letter.draftHash === pinned.draftHash ? letter.markdown : null;
 }
 
-// A start date that cannot be formed, falls on Friday to Sunday, or would push
+// A start date that cannot be formed, has passed, falls on Friday to Sunday, or would push
 // the pay step date past year 9999 gets a plain message (and no step date).
 function startDateError({ startDate, stepRate }) {
   if (!startDate) return null;
   if (!isValidDay(startDate)) return "Enter a valid date.";
+  if (startDate < todayET()) return "Pick a date in the future.";
   if (!isStartWeekday(startDate)) return "Pick a Monday to Thursday.";
   return stepRate !== "" && !stepDateFor(startDate) ? "That start date is too far out for a pay step date." : null;
 }
@@ -197,16 +203,16 @@ function sendNote(ownerActions, sends, firstName) {
   return `${who} Nothing goes out until you press Send offer.`;
 }
 
-// Everything on screen comes from `data`, the latest successful read: the
-// draft (`reviewed`), its letter preview and its draftHash. `edits` are only
-// what the owner typed since that read.
-function formView({ edits, reviewed, data, contact, busy, locked }) {
+// What is on screen is the draft this form pinned when it loaded it (`pinned`, a
+// draft from a successful read) plus what the owner typed since (`edits`). A
+// newer read never replaces it silently.
+function formView({ edits, pinned, data, contact, busy, locked }) {
   const phone = maskPhone(contact?.phone);
   const email = maskEmail(contact?.email);
-  const base = fieldsFrom(reviewed || data.defaults);
+  const base = fieldsFrom(pinned || data.defaults);
   const fields = { ...base, ...edits };
   const { startError, fieldsOk } = fieldChecks(fields);
-  const dirty = !reviewed || FIELD_KEYS.some((k) => fields[k] !== base[k]);
+  const dirty = !pinned || FIELD_KEYS.some((k) => fields[k] !== base[k]);
   return {
     base,
     fields,
@@ -215,13 +221,43 @@ function formView({ edits, reviewed, data, contact, busy, locked }) {
     startError,
     fieldsOk,
     dirty,
-    canSend: data.viewer?.ownerActions === true && Boolean(reviewed?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy && !locked,
+    canSend: data.viewer?.ownerActions === true && Boolean(pinned?.draftHash) && !dirty && fieldsOk && data.termsIssued && !busy && !locked,
   };
+}
+
+function ReadOnlyNotice({ changed, locked, hasLatest, onAdopt, onRetry }) {
+  if (changed) {
+    return (
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <ActionFeedback error className="flex-1">
+          This draft changed. Review the new version.
+        </ActionFeedback>
+        <Button size="sm" variant="secondary" onClick={onAdopt}>
+          {hasLatest ? "Show the new version" : "Close"}
+        </Button>
+      </div>
+    );
+  }
+  if (!locked) return null;
+  return (
+    <ActionFeedback error onRetry={onRetry}>
+      The offer could not be loaded after your last change. Fields and Send stay off until it loads.
+    </ActionFeedback>
+  );
+}
+
+function LetterBox({ letter }) {
+  return (
+    <div className="border-hairline border border-zinc-200 rounded p-3 max-h-80 overflow-y-auto">
+      {letter ? <SafeMarkdown markdown={letter} /> : <p className="text-14 text-zinc-500">Save the draft to see the letter.</p>}
+    </div>
+  );
 }
 
 function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged, onSent, onBusyChange }) {
   const [edits, setEdits] = useState({});
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
+  const [pinned, setPinned] = useState(() => reviewedDraft(data, initialDraftId(draft, data)));
   const [needRead, setNeedRead] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -232,12 +268,16 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  const reviewed = reviewedDraft(data, draftId);
+  // A background read that differs from the pinned draft puts the form in a
+  // read-only "changed" state until the owner loads the new version.
+  const latest = reviewedDraft(data, draftId);
+  const changed = Boolean(pinned) && !needRead && (!latest || latest.draftHash !== pinned.draftHash);
   // Read-only until a read has succeeded and holds the draft this form is about.
-  const locked = isLocked(needRead, draftId, reviewed);
-  const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ edits, reviewed, data, contact, busy, locked });
+  const locked = needRead || changed || Boolean(draftId && !pinned);
+  const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ edits, pinned, data, contact, busy, locked });
   const ownerActions = data.viewer?.ownerActions === true;
   const sends = sendChannels(contact);
+  const letter = letterFor(data, pinned);
 
   const onChange = (key, value) => setEdits((prev) => applyEdit({ ...base, ...prev }, key, value));
 
@@ -253,73 +293,75 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     }
   };
 
-  // Re-read after a write. The form shows the result only once the read holds
-  // the draft it expects; until then it stays read-only (Try again re-reads).
-  // With no expected id (another admin created the first draft meanwhile) the
-  // open draft in the read is adopted: its id and hash replace this form's.
+  // Re-read after a write. The form pins the draft in the read only once the read
+  // holds the draft it expects; until then it stays read-only (Try again re-reads).
+  // With no expected id (another admin created the first draft meanwhile) the open
+  // draft in the read is adopted.
   const refresh = async (expectId) => {
     const next = await onChanged();
     const found = next && (expectId ? reviewedDraft(next, expectId) : openDraft(next));
-    if (found) {
-      setDraftId(found.id);
+    if (found) setPinned(found);
+    if (found || (next && !expectId)) {
+      if (found) setDraftId(found.id);
       setNeedRead(false);
       setEdits({});
     }
     return next;
   };
 
-  // Another admin changed this draft since the read this form shows: say so,
-  // then re-read and show their version before anything else is saved or sent.
-  const draftChanged = async (id) => {
+  // Re-read. If the read shows the draft is gone (another admin sent or discarded
+  // it), close the form: the card shows the offer's current state.
+  const reread = async () => {
+    const expected = pinned?.id || draftId;
+    const next = await refresh(expected);
+    if (next && expected && !reviewedDraft(next, expected)) onClose();
+  };
+  const retryRead = () => run(reread);
+
+  // The server refused a write because the draft or offer moved on: nothing was
+  // written. Say so, re-read, and never re-base the owner's edits silently.
+  const staleWrite = async () => {
     setConfirming(false);
     setNeedRead(true);
-    await refresh(id);
+    await reread();
+  };
+
+  const adoptLatest = () => {
+    if (!latest) return onClose();
+    setPinned(latest);
+    setDraftId(latest.id);
+    setEdits({});
   };
 
   const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      // An existing draft is named by id and hash, so a stale save is refused.
-      const guard = reviewed ? { draftId: reviewed.id, draftHash: reviewed.draftHash } : {};
+      // An existing draft is named by the id and hash pinned when it was loaded.
+      const guard = pinned ? { draftId: pinned.id, draftHash: pinned.draftHash } : {};
       const { offer } = await saveOfferDraft(applicationId, { ...toPayload(fields), ...guard });
       setDraftId(offer.id);
       setNeedRead(true);
       await refresh(offer.id);
     } catch (err) {
       setError(offerErrorMessage(err));
-      if (err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed?.id || null);
-      if (err?.body?.code === "OFFER_NOT_DRAFT") await notDraft();
+      if (isStaleWrite(err)) await staleWrite();
     } finally {
       setBusy(false);
     }
-  };
-
-  // Re-read. If the read shows this draft is gone (another admin sent or
-  // discarded it), close the form: the card shows the offer's current state.
-  const reread = async () => {
-    const next = await refresh(draftId);
-    if (next && draftId && !reviewedDraft(next, draftId)) onClose();
-  };
-  const retryRead = () => run(reread);
-  const notDraft = async () => {
-    setConfirming(false);
-    setNeedRead(true);
-    await reread();
   };
 
   const send = async () => {
     setBusy(true);
     setError(null);
     try {
-      const out = await sendOffer(applicationId, reviewed.id, reviewed.draftHash);
+      const out = await sendOffer(applicationId, pinned.id, pinned.draftHash);
       setResult(out.comms || {});
       await onSent();
       setConfirming(false);
     } catch (err) {
       setError(offerErrorMessage(err));
-      if (err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed.id);
-      if (err?.body?.code === "OFFER_NOT_DRAFT") await notDraft();
+      if (isStaleWrite(err)) await staleWrite();
     } finally {
       setBusy(false);
     }
@@ -350,10 +392,8 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     <>
       <DialogBody>
         <div className="flex flex-col gap-4">
-          {locked && !busy && (
-            <ActionFeedback error onRetry={retryRead}>
-              The offer could not be loaded after your last change. Fields and Send stay off until it loads.
-            </ActionFeedback>
+          {!busy && (
+            <ReadOnlyNotice changed={changed} locked={locked} hasLatest={Boolean(latest)} onAdopt={adoptLatest} onRetry={retryRead} />
           )}
           <OfferFields fields={fields} onChange={onChange} startError={startError} sendTo={sendTo} disabled={busy || locked} />
           <Row label="Shared terms attached">
@@ -361,9 +401,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
           </Row>
           <div>
             <div className="ui-label mb-1">Letter preview</div>
-            <div className="border-hairline border border-zinc-200 rounded p-3 max-h-80 overflow-y-auto">
-              <SafeMarkdown markdown={data.letterPreview?.markdown} />
-            </div>
+            <LetterBox letter={letter} />
             <div className="text-14 text-zinc-500 mt-1">Shows the saved draft. Save the draft to refresh it.</div>
           </div>
           <div className="text-14 text-zinc-500">

@@ -51,14 +51,19 @@ export function sendOffer(applicationId, offerId, draftHash) {
   });
 }
 
-export function withdrawOffer(applicationId, offerId) {
-  return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/withdraw`, { method: "POST" });
+// Every write names the state the owner saw when the action started:
+// withdraw { expectedStatus, draftHash? (a draft needs it) }, revise { expectedStatus, startDate? }.
+export function withdrawOffer(applicationId, offerId, expected) {
+  return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/withdraw`, {
+    method: "POST",
+    body: JSON.stringify(expected),
+  });
 }
 
-export function reviseOffer(applicationId, offerId, startDate) {
+export function reviseOffer(applicationId, offerId, expectedStatus, startDate) {
   return offerRequest(`/admin/careers/${applicationId}/offer/${offerId}/revise`, {
     method: "POST",
-    body: JSON.stringify(startDate ? { startDate } : {}),
+    body: JSON.stringify(startDate ? { expectedStatus, startDate } : { expectedStatus }),
   });
 }
 

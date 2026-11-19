@@ -106,6 +106,14 @@ export function sendChannels(contact) {
   return email ? "one email" : null;
 }
 
+// A write the server refused because the offer or draft is no longer what the
+// owner was looking at. Nothing was written: re-read and show the message.
+export const STALE_CODES = ["DRAFT_CHANGED", "OFFER_CHANGED", "OFFER_NOT_DRAFT"];
+
+export function isStaleWrite(err) {
+  return STALE_CODES.includes(err?.body?.code);
+}
+
 export function money(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "";
@@ -118,6 +126,7 @@ const ERROR_TEXT = {
   APPLICATION_CLOSED: "This application is closed (hired, rejected or withdrawn). Move it back before sending an offer.",
   ROLE_NOT_SUPPORTED: "Offers are for technician applications only.",
   DRAFT_CHANGED: "This draft changed after you opened it. Review the new preview, then send.",
+  OFFER_CHANGED: "This offer changed after you opened it. Review it again.",
   DRAFT_HASH_REQUIRED: "The draft could not be checked. Reload the offer, review the preview, then send.",
 };
 
