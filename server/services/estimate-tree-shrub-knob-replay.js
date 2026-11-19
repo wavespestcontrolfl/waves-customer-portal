@@ -321,6 +321,42 @@ function mistingKnobSignalForReplay(estData = {}) {
   return null;
 }
 
+// Pre-slab termiticide container cost (owner 2026-11-18: the bifenthrin bottle became LESCO Crosscheck Plus, $41.57 / 96 oz to
+// $30.90 / 128 oz). The pre-slab price is cost-plus on the product's container cost, which pricing_config and its catalog link
+// move, and every replay path re-runs generateEstimate under the LIVE value: without this a sent slab quote would re-price on
+// revisit or accept. Same contract as the misting stamp: the stored pre-slab row keeps the product it quoted and the container
+// cost it priced with (the raw line's containerCost; the mapped item's fullContainerProductCost / containersRequired, cent-exact),
+// and they replay for that product. No stored row, or none with a finite cost basis: null (the live config prices it, like a
+// fresh quote). Trenching needs no pin for this swap: it prices per linear foot with Taurus chemistry included and charges a
+// product only for the cost above that, and both bifenthrin bottles cost less per finished gallon at either rate.
+function preSlabRowContainerCost(row) {
+  const direct = Number(row.containerCost);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const full = Number(row.fullContainerProductCost);
+  const containers = Number(row.containersRequired);
+  return Number.isFinite(full) && full > 0 && Number.isInteger(containers) && containers > 0
+    ? Math.round((full / containers) * 100) / 100
+    : NaN;
+}
+function preSlabTermiticideKnobSignalForReplay(estData = {}) {
+  const { storedPreSlabTermiticideRows } = require('./estimate-result-container');
+  for (const row of storedPreSlabTermiticideRows(estData)) {
+    const productKey = String(row.productKey || '').trim().toLowerCase();
+    const containerOz = Number(row.containerOz);
+    const containerCost = preSlabRowContainerCost(row);
+    if (productKey && Number.isFinite(containerOz) && containerOz > 0 && Number.isFinite(containerCost) && containerCost > 0) {
+      return { productKey, containerCost, containerOz };
+    }
+  }
+  return null;
+}
+
+// The pin as engine-input overrides: {} when the stored rows carry none, so Object.assign adds nothing.
+function preSlabTermiticideReplayOverrides(estData = {}) {
+  const knobs = preSlabTermiticideKnobSignalForReplay(estData);
+  return knobs ? { preSlabTermiticidePricingKnobs: knobs } : {};
+}
+
 // Every install knob a stamped line carries replays verbatim (codex #4313
 // r5 P1: a later multiplier / buildup / floor edit must not move a sent
 // install either); an unstamped line replays the pre-stamp values of those
@@ -420,6 +456,8 @@ function applyTreeShrubPalmReplay(v1Input, estData = {}) {
 module.exports = {
   termiteKnobSignalForReplay,
   mistingKnobSignalForReplay,
+  preSlabTermiticideKnobSignalForReplay,
+  preSlabTermiticideReplayOverrides,
   PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,
   NEUTRAL_TREE_SHRUB_KNOBS,

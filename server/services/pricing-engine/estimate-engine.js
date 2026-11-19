@@ -259,7 +259,7 @@ const {
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
   pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
-  priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
+  priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor, normalizePreSlabTermiticideProduct,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching, priceAreaAddOnList, assertAreaAddOnHostVisit,
   pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
@@ -293,6 +293,19 @@ function serviceSelected(value) {
 
 function serviceOptions(value) {
   return value && typeof value === 'object' ? value : {};
+}
+
+// A replayed quote keeps the container cost its stored pre-slab row priced with (input.preSlabTermiticidePricingKnobs, set by
+// the server replay paths from estimate-tree-shrub-knob-replay), for the product that row quoted only. A cost set on the service
+// itself still wins.
+function withPreSlabReplayCost(options, knobs) {
+  if (!knobs || typeof knobs !== 'object') return options;
+  const { productKey } = normalizePreSlabTermiticideProduct(options.productKey, { legacyPayload: !!options.legacyPayload });
+  if (productKey !== knobs.productKey) return options;
+  const replayed = { ...options };
+  if (!(Number(options.customContainerCost) > 0)) replayed.customContainerCost = knobs.containerCost;
+  if (!(Number(options.customContainerOz) > 0)) replayed.customContainerOz = knobs.containerOz;
+  return replayed;
 }
 
 function uniqueStrings(values = []) {
@@ -2011,7 +2024,7 @@ function generateEstimate(input) {
     const preSlabOptions = serviceOptions(preSlabService);
     const result = legacyPreSlabService && !canonicalPreSlabService
       ? pricePreSlabTermidor(property, preSlabOptions)
-      : pricePreSlabTermiticide(property, preSlabOptions);
+      : pricePreSlabTermiticide(property, withPreSlabReplayCost(preSlabOptions, input.preSlabTermiticidePricingKnobs));
     lineItems.push(result);
   }
   // Commercial bed bug bypasses the manual lane only with EXPLICIT commercial

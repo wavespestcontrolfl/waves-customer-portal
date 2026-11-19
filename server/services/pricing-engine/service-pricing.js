@@ -7050,13 +7050,19 @@ function resolveTrenchDepthPriceMultiplier(cfg = {}, trenchDepthFt) {
 
 // Owner 2026-11-18: talstar_p and bifen_it name the LESCO Crosscheck Plus bottle since then, under the same keys. A label check on
 // either counts only when the caller says it was made for that bottle (options.labelBottle: the estimate tool sends it; a request
-// or engine input saved before then lacks it), so a check made for the earlier bottle never carries over to a replay or re-price.
-// The product is the one this engine resolves and prices, aliases included. Fipronil checks are unchanged.
+// or engine input saved before then lacks it) AND the configured product names that bottle, so a check made for the earlier
+// bottle never carries over to a replay or re-price, and a Crosscheck Plus check never counts for a product that still names
+// Talak (one an admin edited, which the 2026-11-19 migration leaves alone). The product is the one this engine resolves and
+// prices, aliases included. Fipronil checks are unchanged.
 const BIFENTHRIN_LABEL_BOTTLE = 'lesco_crosscheck_plus';
 const BIFENTHRIN_TERMITICIDE_KEYS = new Set(['talstar_p', 'bifen_it']);
-function labelCheckCounts(options, productKey) {
-  return optionBooleanTrue(options.labelConfirmed)
-    && (!BIFENTHRIN_TERMITICIDE_KEYS.has(productKey) || options.labelBottle === BIFENTHRIN_LABEL_BOTTLE);
+// The bottle a configured product names: its catalog link (pre-slab), else its label (a trenching product has no link). Both come
+// from pricing_config over the code.
+const namesCrosscheckPlus = (product = {}) => /crosscheck/i.test(String(product.catalogProductName || product.label || ''));
+function labelCheckCounts(options, productKey, product) {
+  if (!optionBooleanTrue(options.labelConfirmed)) return false;
+  return !BIFENTHRIN_TERMITICIDE_KEYS.has(productKey)
+    || (options.labelBottle === BIFENTHRIN_LABEL_BOTTLE && namesCrosscheckPlus(product));
 }
 
 function priceTrenching(property = {}, options = {}) {
@@ -7102,7 +7108,7 @@ function priceTrenching(property = {}, options = {}) {
     ? warrantyResolution.warrantyTier
     : defaultTrenchingWarrantyTier(product);
   const warrantyConfig = cfg.warrantyTiers?.[warrantyTier] || cfg.warrantyTiers?.none || {};
-  const labelConfirmed = labelCheckCounts(options, productResolution.productKey);
+  const labelConfirmed = labelCheckCounts(options, productResolution.productKey, product);
   const labelConfirmationRequiredForPayload = !legacyTrenchingPayload;
   const warningList = [
     ...(product.warnings || []),
@@ -7455,7 +7461,7 @@ function pricePreSlabTermiticide(input, options = {}) {
   }
   const warrantyExtendedPrice = warrantyExtendedSelected ? cfg.warrantyExtended : 0;
   const warrantyAdder = warrantyExtendedPrice;
-  const labelConfirmed = labelCheckCounts(options, productResolution.productKey);
+  const labelConfirmed = labelCheckCounts(options, productResolution.productKey, product);
   const requiresLabelConfirmation = product.requiresLabelConfirmation === true;
   const labelManualReviewReasons = requiresLabelConfirmation && !labelConfirmed
     ? ['pre_slab_label_confirmation_required']

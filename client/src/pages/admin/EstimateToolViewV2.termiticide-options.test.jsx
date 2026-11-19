@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BIFENTHRIN_LABEL_BOTTLE, clearPriorBottleLabelChecks, termiticideProductOptions } from "./EstimateToolViewV2";
+import { BIFENTHRIN_LABEL_BOTTLE, canonicalTermiticideProducts, clearPriorBottleLabelChecks, termiticideProductOptions } from "./EstimateToolViewV2";
 
 // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so the
 // pre-slab and trenching dropdowns list the bottle once (LESCO Crosscheck Plus since 2026-11-18); a saved bifen_it selection keeps a match.
@@ -54,6 +54,17 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talak" });
     const fipronil = saved({ preslabProductKey: "termidor", trenchingProductKey: "taurus" });
     expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: fipronil, cleared: [] });
+  });
+
+  it("restores a saved alias as its option key, so the picker and the label panel show the product the engine prices", () => {
+    expect(canonicalTermiticideProducts({ preslabProductKey: "talak", trenchingProductKey: "Crosscheck Plus", notes: "kept" }))
+      .toEqual({ preslabProductKey: "talstar_p", trenchingProductKey: "talstar_p", notes: "kept" });
+    expect(canonicalTermiticideProducts({ preslabProductKey: "termidor", trenchingProductKey: "taurus" }))
+      .toEqual({ preslabProductKey: "termidor_sc", trenchingProductKey: "taurus_sc" });
+    const keys = { preslabProductKey: "talstar_p", trenchingProductKey: "" };
+    expect(canonicalTermiticideProducts(keys)).toBe(keys);
+    const unknown = { preslabProductKey: "mystery bottle", trenchingProductKey: "bifen_it" };
+    expect(canonicalTermiticideProducts(unknown)).toBe(unknown);
   });
 
   it("clears only the bifenthrin check when the other key is fipronil", () => {

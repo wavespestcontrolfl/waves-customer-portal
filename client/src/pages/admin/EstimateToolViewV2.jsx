@@ -141,6 +141,18 @@ const LABEL_CHECKS = [
 ];
 const LABEL_CHECK_FOR_PRODUCT = Object.fromEntries(LABEL_CHECKS.map(({ productField, checkField }) => [productField, checkField]));
 
+// A saved alias ("talak", "Crosscheck Plus") becomes its option key, so the picker shows the product the engine prices and the label
+// panel shows that product's warning. A blank or unrecognized value is left as saved.
+export function canonicalTermiticideProducts(form) {
+  let next = form;
+  for (const { productField, resolve } of LABEL_CHECKS) {
+    const value = form[productField];
+    const key = typeof value === "string" && value.trim() ? resolve(value, { fallback: null }) : null;
+    if (key && key !== value) next = { ...next, [productField]: key };
+  }
+  return next;
+}
+
 // savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it.
 export function clearPriorBottleLabelChecks(savedInputs, form) {
   if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form, cleared: [] };
@@ -2295,7 +2307,7 @@ export default function EstimateToolViewV2({
   function reopenEditSource(d) {
     const restored = formFromEditSource(d);
     const { form: scrubbed, cleared } = scrubReopenedEstimateForm(restored, d.engineProfile);
-    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, scrubbed);
+    const { form: seeded, cleared: labelChecks } = clearPriorBottleLabelChecks(d.inputs, canonicalTermiticideProducts(scrubbed));
     const guessedHomeSize = linesPricedOnGuessedHomeSize(d.result).length > 0;
     const notice = [
       cleared.length > 0

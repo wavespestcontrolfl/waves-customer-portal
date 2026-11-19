@@ -1498,7 +1498,8 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
   },
 };
 
-export function normalizeTrenchingProductKey(value) {
+// fallback: what an unrecognized value resolves to (the engine's default product; null tells a caller the value is unknown).
+export function normalizeTrenchingProductKey(value, { fallback = 'taurus_sc' } = {}) {
   const raw = String(value || 'taurus_sc')
     .trim()
     .toLowerCase()
@@ -1525,7 +1526,7 @@ export function normalizeTrenchingProductKey(value) {
     crosscheck_plus: 'talstar_p',
     lesco_crosscheck_plus: 'talstar_p',
   };
-  return aliases[raw] || 'taurus_sc';
+  return aliases[raw] || fallback;
 }
 
 function normalizeTrenchingRate(value) {
@@ -1552,7 +1553,7 @@ function normalizeTrenchingWarranty(value, product) {
   return aliases[raw] || (product.chemistryType === 'repellent_pyrethroid' ? 'none' : 'one_year_retreat');
 }
 
-export function normalizePreSlabProductKey(value) {
+export function normalizePreSlabProductKey(value, { fallback = 'termidor_sc' } = {}) {
   const raw = String(value || 'termidor_sc')
     .trim()
     .toLowerCase()
@@ -1577,7 +1578,7 @@ export function normalizePreSlabProductKey(value) {
     crosscheck_plus: 'talstar_p',
     lesco_crosscheck_plus: 'talstar_p',
   };
-  return aliases[raw] || 'termidor_sc';
+  return aliases[raw] || fallback;
 }
 
 function normalizePreSlabVolume(value) {

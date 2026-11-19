@@ -99,6 +99,25 @@ function storedMistingRows(estimateData, options = {}) {
   return mistingRowsIn(storedEstimateContainer(data, options) || data);
 }
 
+// The stored rows of the pre-slab termiticide line: the mapped one-time item, its quote-required copy and the raw engine line,
+// from the same authoritative container. Each keeps the product it quoted and the container cost it priced with.
+const isPreSlabTermiticideRow = (row) => isRecord(row) && row.service === 'pre_slab_termiticide';
+function preSlabTermiticideRowsIn(container) {
+  const nested = container.results && container.results.oneTime;
+  return [
+    container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
+    nested && nested.items, nested && nested.specItems,
+    container.specItems, container.quoteRequiredItems, container.lineItems,
+  ].filter(Array.isArray).flat().filter(isPreSlabTermiticideRow);
+}
+function storedPreSlabTermiticideRows(estimateData, options = {}) {
+  const data = parseStoredData(estimateData);
+  if (!data) return [];
+  const containers = [data.result, data.engineResult].filter(isRecord);
+  if (containers.length && !containers.some((container) => preSlabTermiticideRowsIn(container).length)) return [];
+  return preSlabTermiticideRowsIn(storedEstimateContainer(data, options) || data);
+}
+
 // The commercial engine ids and their residential label-mapped twins are the SAME charge in two
 // spellings: canonicalized for the duplicate key only (each line keeps its own serviceKey).
 const DEDUPE_FAMILY = {
@@ -212,5 +231,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedMistingRows,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedMistingRows,
 };

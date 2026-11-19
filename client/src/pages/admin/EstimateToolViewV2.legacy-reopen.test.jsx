@@ -130,6 +130,14 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
       .toMatchObject({ preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
   });
 
+  it('restores a saved alias as its option key, so the picker and the panel name the bottle the engine prices', async () => {
+    reopen({ ...PRESLAB, preslabProductKey: 'talak' }, HOUSE);
+    expect(await screen.findByText(/pre-slab label check was for the earlier bifenthrin bottle/)).toBeInTheDocument();
+    expect(document.getElementById('estimate-preslabProductKey')).toHaveValue('talstar_p');
+    expect(labelCheck()).not.toBeChecked();
+    expect(screen.getAllByText(/LESCO Crosscheck Plus, EPA 10404-120/).length).toBeGreaterThan(0);
+  });
+
   it('keeps a label check the form made for Crosscheck Plus', async () => {
     reopen({ ...PRESLAB, _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
     await waitFor(() => expect(labelCheck()).toBeChecked());

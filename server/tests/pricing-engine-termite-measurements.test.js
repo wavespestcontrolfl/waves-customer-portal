@@ -929,6 +929,31 @@ describe('saved bifenthrin label checks follow the bottle on server replay', () 
     expect(legacy({ labelConfirmed: true, labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE })).toBe(true);
   });
 
+  // The migration leaves a product an admin edited away from the Talak values alone, so the configured product can still name Talak:
+  // a check made for Crosscheck Plus never counts for it, pre-slab (its catalog link names the bottle) or trenching (its label does).
+  test('a Crosscheck Plus label check never counts for a configured product that still names Talak', () => {
+    const sp = require('../services/pricing-engine/service-pricing');
+    const { SPECIALTY } = require('../services/pricing-engine/constants');
+    const pre = SPECIALTY.preSlabTermiticide.products.talstar_p;
+    const trench = SPECIALTY.trenching.products.bifen_it;
+    const saved = [{ ...pre }, { ...trench }];
+    const checked = { labelConfirmed: true, labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE };
+    const counts = () => [
+      sp.pricePreSlabTermiticide({ slabSqFt: 2500 }, { productKey: 'talstar_p', ...checked }).labelConfirmed,
+      sp.priceTrenching({ footprint: 2000 }, { perimeterLF: 200, productKey: 'bifen_it', ...checked }).labelConfirmed,
+    ];
+    try {
+      expect(counts()).toEqual([true, true]);
+      Object.assign(pre, { catalogProductName: 'Atticus Talak 7.9 F', label: 'Talak 7.9 F - Bifenthrin' });
+      Object.assign(trench, { label: 'Talak 7.9 F - Bifenthrin' });
+      expect(counts()).toEqual([false, false]);
+    } finally {
+      Object.assign(pre, saved[0]);
+      Object.assign(trench, saved[1]);
+    }
+    expect(counts()).toEqual([true, true]);
+  });
+
   // Public price ranges sweep every product with a label check made for its current bottle; a bifenthrin row priced without the
   // mark would leave the range (its review makes the pre-slab value NaN).
   test('the public price ranges count the label check on both bifenthrin products (the sweep carries the mark)', () => {
@@ -947,5 +972,71 @@ describe('saved bifenthrin label checks follow the bottle on server replay', () 
       preslab.mockRestore();
       trench.mockRestore();
     }
+  });
+});
+
+// Owner 2026-11-18: the bifenthrin bottle moved from Talak ($41.57 / 96 oz) to LESCO Crosscheck Plus ($30.90 / 128 oz) under the
+// same keys. A slab quote already sent keeps the container cost it priced with on every replay; a fresh quote prices the new bottle.
+describe('a sent pre-slab quote keeps the container cost it priced with', () => {
+  const replay = require('../services/estimate-tree-shrub-knob-replay');
+  const PROFILE = { homeSqFt: 2400, stories: 1, lotSqFt: 9000, propertyType: 'single_family' };
+  const input = (extra = {}) => ({ ...PROFILE, services: { preSlabTermiticide: { productKey: 'talstar_p', slabSqFt: 6832, ...extra } } });
+  const TALAK = { productKey: 'talstar_p', containerCost: 41.57, containerOz: 96 };
+  const slabLine = (estimate) => estimate.lineItems.find((line) => line.service === 'pre_slab_termiticide');
+  // A quote priced before the swap: the engine line under the Talak cost basis, as the engine wrote it then.
+  const oldQuote = () => generateEstimate({ ...input(), preSlabTermiticidePricingKnobs: TALAK });
+
+  test('the pin reproduces the earlier price, for the product it names only; a cost on the service still wins', () => {
+    expect(slabLine(generateEstimate(input())).price).toBe(743);
+    expect(slabLine(oldQuote())).toMatchObject({ price: 993, containerCost: 41.57, containerOz: 96 });
+    expect(slabLine(generateEstimate({ ...input(), preSlabTermiticidePricingKnobs: { ...TALAK, productKey: 'termidor_sc' } })).price).toBe(743);
+    const custom = input({ customContainerCost: 30.9, customContainerOz: 128 });
+    expect(slabLine(generateEstimate({ ...custom, preSlabTermiticidePricingKnobs: TALAK })).price).toBe(743);
+  });
+
+  test('the signal reads the cost basis from the raw engine line and from the mapped one-time item', () => {
+    const engineResult = oldQuote();
+    expect(replay.preSlabTermiticideKnobSignalForReplay({ engineInputs: input(), engineResult })).toEqual(TALAK);
+    expect(replay.preSlabTermiticideKnobSignalForReplay({ result: mapV1ToLegacyShape(engineResult) })).toEqual(TALAK);
+    expect(replay.preSlabTermiticideKnobSignalForReplay({ result: mapV1ToLegacyShape(generateEstimate({ ...PROFILE, services: {} })) })).toBeNull();
+    expect(replay.preSlabTermiticideKnobSignalForReplay({ engineResult: { lineItems: [{ service: 'pre_slab_termiticide', productKey: 'talstar_p' }] } })).toBeNull();
+    expect(replay.preSlabTermiticideKnobSignalForReplay({})).toBeNull();
+  });
+
+  test('the public replay of an old quote keeps its price; a copy of the pin inside the stored inputs never prices', () => {
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    expect(slabLine(generateEstimate(extractEngineInputs({ engineInputs: input(), engineResult: oldQuote() }))).price).toBe(993);
+    // No stored pre-slab row to read: the replay sets no pin, and the copy planted in the stored inputs is cleared, not priced.
+    const planted = { engineInputs: { ...input(), preSlabTermiticidePricingKnobs: TALAK } };
+    expect(extractEngineInputs(planted).preSlabTermiticidePricingKnobs).toBeUndefined();
+    expect(slabLine(generateEstimate(extractEngineInputs(planted))).price).toBe(743);
+  });
+
+  test('the authoritative recompute keeps an old quote only on a declared replay; a posted save prices the new bottle', async () => {
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const deps = { needsSync: () => false, syncConstantsFromDB: async () => {}, withTrustedCatalogPricing: async (inputs) => inputs, translateV2CallToV1Input: null };
+    const stored = { engineInputs: { ...input(), preSlabTermiticidePricingKnobs: TALAK }, engineResult: oldQuote() };
+    const replayed = await serverRecomputeFromEstimateData(stored, { ...deps, replaySavedPricingKnobs: true });
+    expect(slabLine(replayed.rawEngineResult).price).toBe(993);
+    const posted = await serverRecomputeFromEstimateData(stored, deps);
+    expect(slabLine(posted.rawEngineResult).price).toBe(743);
+    const { CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
+    expect(CLIENT_IDENTITY_FIELDS).toContain('preSlabTermiticidePricingKnobs');
+  });
+
+  test('trenching needs no pin: the bottle never moves a trench price, at either rate', () => {
+    const products = require('../services/pricing-engine/constants').SPECIALTY.trenching.products;
+    const saved = { ...products.talstar_p };
+    const prices = () => ['standard', 'high'].flatMap((applicationRate) => [120, 260].map((perimeterLF) => priceTrenching(
+      { footprint: 2400 }, { perimeterLF, productKey: 'talstar_p', applicationRate },
+    ).price));
+    const crosscheck = prices();
+    try {
+      Object.assign(products.talstar_p, { label: 'Talak 7.9 F - Bifenthrin', containerCost: 41.57, containerOz: 96 });
+      expect(prices()).toEqual(crosscheck);
+    } finally {
+      Object.assign(products.talstar_p, saved);
+    }
+    expect(crosscheck.every((price) => price > 0)).toBe(true);
   });
 });
