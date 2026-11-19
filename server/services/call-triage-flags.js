@@ -3681,6 +3681,7 @@ module.exports = {
   quoteBindsConfirmedSlot,
   turnHasNegationOrHedge,
   turnHasUnresolvedConditional,
+  quoteIsPlainStatement,
   normalizeCommitmentText,
   hasAgentCommittedEvidence,
   etWallClockOfConfirmedStart,

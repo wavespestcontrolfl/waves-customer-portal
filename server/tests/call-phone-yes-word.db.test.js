@@ -1,0 +1,200 @@
+/**
+ * The caller's word for the phone-yes cards (call-phone-yes-word.js) through PostgreSQL: which calls still owe a read
+ * (held to the processor's own candidate query row for row), the customer's latest word since the send, and what
+ * stands between it and the booking call. Runs inside a rolled-back transaction. Synthetic names and numbers only.
+ * Skips without DATABASE_URL.
+ */
+const SKIP = !process.env.DATABASE_URL;
+
+jest.setTimeout(120000);
+let mockConn;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockConn(...args);
+  proxy.raw = (...args) => mockConn.raw(...args);
+  proxy.transaction = (...args) => mockConn.transaction(...args);
+  Object.defineProperty(proxy, 'fn', { get: () => mockConn.fn });
+  Object.defineProperty(proxy, 'schema', { get: () => mockConn.schema });
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const knex = require('knex');
+const { randomUUID } = require('crypto');
+const {
+  owedReadSql, latestBillingChoice, unreadCallSince, laterWordProblem, callerWord,
+} = require('../services/call-phone-yes-word');
+
+const describeDb = SKIP ? describe.skip : describe;
+const DAY = 86400000;
+const WORDS = "Let's do the quarterly plan, just bill me each time you come out.";
+const RECORDED = { recording_url: 'https://example.test/recording.mp3', recording_duration_seconds: 60 };
+// The V2 extraction: the caller's plan choice with its evidence quote (the caller's own sentence).
+const extractionWith = (choice, intent = null) => ({
+  meta: { call_summary: 'Caller asked about the quarterly plan.' },
+  service_request: { primary_service_category: 'pest_general', ...(choice ? { billing_choice: choice } : {}), ...(intent ? { service_intent: intent } : {}) },
+  scheduling: { status: 'confirmed' },
+  evidence: choice ? [
+    { field_path: '/service_request/billing_choice', quote: 'You can bill each time.', speaker: 'agent', transcript_offset_ms: 900 },
+    { field_path: '/service_request/billing_choice', quote: WORDS, speaker: 'caller', transcript_offset_ms: 1200 },
+  ] : [],
+});
+// A labeled two-speaker transcript: the caller says WORDS on a call that names the plan.
+const transcriptWith = (choice) => (choice
+  ? `Agent: Thanks for calling Waves, how can I help?\nCaller: ${WORDS}\nAgent: You can bill each time. You are all set.`
+  : 'Agent: Thanks for calling Waves, how can I help?\nCaller: I need someone out for the bugs.\nAgent: You are all set.');
+
+describeDb("the caller's word (PostgreSQL)", () => {
+  let database; let trx;
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+  });
+  afterAll(async () => { await database.destroy(); });
+  beforeEach(async () => {
+    trx = await database.transaction();
+    mockConn = trx;
+  });
+  afterEach(async () => { await trx.rollback(); });
+
+  let seq = 0;
+  const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
+  async function customer() {
+    const id = randomUUID();
+    seq += 1;
+    await trx('customers').insert({
+      id, first_name: 'Pat', last_name: 'Sampleton', phone: `+1941555${String(5000 + seq)}`, email: `qa-${id.slice(0, 8)}@example.test`, active: true,
+    });
+    return id;
+  }
+  async function call(customerId, choice, over = {}, intent = null) {
+    const id = randomUUID();
+    await trx('call_log').insert({
+      id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101', answered_by: 'human',
+      processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(extractionWith(choice, intent)),
+      transcription: transcriptWith(choice), direction: 'inbound', ...over,
+    });
+    return id;
+  }
+  const since = () => new Date(Date.now() - 2 * DAY);
+  const rowOf = (id) => trx('call_log').where({ id }).first(require('../services/call-phone-yes-word').CALL_COLUMNS);
+
+  test("owed is exactly what the processor's sweep would read again", async () => {
+    const processor = require('../services/call-recording-processor');
+    const customerId = await customer();
+    const settled = new Date(Date.now() - 20 * 60000); // past the processor's 10-minute settle window
+    const masked = { transcription_metadata: JSON.stringify({ pan_detected: true }) };
+    const states = [
+      { processing_status: null, ...RECORDED }, { processing_status: null }, { processing_status: null, ...RECORDED, recording_duration_seconds: 8 },
+      { processing_status: 'pending', ...RECORDED }, { processing_status: 'processed', ...RECORDED },
+      { processing_status: 'processed', transcription_status: 'pending', transcription: null, ...RECORDED },
+      { processing_status: 'no_transcription', extraction_attempts: 1, ...RECORDED }, { processing_status: 'no_transcription', extraction_attempts: 1 },
+      { processing_status: 'no_transcription', extraction_attempts: 3, ...RECORDED },
+      { processing_status: 'extraction_failed', extraction_attempts: 1, ...RECORDED }, { processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED },
+      { processing_status: 'extraction_failed', extraction_attempts: 1, ...RECORDED, created_at: new Date(Date.now() - 8 * DAY) },
+      { processing_status: null, ...masked }, { processing_status: 'pending', ...masked }, { processing_status: null, ...masked, transcription: null },
+      { processing_status: 'extraction_failed', extraction_attempts: 1, ...masked }, { processing_status: 'no_transcription', extraction_attempts: 1, ...masked },
+      { processing_status: 'processed', ...masked },
+    ];
+    const ids = [];
+    for (const state of states) ids.push(await call(customerId, null, { created_at: settled, updated_at: settled, ...state }));
+    const owed = await trx('call_log').whereIn('id', ids).whereRaw(owedReadSql('call_log')).pluck('id');
+    const read = await trx('call_log').whereIn('id', ids).whereRaw(`NOT ${owedReadSql('call_log')}`).pluck('id');
+    const candidates = await processor.pendingCandidatesQuery().whereIn('id', ids).pluck('id');
+    expect(candidates.length).toBeGreaterThan(5);
+    expect([...owed].sort()).toEqual([...candidates].sort());
+    expect(owed.length + read.length).toBe(states.length);
+  });
+
+  test('a call being read is owed; so is one inside the settle window', async () => {
+    const customerId = await customer();
+    await call(customerId, null, { processing_status: 'processing' });
+    await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(true);
+    const other = await customer();
+    await call(other, null, { processing_status: null, ...RECORDED, updated_at: new Date() });
+    await expect(unreadCallSince(trx, { customerId: other, since: since() })).resolves.toBe(true);
+  });
+
+  test('an owed call before the window, or a sandbox call, does not count', async () => {
+    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+    const customerId = await customer();
+    await call(customerId, null, { processing_status: 'processing', created_at: new Date(Date.now() - 3 * DAY) });
+    await call(customerId, null, { processing_status: 'processing', source: VOICE_RELAY_SANDBOX_SOURCE });
+    await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(false);
+  });
+
+  test("a yes: the caller's pay-per-application choice with their own sentence", async () => {
+    const customerId = await customer();
+    const yesCallId = await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({
+      yes: { callLogId: yesCallId, at: expect.any(Date), quote: WORDS }, noYes: null,
+    });
+  });
+
+  test.each([
+    ['no call names a choice', [[null, {}]], { yes: null, noYes: 'no_yes_heard' }],
+    ['the newest word is annual prepay', [['per_application', { created_at: hoursAgo(5) }], ['annual_prepay', { created_at: hoursAgo(2) }]], { skip: 'chose_annual_prepay' }],
+    ['a later call asked to cancel', [['per_application', { created_at: hoursAgo(5) }], [null, { created_at: hoursAgo(2) }, 'cancellation_request']], { skip: 'took_back' }],
+    ['the yes call also asked for a one-time visit', [['per_application', { created_at: hoursAgo(5) }, 'preventative_one_time']], { skip: 'took_back' }],
+    ['the choice came before the send', [['per_application', { created_at: new Date(Date.now() - 3 * DAY) }]], { yes: null, noYes: 'no_yes_heard' }],
+    ['the choice call is a voicemail', [['per_application', { answered_by: 'voicemail' }]], { yes: null, noYes: 'no_yes_heard' }],
+    ['the choice call is still being read', [['per_application', { processing_status: 'processing' }]], { yes: null, noYes: 'no_yes_heard' }],
+    ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
+  ])('%s', async (_name, calls, expected) => {
+    const customerId = await customer();
+    for (const [choice, over, intent] of calls) await call(customerId, choice, over, intent);
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual(expected);
+  });
+
+  test('a yes on a sandbox call is not heard', async () => {
+    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+    const customerId = await customer();
+    await call(customerId, 'per_application', { source: VOICE_RELAY_SANDBOX_SOURCE });
+    await expect(latestBillingChoice(trx, { customerId, since: since() })).resolves.toBeNull();
+  });
+
+  test('the latest word is found past fifty calls with none', async () => {
+    const customerId = await customer();
+    await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    await call(customerId, null, { created_at: hoursAgo(4) }, 'cancellation_request');
+    for (let n = 0; n < 55; n += 1) await call(customerId, null, { created_at: new Date(Date.now() - 3 * 3600000 + n * 1000) });
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
+  });
+
+  test("an outbound call with swapped labels hears the customer's words", async () => {
+    const customerId = await customer();
+    const callId = await call(customerId, 'per_application', {
+      direction: 'outbound-api',
+      transcription: `Caller: Hi, this is Sam with Waves, calling about your quote.\nAgent: ${WORDS}\nCaller: Will do.`,
+    });
+    await expect(latestBillingChoice(trx, { customerId, since: since() }))
+      .resolves.toMatchObject({ choice: 'per_application', callLogId: callId, quote: WORDS });
+  });
+
+  test.each([
+    ['the yes came after the booking call', { yesHoursAgo: 1, bookingHoursAgo: 2 }, 'yes_after_booking'],
+    ['the booking call could not be read', { bookingOver: { v2_extraction_status: 'failed' } }, 'booking_call_unread'],
+    ['the customer called again after the yes', { laterHoursAgo: 1 }, 'newer_call'],
+    ['nothing came between', {}, null],
+  ])('between the word and the booking: %s', async (_name, setup, expected) => {
+    const { yesHoursAgo = 5, bookingHoursAgo = 2, bookingOver = {}, laterHoursAgo = null } = setup;
+    const customerId = await customer();
+    const yesCallId = await call(customerId, 'per_application', { created_at: hoursAgo(yesHoursAgo) });
+    const bookingCallId = await call(customerId, null, { created_at: hoursAgo(bookingHoursAgo), ...bookingOver });
+    if (laterHoursAgo != null) await call(customerId, null, { created_at: hoursAgo(laterHoursAgo) });
+    const yes = { callLogId: yesCallId, at: hoursAgo(yesHoursAgo) };
+    await expect(laterWordProblem(trx, { customerId, yes, booking: await rowOf(bookingCallId) })).resolves.toBe(expected);
+  });
+
+  test('with no yes, a call after the booking is a newer call; one before it is not', async () => {
+    const customerId = await customer();
+    await call(customerId, null, { created_at: hoursAgo(5) });
+    const bookingCallId = await call(customerId, null, { created_at: hoursAgo(2) });
+    await expect(laterWordProblem(trx, { customerId, yes: null, booking: await rowOf(bookingCallId) })).resolves.toBeNull();
+    await call(customerId, null, { created_at: hoursAgo(1) });
+    await expect(laterWordProblem(trx, { customerId, yes: null, booking: await rowOf(bookingCallId) })).resolves.toBe('newer_call');
+  });
+});
