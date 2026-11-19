@@ -142,12 +142,12 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(triage.slice(at, at + 700)).toContain("'family_account_candidates'");
   });
   test('techs: the card is hidden from the list and counts and refused on every transition (admin-only reasons)', () => {
-    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs', 'call_prepay_choice'];");
+    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs', 'call_prepay_choice', 'call_phone_yes'];");
     expect(triage).toContain("q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain("q.whereNotIn('reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain('if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {');
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs", "call_prepay_choice"]);');
+    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs", "call_prepay_choice", "call_phone_yes"]);');
     const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
     expect(branch.slice(0, 600)).toContain('isAdmin ? (');
   });
@@ -165,7 +165,7 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\([\s\S]*?"family_account_candidates"[\s\S]*?\]\);/);
     expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
-    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence, call_prepay_choice: CallPrepayEvidence };');
+    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence, call_prepay_choice: CallPrepayEvidence, call_phone_yes: PhoneYesEvidence };');
     expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
   });
 });

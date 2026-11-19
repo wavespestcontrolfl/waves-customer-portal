@@ -1,0 +1,334 @@
+/**
+ * GATE_CALL_PHONE_YES_ACCEPT through PostgreSQL (owner 2026-11-18, step 1: the office taps). A call booked a pest visit
+ * while the customer had an open estimate: the sweep files ONE admin card for it, in one of two states (the caller's
+ * yes in their own words, or "No yes heard"), with the shadow verdict for the later automatic step. It accepts
+ * nothing and sends nothing. The card stays open while a visit the call booked is on the calendar, also after the
+ * estimate expires, and closes itself once it stops being true. Runs inside a rolled-back transaction. Synthetic
+ * names, numbers and addresses only. Skips without DATABASE_URL.
+ */
+const SKIP = !process.env.DATABASE_URL;
+
+jest.setTimeout(120000);
+let mockConn;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockConn(...args);
+  proxy.raw = (...args) => mockConn.raw(...args);
+  proxy.transaction = (...args) => mockConn.transaction(...args);
+  Object.defineProperty(proxy, 'fn', { get: () => mockConn.fn });
+  Object.defineProperty(proxy, 'schema', { get: () => mockConn.schema });
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})), notifyCustomer: jest.fn(async () => ({})) }));
+jest.mock('../services/account-membership-email', () => ({
+  sendMembershipStarted: jest.fn(async () => ({})),
+  isEmailLike: (value) => /@/.test(String(value || '')),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
+
+const knex = require('knex');
+const { randomUUID } = require('crypto');
+const acceptance = require('../services/estimate-manual-acceptance');
+const { sendMembershipStarted } = require('../services/account-membership-email');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { notifyAdmin } = require('../services/notification-service');
+const { runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS } = require('../services/call-phone-yes-accept');
+
+const GATE = 'GATE_CALL_PHONE_YES_ACCEPT';
+const describeDb = SKIP ? describe.skip : describe;
+const DAY = 86400000;
+const WORDS = "Let's do the quarterly plan, just bill me each time you come out.";
+
+// Quarterly pest: 4 visits a year at $45 = $180 a year = $15 a month. No setup fee disclosed.
+const planData = (over = {}) => ({
+  customerSelection: { frequency: 'quarterly' },
+  setupFeeQuote: { amount: 0, waived: true },
+  result: {
+    totals: { year2mo: 15, year2: 180 },
+    results: { pestTiers: [{ label: 'Quarterly', mo: 15, ann: 180, apps: 4, pa: 45 }] },
+    recurring: {
+      discount: 0, monthlyTotal: 15, grandTotal: 15,
+      services: [{ name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: 45 }],
+    },
+    oneTime: { items: [], membershipFee: 0 },
+  },
+  ...over,
+});
+// The V2 extraction: the caller's plan choice with its evidence quote (the caller's own sentence).
+const extractionWith = (choice, intent = null) => ({
+  meta: { call_summary: 'Caller asked about the quarterly plan.' },
+  service_request: { primary_service_category: 'pest_general', ...(choice ? { billing_choice: choice } : {}), ...(intent ? { service_intent: intent } : {}) },
+  scheduling: { status: 'confirmed' },
+  evidence: choice ? [
+    { field_path: '/service_request/billing_choice', quote: 'You can bill each time.', speaker: 'agent', transcript_offset_ms: 900 },
+    { field_path: '/service_request/billing_choice', quote: WORDS, speaker: 'caller', transcript_offset_ms: 1200 },
+  ] : [],
+});
+
+describeDb('call phone yes cards (PostgreSQL)', () => {
+  let database; let trx;
+  const savedGate = process.env[GATE];
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
+    database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+  });
+  afterAll(async () => {
+    await database.destroy();
+    if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
+  });
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    process.env[GATE] = 'true';
+    trx = await database.transaction();
+    mockConn = trx;
+  });
+  afterEach(async () => { await trx.rollback(); });
+
+  let seq = 0;
+  const inDays = (n) => new Date(Date.now() + n * DAY).toISOString().slice(0, 10);
+  async function customer(over = {}) {
+    const id = randomUUID();
+    seq += 1;
+    await trx('customers').insert({
+      id, first_name: 'Pat', last_name: 'Sampleton', phone: `+1941555${String(4000 + seq)}`, email: `qa-${id.slice(0, 8)}@example.test`, active: true, ...over,
+    });
+    return id;
+  }
+  async function estimate(customerId, over = {}) {
+    const [row] = await trx('estimates').insert({
+      customer_id: customerId, status: 'sent', token: randomUUID().replace(/-/g, ''), customer_name: 'Pat Sampleton',
+      address: '100 Example Lane, Sampleton, FL 34200', monthly_total: 15, annual_total: 180, onetime_total: 0,
+      waveguard_tier: 'Bronze', show_one_time_option: false, bill_by_invoice: false, category: 'RESIDENTIAL',
+      estimate_data: JSON.stringify(planData()), sent_at: new Date(Date.now() - 2 * DAY), expires_at: new Date(Date.now() + 5 * DAY), ...over,
+    }).returning('*');
+    return row;
+  }
+  async function call(customerId, choice, over = {}, intent = null) {
+    const id = randomUUID();
+    await trx('call_log').insert({
+      id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101', answered_by: 'human',
+      processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(extractionWith(choice, intent)), ...over,
+    });
+    return id;
+  }
+  async function visit(customerId, callLogId, over = {}) {
+    const id = randomUUID();
+    await trx('scheduled_services').insert({
+      id, customer_id: customerId, source_call_log_id: callLogId, scheduled_date: inDays(9), window_start: '15:00', window_end: '17:00',
+      service_type: 'General Pest Control', status: 'confirmed', source_action: 'ai_call_pipeline', is_recurring: false,
+      service_address_line1: '100 Example Lane', service_address_city: 'Sampleton', service_address_state: 'FL', service_address_zip: '34200', ...over,
+    });
+    return id;
+  }
+  // The usual case: estimate sent two days ago; the yes call yesterday; the booking call two hours ago.
+  async function phoneYes({
+    estimateOver = {}, customerOver = {}, yesChoice = 'per_application', yesIntent = null, bookingChoice = null, bookingIntent = null, visitOver = {},
+  } = {}) {
+    const customerId = await customer(customerOver);
+    const est = await estimate(customerId, estimateOver);
+    const yesCallId = await call(customerId, yesChoice, { created_at: new Date(Date.now() - DAY) }, yesIntent);
+    const bookingCallId = await call(customerId, bookingChoice, { created_at: new Date(Date.now() - 2 * 3600000) }, bookingIntent);
+    const visitId = await visit(customerId, bookingCallId, visitOver);
+    return { customerId, est, yesCallId, bookingCallId, visitId };
+  }
+  const cards = (callLogId) => trx('triage_items').where({ call_log_id: callLogId, reason_code: REASON_CODE }).select('*');
+  const statusOf = async (table, id) => (await trx(table).where({ id }).first('status')).status;
+  const payloadOf = (card) => (typeof card.payload === 'string' ? JSON.parse(card.payload) : card.payload);
+  const sweep = () => runCallPhoneYesSweep();
+
+  test("a yes: ONE card with the caller's words and auto would accept; nothing accepted, nothing sent", async () => {
+    const spy = jest.spyOn(acceptance, 'markEstimateManuallyAccepted');
+    const { customerId, est, yesCallId, bookingCallId, visitId } = await phoneYes();
+    const before = await trx('scheduled_services').where({ id: visitId }).first();
+
+    await expect(sweep()).resolves.toMatchObject({ filed: 1, closed: 0 });
+
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({
+      status: 'open', severity: 'advisory', related_customer_id: customerId, related_estimate_id: est.id, related_scheduled_service_id: visitId,
+      summary: 'Caller said yes to pay per application on the call. The estimate is not accepted yet.',
+    });
+    expect(payloadOf(card)).toMatchObject({
+      flag: REASON_CODE, yes_heard: true, billing_choice: 'per_application', estimate_id: est.id, estimate_ids: [est.id],
+      scheduled_service_id: visitId, yes_call_log_id: yesCallId, caller_words: WORDS,
+      auto_would_accept: true, auto_reason: null, auto_message: null,
+    });
+    // Nothing accepted, linked, priced or sent.
+    expect(spy).not.toHaveBeenCalled();
+    expect(await statusOf('estimates', est.id)).toBe('sent');
+    expect(await trx('scheduled_services').where({ id: visitId }).first()).toEqual(before);
+    expect(sendMembershipStarted).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // One card per call, ever.
+    await expect(sweep()).resolves.toMatchObject({ filed: 0, closed: 0 });
+    spy.mockRestore();
+  });
+
+  test.each([
+    ['no billing choice on any call', { yesChoice: null }],
+    ['the yes came before the estimate was (re)sent', { estimateOver: { sent_at: new Date(Date.now() - 3600000) } }],
+  ])('no yes heard (%s): ONE card that says so, with no words', async (_name, setup) => {
+    const { bookingCallId } = await phoneYes(setup);
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card.summary).toBe('A call booked a pest visit while an estimate is open. No yes heard on the call. The estimate is not accepted yet.');
+    expect(payloadOf(card)).toMatchObject({
+      yes_heard: false, billing_choice: null, yes_call_log_id: null, caller_words: null,
+      auto_would_accept: false, auto_reason: 'no_yes_heard', auto_message: REASONS.no_yes_heard,
+    });
+  });
+
+  test('a yes on the booking call itself is heard', async () => {
+    const { bookingCallId } = await phoneYes({ yesChoice: null, bookingChoice: 'per_application' });
+    await sweep();
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: bookingCallId, auto_would_accept: true });
+  });
+
+  test.each([
+    ['a later call chose annual prepay (the prepay card owns it)', { bookingChoice: 'annual_prepay' }, 'chose_annual_prepay'],
+    ['the booking call asked for a one-time visit instead', { bookingIntent: 'preventative_one_time' }, 'took_back'],
+    ['the booking call asked to cancel', { bookingIntent: 'cancellation_request' }, 'took_back'],
+    ['the yes call itself also asked for a one-time visit', { yesIntent: 'preventative_one_time' }, 'took_back'],
+    ['the call booked a lawn visit, not a pest visit', { visitOver: { service_type: 'Lawn Care' } }, 'no_pest_visit'],
+    ['the estimate lapsed', { estimateOver: { expires_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
+  ])('no card when %s', async (_name, setup, reason) => {
+    const { customerId, bookingCallId } = await phoneYes(setup);
+    await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason });
+    await expect(sweep()).resolves.toMatchObject({ filed: 0 });
+    expect(await cards(bookingCallId)).toEqual([]);
+  });
+
+  test('a yes on a sandbox call is not heard', async () => {
+    const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+    const { yesCallId, bookingCallId } = await phoneYes();
+    await trx('call_log').where({ id: yesCallId }).update({ source: VOICE_RELAY_SANDBOX_SOURCE });
+    await sweep();
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, auto_reason: 'no_yes_heard' });
+  });
+
+  test.each([
+    ['the visit is already a series', { visitOver: { is_recurring: true, recurring_pattern: 'quarterly' } }, 'visit_not_one_off'],
+    ['the visit is at another address', { visitOver: { service_address_line1: '200 Other Road' } }, 'property_mismatch'],
+    ['the visit carries a setup fee', { visitOver: { pending_setup_fee: 99 } }, 'setup_fee_stamped'],
+    ['the visit carries a price', { visitOver: { estimated_price: 99 } }, 'visit_priced'],
+    ['the visit date has passed', { visitOver: { scheduled_date: inDays(-5) } }, 'visit_in_past'],
+    ['the customer is already a WaveGuard member', { customerOver: { waveguard_tier: 'Silver' } }, 'existing_plan'],
+    ['the estimate is a commercial proposal', { estimateOver: { estimate_data: JSON.stringify(planData({ proposal: { enabled: true } })) } }, 'commercial_estimate'],
+    ['the estimate is in the commercial category', { estimateOver: { category: 'COMMERCIAL' } }, 'commercial_estimate'],
+    ['the estimate has a one-time line', {
+      estimateOver: { onetime_total: 85, estimate_data: JSON.stringify(planData({ result: { ...planData().result, oneTime: { items: [{ name: 'Wasp Nest Removal', price: 85 }], membershipFee: 0 } } })) },
+    }, 'one_time_items'],
+    ['the estimate has a one-time total no line itemizes', { estimateOver: { onetime_total: 85 } }, 'one_time_items'],
+  ])('a yes the accept would refuse (%s): ONE card, auto would accept no, with the reason', async (_name, setup, reason) => {
+    const { est, bookingCallId } = await phoneYes(setup);
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    await expect(sweep()).resolves.toMatchObject({ filed: 0, closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'open', related_estimate_id: est.id });
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: false, auto_reason: reason, auto_message: REASONS[reason] });
+  });
+
+  test.each([
+    ['the yes came on a later call than the booking', async ({ customerId }) => {
+      await call(customerId, 'per_application', { created_at: new Date(Date.now() - 3600000) });
+    }, 'yes_after_booking'],
+    ['the booking call could not be read', ({ bookingCallId }) => trx('call_log').where({ id: bookingCallId }).update({ v2_extraction_status: 'failed' }),
+      'booking_call_unread'],
+    ['the customer called again after the yes', async ({ customerId }) => {
+      await call(customerId, null, { created_at: new Date(Date.now() - 3600000) });
+    }, 'newer_call'],
+    ['two open estimates', ({ customerId }) => estimate(customerId), 'more_than_one_estimate'],
+    ['two visits on the booking call', ({ customerId, bookingCallId }) => visit(customerId, bookingCallId, { scheduled_date: inDays(12) }), 'more_than_one_visit'],
+    ['another live plan', ({ customerId }) => visit(customerId, null, {
+      source_action: 'admin', is_recurring: true, recurring_pattern: 'quarterly', scheduled_date: inDays(30),
+    }), 'existing_plan'],
+  ])('%s: ONE card whose shadow line names it', async (_name, change, reason) => {
+    const fixture = await phoneYes();
+    await change(fixture);
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(fixture.bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: reason });
+  });
+
+  test('a call from the customer still being read waits; once read, the card files', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    const laterCallId = await call(customerId, null, { created_at: new Date(Date.now() - 3600000), processing_status: 'processing' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 0 });
+    await trx('call_log').where({ id: laterCallId }).update({ processing_status: 'processed' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card).auto_reason).toBe('newer_call');
+  });
+
+  test('two open estimates: the card names both and stays until neither is open or lapsed', async () => {
+    const { customerId, est, bookingCallId } = await phoneYes();
+    const other = await estimate(customerId);
+    await expect(sweep()).resolves.toMatchObject({ filed: 1, closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'open', related_estimate_id: null });
+    expect(payloadOf(card).estimate_ids.sort()).toEqual([est.id, other.id].sort());
+    await trx('estimates').where({ id: est.id }).update({ status: 'declined', declined_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    await trx('estimates').where({ id: other.id }).update({ status: 'expired', expires_at: new Date(Date.now() - 3600000) });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    await trx('estimates').where({ id: other.id }).update({ status: 'declined', declined_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_source: 'auto', resolution_rule: 'call_phone_yes_moot' });
+  });
+
+  test('the card stays open after the estimate expires and after the visit is done', async () => {
+    const { est, bookingCallId, visitId } = await phoneYes();
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'expired', expires_at: new Date(Date.now() - 3600000) });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'completed' });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+  });
+
+  test('a card that names its estimate stays open when a second estimate opens', async () => {
+    const { customerId, est, bookingCallId } = await phoneYes();
+    await sweep();
+    await estimate(customerId);
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'open', related_estimate_id: est.id });
+  });
+
+  test.each([
+    ['the estimate is accepted', ({ est }) => trx('estimates').where({ id: est.id }).update({ status: 'accepted', accepted_at: new Date() }), 'was accepted'],
+    ['the estimate is declined', ({ est }) => trx('estimates').where({ id: est.id }).update({ status: 'declined', declined_at: new Date() }), 'declined'],
+    ['every visit the call booked is cancelled', ({ bookingCallId }) => trx('scheduled_services').where({ source_call_log_id: bookingCallId }).update({ status: 'cancelled' }),
+      'off the calendar'],
+    ['the customer chooses annual prepay on a later call', ({ customerId }) => call(customerId, 'annual_prepay', { created_at: new Date() }), 'annual prepay'],
+    ['the customer asks to cancel on a later call', ({ customerId }) => call(customerId, null, { created_at: new Date() }, 'cancellation_request'),
+      'asked to cancel'],
+    ['the call moves to another customer', async ({ bookingCallId }) => {
+      await trx('call_log').where({ id: bookingCallId }).update({ customer_id: await customer() });
+    }, 'no longer linked'],
+  ])('the card closes itself when %s', async (_name, change, note) => {
+    const fixture = await phoneYes();
+    await expect(sweep()).resolves.toMatchObject({ filed: 1, closed: 0 });
+    await change(fixture);
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    const [card] = await cards(fixture.bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_source: 'auto', resolution_rule: 'call_phone_yes_moot' });
+    expect(card.resolution_note).toContain(note);
+  });
+
+  test('gate off: no card', async () => {
+    const { bookingCallId } = await phoneYes();
+    delete process.env[GATE];
+    await expect(sweep()).resolves.toEqual({ skipped: true, scanned: 0, filed: 0, closed: 0 });
+    expect(await cards(bookingCallId)).toEqual([]);
+  });
+});

@@ -1095,6 +1095,9 @@ function buildTriageItem({
     // The caller chose annual prepay on a call the pipeline booked (call-prepay-choice.js, GATE_CALL_PREPAY_CHOICE):
     // one admin-only card with a one-tap accept of the open estimate as annual prepay.
     call_prepay_choice: 'billing_review',
+    // A call booked a pest visit while the customer had an open estimate (call-phone-yes-accept.js,
+    // GATE_CALL_PHONE_YES_ACCEPT): one admin card, so the office accepts the estimate.
+    call_phone_yes: 'billing_review',
   };
 
   const synopsis = extraction?.meta?.call_summary || null;

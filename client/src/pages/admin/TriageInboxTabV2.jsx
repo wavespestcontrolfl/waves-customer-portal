@@ -74,6 +74,7 @@ const REASON_LABELS = {
   family_account_candidates: "Caller may match an account — confirm, then link",
   name_spelling_differs: "Caller spelled their name — check it",
   call_prepay_choice: "Caller chose annual prepay — accept the estimate",
+  call_phone_yes: "Call booked a visit on an open estimate",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -458,6 +459,35 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
   );
 }
 
+// call_phone_yes (GATE_CALL_PHONE_YES_ACCEPT, admin only): a call booked a pest visit while the customer had an open
+// estimate, and nothing accepted the estimate. The card says what the call reader heard: the caller's yes in their own
+// words, or "No yes heard". The shadow line is what an automatic accept would have done when the card opened.
+export function PhoneYesEvidence({ payload }) {
+  const p = parsePayload(payload) || {};
+  const saidAt = p.yes_at
+    ? `${new Date(p.yes_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`
+    : null;
+  const heard = p.yes_heard === true ? ["Caller said yes to pay per application", saidAt].filter(Boolean).join(" · ") : "No yes heard";
+  const rows = [
+    ["On the call", heard],
+    ["Caller's words", p.yes_heard === true && p.caller_words ? `\u201c${p.caller_words}\u201d` : null],
+    ["Auto would accept", p.auto_would_accept === true ? "Yes" : ["No.", p.auto_message].filter(Boolean).join(" ")],
+  ].filter(([, value]) => value);
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">The estimate is not accepted yet</div>
+      {rows.map(([label, value]) => (
+        <div key={label} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{label}:</span> {value}
+        </div>
+      ))}
+      {p.estimate_id && (
+        <a href={`/admin/estimates?estimateId=${encodeURIComponent(p.estimate_id)}`} className="inline-block mt-1 text-14 font-medium text-zinc-900 underline">Open the estimate</a>
+      )}
+    </div>
+  );
+}
+
 // name_spelling_differs (advisory): every spelling the caller gave that differs from the saved name, each
 // with the caller turn it came from. The card text names the first; `also` lists any other field.
 export function NameSpellingEvidence({ payload, openCustomerIds = null }) {
@@ -510,17 +540,17 @@ function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, canSa
 }
 
 // Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
-const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence, call_prepay_choice: CallPrepayEvidence };
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence, secondary_contact_captured: SecondContactEvidence, call_prepay_choice: CallPrepayEvidence, call_phone_yes: PhoneYesEvidence };
 
 // Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
 // /verdict on each). The verdict badge is not shown on them.
 const NO_VERDICT_REASONS = new Set([
   "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
   "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
-  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs", "call_prepay_choice",
+  "auto_booking_skipped_after_approval", "text_number_differs", "name_spelling_differs", "call_prepay_choice", "call_phone_yes",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
-const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs", "call_prepay_choice"]);
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs", "call_prepay_choice", "call_phone_yes"]);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";

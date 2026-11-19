@@ -1348,3 +1348,46 @@ describe('call_prepay_choice card', () => {
     expect(screen.getByText(/Billing:/).parentElement).toHaveTextContent('Caller chose annual prepay');
   });
 });
+
+// GATE_CALL_PHONE_YES_ACCEPT: a call booked a pest visit while the customer had an open estimate. The card says what the
+// call reader heard (the caller's yes in their words, or "No yes heard"), the shadow line, and links the estimate.
+describe('call_phone_yes card', () => {
+  const card = (payload) => ({
+    ...ordinary, id: 'py', call_log_id: 'call-11', first_name: 'Pat', last_name: 'Sampleton', reason_code: 'call_phone_yes',
+    feedback_verdict: null, severity: 'advisory', payload: JSON.stringify({ flag: 'call_phone_yes', ...payload }),
+  });
+  const load = (item) => adminFetch.mockImplementation(async (url) => (String(url).startsWith('/admin/triage?')
+    ? { items: [item], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+
+  it("a yes: the caller's words, the shadow line and the estimate; Resolve and Dismiss, never a call verdict", async () => {
+    load(card({
+      yes_heard: true, billing_choice: 'per_application', estimate_id: 'est-7', yes_call_log_id: 'call-10',
+      yes_at: '2026-11-12T21:09:00.000Z', caller_words: "Let's do the quarterly, bill me each time.",
+      auto_would_accept: false, auto_reason: 'more_than_one_estimate', auto_message: 'The customer has more than one open estimate.',
+    }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText('Call booked a visit on an open estimate')).toBeInTheDocument();
+    expect(within(el).getByText(/Caller said yes to pay per application · Nov 12, 4:09\sPM ET/)).toBeInTheDocument();
+    expect(within(el).getByText(/\u201cLet's do the quarterly, bill me each time\.\u201d/)).toBeInTheDocument();
+    expect(within(el).getByText(/No\. The customer has more than one open estimate\./)).toBeInTheDocument();
+    expect(within(el).getByRole('link', { name: 'Open the estimate' })).toHaveAttribute('href', '/admin/estimates?estimateId=est-7');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+  });
+
+  it('no yes heard: says so and never claims a yes or quotes words', async () => {
+    load(card({
+      yes_heard: false, billing_choice: null, estimate_id: 'est-7', caller_words: 'stale words',
+      auto_would_accept: false, auto_reason: 'no_yes_heard', auto_message: 'No yes was heard on the call.',
+    }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText('No yes heard')).toBeInTheDocument();
+    expect(within(el).queryByText(/Caller said yes/)).toBeNull();
+    expect(within(el).queryByText(/stale words/)).toBeNull();
+    expect(within(el).getByText(/No\. No yes was heard on the call\./)).toBeInTheDocument();
+  });
+});
