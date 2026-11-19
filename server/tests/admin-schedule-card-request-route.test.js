@@ -45,8 +45,10 @@ jest.mock('../services/appointment-card-request', () => ({
   visitCardLinkClosedReason: (...args) => mockClosedReason(...args),
 }));
 const mockSetupLinkIneligibility = jest.fn(async () => ({ reason: null }));
+const mockDeliveryPreflight = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/autopay-setup-link', () => ({
   setupLinkIneligibility: (...args) => mockSetupLinkIneligibility(...args),
+  autopayDeliveryPreflight: (...args) => mockDeliveryPreflight(...args),
 }));
 const mockMarkTerms = jest.fn(async () => ({ marked: false }));
 jest.mock('../services/in-person-handoff', () => ({ markTermsRequired: (...args) => mockMarkTerms(...args) }));
@@ -103,6 +105,7 @@ describe('GET /admin/schedule/:id/card-request', () => {
     mockOnAutopay.mockResolvedValue(false);
     mockClosedReason.mockReturnValue(null);
     mockSetupLinkIneligibility.mockResolvedValue({ reason: null });
+    mockDeliveryPreflight.mockResolvedValue({ ok: true });
   });
 
   test('returns the rollup: request row + one-text stamp + live Auto Pay state', async () => {
@@ -177,10 +180,14 @@ describe('GET /admin/schedule/:id/card-request', () => {
 
   // Pre-push Codex P1: the closed line may name the customer's own Auto Pay
   // link only when that link would go out (it refuses dues, prepay and
-  // one-time lanes, payer-billed customers, and a dark gate).
-  test("customerLinkAvailable follows the customer's Auto Pay link eligibility on a closed visit", async () => {
+  // one-time lanes, payer-billed customers, and a dark gate). The line names
+  // the TEXT button, so the text itself must pass too (no phone, STOP or a
+  // landline would refuse that tap the way the visit's button was refused).
+  test("customerLinkAvailable is true only when a text of the customer's Auto Pay link would go out", async () => {
     const visitRow = { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null, status: 'on_site', scheduled_date: '2026-11-11' };
+    const customerRow = { id: 'cust-1', phone: '+19415550100' };
     mockClosedReason.mockReturnValue('visit_not_live:on_site');
+    mockSetupLinkIneligibility.mockResolvedValue({ reason: null, customer: customerRow });
     const read = async () => withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`);
       expect(response.status).toBe(200);
@@ -190,9 +197,19 @@ describe('GET /admin/schedule/:id/card-request', () => {
     stubTables({ scheduled_services: visitRow, appointment_card_requests: undefined, customers: { id: 'cust-1' } });
     await expect(read()).resolves.toMatchObject({ closedReason: 'visit_not_live:on_site', customerLinkAvailable: true });
     expect(mockSetupLinkIneligibility).toHaveBeenCalledWith('cust-1');
+    // The customer page's "Text Auto Pay link" is an office SMS send: same
+    // channel and trigger, on the customer row eligibility read.
+    expect(mockDeliveryPreflight).toHaveBeenCalledWith({ customerId: 'cust-1', customer: customerRow, delivery: 'sms', trigger: 'admin' });
 
+    // Eligible, but the text would not go out.
+    mockDeliveryPreflight.mockResolvedValue({ ok: false, reason: 'no_customer_phone' });
+    await expect(read()).resolves.toMatchObject({ customerLinkAvailable: false });
+
+    // Not eligible: the SMS preflight never runs.
+    mockDeliveryPreflight.mockClear();
     mockSetupLinkIneligibility.mockResolvedValue({ reason: 'unsupported_billing_lane' });
     await expect(read()).resolves.toMatchObject({ customerLinkAvailable: false });
+    expect(mockDeliveryPreflight).not.toHaveBeenCalled();
 
     // An unreadable check names no fallback and never fails the panel.
     mockSetupLinkIneligibility.mockRejectedValue(new Error('payment_methods unreadable'));
@@ -210,6 +227,7 @@ describe('GET /admin/schedule/:id/card-request', () => {
       await expect(response.json()).resolves.toMatchObject({ closedReason: null, customerLinkAvailable: false });
     });
     expect(mockSetupLinkIneligibility).not.toHaveBeenCalled();
+    expect(mockDeliveryPreflight).not.toHaveBeenCalled();
   });
 
   test('404 on an unknown visit', async () => {

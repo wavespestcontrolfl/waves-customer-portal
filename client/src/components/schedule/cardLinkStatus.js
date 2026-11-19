@@ -46,9 +46,9 @@ export function describeCardRequestState(data) {
 
 // Owner 2026-11-19: a card link tapped while the tech was on site came back
 // "not live" three times. The visit's link closes once the tech is on the
-// way. The line names the customer's own Auto Pay link only when the server
-// says that link would go out (its gate, payer, billing lane and Auto Pay
-// state all allow it).
+// way. The line names the customer page's "Text Auto Pay link" only when the
+// server says that text would go out (the link's gate, payer, billing lane
+// and Auto Pay state, then the SMS preflight: phone, STOP, landline).
 function closedVisitLine(reason, customerLinkAvailable) {
   let why = 'This visit is not live';
   if (reason === 'visit_in_past') why = "This visit's date has passed";
