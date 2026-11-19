@@ -307,19 +307,21 @@ const REPEAT_DAYS = 14;
 const REPEAT_MIN_PRIOR = 2;
 const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
-// Pre-push audit rounds 2 to 6 each found one more sign of a person that the
+// Pre-push audit rounds 2 to 7 each found one more sign of a person that the
 // history still counted (a spoofed number, a press-1 pass, a short recording, a
 // pass whose stamp failed, a parked recording, a callback). So the rule reads
 // every sign at once, for the whole number and not only the counted calls. In
 // the window:
-//  - an inbound call from it that reached staff or Sandy (answered_by, an AI
-//    outcome, or Sandy's session claim, which stays when a relay falls back to
-//    voicemail); that holds a recording anywhere (its own, or one parked or
-//    superseded in metadata: call-recording-processor.js RECORDING_LISTS) or a
-//    transcript of any kind; that rang the voicemail lane; or that met the
-//    press-1 screen with a key press or a challenge whose result was never saved;
+//  - an inbound call from it that was linked to a customer; that reached staff
+//    or Sandy (answered_by, an AI outcome, or Sandy's session claim, which
+//    stays when a relay falls back to voicemail); that holds a recording
+//    anywhere (its own, or one parked or superseded in metadata:
+//    call-recording-processor.js RECORDING_LISTS) or a transcript of any kind;
+//    that rang the voicemail lane; or that met the press-1 screen with a key
+//    press or a challenge whose result was never saved;
 //  - an outbound call to it whose customer leg answered (the callback proof,
-//    ANSWERED_LEG_PROOF_SQL): staff reached that caller;
+//    CUSTOMER_LEG_ANSWERED_SQL, even with no bridge stamp; or the bridged
+//    recording proof in ANSWERED_LEG_PROOF_SQL): staff reached that caller;
 //  - a text from it.
 // Any one means a person uses the number. Read only when the history matched,
 // and bounded like the history.
@@ -334,7 +336,8 @@ async function numberShowsPerson(key, since) {
         .where('later.direction', 'inbound')
         .whereRaw(`${LATER_KEY} = ?`, [key])
         .where((person) => person
-          .whereIn('later.answered_by', ['human', 'ai_agent'])
+          .whereNotNull('later.customer_id')
+          .orWhereIn('later.answered_by', ['human', 'ai_agent'])
           .orWhereIn('later.call_outcome', [...AI_OUTCOMES])
           .orWhereRaw("later.metadata->>'relay_session_claimed_at' IS NOT NULL")
           .orWhereNotNull('later.recording_sid').orWhereNotNull('later.recording_url')
@@ -347,9 +350,13 @@ async function numberShowsPerson(key, since) {
           .orWhereRaw("later.metadata->>'preconnect_screen' IN ('passed', 'gated')")))
       .orWhere((outbound) => outbound
         .where('later.direction', 'outbound')
-        .whereNotNull('later.bridged_at')
         .whereRaw(`${phoneKeySql('later.to_phone')} = ?`, [key])
-        .whereRaw(ANSWERED_LEG_PROOF_SQL)))
+        // An answered customer leg is proof even when the bridge stamp failed
+        // to save (the connect webhook dials on; pre-push audit r7). The
+        // recording-only proof keeps the bridge.
+        .where((answered) => answered
+          .whereRaw(CUSTOMER_LEG_ANSWERED_SQL)
+          .orWhere((bridged) => bridged.whereNotNull('later.bridged_at').whereRaw(ANSWERED_LEG_PROOF_SQL)))))
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first('later.id');
   if (call) return true;
@@ -374,13 +381,19 @@ async function isRepeatSilentCaller(row) {
   const at = new Date(row.created_at || Date.now());
   const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
   const otherLineSql = otherLines.length ? `${LAST10_SQL('to_phone')} IN (${otherLines.map(() => '?').join(', ')})` : 'false';
-  const found = await silentHangupsBefore(at, REPEAT_DAYS, new Date())
+  const checkedAt = new Date();
+  const found = await silentHangupsBefore(at, REPEAT_DAYS, checkedAt)
     .whereNot('id', row.id)
     .whereRaw(`${CALLER_KEY} = ?`, [key])
     .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
     .whereRaw("metadata->>'preconnect_screen' IS NULL")
-    // No recording at all: even a 2-second recording can hold "call me back".
+    // No recording at all (even 2 seconds can hold "call me back"), the call
+    // over and past the voicemail grace at check time. The shared read also
+    // admits a known short recording length, 0 included, with no grace; this
+    // rule never does (pre-push audit r7).
     .whereNull('recording_sid').whereNull('recording_url')
+    .whereIn('status', TERMINAL_STATUSES)
+    .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)])
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
   if (!(found?.other_line || Number(found?.n || 0) >= REPEAT_MIN_PRIOR)) return false;
@@ -551,7 +564,8 @@ const CALLED_BACK_SQL = buildCalledBackSql('');
 // No literal question mark: knex reads one as a binding.
 const CUSTOMER_LEG_SECONDS_SQL = "CASE WHEN later.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (later.metadata->'customer_leg'->>'duration_seconds')::numeric > 0 ELSE FALSE END";
 // The proof alone, on a `later` row: the repeat rule's person check reads it too.
-const ANSWERED_LEG_PROOF_SQL = "((later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')'
+const CUSTOMER_LEG_ANSWERED_SQL = "(later.metadata->'customer_leg'->>'status' = 'completed' AND " + CUSTOMER_LEG_SECONDS_SQL + ')';
+const ANSWERED_LEG_PROOF_SQL = `(${CUSTOMER_LEG_ANSWERED_SQL}`
   + " OR (later.metadata->'customer_leg' IS NULL AND later.recording_duration_seconds > 0 AND (later.recording_sid IS NOT NULL OR later.recording_url IS NOT NULL)))";
 const CALLED_BACK_ANSWERED_SQL = buildCalledBackSql(` AND ${ANSWERED_LEG_PROOF_SQL}`);
 // The same proof plus a bridged call still in flight. For the claim, the sweep

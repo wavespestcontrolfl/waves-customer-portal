@@ -652,6 +652,15 @@ jest.setTimeout(30000);
       const redial = call('+17275550613', 1);
       await database('call_log').insert([{ ...fresh, to_phone: SECOND_GBP_LINE }, redial]);
       expect(await repeat(redial)).toBe(false);
+      // Nor with a known recording length of 0 (the shared read's short-recording
+      // branch skips the grace), nor while the call is still in progress (pre-push audit r7).
+      const zeroLength = prior('+17275550615', 2, { to_phone: SECOND_GBP_LINE, recording_duration_seconds: 0 });
+      const zeroRedial = call('+17275550615', 1);
+      const live = prior('+17275550616', 60 * 24, { to_phone: SECOND_GBP_LINE, status: 'in-progress', recording_duration_seconds: 0 });
+      const liveRedial = call('+17275550616', 1);
+      await database('call_log').insert([zeroLength, zeroRedial, live, liveRedial]);
+      expect(await repeat(zeroRedial)).toBe(false);
+      expect(await repeat(liveRedial)).toBe(false);
     });
 
     test('only fully attested history counts: B, a failed check or no attestation could be a spoofed number (pre-push audit)', async () => {
@@ -703,6 +712,7 @@ jest.setTimeout(30000);
     // A sign of a person anywhere on the number in the window, even on a call
     // the history never counts and before the counted hang-up (pre-push audit).
     test.each([
+      ['a call linked to a customer', { customer_id: randomUUID() }],
       ['a call that reached staff', { answered_by: 'human' }],
       ['a call Sandy answered', { answered_by: 'ai_agent' }],
       ['a call Sandy handed to a person', { answered_by: null, call_outcome: 'ai_transferred' }],
@@ -726,20 +736,25 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(false);
     });
 
-    test('a staff callback that reached the caller before the hang-ups is a person; one that rang out is not (pre-push audit r6)', async () => {
+    // A staff callback before the counted hang-up, where "got through later" cannot see it (pre-push audit r6, r7).
+    test.each([
+      ['rang out', true, { bridged: true, leg: { status: 'no-answer', duration_seconds: 0 } }],
+      ['left a recording but has no bridge stamp', true, { bridged: false, recording: true }],
+      ['was bridged and recorded', false, { bridged: true, recording: true }],
+      ['had its customer leg answer', false, { bridged: true, leg: { status: 'completed', duration_seconds: 95 } }],
+      ['had its customer leg answer but lost the bridge stamp', false, { bridged: false, leg: { status: 'completed', duration_seconds: 95 } }],
+    ])('a staff callback that %s: repeat stays %s', async (label, stillRepeat, shape) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
-      // Before the counted hang-up, so "got through later" cannot see it.
-      const callback = (minutesAgo, leg) => {
-        const base = call(GBP_LINE, minutesAgo, { direction: 'outbound', to_phone: CALLER, answered_by: null, metadata: { customer_leg: leg } });
-        return { ...base, bridged_at: base.created_at };
-      };
-      await database('call_log').insert(callback(60 * 24 * 5, { status: 'no-answer', duration_seconds: 0 }));
-      expect(await repeat(row)).toBe(true);
-      await database('call_log').insert(callback(60 * 24 * 4, { status: 'completed', duration_seconds: 95 }));
-      expect(await repeat(row)).toBe(false);
+      const base = call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: CALLER, answered_by: null, metadata: shape.leg ? { customer_leg: shape.leg } : {} });
+      await database('call_log').insert({
+        ...base,
+        bridged_at: shape.bridged ? base.created_at : null,
+        ...(shape.recording ? { recording_sid: 'RE9', recording_url: 'https://api.twilio.com/RE9', recording_duration_seconds: 30 } : {}),
+      });
+      expect(await repeat(row)).toBe(stillRepeat);
     });
 
     test('a text from the number in the last 14 days is a person; our own text and an older sign are not (pre-push audit)', async () => {
