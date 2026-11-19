@@ -8614,8 +8614,10 @@ draft token answers the same generic 404. Privacy headers (`noStore`) are mounte
 browser route `/careers/offer/:token` gets the same headers via `utils/sensitive-spa-headers.js`, matched as the
 router matches: each segment percent-decoded, any case, extra trailing slashes ignored, any token (a bad one shows
 the not-valid page). A last segment that looks like a file name (`bad.pdf`) gets the plain missing-file 404, as on
-every SPA path, and never the page; no offer token has a dot. The service worker never stores an offer document as
-its offline shell (`client/public/sw.js` `isPrivateLinkPage`), because a stored response keeps its URL. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+every SPA path, and never the page; no offer token has a dot. The service worker never handles an offer URL, in any
+request mode (`client/public/sw.js` `isPrivateLinkPage`): it stores nothing, because a stored response or request
+keeps its URL, and it never serves its offline shell in the page's place, so the browser always fetches the page
+with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
 textConsent, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the

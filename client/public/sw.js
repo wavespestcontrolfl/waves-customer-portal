@@ -601,8 +601,7 @@ self.addEventListener('activate', event => {
   event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
 });
 
-// A job-offer link page is never stored as the offline shell: a stored
-// response keeps its URL, and so the private link would sit in Cache Storage.
+// A job-offer link page: its URL is the applicant's private signing link.
 // The page router matches each percent-decoded segment in any case, with any
 // trailing slashes, so this does too (as isCareersOfferPath on the server).
 function isPrivateLinkPage(pathname) {
@@ -620,6 +619,11 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
   if (url.pathname.startsWith('/ws/')) return;
+  // Nor a job-offer link, in any request mode. A stored response or request
+  // keeps its URL, so the link would sit in Cache Storage; and an offline
+  // shell served in its place would carry another page's headers, without
+  // no-referrer. The browser fetches it, with the server's privacy headers.
+  if (isPrivateLinkPage(url.pathname)) return;
 
   // HTML navigation requests: network-first with offline fallback.
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
@@ -645,11 +649,7 @@ self.addEventListener('fetch', event => {
             if (!assets.length) return;
             advanceLiveBuild(buildIdOf(assets), navSeq);
           }).catch(() => {}));
-          // A private link page still advances the live build above, like a
-          // navigation whose shell refresh failed; the last shell stays.
-          if (!isPrivateLinkPage(url.pathname)) {
-            event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}));
-          }
+          event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}));
         }
         return response;
       } catch {

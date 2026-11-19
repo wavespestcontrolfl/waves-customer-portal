@@ -384,10 +384,14 @@ describe('customer service-worker update contract', () => {
 });
 
 describe('service-worker private link pages', () => {
-  // The offline shell is a stored copy of the last page loaded, and a stored
-  // response keeps its URL. A job-offer page must never become it: its URL is
-  // the applicant's private signing link.
-  it('never stores a job-offer page as the offline shell, so the previous shell stays', async () => {
+  // A job-offer URL is the applicant's private signing link. The worker never
+  // handles it, in any request mode: nothing stored (a stored response or
+  // request keeps its URL), and no offline shell served in its place (that
+  // shell carries another page's headers, without no-referrer).
+  const token = 'a'.repeat(64);
+  const offerPaths = [`/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`];
+
+  it('leaves a job-offer URL to the browser in every request mode, online and offline', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
     setFetch(serveBuild(['/assets/index-AAA.js']));
@@ -395,16 +399,33 @@ describe('service-worker private link pages', () => {
     const before = await (await cache.match('/')).text();
     expect(before).toContain('index-AAA');
     setFetch(serveBuild(['/assets/index-BBB.js']));
-    const token = 'a'.repeat(64);
-    for (const offerPath of [`/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`]) {
-      const { response } = await dispatchFetch(offerPath, { mode: 'navigate' });
-      expect(response.ok).toBe(true); // the page itself still loads from the network
-      expect(await (await cache.match('/')).text()).toBe(before);
+    for (const offerPath of offerPaths) {
+      for (const mode of ['navigate', 'cors']) {
+        const { response } = await dispatchFetch(offerPath, { mode });
+        expect(response).toBeUndefined(); // no respondWith: the browser fetches it
+      }
     }
+    setFetch(async () => { throw new TypeError('Failed to fetch'); }); // offline
+    for (const offerPath of offerPaths) {
+      const { response } = await dispatchFetch(offerPath, { mode: 'navigate' });
+      expect(response).toBeUndefined(); // never the cached shell of another page
+    }
+    expect(await (await cache.match('/')).text()).toBe(before);
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
-    // Any other page still refreshes the shell.
-    await dispatchFetch('/careers/offers', { mode: 'navigate' });
+  });
+
+  it('still serves and refreshes the shell for every other page', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    setFetch(serveBuild(['/assets/index-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    setFetch(serveBuild(['/assets/index-BBB.js']));
+    const { response } = await dispatchFetch('/careers/offers', { mode: 'navigate' });
+    expect(response.ok).toBe(true);
     expect(await (await cache.match('/')).text()).toContain('index-BBB');
+    setFetch(async () => { throw new TypeError('Failed to fetch'); });
+    const { response: offline } = await dispatchFetch('/careers/offers', { mode: 'navigate' });
+    expect(await offline.text()).toContain('index-BBB');
   });
 });
 
