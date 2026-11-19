@@ -217,6 +217,66 @@ test('booking fit suppresses a stale route unless its writer may persist the pro
   await expect(run(true)).resolves.toEqual([expect.objectContaining({ slot })]);
 });
 
+test('booking fit scores an overlapping capacity card only from its certified live order', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours, CAPACITY_PLACEMENT } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const existing = {
+    id: 'existing', customer_id: 'customer-1', technician_id: tech, status: 'confirmed', scheduled_date: date,
+    window_start: '10:00', window_end: '10:30', estimated_duration_minutes: 30,
+    lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 1,
+  };
+  const target = {
+    lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60,
+  };
+  const calendar = () => new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, [existing]], [`${date}|${tech}`, []],
+  ]);
+  const capacitySlot = {
+    date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['existing', '__candidate__'], durationMinutes: 60 },
+  };
+
+  await expect(assessOfferedHours(jest.fn(), [capacitySlot], target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ slot: capacitySlot, startMin: 600, finishMin: 690 })]);
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [capacitySlot], { ...target, estimated_duration_minutes: 30 },
+    { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ slot: capacitySlot, finishMin: 660 })]);
+
+  // The nominally identical fixed-hour card remains blocked by the existing 10 AM row.
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: undefined }], target,
+    { now: NOW, calendar: calendar() })).resolves.toEqual([]);
+
+  // A route mutation or duration mismatch invalidates the old certificate.
+  for (const proof of [
+    { routeMode: 'arrival_windows', order: ['missing', '__candidate__'], durationMinutes: 60 },
+    { routeMode: 'arrival_windows', order: ['existing', '__candidate__'], durationMinutes: 30 },
+  ]) {
+    occupancy.listOccupiedWindows.mockClear();
+    await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: proof }], target,
+      { now: NOW, calendar: calendar() })).resolves.toEqual([]);
+  }
+});
+
+test('slot classification preserves certified capacity order internally but not in JSON', () => {
+  const { CAPACITY_PLACEMENT } = require('../services/day-replan/booking-fit');
+  const { _internals: slots } = require('../services/estimate-slot-availability');
+  const classified = slots.classifySlot({
+    date: '2026-11-20', start_time: '10:00', route_mode: 'arrival_windows', detour_minutes: 3,
+    technician: { id: 'tech-1', name: 'Pat Tester' },
+    route_arrivals: [{ id: 'existing' }, { id: '__candidate__' }], stops_that_day: 1,
+  }, 20, 60);
+
+  expect(classified[CAPACITY_PLACEMENT]).toEqual({
+    routeMode: 'arrival_windows', order: ['existing', '__candidate__'], durationMinutes: 60,
+  });
+  expect(JSON.stringify(classified)).not.toContain('__candidate__');
+});
+
 test('booking fit blocks live make-room destinations from the writer reader with its technician scope', async () => {
   const occupancy = require('../services/scheduling/occupancy');
   const { assessOfferedHours } = require('../services/day-replan/booking-fit');

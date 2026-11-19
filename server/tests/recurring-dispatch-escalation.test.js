@@ -218,6 +218,18 @@ describe('recurring visit with no arrival time and no due date', () => {
     const whyOf = (key) => notifications.notifyAdmin.mock.calls.find((call) => call[3].dedupeKey === key)[2];
     expect(whyOf('recurring-no-window:s7:2026-08-12')).toBe('The Aug 12 visit, 7 days away or less, has no arrival time; set one in dispatch so it can be placed.');
     expect(whyOf('recurring-no-window:s8:2026-08-13')).toBe('The Aug 13 visit has no arrival time; set one in dispatch so it can be placed.');
+    const optsOf = (key) => notifications.notifyAdmin.mock.calls.find((call) => call[3].dedupeKey === key)[3];
+    const soonOpts = optsOf('recurring-no-window:s7:2026-08-12');
+    const laterOpts = optsOf('recurring-no-window:s8:2026-08-13');
+    const standing = (key, body) => {
+      const call = notifications.notifyAdmin.mock.calls.find((entry) => entry[3].dedupeKey === key);
+      return { title: call[1], body, link: call[3].link };
+    };
+    expect(soonOpts.metadata.urgency).toBe('soon');
+    expect(laterOpts.metadata.urgency).toBe('standard');
+    expect(soonOpts.ringOnRefresh(standing('recurring-no-window:s7:2026-08-12', 'The visit has no arrival time.'), { urgency: 'standard' })).toBe(true);
+    expect(soonOpts.ringOnRefresh(standing('recurring-no-window:s7:2026-08-12', 'The visit, 7 days away or less, has no arrival time.'), {})).toBe(false);
+    expect(laterOpts.ringOnRefresh(standing('recurring-no-window:s8:2026-08-13', 'The visit has no arrival time.'), { urgency: 'standard' })).toBe(false);
   });
 
   test.each([
@@ -267,6 +279,10 @@ describe('recurring visit with no arrival time and no due date', () => {
       options: {},
     });
     expect(notifications.notifyAdmin.mock.calls[0][3].metadata.suggestedStarts).toEqual(['10:00']);
+    const opts = notifications.notifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.urgency).toBe('standard');
+    expect(opts.ringOnRefresh({ title: notifications.notifyAdmin.mock.calls[0][1], body: 'unchanged alert', link: opts.link },
+      { urgency: 'standard', suggestedStarts: ['08:00'] })).toBe(false);
   });
 
   test('another occurrence on the same date keeps the basic notice without suggesting a duplicate visit', async () => {

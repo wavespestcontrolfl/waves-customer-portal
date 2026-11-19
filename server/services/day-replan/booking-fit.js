@@ -1,8 +1,8 @@
 'use strict';
 
 const { currentOrder, promisedWindowOrder, staleOrderReasons } = require('../route-reorder-window-fit');
-const { coVisitGroups, simulate } = require('./app-sim');
-const { preferredFit, fitOfferedHour } = require('./close-gaps');
+const { coVisitGroups, simulate, promisesKept } = require('./app-sim');
+const { openTime, preferredFit, fitOfferedHour, serviceBlocks } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const {
@@ -12,8 +12,13 @@ const { isHoldStop } = require('../scheduling/travel-gap');
 const { etDateString } = require('../../utils/datetime-et');
 
 const OFFER_RANK = Symbol('dispatch offer ranking');
+// find-time's capacity result has already certified one insertion order. The
+// estimate picker carries that evidence only in-process: Symbols survive the
+// picker spreads but are omitted from the public JSON response.
+const CAPACITY_PLACEMENT = Symbol.for('waves.dispatch.certifiedCapacityPlacement');
 const { DEFAULT_OPTIONS } = require('./planner');
 const minute = t => Number(String(t).slice(0, 2)) * 60 + Number(String(t).slice(3, 5));
+const hhmm = min => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 const hasPin = r => r?.lat != null && r?.lng != null && Number.isFinite(Number(r.lat))
   && Number.isFinite(Number(r.lng)) && Number(r.lat) !== 0 && Number(r.lng) !== 0;
 
@@ -87,6 +92,82 @@ function routeOrderFor(rows, allowStaleOrderFallback) {
   return { ordered: allowStaleOrderFallback ? promisedWindowOrder(rows) : null, staleReasons };
 }
 
+// Rebuild one freshly loaded route in the capacity picker's certified order.
+// The only unknown id must be its prospective marker. Added/removed stops,
+// duplicate ids, or a grouping shape we cannot map exactly make the evidence
+// stale, so the advisory score is suppressed instead of inventing an order.
+function certifiedSequence(slot, groups, proposed) {
+  const proof = slot?.[CAPACITY_PLACEMENT];
+  const actualDuration = Number(proposed.estimated_duration_minutes);
+  if (proof?.routeMode !== 'arrival_windows' || !Array.isArray(proof.order)
+      || proof.order.length !== groups.length + 1 || !(actualDuration > 0)
+      || !(Number(proof.durationMinutes) >= actualDuration)) return null;
+  const byMember = new Map();
+  for (const group of groups) {
+    for (const row of group) {
+      const id = String(row.id);
+      if (byMember.has(id)) return null;
+      byMember.set(id, group);
+    }
+  }
+  const seen = new Set();
+  let candidate = 0;
+  const orderedGroups = [];
+  for (const rawId of proof.order) {
+    const id = String(rawId);
+    if (id === '__candidate__') {
+      candidate += 1;
+      orderedGroups.push([proposed]);
+      continue;
+    }
+    const group = byMember.get(id);
+    if (!group || seen.has(group)) return null;
+    seen.add(group);
+    orderedGroups.push(group);
+  }
+  if (candidate !== 1 || seen.size !== groups.length) return null;
+  return orderedGroups.flat();
+}
+
+// Capacity windows may overlap nominally: their safety comes from the
+// certified sequence and real work lengths, not from fixed-hour vacancy.
+// Re-simulate that order against the current rows and exact blocks before
+// using it as advisory ranking evidence.
+function fitCertifiedCapacity(input, slot, proposed) {
+  const startMin = minute(slot.windowStart);
+  if (!Number.isFinite(startMin) || startMin < input.bounds.openMin || !prefOk(input.pref, startMin)) return null;
+  // The public card's end is its reserved/display width. The scoring target
+  // carries the catalog's actual expected work; a certified longer placement
+  // may safely be re-simulated at that shorter duration, but never vice versa.
+  const actual = { ...proposed, window_end: hhmm(startMin + Number(proposed.estimated_duration_minutes)) };
+  const seq = certifiedSequence(slot, input.groups, actual);
+  if (!seq) return null;
+  const sim = simulate(seq, {
+    origin: input.origin,
+    departureMin: input.bounds.departureMin,
+    blockedIntervals: serviceBlocks(input.blocks),
+  });
+  if (!sim || !promisesKept(sim, seq, input.marginMin)
+      || (input.requireClose && sim.serviceFinishMin > input.bounds.closeMin)) return null;
+  const figures = openTime(sim, input.bounds);
+  const arrival = sim.arrivals.find(row => String(row.id) === String(actual.id));
+  if (!figures || !arrival) return null;
+  const baselineSeq = seq.filter(row => String(row.id) !== String(actual.id));
+  const baseline = simulate(baselineSeq, {
+    origin: input.origin,
+    departureMin: input.bounds.departureMin,
+    blockedIntervals: serviceBlocks(input.blocks),
+  });
+  if (!baseline) return null;
+  return {
+    start: slot.windowStart, startMin, finishMin: arrival.departureMin,
+    driveMin: figures.driveMin, waitMin: figures.waitMin, sellableMin: figures.sellableMin,
+    biggestMin: figures.biggestMin, slots: figures.slots, baselineDriveMin: baseline.travelMin,
+  };
+}
+
+const prefOk = (pref, startMin) => !pref || (startMin >= pref.startMin && startMin < pref.endMin);
+
 // All inputs are stored appointments, pins and local drive estimates. One read of the route per date and
 // one of the calendar blocks per technician-date. Candidates come from the caller's own admitted hours.
 async function assessOfferedHours(conn, offered, target, {
@@ -159,15 +240,17 @@ async function assessOfferedHours(conn, offered, target, {
       const unavailable = [...routeBlocks, ...blockedHours.map(h => ({ startMin: h * 60, endMin: h * 60 + 60 }))];
       const origin = homeFromMap(homes, techId);
       const before = simulate(ordered, { origin, departureMin });
-      if (!before) continue;
       const bounds = { openMin: DAY_OPEN, closeMin: DAY_CLOSE, departureMin, unavailable, driveBlocks: routeBlocks };
       for (const slot of slots) {
         const proposed = { ...target, id: target.id || '__new_booking__', technician_id: techId, window_start: slot.windowStart, window_end: slot.windowEnd };
         const group = [proposed];
-        const fit = fitOfferedHour({ groups: [...groups, group], group, leaderId: proposed.id, pref,
-          origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds, blocks: routeBlocks, blockedHours, rowHours, requireClose: true },
-        minute(slot.windowStart) / 60);
-        if (fit) fits.push({ ...fit, addedDriveMin: fit.driveMin - before.travelMin, slot });
+        const input = { groups, group, leaderId: proposed.id, pref, origin,
+          marginMin: DEFAULT_OPTIONS.marginMin, bounds, blocks: routeBlocks, blockedHours, rowHours, requireClose: true };
+        const capacityFit = fitCertifiedCapacity(input, slot, proposed);
+        const fit = capacityFit || (slot?.[CAPACITY_PLACEMENT] ? null : (before && fitOfferedHour(
+          { ...input, groups: [...groups, group] }, minute(slot.windowStart) / 60)));
+        const baselineDriveMin = capacityFit?.baselineDriveMin ?? before?.travelMin;
+        if (fit && Number.isFinite(baselineDriveMin)) fits.push({ ...fit, addedDriveMin: fit.driveMin - baselineDriveMin, slot });
       }
     }
   }
@@ -226,6 +309,6 @@ function observeOffers(conn, shown, target, options = {}) {
 }
 
 module.exports = {
-  assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK,
-  _internals: { withoutOwnEstimateHold, routeOrderFor },
+  assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK, CAPACITY_PLACEMENT,
+  _internals: { withoutOwnEstimateHold, routeOrderFor, certifiedSequence, fitCertifiedCapacity },
 };

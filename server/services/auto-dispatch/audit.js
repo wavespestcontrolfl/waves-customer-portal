@@ -562,7 +562,8 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd, now) {
         // A failed optional query rolls back its savepoint and leaves the original notice usable.
         suggestion = await trx.transaction(nested => noWindowDetail(nested, current, date, now));
       } catch (err) { logger.warn(`[auto-dispatch] no-window suggestions unavailable (${err.message})`); }
-      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', {
+      const urgency = date <= soonEnd ? 'soon' : 'standard';
+      const alert = {
         area: 'Schedule',
         action: await namedVisitAction(row.customer_id,
           [(who) => `set an arrival time for ${who}'s visit`, (who) => `set a time for ${who}'s visit`],
@@ -573,12 +574,24 @@ async function flagNoWindowVisits(candidates, today, to, soonEnd, now) {
         subject: { type: 'visit', id: String(row.id) },
         doneWhen: 'visit_has_arrival_time',
         who: 'person',
-      }, {
+      };
+      const expected = require('../admin-alert-compose').composeAdminAlert(alert);
+      const inserted = await require('../admin-alert-compose').raiseAdminAlert('schedule_conflict', alert, {
         bell: true,
         dedupeKey: noWindowKey(row),
         refreshOnDedupe: true,
+        // Suggested starts are advisory and change as the route fills. Keep
+        // the standing card current without clearing its read state or using
+        // another shared ring-budget slot. The real far -> soon escalation
+        // still re-rings once, including rows created before `urgency` was
+        // stamped (their body carries the old urgency evidence).
+        ringOnRefresh: (existing, existingMeta) => existing?.title !== expected.headline
+          || existing?.link !== expected.link
+          || (urgency === 'soon' && existingMeta?.urgency !== 'soon'
+            && !String(existing?.body || '').includes(`${SOON_DAYS} days away or less`)),
         detail: suggestion.detail,
-        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date, suggestedStarts: suggestion.hours },
+        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, scheduledDate: date,
+          suggestedStarts: suggestion.hours, urgency },
         trx,
       });
       if (!inserted) throw new Error(`Recurring no-window notice could not be recorded for ${row.id}`);
