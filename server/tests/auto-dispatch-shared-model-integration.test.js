@@ -41,6 +41,7 @@ const PREFS = {
   blackout: null, service_category: 'general', raw_snapshot: null,
 };
 const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35 };
+const ELIGIBLE = { is_recurring: true, recurring_parent_id: 'parent-1', status: 'confirmed', customer_active: true };
 
 function stopRow(id, windowStart, windowEnd, lat, lng, { date = '2026-08-11', tech = 't2' } = {}) {
   return {
@@ -122,7 +123,7 @@ function ctxWith(db) {
 }
 
 test('a visit already well placed (tight, clustered current day) does NOT move to a far, empty candidate day', async () => {
-  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  const SVC = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
     window_start: '09:00', estimated_duration_minutes: 60, lat: 27.40, lng: -82.50,
     auto_dispatch_change_count: 0 };
   // Current day: two neighbors immediately around the visit, close by (same
@@ -147,7 +148,7 @@ test('a visit already well placed (tight, clustered current day) does NOT move t
 });
 
 test('ranking uses the identity-read booked window, never the stale windowless scan row', async () => {
-  const stale = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  const stale = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
     window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04',
     estimated_duration_minutes: 60, lat: 27.40, lng: -82.50, auto_dispatch_change_count: 0 };
   const live = { ...stale, window_start: '09:00', window_end: '10:00' };
@@ -166,7 +167,7 @@ test('ranking uses the identity-read booked window, never the stale windowless s
 });
 
 test('a clearly better clustered day wins over a poorly-placed current day', async () => {
-  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  const SVC = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
     window_start: '12:00', estimated_duration_minutes: 60, lat: 27.50, lng: -82.50,
     auto_dispatch_change_count: 0 };
   // Current day: the visit's only neighbor is far away (different part of
@@ -202,7 +203,7 @@ test('a clearly better clustered day wins over a poorly-placed current day', asy
 // empty day — otherwise a well-clustered unassigned visit scores as a lone
 // HQ round trip and any comparable candidate falsely clears the threshold.
 test('an UNASSIGNED visit on a clustered day scores that day, so an equally clustered candidate does not move it', async () => {
-  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: null,
+  const SVC = { ...ELIGIBLE, id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: null,
     window_start: '09:00', estimated_duration_minutes: 60, lat: 27.40, lng: -82.50,
     auto_dispatch_change_count: 0 };
   const near = (id, start, end, date, tech) => stopRow(id, start, end, 27.401, -82.501, { date, tech });

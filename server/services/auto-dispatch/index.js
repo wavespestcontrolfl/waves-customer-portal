@@ -1258,6 +1258,9 @@ async function evaluateServiceForRun(service, run) {
 
   const ctx = {
     db,
+    // The identity-read mover must clear the same complete pure eligibility
+    // gate immediately before live scoring, including this guard mode.
+    eligibilityContext: eligCtx,
     nowDate: run.nowDate,
     lockWindowDays: config.lockWindowDays,
     lookaheadDays: config.lookaheadDays,

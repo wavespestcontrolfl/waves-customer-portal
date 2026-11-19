@@ -51,6 +51,7 @@ const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
+const { isEligibleForAutoDispatch } = require('./eligibility');
 const { capacityEnabled } = require('../scheduling/policy');
 const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
@@ -109,6 +110,7 @@ const DAY_STOP_COLUMNS = [
   'customers.city as customer_city',
   'customers.state as customer_state',
   'customers.zip as customer_zip',
+  'customers.active as customer_active',
   'scheduled_services.lat as svc_lat',
   'scheduled_services.lng as svc_lng',
   'customers.latitude as customer_latitude',
@@ -176,7 +178,9 @@ function rowToDayStop(r) {
 // so routeCost must charge their planning minutes with the visit's — on the
 // current placement and every candidate alike — or a grouped visit's route
 // minutes would omit their work (Codex pre-push P1).
-function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order) {
+function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order, placement = {}) {
+  const windowStart = placement.windowStart || service.window_start;
+  const windowEnd = placement.windowEnd || service.window_end;
   return {
     geo,
     startMin,
@@ -184,13 +188,29 @@ function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = 
     id: service.id,
     route_order: routeOrder,
     created_at: service.created_at,
+    time_window: service.time_window,
     visit_id: service.visit_id,
+    customer_id: service.customer_id,
+    scheduled_date: placement.date || service.scheduled_date,
+    technician_id: placement.technicianId ?? service.technician_id,
+    reservation_service_mix: service.reservation_service_mix,
+    lat: geo?.lat ?? null,
+    lng: geo?.lng ?? null,
+    service_address_line1: service.service_address_line1,
+    service_address_line2: service.service_address_line2,
+    service_address_city: service.service_address_city,
+    service_address_zip: service.service_address_zip,
+    customer_address_line1: service.customer_address_line1,
+    customer_address_line2: service.customer_address_line2,
+    customer_city: service.customer_city,
+    customer_state: service.customer_state,
+    customer_zip: service.customer_zip,
     service_type: service.service_type,
     is_recurring: service.is_recurring,
     is_callback: service.is_callback,
     estimated_duration_minutes: service.estimated_duration_minutes,
-    window_start: service.window_start,
-    window_end: service.window_end,
+    window_start: windowStart,
+    window_end: windowEnd,
     preserveCapacity: preservesCapacity(service),
     unitMembers: siblings,
   };
@@ -545,7 +565,11 @@ function candidateRouteOrder(service, cand) {
 // active stops.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const routeVisit = serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand));
+  const routeVisit = serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved,
+    candidateRouteOrder(service, cand), {
+      date: cand.date, technicianId: cand.technician_id,
+      windowStart: cand.start_time, windowEnd: cand.end_time,
+    });
   const cost = routeCost(stops, routeVisit, home);
   return {
     ...cand,
@@ -1251,6 +1275,20 @@ async function sourceSnapshot(service, grouped) {
   if (!liveRow) {
     throw skipEvaluation(SOURCE_SNAPSHOT_STALE, 'The source visit no longer exists');
   }
+  // Keep the raw stored coordinates on the service snapshot used by the
+  // pass-2 drift fence. Routing may resolve through customer coordinates,
+  // but that fallback must not masquerade as a scheduled_services edit.
+  const refreshed = {
+    ...service,
+    ...liveRow,
+    lat: liveRow.lat ?? null,
+    lng: liveRow.lng ?? null,
+  };
+  const eligibility = isEligibleForAutoDispatch(refreshed, grouped.eligibilityContext || {});
+  if (!eligibility.eligible) {
+    throw skipEvaluation(SOURCE_SNAPSHOT_STALE,
+      `The source visit is no longer auto-dispatchable (${eligibility.reason_code})`);
+  }
   const live = {
     ...rowToDayStop(liveRow),
     dateStr: toDateStr(liveRow.scheduled_date),
@@ -1275,7 +1313,7 @@ async function sourceSnapshot(service, grouped) {
   });
   const geo = live.geo;
   return {
-    service: { ...service, ...liveRow, ...live, lat: geo?.lat ?? null, lng: geo?.lng ?? null },
+    service: { ...refreshed, ...live, lat: liveRow.lat ?? null, lng: liveRow.lng ?? null },
     geo,
     sourceDay: [live, ...sourceDay.filter(row => String(row.id) !== String(service.id))],
   };
@@ -1459,7 +1497,7 @@ module.exports = {
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {
-    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext, sourceSnapshot,
+    candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext, sourceSnapshot, serviceToRouteStop,
     filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };

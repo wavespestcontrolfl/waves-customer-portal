@@ -39,7 +39,7 @@ const {
   computeCurrentPlacement,
   SOURCE_SNAPSHOT_STALE,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, sourceSnapshot,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, sourceSnapshot, serviceToRouteStop,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -57,7 +57,11 @@ afterAll(() => {
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION; else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
 });
 
-const SERVICE = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+const SERVICE = {
+  id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1',
+  window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5,
+  is_recurring: true, recurring_parent_id: 'parent-1', customer_active: true,
+};
 const prefs = { service_category: 'general', blackout: null };
 
 function ctxBase() {
@@ -124,15 +128,19 @@ describe('source snapshot drift fence', () => {
     groupContext: { excludeIds: new Set(['s1']), siblings: [], visitWindowStart: '09:00' },
   });
 
-  test.each([
-    ['corrected', { svc_lat: 27.42, svc_lng: -82.52 }, { lat: 27.42, lng: -82.52 }],
-    ['cleared', { svc_lat: null, svc_lng: null }, null],
-  ])('a windowless mover is read by id and its %s live pin wins', async (_label, pin, expectedGeo) => {
-    const row = liveRow({ window_start: null, window_end: null, ...pin });
+  test('a windowless mover is read by id and its corrected live pin wins', async () => {
+    const expectedGeo = { lat: 27.42, lng: -82.52 };
+    const row = liveRow({ window_start: null, window_end: null, svc_lat: expectedGeo.lat, svc_lng: expectedGeo.lng });
     const result = await sourceSnapshot(SERVICE, grouped(sourceDb(row)));
     expect(result.geo).toEqual(expectedGeo);
     expect(result.service.window_start).toBeNull();
     expect(result.sourceDay[0]).toMatchObject({ id: 's1', window_start: null, geo: expectedGeo });
+  });
+
+  test('a live pin removal fails refreshed eligibility before any route scoring', async () => {
+    const row = liveRow({ window_start: null, window_end: null, svc_lat: null, svc_lng: null });
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(row))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
   });
 
   test.each([
@@ -153,6 +161,51 @@ describe('source snapshot drift fence', () => {
     await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow({ [field]: true })))))
       .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
   });
+
+  test('customer fallback coordinates score the route but stay raw-null for the pass-2 drift fence', async () => {
+    const row = liveRow({ svc_lat: null, svc_lng: null, lat: null, lng: null,
+      customer_latitude: 27.43, customer_longitude: -82.53 });
+    const result = await sourceSnapshot(SERVICE, grouped(sourceDb(row)));
+    expect(result.geo).toEqual({ lat: 27.43, lng: -82.53 });
+    expect(result.service).toMatchObject({ lat: null, lng: null,
+      customer_latitude: 27.43, customer_longitude: -82.53 });
+  });
+
+  test.each([
+    ['en_route', { status: 'en_route' }],
+    ['on_site', { status: 'on_site' }],
+    ['non-recurring', { is_recurring: false }],
+    ['parent template', { recurring_parent_id: null }],
+  ])('%s mover fails the refreshed eligibility gate before scoring', async (_label, change) => {
+    await expect(sourceSnapshot(SERVICE, grouped(sourceDb(liveRow(change)))))
+      .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
+  });
+});
+
+test('synthetic mover uses the candidate window and placement identity for duration, co-visits and allocations', () => {
+  const mix = { version: 2, allocatedServiceIds: ['s1', 'peer'] };
+  const service = {
+    ...SERVICE,
+    window_start: '14:00', window_end: '15:00', technician_id: 'old-tech', scheduled_date: '2026-08-04',
+    customer_id: 'same-customer', reservation_service_mix: mix,
+    service_address_line1: '12 Palm Way', service_address_city: 'Bradenton', service_address_zip: '34203',
+  };
+  const moved = serviceToRouteStop(service, { lat: 27.45, lng: -82.45 }, 9 * 60, [], null, {
+    date: '2026-08-06', technicianId: 't1', windowStart: '09:00', windowEnd: '10:00',
+  });
+  expect(moved).toMatchObject({
+    window_start: '09:00', window_end: '10:00', scheduled_date: '2026-08-06', technician_id: 't1',
+    customer_id: 'same-customer', reservation_service_mix: mix,
+    lat: 27.45, lng: -82.45, service_address_line1: '12 Palm Way',
+  });
+  expect(require('../services/auto-dispatch/route-model').stopPlanningMinutes(moved)).toBe(60);
+
+  const peer = { ...moved, id: 'peer', route_order: 1, created_at: '2026-01-01T00:00:00Z' };
+  expect(require('../services/auto-dispatch/route-model').physicalStops([peer, moved])).toHaveLength(1);
+
+  const legacy = { ...peer, id: 'legacy', reservation_service_mix: null, estimated_duration_minutes: null };
+  const legacyMover = { ...moved, reservation_service_mix: null, estimated_duration_minutes: null };
+  expect(require('../services/auto-dispatch/route-model').physicalStops([legacy, legacyMover])).toHaveLength(1);
 });
 
 // The tech-day a batched day-stop row belongs to (the 2026-08-06 / t1 slot
@@ -1082,8 +1135,8 @@ test('current and candidate scoring share the mover coordinates from the source-
 
   rows[0] = { ...rows[0], svc_lat: null, svc_lng: null };
   findAvailableSlots.mockClear();
-  expect(await findValidCandidateSlots(stale, prefs, { ...ctxBase(), db }))
-    .toMatchObject({ note: 'no_geo', candidates: [] });
+  await expect(findValidCandidateSlots(stale, prefs, { ...ctxBase(), db }))
+    .rejects.toMatchObject({ code: SOURCE_SNAPSHOT_STALE, skipEvaluation: true });
   expect(findAvailableSlots).not.toHaveBeenCalled();
 });
 
