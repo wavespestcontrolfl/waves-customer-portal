@@ -60,6 +60,7 @@ function setupDb() {
       select: jest.fn(() => q),
       count: jest.fn(() => q),
       first: jest.fn(() => Promise.resolve(tableState.post ?? null)),
+      columnInfo: jest.fn(() => Promise.resolve(tableState.heroColumn ?? { type: 'text', maxLength: null })),
       update: jest.fn((u) => { calls.updates.push({ table, filters: { ...q._filters }, updates: u }); return { returning: () => Promise.resolve([{ ...tableState.post, ...u }]) }; }),
       // Mirrors the atomic guarded delete: only a non-astro-active existing
       // row deletes; anything else reports 0 rows like Postgres would.
@@ -247,6 +248,19 @@ describe('regenerate-image publish guard (codex r10)', () => {
     expect(r.statusCode).toBe(200);
     expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'blog-hero', index: 0, slug: 'pest-control/ghost-ants-sarasota', title: 'Ghost Ants In Sarasota', keyword: 'ghost ants' }));
     expect(calls.updates.at(-1).updates.featured_image_url).toBe('data:image/png;base64,QUJD');
+    // Production's featured_image_url is varchar(255): the multi-MB data URL
+    // cannot be saved there, so the route refuses BEFORE the paid image call
+    // (pre-push audit P1 on 4e35f451be); an unreadable column counts as too short.
+    AstroPublisher.generatePlannedImage.mockClear();
+    const writes = calls.updates.length;
+    for (const column of [{ type: 'character varying', maxLength: 255 }, {}]) {
+      tableState.heroColumn = column;
+      const refused = await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.payload.error).toMatch(/cannot save a generated picture yet/);
+    }
+    expect(AstroPublisher.generatePlannedImage).not.toHaveBeenCalled();
+    expect(calls.updates).toHaveLength(writes);
   });
 
   test('a post that becomes an identification post while the picture is made refuses the save, and an unsaved selection that would make it one is refused before the image call; both checks are null-safe (pre-push audit P1s on 5608d79a6a and 9395fddc43)', async () => {
@@ -270,6 +284,7 @@ describe('regenerate-image publish guard (codex r10)', () => {
         };
         const q = {
           where: jest.fn((a) => { if (typeof a === 'function') a(sub); return q; }),
+          columnInfo: jest.fn(() => Promise.resolve({ type: 'text', maxLength: null })),
           first: jest.fn(() => Promise.resolve(readRow)),
           update: jest.fn((u) => ({
             returning: () => {

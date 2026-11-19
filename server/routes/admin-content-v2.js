@@ -772,6 +772,15 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
         && isIdentificationPost({ ...post, post_type: req.body.post_type || null })) {
       return res.status(409).json({ error: 'Save the post type change first: the picture is planned from the saved post type.' });
     }
+    // The save stores the hero as a data URL of several MB. In production
+    // featured_image_url is varchar(255) (migration 20260401000034; read
+    // 11-19), so the save cannot hold it: refuse before the paid image call
+    // instead of paying and then failing. Where the column has no small
+    // length limit, the button works. An unreadable column counts as too short.
+    const heroColumn = await db('blog_posts').columnInfo('featured_image_url').catch(() => null);
+    if (!heroColumn?.type || (heroColumn.maxLength != null && Number(heroColumn.maxLength) < 10e6)) {
+      return res.status(409).json({ error: 'The editor cannot save a generated picture yet: the featured image field is too short for one. No picture was made.' });
+    }
 
     const url = await generateFeaturedImage({
       title: post.title,
