@@ -404,7 +404,10 @@ function rowReader(conn) {
   };
 }
 
-const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map((r) => String(r.technician_id)));
+// A booked stop: not an unclaimed hold (no customer yet, a live expiry). Only a booked stop staffs a Sunday, as the 07:05
+// notice counts Sundays only with stops booked (pre-push audit round 38); a hold still holds its time on a staffed route.
+const bookedStop = (r) => r.customer_id != null || r.reservation_expires_at == null;
+const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id && bookedStop(r)).map((r) => String(r.technician_id)));
 
 /**
  * Work this technician's count must hold but cannot, or null (pre-push audit rounds 35 and 36). Its date is left

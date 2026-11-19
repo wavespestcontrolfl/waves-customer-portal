@@ -413,6 +413,22 @@ describe('runRouteCheck', () => {
     expect(JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22')).toMatchObject({ stops: 1, staffed: true });
   });
 
+  test("an unclaimed hold alone does not staff a Sunday; a staff-booked visit that keeps its hold timestamp does (round 38)", async () => {
+    const expires = '2026-11-20T12:00:00Z';
+    for (const [extra, staffedSunday] of [
+      [{ customer_id: null, reservation_expires_at: expires }, false],
+      [{ customer_id: 'cust-1', reservation_expires_at: expires }, true],
+    ]) {
+      replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('h1', '10:00:00', '11:00:00', extra)] : []));
+      const { conn, writes } = fakeConn();
+      await runRouteCheck({ conn, now: NOW });
+      const days = JSON.parse(writes[0][1].days);
+      expect([extra.customer_id, days.some((d) => d.date === '2026-11-22')]).toEqual([extra.customer_id, staffedSunday]);
+      expect(JSON.parse(writes[0][1].totals).next.dates)
+        .toEqual(staffedSunday ? ['2026-11-20', '2026-11-21', '2026-11-22'] : ['2026-11-20', '2026-11-21', '2026-11-23']);
+    }
+  });
+
   test('a tech-day that fails to read is marked and the row is still written', async () => {
     replan.loadBlocks.mockImplementation(async (_c, date) => {
       if (date === '2026-11-20') throw new Error('timeout');
