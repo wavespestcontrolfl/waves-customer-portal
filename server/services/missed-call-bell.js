@@ -384,68 +384,94 @@ function settledSilentSql(checkedAt) {
   return [`(${sql} AND COALESCE(call_log.updated_at, call_log.created_at) < ?)`, [...bindings, new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)]];
 }
 
-// The number's record beside the counted history, read only once that matched
-// and bounded like it: the number is no staff or internal phone; the judged
-// call, read fresh, is still a silent call (a late write can mark it answered
-// after the bell read it; pre-push audit r10), with no grace test, since the
-// bell itself rings 5 minutes after the terminal status; no other call from
-// or to the number, from the window start up to this check, is anything but a
-// settled silent hang-up (IS NOT TRUE: a NULL in the test blocks too); and no
-// text from or to it but our own text-back. Up to the check, not to the
-// judged call: a staff callback can come between the call and its bell
-// (pre-push audit r9).
-async function recordIsSilent(row, key, at, checkedAt) {
-  // One of our own lines, a staff forward (pre-push audit r11) or a phone on
-  // any staff row (technician or admin, any status) is never a robocaller.
-  // The staff table is read here, not through the cached staff-sender list:
-  // that list answers "not staff" when its gate is off or its read failed
-  // (pre-push audit r12). The read has the same time limit as the reads
-  // below; a failed or slow read throws, and the push goes.
-  if (require('../config/twilio-numbers').isInternalNumber(`+${key}`)) return false;
-  const staff = await db('technicians')
-    .whereRaw(`${phoneKeySql('technicians.phone')} = ?`, [key])
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
-    .first('id');
-  if (staff) return false;
-  const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
-  const judged = await db('call_log').where('id', row.id).whereRaw(...silentCallSql())
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
-  if (!judged) return false;
+// The number's whole record, as conditions on the judged call's own row. The
+// check's read and the repeat quiet stamp's update both apply them, so nothing
+// the check read can change before the stamp: a change that lands in between
+// leaves the stamp matching no row, and the push goes (pre-push audit r13,
+// r14). Bounded like the history read (14 days). The conditions:
+//  - the judged call is still a silent call (a late write can mark it
+//    answered after the bell read it; pre-push audit r10), with no grace test:
+//    the bell itself rings 5 minutes after the terminal status;
+//  - no staff row (technician or admin, any status) has the number's phone,
+//    read from the table itself: the cached staff-sender list answers "not
+//    staff" when its gate is off or its read failed (pre-push audit r12);
+//  - every other call from or to the number, from the window start on, is a
+//    settled silent hang-up (IS NOT TRUE: a NULL blocks too). From the window
+//    start on, not to the judged call: a staff callback can come between the
+//    call and its bell (pre-push audit r9);
+//  - no text from or to it but our own text-back in the text log
+//    (message_type as in missed-call-text-back.js; as the text-back's
+//    contactState reads contact; pre-push audit r11);
+//  - in the unified inbox, which the SMS webhook writes first and the text log
+//    only as best effort (pre-push audit r14), nothing in the window but
+//    mirrors of silent calls (the voicemail or unanswered, no recording) and
+//    our text-back: the only shapes the inbox holds for the matched numbers
+//    of the 90 days to 2026-11-19. And no conversation with the number is
+//    linked to a customer.
+// The inner reads name call_log without an alias: inside them it is the inner
+// table, and the judged call is excluded by its id.
+const INBOX_SILENT_SQL = "((m.channel = 'voice' AND m.direction = 'inbound'"
+  + " AND COALESCE(m.answered_by, 'voicemail') = 'voicemail' AND m.recording_sid IS NULL)"
+  + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'))";
+function silentRecordClauses(row, key, since, checkedAt) {
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
-  const other = await db('call_log')
-    .modify((qb) => whereNotSandboxCall(qb))
-    .whereNot('id', row.id)
-    .where('created_at', '>=', since)
-    .where((number) => number
-      .whereRaw(`${CALLER_KEY} = ?`, [key])
-      .orWhereRaw(`${phoneKeySql('call_log.to_phone')} = ?`, [key]))
-    .whereRaw(`${settledSql} IS NOT TRUE`, settledBindings)
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
-    .first('id');
-  if (other) return false;
-  // Texts the same way: none from or to the number since the window start but
-  // our own text-back (message_type as in missed-call-text-back.js). A reply,
-  // a staff text or another lane's text is contact, as the text-back's
-  // contactState reads it (pre-push audit r11).
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-  const text = await excludeUnresolvedSendReservations(db('sms_log'))
-    .where('created_at', '>=', since)
-    .where((number) => number
-      .whereRaw(`${phoneKeySql('sms_log.from_phone')} = ?`, [key])
-      .orWhereRaw(`${phoneKeySql('sms_log.to_phone')} = ?`, [key]))
-    .whereRaw("(sms_log.direction = 'outbound' AND sms_log.message_type = 'missed_call_text_back') IS NOT TRUE")
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
-    .first('id');
-  return !text;
+  return (qb) => qb
+    .whereRaw(...silentCallSql())
+    .whereNotExists(function staffPhone() {
+      this.select(1).from('technicians').whereRaw(`${phoneKeySql('technicians.phone')} = ?`, [key]);
+    })
+    .whereNotExists(function otherCall() {
+      this.select(1).from('call_log')
+        .modify((inner) => whereNotSandboxCall(inner))
+        .whereNot('call_log.id', row.id)
+        .where('call_log.created_at', '>=', since)
+        .where((number) => number
+          .whereRaw(`${CALLER_KEY} = ?`, [key])
+          .orWhereRaw(`${phoneKeySql('call_log.to_phone')} = ?`, [key]))
+        .whereRaw(`${settledSql} IS NOT TRUE`, settledBindings);
+    })
+    .whereNotExists(function loggedText() {
+      excludeUnresolvedSendReservations(this.select(1).from('sms_log as s'), 's')
+        .where('s.created_at', '>=', since)
+        .where((number) => number
+          .whereRaw(`${phoneKeySql('s.from_phone')} = ?`, [key])
+          .orWhereRaw(`${phoneKeySql('s.to_phone')} = ?`, [key]))
+        .whereRaw("(s.direction = 'outbound' AND s.message_type = 'missed_call_text_back') IS NOT TRUE");
+    })
+    .whereNotExists(function inboxMessage() {
+      this.select(1).from('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
+        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
+        .where('m.created_at', '>=', since)
+        .whereRaw(`${INBOX_SILENT_SQL} IS NOT TRUE`);
+    })
+    .whereNotExists(function linkedConversation() {
+      this.select(1).from('conversations as c')
+        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
+        .whereNotNull('c.customer_id');
+    });
 }
 
-async function isRepeatSilentCaller(row) {
-  if (!row || row.customer_id) return false;
+// Read only once the history matched. Returns the record conditions for the
+// stamp, or null. One of our own lines or a staff forward (config, not the
+// database; pre-push audit r11) is never a robocaller.
+async function recordIsSilent(row, key, at, checkedAt) {
+  if (require('../config/twilio-numbers').isInternalNumber(`+${key}`)) return null;
+  const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
+  const clauses = silentRecordClauses(row, key, since, checkedAt);
+  const judged = await db('call_log').where('id', row.id).modify(clauses)
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
+  return judged ? clauses : null;
+}
+
+// The repeat check: null, or the record conditions the quiet stamp applies.
+async function repeatSilentCaller(row) {
+  if (!row || row.customer_id) return null;
   const line = require('../config/twilio-numbers').findByNumber(row.to_phone);
-  if (line?.type !== 'gbp_tracking') return false;
+  if (line?.type !== 'gbp_tracking') return null;
   const raw = String(row.from_phone || '').replace(/\D/g, '');
   const plus = String(row.from_phone || '').trim().startsWith('+');
-  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
+  if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return null;
   const key = `1${raw.slice(-10)}`;
   const at = new Date(row.created_at || Date.now());
   const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
@@ -461,8 +487,12 @@ async function isRepeatSilentCaller(row) {
     .whereRaw(settledSql, settledBindings)
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
-  if (!(found?.other_line || Number(found?.n || 0) >= REPEAT_MIN_PRIOR)) return false;
+  if (!(found?.other_line || Number(found?.n || 0) >= REPEAT_MIN_PRIOR)) return null;
   return recordIsSilent(row, key, at, checkedAt);
+}
+
+async function isRepeatSilentCaller(row) {
+  return Boolean(await repeatSilentCaller(row));
 }
 
 const spamGateOn = (name) => require('../config/feature-gates').isEnabled(name);
@@ -710,10 +740,10 @@ const QUIET_RULES = [
 async function quietRobodialerPush(row, fenced) {
   const flags = {
     ...(await classifySpamWave(row)), // fails open inside
-    repeat: await isRepeatSilentCaller(row).catch((err) => {
+    repeat: await repeatSilentCaller(row).catch((err) => {
       // A code only: a Knex error echoes the bound values, here the caller's number.
       logger.warn(`[missed-call-bell] repeat check failed, treating as not spam: ${err?.code || err?.name || 'error'}`);
-      return false;
+      return null;
     }),
     screen: !row.customer_id && parseMeta(row.metadata).preconnect_screen === 'failed',
   };
@@ -727,10 +757,14 @@ async function quietRobodialerPush(row, fenced) {
   if (!Object.keys(stamps).length) return false;
   // Quiet only when the marker is durable: the re-push recognises a quiet call by
   // it. A failed or empty stamp write fails open (the push goes as usual). A
-  // repeat quiet is written only while the call is still a silent call: a
-  // customer link, a staff note or an answer that lands after the repeat
-  // check read the call matches no row, and the push goes (pre-push audit r13).
-  const write = quietAs === 'repeat_quiet' ? fenced().whereRaw(...silentCallSql()) : fenced();
+  // repeat quiet is written only while the number's whole record still holds
+  // (silentRecordClauses, the check's own conditions, in the same statement):
+  // a customer link, a note, an answer, a staff call or text, or a reply that
+  // lands after the check read the record matches no row, and the push goes
+  // (pre-push audit r13, r14). It has the reads' time limit.
+  const write = quietAs === 'repeat_quiet'
+    ? fenced().modify(flags.repeat).timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
+    : fenced();
   const stamped = await write.update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => 0);
   return Boolean(quietAs) && stamped === 1;
 }
@@ -1245,6 +1279,7 @@ module.exports = {
   isRobodialerWave,
   isRobodialerBurst,
   isRepeatSilentCaller,
+  quietRobodialerPush,
   classifySpamWave,
   exchangeHangupScreenHit,
   sweepMissedCalls,

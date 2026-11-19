@@ -37,13 +37,13 @@ jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(a
 const { isEnabled } = require('../config/feature-gates');
 const { triggerNotification } = require('../services/notification-triggers');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
-const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst, isRepeatSilentCaller, exchangeHangupScreenHit } = require('../services/missed-call-bell');
+const { ringMissedCallIfUnanswered, isRobodialerWave, isRobodialerBurst, isRepeatSilentCaller, quietRobodialerPush, exchangeHangupScreenHit } = require('../services/missed-call-bell');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call bell: robodialer wave on PostgreSQL', () => {
   let database;
   const schema = `missed_call_wave_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians'];
+  const tables = ['call_log', 'scheduled_services', 'invoices', 'customers', 'leads', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'sms_log', 'technicians', 'conversations', 'messages'];
 
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
@@ -606,6 +606,13 @@ jest.setTimeout(30000);
     const judged = (extra = {}) => call(CALLER, 10, { metadata: { location: 'GBP — Parrish' }, ...extra });
     // History the carrier fully attested (what the webhook stores as metadata.stir_verstat).
     const prior = (phone, minutesAgo, extra = {}) => call(phone, minutesAgo, { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, ...extra });
+    // A unified inbox thread with the number: a conversation, and one message
+    // half an hour ago unless message is null.
+    const inbox = async (phone, message, conversation = {}) => {
+      const id = randomUUID();
+      await database('conversations').insert({ id, channel: message?.channel || 'sms', contact_phone: phone, unknown_contact: true, created_at: new Date(), ...conversation });
+      if (message) await database('messages').insert({ id: randomUUID(), conversation_id: id, created_at: new Date(Date.now() - 30 * 60 * 1000), ...message });
+    };
 
     test('gate on: the third silent call from one number keeps its bell row, sends no push, is titled likely robocall, and settles', async () => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
@@ -623,43 +630,45 @@ jest.setTimeout(30000);
       expect(metadata.missed_call_push_retries).toBeUndefined();
     });
 
-    // The quiet stamp re-checks the call: a write that lands after the repeat
-    // check read the call, before the stamp, leaves the stamp unwritten, and
-    // the push goes (pre-push audit r13).
+    // The repeat quiet stamp applies the record check's own conditions in its
+    // update: a change that lands after the check read the record, before the
+    // stamp, leaves the stamp unwritten, and the push goes (pre-push audit r13,
+    // r14). The stamp write below runs the late change first, then the update.
+    const LINKED_CUSTOMER = '00000000-0000-4000-8000-000000000611';
     test.each([
-      ['a staff note', { notes: 'called back, it was a person' }],
-      ['a customer link', { customer_id: '00000000-0000-4000-8000-000000000611' }],
-    ])('%s that lands after the repeat check read the call lets the push go (pre-push audit r13)', async (label, late) => {
+      ['a staff note on the judged call', (row) => database('call_log').where({ id: row.id }).update({ notes: 'called back, it was a person' })],
+      ['a customer link on the judged call', (row) => database('call_log').where({ id: row.id }).update({ customer_id: LINKED_CUSTOMER })],
+      ['a staff callback that rang out', () => database('call_log').insert(call(GBP_LINE, 0, { direction: 'outbound', to_phone: CALLER, status: 'no-answer', answered_by: null }))],
+      ['a reply in the text log', () => database('sms_log').insert({ id: randomUUID(), direction: 'inbound', from_phone: CALLER, to_phone: GBP_LINE, message_body: 'who is this', status: 'received', created_at: new Date() })],
+      ['a reply only in the unified inbox', () => inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' })],
+      ['a staff row with the number', () => database('technicians').insert({ id: randomUUID(), name: 'Staff Test', phone: CALLER, role: 'technician', employment_status: 'active' })],
+      ['a conversation with the number linked to a customer', () => inbox(CALLER, null, { customer_id: LINKED_CUSTOMER })],
+    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14)', async (label, lateWrite) => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
-      const row = judged();
-      await database('call_log').insert(row);
-      // The record check's text read is its last read: the late write lands as
-      // that read runs (only the one-argument form recordIsSilent uses).
-      const reservation = require('../services/messaging/review-ask-reservation');
-      const original = reservation.excludeUnresolvedSendReservations;
+      const inserted = judged();
+      await database('call_log').insert(inserted);
+      const row = await stored(inserted);
       let landed = false;
-      const spy = jest.spyOn(reservation, 'excludeUnresolvedSendReservations').mockImplementation((query, ...rest) => {
-        const read = original(query, ...rest);
-        if (landed || rest.length) return read;
-        landed = true;
-        const run = read.then.bind(read);
-        read.then = (resolve, reject) => database('call_log').where({ id: row.id }).update(late).then(() => run(resolve, reject), reject);
-        return read;
-      });
-      try {
-        reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
-        expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
-        expect(landed).toBe(true);
-        const [, payload, opts] = triggerNotification.mock.calls[0];
-        expect(payload.name).toBe('unknown caller (GBP — Parrish)');
-        expect(await opts.beforePush({ dispatching: true })).toBe(true);
-      } finally {
-        spy.mockRestore();
-      }
-      const after = await stored(row);
-      expect(after).toMatchObject(late);
-      expect(after.metadata.missed_call_spam_wave).toBeUndefined();
+      const fenced = () => {
+        const stamp = database('call_log').where({ id: row.id });
+        const run = stamp.then.bind(stamp);
+        stamp.then = (resolve, reject) => Promise.resolve(lateWrite(row)).then(() => { landed = true; return run(resolve, reject); }, reject);
+        return stamp;
+      };
+      expect(await quietRobodialerPush(row, fenced)).toBe(false);
+      expect(landed).toBe(true);
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
+    });
+
+    test('with no late change the same stamp write quiets the call', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
+      const inserted = judged();
+      await database('call_log').insert(inserted);
+      const row = await stored(inserted);
+      expect(await quietRobodialerPush(row, () => database('call_log').where({ id: row.id }))).toBe(true);
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBe('repeat_quiet');
     });
 
     test('gate off: the call rings as before, titled unknown caller, stamped for the shadow read', async () => {
@@ -884,6 +893,42 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(true);
       await database('sms_log').insert({ id: randomUUID(), status: 'delivered', created_at: new Date(Date.now() - 30 * 60 * 1000), ...sms });
       expect(await repeat(row)).toBe(stillRepeat);
+    });
+
+    // The unified inbox, which the SMS webhook writes first and the text log
+    // only as best effort (pre-push audit r14): only mirrors of silent calls and
+    // our text-back leave the number a repeat.
+    test.each([
+      ['a text from it', { channel: 'sms', direction: 'inbound', body: 'is this the pest company' }, {}],
+      ['a reaction or HELP reply', { channel: 'sms', direction: 'inbound', message_type: 'sms_reaction' }, {}],
+      ['a staff text to it', { channel: 'sms', direction: 'outbound', message_type: 'manual', body: 'Hi, Waves returning your call' }, {}],
+      ['a staff call to it', { channel: 'voice', direction: 'outbound' }, {}],
+      ['an answered call', { channel: 'voice', direction: 'inbound', answered_by: 'human' }, {}],
+      ['a recorded call', { channel: 'voice', direction: 'inbound', answered_by: 'voicemail', recording_sid: 'RE00000000000000000000000000000611' }, {}],
+      ['a conversation linked to a customer', null, { customer_id: LINKED_CUSTOMER }],
+    ])('a number with %s only in the unified inbox is never a repeat (pre-push audit r14)', async (label, message, conversation) => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      await inbox(CALLER, message, conversation);
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('silent call mirrors and our text-back in the unified inbox leave a repeat; an older inbox text is outside the window (pre-push audit r14)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      const id = randomUUID();
+      await database('conversations').insert({ id, channel: 'voice', contact_phone: CALLER, unknown_contact: true, created_at: new Date() });
+      const ago = (minutes) => new Date(Date.now() - minutes * 60 * 1000);
+      await database('messages').insert([
+        { id: randomUUID(), conversation_id: id, channel: 'voice', direction: 'inbound', answered_by: 'voicemail', delivery_status: 'no-answer', author_type: 'customer', metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile' }, created_at: ago(60 * 24 * 2) },
+        { id: randomUUID(), conversation_id: id, channel: 'voice', direction: 'inbound', answered_by: null, delivery_status: 'completed', author_type: 'customer', created_at: ago(10) },
+        { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'outbound', message_type: 'missed_call_text_back', author_type: 'system', created_at: ago(5) },
+        { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'inbound', body: 'an old thread', created_at: ago(60 * 24 * 15) },
+      ]);
+      expect(await repeat(row)).toBe(true);
     });
 
     test('one of our own lines or a staff forward is never a repeat (pre-push audit r11)', async () => {
