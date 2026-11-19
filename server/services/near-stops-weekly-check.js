@@ -55,6 +55,12 @@ const DONE_WHEN = 'count_zero';
 const LINK = '/admin/schedule';
 const AREA = 'Schedule';
 const LOOKAHEAD_DAYS = 30;
+// Rounds pair across a wider span than the report: a round near the end meets its
+// partner just past it, and a round whose partner was served last month keeps that
+// partner instead of meeting the next round. Only live splits in the next 30 days report.
+const PAIR_DAYS_BACK = LOOKAHEAD_DAYS;
+const PAIR_DAYS_AHEAD = 2 * LOOKAHEAD_DAYS;
+const SERVED_STATUS = 'completed';
 const NEXT_DOOR_MILES = 0.1; // about 528 feet, any two customers
 const OWN_HOMES_MILES = 0.5; // one customer's two homes
 const SAME_PLACE_MILES = 0.003; // about 16 feet: one customer's stops at one home
@@ -68,11 +74,11 @@ const DETAIL_MAX = 2000;
 // the owner's words, from each code's own reason_description. An unknown code
 // falls back to its own words, lower case.
 const HOLD_WORDS = {
-  NO_SCORE_IMPROVEMENT: 'no other day scored better',
+  NO_SCORE_IMPROVEMENT: 'no other day scored enough better',
   NO_VALID_SLOT: 'no open slot in reach',
   NO_SLOT_MATCHING_PREFERENCE: "no slot fits the customer's day or time wish",
   NO_DRIVE_SAVING: 'no move saved enough drive',
-  NO_ROAD_DRIVE_SAVING: 'real roads showed no saving',
+  NO_ROAD_DRIVE_SAVING: 'real roads showed too little saving',
   PERSON_PLACED: 'staff picked the day',
   PERSON_PLACED_UNKNOWN: 'staff may have picked the day',
   REMINDER_SENT_FROZEN: 'customer already told the time',
@@ -159,6 +165,7 @@ function toVisit(row, geo) {
     date: dateOnlyString(row.scheduled_date),
     windowStart: hhmm(row.window_start),
     tech: row.technician_id ? String(row.technician_id) : null,
+    done: row.status === SERVED_STATUS, // served: a pairing partner, never a split to report
     planChild: row.recurring_parent_id != null, // a plan's own later visit or booster
     lat: geo.lat,
     lng: geo.lng,
@@ -211,26 +218,15 @@ const slotKey = (v) => `${v.date} ${v.windowStart || '99:99'}`;
 // resolve the same way, so a split keeps its key from week to week.
 const visitOrder = (x, y) => slotKey(x).localeCompare(slotKey(y)) || x.id.localeCompare(y.id);
 
-function nearestVisit(visit, others) {
-  let best = null;
-  for (const other of others) {
-    const gap = Math.abs(daysBetween(visit.date, other.date));
-    if (!best || gap < best.gap || (gap === best.gap && visitOrder(other, best.visit) < 0)) best = { visit: other, gap };
+// One stop per home, day and time: a combined visit (several services at one home
+// and hour) is one stop, and its first row (visitOrder) stands for it.
+function physicalStops(place) {
+  const stops = new Map();
+  for (const visit of [...place.visits].sort(visitOrder)) {
+    const key = `${visit.date}|${visit.windowStart || ''}`;
+    if (!stops.has(key)) stops.set(key, visit);
   }
-  return best ? best.visit : null;
-}
-
-// Each visit of the place with fewer visits meets the nearest-dated visit of the
-// other place, so a monthly plan beside a two-monthly one pairs its nearer round,
-// not both. Each match comes back earlier visit first; the matches soonest first.
-function matchVisits(pair) {
-  const [few, many] = pair.a.visits.length <= pair.b.visits.length ? [pair.a, pair.b] : [pair.b, pair.a];
-  const matches = [];
-  for (const visit of few.visits) {
-    const near = nearestVisit(visit, many.visits);
-    if (near) matches.push([visit, near].sort(visitOrder));
-  }
-  return matches.sort((x, y) => visitOrder(x[0], y[0]) || visitOrder(x[1], y[1]));
+  return [...stops.values()];
 }
 
 // An unassigned stop (no technician) may be on either route, so it counts.
@@ -285,15 +281,46 @@ const gapOf = (p) => p.gap ?? 0;
 // One stable key per split: its two visits.
 const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
 
-function findApartPairs(rows) {
+// The two homes' stops, paired one to one. A stop already together with a stop next
+// door (or on the same day with no time to judge) pairs first; the rest pair nearest
+// dates first, then the earlier slots. So each stop meets at most one stop next
+// door, and a round with no partner pairs with nothing. Returns the pairs apart.
+function pairSplits(pair, stopsByDay) {
+  const candidates = [];
+  for (const x of physicalStops(pair.a)) {
+    for (const y of physicalStops(pair.b)) {
+      const [first, second] = [x, y].sort(visitOrder);
+      const days = Math.abs(daysBetween(first.date, second.date));
+      candidates.push({ first, second, days, split: splitOf(first, second, pair, stopsByDay) });
+    }
+  }
+  candidates.sort((p, q) => Number(p.split != null) - Number(q.split != null) || p.days - q.days
+    || visitOrder(p.first, q.first) || visitOrder(p.second, q.second));
+  const used = new Set();
+  const splits = [];
+  for (const c of candidates) {
+    if (used.has(c.first.id) || used.has(c.second.id)) continue;
+    used.add(c.first.id);
+    used.add(c.second.id);
+    if (c.split) splits.push(c);
+  }
+  return splits;
+}
+
+// Every split of two live visits that both fall between `from` (today) and `until`
+// (the report's last day). The rows reach further on both sides (PAIR_DAYS_BACK,
+// PAIR_DAYS_AHEAD) only so each round meets its own partner: a split with a served
+// visit is over, and one whose partner is past `until` reports in a later week.
+function findApartPairs(rows, { from = null, until = null } = {}) {
   const places = buildPlaces(rows);
   const stopsByDay = stopsByDayOf(rows);
   const apart = [];
   for (const pair of nearPairs(places)) {
-    const hit = matchVisits(pair)
-      .map(([first, second]) => ({ first, second, split: splitOf(first, second, pair, stopsByDay) }))
-      .find((m) => m.split);
-    if (hit) apart.push({ ...pair, first: hit.first, second: hit.second, ...hit.split });
+    for (const hit of pairSplits(pair, stopsByDay)) {
+      if (hit.first.done || hit.second.done || hit.days > LOOKAHEAD_DAYS) continue;
+      if ((from && hit.first.date < from) || (until && hit.second.date > until)) continue;
+      apart.push({ ...pair, first: hit.first, second: hit.second, ...hit.split });
+    }
   }
   // Same-day splits first, then the pairs the fewest days apart: the easiest to join.
   return apart.sort((x, y) => gapOf(x) - gapOf(y) || visitOrder(x.first, y.first) || pairKey(x).localeCompare(pairKey(y)));
@@ -497,18 +524,18 @@ async function writeAlert(composed, now, conn = db) {
 
 // -------------------------------------------------------------------- loaders
 
-// Live visits only (not done, cancelled or skipped), no estimate-slot holds and no
-// internal test customers.
-async function loadUpcomingStops(today, until, conn = db) {
+// Live visits, and served ones as pairing partners only; never a cancelled,
+// skipped, moved or missed visit, an estimate-slot hold or an internal test customer.
+async function loadStops(fromDate, untilDate, conn = db) {
   const { isInternalTestCustomerId } = require('./internal-test-customers');
   const rows = await conn('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
-    .whereBetween('s.scheduled_date', [today, until])
-    .whereIn('s.status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .whereBetween('s.scheduled_date', [fromDate, untilDate])
+    .whereIn('s.status', [...NONTERMINAL_SCHEDULED_SERVICE_STATUSES, SERVED_STATUS])
     .whereNull('s.reservation_expires_at')
     .orderBy([{ column: 's.scheduled_date' }, { column: 's.window_start' }, { column: 's.id' }])
     .select(
-      's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id',
+      's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id', 's.status',
       's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng',
       's.service_address_line1', 's.service_address_zip', 's.service_address_city',
       'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1', 'c.zip as customer_zip',
@@ -575,8 +602,8 @@ async function loadShortDrives(conn = db) {
 
 async function loadWeek(now = new Date(), conn = db) {
   const weekStart = etWeekStart(now);
-  const stops = await loadUpcomingStops(etDateString(now), etDateString(addETDays(now, LOOKAHEAD_DAYS)), conn);
-  const apart = findApartPairs(stops);
+  const stops = await loadStops(etDateString(addETDays(now, -PAIR_DAYS_BACK)), etDateString(addETDays(now, PAIR_DAYS_AHEAD)), conn);
+  const apart = findApartPairs(stops, { from: etDateString(now), until: etDateString(addETDays(now, LOOKAHEAD_DAYS)) });
   const nightLog = await loadNightLog(apart.flatMap((p) => [p.first.id, p.second.id]), now, conn);
   const replan = await loadReplanFixed(apart, now, conn);
   const drives = await loadShortDrives(conn);
@@ -658,13 +685,13 @@ module.exports = {
   _private: {
     buildPlaces,
     nearPairs,
-    matchVisits,
+    pairSplits,
     findApartPairs,
     holdFor,
     replanHoldFor,
     loadNightLog,
     loadReplanFixed,
-    loadUpcomingStops,
+    loadStops,
     physicalLegs,
     shortDriveSummary,
     composeWeeklyCheck,

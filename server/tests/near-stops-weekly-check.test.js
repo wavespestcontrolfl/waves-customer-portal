@@ -43,7 +43,7 @@ const {
   weekIsMissing,
   DEDUPE_KEY,
   _private: {
-    buildPlaces, findApartPairs, holdFor, replanHoldFor, loadNightLog, loadReplanFixed, loadUpcomingStops, physicalLegs,
+    buildPlaces, findApartPairs, holdFor, replanHoldFor, loadNightLog, loadReplanFixed, loadStops, physicalLegs,
     shortDriveSummary, composeWeeklyCheck, ringOnNewPair, writeAlert, sentRecently,
   },
 } = require('../services/near-stops-weekly-check');
@@ -73,11 +73,12 @@ const TECH = { id: 'tech-1', name: 'Tech One' };
 // ------------------------------------------------------------------ part 1
 
 let seq = 0;
-function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false }) {
+function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending' }) {
   seq += 1;
   return {
     id: `svc-${seq}`,
     customer_id: customer,
+    status,
     scheduled_date: date,
     window_start: start ? `${start}:00` : null,
     technician_id: TECH.id,
@@ -227,7 +228,7 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([]);
   });
 
-  test('each visit meets the nearest-dated visit next door: the April round with no partner is not a split', () => {
+  test('rounds pair one to one, nearest dates first: the April round with no partner is not a split', () => {
     const rows = [
       stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00', plan: true }),
       stop({ customer: 'c-a', at: HOME_A, date: '2027-04-01', start: '09:00', plan: true }),
@@ -241,6 +242,62 @@ describe('part 1: next-door stops booked apart', () => {
     expect([pairs[0].first.date, pairs[0].second.date]).toEqual(['2027-05-03', '2027-05-10']);
     const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' });
     expect(detail).toContain("7 days apart, past the night run's 5-day reach.");
+  });
+
+  test('a combined visit together with its neighbor is one stop: a later visit next door is no split', () => {
+    const combined = () => stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00', plan: true });
+    const rows = [
+      combined(), combined(), combined(),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '10:00', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', start: '10:00', plan: true }),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
+  test('two rounds of the same two homes booked apart are two splits', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-29', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-03', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-30', plan: true }),
+    ];
+    const pairs = findApartPairs(rows);
+    expect(pairs.map((p) => [p.first.date, p.second.date])).toEqual([['2027-03-29', '2027-03-30'], ['2027-03-01', '2027-03-03']]);
+    expect(composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' }).itemKeys).toHaveLength(2);
+  });
+
+  test("a round near the end of the 30 days meets its own partner just past them, not an older round", () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-29', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-03', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-31', plan: true }),
+    ];
+    // Its partner is a day past the report: no split now (never a 26-day one with the
+    // March 3 round), and the split reports once both visits are inside the 30 days.
+    expect(findApartPairs(rows, { until: '2027-03-30' })).toEqual([]);
+    expect(findApartPairs(rows, { until: '2027-03-31' }).map((p) => [p.first.date, p.second.date])).toEqual([['2027-03-29', '2027-03-31']]);
+  });
+
+  test("a round whose partner was served last month keeps that partner: next month's visit next door is no split", () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-03', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-02-27', plan: true, status: 'completed' }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-29', plan: true }),
+    ];
+    expect(findApartPairs(rows, { from: '2027-03-01', until: '2027-03-31' })).toEqual([]);
+    // Without last month's served visit, the round would meet the wrong one.
+    expect(findApartPairs(rows.slice(0, 1).concat(rows.slice(2)), { from: '2027-03-01' })).toHaveLength(1);
+  });
+
+  test('a split with a served visit, or one that starts before today, is over and not reported', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true, status: 'completed' }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
+      stop({ customer: 'c-d', at: north(12), date: '2027-02-27', plan: true }),
+      stop({ customer: 'c-e', at: north(0.05, north(12)), date: '2027-03-02', plan: true }),
+    ];
+    expect(findApartPairs(rows, { from: '2027-03-01', until: '2027-03-31' })).toEqual([]);
+    expect(findApartPairs(rows)).toHaveLength(1);
   });
 
   test('a visit with no time yet on the same day is not judged', () => {
@@ -264,6 +321,11 @@ describe('what holds each visit, in plain words', () => {
   test("the night run's own reason for the visit", () => {
     const log = new Map([['svc-9', { reason_code: 'REMINDER_SENT_FROZEN', action: 'no_change' }]]);
     expect(holdFor(planVisit, log)).toBe('customer already told the time');
+  });
+
+  test('a gain under the night run\'s bar reads as not enough, never as none', () => {
+    expect(holdFor(planVisit, new Map([['svc-9', { reason_code: 'NO_SCORE_IMPROVEMENT' }]]))).toBe('no other day scored enough better');
+    expect(holdFor(planVisit, new Map([['svc-9', { reason_code: 'NO_ROAD_DRIVE_SAVING' }]]))).toBe('real roads showed too little saving');
   });
 
   test('an unknown reason reads as its own words', () => {
@@ -296,13 +358,13 @@ describe('what holds each visit, in plain words', () => {
 describe('what the check reads', () => {
   const NOW = new Date('2027-03-01T11:17:00.000Z');
 
-  test('only live visits count: never a done, cancelled or skipped visit, a held slot or the demo account', async () => {
+  test('the stops read: live visits and served ones; never a cancelled, skipped, moved or missed visit, a held slot or the demo account', async () => {
     const { conn, calls } = recorder({ 'scheduled_services as s': [{ id: 'v1', customer_id: 'c-1' }, { id: 'v2', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }] });
-    const rows = await loadUpcomingStops('2027-03-01', '2027-03-31', conn);
+    const rows = await loadStops('2027-02-01', '2027-04-30', conn);
     expect(rows.map((r) => r.id)).toEqual(['v1']);
     const statuses = calls.find((c) => c[0] === 'whereIn' && c[1] === 's.status')[2];
-    expect(statuses).toEqual(expect.arrayContaining(['pending', 'confirmed']));
-    for (const done of ['completed', 'cancelled', 'rescheduled', 'skipped', 'no_show']) expect(statuses).not.toContain(done);
+    expect(statuses).toEqual(expect.arrayContaining(['pending', 'confirmed', 'completed']));
+    for (const gone of ['cancelled', 'rescheduled', 'skipped', 'no_show']) expect(statuses).not.toContain(gone);
     expect(calls).toContainEqual(['whereNull', 's.reservation_expires_at']);
   });
 
