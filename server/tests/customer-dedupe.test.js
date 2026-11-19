@@ -1878,31 +1878,30 @@ describe('executeMerge', () => {
     });
 
     // The sprinkler timer on file is the box on the LOSER's wall: it follows the same premise as the new-sod
-    // record (kept for the same home, cleared otherwise), and is journaled either way with the row's home stamp.
+    // record (kept for the same home, cleared otherwise), and is journaled either way.
     describe('the sprinkler timer on that moved row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
       const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
-      const STAMP = new Date('2026-11-01T12:00:00.000Z');
       const touchesTimer = (prefUpdates) => prefUpdates.some(([, payload]) => 'irrigation_controller_brand' in payload);
 
       it('different homes: the whole timer is cleared on the winner and journaled for the undo; the sod entry keeps its shape', async () => {
         const { prefUpdates, result, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { timer: X2 });
         expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false, home_changed_at: null });
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: false });
         expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBe(1);
         expect(Object.keys(recorded.moved_pref_new_sod.before)).toEqual(['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on']);
         // The move stamp itself never clears it (it has no before-image of its own).
         expect(prefUpdates.find(([, payload]) => payload.irrigation_home_changed_at)[1]).not.toHaveProperty('irrigation_controller_brand');
       });
 
-      it('same home, or an addressless winner that inherits the loser\'s home: the timer stays, journaled with the home stamp', async () => {
+      it('same home, or an addressless winner that inherits the loser\'s home: the timer stays on the row and is journaled as kept', async () => {
         for (const [loserAddr, options] of [
           [{ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' }, {}],
           [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { winnerAddr: { address_line1: null, city: null, zip: null } }],
         ]) {
-          const { prefUpdates, result, recorded } = await merge(loserAddr, { ...options, timer: { ...X2, irrigation_home_changed_at: STAMP } });
+          const { prefUpdates, result, recorded } = await merge(loserAddr, { ...options, timer: X2 });
           expect(touchesTimer(prefUpdates)).toBe(false);
-          expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true, home_changed_at: STAMP.getTime() });
+          expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2, kept: true });
           expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
         }
       });
@@ -1910,8 +1909,15 @@ describe('executeMerge', () => {
       it('different homes, no timer on the row: nothing to clear, the empty timer is still journaled for the undo guard', async () => {
         const { prefUpdates, recorded, result } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' });
         expect(touchesTimer(prefUpdates)).toBe(false);
-        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: NO_TIMER, kept: false, home_changed_at: null });
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: NO_TIMER, kept: false });
         expect(result.repointed['property_preferences.sprinkler_timer_cleared']).toBeUndefined();
+      });
+
+      it('a lone field is a timer too: a moved row with only a phone-app answer is cleared on a different-homes merge', async () => {
+        const lone = { ...NO_TIMER, irrigation_controller_app: 'yes' };
+        const { prefUpdates, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { timer: lone });
+        expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
+        expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: lone, kept: false });
       });
 
       it('a timer read that fails aborts the merge: it is never skipped in silence', async () => {

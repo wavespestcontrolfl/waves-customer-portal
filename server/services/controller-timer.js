@@ -8,10 +8,9 @@
  * It is not a watering input. Nothing here connects to, pauses or starts a timer.
  */
 const CONTROLLER_TIMER_FIELDS = Object.freeze(['irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app']);
-const [BRAND, MODEL, APP] = CONTROLLER_TIMER_FIELDS;
 
 function clearedControllerTimer() {
-  return { [BRAND]: null, [MODEL]: null, [APP]: null };
+  return controllerTimerOf(null);
 }
 
 // The timer on a property_preferences row as plain values, keyed by column (a column the row lacks reads as null).
@@ -19,11 +18,16 @@ function controllerTimerOf(row) {
   return Object.fromEntries(CONTROLLER_TIMER_FIELDS.map((field) => [field, row?.[field] ?? null]));
 }
 
-// A same-home customer merge: the surviving row takes the other row's whole timer only when it has none.
-// Whole or nothing. Returns the columns to set ({} = leave the row alone).
+// Does the row carry a timer? The columns are independently nullable, so ANY non-null one is a record.
+function hasControllerTimer(row) {
+  return CONTROLLER_TIMER_FIELDS.some((field) => row?.[field] != null);
+}
+
+// A same-home customer merge: the surviving row takes the other row's whole timer only when it has none
+// (not one field of its own). Whole or nothing. Returns the columns to set ({} = leave the row alone).
 function controllerTimerToCarry(winnerRow, loserRow) {
-  if (winnerRow?.[BRAND] || !loserRow?.[BRAND]) return {};
+  if (hasControllerTimer(winnerRow) || !hasControllerTimer(loserRow)) return {};
   return controllerTimerOf(loserRow);
 }
 
-module.exports = { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, controllerTimerToCarry };
+module.exports = { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, controllerTimerToCarry, hasControllerTimer };
