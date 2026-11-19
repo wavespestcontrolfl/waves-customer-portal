@@ -291,7 +291,9 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
 // the carrier fully attested (STIR/SHAKEN 'TN-Validation-Passed-A', stored as
 // metadata.stir_verstat by the voice webhook) counts (pre-push audit): a
 // spoofed earlier call that borrowed a real person's number must never silence
-// that person's own first missed call. Production back-test, 90 days to
+// that person's own first missed call. A caller who pressed 1 at the screen is a
+// person (pre-push audit): such a call is never judged a repeat, and such history
+// never counts. Production back-test, 90 days to
 // 2026-11-19: 22 calls from 14 numbers, 13 pushed bells, 0 real callers (no
 // message, no later text, no later call that got through, no lead, no customer).
 const REPEAT_DAYS = 14;
@@ -299,7 +301,7 @@ const REPEAT_MIN_PRIOR = 2;
 const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
 async function isRepeatSilentCaller(row) {
-  if (!row || row.customer_id) return false;
+  if (!row || row.customer_id || parseMeta(row.metadata).preconnect_screen === 'passed') return false;
   const line = require('../config/twilio-numbers').findByNumber(row.to_phone);
   if (line?.type !== 'gbp_tracking') return false;
   const raw = String(row.from_phone || '').replace(/\D/g, '');
@@ -311,6 +313,7 @@ async function isRepeatSilentCaller(row) {
     .whereNot('id', row.id)
     .whereRaw(`${CALLER_KEY} = ?`, [`1${raw.slice(-10)}`])
     .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
+    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') <> 'passed'")
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
   return Boolean(found?.other_line) || Number(found?.n || 0) >= REPEAT_MIN_PRIOR;
@@ -562,7 +565,8 @@ async function quietRobodialerPush(row, fenced) {
   const flags = {
     ...(await classifySpamWave(row)), // fails open inside
     repeat: await isRepeatSilentCaller(row).catch((err) => {
-      logger.warn(`[missed-call-bell] repeat check failed, treating as not spam: ${err.message}`);
+      // A code only: a Knex error echoes the bound values, here the caller's number.
+      logger.warn(`[missed-call-bell] repeat check failed, treating as not spam: ${err?.code || err?.name || 'error'}`);
       return false;
     }),
     screen: !row.customer_id && parseMeta(row.metadata).preconnect_screen === 'failed',

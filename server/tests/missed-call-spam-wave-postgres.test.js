@@ -664,6 +664,23 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(true);
     });
 
+    test('gate on: a caller who pressed 1 at the screen is a person: never quieted, and such history never counts (pre-push audit)', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged({ metadata: { location: 'GBP — Parrish', preconnect_screen: 'passed' } });
+      await database('call_log').insert(row);
+      reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      const [, payload, opts] = triggerNotification.mock.calls[0];
+      expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(await opts.beforePush({ dispatching: true })).toBe(true);
+      expect((await stored(row)).metadata.missed_call_spam_wave).toBeUndefined();
+      // History: a passed screen on the other line is no silent hang-up for this rule.
+      const next = call('+17275550614', 10);
+      await database('call_log').insert([prior('+17275550614', 60 * 24, { to_phone: SECOND_GBP_LINE, metadata: { stir_verstat: 'TN-Validation-Passed-A', preconnect_screen: 'passed' } }), next]);
+      expect(await repeat(next)).toBe(false);
+    });
+
     test('two earlier silent calls on any line make a repeat, but only a call on a GBP line is judged', async () => {
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3, { to_phone: OFFICE_LINE }), prior(CALLER, 60 * 24, { to_phone: OFFICE_LINE })]);
       const row = judged();
