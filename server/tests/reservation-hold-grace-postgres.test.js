@@ -159,6 +159,52 @@ postgres('hold grace + extend (real Postgres)', () => {
   });
 
   describe('commitReservation grace', () => {
+    test.each(['live', 'lapsed', 'cleared'])('a different customer cannot take or replay a staff-booked row (%s expiry)', async expiry => {
+      await withHold({ committed: true, expiresInSeconds: expiry === 'live' ? 60 : -30 }, async ({ trx, holdId, customerId }) => {
+        if (expiry === 'cleared') {
+          await trx('scheduled_services').where({ id: holdId }).update({ reservation_expires_at: null });
+        }
+        const rival = randomUUID();
+        await trx('customers').insert({
+          id: rival, first_name: 'Synthetic', last_name: 'Rival', phone: '+19415550113',
+        });
+        await trx('scheduled_services').where({ id: holdId }).update({ estimated_price: 73 });
+
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: holdId,
+          customerId: rival,
+          estimatedPrice: 1,
+          trx,
+        })).rejects.toMatchObject({ code: 'RESERVATION_NOT_FOUND' });
+        const booked = await trx('scheduled_services').where({ id: holdId })
+          .first('customer_id', 'estimated_price');
+        expect(booked.customer_id).toBe(customerId);
+        expect(Number(booked.estimated_price)).toBe(73);
+      });
+    });
+
+    test('checkout cannot claim a separate hold after staff booked the same hour', async () => {
+      await withHold({ windowStart: '10:00', windowEnd: '11:00' }, async ({ trx, holdId, customerId, date }) => {
+        const otherCustomer = randomUUID();
+        await trx('customers').insert({
+          id: otherCustomer, first_name: 'Office', last_name: 'Booking', phone: '+19415550112',
+        });
+        await trx('scheduled_services').insert({
+          customer_id: otherCustomer,
+          scheduled_date: date,
+          window_start: '10:00',
+          window_end: '11:00',
+          service_type: 'Lawn Care',
+          status: 'confirmed',
+          reservation_expires_at: trx.raw("NOW() - INTERVAL '1 minute'"),
+        });
+
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect((await holdRow(trx, holdId)).customer_id).toBeNull();
+      });
+    });
+
     test('graduates a hold that expired 30 s ago (the owner case: 34 s late)', async () => {
       process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
       await withHold({ expiresInSeconds: -30 }, async ({ trx, holdId, customerId }) => {

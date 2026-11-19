@@ -12,6 +12,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
 const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
+const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
 const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
@@ -548,10 +549,7 @@ class AvailabilityEngine {
       .where('scheduled_services.scheduled_date', dateStr)
       .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('scheduled_services.window_start')
-      .where((q) => {
-        q.whereNull('scheduled_services.reservation_expires_at')
-          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      })
+      .where(bookedVisitOrLiveHold)
       .modify((q) => {
         // Case-insensitive city match — same reasoning as the slot
         // builder above; empty list matches nothing like an empty whereIn.
