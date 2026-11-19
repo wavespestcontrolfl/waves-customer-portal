@@ -15,8 +15,11 @@
  *      feasibility, on-the-hour starts, the model drive minutes) the calendar
  *      as it stood when the booking was made (scheduled_services rows plus the
  *      reschedule_log moves made after it). Closed days and the technician's
- *      days off are skipped. Not replayed: the office screen's arrival-window
- *      simulation (GATE_ADMIN_ARRIVAL_WINDOWS) and what the customer asked for.
+ *      days off are skipped. With one technician every stop that day is on one
+ *      route, an unassigned visit too; with two or more the part pauses, because
+ *      no log says whose route a stop was on at booking. Not replayed: the office
+ *      screen's arrival-window simulation (GATE_ADMIN_ARRIVAL_WINDOWS) and what
+ *      the customer asked for.
  *   3. Truck GPS minutes for visit-to-visit drives under half a mile
  *      (visit_gps_legs): the evidence a short-hop drive price would need.
  *
@@ -63,6 +66,7 @@ const BOOKING_LEAD_MINUTES = 30; // find-time's same-day lead (todayFloorMin)
 const SHORT_DRIVE_MILES = 0.5;
 const NIGHT_LOG_HOURS = 36;
 const MAX_LINES = 3;
+const OFF_ROUTE = new Set(NOT_A_ROUTE_STOP_STATUSES);
 const HEADLINE_MAX = 60;
 const SUMMARY_MAX = 110;
 const DETAIL_MAX = 2000;
@@ -225,10 +229,29 @@ function matchVisits(pair) {
   return matches.sort((x, y) => slotKey(x[0]).localeCompare(slotKey(y[0])));
 }
 
+// An unassigned stop (no technician) may be on either route, so it counts.
+const sameRoute = (a, b) => !a || !b || a === b;
+
 function stopsBetween(dayStops, first, second) {
   const owners = new Set([first.customerId, second.customerId]);
-  return dayStops.filter((s) => s.tech === first.tech && !owners.has(s.customerId)
+  return dayStops.filter((s) => sameRoute(s.tech, first.tech) && !owners.has(s.customerId)
     && s.windowStart > first.windowStart && s.windowStart < second.windowStart).length;
+}
+
+// Every timed stop by day, with or without a map pin: a stop between two homes
+// splits them even when it cannot be placed on the map.
+function stopsByDayOf(rows) {
+  const byDay = new Map();
+  for (const row of rows) {
+    const windowStart = hhmm(row.window_start);
+    if (!windowStart) continue;
+    const date = dateOnlyString(row.scheduled_date);
+    if (!byDay.has(date)) byDay.set(date, []);
+    byDay.get(date).push({
+      customerId: String(row.customer_id), tech: row.technician_id ? String(row.technician_id) : null, windowStart,
+    });
+  }
+  return byDay;
 }
 
 // How one matched pair sits on the calendar. Null = not a split to report: together
@@ -248,12 +271,7 @@ const gapOf = (p) => p.gap ?? 0;
 
 function findApartPairs(rows) {
   const places = buildPlaces(rows);
-  const stopsByDay = new Map();
-  for (const visit of places.flatMap((p) => p.visits)) {
-    if (!visit.windowStart) continue;
-    if (!stopsByDay.has(visit.date)) stopsByDay.set(visit.date, []);
-    stopsByDay.get(visit.date).push(visit);
-  }
+  const stopsByDay = stopsByDayOf(rows);
   const apart = [];
   for (const pair of nearPairs(places)) {
     const hit = matchVisits(pair)
@@ -300,9 +318,11 @@ function pairLine(p, nightLog) {
 
 // -------------------------------------------- part 2: bookings that cost drive
 
+// "09:00:00-10:00:00", or a start alone ("09:00:00": the day re-plan logs a row
+// with no end that way); occupiedRows gives a missing end the visit's length.
 function splitWindow(value) {
-  const match = /^(\d{1,2}:\d{2})(?::\d{2})?\s*-\s*(\d{1,2}:\d{2})/.exec(String(value || ''));
-  return match ? [match[1], match[2]] : [null, null];
+  const match = /^(\d{1,2}:\d{2})(?::\d{2})?(?:\s*-\s*(\d{1,2}:\d{2}))?/.exec(String(value || '').trim());
+  return match ? [match[1], match[2] || null] : [null, null];
 }
 
 // One row as it stood at instant T: null when it was not on the calendar then (made
@@ -310,10 +330,11 @@ function splitWindow(value) {
 // after T carries the slot the row held at T (reschedule_log original_date/_window).
 function stateAt(row, T, moves = []) {
   if (ms(row.created_at) > T) return null;
-  // A cancelled row left the calendar when it was cancelled (cancelled_at; a
-  // few older rows lack it, so their last update stands in). A hold that had
-  // expired by T was off it too, as find-time's loader drops one at NOW().
-  if (row.status === 'cancelled' && ms(row.cancelled_at || row.updated_at) <= T) return null;
+  // A row now off the route (cancelled, skipped, no-show, rescheduled) left it
+  // when it changed: cancelled_at for a cancel, else its last update stands in
+  // (no log keeps the others' change time). A hold that had expired by T was
+  // off the calendar too, as find-time's loader drops one at NOW().
+  if (OFF_ROUTE.has(row.status) && ms((row.status === 'cancelled' && row.cancelled_at) || row.updated_at) <= T) return null;
   if (row.reservation_expires_at && ms(row.reservation_expires_at) <= T) return null;
   const later = moves.find((m) => ms(m.created_at) > T);
   if (!later) return { date: dateOnlyString(row.scheduled_date), windowStart: row.window_start, windowEnd: row.window_end };
@@ -348,7 +369,7 @@ function toBooking(rows) {
   const head = rows[0];
   const lat = head.svc_lat ?? head.cust_lat;
   const lng = head.svc_lng ?? head.cust_lng;
-  if (lat == null || lng == null || !head.technician_id) return null;
+  if (lat == null || lng == null) return null;
   const spans = occupiedRows(rows.map((r) => withState(r, r.atBooking)));
   const startMin = Math.min(...spans.map((s) => s.startMin));
   const endMin = Math.max(...spans.map((s) => s.endMin));
@@ -358,7 +379,6 @@ function toBooking(rows) {
     ids: new Set(rows.map((r) => String(r.id))),
     customerName: shortName(head),
     city: head.city || null,
-    technicianId: String(head.technician_id),
     day: head.atBooking.date,
     startMin,
     durationMinutes: endMin > startMin ? endMin - startMin : 60,
@@ -370,8 +390,10 @@ function toBooking(rows) {
   };
 }
 
-// One booking = one customer's new visit at one home on one day, however many
-// service rows it holds. Each row is read as it stood when it was made.
+// One booking = one customer's new visit at one home, day and start, however many
+// service rows it holds (a combined visit's rows share their start). A second
+// appointment at the same home that day stays its own booking. Each row is read
+// as it stood when it was made.
 function groupBookings(created, movesById) {
   const groups = new Map();
   const sorted = [...created].sort((a, b) => ms(a.created_at) - ms(b.created_at));
@@ -380,7 +402,7 @@ function groupBookings(created, movesById) {
     if (!atBooking || !hhmm(atBooking.windowStart)) continue;
     const lat = Number(row.svc_lat ?? row.cust_lat);
     const lng = Number(row.svc_lng ?? row.cust_lng);
-    const key = `${row.customer_id}|${atBooking.date}|${lat.toFixed(4)}|${lng.toFixed(4)}`;
+    const key = `${row.customer_id}|${atBooking.date}|${hhmm(atBooking.windowStart)}|${lat.toFixed(4)}|${lng.toFixed(4)}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ ...row, atBooking });
   }
@@ -430,9 +452,12 @@ function bookedDetour(booking, tech, params) {
 }
 
 function replayBooking(booking, ctx) {
-  const tech = ctx.techs.get(booking.technicianId);
-  if (!tech) return null;
-  const services = calendarAt(ctx.rows, booking.createdAt.getTime(), ctx.movesById, booking.ids);
+  const { tech } = ctx;
+  // One technician serves every stop, so the day is one route: an unassigned
+  // visit is a stop on it too (find-time's own rule for a committed stop with
+  // no technician, on its customer-facing path).
+  const services = calendarAt(ctx.rows, booking.createdAt.getTime(), ctx.movesById, booking.ids)
+    .map((row) => ({ ...row, technician_id: tech.id }));
   const params = dayParams(booking, services, ctx.techStartPoints);
   const booked = bookedDetour(booking, tech, params);
   const first = laterDate(booking.bookingDay, shiftDateStr(booking.day, -SOONER_DAYS));
@@ -464,7 +489,9 @@ function shortDriveSummary(legs, fromDay, toDay) {
     return day >= fromDay && day < toDay;
   });
   const minutes = legs.map((l) => Number(l.drive_minutes)).filter(Number.isFinite).sort((a, b) => a - b);
-  return { week, total: legs.length, median: minutes.length ? minutes[Math.floor(minutes.length / 2)] : null };
+  const mid = Math.floor(minutes.length / 2);
+  const median = minutes.length % 2 ? minutes[mid] : (minutes.length ? (minutes[mid - 1] + minutes[mid]) / 2 : null);
+  return { week, total: legs.length, median };
 }
 
 const legWords = (l) => `${Number(l.drive_miles).toFixed(1)} mi in ${Number(l.drive_minutes).toFixed(1)} min`;
@@ -515,8 +542,19 @@ function fitDetail(lines) {
   return text.length <= DETAIL_MAX ? text : `${text.slice(0, DETAIL_MAX - 1)}…`;
 }
 
+function bookingSection({ costly, replayed, techCount }) {
+  if (techCount !== 1) {
+    return [`Bookings last week: not replayed. The replay needs one technician to know whose route each stop was on; the schedule has ${techCount}.`];
+  }
+  return [
+    `Bookings last week that took a costlier hour: ${costly.length} of ${replayed} replayed`,
+    ...capped(costly.map(bookingLine)),
+    REPLAY_NOTE,
+  ];
+}
+
 function composeWeeklyCheck(data) {
-  const { apart = [], costly = [], replayed = 0, nightLog = null, weekStart } = data;
+  const { apart = [], costly = [], replayed = 0, techCount = 1, nightLog = null, weekStart } = data;
   const drives = data.drives || { week: [], total: 0, median: null, since: null };
   const items = apart.length + costly.length;
   if (!items) return { items: 0 };
@@ -526,9 +564,7 @@ function composeWeeklyCheck(data) {
     `Next-door stops apart in the next ${LOOKAHEAD_DAYS} days: ${apart.length}`,
     ...capped(apart.map((p) => pairLine(p, nightLog))),
     '',
-    `Bookings last week that took a costlier hour: ${costly.length} of ${replayed} replayed`,
-    ...capped(costly.map(bookingLine)),
-    REPLAY_NOTE,
+    ...bookingSection({ costly, replayed, techCount }),
     '',
     gpsLine(drives),
   ];
@@ -616,15 +652,17 @@ function dayRange(bookings) {
   return { from: froms.reduce((a, b) => (a < b ? a : b)), to: tos.reduce(laterDate) };
 }
 
-async function loadDayRules(range, conn) {
-  const techRows = await applyAssignable(conn('technicians')).select(techColumns(['id', 'name'], true));
-  const techs = new Map(techRows.map((t) => [String(t.id), t]));
-  const closed = await getBlackoutDates(range.from, range.to, conn);
-  const absent = await absentTechDays(conn, { dateFrom: range.from, dateTo: range.to, technicianIds: [...techs.keys()] });
-  return { techs, closed, absent, techStartPoints: techStartPointsLive() };
+// Strict: a closed-days read that fails throws, so the week is not stamped and
+// the catch-up tries again, instead of a closed day reading as open.
+async function loadDayRules(range, tech, conn) {
+  const closed = await getBlackoutDates(range.from, range.to, conn, { strict: true });
+  const absent = await absentTechDays(conn, { dateFrom: range.from, dateTo: range.to, technicianIds: [tech.id] });
+  return { tech, closed, absent, techStartPoints: techStartPointsLive() };
 }
 
 async function loadBookingReplay(weekStart, conn = db) {
+  const techs = await applyAssignable(conn('technicians')).select(techColumns(['id', 'name'], true));
+  if (techs.length !== 1) return { costly: [], replayed: 0, techCount: techs.length };
   const start = parseETDateTime(`${shiftDateStr(weekStart, -7)}T00:00`);
   const end = parseETDateTime(`${weekStart}T00:00`);
   const created = await calendarQuery(conn)
@@ -653,8 +691,8 @@ async function loadBookingReplay(weekStart, conn = db) {
     q.whereBetween('s.scheduled_date', [range.from, range.to]);
     if (movedIn.length) q.orWhereIn('s.id', movedIn);
   });
-  const ctx = { rows, movesById, ...(await loadDayRules(range, conn)) };
-  const results = bookings.map((b) => replayBooking(b, ctx)).filter(Boolean);
+  const ctx = { rows, movesById, ...(await loadDayRules(range, techs[0], conn)) };
+  const results = bookings.map((b) => replayBooking(b, ctx));
   const costly = results.filter((r) => r.best && r.saving >= MIN_SAVING_MINUTES).sort((a, b) => b.saving - a.saving);
   return { costly, replayed: results.length };
 }
@@ -676,9 +714,9 @@ async function loadWeek(now = new Date(), conn = db) {
   const stops = await loadUpcomingStops(etDateString(now), etDateString(addETDays(now, LOOKAHEAD_DAYS)), conn);
   const apart = findApartPairs(stops);
   const nightLog = await loadNightLog(apart.flatMap((p) => [p.first.id, p.second.id]), now, conn);
-  const { costly, replayed } = await loadBookingReplay(weekStart, conn);
+  const { costly, replayed, techCount = 1 } = await loadBookingReplay(weekStart, conn);
   const drives = await loadShortDrives(weekStart, conn);
-  return { weekStart, apart, nightLog, costly, replayed, drives };
+  return { weekStart, apart, nightLog, costly, replayed, techCount, drives };
 }
 
 // ------------------------------------------------------------- run + marker

@@ -31,7 +31,7 @@ const {
   runNearStopsWeeklyCheck,
   weekIsMissing,
   _private: {
-    findApartPairs, holdFor, stateAt, groupBookings, replayBooking, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
+    findApartPairs, holdFor, stateAt, groupBookings, replayBooking, shortDriveSummary, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
   },
 } = require('../services/near-stops-weekly-check');
 
@@ -115,6 +115,16 @@ describe('part 1: next-door stops booked apart', () => {
     expect(pairs[0]).toMatchObject({ sameCustomer: true, between: 1 });
     const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' });
     expect(detail).toMatch(/- Avery S\.'s two homes \(Lakewood Ranch\), 0\.3 mi apart: Mon, Mar 1 9:00\sAM and 11:00\sAM, same day, 1 stop between; the 4:40 AM re-plan keeps one customer's own hours\./);
+  });
+
+  test("a stop with no map pin between one customer's two homes still splits them", () => {
+    const pinless = { ...stop({ customer: 'c-x', at: north(8), date: '2027-03-01', start: '10:00' }), lat: null, lng: null, customer_latitude: null, customer_longitude: null };
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
+      pinless,
+      stop({ customer: 'c-a', at: north(0.3, HOME_A), date: '2027-03-01', start: '11:00' }),
+    ];
+    expect(findApartPairs(rows)).toEqual([expect.objectContaining({ sameCustomer: true, between: 1 })]);
   });
 
   test('outside the radius: two customers 0.2 mile apart, or one customer\'s homes 0.6 mile apart', () => {
@@ -227,7 +237,7 @@ function replay({ rows, moves = [], created = [bookingRow()], closed = new Set()
   const movesById = new Map();
   for (const m of moves) movesById.set(m.scheduled_service_id, [...(movesById.get(m.scheduled_service_id) || []), m]);
   const [booking] = groupBookings(created, movesById);
-  const ctx = { rows: [...rows, ...created], movesById, techs: new Map([[TECH.id, TECH]]), closed, absent, techStartPoints: false };
+  const ctx = { rows: [...rows, ...created], movesById, tech: TECH, closed, absent, techStartPoints: false };
   return replayBooking(booking, ctx);
 }
 
@@ -262,6 +272,26 @@ describe('part 2: the booking replay', () => {
     expect(replay({ rows: [cancelledBefore, acrossStop()] }).saving).toBe(0);
   });
 
+  test('a move logged with a start alone still holds the stop at that hour', () => {
+    const moved = { ...besideStop(), scheduled_date: '2027-03-20' };
+    const moves = [{ scheduled_service_id: 's-beside', original_date: DAY, original_window: '09:00:00', created_at: after(120) }];
+    expect(replay({ rows: [moved, acrossStop()], moves }).saving).toBe(56);
+  });
+
+  test('a visit with no technician is a stop on the one route, and so is a booking with none', () => {
+    const unassigned = { ...besideStop(), technician_id: null };
+    expect(replay({ rows: [unassigned, acrossStop()] }).saving).toBe(56);
+    const created = [bookingRow({ technician_id: null })];
+    expect(replay({ rows: [besideStop(), acrossStop()], created }).saving).toBe(56);
+  });
+
+  test('a stop skipped before the booking was off the route; one skipped after was still on it', () => {
+    const skippedBefore = { ...besideStop(), status: 'skipped', updated_at: before(30) };
+    expect(replay({ rows: [skippedBefore, acrossStop()] }).saving).toBe(0);
+    const skippedAfter = { ...besideStop(), status: 'skipped', updated_at: after(30) };
+    expect(replay({ rows: [skippedAfter, acrossStop()] }).saving).toBe(56);
+  });
+
   test('a booking moved after it was made is judged at the hour it took', () => {
     const created = [bookingRow({ scheduled_date: '2027-03-09', window_start: '08:00:00', window_end: '09:00:00' })];
     const moves = [{ scheduled_service_id: 'b-1', original_date: DAY, original_window: '15:00:00-16:00:00', created_at: after(5) }];
@@ -290,11 +320,17 @@ describe('part 2: the booking replay', () => {
     expect(screen({ source: 'inspection_link' })).toBe('inspection link');
   });
 
-  test('one booking per customer, home and day, however many service rows it holds', () => {
+  test('one booking per customer, home, day and start, however many service rows it holds', () => {
     const second = bookingRow({ id: 'b-2' });
     const bookings = groupBookings([bookingRow(), second], new Map());
     expect(bookings).toHaveLength(1);
     expect([...bookings[0].ids].sort()).toEqual(['b-1', 'b-2']);
+  });
+
+  test('a second appointment at the same home that day stays its own booking', () => {
+    const morning = bookingRow({ id: 'b-2', window_start: '09:00:00', window_end: '10:00:00' });
+    const bookings = groupBookings([bookingRow(), morning], new Map());
+    expect(bookings.map((b) => [b.startMin, b.durationMinutes])).toEqual([[900, 60], [540, 60]]);
   });
 });
 
@@ -345,6 +381,22 @@ describe('the notification', () => {
     expect(out.detail).toContain('Not replayed: the office screen\'s arrival-window check and what the customer asked for.');
     expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: last week 0.4 mi in 1.9 min. All since Thu, Aug 27: 1, median 1.9 min.');
     expect(out.metadata).toMatchObject({ weekOf: '2027-03-01', pairsApart: 12, bookingsReplayed: 30, bookingsCostly: 12, costlyMinutes: 672 });
+  });
+
+  test('with two technicians the booking part says it is paused, and why', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
+    ];
+    const out = composeWeeklyCheck({ apart: findApartPairs(rows), nightLog: new Map(), techCount: 2, weekStart: '2027-03-01' });
+    expect(out.detail).toContain('Bookings last week: not replayed. The replay needs one technician to know whose route each stop was on; the schedule has 2.');
+    expect(out.detail).not.toContain('How: the calendar');
+  });
+
+  test('the GPS median of an even count is the mean of the middle two', () => {
+    const legs = [{ service_date: '2027-03-02', drive_minutes: 1 }, { service_date: '2027-02-01', drive_minutes: 5 }];
+    expect(shortDriveSummary(legs, '2027-03-01', '2027-03-08')).toMatchObject({ total: 2, median: 3 });
+    expect(shortDriveSummary(legs, '2027-03-01', '2027-03-08').week).toHaveLength(1);
   });
 
   test('the summary leads with the easiest pair to join', () => {
