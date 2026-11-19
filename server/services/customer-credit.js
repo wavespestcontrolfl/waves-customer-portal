@@ -264,8 +264,8 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
 // serializes on the customer row, and both sides of a claimed -> failed/
 // ambiguous transition match this predicate, so the reservation cannot vanish
 // at that seam.
-async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh) {
-  const attempts = await dbh('stripe_invoice_charge_attempts as attempt')
+function unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh) {
+  return dbh('stripe_invoice_charge_attempts as attempt')
     .join('invoices as held_invoice', 'held_invoice.id', 'attempt.invoice_id')
     .where('held_invoice.customer_id', customerId)
     .whereNot('attempt.invoice_id', invoiceId)
@@ -278,7 +278,11 @@ async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }
       }).orWhere(function awaitingAuthentication() {
         whereAwaitingAuthentication(this, 'attempt');
       });
-    })
+    });
+}
+
+async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh) {
+  const attempts = await unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh)
     .select(
       'attempt.credit_applied_delta',
       'attempt.credit_applied_total',
@@ -292,6 +296,49 @@ async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }
     const stillUnposted = Math.max(0, round2(submittedTarget - alreadyPosted));
     return sum + Math.min(submittedDelta, stillUnposted);
   }, 0));
+}
+
+// Checkout pricing needs the balance and sibling reservation from the SAME
+// PostgreSQL statement. Two ordinary READ COMMITTED selects can straddle a
+// sibling settlement (old balance, then vanished reservation) and temporarily
+// promise the same credit twice. This snapshot is intentionally unlocked: the
+// eventual draw still repeats the calculation under its established locks.
+async function accountCreditSnapshotForInvoice({
+  customerId,
+  invoiceId,
+  balanceAdjustment = 0,
+}, dbh = db) {
+  if (!customerId) {
+    return { balance: 0, reserved: 0, spendable: 0, autoApplyEnabled: false };
+  }
+  const reservation = unpostedSavedCardCreditQuery({ customerId, invoiceId }, dbh)
+    .sum({
+      reserved_credit: dbh.raw(
+        'LEAST(GREATEST(COALESCE(??, 0), 0), GREATEST(COALESCE(??, 0) - COALESCE(??, 0), 0))',
+        [
+          'attempt.credit_applied_delta',
+          'attempt.credit_applied_total',
+          'held_invoice.credit_applied',
+        ],
+      ),
+    })
+    .as('credit_reservation');
+  const row = await dbh('customers as credit_customer')
+    .crossJoin(reservation)
+    .where('credit_customer.id', customerId)
+    .first(
+      'credit_customer.account_credits',
+      'credit_customer.auto_apply_account_credit',
+      'credit_reservation.reserved_credit',
+    );
+  const balance = round2((Number(row?.account_credits) || 0) + Number(balanceAdjustment || 0));
+  const reserved = round2(row?.reserved_credit || 0);
+  return {
+    balance,
+    reserved,
+    spendable: Math.max(0, round2(balance - reserved)),
+    autoApplyEnabled: row?.auto_apply_account_credit === true,
+  };
 }
 
 async function spendableAccountCreditForInvoice({ customerId, invoiceId, balance }, dbh) {
@@ -893,6 +940,7 @@ module.exports = {
   afterCommit,
   outermostTransaction,
   customerAutoApplyEnabled,
+  accountCreditSnapshotForInvoice,
   unpostedSavedCardCreditForOtherInvoices,
   spendableAccountCreditForInvoice,
   VALID_SOURCES,

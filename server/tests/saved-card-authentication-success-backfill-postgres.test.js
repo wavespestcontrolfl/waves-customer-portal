@@ -284,6 +284,38 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
     });
   });
 
+  test.each([false, true])('two retained successes and one local settlement stay held (PI bound: %s)', async (bound) => {
+    const ambiguous = await fixture({ invoiceStatus: 'overdue', bindAttemptToIntent: bound });
+    const unrecordedPi = `pi_${randomUUID().replaceAll('-', '')}`;
+    await app('stripe_webhook_events').insert({
+      id: `evt_${randomUUID().replaceAll('-', '')}`,
+      event_type: 'payment_intent.succeeded',
+      processed: true,
+      payload: {
+        object: {
+          id: unrecordedPi,
+          status: 'succeeded',
+          payment_method: ambiguous.stripePaymentMethodId,
+          metadata: {
+            source: 'admin_card_on_file',
+            saved_card_attempt_id: ambiguous.attemptId,
+            waves_invoice_id: ambiguous.invoiceId,
+            waves_customer_id: ambiguous.customerId,
+          },
+        },
+      },
+    });
+
+    await migration.up(app);
+
+    expect(await attempt(ambiguous.attemptId)).toMatchObject({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: bound ? ambiguous.piId : null,
+    });
+    expect(await app('payments').where({ stripe_payment_intent_id: unrecordedPi })).toHaveLength(0);
+  });
+
   test('keeps a bound success held when the same PI has exact cancellation evidence', async () => {
     const ids = await fixture({ bindAttemptToIntent: true, includeEvent: false });
     await app('stripe_invoice_charge_attempts').where({ id: ids.attemptId }).update({

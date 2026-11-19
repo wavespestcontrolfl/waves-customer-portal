@@ -463,4 +463,132 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       balanceAfter: 15,
     });
   });
+
+  test('checkout snapshot sees one side of a concurrent sibling settlement, never a doubled credit', async () => {
+    const customerId = randomUUID();
+    const heldInvoiceId = randomUUID();
+    const checkoutInvoiceId = randomUUID();
+    const attemptId = randomUUID();
+    await app('customers').insert({
+      id: customerId,
+      account_credits: 100,
+      auto_apply_account_credit: true,
+    });
+    await app('invoices').insert([
+      {
+        id: heldInvoiceId,
+        customer_id: customerId,
+        status: 'sent',
+        total: 100,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+      {
+        id: checkoutInvoiceId,
+        customer_id: customerId,
+        status: 'sent',
+        total: 100,
+        credit_applied: 0,
+        amount_paid: 0,
+      },
+    ]);
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId,
+      invoice_id: heldInvoiceId,
+      payment_method_id: randomUUID(),
+      stripe_payment_method_id: 'pm_snapshot_settlement',
+      idempotency_key: `snapshot-${attemptId}`,
+      status: 'claimed',
+      amount: 75,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      submitted_at: new Date(),
+      created_at: new Date(),
+    });
+
+    const settlement = await app.transaction();
+    try {
+      await settlement('customers').where({ id: customerId }).update({ account_credits: 75 });
+      await settlement('invoices').where({ id: heldInvoiceId }).update({ credit_applied: 25 });
+      await settlement('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+        status: 'succeeded',
+        resolved_at: settlement.fn.now(),
+      });
+
+      await expect(CustomerCredit.accountCreditSnapshotForInvoice({
+        customerId,
+        invoiceId: checkoutInvoiceId,
+      }, app)).resolves.toMatchObject({
+        balance: 100,
+        reserved: 25,
+        spendable: 75,
+        autoApplyEnabled: true,
+      });
+      await settlement.commit();
+    } catch (err) {
+      await settlement.rollback();
+      throw err;
+    }
+
+    await expect(CustomerCredit.accountCreditSnapshotForInvoice({
+      customerId,
+      invoiceId: checkoutInvoiceId,
+    }, app)).resolves.toMatchObject({
+      balance: 75,
+      reserved: 0,
+      spendable: 75,
+      autoApplyEnabled: true,
+    });
+  });
+
+  test('checkout projection and invoice lock complete while Terminal holds invoice then customer', async () => {
+    const customerId = randomUUID();
+    const terminalInvoiceId = randomUUID();
+    const checkoutInvoiceId = randomUUID();
+    const heldInvoiceId = randomUUID();
+    await app('customers').insert({
+      id: customerId,
+      account_credits: 100,
+      auto_apply_account_credit: true,
+    });
+    await app('invoices').insert([
+      { id: terminalInvoiceId, customer_id: customerId, status: 'sent', total: 25, credit_applied: 0, amount_paid: 0 },
+      { id: checkoutInvoiceId, customer_id: customerId, status: 'sent', total: 100, credit_applied: 0, amount_paid: 0 },
+      { id: heldInvoiceId, customer_id: customerId, status: 'sent', total: 25, credit_applied: 0, amount_paid: 0 },
+    ]);
+    await app('stripe_invoice_charge_attempts').insert({
+      id: randomUUID(),
+      invoice_id: heldInvoiceId,
+      payment_method_id: randomUUID(),
+      stripe_payment_method_id: 'pm_terminal_lock_order',
+      status: 'claimed',
+      amount: 0,
+      credit_applied_delta: 25,
+      credit_applied_total: 25,
+      submitted_at: new Date(),
+      created_at: new Date(),
+    });
+
+    const terminal = await app.transaction();
+    try {
+      await terminal('invoices').where({ id: terminalInvoiceId }).forUpdate().first('id');
+      await terminal('customers').where({ id: customerId }).forUpdate().first('id');
+
+      await expect(app.transaction(async (checkout) => {
+        await checkout.raw("SET LOCAL lock_timeout = '250ms'");
+        const snapshot = await CustomerCredit.accountCreditSnapshotForInvoice({
+          customerId,
+          invoiceId: checkoutInvoiceId,
+        }, checkout);
+        await checkout('invoices').where({ id: checkoutInvoiceId }).forUpdate().first('id');
+        return snapshot;
+      })).resolves.toMatchObject({
+        balance: 100,
+        reserved: 25,
+        spendable: 75,
+      });
+    } finally {
+      await terminal.rollback();
+    }
+  });
 });

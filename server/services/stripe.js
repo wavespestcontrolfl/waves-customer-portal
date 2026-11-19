@@ -4076,7 +4076,8 @@ const StripeService = {
           && (setupCreditGates.autoApplyAccountCredit
             || (!opts.holdCoverageForCapture && setupCreditGates.payPromoCode));
         let setupCreditCustomerId = setupCreditEnabled ? String(invoice.customer_id) : null;
-        let setupCreditCustomer = null;
+        let setupCreditSnapshot = null;
+        let setupPromoPending = 0;
         // The intent a cancel-and-replace branch below retires (codex local
         // max-effort review on #5434): it must stay in the replacement's
         // idempotency key. Clearing the invoice pointer alone made the key
@@ -4133,36 +4134,19 @@ const StripeService = {
           }
           if (setupCreditEnabled) setupCreditCustomerId = ownerId;
         }
-        // Balance movements and saved-card reservation settlement both take
-        // the customer row before their invoice row. Keep that order here and
-        // hold the row through the balance + reservation reads below, so the
-        // coverage projection cannot observe the old balance after a sibling
-        // has already made its reservation disappear (or vice versa).
+        // One statement reads the opt-in, balance and sibling reservations.
+        // Do not row-lock the customer for this coverage-only projection:
+        // Terminal owns invoice -> customer, so customer -> invoice here can
+        // deadlock. The actual credit draw revalidates under its own locks.
         if (setupCreditCustomerId) {
-          const creditProbe = await trx('customers')
-            .where({ id: setupCreditCustomerId })
-            .first('id', 'account_credits', 'auto_apply_account_credit');
-          const promoProbe = opts.holdCoverageForCapture || !setupCreditGates.payPromoCode
+          setupPromoPending = opts.holdCoverageForCapture || !setupCreditGates.payPromoCode
             ? 0
             : await require('./invoice-promo-code').pendingPromoCredit(invoice, trx);
-          const probeOptedIn = setupCreditGates.autoApplyAccountCredit
-            && creditProbe?.auto_apply_account_credit === true;
-          if (probeOptedIn || promoProbe > 0) {
-            const probeSpendable = await require('./customer-credit').spendableAccountCreditForInvoice({
-              customerId: setupCreditCustomerId,
-              invoiceId,
-              balance: (Number(creditProbe?.account_credits) || 0) + promoProbe,
-            }, trx);
-            const probeAvailable = probeOptedIn
-              ? probeSpendable
-              : Math.min(promoProbe, probeSpendable);
-            if (probeAvailable > 0) {
-              setupCreditCustomer = await trx('customers')
-                .where({ id: setupCreditCustomerId })
-                .forUpdate()
-                .first('id', 'account_credits', 'auto_apply_account_credit');
-            }
-          }
+          setupCreditSnapshot = await require('./customer-credit').accountCreditSnapshotForInvoice({
+            customerId: setupCreditCustomerId,
+            invoiceId,
+            balanceAdjustment: setupPromoPending,
+          }, trx);
         }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
@@ -4233,26 +4217,17 @@ const StripeService = {
         // here, so the stale-PI triage below clears the way for it; the
         // redemption and its draw are one step at the apply. Never on a
         // hold-for-capture setup: the code is not offered there.
-        const promoPending = !setupCreditCustomer || opts.holdCoverageForCapture
-          ? 0
-          : await require('./invoice-promo-code').pendingPromoCredit(lockedInvoice, trx);
+        const promoPending = setupCreditSnapshot ? setupPromoPending : 0;
         const autoApplyEnabled = setupCreditGates.autoApplyAccountCredit;
         let autoCredit = 0;
         let availableCredit = 0;
-        if (setupCreditCustomer && !lockedInvoice.payer_id
+        if (setupCreditSnapshot && !lockedInvoice.payer_id
           && (autoApplyEnabled || promoPending > 0)) {
-          const creditRow = setupCreditCustomer;
-          const optedIn = autoApplyEnabled && creditRow?.auto_apply_account_credit === true;
+          const optedIn = autoApplyEnabled && setupCreditSnapshot.autoApplyEnabled;
           if (optedIn || promoPending > 0) {
-            // Promo issuance happens before its capped draw. Price against the
-            // balance that will exist after that post, so a legacy saved-card
-            // reservation larger than today's balance absorbs the promo first
-            // instead of making setup promise credit the savepoint cannot use.
-            const postPromoSpendable = await require('./customer-credit').spendableAccountCreditForInvoice({
-              customerId: lockedInvoice.customer_id,
-              invoiceId,
-              balance: (Number(creditRow?.account_credits) || 0) + promoPending,
-            }, trx);
+            // The snapshot includes the pending promo in its projected balance,
+            // so a legacy saved-card reservation absorbs that issuance first.
+            const postPromoSpendable = setupCreditSnapshot.spendable;
             // The promo hook consumes up to its own posted amount. Only the
             // remainder came from the customer's pre-existing opted-in
             // balance and should trigger the second, automatic draw.

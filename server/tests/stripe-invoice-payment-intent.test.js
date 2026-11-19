@@ -125,6 +125,10 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     }));
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/customer-credit', () => ({
+      accountCreditSnapshotForInvoice: jest.fn(async ({ balanceAdjustment = 0 }) => {
+        const balance = (Number(customerAccountCredits) || 0) + Number(balanceAdjustment || 0);
+        return { balance, reserved: 0, spendable: balance, autoApplyEnabled: true };
+      }),
       spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => Number(balance) || 0),
       applyAccountCreditToInvoice: jest.fn(async () => {
         if (applyCreditSideEffect) applyCreditSideEffect();
@@ -209,24 +213,27 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     invoiceRow.stripe_payment_intent_id = null;
     applyCreditSideEffect = () => { invoiceRow.credit_applied = '75.00'; };
     const CustomerCredit = require('../services/customer-credit');
-    CustomerCredit.spendableAccountCreditForInvoice.mockResolvedValue(75);
+    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValue({
+      balance: 100,
+      reserved: 25,
+      spendable: 75,
+      autoApplyEnabled: true,
+    });
 
     const StripeService = require('../services/stripe');
     const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, {
       holdCoverageForCapture: true,
     });
 
-    expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+    expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
       customerId: invoiceRow.customer_id,
       invoiceId: invoiceRow.id,
-      balance: 100,
+      balanceAdjustment: 0,
     }, trxMock);
     expect(CustomerCredit.applyAccountCreditToInvoice).toHaveBeenCalledWith({
       invoiceId: invoiceRow.id,
     }, trxMock);
-    expect(customersQuery.forUpdate).toHaveBeenCalledTimes(1);
-    expect(customersQuery.forUpdate.mock.invocationCallOrder[0])
-      .toBeLessThan(lockedInvoiceQuery.forUpdate.mock.invocationCallOrder[0]);
+    expect(customersQuery.forUpdate).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(2500);
     expect(result.covered_by_credit).not.toBe(true);
   });
@@ -836,15 +843,20 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         client_secret: 'pi_gross_after_reserved_promo_secret',
       });
       const CustomerCredit = require('../services/customer-credit');
-      CustomerCredit.spendableAccountCreditForInvoice.mockResolvedValueOnce(0);
+      CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({
+        balance: 25,
+        reserved: 25,
+        spendable: 0,
+        autoApplyEnabled: true,
+      });
 
       const StripeService = require('../services/stripe');
       await StripeService.createInvoicePaymentIntent(invoiceRow.id);
 
-      expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
         customerId: invoiceRow.customer_id,
         invoiceId: invoiceRow.id,
-        balance: 25,
+        balanceAdjustment: 25,
       }, trxMock);
       expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
       expect(CustomerCredit.applyAccountCreditToInvoice).not.toHaveBeenCalled();

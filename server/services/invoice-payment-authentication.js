@@ -20,7 +20,7 @@ function matchingSavedCardIntent(intent, database, { lockInvoice = false, settle
   if (!intent.id || meta.source !== 'admin_card_on_file') return;
   if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(isUuid)) return;
   const methodId = (typeof intent.payment_method === 'string' ? intent.payment_method : intent.payment_method?.id)
-    || intent.last_payment_error?.payment_method?.id || null;
+    || (intent.status === 'canceled' && intent.last_payment_error?.payment_method?.id) || null;
   const invoice = database('invoices').select('id')
     .where({ id: meta.waves_invoice_id, customer_id: meta.waves_customer_id });
   if (settled) invoice.where({ status: 'paid', stripe_payment_intent_id: intent.id });
@@ -60,6 +60,20 @@ async function findSettlingAuthenticationAttempt(intent, invoice, database, { lo
   if (lock) query.forUpdate();
   return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts')
     .first('id', 'amount', 'credit_applied_delta', 'credit_applied_total', 'canceled_checkout_payment_intent_id');
+}
+
+// A different saved card can collect the exact same amount. Check for the
+// invoice's other pending attempts independently of the incoming PI metadata.
+async function assertNoConflictingAuthenticationSettlement(intent, invoice, verifiedAttempt, database) {
+  if (!invoice || !isUuid(invoice.id) || (invoice.status === 'paid' && invoice.stripe_payment_intent_id === intent.id)) return;
+  const query = database('stripe_invoice_charge_attempts').where({ invoice_id: invoice.id });
+  if (verifiedAttempt) query.whereNot({ id: verifiedAttempt.id });
+  const conflict = await whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts').first('id');
+  if (conflict) {
+    throw Object.assign(new Error(`Captured PI ${intent.id} conflicts with pending saved-card authentication ${conflict.id} on invoice ${invoice.id}`), {
+      code: 'SAVED_CARD_SETTLEMENT_IDENTITY_CONFLICT', invoice,
+    });
+  }
 }
 
 // A webhook can arrive before the worker records the decline. Without a
@@ -113,6 +127,6 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
 }
 
 module.exports = {
-  whereAwaitingAuthentication, findSettlingAuthenticationAttempt, recordAuthenticationCancellation,
+  whereAwaitingAuthentication, findSettlingAuthenticationAttempt, assertNoConflictingAuthenticationSettlement, recordAuthenticationCancellation,
   recordAuthenticationSettlement, verifySavedCardCancellation,
 };

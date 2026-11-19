@@ -38,8 +38,8 @@ exports.up = async function up(knex) {
 
       UNION ALL
 
-      -- An old row without a PI binding needs the retained signed-event ledger
-      -- to bind one, including the immutable saved Stripe method.
+      -- Exact retained successes also expose a second capture conflicting
+      -- with a known binding, even when only the bound PI reached the ledger.
       SELECT DISTINCT
         attempt.id AS attempt_id,
         attempt.invoice_id,
@@ -67,10 +67,15 @@ exports.up = async function up(knex) {
        AND webhook.payload->'object'->'metadata'->>'saved_card_attempt_id' = attempt.id::text
        AND webhook.payload->'object'->'metadata'->>'waves_invoice_id' = attempt.invoice_id::text
        AND webhook.payload->'object'->'metadata'->>'waves_customer_id' = attempt.customer_id::text
-      WHERE attempt.stripe_payment_intent_id IS NULL
+    ), unique_candidates AS (
+      SELECT attempt_id, MIN(pi_id) AS pi_id
+      FROM candidate_intents
+      GROUP BY attempt_id
+      HAVING COUNT(DISTINCT pi_id) = 1
     ), exact_settlements AS (
       SELECT DISTINCT candidate.attempt_id, candidate.pi_id
       FROM candidate_intents candidate
+      JOIN unique_candidates one USING (attempt_id, pi_id)
       JOIN payments payment
         ON payment.stripe_payment_intent_id = candidate.pi_id
        AND payment.customer_id = candidate.customer_id
@@ -93,25 +98,20 @@ exports.up = async function up(knex) {
               OR conflicting.metadata->>'invoice_id' IS DISTINCT FROM candidate.invoice_id::text
             )
         )
-    ), unambiguous AS (
-      SELECT attempt_id, MIN(pi_id) AS pi_id
-      FROM exact_settlements
-      GROUP BY attempt_id
-      HAVING COUNT(DISTINCT pi_id) = 1
     )
     UPDATE stripe_invoice_charge_attempts attempt
     SET status = 'succeeded',
-        stripe_payment_intent_id = unambiguous.pi_id,
+        stripe_payment_intent_id = exact_settlements.pi_id,
         decline_code = NULL,
         error_message = NULL,
         resolved_at = NOW(),
         updated_at = NOW()
-    FROM unambiguous
-    WHERE attempt.id = unambiguous.attempt_id
+    FROM exact_settlements
+    WHERE attempt.id = exact_settlements.attempt_id
       AND attempt.status = 'failed'
       AND attempt.decline_code = 'authentication_required'
       AND attempt.resolved_at IS NOT NULL
-      AND (attempt.stripe_payment_intent_id IS NULL OR attempt.stripe_payment_intent_id = unambiguous.pi_id)
+      AND (attempt.stripe_payment_intent_id IS NULL OR attempt.stripe_payment_intent_id = exact_settlements.pi_id)
   `);
 };
 

@@ -98,6 +98,18 @@ jest.setTimeout(20000);
     });
   });
 
+  async function waitForBlockedSettlement(holderPid) {
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      const { rows: [wait] } = await mockDatabase.raw(
+        'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE ?::int = ANY(pg_blocking_pids(pid))) AS blocked', [holderPid],
+      );
+      if (wait.blocked) return;
+      if (Date.now() >= deadline) throw new Error('Settlement did not reach the held row lock');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
   test('an unrelated checkout attached after the preliminary lookup is preserved', async () => {
     const retired = `pi_old_${attemptId}`;
     const newer = `pi_new_${attemptId}`;
@@ -109,15 +121,7 @@ jest.setTimeout(20000);
       const { rows: [session] } = await holder.raw('SELECT pg_backend_pid() AS pid');
       await holder('customers').where({ id: customerId }).forUpdate().first('id');
       outcome = settle(intent);
-      const deadline = Date.now() + 10000;
-      for (;;) {
-        const { rows: [wait] } = await mockDatabase.raw(
-          'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE ?::int = ANY(pg_blocking_pids(pid))) AS blocked', [session.pid],
-        );
-        if (wait.blocked) break;
-        if (Date.now() >= deadline) throw new Error('Settlement did not reach the customer lock');
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
+      await waitForBlockedSettlement(session.pid);
       await holder('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: newer });
       await holder.commit();
       await outcome;
@@ -160,6 +164,80 @@ jest.setTimeout(20000);
     expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id }).first()).toMatchObject({
       status: 'paid', amount: '76.88', base_amount_cents: 7500, surcharge_amount_cents: 188,
     });
+  });
+
+  test.each(['processing', 'failed', 'paid'])('stores the verified surcharge breakdown on an existing %s payment', async (status) => {
+    Object.assign(intent, { amount: 7688, amount_received: 7688 });
+    Object.assign(intent.metadata, { card_surcharge: '1.88', surcharge_rate_bps: '250', card_funding: 'credit' });
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ amount: 76.88 });
+    await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id, amount: 76.88,
+      payment_date: '2026-11-19', status, processor: 'stripe', base_amount_cents: 7688, surcharge_amount_cents: 0,
+      metadata: { invoice_id: invoiceId, prior_note: 'keep', base_amount: 76.88, card_surcharge: 0 } });
+    await settle(intent);
+    const rows = await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: 'paid', amount: '76.88', base_amount_cents: 7500, surcharge_amount_cents: 188,
+      surcharge_rate_bps: 250, surcharge_policy_version: 'test', card_funding: 'credit',
+      metadata: { invoice_id: invoiceId, prior_note: 'keep', base_amount: 75, card_surcharge: 1.88, charged_amount: 76.88 },
+    });
+  });
+
+  test.each(['different card', 'different saved-card attempt', 'different bound PI', 'method from a prior failure', 'independent checkout'])(
+    'quarantines an exact $100 capture from a %s while the original challenge can still settle', async (kind) => {
+      await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+        amount: 100, credit_applied_delta: 0, credit_applied_total: 0,
+        stripe_payment_intent_id: kind === 'different bound PI' ? 'pi_original_challenge' : null,
+      });
+      intent.amount = intent.amount_received = 10000;
+      intent.metadata.base_amount = '100';
+      if (kind === 'different card') intent.payment_method = 'pm_other';
+      if (kind === 'different saved-card attempt') intent.metadata.saved_card_attempt_id = randomUUID();
+      if (kind === 'method from a prior failure') {
+        delete intent.payment_method;
+        intent.last_payment_error = { payment_method: { id: 'pm_saved' } };
+      }
+      if (kind === 'independent checkout') delete intent.metadata.source;
+      await settle(intent);
+      expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first()).toMatchObject({
+        invoice_id: invoiceId, customer_id: customerId, amount: '100.00', resolved: false,
+        original_db_error: expect.stringContaining(attemptId),
+      });
+      expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', total: '100.00' });
+      expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id })).toHaveLength(0);
+      expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first()).toMatchObject({ status: 'failed' });
+    },
+  );
+
+  test.each(['processing', 'failed'])('a challenge committed after the lookup preserves a %s payment and records the conflicting capture', async (status) => {
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
+      decline_code: 'card_declined', amount: 100, credit_applied_delta: 0, credit_applied_total: 0,
+    });
+    intent.amount = intent.amount_received = 10000;
+    intent.metadata.base_amount = '100';
+    delete intent.metadata.source;
+    await mockDatabase('payments').insert({ customer_id: customerId, stripe_payment_intent_id: intent.id,
+      amount: 100, payment_date: '2026-11-19', status, processor: 'stripe', metadata: { invoice_id: invoiceId } });
+    const holder = await mockDatabase.transaction();
+    let outcome;
+    try {
+      const { rows: [session] } = await holder.raw('SELECT pg_backend_pid() AS pid');
+      await holder('invoices').where({ id: invoiceId }).forUpdate().first('id');
+      outcome = settle(intent);
+      await waitForBlockedSettlement(session.pid);
+      await holder('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ decline_code: 'authentication_required' });
+      await holder.commit();
+      await outcome;
+      expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id }).first()).toMatchObject({ status });
+      expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent' });
+      expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first()).toMatchObject({
+        invoice_id: invoiceId, customer_id: customerId, amount: '100.00', resolved: false,
+        original_db_error: expect.stringContaining(attemptId),
+      });
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+      await outcome;
+    }
   });
 
   test('a pre-existing payment uses only the missing credit and finishes in the invoice transaction', async () => {
