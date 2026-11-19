@@ -213,7 +213,24 @@ test('a saved-card authentication_required row with no PI id cannot open a secon
   expect(memberCollectionPending).not.toHaveBeenCalled();
 });
 
-test('the portal marks a known authentication_required row for a verification-only UI', async () => {
+test.each([
+  {
+    label: 'known authentication_required',
+    invoiceRow: invoice(),
+    expectedState: 'authentication_pending',
+  },
+  {
+    label: 'authentication lookup failure',
+    invoiceRow: invoice(),
+    attemptFailure: new Error('authentication lookup failed'),
+    expectedState: 'authentication_unknown',
+  },
+  {
+    label: 'historical authentication_required after settlement',
+    invoiceRow: invoice({ status: 'paid', amount_paid: '95.00' }),
+    expectedState: null,
+  },
+])('the portal serializes verification state for $label', async ({ invoiceRow, attemptFailure, expectedState }) => {
   const payment = {
     id: 'pay-sca',
     customer_id: 'cust-1',
@@ -241,6 +258,7 @@ test('the portal marks a known authentication_required row for a verification-on
     query.first = async () => ({ count: 1 });
     query.select = async () => {
       if (table === 'stripe_invoice_charge_attempts as attempt') {
+        if (attemptFailure) throw attemptFailure;
         return [{
           invoice_id: INV_A,
           decline_code: 'authentication_required',
@@ -252,7 +270,7 @@ test('the portal marks a known authentication_required row for a verification-on
       invoiceReads += 1;
       // The first invoice read is receipt enrichment. The second is the
       // failed-payment recovery candidate lookup.
-      return invoiceReads === 1 ? [] : [invoice()];
+      return invoiceReads === 1 ? [] : [invoiceRow];
     };
     return query;
   });
@@ -265,7 +283,7 @@ test('the portal marks a known authentication_required row for a verification-on
   expect(result.payments[0]).toMatchObject({
     id: 'pay-sca',
     recoveryInvoice: null,
-    recoveryState: 'authentication_pending',
+    recoveryState: expectedState,
   });
   expect(memberCollectionPending).not.toHaveBeenCalled();
 });

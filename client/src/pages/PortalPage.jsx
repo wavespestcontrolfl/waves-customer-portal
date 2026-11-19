@@ -6438,6 +6438,12 @@ function BillingChannelFieldset({ field, channels, available, saving, onToggle, 
   );
 }
 
+const PAYMENT_VERIFICATION_STATES = new Set(['authentication_pending', 'authentication_unknown']);
+
+function paymentNeedsVerification(payment) {
+  return payment?.status === 'failed' && PAYMENT_VERIFICATION_STATES.has(payment?.recoveryState);
+}
+
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
@@ -7091,18 +7097,17 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // the Auto Pay-off banner can point at the Pay now button when one renders.
   const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
   const primaryOpenInvoice = openInvoices[0] || null;
-  // A saved-card attempt awaiting authentication can still settle. Keep the
-  // original open-invoice list intact, but do not let the newer failed-payment
-  // recovery surfaces actively send the customer toward another checkout.
-  const authenticationPending = payments.some((payment) => (
-    payment.status === 'failed' && payment.recoveryState === 'authentication_pending'
-  ));
+  // A saved-card attempt awaiting authentication can still settle; a failed
+  // verification read cannot prove otherwise. Keep the original open-invoice
+  // list intact, but do not let the newer failed-payment recovery surfaces
+  // actively send the customer toward another checkout in either state.
+  const paymentVerificationRequired = payments.some(paymentNeedsVerification);
   const bannerConfig = {
     failed: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
-      badge: authenticationPending ? 'Status check needed' : 'Action needed',
+      badge: paymentVerificationRequired ? 'Status check needed' : 'Action needed',
       titleColor: B.red, subtitleColor: B.grayDark,
-      title: authenticationPending ? 'Payment needs verification' : 'Payment failed',
+      title: paymentVerificationRequired ? 'Payment needs verification' : 'Payment failed',
       // No interruption claim: a balance never withholds service (nothing
       // reads service_paused_at to block a visit). No retry promise either —
       // billing-cron only retries rows it armed with next_retry_at, which
@@ -7115,7 +7120,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // skips and no card update clears (there is no resume path today), and
       // it renders with Auto Pay off. Both actions are stated plainly and
       // nothing is guaranteed about what happens next.
-      detail: authenticationPending
+      detail: paymentVerificationRequired
         ? 'Contact us to confirm the payment status before trying again.'
         : cancelledAccount
         ? (primaryOpenInvoice
@@ -7568,7 +7573,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
             {bannerConfig.detail}
           </div>
-          {bannerState === 'failed' && primaryOpenInvoice && !authenticationPending && (
+          {bannerState === 'failed' && primaryOpenInvoice && !paymentVerificationRequired && (
             <div style={{ marginTop: 10 }}>
               <a href="#billing-open-invoices" style={payNowButtonStyle} data-glass-accent="">
                 View open invoices
@@ -8035,15 +8040,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               </div>
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {p.recoveryState === 'authentication_pending' ? (
+                  {paymentNeedsVerification(p) ? (
                     <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
                       Payment needs verification. Contact us to confirm the payment status before trying again.
                     </span>
-                  ) : p.recoveryInvoice ? (
+                  ) : p.recoveryInvoice && !paymentVerificationRequired ? (
                     <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       Review invoice
                     </a>
-                  ) : primaryOpenInvoice && !authenticationPending ? (
+                  ) : primaryOpenInvoice && !paymentVerificationRequired ? (
                     <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       View open invoices
                     </a>

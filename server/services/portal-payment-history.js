@@ -381,20 +381,27 @@ function recoveryInvoiceIsPayable(invoice, ownedIds = null) {
 function emptyRecoveryDetails() {
   return {
     recoveryByPaymentId: new Map(),
-    authenticationPendingPaymentIds: new Set(),
+    recoveryStateByPaymentId: new Map(),
   };
 }
 
-function recoveryFieldsFor(paymentId, { recoveryByPaymentId, authenticationPendingPaymentIds }) {
+function recoveryFieldsFor(paymentId, { recoveryByPaymentId, recoveryStateByPaymentId }) {
   const id = String(paymentId);
   return {
     recoveryInvoice: recoveryByPaymentId.get(id) || null,
     // Do not collapse this into an ordinary unavailable invoice. The client
     // must replace its new pay/list shortcuts with verification guidance
     // while the original off-session intent can still settle.
-    recoveryState: authenticationPendingPaymentIds.has(id)
-      ? 'authentication_pending'
-      : null,
+    recoveryState: recoveryStateByPaymentId.get(id) || null,
+  };
+}
+
+function unknownRecoveryDetails(payments) {
+  return {
+    recoveryByPaymentId: new Map(),
+    recoveryStateByPaymentId: new Map(payments.map((payment) => [
+      String(payment.id), 'authentication_unknown',
+    ])),
   };
 }
 
@@ -407,7 +414,7 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   const keys = recoveryLookupKeys(failedPayments);
   if (!Object.values(keys).some((values) => values.length > 0)) return emptyRecoveryDetails();
   const initialRows = await loadRecoveryInvoiceRows(customerId, keys, database);
-  if (!initialRows) return emptyRecoveryDetails();
+  if (!initialRows) return unknownRecoveryDetails(failedPayments);
 
   // An asynchronous saved-bank failure reopens the invoice and deliberately
   // clears its PaymentIntent. The resolved charge-attempt row retains the
@@ -427,29 +434,35 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   // could win. All identifiers on an ordinary attempt must resolve uniquely
   // to one invoice; marked combined shares are handled explicitly below.
   const indexes = recoveryIdentityIndexes(rows, resolvedFailedAttempts);
+  if (attemptLookupFailed) return unknownRecoveryDetails(failedPayments);
   const invoiceByPaymentId = identifyRecoveryInvoices(failedPayments, indexes, attemptLookupFailed);
 
   const authPendingInvoiceIds = await loadAuthenticationPendingInvoiceIds(
     customerId, [...invoiceByPaymentId.values()], database,
   );
-  if (!authPendingInvoiceIds) return emptyRecoveryDetails();
-  const authenticationPendingPaymentIds = new Set();
+  if (!authPendingInvoiceIds) {
+    const outstandingPayments = failedPayments.filter((payment) => (
+      recoveryInvoiceIsPayable(invoiceByPaymentId.get(String(payment.id)))
+    ));
+    return unknownRecoveryDetails(outstandingPayments);
+  }
+  const recoveryStateByPaymentId = new Map();
   for (const [paymentId, invoice] of invoiceByPaymentId) {
-    if (!authPendingInvoiceIds.has(String(invoice.id))) continue;
-    authenticationPendingPaymentIds.add(paymentId);
+    if (!authPendingInvoiceIds.has(String(invoice.id)) || !recoveryInvoiceIsPayable(invoice)) continue;
+    recoveryStateByPaymentId.set(paymentId, 'authentication_pending');
     invoiceByPaymentId.delete(paymentId);
   }
 
   const identifiedInvoices = [...new Map([...invoiceByPaymentId.values()]
     .map((row) => [String(row.id), row])).values()];
   if (!identifiedInvoices.length) {
-    return { recoveryByPaymentId: new Map(), authenticationPendingPaymentIds };
+    return { recoveryByPaymentId: new Map(), recoveryStateByPaymentId };
   }
   const ownership = await require('./invoice-payer-ownership').liveInvoiceOwnership(
     customerId, identifiedInvoices, database, { maxResolutions: 30, byCandidatePayer: true },
   );
   if (ownership.unverifiable) {
-    return { recoveryByPaymentId: new Map(), authenticationPendingPaymentIds };
+    return { recoveryByPaymentId: new Map(), recoveryStateByPaymentId };
   }
 
   const availableInvoices = new Map();
@@ -475,7 +488,7 @@ async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
       invoiceNumber: current.invoice_number || null,
     });
   }
-  return { recoveryByPaymentId, authenticationPendingPaymentIds };
+  return { recoveryByPaymentId, recoveryStateByPaymentId };
 }
 
 async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
