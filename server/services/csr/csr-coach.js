@@ -10,6 +10,8 @@ const { isV2Extraction } = require('../../utils/extraction-compat');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { nanpNationalDigits } = require('../../utils/phone');
 const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes } = require('./weekly-call-outcomes');
+const { callStartedAtSql } = require('../sms-pending-conversations');
+const { dateOnlyString } = require('../../utils/date-only');
 
 
 let TwilioService;
@@ -505,6 +507,15 @@ const CSR_SCORE_SCHEMA = {
   },
 };
 
+
+// The Friday tip's period holds a scored call by the ET date the call STARTED, as its outcomes line does
+// (callStartedAtSql): call_date is the date scoring finished, so a Thursday call scored Friday before 8 AM is
+// Thursday's. A score with no linked call row (one posted to the admin score route, or a call row since removed)
+// keeps its call_date. ET calendar dates: fromDate inclusive, toDate exclusive.
+function scoreInTipPeriod(score, { fromDate, toDate }) {
+  const date = score?.call_started_at ? etDateString(new Date(score.call_started_at)) : dateOnlyString(score?.call_date);
+  return Boolean(date) && date >= fromDate && date < toDate;
+}
 class CSRCoach {
 
   /**
@@ -823,7 +834,7 @@ Return JSON:
    * Get team overview stats for the CSR Coach dashboard.
    */
   // `withWeeklyCallOutcomes: false` skips the week's call aggregate for a caller that does not show it (the leaderboard).
-  async getTeamOverview(days = 30, { withWeeklyCallOutcomes = true } = {}) {
+  async getTeamOverview(days = 30) {
     const since = etDateString(addETDays(new Date(), -days));
 
     const scores = await db('csr_call_scores').where('call_date', '>=', since);
@@ -882,10 +893,7 @@ Return JSON:
     const fixableRevenue = fixableLosses.reduce((sum, s) => sum + parseFloat(s.estimated_job_value || 0), 0);
     const totaled = scores.filter(s => s.total_score != null);
 
-    const weeklyCallOutcomes = withWeeklyCallOutcomes ? await loadWeeklyCallOutcomesFailSoft() : null;
-
     return {
-      weeklyCallOutcomes,
       csrStats,
       teamTotals: {
         calls: scores.length,
@@ -909,9 +917,17 @@ Return JSON:
   // seven completed days its call-outcomes line reads (weekly-call-outcomes.js completedWeekDates), so the tip covers
   // one period. Without it, scores dated after the day a week ago (the CSR page's on-demand tip).
   async generateWeeklyTeamRecommendation({ between = null } = {}) {
-    const allScores = await db('csr_call_scores').where((q) => (between
-      ? q.where('call_date', '>=', between.fromDate).where('call_date', '<', between.toDate)
-      : q.where('call_date', '>', etDateString(addETDays(new Date(), -7)))));
+    // A period's scores carry their call's start time (metadata.callSid is the call's twilio_call_sid), and
+    // scoreInTipPeriod places each by it. A call is scored after it starts, so every call that started in the period
+    // has call_date >= fromDate; a later call_date (scored after the period ended) stays in this read.
+    const allScores = between
+      ? (await db('csr_call_scores as s')
+        .joinRaw(`LEFT JOIN LATERAL (SELECT MIN(${callStartedAtSql('cl')}) AS started_at FROM call_log cl`
+          + " WHERE cl.twilio_call_sid = s.metadata->>'callSid') call_start ON TRUE")
+        .where('s.call_date', '>=', between.fromDate)
+        .select('s.*', 'call_start.started_at as call_started_at'))
+        .filter((score) => scoreInTipPeriod(score, between))
+      : await db('csr_call_scores').where('call_date', '>', etDateString(addETDays(new Date(), -7)));
 
     if (allScores.length < 5) {
       return { recommendation: 'Not enough data yet — need at least 5 scored calls.', dataPoint: '', estimatedImpact: '' };
@@ -984,7 +1000,7 @@ Return JSON:
     const periodStart = day <= 15 ? `${ym}-01` : `${ym}-16`;
     const periodEnd = day <= 15 ? `${ym}-15` : `${ym}-${String(lastDay).padStart(2, '0')}`;
 
-    const overview = await this.getTeamOverview(15, { withWeeklyCallOutcomes: false });
+    const overview = await this.getTeamOverview(15);
 
     // Determine winners
     const csrs = overview.csrStats;
@@ -1019,12 +1035,14 @@ async function loadWeeklyCallOutcomesFailSoft() {
 }
 
 module.exports = new CSRCoach();
+module.exports.loadWeeklyCallOutcomesFailSoft = loadWeeklyCallOutcomesFailSoft;
 module.exports.csrScoringApplies = csrScoringApplies;
 module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
 module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
 module.exports.resolveCallbackNumbers = resolveCallbackNumbers;
 module.exports.callbackNamesOwnedNumber = callbackNamesOwnedNumber;
 module.exports.buildCsrScoringText = buildCsrScoringText;
+module.exports.scoreInTipPeriod = scoreInTipPeriod;
 module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;
 module.exports.isUsableCsrScore = isUsableCsrScore;
 module.exports.normalizeCsrScore = normalizeCsrScore;
