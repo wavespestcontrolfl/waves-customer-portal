@@ -11,7 +11,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [], open: [], callLogSelects: [] };
+const mockState = { calls: [], booked: [], triage: [], customers: [], decisions: [], alertedKeys: new Set(), rung: [], open: [], callLogSelects: [] };
 
 // Minimal chainable stand-in for the knex builder: resolves rows per table.
 jest.mock('../models/db', () => {
@@ -23,6 +23,7 @@ jest.mock('../models/db', () => {
       if (table === 'triage_items') return mockState.triage;
       if (table === 'notifications') return ctx.probe ? mockState.open : mockState.rung;
       if (table === 'customers') return mockState.customers;
+      if (table === 'route_decisions') return mockState.decisions;
       return [];
     };
     const b = {
@@ -35,7 +36,7 @@ jest.mock('../models/db', () => {
       whereNotIn: () => b,
       groupByRaw: () => b,
       orderBy: () => b,
-      // The columns each call_log read asks for (the held-call test checks the scan reads ai_validation).
+      // The columns each call_log read asks for (the held-call test checks what the scan reads).
       select: (...cols) => { if (table === 'call_log') mockState.callLogSelects.push(cols); return b; },
       first: () => Promise.resolve(
         table === 'notifications' && ctx.rawArgs.some((k) => mockState.alertedKeys.has(k)) ? { id: 'n-old' } : undefined,
@@ -67,9 +68,7 @@ function missCall(over = {}) {
     id: CALL_ID, twilio_call_sid: 'CAsynthetic900', customer_id: 'cust-9',
     direction: 'inbound', created_at: '2026-09-28T21:30:00Z',
     from_phone: '+19415550199', to_phone: '+19415550100',
-    // A finished pass stores the call agent's decision; this one let the booking through.
     processing_status: 'processed',
-    ai_validation: { mode: 'enforce', generated_at: '2026-09-28T21:40:00Z', routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } },
     ai_extraction_enriched: {
       caller: { name_full: 'Robin Example' },
       service_request: { specific_service_name: 'Wasp Nest Removal' },
@@ -88,6 +87,7 @@ beforeEach(() => {
   mockState.rung = [];
   mockState.open = [];
   mockState.callLogSelects = [];
+  mockState.decisions = [];
   NotificationService.notifyAdmin.mockReset();
   require('../config/feature-gates').alertRingOnceLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-new', deduped: false });
@@ -133,20 +133,22 @@ describe('first bell', () => {
 // Owner 2026-11-18 (option A of the call booking holds scope): a visit the call agent
 // held rang 1.5 to 2.5 hours after the call and never said why.
 describe('a visit the call agent held', () => {
-  const HELD = { mode: 'enforce', generated_at: NOW.toISOString(), routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
+  // The call agent's live decision on the call's last pass: routing held it on the address.
+  const HELD = { call_log_id: CALL_ID, mode: 'enforce', recording_sid: '', final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: NOW.toISOString() };
   const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
 
   test('rings 15 minutes after the call and names why; the scan reads the hold and call-end inputs', async () => {
-    mockState.calls = [missCall({ created_at: minutesAgo(15), ai_validation: HELD })];
+    mockState.calls = [missCall({ created_at: minutesAgo(15) })];
+    mockState.decisions = [HELD];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result).toMatchObject({ misses: 1, alerted: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(title).toBe("Schedule — book Robin Example's Wasp Nest Removal");
+    expect(title).toBe("Schedule — review Robin Example's Wasp Nest Removal");
     expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because the address is not confirmed.');
     expect(opts.bell).toBe(true);
-    // callHoldReason's inputs (the decision, the pass's status and claim time), heldWaitStart's
-    // (where a held call's wait starts), and callerOptedOut's V1 signal.
-    const needed = ['ai_validation', 'processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'ai_extraction'];
+    // callHoldReason's and liveDecision's inputs (the pass's status, claim time and recording),
+    // heldWaitStart's (where a held call's wait starts), and callerOptedOut's V1 signal.
+    const needed = ['processing_status', 'processing_started_at', 'recording_sid', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'ai_extraction'];
     expect(mockState.callLogSelects.some((cols) => needed.every((col) => cols.includes(col)))).toBe(true);
   });
 
