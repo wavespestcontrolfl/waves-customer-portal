@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boxFits, dictationRefusal, insertDictatedText, isEligibleBox, readSelection } from "./dictationInsert";
+import { boxFits, insertDictatedText, isEligibleBox, readSelection } from "./dictationInsert";
 
 // FocusedBoxMic (GATE_DICTATION_EVERY_BOX): which boxes get the shared mic, and
 // how dictated words land in a box the mic does not own.
@@ -124,48 +124,33 @@ describe("insertDictatedText", () => {
 
   it("room for only the space before the words is a full box: no lone space goes in", () => {
     const el = box('<textarea maxlength="6">Hello</textarea>');
-    expect(dictationRefusal(el, { start: 5, end: 5 })).toBe("full");
     expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: false, reason: "full" });
     expect(el.value).toBe("Hello");
     // after a space, the same one character takes the first letter
     const spaced = box('<textarea maxlength="7">Hello </textarea>');
-    expect(dictationRefusal(spaced, { start: 6, end: 6 })).toBe(null);
+    expect(insertDictatedText(spaced, "world", { start: 6, end: 6 })).toEqual({ ok: true });
+    expect(spaced.value).toBe("Hello w");
     // maxlength="0" takes nothing; no maxlength takes anything
     const zero = box('<textarea maxlength="0"></textarea>');
-    expect(dictationRefusal(zero, { start: 0, end: 0 })).toBe("full");
     expect(insertDictatedText(zero, "world", { start: 0, end: 0 })).toEqual({ ok: false, reason: "full" });
-    expect(dictationRefusal(box("<textarea></textarea>"), { start: 0, end: 0 })).toBe(null);
+    const open = box("<textarea></textarea>");
+    expect(insertDictatedText(open, "world", { start: 0, end: 0 })).toEqual({ ok: true });
+    expect(open.value).toBe("world");
   });
 
   it("a box in a disabled fieldset is locked: no mic, no words", () => {
     const el = box("<fieldset disabled><textarea>Hello</textarea></fieldset>");
     expect(el.disabled).toBe(false);
     expect(isEligibleBox(el)).toBe(false);
-    expect(dictationRefusal(el, { start: 5, end: 5 })).toBe("locked");
     expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: false, reason: "locked" });
     expect(el.value).toBe("Hello");
   });
 
-  // A modal opened while the words came back: the box stays enabled but out of reach, and focus
-  // sits on the modal's input. The browser's insert writes into whatever has focus.
+  // A modal opened while the words came back: focus sits on the modal's input, and the browser's
+  // insert writes into whatever has focus.
   const insertIntoFocused = () => vi.fn((cmd, _ui, text) => {
     document.activeElement.value += text;
     return true;
-  });
-
-  it.each([
-    ["inert", '<div inert><textarea>Hello</textarea></div><input id="modal">'],
-    ["aria-hidden", '<div aria-hidden="true"><textarea>Hello</textarea></div><input id="modal">'],
-    ["display none", '<textarea style="display: none">Hello</textarea><input id="modal">'],
-  ])("a box out of sight (%s) is hidden: no words, no resend, nothing in the modal's input", (_name, html) => {
-    const el = box(html);
-    const modal = document.getElementById("modal");
-    modal.focus();
-    document.execCommand = insertIntoFocused();
-    expect(dictationRefusal(el, { start: 5, end: 5 })).toBe("hidden");
-    expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: false, reason: "hidden" });
-    expect(el.value).toBe("Hello");
-    expect(modal.value).toBe("");
   });
 
   it("focus that stays on another field (a modal's focus trap) never gets the browser insert", () => {

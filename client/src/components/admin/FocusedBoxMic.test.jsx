@@ -192,79 +192,7 @@ describe("FocusedBoxMic", () => {
     expect(document.body.textContent).not.toContain("lost words");
   });
 
-  it("box gone when the send gets no answer: no resend is offered for words with nowhere to go", async () => {
-    stubServer({ available: true, everyBox: true });
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal("confirm", confirm);
-    function Host() {
-      const [open, setOpen] = useState(true);
-      return <>{open && <textarea aria-label="notes" defaultValue="Hello" />}<button type="button" onClick={() => setOpen(false)}>Close</button></>;
-    }
-    await mount(<Host />);
-    await focusBox();
-    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
-    const stop = await screen.findByRole("button", { name: "Stop dictation" });
-    await act(async () => { fireEvent.click(stop); });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
-    await act(async () => { fireEvent.click(screen.getByText("Close")); });
-    await act(async () => { rejectClip(new TypeError("Load failed")); });
-    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
-    expect(confirm).not.toHaveBeenCalled();
-    expect(clipRequests).toHaveLength(1);
-  });
-
-  it("box locked when the send gets no answer: no resend is offered (the words could not go in)", async () => {
-    stubServer({ available: true, everyBox: true });
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal("confirm", confirm);
-    await mount(<textarea aria-label="notes" defaultValue="" />);
-    await focusBox();
-    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
-    const stop = await screen.findByRole("button", { name: "Stop dictation" });
-    await act(async () => { fireEvent.click(stop); });
-    await waitFor(() => expect(clipRequests).toHaveLength(1));
-    screen.getByLabelText("notes").readOnly = true;
-    await act(async () => { rejectClip(new TypeError("Load failed")); });
-    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
-    expect(confirm).not.toHaveBeenCalled();
-    expect(clipRequests).toHaveLength(1);
-  });
-
-  it("box's fieldset disabled when the send gets no answer: no resend is offered (the words could not go in)", async () => {
-    stubServer({ available: true, everyBox: true });
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal("confirm", confirm);
-    await mount(<fieldset><textarea aria-label="notes" defaultValue="" /></fieldset>);
-    await focusBox();
-    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
-    const stop = await screen.findByRole("button", { name: "Stop dictation" });
-    await act(async () => { fireEvent.click(stop); });
-    await waitFor(() => expect(clipRequests).toHaveLength(1));
-    document.querySelector("fieldset").disabled = true;
-    await act(async () => { rejectClip(new TypeError("Load failed")); });
-    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
-    expect(confirm).not.toHaveBeenCalled();
-    expect(clipRequests).toHaveLength(1);
-  });
-
-  it("box full when the send gets no answer: no resend is offered (no room for the words)", async () => {
-    stubServer({ available: true, everyBox: true });
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal("confirm", confirm);
-    await mount(<textarea aria-label="notes" maxLength={5} defaultValue="" />);
-    await focusBox();
-    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
-    const stop = await screen.findByRole("button", { name: "Stop dictation" });
-    await act(async () => { fireEvent.click(stop); });
-    await waitFor(() => expect(clipRequests).toHaveLength(1));
-    screen.getByLabelText("notes").value = "Hello";
-    await act(async () => { rejectClip(new TypeError("Load failed")); });
-    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
-    expect(confirm).not.toHaveBeenCalled();
-    expect(clipRequests).toHaveLength(1);
-  });
-
-  it("box still there when the send gets no answer: yes resends the same recording and the words land", async () => {
+  it("a send with no answer shows the error and asks nothing: this mic does not offer a resend", async () => {
     stubServer({ available: true, everyBox: true });
     const confirm = vi.fn(() => true);
     vi.stubGlobal("confirm", confirm);
@@ -275,11 +203,9 @@ describe("FocusedBoxMic", () => {
     await act(async () => { fireEvent.click(stop); });
     await waitFor(() => expect(clipRequests).toHaveLength(1));
     await act(async () => { rejectClip(new TypeError("Load failed")); });
-    await waitFor(() => expect(clipRequests).toHaveLength(2));
-    expect(confirm).toHaveBeenCalledTimes(1);
-    await act(async () => { resolveClip({ ok: true, json: async () => ({ text: "kept words" }) }); });
-    await waitFor(() => expect(screen.getByLabelText("notes").value).toContain("kept words"));
-    expect(alert).not.toHaveBeenCalled();
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(clipRequests).toHaveLength(1);
   });
 
   it("holds a Send button in the box's own dialog until the words land, but not Cancel", async () => {

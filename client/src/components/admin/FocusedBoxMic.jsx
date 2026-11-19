@@ -7,7 +7,7 @@ import { readToken } from "../../hooks/useServerDictationMode";
 import { setDictationPending } from "../../hooks/dictationPending";
 import { LiveWordsBubble } from "../tech/DictationButton";
 import { useIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
-import { boxFits, dictationRefusal, insertDictatedText, isEligibleBox, readSelection } from "../../lib/dictationInsert";
+import { boxFits, insertDictatedText, isEligibleBox, readSelection } from "../../lib/dictationInsert";
 
 // One Waves mic for every staff multi-line text box that has none of its own
 // (GATE_DICTATION_EVERY_BOX). AdminLayoutV2 mounts it once. While an eligible
@@ -23,7 +23,6 @@ const NOTICE_MS = 6000;
 const NOTICES = {
   gone: "Dictation: the text box was closed before the words came back, so they were not added.",
   locked: "Dictation: the text box is locked now, so the words were not added.",
-  hidden: "Dictation: the text box is hidden or covered now, so the words were not added.",
   full: "Dictation: the text box is full, so the words were not added.",
   wait: "Dictation: wait for the words to appear in the box, then press that button again.",
 };
@@ -345,12 +344,7 @@ function FocusedBoxMicInner() {
     const result = insertDictatedText(session.el, text, session.selection);
     if (!result.ok) setNotice(NOTICES[result.reason]);
   }, []);
-  // A send with no answer may ask to resend the clip: only while the tap's box can still take the words.
-  const resendWanted = useCallback(() => {
-    const session = sessionRef.current;
-    return Boolean(session) && dictationRefusal(session.el, session.selection) === null;
-  }, []);
-  const { listening, starting, uploading, toggle, abandon, mode, supported, liveText } = useSpeechDictation(onTranscript, { dictationContext, resendWanted });
+  const { listening, starting, uploading, toggle, abandon, mode, supported, liveText } = useSpeechDictation(onTranscript, { dictationContext });
   const busy = mode === "upload" && (starting || listening || uploading);
 
   // Send / Ask buttons wait for words still in flight (dictationPending.js).

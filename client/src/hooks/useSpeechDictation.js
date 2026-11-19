@@ -80,10 +80,10 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  *
  * A send that got no answer (iOS "Load failed", or a 2xx answer cut off) shows "The words did not
  * come back." A caller that passes `{ resendWanted: () => boolean }`, true while its field can
- * still take the words (FocusedBoxMic: its box is there, unlocked and has room; the IB bar: its
- * prompt takes any words), is asked "Send the recording again?" instead, once the page is visible
- * and while the field still belongs to the recording and its login. Never resent on its own.
- * Each field has its own limits and only its caller can check them: no check, no question.
+ * still take the words (the IB bar: its prompt takes any words), is asked "Send the recording
+ * again?" instead, once the page is visible and while the field still belongs to the recording
+ * and its login. Never resent on its own. Each field has its own limits and only its caller can
+ * check them: no check, no question.
  *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
