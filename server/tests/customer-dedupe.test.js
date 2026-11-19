@@ -1809,14 +1809,18 @@ describe('executeMerge', () => {
   // for the same home.
   describe('the new-sod record on a preferences row that moves whole to a winner with none', () => {
     const MOVED_ROW = { id: 'pp-1', sod_laid_on: new Date('2026-10-01T00:00:00Z'), sod_covers: 'part', sod_area: 'back lawn by the pool cage', sod_rooted_on: null };
-    async function merge(loserAddr, { hasRecord = true, timer = {}, winnerAddr = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' } } = {}) {
+    async function merge(loserAddr, { hasRecord = true, timer = {}, timerColumnsMissing = false, winnerAddr = { address_line1: '100 Main St', city: 'Bradenton', zip: '34205' } } = {}) {
       const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', ...winnerAddr };
       const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', ...loserAddr };
       const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'property_preferences', column_name: 'customer_id' }] });
       const base = trx.getMockImplementation();
       const prefUpdates = [];
       trx.mockImplementation((table) => (table !== 'property_preferences' ? base(table) : makeChain(table, (q) => {
-        if (q.called('first')) return { ...(hasRecord ? MOVED_ROW : { id: 'pp-1', sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null }), ...timer };
+        if (q.called('first')) {
+          // The timer read is its own statement; before its migration Postgres answers 42703 (undefined column).
+          if (timerColumnsMissing && q.args('first').includes('irrigation_controller_brand')) throw Object.assign(new Error('column does not exist'), { code: '42703' });
+          return { ...(hasRecord ? MOVED_ROW : { id: 'pp-1', sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null }), ...timer };
+        }
         if (q.called('select')) return [{ id: 'pp-1' }];
         if (q.called('update')) { prefUpdates.push([q.args('where')[0], q.args('update')[0]]); return 1; }
         return [];
@@ -1873,7 +1877,8 @@ describe('executeMerge', () => {
       expect(result.repointed['property_preferences.new_sod_cleared']).toBeUndefined();
     });
 
-    // The sprinkler timer on file is the box on the LOSER's wall: same clear, its own journal entry.
+    // The sprinkler timer on file is the box on the LOSER's wall, and the moved row has a new owner: always
+    // cleared, with the original journaled in its own entry.
     describe('the sprinkler timer on that moved row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
       const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
@@ -1889,15 +1894,25 @@ describe('executeMerge', () => {
         expect(prefUpdates.find(([, payload]) => payload.irrigation_home_changed_at)[1]).not.toHaveProperty('irrigation_controller_brand');
       });
 
-      it('same home, or an addressless winner that inherits the loser\'s home: the timer stays and nothing is journaled', async () => {
+      it('same home, or an addressless winner that inherits the loser\'s home: cleared and journaled too, while the sod record stays', async () => {
         for (const [loserAddr, options] of [
           [{ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' }, { timer: X2 }],
           [{ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { timer: X2, winnerAddr: { address_line1: null, city: null, zip: null } }],
         ]) {
           const { prefUpdates, recorded } = await merge(loserAddr, options);
-          expect(touchesTimer(prefUpdates)).toBe(false);
-          expect(recorded.moved_pref_timer).toBe(null);
+          expect(prefUpdates).toContainEqual([{ id: 'pp-1' }, NO_TIMER]);
+          expect(recorded.moved_pref_timer).toEqual({ row_id: 'pp-1', before: X2 });
+          expect(touchesSod(prefUpdates)).toBe(false);
+          expect(recorded.moved_pref_new_sod).toBe(null);
         }
+      });
+
+      it('timer columns not there yet (42703): the merge goes on, and the new-sod record is still cleared and journaled', async () => {
+        const { prefUpdates, result, recorded } = await merge({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' }, { timerColumnsMissing: true });
+        expect(recorded.moved_pref_timer).toBe(null);
+        expect(touchesTimer(prefUpdates)).toBe(false);
+        expect(recorded.moved_pref_new_sod.before.sod_laid_on).toBe('2026-10-01');
+        expect(result.repointed['property_preferences.new_sod_cleared']).toBe(1);
       });
 
       it('different homes, no timer on the row: nothing to clear, the empty timer is still journaled for the undo guard', async () => {

@@ -1224,6 +1224,21 @@ describe('revertMerge', () => {
         expect(state.journalUpdate).toBeNull();
       });
 
+      // A merge from before the timer existed journaled no timer entry. The row it moved whole carried none,
+      // so a timer there now is the kept customer's: different homes (a new-sod entry) or the same home (row ids only).
+      it.each([['with a new-sod entry', false], ['with row ids only', true]])('a journal with no timer entry, %s: REFUSES when the moved row carries a timer now', async (_label, dropSodEntry) => {
+        const journal = journalWithSod();
+        if (dropSodEntry) journal.repointed_ids.moved_pref_new_sod = null;
+        const tables = tablesFor();
+        tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, ...X2 };
+        const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables });
+        db.transaction.mockImplementation(async (fn) => fn(trx));
+        await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+          .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer was entered .* after this merge/) });
+        expect(state.repointedBack).toEqual([]);
+        expect(state.journalUpdate).toBeNull();
+      });
+
       it('an empty journaled timer writes no timer columns when nothing was entered', async () => {
         const { trx, state } = buildRevertTrx({ journal: journalWithTimer(NO_TIMER), winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
         db.transaction.mockImplementation(async (fn) => fn(trx));
