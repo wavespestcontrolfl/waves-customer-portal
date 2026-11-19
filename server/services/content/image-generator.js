@@ -526,18 +526,55 @@ const REFERENCE_CLAUSES = {
   },
 };
 
-function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, avoidDepicting = [], uniformLogo = false, vanWrap = false, referenceRoles }) {
-  const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
-  const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
-  const base = style
-    ? `A high-quality ${kind} (${style.label.toLowerCase()}) for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`
-    : `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
-  // Body images name the SECTION (keyword) and carry its opening prose as
-  // context (topic) — a generic heading ("What to expect") alone would
-  // illustrate nothing in particular.
-  const focus = (mode === 'blog-body' && keyword && topic && topic !== keyword)
-    ? `Subject: ${keyword}. Context from the article: ${topic}`
-    : `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
+// What each mode changes in a prompt: what the picture is called, its frame,
+// the editorial rules (blog pictures only) and whether it is an in-article
+// picture. The frame is in the prompt because Gemini's generateContent takes
+// no size parameter: without it, Gemini-only deploys return arbitrary aspect
+// ratios for both blog heroes and social tiles. A mode outside the table
+// keeps the hero wording and frame, without the editorial rules.
+const EDITORIAL_LINE = `Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose. ${NO_DRAWN_MARKS_LINE}`;
+const LANDSCAPE_COMPOSITION = 'Composition: landscape 3:2 aspect ratio, 1536x1024.';
+const PROMPT_MODES = {
+  'blog-hero': { kind: 'blog hero image', composition: LANDSCAPE_COMPOSITION, editorial: EDITORIAL_LINE, body: false },
+  'blog-body': { kind: 'in-article illustration', composition: LANDSCAPE_COMPOSITION, editorial: EDITORIAL_LINE, body: true },
+  'social-square': { kind: 'social media tile', composition: 'Composition: square 1:1 aspect ratio, 1024x1024.', editorial: '', body: false },
+};
+const OTHER_PROMPT_MODE = { kind: 'blog hero image', composition: LANDSCAPE_COMPOSITION, editorial: '', body: false };
+
+// What a picture is about, read the same way by its prompt and its alt text.
+// A body picture names its SECTION (keyword) and carries the section's
+// opening prose (topic) as context: a generic heading ("What to expect")
+// alone would illustrate nothing in particular, and would tell a screen
+// reader nothing. `lead` is null when there is no separate context.
+function pictureSubject({ mode, keyword, topic, title }) {
+  const lead = mode === 'blog-body' && keyword && topic && topic !== keyword ? topic : null;
+  return { name: keyword || topic || title, lead };
+}
+
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, avoidDepicting, uniformLogo, vanWrap, referenceRoles }) {
+  const modeParts = PROMPT_MODES[mode] || OTHER_PROMPT_MODE;
+  const about = pictureSubject({ mode, keyword, topic, title });
+  const focus = about.lead
+    ? `Subject: ${keyword}. Context from the article: ${about.lead}`
+    : `Subject: ${about.name || 'pest control / lawn care service'}.`;
+  // A styled picture opens with its style's label and carries its style
+  // line; a picture with no plan, or with a style this module no longer has,
+  // keeps the photorealistic opener and the legacy style line. Brand palette
+  // is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the brand brief
+  // explicitly forbids teal, so steer the grade, don't paint it. The limited
+  // illustration palettes (blue / gold / neutrals) must not steer a
+  // technician's shirt back to blue: uniform red stays allowed wherever the
+  // picture can show a technician.
+  const style = plan && IMAGE_STYLES[plan.style];
+  const [base, styleLine] = style
+    ? [
+      `A high-quality ${modeParts.kind} (${style.label.toLowerCase()}) for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`,
+      `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast${plan.cast === 'homeowner' || plan.cast === 'none' ? '.' : "; a technician's red shirt or red cap is part of the palette."}`,
+    ]
+    : [
+      `A high-quality, photorealistic ${modeParts.kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`,
+      'Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).',
+    ];
   // A planned image names ITS setting, time and vantage; the legacy line
   // (one fixed postcard) only remains for callers that pass no plan.
   // The van wrap only where the plan places a van.
@@ -548,31 +585,14 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : (city
       ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
       : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`);
-  // Aspect/dimension lives in the prompt because Gemini's generateContent
-  // doesn't accept a size parameter — without this, Gemini-only deploys
-  // return arbitrary aspect ratios for both blog heroes and social tiles.
-  const composition = mode === 'social-square'
-    ? `Composition: square 1:1 aspect ratio, 1024x1024.`
-    : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
-  // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
-  // brand brief explicitly forbids teal, so steer the grade, don't paint it.
-  // The limited illustration palettes (blue / gold / neutrals) must not
-  // steer a technician's shirt back to blue: uniform red is always allowed.
-  const styleLine = style
-    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast${plan.cast === 'homeowner' || plan.cast === 'none' ? '.' : "; a technician's red shirt or red cap is part of the palette."}`
-    : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
-  const textRule = clauses.noText;
   const guards = `Must not depict: ${[clauses.guard, STANDARD_GUARDS[1], ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
-  const framing = mode === 'blog-body' ? bodyFramingFor(shot, plan && plan.cast) : '';
-  const distinct = (mode === 'blog-body' && avoid)
+  const framing = modeParts.body ? bodyFramingFor(shot, plan && plan.cast) : '';
+  const distinct = (modeParts.body && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
-    : '';
-  const editorial = mode === 'blog-hero' || mode === 'blog-body'
-    ? `Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose. ${NO_DRAWN_MARKS_LINE}`
     : '';
   const uniform = peopleClauseFor(plan, clauses.uniform);
   const van = hasVan ? clauses.van : '';
-  return [base, focus, local, framing, referenceRoles, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
+  return [base, focus, local, framing, referenceRoles, uniform, van, modeParts.composition, styleLine, clauses.noText, guards, distinct, modeParts.editorial].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -581,11 +601,11 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
 // alt BEFORE the hero exists; publishers overwrite it with this at
 // generation time (astro-publisher stamps it alongside the hero src).
 function buildAltText({ title, topic, keyword, city, mode = 'blog-hero', plan = null } = {}) {
-  let subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
-  // Body images are generated from heading + section lead; the alt describes
-  // the same context (a generic heading alone tells a screen reader nothing).
-  if (mode === 'blog-body' && keyword && topic && topic !== keyword) {
-    const lead = String(topic).trim().replace(/\s+/g, ' ');
+  // The alt carries the same subject and section context as the prompt.
+  const about = pictureSubject({ mode, keyword, topic, title });
+  let subject = String(about.name || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
+  if (about.lead) {
+    const lead = String(about.lead).trim().replace(/\s+/g, ' ');
     const clipped = lead.length > 140 ? `${lead.slice(0, 140).replace(/\s+\S*$/, '')}…` : lead;
     subject = `${String(keyword).trim()} — ${clipped}`.replace(/[.!?]+$/, '');
   }
