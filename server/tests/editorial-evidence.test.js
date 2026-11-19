@@ -421,6 +421,14 @@ test('source extraction ignores image assets and fleet links, deduplicates evide
   expect(evidence.sourceUrls('[IFAS](https://edis.ifas.ufl.edu/fact) ![x](https://example.org/x.webp) https://wavespestcontrol.com/about',
     { required_sources: ['https://edis.ifas.ufl.edu/fact'] })).toEqual(['https://edis.ifas.ufl.edu/fact']);
 });
+// Live post 2026-11-19: "[a 2023 UF/IFAS article](https://blogs.ifas.ufl.edu/.../empty-wallets/): the indoor
+// environment ..." was read as ".../empty-wallets/):", which answers 404, so its claims had no source.
+test('source extraction drops a colon that follows a link', () => {
+  expect(evidence.sourceUrls('A [2023 UF/IFAS article](https://blogs.ifas.ufl.edu/news/2023/02/22/empty-wallets/): the indoor air is dry.'))
+    .toEqual(['https://blogs.ifas.ufl.edu/news/2023/02/22/empty-wallets/']);
+  expect(evidence.sourceUrls('See https://edis.ifas.ufl.edu/publication/IN917: it lists three names.'))
+    .toEqual(['https://edis.ifas.ufl.edu/publication/IN917']);
+});
 test('prepareDraft hands the review the competitor pages the writer listed in notes_for_reviewer (Codex r2, r6 on #5191)', async () => {
   reviewer.review.mockResolvedValueOnce(passing());
   await evidence.prepareDraft({ frontmatter: { title: 'How to inspect a door' }, body: "Per Orkin's terms, plans renew yearly.",

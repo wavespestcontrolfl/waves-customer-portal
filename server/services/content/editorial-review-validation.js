@@ -44,8 +44,10 @@ function validateChecks(checks, document, title, sources) {
   return null;
 }
 
+// Document codes (UF/IFAS EENY-514, ENH5, LH010) name a source; their digits are not figures.
+const DOCUMENT_CODE_RE = /\b[A-Z]{2,}-?\d+[A-Z]?\b/g;
 function deterministicClaimKind(passage) {
-  const text = String(passage || '');
+  const text = String(passage || '').replace(DOCUMENT_CODE_RE, ' ');
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
   if (/(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i.test(text)) return 'quantitative';
@@ -62,26 +64,45 @@ function isTrivialNumericInstruction(passage) {
   return /^(?:check|empty|inspect|look|remove|walk)\b/i.test(String(passage || '').trim());
 }
 
+// A non_external passage may carry a number only where the number makes no outside claim: the visible
+// "Last updated: Month Year" line every brief asks for (content-brief-builder), and the text of a link to
+// one of our own pages (a relative path; that page carries its own review). Anything else with a figure
+// left over is still held to the deterministic kind.
+const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)\s*:?\s*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
+const OWN_PAGE_LINK_RE = /\[([^\]]*)\]\(\/[^)\s]*\)/g;
+function numericNonExternalAllowed(passage) {
+  const text = String(passage || '').trim();
+  if (isTrivialNumericInstruction(text) || DATE_STAMP_RE.test(text)) return true;
+  return deterministicClaimKind(text.replace(OWN_PAGE_LINK_RE, ' ')) !== 'quantitative';
+}
+
+// A supported claim meets the rules of BOTH its label and the deterministic kind, so a wrong label
+// cannot loosen anything (Mac test 2026-11-19: a supported nickname quote labeled "general" used to
+// reject a whole 89-claim answer).
+function supportedClaimError(claim, kinds, sources) {
+  if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
+  if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
+  if (['quantitative', 'expert_quote', 'named_example'].some((kind) => kinds.has(kind))
+    && claim.sourceSuitability !== 'primary_authoritative') return `claim_primary_source_required:${claim.claimId}`;
+  if (kinds.has('expert_quote')
+    && exactQuotedPhrases(claim.passage).some((phrase) => !sources[claim.sourceIndex].excerpt.includes(phrase))) return `claim_attribution_quote:${claim.claimId}`;
+  return null;
+}
+
 function validateClaimEvidence(claim, sources) {
   const kinds = ['quantitative', 'expert_quote', 'named_example', 'general', 'non_external'];
   const suitability = ['primary_authoritative', 'suitable_secondary', 'unsuitable', 'not_applicable'];
   if (!kinds.includes(claim.claimKind)) return `claim_kind:${claim.claimId}`;
   if (!suitability.includes(claim.sourceSuitability)) return `claim_suitability:${claim.claimId}`;
   const deterministicKind = deterministicClaimKind(claim.passage);
-  const allowedInstruction = `${claim.verdict}:${deterministicKind}` === 'non_external:quantitative'
-    && isTrivialNumericInstruction(claim.passage);
-  if (deterministicKind && !allowedInstruction && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
-  if (claim.verdict === 'supported') {
-    if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
-    if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
-    if (['quantitative', 'expert_quote', 'named_example'].includes(claim.claimKind)
-      && claim.sourceSuitability !== 'primary_authoritative') return `claim_primary_source_required:${claim.claimId}`;
-    if (claim.claimKind === 'expert_quote'
-      && exactQuotedPhrases(claim.passage).some((phrase) => !sources[claim.sourceIndex].excerpt.includes(phrase))) return `claim_attribution_quote:${claim.claimId}`;
-  } else {
-    if (claim.sourceIndex !== -1 || claim.sourceQuote !== '') return `claim_empty_source:${claim.claimId}`;
-    if (claim.verdict === 'non_external' && (claim.claimKind !== 'non_external' || claim.sourceSuitability !== 'not_applicable')) return `claim_non_external_shape:${claim.claimId}`;
-  }
+  if (claim.verdict === 'supported') return supportedClaimError(claim, new Set([claim.claimKind, deterministicKind].filter(Boolean)), sources);
+  if (claim.sourceIndex !== -1 || claim.sourceQuote !== '') return `claim_empty_source:${claim.claimId}`;
+  // An unsupported claim fails source support whatever its label. A figure or an attributed quote marked
+  // non_external would skip the source rules, so that stays a hard reject.
+  if (claim.verdict !== 'non_external') return null;
+  const allowedNumber = deterministicKind === 'quantitative' && numericNonExternalAllowed(claim.passage);
+  if (deterministicKind && !allowedNumber) return `claim_kind_mismatch:${claim.claimId}`;
+  if (claim.claimKind !== 'non_external' || claim.sourceSuitability !== 'not_applicable') return `claim_non_external_shape:${claim.claimId}`;
   return null;
 }
 

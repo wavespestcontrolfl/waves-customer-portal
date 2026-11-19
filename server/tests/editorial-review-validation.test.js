@@ -45,6 +45,78 @@ describe('editorial review coverage validation', () => {
       .toBe('claim_kind_mismatch:C1');
   });
 
+  const NON_EXTERNAL = { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' };
+
+  // Every brief asks for a visible "Last updated: Month Year" line (content-brief-builder), so a review that
+  // could not label it failed on every post (Mac test 2026-11-19: claim_kind_mismatch on C1).
+  test.each([
+    '*Last updated: November 2026.*',
+    'Last updated: November 2026',
+    '_Updated: March 2027._',
+  ])('allows the date-stamp line as non-external: %s', (passage) => {
+    expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
+  });
+
+  test('allows a number inside the text of a link to one of our own pages', () => {
+    const passage = 'Our [guide to the 8 cockroach types in Florida](/pest-control/cockroach-types/) covers the rest.';
+    expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
+  });
+
+  test('allows a document code that names a source', () => {
+    expect(validateClaim('Here is what EENY-514 says about the spray:', NON_EXTERNAL)).toBeNull();
+  });
+
+  test.each([
+    'Last updated: November 2026, when 40% of homes had roaches.',
+    'Our [guide](/pest-control/cockroach-types/) says 8 types live here.',
+    'Read the [8 types guide](https://example.org/roaches) first.',
+    'EENY-514 says the roach is 1.5 inches long.',
+  ])('still rejects a figure outside those cases as non-external: %s', (passage) => {
+    expect(validateClaim(passage, NON_EXTERNAL)).toBe('claim_kind_mismatch:C1');
+  });
+
+  test('does not reject an unsupported numeric claim over its kind label', () => {
+    const passage = 'A [2023 UF/IFAS article](https://blogs.ifas.ufl.edu/news/2023/x/) gives one reason.';
+    const analysis = { claims: [{ id: 'C1', passage }], sections: [], passages: [] };
+    const response = {
+      claimInventoryComplete: true,
+      checks: CHECK_NAMES.map((name) => (name === 'source_support'
+        ? { name, status: 'fail', findings: [{ passage, detail: 'No fetched source.', action: 'Add the source.', sourceIndexes: [], sourceQuote: '' }] }
+        : { name, status: 'pass', findings: [] })),
+      claims: [{ claimId: 'C1', passage, verdict: 'unsupported', claimKind: 'general', sourceSuitability: 'unsuitable', sourceIndex: -1, sourceQuote: '', action: 'Add the source.' }],
+      sectionCoverage: [],
+      passageCoverage: [],
+    };
+    expect(validateReviewJson(response, analysis, passage, '', [])).toBeNull();
+  });
+
+  test('holds a supported numeric claim labeled general to the primary-source rule', () => {
+    const passage = 'Termites cause $5 billion in property damage every year.';
+    const sources = [{ excerpt: 'Termites cause $5 billion in property damage every year in the US.' }];
+    expect(validateClaim(passage, { verdict: 'supported', claimKind: 'general', sourceSuitability: 'suitable_secondary', sourceIndex: 0, sourceQuote: 'Termites cause $5 billion in property damage' }, sources))
+      .toBe('claim_primary_source_required:C1');
+  });
+
+  const QUOTE = 'Adults spray a foul fluid, which the UF/IFAS gallery says is where the nickname "stinking cockroach" comes from.';
+  test('accepts a supported attributed quote labeled general when it meets the quote rules', () => {
+    const sources = [{ excerpt: 'It is often called the "stinking cockroach" because it produces a foul-smelling fluid.' }];
+    expect(validateClaim(QUOTE, { verdict: 'supported', claimKind: 'general', sourceSuitability: 'primary_authoritative', sourceIndex: 0, sourceQuote: 'often called the "stinking cockroach" because' }, sources))
+      .toBeNull();
+  });
+
+  test('holds a supported attributed quote labeled general to the word-for-word rule', () => {
+    const sources = [{ excerpt: 'It is often called the stink roach because it produces a foul-smelling fluid.' }];
+    expect(validateClaim(QUOTE, { verdict: 'supported', claimKind: 'general', sourceSuitability: 'primary_authoritative', sourceIndex: 0, sourceQuote: 'produces a foul-smelling fluid' }, sources))
+      .toBe('claim_attribution_quote:C1');
+  });
+
+  test('holds a supported claim to the rules of its own label too', () => {
+    const passage = 'Roach bait in Florida homes works best in kitchens.';
+    const sources = [{ excerpt: 'Roach bait in Florida homes works best in kitchens and baths.' }];
+    expect(validateClaim(passage, { verdict: 'supported', claimKind: 'named_example', sourceSuitability: 'suitable_secondary', sourceIndex: 0, sourceQuote: 'Roach bait in Florida homes works best' }, sources))
+      .toBe('claim_primary_source_required:C1');
+  });
+
   test('rejects a trivial substring as a supporting source quote', () => {
     const passage = 'Termites cause $5 billion in property damage every year.';
     const sources = [{ excerpt: 'An unrelated sentence. Another unrelated sentence.' }];

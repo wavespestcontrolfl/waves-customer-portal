@@ -51,7 +51,7 @@ function domainContextFromDocument(document) {
 function trimTrailingUrlNoise(url) {
   let out = url;
   for (;;) {
-    if (/[.,;]$/.test(out)) { out = out.slice(0, -1); continue; }
+    if (/[.,;:]$/.test(out)) { out = out.slice(0, -1); continue; }
     if (out.endsWith(')')) {
       const opens = (out.match(/\(/g) || []).length;
       const closes = (out.match(/\)/g) || []).length;
