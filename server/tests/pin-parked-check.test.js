@@ -453,52 +453,49 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
   });
 
   describe('an open suggestion is judged again on its own spot and day', () => {
-    // The open row an earlier run made from visit-1: 310 m north on Oct 8.
+    // The open row an earlier run made from visit-1 (tech-1's truck): 310 m north on Oct 8.
     const openRow = (extra = {}) => ({
-      id: 's-1', customer_id: 'customer-1', scheduled_service_id: 'visit-1',
+      id: 's-1', customer_id: 'customer-1', scheduled_service_id: 'visit-1', technician_id: 'tech-1',
       parked_lat: at(310).lat.toFixed(7), parked_lng: at(310).lng.toFixed(7), stop_started_at: new Date('2026-10-08T14:25:00Z'), ...extra,
     });
     const entry = (briefDays, verdict = { flag: false, reason: 'neighbour_visit' }, extra = {}) => ({ visit: visit(extra), verdict, briefPinDays: briefDays });
+    const byId = (...entries) => new Map(entries.map((e) => [String(e.visit.id), e]));
 
     test("both facts on the suggestion's own spot and day explain it, whatever the visit's verdict is today", async () => {
       for (const verdict of [{ flag: false, reason: 'neighbour_visit' }, { flag: false, reason: 'home_base' }, { flag: true, distanceM: 540 }, { flag: false, reason: 'other_customer_stop' }]) {
         const conn = pinsConn({ customers: FOUND });
-        expect(await p.suggestionExplained(conn, openRow(), [entry(['2026-10-08'], verdict)], RADIUS)).toBe(true);
+        expect(await p.suggestionExplained(conn, openRow(), byId(entry(['2026-10-08'], verdict)), RADIUS)).toBe(true);
         const raw = conn.calls[0].steps.find(([name]) => name === 'whereRaw');
         expect(raw[2][0]).toBeCloseTo(at(310).lat, 7); // measured from the suggestion's spot, not today's closest stop
+        expect(conn.calls[0].steps).toContainEqual(['whereNot', 'c.id', 'customer-1']);
       }
     });
 
     test('either fact alone, or a short stop on another day, leaves it open', async () => {
-      expect(await p.suggestionExplained(pinsConn(), openRow(), [entry(['2026-10-08'])], RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(pinsConn(), openRow(), byId(entry(['2026-10-08'])), RADIUS)).toBe(false);
       const conn = pinsConn({ customers: FOUND });
-      expect(await p.suggestionExplained(conn, openRow(), [entry(['2026-10-07'])], RADIUS)).toBe(false);
-      expect(await p.suggestionExplained(conn, openRow(), [entry([])], RADIUS)).toBe(false);
-      expect(await p.suggestionExplained(conn, openRow(), [{ visit: visit(), verdict: { flag: false, reason: 'stops_unreadable', unknown: true } }], RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(conn, openRow(), byId(entry(['2026-10-07'])), RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(conn, openRow(), byId(entry([])), RADIUS)).toBe(false);
+      const unknown = { visit: visit(), verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
+      expect(await p.suggestionExplained(conn, openRow(), byId(unknown), RADIUS)).toBe(false);
       expect(conn.calls).toEqual([]);
     });
 
-    test('it is matched to the visit it was made from; a grouped partner matches by visit_id', async () => {
+    test("only the suggestion's own visit and truck count: another visit, or the visit now on another technician, leave it open", async () => {
       const conn = pinsConn({ customers: FOUND });
-      expect(await p.suggestionExplained(conn, openRow({ scheduled_service_id: 'visit-9' }), [entry(['2026-10-08'])], RADIUS)).toBe(false);
-      expect(conn.calls).toEqual([]); // a standalone visit never reads the service
-      const partner = [entry(['2026-10-08'], undefined, { id: 'partner-2', visit_id: 'group-7' })];
-      const same = pinsConn({ customers: FOUND, serviceVisitId: 'group-7' });
-      expect(await p.suggestionExplained(same, openRow({ scheduled_service_id: 'partner-1' }), partner, RADIUS)).toBe(true);
-      expect(same.tables()[0]).toBe('scheduled_services');
-      for (const serviceVisitId of ['group-8', null]) {
-        expect(await p.suggestionExplained(pinsConn({ customers: FOUND, serviceVisitId }), openRow({ scheduled_service_id: 'partner-1' }), partner, RADIUS)).toBe(false);
-      }
+      expect(await p.suggestionExplained(conn, openRow({ scheduled_service_id: 'visit-9' }), byId(entry(['2026-10-08'])), RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(conn, openRow(), byId(entry(['2026-10-08'], undefined, { technician_id: 'tech-2' })), RADIUS)).toBe(false);
+      expect(conn.calls).toEqual([]);
     });
 
     test('no spot, no stop time, no source service or a failed read: it stays open', async () => {
       const conn = pinsConn({ customers: FOUND });
-      const group = [entry(['2026-10-08'])];
-      expect(await p.suggestionExplained(conn, openRow({ parked_lat: null }), group, RADIUS)).toBe(false);
-      expect(await p.suggestionExplained(conn, openRow({ stop_started_at: null }), group, RADIUS)).toBe(false);
-      expect(await p.suggestionExplained(conn, openRow({ scheduled_service_id: null }), group, RADIUS)).toBe(false);
+      const ids = byId(entry(['2026-10-08']));
+      expect(await p.suggestionExplained(conn, openRow({ parked_lat: null }), ids, RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(conn, openRow({ stop_started_at: null }), ids, RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(conn, openRow({ scheduled_service_id: null }), ids, RADIUS)).toBe(false);
       expect(conn.calls).toEqual([]);
-      expect(await p.suggestionExplained(pinsConn({ fail: true }), openRow(), group, RADIUS)).toBe(false);
+      expect(await p.suggestionExplained(pinsConn({ fail: true }), openRow(), ids, RADIUS)).toBe(false);
     });
 
     test('an explained suggestion is retired before anything else is decided; a stop at the pin closes it as before', async () => {
@@ -522,6 +519,39 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
         expect(close).toHaveBeenLastCalledWith('s-1', 'superseded', expect.objectContaining({ reason: 'stop_at_pin' }));
       } finally { close.mockRestore(); }
     });
+
+    test('a customer with an open suggestion and no visit in the window is judged on the source visit alone and decides nothing', async () => {
+      const store = require('../services/customer-pin-suggestions');
+      const close = jest.spyOn(store, 'closeSuggestion').mockResolvedValue({ id: 's-1' });
+      try {
+        const tally = { created: 0, closed: 0 };
+        const openByCustomer = new Map([['customer-1', openRow()]]);
+        const source = entry(['2026-10-08'], { flag: true, distanceM: 310 });
+        await p.applyDecisions(pinsConn({ customers: FOUND }), { judged: [], sources: [source], openByCustomer, radius: RADIUS, tally });
+        expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({ reason: 'other_customer_stop' }));
+        expect(tally).toEqual({ created: 0, closed: 1 }); // a source verdict never makes a suggestion
+        close.mockClear();
+        await p.applyDecisions(pinsConn({ customers: FOUND }), { judged: [], sources: [], openByCustomer, radius: RADIUS, tally });
+        expect(close).not.toHaveBeenCalled();
+      } finally { close.mockRestore(); }
+    });
+  });
+
+  test('the source visits of open suggestions are read by id, only when they are not already in the run', async () => {
+    const reads = [];
+    const builder = { whereIn: async (column, ids) => { reads.push([column, ids]); return []; } };
+    const q = new Proxy(builder, { get: (target, name) => target[name] || (() => q) });
+    const conn = Object.assign(() => q, { raw: (sql) => sql });
+    const opens = new Map([['customer-1', { scheduled_service_id: 'visit-1' }], ['customer-2', { scheduled_service_id: 'visit-2' }], ['customer-3', { scheduled_service_id: null }]]);
+    expect(await p.loadSourceVisits(conn, opens, [visit()])).toEqual([]);
+    expect(reads).toEqual([['s.id', ['visit-2']]]);
+    reads.length = 0;
+    expect(await p.loadSourceVisits(conn, new Map([['customer-1', { scheduled_service_id: 'visit-1' }]]), [visit()])).toEqual([]);
+    expect(reads).toEqual([]); // nothing to read
+    const f = new Proxy({}, { get: (_t, name) => (name === 'whereIn' ? async () => { throw Object.assign(new Error('db down'), { code: 'XX000' }); } : () => f) });
+    const failing = Object.assign(() => f, { raw: (sql) => sql });
+    expect(await p.loadSourceVisits(failing, opens, [])).toEqual([]);
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('could not read the visits of open suggestions'), { error: 'XX000' });
   });
 
   test('the run reads the short gaps (1 minute and up), clears before it decides and judges open suggestions again', () => {
@@ -529,7 +559,10 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
     expect(p.BRIEF_STOP_MIN_MINUTES).toBe(1);
     expect(source).toMatch(/minMinutes: BRIEF_STOP_MIN_MINUTES/);
     expect(source).toMatch(/const judged = await clearStopsAtOtherCustomers\(conn, judgeVisits\(/);
-    expect(source).toMatch(/decision\.action !== 'ok' && Boolean\(open\) && await suggestionExplained\(conn, open, group, radius\)/);
+    expect(source).toMatch(/decision\.action !== 'ok' && Boolean\(open\) && await suggestionExplained\(conn, open, entryById, radius\)/);
+    expect(source).toMatch(/const vehicles = await loadVehicles\(conn, \[\.\.\.visits, \.\.\.sourceVisits\], window\)/);
+    // the tally and the decisions come from the window's visits only; the source visits only feed suggestionExplained
+    expect(source).toMatch(/for \(const \{ verdict \} of judged\) tallyKey/);
   });
 });
 

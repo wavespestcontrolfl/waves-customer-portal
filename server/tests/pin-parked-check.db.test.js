@@ -458,6 +458,40 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect((await bellNow(bell.id)).done_at).not.toBeNull();
     });
 
+    test('an open suggestion whose visit left the window (runs missed) is judged again up to the lookback cap, and makes nothing new', async () => {
+      const { customerId } = await ourVisit(); // completed Oct 8
+      await customer(north(338));
+      await shortThenLong({ arrivalReceivedAt: '2026-10-09T13:00:00Z' }); // the trip that ended at the pin reaches us after the first run
+      expect(await run()).toMatchObject({ created: 1 });
+      const [row] = await open(customerId);
+      const bell = await bellFor(row);
+      const on = (iso) => runPinParkedCheck({ now: new Date(iso), conn: mockPg });
+      // Oct 16: the visit's day is past the 7 day cap, so its truck is not read again and the suggestion stays.
+      expect(await on('2026-10-16T12:00:00Z')).toMatchObject({ visits: 0, created: 0, closed: 0 });
+      expect(await open(customerId)).toHaveLength(1);
+      // Oct 13: out of the 3 day window, inside the cap: judged again on its own visit's truck data, and closed.
+      expect(await on('2026-10-13T12:00:00Z')).toMatchObject({ visits: 0, created: 0, closed: 1 });
+      expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
+      expect((await bellNow(bell.id)).done_at).not.toBeNull();
+      expect(await on('2026-10-13T12:00:00Z')).toMatchObject({ visits: 0, created: 0, closed: 0 });
+    });
+
+    test("a visit moved to another technician since the suggestion leaves it open: only the truck that made it counts", async () => {
+      const { customerId, visitId } = await ourVisit();
+      await customer(north(338));
+      await truckStopsAt(north(310), 29); // the first truck: the long stop only
+      expect(await run()).toMatchObject({ created: 1 });
+      // The visit is moved to another technician, whose truck parked 3 minutes at the pin that day.
+      const otherImei = 'TESTIMEI0002';
+      const otherTech = await technician(otherImei);
+      await mockPg('scheduled_services').where({ id: visitId }).update({ technician_id: otherTech });
+      const away = north(4000);
+      await tripData(`trip-x-${randomUUID()}`, [['2026-10-08T14:00:00Z', away], ['2026-10-08T14:20:00Z', north(19)]], { imei: otherImei });
+      await tripData(`trip-y-${randomUUID()}`, [['2026-10-08T14:23:00Z', north(19)], ['2026-10-08T14:40:00Z', away]], { imei: otherImei });
+      expect(await runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg })).toMatchObject({ visits: 1, created: 0, closed: 0 });
+      expect(await open(customerId)).toHaveLength(1);
+    });
+
     test('a short stop at the pin on another day does not clear the long stop', async () => {
       // The visit was started Oct 7 (a 3 minute stop at the pin) and done Oct 8 (29 minutes at the other customer's).
       const techId = await technician();
