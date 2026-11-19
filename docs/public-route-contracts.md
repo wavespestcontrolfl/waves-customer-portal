@@ -1393,6 +1393,14 @@ above. The estimate surface follows the same rule in hour mode: the offer filter
 (`filterCollidingSlots`), the ASAP packing dates and the hold/commit probes in
 `slot-reservation.js` count only the slot technician's rows plus unassigned ones
 while the gate is on, so an offered estimate hour reserves and commits.
+Far-south customers (owner rule B, 2026-11-19, with `GATE_SOUTH_ZONE_DAY_FUNNEL`
+live): the estimate page and the lead assessment link offer a technician on a
+far-south zone day only when that technician has a far-south stop that day, or
+the day has an unassigned far-south stop (`zone-day-funnel.js`
+`dropOtherTruckDays`, run before either page chooses among technicians). When
+no such opening is left, the page opens one new day, as with one technician.
+The assessment link's commit rebuild drops the same openings, so it books that
+zone-day technician or answers `SLOT_TAKEN`. No field or status changes.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7559,10 +7567,15 @@ estimate page's own helpers (`services/scheduling/zone-day-funnel.js`,
 `funnelOfferPool`; the pool narrows before the customer route check; the
 seed prefers the zone's route day under `GATE_ZONE_ROUTE_DAYS`), so such a lead
 can see fewer days, or one. A lead outside those zones, a gate-off request and
-any zone or stop lookup failure get the unfunneled list. The funnel is
-offer-time only, like the route check: the commit's single-day anti-forgery
-build and the location re-validation omit the address and are not funneled, so
-a time the funnel hid can still be committed by a request built by hand. No
+any zone or stop lookup failure get the unfunneled list. The commit's
+single-day anti-forgery build and the location re-validation pass the address
+too. With one technician (`GATE_MULTI_TECH_CONFIRM` off) a one-day build funnels
+to itself and reads nothing, so the funnel stays offer-time only, like the route
+check: a time the funnel hid can still be committed by a request built by hand.
+Per truck (`GATE_MULTI_TECH_CONFIRM` on, owner rule B 2026-11-19) every list,
+the commit build included, first drops each opening of a technician on another
+technician's far-south day (`dropOtherTruckDays`), so a zone day's start books
+its own technician, or answers `SLOT_TAKEN` when that technician lost the hour. No
 field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than

@@ -48,11 +48,19 @@
  * (techDays), and onZoneDay decides whether a date is a zone day for one
  * technician: a stop of that technician, or an unassigned stop (any truck may
  * take it). The night run's far-south rule (auto-dispatch/south-day-kept.js)
- * reads it. The booking funnels here (the estimate page, the assessment link)
- * keep the fleet's zone days: their slot builders choose among trucks around
- * the funnel (one technician per start, the customer route check's floor, the
- * seed day), so per truck there needs those choices made per truck too
- * (follow-up). Off, every zone day is the fleet's, as with one truck.
+ * reads it. The booking pages (the estimate page, the assessment link) follow
+ * owner rule B (2026-11-19, "Only the truck that is already going south that
+ * day"): dropOtherTruckDays removes each opening of a truck on another
+ * truck's zone day, and it runs on the openings BEFORE a page chooses among
+ * trucks (one technician per start, the one-per-hour collapse, the line
+ * rule's home-first start, the seed day, the customer route check and its
+ * floor). Each of those choices then runs exactly as with one truck, over
+ * what the rule allows: clustered keeps the zone trucks' own days, seeded
+ * opens one new day (no truck goes south on it yet; never empty when such a
+ * day has an opening). The assessment link's commit rebuild drops the same
+ * openings, because that commit books whichever truck its rebuild finds at
+ * the picked date and start (the estimate page books the signed slot's own
+ * technician). Off, every zone day is the fleet's, as with one truck.
  *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.
@@ -245,6 +253,15 @@ function onZoneDay(date, techId, days, techDays) {
   return !!techs && (techs.has(null) || techs.has(String(techId)));
 }
 
+// Owner rule B per truck: the slots a booking page may offer before it chooses among trucks. A date with no zone
+// stop stays open to every truck; a zone day only to its own trucks (onZoneDay: a stop of that technician, an
+// unassigned stop, or a slot with no technician). `view` = getZoneFunnelDays' { days, techDays }; `techOf(slot)` reads
+// a slot's technician id. Fleet-wide (techDays null) or no funnel (days null): the very same array.
+function dropOtherTruckDays(slots, { days = null, techDays = null } = {}, techOf) {
+  if (!days || !techDays || !Array.isArray(slots)) return slots;
+  return slots.filter((slot) => !days.has(slot?.date) || onZoneDay(slot.date, techOf(slot), days, techDays));
+}
+
 // Pure pool filter. funnelDays null → untouched. Otherwise clustered mode
 // keeps only zone-stop days; when none of those days survives in the pool
 // (no zone stop in the window, or every zone day's windows are taken or
@@ -271,26 +288,33 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
   };
 }
 
-// The same funnel for an offer pool that is not built by the estimate page
-// (the lead assessment link: routes/booking.js buildBookingAvailability, fed
-// the lead's address text). Same helpers, same rules: the zone resolves from
-// the address text through resolveEstimateZone, the cluster days come from
-// getZoneFunnelDays over THIS request's window, and applyZoneDayFunnel keeps
-// the cluster days or seeds one day (the pool's score order, route day first).
-// Returns `pool` itself — same array — whenever the funnel does not apply
-// (gate off, no address, no funneled zone) or cannot be resolved (zone or
-// lookup failure: logged, fail open, exactly as the estimate page does).
-async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn }) {
-  if (!address || !Array.isArray(pool) || !pool.length || !isEnabled('southZoneDayFunnel')) return pool;
+// The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
+// routes/booking.js buildBookingAvailability, fed the lead's address text), read in two steps because that
+// builder keeps one technician per date and start: offerFunnelView before its claims (per truck,
+// dropOtherTruckDays runs on find-time's slots), funnelOfferPool after them. Same helpers, same rules: the zone
+// resolves from the address text through resolveEstimateZone and the cluster days come from getZoneFunnelDays over
+// THIS request's window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
+// no funneled zone) or cannot be resolved (zone or lookup failure: logged, fail open, as the estimate page does).
+// In the fleet view a one-day window funnels to itself (clustered or seeded, that day stays whole), so it reads
+// nothing: the commit's single-day rebuild with the gate off runs exactly as before.
+async function offerFunnelView({ address, dateFrom, dateTo, conn }) {
+  if (!address || !isEnabled('southZoneDayFunnel')) return null;
+  if (dateFrom === dateTo && !perTruckLive()) return null;
   let estimateZone = null;
   try {
     estimateZone = await resolveEstimateZone(conn, { address });
   } catch (err) {
     logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
-    return pool;
+    return null;
   }
-  const { days } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
-  if (!days) return pool;
+  const { days, techDays } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
+  return days ? { days, techDays } : null;
+}
+
+// applyZoneDayFunnel over an offer pool with offerFunnelView's `view`: the cluster days, or one seed day (the
+// pool's score order, route day first). Returns `pool` itself (same array) when `view` is null or the pool empty.
+async function funnelOfferPool(pool, view, { routeDaySlug = null, conn } = {}) {
+  if (!view || !Array.isArray(pool) || !pool.length) return pool;
   let preferredSeedDates = [...new Set(pool.map((s) => s?.date).filter(Boolean))];
   if (routeDaySlug) {
     const { preferRouteDayDates, readZoneRouteDays } = require('./zone-route-days');
@@ -298,7 +322,7 @@ async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug =
       zoneSlug: routeDaySlug, config: await readZoneRouteDays(conn),
     });
   }
-  return applyZoneDayFunnel(pool, days, { preferredSeedDates }).slots;
+  return applyZoneDayFunnel(pool, view.days, { preferredSeedDates }).slots;
 }
 
 // The service_zones rows the funnel applies to right now (isFunnelZone: gate on AND slug in the funnel list). []
@@ -323,6 +347,8 @@ function rowInFunnelZones(row, zones) {
 module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
+  dropOtherTruckDays,
+  offerFunnelView,
   funnelOfferPool,
   funnelZoneRows,
   rowInFunnelZones,

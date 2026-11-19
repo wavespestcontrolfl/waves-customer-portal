@@ -2221,12 +2221,14 @@ async function sendSlotTaken(res, { location, address = null, range, config, cat
 
 // The picked slot re-checked at a location that differs from the one it
 // was offered for — the MATCHED slot object (technician/end_time can differ
-// by location), or null when it is not open there.
-async function revalidateSlotAt(location, { date, time, config, catalog, leadId }) {
+// by location), or null when it is not open there. `address` is that
+// location's address: per truck the far-south rule drops the same openings
+// as on the commit's own rebuild (zone-day-funnel.js dropOtherTruckDays).
+async function revalidateSlotAt(location, { date, time, config, catalog, leadId, address }) {
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
@@ -2616,9 +2618,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
     // Anti-forgery: re-validate against a fresh single-day availability
-    // build at the CATALOG's real duration (reservice-public's model).
+    // build at the CATALOG's real duration (reservice-public's model). It
+    // passes the address like the offered lists: one truck (fleet view), a
+    // one-day build funnels to itself and reads nothing; per truck
+    // (GATE_MULTI_TECH_CONFIRM, owner rule B) it drops each opening of a truck
+    // on another truck's far-south day, so the start goes to the truck the
+    // list offered, or SLOT_TAKEN when that truck lost the hour.
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address,
     });
     const slot = findSlotIn(dayAvailability, date, time);
     if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, range, config, catalog, leadId: lead.id });
@@ -2676,7 +2683,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // of its own (a gated weather-outlook call), neither of which may run
     // while that lock is held.
     const bookingSlot = locationMoved
-      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id })
+      ? await revalidateSlotAt(bookingLocation, { date, time, config, catalog, leadId: lead.id, address: customerAddressFields(custRow) })
       : slot;
     if (!bookingSlot) return sendSlotTaken(res, { location: bookingLocation, address: customerAddressFields(custRow), range, config, catalog, leadId: lead.id });
 

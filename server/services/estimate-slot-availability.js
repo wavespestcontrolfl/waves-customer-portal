@@ -40,7 +40,9 @@ const { ensureCatalogLoaded, expectedServiceMinutes, stopExpectedMinutesSync, ex
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY, MAKE_ROOM_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
-const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
+const {
+  getZoneFunnelDays, applyZoneDayFunnel, dropOtherTruckDays, onZoneDay, fallbackCenterZoneName,
+} = require('./scheduling/zone-day-funnel');
 const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRouteDaysPolicyKey } = require('./scheduling/zone-route-days');
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid,
@@ -2199,19 +2201,21 @@ function makeRoomModeFor(userOpts) {
 }
 
 // The zone-day funnel as the page resolved it (applyZoneDayFunnel): its cluster days, plus the one seed day when it
-// seeded one. funnelDays null = no funnel.
-function funnelAllows(funnelDays, funnel, date) {
-  return !funnelDays || funnelDays.has(date) || (funnel?.mode === 'seeded' && funnel.seedDate === date);
+// seeded one. funnelDays null = no funnel. Per truck (`techDays`, owner rule B) a cluster day admits only its own
+// trucks (onZoneDay); the seed day is never a zone day (dropOtherTruckDays ran on the pool it was chosen from).
+function funnelAllows(funnelDays, funnel, slot, techDays = null) {
+  return !funnelDays || onZoneDay(slot.date, slot.techId, funnelDays, techDays)
+    || (funnel?.mode === 'seeded' && funnel.seedDate === slot.date);
 }
 
 // This page's own offer rules for one window the make-room check tries: the request's dates and weekends, the
 // customer grid and close, the zone days, the time of day, the notice and the season.
-function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel = null }) {
+function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnelTechDays = null, funnel = null }) {
   return (slot) => {
     if (!slot?.date || slot.date < dateFrom || slot.date > dateTo) return false;
     if (!enumerateETDateStrings(slot.date, slot.date, { includeWeekends: opts.includeWeekends }).length) return false;
     if (!slotWindowFitsDay(slot.windowStart, slot.windowEnd)) return false;
-    if (!funnelAllows(funnelDays, funnel, slot.date)) return false;
+    if (!funnelAllows(funnelDays, funnel, slot, funnelTechDays)) return false;
     const kept = filterPastSlotsForToday(filterTimeOfDay([slot], opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes });
     return filterSeasonalSlots(kept, serviceProfile).length === 1;
   };
@@ -2552,7 +2556,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // — evaluated over THIS request's window, so a pinned single-date request
   // seeds that day instead of returning nothing. days null = funnel
   // inactive; the helper fails open on its own.
-  const { days: funnelDays, failed: funnelLookupFailed } = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
+  const { days: funnelDays, techDays: funnelTechDays, failed: funnelLookupFailed } = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
+  // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): a truck on another truck's zone day is never
+  // offered. Applied to each pool as it is built, before the page chooses among trucks (the one-per-hour collapse,
+  // the line rule's home-first start, the seed day, the customer route check and its floor), so each of those choices
+  // runs as with one truck over what is left. Fleet-wide, the very same array.
+  const truckDays = (slots) => dropOtherTruckDays(slots, { days: funnelDays, techDays: funnelTechDays }, (s) => s?.techId);
   // Fail-open must stay REQUEST-scoped: when the gate is on and either the
   // zone resolution or the zone-stop lookup failed, this request may be
   // serving an unfunneled pool to a funnel-zone estimate — caching that
@@ -2592,7 +2601,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       }))),
       stopDatesInRange(dateFrom, dateTo, estimateId),
     ]);
-    const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !dateHasStop(stopDates, s)), lineRanking);
+    const asapRaw = applyLineOfferRule(truckDays(asapLists.flat().filter((s) => !dateHasStop(stopDates, s))), lineRanking);
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
     const filtered = applyOnePerHour(applyLineOfferRule(dedupeSlots(asap), lineRanking, { sameStart: true })).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
@@ -2710,10 +2719,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // A date with a committed stop offers ONLY the packed find-time ends — a
   // synthetic hourly ASAP window there is the exact hole-maker the bug
   // report describes (owner ruling 2026-09-23). An empty date is untouched.
-  const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !dateHasStop(stopDates, s)), lineRanking);
+  const asapRaw = applyLineOfferRule(truckDays(asapLists.flat().filter((s) => !dateHasStop(stopDates, s))), lineRanking);
 
-  const classifiedRaw = applyLineOfferRule((raw?.slots || [])
-    .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes)), lineRanking);
+  const classifiedRaw = applyLineOfferRule(truckDays((raw?.slots || [])
+    .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes))), lineRanking);
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
   const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
@@ -2780,7 +2789,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
     // The zone the page passes find-time, for the self-serve drive cap's route-day lift.
     zoneSlug: routeDaySlug,
-    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
+    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnelTechDays, funnel }),
     placement: makeRoomPlacement({ estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, estimateId, lineRanking }),
   };
   // Mode on: the earliest passing make-room hour joins the list below (the free list when none does). Shadow, and
