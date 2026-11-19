@@ -174,7 +174,9 @@ function simulateBookedDay(rows, { origin, departureMin, blocks, date }) {
       raw_estimate_minutes: stop.memberIds ? stop.estimated_duration_minutes
         : ('raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes),
       estimated_duration_minutes: stop.memberIds ? stop.estimated_duration_minutes : workDuration(stop) })), {
-      startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals: serviceBlocks(blocks),
+      startMin: departureMin, origin, end: origin, reportLate: true,
+      // Every block, unfiltered, as dispatch passes them: one with no valid span makes the simulation refuse the day.
+      blockedIntervals: blocks.map(({ startMin, endMin }) => ({ startMin, endMin })),
       dayEndMin: DISPATCH_DAY_END, includeReturnInFinish: true,
       legMinutes: (from, to, departMin) => travel.lookup({ date, from, to, departureMin: departMin }).minutes,
     });
@@ -377,13 +379,17 @@ function recoverable(conn, read) {
   return read(conn);
 }
 
-/** A date's live rows (the re-plan's own read: expired holds out), read once per run; null when the read failed. */
+/**
+ * A date's rows, read once per run; null when the read failed. The re-plan's own read, with every visit staff have
+ * booked (reservation-occupancy bookedVisitOrLiveHold: a customer-linked visit counts even when it keeps its old hold
+ * timestamp), the rule dispatch's commit-time checks count; an unclaimed hold counts until it expires.
+ */
 function rowReader(conn) {
   const cache = new Map();
   return async (day) => {
     if (!cache.has(day)) {
       try {
-        cache.set(day, await recoverable(conn, (c) => replan.loadDayStops(c, day)));
+        cache.set(day, await recoverable(conn, (c) => replan.loadDayStops(c, day, true)));
       } catch (err) {
         logger.warn(`[route-check] ${day}: stops read failed (${err.message})`);
         cache.set(day, null);
@@ -403,7 +409,9 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
     const mixById = new Map(occupancy.filter((r) => r.reservation_service_mix != null).map((r) => [String(r.id), r.reservation_service_mix]));
     const own = rows.filter((r) => String(r.technician_id) === techId)
       .map((r) => (r.reservation_service_mix == null && mixById.has(String(r.id)) ? { ...r, reservation_service_mix: mixById.get(String(r.id)) } : r));
-    const blocks = await recoverable(conn, (c) => replan.loadBlocks(c, day, techId));
+    // Every block, also one with no valid span: dispatch's simulation refuses such a day, so the check leaves it
+    // unmeasured (pre-push audit round 33).
+    const blocks = await recoverable(conn, (c) => replan.loadBlocks(c, day, techId, { keepInvalid: true }));
     // Time held for this technician: every booked span the booking surfaces count, exact to the minute
     // (listOccupiedWindows: make-room destinations included; a window may end off the hour).
     const held = heldSpans(occupancy, techId, env.techBlind);

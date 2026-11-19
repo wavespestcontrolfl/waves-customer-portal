@@ -230,6 +230,14 @@ describe('one tech-day', () => {
     expect(rc.measureTechDay({ ...open, rows: [stop('late', '17:30:00', null)] }).skip).toBe('NO_SIMULATION');
   });
 
+  test("a block with no valid span leaves the day unmeasured, as dispatch's simulation refuses it (round 33)", () => {
+    const day = [stop('s1', '10:00:00', null)];
+    for (const block of [{ startMin: 600, endMin: 600 }, { startMin: 660, endMin: 600 }, { startMin: NaN, endMin: 600 }]) {
+      expect(rc.measureTechDay({ ...open, rows: day, blocks: [block] }).skip).toBe('NO_SIMULATION');
+    }
+    expect(rc.measureTechDay({ ...open, rows: day, blocks: [{ startMin: 600, endMin: 660 }] }).skip).toBeUndefined();
+  });
+
   test('after the day closes there is no opening', () => {
     expect(rc.measureTechDay({ ...open, rows: [], departureMin: 1050, openMin: 1050 })).toMatchObject({ openings: [], slots: 0 });
   });
@@ -416,6 +424,17 @@ describe('runRouteCheck', () => {
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
     replan.loadBlocks.mockResolvedValue([]);
+  });
+
+  test("the check reads every visit staff have booked and every block, as dispatch's commit-time checks do (round 33)", async () => {
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [stop('s1', '10:00:00', null)] : []));
+    const { conn } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    expect(replan.loadDayStops.mock.calls.length).toBeGreaterThan(0);
+    expect(replan.loadDayStops.mock.calls.every(([, , booked]) => booked === true)).toBe(true);
+    expect(replan.loadBlocks.mock.calls.length).toBeGreaterThan(0);
+    expect(replan.loadBlocks.mock.calls.every(([, , , options]) => options?.keepInvalid === true)).toBe(true);
+    replan.loadDayStops.mockResolvedValue([]);
   });
 
   test("a version-2 allocation's services are one stop: its allocation comes from the occupancy read", async () => {
