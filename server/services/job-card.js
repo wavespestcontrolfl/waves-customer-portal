@@ -1335,6 +1335,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
         substitutedFor: item.substitution?.originalProductName || null,
         // Only the primary lawn plan's lines take the "Use" tick: the ids ride to the plan engine, never to an add-on's protocol.
         ...(item.role === 'conditional' || item.conditional === true ? { planOption: true } : {}),
+        // The id the engine matches a Use tick against: the original product's when an approved substitution swaps it.
+        selectionId: item.substitution?.originalProductId || item.product.id,
         ...(item.bermudaStep ? { bermudaStep: true } : {}),
       });
     }
@@ -1757,7 +1759,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       role: line.role || 'base',
       conditional: line.selected === false,
       // The primary lawn plan's "if needed" line (takes a Use tick) and the bermuda removal step (its lines tick together).
-      ...(line.planOption ? { planOption: true } : {}),
+      ...(line.planOption ? { planOption: true, selectionId: line.selectionId } : {}),
       ...(line.bermudaStep ? { bermudaStep: true } : {}),
       line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.source ? `${line.source}: ${describeLine(line.raw)}` : describeLine(line.raw), ...line.extraLines.map(describeLine)].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
       verdict: verdict.verdict,

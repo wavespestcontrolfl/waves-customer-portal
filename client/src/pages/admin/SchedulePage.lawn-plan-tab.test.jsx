@@ -21,6 +21,7 @@ const STEP_IDS = ["rec", "fus", "nis"];
 let blocked = false;
 let serverIgnores = [];
 let hold = null;
+let jobCardOff = false;
 const idsOf = (url) => (new URL(url, "http://x").searchParams.get("selectedConditionalProductIds") || "").split(",").filter(Boolean);
 
 // The server's resolved selection for a read: the ids asked for, less any it refuses; a bermuda step is all or none.
@@ -49,7 +50,9 @@ const cardFor = (url) => {
     mixingOrder: [{ step: 1, productId: "base", productName: "Fixture potassium", instruction: "Add the potassium first." }],
     bermudaMixingOrder: [{ step: 1, productId: null, productName: "Water", instruction: "Half fill the backpack." }, { step: 2, productId: "rec", productName: "Fixture rec", instruction: "Add rec." }],
     products: [
-      optionCard("opt", "Fixture optional"),
+      optionCard("opt", "Fixture optional", { order: { quantity: 2, unit: "gal", packSize: "1 gal" } }),
+      // An approved substitution: the engine matches the tick by the original product id.
+      { ...optionCard("sub", "Fixture substitute", { selectionId: "orig" }), conditional: !on.includes("orig"), planned: on.includes("orig") ? { amount: 5, unit: "fl oz" } : null },
       { id: "base", name: "Fixture base", role: "base", conditional: false, verdict: "ok", planned: { amount: 2, unit: "fl oz" }, line: "Fixture base line" },
       // A conditional line of a tree and shrub add-on: the server applies the ticks to the lawn plan only.
       { id: "tree", name: "Fixture tree add-on", role: "conditional", conditional: true, verdict: "ok", planned: null, line: "Tree line" },
@@ -63,7 +66,7 @@ function fixture(url) {
   if (path.endsWith("/intelligence-bar/quick-actions")) return { actions: [] };
   if (path.endsWith("/job-card/products")) return { products: [{ id: "alpha", name: "Fixture alpha", category: "x" }] };
   if (path.endsWith("/job-card/mix")) return { enabled: true, amount: 1.5, unit: "oz", gallons: 110, sprayCheck: { verdict: "ok" }, rotationWarnings: [], tank: { calibrated: true } };
-  if (path.includes("/protocols/job-card/")) return cardFor(url);
+  if (path.includes("/protocols/job-card/")) return jobCardOff ? { enabled: false } : cardFor(url);
   if (path.includes("/treatment-plans/")) return { plan: planFor(url) };
   if (path.endsWith("/pay-growth/availability")) return { available: false };
   if (path.endsWith("/turf-profile")) return { profile: { track_key: "A_St_Aug_Sun", lawn_sqft: 10000 } };
@@ -72,7 +75,7 @@ function fixture(url) {
   if (path.endsWith("/scripts")) return { scripts: [] };
   if (path.endsWith("/equipment")) return { checklists: [] };
   if (path.endsWith("/programs")) return { track: { name: "Fixture program", notes: [], visits: [] } };
-  if (path.endsWith("/lawn-mix")) return { month: "Jul", visit: { visit: 7 }, areaSqft: 10000, equipment: null, items: [] };
+  if (path.endsWith("/lawn-mix")) return { month: "Jul", visit: { visit: 7 }, areaSqft: 10000, equipment: { systemName: "Fixture rig", carrierGalPer1000: 2 }, items: [{ raw: "Legacy line", selected: true, product: { name: "Legacy mix product" }, jobMix: { amount: 7, amountUnit: "fl oz" }, fullTankMix: { amount: 14, amountUnit: "fl oz" } }] };
   throw new Error(`Unexpected request: ${path}`);
 }
 const asked = (match) => fetch.mock.calls.map(([u]) => String(u)).filter((u) => u.includes(match));
@@ -82,6 +85,7 @@ beforeEach(() => {
   blocked = false;
   serverIgnores = [];
   hold = null;
+  jobCardOff = false;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
     // A held read of the job card or the plan with ticks: the panel waits on it, as on a slow network.
@@ -142,6 +146,35 @@ describe("ProtocolPanel Plan tab", () => {
     await mount();
     fireEvent.click(await screen.findByRole("button", { name: "See Plan tab" }));
     expect(await screen.findByText("Fixture track")).toBeInTheDocument();
+  });
+});
+
+describe("the legacy Lawn tab", () => {
+  const openLawnTab = async () => {
+    await act(async () => { render(<MemoryRouter><ProtocolPanel service={service} onClose={() => {}} /></MemoryRouter>); });
+    fireEvent.click(await screen.findByRole("button", { name: "Lawn" }));
+  };
+
+  it("with the Job tab on it shows no mix amounts, only a line naming the Job tab", async () => {
+    await openLawnTab();
+    expect(await screen.findByText("Amounts show on the Job tab.")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy mix product")).toBeNull();
+    expect(screen.queryByText(/7 fl oz|14 fl oz/)).toBeNull();
+  });
+
+  it("with the Job tab off the Lawn tab's mix shows as before", async () => {
+    jobCardOff = true;
+    await openLawnTab();
+    expect(await screen.findByText("Legacy mix product")).toBeInTheDocument();
+    expect(screen.queryByText("Amounts show on the Job tab.")).toBeNull();
+  });
+
+  it("with the Job tab off the Plan tab names the Lawn tab for mix amounts", async () => {
+    jobCardOff = true;
+    await act(async () => { render(<MemoryRouter><ProtocolPanel service={service} onClose={() => {}} initialSection="lawn_plan" /></MemoryRouter>); });
+    expect(await screen.findByText("The Job tab is off. Mix amounts show on the Lawn tab.")).toBeInTheDocument();
+    expect(screen.queryByText("Amounts show on the Job tab.")).toBeNull();
+    expect(screen.queryByLabelText(/^Use /)).toBeNull();
   });
 });
 
@@ -217,6 +250,30 @@ describe("Use ticks on the Job tab", () => {
     await waitFor(() => expect(asked("/job-card/").at(-1)).not.toContain("selectedConditionalProductIds"));
     await waitFor(() => expect(screen.getByLabelText("Use Fixture rec")).not.toBeDisabled());
     for (const id of STEP_IDS) expect(screen.getByLabelText(`Use Fixture ${id}`)).not.toBeChecked();
+  });
+
+  it("a tick on a substituted product sends the original product id, and the box shows checked when the server selects it", async () => {
+    await mount();
+    fireEvent.click(await screen.findByLabelText("Use Fixture substitute"));
+    await waitFor(() => expect(lastCardIds()).toEqual(["orig"]));
+    await waitFor(() => expect(screen.getByLabelText("Use Fixture substitute")).not.toBeDisabled());
+    expect(screen.getByLabelText("Use Fixture substitute")).toBeChecked();
+    expect(screen.getAllByText("Fixture substitute").length).toBeGreaterThan(0);
+  });
+
+  it("no restock sized for the old selection: Order more is gone while a tick is re-read, and an open confirmation does not survive it", async () => {
+    await mount();
+    await screen.findByLabelText("Use Fixture optional");
+    fireEvent.click(document.getElementById("job-card-product-opt"));
+    fireEvent.click(await screen.findByRole("button", { name: "Order more" }));
+    expect(screen.getByRole("button", { name: "Tap again to order" })).toBeInTheDocument();
+    hold = deferred();
+    fireEvent.click(screen.getByLabelText("Use Fixture optional"));
+    await screen.findAllByText("Checking the new selection…");
+    expect(screen.queryByRole("button", { name: /Order more|Tap again to order/ })).toBeNull();
+    await act(async () => { hold.release(); });
+    expect(await screen.findByRole("button", { name: "Order more" })).not.toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Tap again to order" })).toBeNull();
   });
 
   it("a tick clears the Tank search's product and result, and the next search reads the same ticks", async () => {

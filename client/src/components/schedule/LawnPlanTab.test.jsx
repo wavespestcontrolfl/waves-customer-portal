@@ -6,6 +6,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import LawnPlanTab from './LawnPlanTab';
+import protocols from '../../../../server/config/protocols.json';
 
 afterEach(cleanup);
 
@@ -69,6 +70,25 @@ describe('LawnPlanTab', () => {
     // The unmatched line has no product: its description is the name.
     expect(screen.getAllByText('Orphan Herbicide').length).toBeGreaterThan(0);
     expect(container.textContent).not.toMatch(/0\.5|3\.51|per 1,000|\$|2 oz|15\.00/);
+  });
+
+  it('shows the plan objective by its description: the real June lawn note, with its Advion rate, shows no dose', () => {
+    const note = JSON.stringify(protocols).match(/"notes":"([^"]*Advion Insect Granule bait, 3 lb per 1,000 sq ft[^"]*)"/)?.[1];
+    expect(note).toBeTruthy();
+    // What GET /admin/treatment-plans sends as `objectiveDescription` for that note (the server's describeLine output).
+    const objectiveDescription = 'BLACKOUT. K-Flow (soil-test gated). N rate: ★ Chinch IPM threshold defined. Mole cricket nymph spots (UF/IFAS and Clemson: treat small nymphs from mid-June through July): Advion Insect Granule bait, of treated area by hand shaker, on the tunnel areas, once per spot per year. Fall adults: Dylox.';
+    const { container } = render(<LawnPlanTab plan={{ ...plan, protocol: { ...plan.protocol, objective: note, objectiveDescription } }} loading={false} error="" onRefresh={() => {}} />);
+    expect(container.textContent).toContain('Advion Insect Granule bait');
+    expect(container.textContent).not.toMatch(/3 lb|per 1,000 sq ft|\$/);
+  });
+
+  it('names the tab that carries the mix amounts, by whether the panel has a Job tab', () => {
+    const { rerender } = render(<LawnPlanTab plan={plan} loading={false} error="" onRefresh={() => {}} jobTab />);
+    expect(screen.getByText('Amounts show on the Job tab.')).toBeTruthy();
+    rerender(<LawnPlanTab plan={plan} loading={false} error="" onRefresh={() => {}} jobTab={false} />);
+    expect(screen.getByText('The Job tab is off. Mix amounts show on the Lawn tab.')).toBeTruthy();
+    rerender(<LawnPlanTab plan={plan} loading={false} error="" onRefresh={() => {}} />);
+    expect(screen.queryByText(/Job tab/)).toBeNull();
   });
 
   it('says so while loading, and when the plan cannot be read', () => {

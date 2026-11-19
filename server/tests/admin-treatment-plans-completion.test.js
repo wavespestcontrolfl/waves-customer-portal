@@ -145,3 +145,15 @@ test.each([true, false])('every protocol line carries a description with no rate
   for (const item of [...protocol.base, ...protocol.conditional]) expect(item.description).not.toMatch(/\$|0\.5|1,000|fl oz| oz|15\.00/);
   expect(protocol.base[0].raw).toBe(tech ? 'Stonewall 4FL 0.5 fl oz per 1,000' : raw);
 });
+
+// The engine copies the visit's notes into protocol.objective, and a June lawn note names an Advion rate and a price can ride in a note too.
+test.each([true, false])('the plan objective carries a description with no rate and no price, from the real June lawn note (technician=%s)', async tech => {
+  const protocols = require('../config/protocols.json');
+  const note = JSON.stringify(protocols).match(/"notes": ?"([^"]*Advion Insect Granule bait, 3 lb per 1,000 sq ft[^"]*)"/)?.[1];
+  expect(note).toBeTruthy();
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { objective: `${note} ($4.20)`, base: [], conditional: [] } });
+  const { protocol } = (await run({ tech })).body.plan;
+  expect(protocol.objectiveDescription).toContain('Advion Insect Granule bait');
+  expect(protocol.objectiveDescription).not.toMatch(/\$|3 lb|1,000|\blb\b/);
+  expect(protocol.objective).toContain('3 lb per 1,000 sq ft');
+});

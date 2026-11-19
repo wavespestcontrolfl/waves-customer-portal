@@ -7204,7 +7204,9 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
             {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
           </div>
         )}
-        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />
+        {/* While a tick is re-read the order is sized for the old selection, so there is no order button; it comes
+            back idle (any open confirmation gone) with the new quantity. */}
+        {!pending && <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />}
       </div>
     </JobCardCollapsible>
   );
@@ -7557,9 +7559,10 @@ export function JobCardTab({ card, loading, error, D, lawn = null }) {
       ))}
       {products.map((p) => {
         // The bermuda removal step is one selection: its lines tick together.
-        const ids = (p.bermudaStep ? products.filter((c) => c.bermudaStep) : [p]).map((c) => String(c.id));
+        // A tick is matched by the id the engine selects by (`selectionId`: the original product's when a substitution swaps it).
+        const ids = (p.bermudaStep ? products.filter((c) => c.bermudaStep) : [p]).map((c) => String(c.selectionId || c.id));
         const use = lawn && p.planOption ? {
-          checked: lawn.pending ? lawn.selectedIds.includes(String(p.id)) : !p.conditional,
+          checked: lawn.pending ? lawn.selectedIds.includes(String(p.selectionId || p.id)) : !p.conditional,
           disabled: lawn.pending,
           onSet: (wanted) => lawn.onSet(ids, wanted),
         } : null;
@@ -8130,6 +8133,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
           />
         ) : activeSection === "lawn_plan" && isLawn ? (
           <LawnPlanTab
+            jobTab={jobCardLoading ? null : jobCardEnabled}
             plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
             loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
             error={lawnPlanError}
@@ -8241,7 +8245,9 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                         lawn sqft before using product amounts.
                       </div>
                     )}
-                    {lawnMix && (
+                    {lawnMix && (jobCardEnabled ? (
+                      <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>Amounts show on the Job tab.</div>
+                    ) : (
                       <div
                         style={{
                           background: D.bg,
@@ -8486,7 +8492,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                           </div>
                         )}
                       </div>
-                    )}
+                    ))}
                     {lawnProtocol && (
                       <>
                         <div

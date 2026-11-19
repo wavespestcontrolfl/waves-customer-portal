@@ -59,11 +59,11 @@ function projectPlanResponse(plan, { technician = false } = {}) {
     const stockAdvisory = require('../services/stock-advisory').isLawnTsStockAdvisoryCompletion({ service_type: propertyGate.service });
     projected = { ...plan, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
   }
-  // The Plan tab shows each protocol line's `description`: the Job tab's own text rule (no rate, no price), for every
-  // viewer. `raw` stays for readers that need the protocol's words.
+  // The Plan tab shows each protocol line's `description` and the plan's `objectiveDescription` (the visit's notes):
+  // the Job tab's own text rule (no rate, no price), for every viewer. `raw` and `objective` stay for other readers.
   if (projected?.protocol) {
     const describe = (items) => (Array.isArray(items) ? items.map((item) => ({ ...item, description: describeLine(item.raw) })) : items);
-    projected = { ...projected, protocol: { ...projected.protocol, base: describe(projected.protocol.base), conditional: describe(projected.protocol.conditional) } };
+    projected = { ...projected, protocol: { ...projected.protocol, objectiveDescription: describeLine(projected.protocol.objective), base: describe(projected.protocol.base), conditional: describe(projected.protocol.conditional) } };
   }
   return technician ? deepStripPriceTokens(stripKeysDeep(projected, TECHNICIAN_PLAN_OWNER_ONLY_KEYS)) : projected;
 }

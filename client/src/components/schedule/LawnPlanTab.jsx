@@ -122,7 +122,14 @@ function LawnFacts({ plan, onRefresh }) {
   );
 }
 
-export default function LawnPlanTab({ plan, loading, error, onRefresh }) {
+// The note under the protocol lines names the tab that carries the mix amounts, by `jobTab`: true = the panel has a
+// Job tab; false = it does not (the legacy Lawn tab then carries the mix); null or not given = not known yet, no note.
+const AMOUNTS_NOTE = {
+  true: 'Amounts show on the Job tab.',
+  false: 'The Job tab is off. Mix amounts show on the Lawn tab.',
+};
+
+export default function LawnPlanTab({ plan, loading, error, onRefresh, jobTab }) {
   if (error) {
     return <NoticeList title="Plan unavailable" tone="alert" items={[{ code: 'load_failed', message: error }]} />;
   }
@@ -144,13 +151,13 @@ export default function LawnPlanTab({ plan, loading, error, onRefresh }) {
         </div>
       )}
       <PlanCard icon={ClipboardList} title="Protocol lines">
-        <div className="text-14 text-ink-secondary leading-snug mb-3">{plan.protocol?.objective || 'No protocol objective available.'}</div>
+        <div className="text-14 text-ink-secondary leading-snug mb-3">{plan.protocol?.objectiveDescription || 'No protocol objective available.'}</div>
         <div className="space-y-2">
           {[...base, ...conditional].map((item, idx) => (
             <ProtocolLine key={`${idx}-${item.raw}`} item={item} />
           ))}
         </div>
-        <div className="text-14 text-ink-secondary mt-3">Amounts show on the Job tab.</div>
+        {AMOUNTS_NOTE[jobTab] && <div className="text-14 text-ink-secondary mt-3">{AMOUNTS_NOTE[jobTab]}</div>}
       </PlanCard>
       <PlanCard icon={Camera} title="Closeout">
         <div className="grid grid-cols-1 gap-3">

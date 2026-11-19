@@ -589,6 +589,25 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     for (const c of addOnCards) expect(c).not.toHaveProperty('planOption');
   });
 
+  test('a Use tick on a substituted "if needed" product is matched by the original product id; the card keeps the substitute for display', async () => {
+    const cat = [{ id: 'sub', name: 'Substitute', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, { id: 'opt', name: 'Optional', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }];
+    const mix = { amount: 1, amountUnit: 'fl oz' };
+    const buildPlan = jest.fn().mockResolvedValue({
+      propertyGate: { month: 'Sep', visit: 9, blocks: [] },
+      mixCalculator: {
+        items: [],
+        conditionalOptions: [
+          { raw: 'Original line', role: 'conditional', conditional: true, selected: false, product: { id: 'sub' }, mix, substitution: { originalProductId: 'orig', originalProductName: 'Original' } },
+          { raw: 'Opt line', role: 'conditional', conditional: true, selected: false, product: { id: 'opt' }, mix },
+        ],
+      },
+    });
+    const out = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog: cat, dbh: () => ({}), deps: { buildPlan } });
+    const cards = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
+    expect(cards.find((c) => c.id === 'sub')).toMatchObject({ id: 'sub', name: 'Substitute', planOption: true, selectionId: 'orig' });
+    expect(cards.find((c) => c.id === 'opt')).toMatchObject({ planOption: true, selectionId: 'opt' });
+  });
+
   test('a plan failure yields no lines instead of a crash', async () => {
     const buildPlan = jest.fn().mockRejectedValue(new Error('Scheduled service not found'));
     const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
