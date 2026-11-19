@@ -417,39 +417,24 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect((await bellNow(bell.id)).done_at).not.toBeNull();
     });
 
-    test("a neighbour's visit completed after the bell explains the stop: the old suggestion is retired with its bell", async () => {
+    test("an exclusion today does not hide the two facts: the neighbour's visit closed out after the bell, the short stop received late", async () => {
       const techId = await technician();
       const customerId = await customer();
-      const neighbourPin = north(520);
+      const neighbourPin = north(338); // 28 m from the long stop
       const neighbourId = await customer(neighbourPin);
       await completedVisit(customerId, techId);
-      await truckStopsAt(north(540), 30);
+      await shortThenLong({ arrivalReceivedAt: '2026-10-09T13:00:00Z' }); // the trip that ended at the pin reaches us after the first run
       expect(await run()).toMatchObject({ visits: 1, created: 1 });
       const [row] = await open(customerId);
       const bell = await bellFor(row);
-      // The neighbour's job that day is closed out a day late, after the bell.
+      // The neighbour's job that day is closed out a day late, after the bell. Today the long stop is excluded as the
+      // neighbour's visit, so our visit is not flagged: the two facts are judged on the open suggestion itself.
       await completedVisit(neighbourId, techId, { lat: neighbourPin.lat, lng: neighbourPin.lng, completed_at: new Date('2026-10-09T13:00:00Z') });
       const later = () => runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
       expect(await later()).toMatchObject({ visits: 2, created: 0, closed: 1, neighbour_visit: 1, stop_at_pin: 1 });
       expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
       expect((await bellNow(bell.id)).done_at).not.toBeNull();
       expect(await later()).toMatchObject({ created: 0, closed: 0 });
-    });
-
-    test("a neighbour's visit on another day than the stop does not retire the suggestion", async () => {
-      // Our visit: the truck stood 540 m away on Oct 7; the visit was closed out on Oct 8.
-      const techId = await technician();
-      const customerId = await customer();
-      const neighbourPin = north(520);
-      const neighbourId = await customer(neighbourPin);
-      await completedVisit(customerId, techId, { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-08T13:00:00Z') });
-      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
-      expect(await run()).toMatchObject({ visits: 1, created: 1 });
-      // The neighbour's only visit is on Oct 8: it shares a day with ours, but not the day of the stop.
-      await completedVisit(neighbourId, techId, { lat: neighbourPin.lat, lng: neighbourPin.lng, completed_at: new Date('2026-10-09T13:00:00Z') });
-      const result = await runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
-      expect(result).toMatchObject({ visits: 2, created: 0, closed: 0, neighbour_visit: 1 });
-      expect(await open(customerId)).toHaveLength(1);
     });
 
     test('a grouped partner completed after the bell is the row judged next; the suggestion of the first partner is still retired', async () => {
