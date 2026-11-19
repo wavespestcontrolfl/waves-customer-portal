@@ -4,6 +4,7 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, 
   startCoVisitChain, advanceCoVisit } = require('../route-reorder-window-fit');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 const { isHoldStop } = require('./travel-gap');
+const { LIVE_SERVICE_OR_HOLD_SQL } = require('./reservation-occupancy');
 
 // Route-quality measures work still to be performed. stops-ahead keeps
 // completed visits as route stops (position/total on the day of service),
@@ -362,7 +363,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
     const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
       select: dayStopSelect(conn),
-    }).whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
+    }).whereRaw(LIVE_SERVICE_OR_HOLD_SQL);
     const unallocated = stops.filter(stop => !techs.some(tech => tech.id === stop.technician_id));
     const closed = blackouts.dates.has(date);
     const byTech = techs.map(tech => {

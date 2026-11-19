@@ -391,7 +391,7 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(true);
   });
 
-  test('a route restored by a customer-linked hold stamp schedules with existing travel estimates', async () => {
+  test('a restored booking keeps existing road checks and uses local travel only for the new legs', async () => {
     const { loadArrivalRouteContext, enumerateArrivalPlacements } = require('../services/scheduling/arrival-route');
     const travel = require('../services/route-optimizer').createSchedulingTravel({ maxRequests: 0 });
     const read = async () => {
@@ -402,18 +402,25 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       const { placements } = enumerateArrivalPlacements(context, {
         durationMinutes: 60, earliestStartMin: 480, latestServiceEndMin: 1080, collectLegs: legs,
       });
-      return { legs, placements: placements.map(slot => slot.windowStart) };
+      return { legs: new Set(legs.map(travel.requestKey)), placements: placements.map(slot => slot.windowStart) };
     };
     await mockConn('scheduled_services').where({ id: NORTH }).update({ customer_id: CUSTOMER });
     const before = await read();
-    expect(before.legs.length).toBeGreaterThan(0);
+    expect(before.legs.size).toBeGreaterThan(0);
     expect(before.placements.length).toBeGreaterThan(0);
     await mockConn('scheduled_services').where({ id: NORTH }).update({
-      reservation_expires_at: mockConn.raw("now() - interval '1 hour'"),
+      customer_id: null, reservation_expires_at: mockConn.raw("now() - interval '1 hour'"),
     });
+    const previouslyVisible = (await read()).legs;
+    await mockConn('scheduled_services').where({ id: NORTH }).update({ customer_id: CUSTOMER });
     const after = await read();
     expect(after.placements).toEqual(before.placements);
-    expect(after.legs).toEqual([]);
+    const shared = new Set([...before.legs].filter(leg => previouslyVisible.has(leg)));
+    expect(shared.size).toBeGreaterThan(0);
+    expect(shared.size).toBeLessThan(before.legs.size);
+    expect(after.legs).toEqual(shared);
+    await mockConn('scheduled_services').where({ id: NORTH }).update({ reservation_expires_at: mockConn.raw("now() + interval '1 hour'") });
+    expect((await read()).legs).toEqual(before.legs);
   });
 
   test('the estimate picker, route capacity and writer preserve a committed appointment from the same estimate', async () => {

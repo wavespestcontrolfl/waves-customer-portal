@@ -245,6 +245,7 @@ async function loadArrivalRouteContext({
   const rows = await dayStopsQuery(conn, {
     dateStr: date,
     excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
+    selectHoldExpiry: true,
     select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
       // An unstamped row inherits the customer's premise, and the co-visit
       // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
@@ -280,10 +281,15 @@ async function loadArrivalRouteContext({
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
     && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && isHoldStop(row))), planningMinutes);
-  // Restoring a previously omitted booking may add route legs. Use cached
-  // times or the local drive model for that route without buying more legs.
-  const cachedRoadsOnly = dayRows.some(row => row.customer_id != null && row.reservation_expires_at != null
-    && (row.technician_id == null || row.technician_id === techId));
+  // Keep the previous route for road pricing only. A newly restored stop
+  // participates in every feasibility check. Its new legs may use a cached
+  // answer or the local model, without suppressing other stops' road checks.
+  const hasChangedRoads = dayRows.some(row => row.customer_id != null && row.reservation_expires_at != null
+    && (row.technician_id == null || row.technician_id === techId)
+    && (row.hold_lapsed || !capacity || (excludeEstimateId && row.source_estimate_id === excludeEstimateId)));
+  const previousRoadRows = hasChangedRoads ? dayRows
+    .filter(row => !row.hold_lapsed && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at))
+    .map(row => row.reservation_expires_at ? { ...row, hold: true } : row) : null;
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
@@ -293,7 +299,7 @@ async function loadArrivalRouteContext({
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   routeOrderPinned,
-  travel, preserveCapacity, blocks, cachedRoadsOnly,
+  travel, preserveCapacity, blocks, previousRoadRows,
   planningMinutes,
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
@@ -940,9 +946,25 @@ function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, 
   };
 }
 
+/** Ask for road times only when the same billed leg already belonged to the
+ * previous route. The result always comes from the actual booked calendar. */
+function evaluateArrivalPlacement(context, options) {
+  if (!context?.previousRoadRows || !options.collectLegs) return evaluateRoute(context, options);
+  const priorLegs = [];
+  const bookedLegs = [];
+  evaluateRoute({ ...context, rows: context.previousRoadRows }, { ...options, collectLegs: priorLegs });
+  const result = evaluateRoute(context, { ...options, collectLegs: bookedLegs });
+  const requestKey = context.travel?.requestKey || RouteOptimizer.schedulingLegKey;
+  const previous = new Set(priorLegs.map(requestKey));
+  for (const leg of bookedLegs) {
+    if (previous.has(requestKey(leg))) options.collectLegs.push(leg);
+  }
+  return result;
+}
+
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
-function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
-  departureMin, returnByMin, bufferMinutes = 0, collectLegs: requestedLegs, allowInsertion = true, place = false,
+function evaluateRoute(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
+  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false,
   // Optional diagnostics (customer route check): on an `arrival_window` failure, add `lateness`
   // (see explainLateness). Unset: no extra work and the result is exactly what it was.
   explain = false,
@@ -955,7 +977,6 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   detail }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
-  const collectLegs = context.cachedRoadsOnly ? null : requestedLegs;
   const capacity = capacityEnabled() || context.preserveCapacity;
   // A version-2 hold accepted while the live gate is rolled back still owes
   // the SAME planning minutes it was offered under (prepareReservationCommit

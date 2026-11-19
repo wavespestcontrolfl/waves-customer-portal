@@ -79,13 +79,15 @@ async function preloadServiceLocations(conn, serviceIds) {
  *   select           REQUIRED — the caller's select list (column names and/or
  *                    db.raw expressions; use guardedCoordSelects for coords)
  */
-function dayStopsQuery(db, { dateStr, technicianId = null, excludeStatuses, select }) {
+function dayStopsQuery(db, { dateStr, technicianId = null, excludeStatuses, select, selectHoldExpiry = false }) {
   if (!Array.isArray(excludeStatuses) || !Array.isArray(select)) {
     throw new Error('dayStopsQuery requires explicit excludeStatuses and select arrays');
   }
   const q = db('scheduled_services')
     .where('scheduled_services.scheduled_date', dateStr);
   if (technicianId) q.where('scheduled_services.technician_id', technicianId);
+  // The billing decision for a restored route uses the same database clock as occupancy.
+  if (selectHoldExpiry) q.select(db.raw('scheduled_services.reservation_expires_at <= NOW() AS hold_lapsed'));
   return q
     .whereNotIn('scheduled_services.status', excludeStatuses)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')

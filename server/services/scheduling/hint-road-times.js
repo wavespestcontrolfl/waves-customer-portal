@@ -419,6 +419,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
       await Promise.all(waits);
     },
     lookup,
+    requestKey: leg => resolve(leg, etAt(now()))?.key,
   };
 }
 

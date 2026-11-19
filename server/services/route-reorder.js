@@ -61,6 +61,7 @@ const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChrono
 
 const { loadTechStartPoints, homeFromMap, assertStartPointUnchanged } = require('./scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('./scheduling/departure-time');
+const { LIVE_SERVICE_OR_HOLD_SQL } = require('./scheduling/reservation-occupancy');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -80,7 +81,7 @@ const EXCLUDE_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'e
 // otherwise route around a visit that will never happen (codex GitHub round
 // P2). Applied to BOTH the membership load and the commit-time re-read so
 // the two reads agree on membership.
-const LIVE_HOLD_SQL = '(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())';
+const LIVE_HOLD_SQL = LIVE_SERVICE_OR_HOLD_SQL;
 
 function intEnv(name, def, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   const raw = process.env[name];
@@ -1521,6 +1522,7 @@ async function runRouteReorder(opts = {}, conn = db) {
         stops = await dayStopsQuery(conn, {
           dateStr,
           excludeStatuses: EXCLUDE_STATUSES,
+          selectHoldExpiry: true,
           select: [
             'scheduled_services.id', 'scheduled_services.technician_id',
             'scheduled_services.customer_id',
@@ -1693,15 +1695,23 @@ async function runRouteReorder(opts = {}, conn = db) {
             summary.skipped.push({ ...entryBase, reason: clockFrozen ? 'WITHIN_72H' : 'REMINDER_SENT_FROZEN', repair: 'NO_SAFE_INSERTION' });
             continue;
           }
+          // A customer-linked row that still carries its former hold stamp
+          // was previously absent once the stamp expired. Keep affected days
+          // entirely local so correcting that classification never starts a
+          // paid provider call that the old reader would not have made.
+          const includesRestoredBooking = techStops.some(stop => stop.customer_id != null && stop.hold_lapsed);
+          const routeInput = ordered.map((s) => ({
+            id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type,
+          }));
+          const routeOptions = { startLat: home.lat, startLng: home.lng, endAtStart: true, techId };
           const result = repair ? {
             orderedStops: repair.orderedStops,
             totalDistanceMeters: modelDistanceMeters(RouteOptimizer, repair.orderedStops, home, home),
             totalDurationSeconds: Math.round(repair.simulation.travelMin * 60),
             source: 'chronological_repair',
-          } : await RouteOptimizer.optimizeRoute(
-            ordered.map((s) => ({ id: s.id, lat: parseFloat(s.lat) || null, lng: parseFloat(s.lng) || null, serviceType: s.service_type })),
-            { startLat: home.lat, startLng: home.lng, endAtStart: true, techId },
-          );
+          } : includesRestoredBooking
+            ? RouteOptimizer.nearestNeighborOptimize(routeInput, routeOptions)
+            : await RouteOptimizer.optimizeRoute(routeInput, routeOptions);
           // PERMUTATION GUARD (uncapped audit P1): orderedStops is built from
           // the external API's waypoint-index list, and route-optimizer
           // defaults a missing list to [] — a missing/partial/duplicated
