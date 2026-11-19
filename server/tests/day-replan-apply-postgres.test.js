@@ -178,7 +178,30 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
   }
   const changedColumns = (before, after) => Object.keys(after).filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k])).sort();
 
+  test('morning unplanned days keep stale-stamped booked work and expire only an unlinked hold', async () => {
+    const { unplannedDays } = require('../services/day-replan/open-blocks-alert')._internals;
+    const date = '2097-06-11';
+    await mockConn('scheduled_services').insert([{
+      customer_id: visits[0].customerId, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', window_start: '10:00', window_end: '11:00',
+      estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01T00:00:00Z',
+    }, {
+      customer_id: null, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', window_start: '12:00', window_end: '13:00',
+      estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01T00:00:00Z',
+    }]);
+    const elig = { from: date, to: date, blackout: new Set(), techIds: [techId], absent: new Set() };
+
+    const [day] = await unplannedDays(mockConn, new Set(), elig);
+    expect(day).toMatchObject({ day: date, technician_id: techId, stops: 1 });
+    expect(day.blocks.map(block => [block.start, block.min])).toEqual([[480, 120], [660, 360]]);
+  });
+
   test('writes the planned hours, the route order and the reminders in one go, silently, and says applied', async () => {
+    // A booked visit can retain its former hold stamp. The planner, locked
+    // membership check and final route-order writer must all keep the row.
+    await mockConn('scheduled_services').where({ id: visits[1].id })
+      .update({ reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 hour'") });
     const writes = await trackWindowWrites();
     const out = await runDayReplanIfEnabled({ now: NOW, conn: mockConn });
     expect(out.status).toBe('completed');
@@ -211,6 +234,9 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const byOrder = [...rows].sort((x, y) => x.route_order - y.route_order);
     expect(byOrder.map((r) => Number(r.route_order))).toEqual([1, 2, 3, 4]);
     expect(byOrder.map((r) => startOf(rows, r.id))).toEqual([...byOrder.map((r) => startOf(rows, r.id))].sort());
+    expect(Number(rows.find((r) => r.id === visits[1].id).route_order)).toBeGreaterThan(0);
+    expect((await mockConn('scheduled_services').where({ id: visits[1].id }).first('reservation_expires_at'))
+      .reservation_expires_at).toBeTruthy();
 
     // Each reminder names its visit's new time and keeps the 24-hour leg pending; nothing was cancelled.
     for (const r of await reminders()) {

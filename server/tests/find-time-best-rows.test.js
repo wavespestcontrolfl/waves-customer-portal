@@ -102,15 +102,20 @@ describe('priceChipsOnRoads', () => {
   function fakeTravel(minutesByLeg, { sends = true } = {}) {
     const calls = [];
     let sent = 0;
+    const bought = new Set();
+    const keyOf = (leg) => `${leg.from === NEW ? 'new' : 'prev'}>${leg.to === NEW ? 'new' : (leg.to === NEXT ? 'next' : 'x')}`;
     return {
       calls,
       factory: () => ({
-        preload: async (legs) => { calls.push(legs.length); if (sends) sent += legs.length; },
+        preload: async (legs) => {
+          calls.push(legs.length);
+          if (sends) { sent += legs.length; legs.forEach((leg) => bought.add(keyOf(leg))); }
+        },
         diagnostics: () => ({ requests: sent, elements: sent }),
         lookup: (leg) => {
-          const key = `${leg.from === NEW ? 'new' : 'prev'}>${leg.to === NEW ? 'new' : (leg.to === NEXT ? 'next' : 'x')}`;
+          const key = keyOf(leg);
           const minutes = minutesByLeg[key];
-          return minutes == null ? { minutes: 99, source: 'conservative_model' } : { minutes, source: 'google_traffic' };
+          return minutes == null || !bought.has(key) ? { minutes: 99, source: 'conservative_model' } : { minutes, source: 'google_traffic' };
         },
       }),
     };
@@ -196,6 +201,44 @@ describe('priceChipsOnRoads', () => {
     const [out] = await priceChipsOnRoads([chip], { travelFactory: travel.factory, ...STAFF });
     expect(out).toMatchObject({ drive_in_minutes: null, detour_minutes: null, drive_source: 'estimate' });
     expect(travel.calls).toEqual([]);
+  });
+
+  test.each([
+    ['previous', { prevRoadEligible: false }, 1],
+    ['next', { nextRoadEligible: false }, 1],
+    ['both', { prevRoadEligible: false, nextRoadEligible: false }, 0],
+  ])('a restored %s neighbour blocks only its newly eligible provider legs', async (_side, eligibility, expectedRequests) => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
+    const chip = hour('2026-10-08', '12:00', 34, 19);
+    chip[GAP_LEGS] = { ...chip[GAP_LEGS], ...eligibility };
+    const [out] = await priceChipsOnRoads([chip], { travelFactory: travel.factory, ...STAFF });
+    // A leg touching either restored neighbour is never purchased. Any
+    // remaining formerly eligible edge keeps its existing provider decision.
+    expect(travel.calls).toEqual(expectedRequests ? [expectedRequests] : []);
+    expect(out).toMatchObject({ drive_in_minutes: 19, detour_minutes: 34, drive_source: 'estimate' });
+  });
+
+  test('a restored calendar cannot purchase any newly displayed chip, including one with unchanged neighbours', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const factory = jest.fn();
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)],
+      { travelFactory: factory, ...STAFF, cacheOnly: true });
+    expect(chip.drive_source).toBe('estimate');
+    expect(factory).not.toHaveBeenCalled();
+    expect(reserveRoadSpend).not.toHaveBeenCalled();
+  });
+
+  test('a restored neighbour may consume the exact chip already in cache', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const seed = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
+    await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: seed.factory, ...STAFF });
+    const chip = hour('2026-10-08', '12:00', 34, 19);
+    chip[GAP_LEGS] = { ...chip[GAP_LEGS], prevRoadEligible: false };
+    const [cached] = await priceChipsOnRoads([chip], {
+      travelFactory: () => { throw new Error('cached restored legs must not buy'); }, ...STAFF,
+    });
+    expect(cached).toMatchObject({ drive_in_minutes: 21, detour_minutes: 34, drive_source: 'google' });
   });
 });
 

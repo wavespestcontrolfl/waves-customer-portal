@@ -5,7 +5,7 @@ jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: as
 jest.mock('../services/auto-dispatch/geo', () => ({ HQ: { lat: 27, lng: -82 }, driveMin: () => 0 }));
 
 const db = require('../models/db');
-const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { findAvailableSlots, GAP_LEGS } = require('../services/scheduling/find-time');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const DATE = etDateString(addETDays(new Date(), 10));
 const OPTIONS = { lat: 27, lng: -82, dateFrom: DATE, dateTo: DATE, durationMinutes: 60, includeWeekends: true };
@@ -33,13 +33,13 @@ function serviceQuery(input) {
       const group = {
         whereNull(key) { nullColumn = column(key); return group; },
         orWhereRaw(sql) {
-          expect(sql).toBe('scheduled_services.reservation_expires_at > NOW()');
+          expect(sql).toBe('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
           liveColumn = 'reservation_expires_at';
           return group;
         },
       };
       fn(group);
-      rows = rows.filter(row => row[nullColumn] == null || new Date(row[liveColumn]) > new Date());
+      rows = rows.filter(row => row[nullColumn] == null || row.customer_id != null || new Date(row[liveColumn]) > new Date());
       return q;
     },
     leftJoin: () => q,
@@ -71,6 +71,22 @@ test('expired holds release the route while live holds still block it', async ()
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(1);
   wire([stop({ reservation_expires_at: new Date(Date.now() + 60_000) })]);
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
+  wire([stop({ customer_id: 'booked-customer', reservation_expires_at: new Date(Date.now() - 60_000) })]);
+  expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
+});
+
+test('a restored booking blocks its gaps without making its chip legs provider-eligible', async () => {
+  wire([stop({
+    customer_id: 'booked-customer', reservation_expires_at: new Date(Date.now() - 60_000),
+    road_pricing_eligible: false, window_start: '10:00', window_end: '11:00',
+  })]);
+  const result = await findAvailableSlots(OPTIONS);
+  expect(result[require('../services/scheduling/find-time').RESTORED_CALENDAR]).toBe(true);
+  const { slots } = result;
+  const before = slots.find(slot => slot.start_time === '08:00');
+  const after = slots.find(slot => slot.start_time === '11:00');
+  expect(before[GAP_LEGS]).toMatchObject({ prevRoadEligible: true, nextRoadEligible: false });
+  expect(after[GAP_LEGS]).toMatchObject({ prevRoadEligible: false, nextRoadEligible: true });
 });
 
 test('untimed placeholders do not invent a morning stop', async () => {

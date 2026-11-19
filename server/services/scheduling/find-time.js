@@ -25,6 +25,7 @@ const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, se
 const { zoneRouteDaysLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
@@ -67,6 +68,7 @@ const DEFAULT_SERVICE_MIN = 60;
 // re-prices the shown legs on real roads (find-time-hints.js). Symbol-keyed
 // so JSON never carries stop coordinates to a client; spreads keep it.
 const GAP_LEGS = Symbol('gapLegs');
+const RESTORED_CALENDAR = Symbol('restoredCalendar');
 
 function hasCoords(stop) {
   return stop != null && stop.lat != null && stop.lng != null;
@@ -152,13 +154,24 @@ function widenBand(band, placements) {
 }
 
 async function preloadBandLegs(travel, routes) {
-  const bands = new Map(routes.map((route) => [route, nearBestStarts(enumerateArrivalPlacements(route.context, route.limits).placements)]));
+  // A restored booked row belongs to the real feasibility calendar, but it
+  // must not move a different hour into Google's paid band. Replay the
+  // previous calendar's complete picker (ranking and widening) and let the
+  // restored route consume only the answers that replay put in the shared
+  // travel cache. Routes without a restored row retain the same context and
+  // therefore the byte-for-byte purchase path they had before.
+  const purchaseContexts = new Map(routes.map((route) => [route, route.context.previousRoadRows
+    ? { ...route.context, rows: route.context.previousRoadRows, previousRoadRows: null }
+    : route.context]));
+  const bands = new Map(routes.map((route) => [route,
+    nearBestStarts(enumerateArrivalPlacements(purchaseContexts.get(route), route.limits).placements)]));
   let pending = routes;
   for (let round = 1; pending.length; round++) {
     await preloadRouteLegs(travel, pending,
-      (route, legs) => enumerateArrivalPlacements(route.context, { ...route.limits, collectLegs: legs, startsOnly: bands.get(route) }));
+      (route, legs) => enumerateArrivalPlacements(purchaseContexts.get(route), { ...route.limits, collectLegs: legs, startsOnly: bands.get(route) }));
     if (round >= BAND_ROUNDS) return;
-    pending = pending.filter((route) => widenBand(bands.get(route), enumerateArrivalPlacements(route.context, route.limits).placements));
+    pending = pending.filter((route) => widenBand(bands.get(route),
+      enumerateArrivalPlacements(purchaseContexts.get(route), route.limits).placements));
   }
 }
 
@@ -884,6 +897,11 @@ function buildDayStops(services, {
         customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Unknown',
         city: s.city,
         service_type: s.service_type,
+        // The former calendar predicate (null expiry or a database-clock
+        // live hold) decides whether this stop was already eligible for a
+        // paid chip leg. A booked row restored only by customer ownership
+        // still blocks the gap, but cannot introduce a provider request.
+        roadPricingEligible: s.road_pricing_eligible !== false,
         // Expected-minutes padding credit (owner ruling 2026-09-23) — only
         // resolved for a customer-facing caller; a plain endMin-startMin
         // window with no catalog match degrades to the legacy endMin/zero
@@ -1057,6 +1075,8 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
         baselineDriveMinutes: baselineDrive,
         newStop: { lat: Number(newStop.lat), lng: Number(newStop.lng) },
         durationMinutes,
+        prevRoadEligible: !prevIsStop || prev.roadPricingEligible !== false,
+        nextRoadEligible: !nextIsStop || next.roadPricingEligible !== false,
       },
     };
   };
@@ -1298,10 +1318,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .whereNotNull('scheduled_services.window_start')
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .where(liveServiceOrHold)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',
@@ -1312,6 +1329,13 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       'scheduled_services.service_type',
       'scheduled_services.service_key_snapshot',
       'scheduled_services.estimated_duration_minutes',
+      'scheduled_services.customer_id',
+      'scheduled_services.reservation_expires_at',
+      // Keep the provider-spend decision on the old occupancy boundary.
+      // liveServiceOrHold above intentionally restores customer-linked rows
+      // for calendar correctness; only null/future expiry rows were already
+      // eligible to price chip legs before that restoration.
+      db.raw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW()) as road_pricing_eligible'),
       // Planning-minute inputs: stopCreditResolver credits a stop the owner
       // table names at the router's minutes, as the booking check does.
       'scheduled_services.is_recurring',
@@ -1467,12 +1491,15 @@ async function findAvailableSlots(opts) {
     evaluated,
     total_feasible: candidates.length,
     searched_dates: searchedDates,
+    // Changing one gap can replace both the day and week chips, including a
+    // chip with unchanged endpoints. Keep this response on cached road times.
+    ...(services.some(row => row.road_pricing_eligible === false) ? { [RESTORED_CALENDAR]: true } : {}),
   };
 }
 
 module.exports = {
   findAvailableSlots,
-  GAP_LEGS,
+  GAP_LEGS, RESTORED_CALENDAR,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.
   DAY_START_HOUR,

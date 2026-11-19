@@ -52,10 +52,12 @@ const pickerTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 
 // traffic (routingPreference TRAFFIC_UNAWARE, Google's Essentials price, half
 // the traffic-aware one); the answer does not depend on the hour, so one
 // lookup per pair of places serves every departure.
+const schedulingPin = p => `${Number(p.lat)},${Number(p.lng)}`;
+const schedulingLegKey = ({ date, from, to, departureMin }) => `${date}|${Math.ceil(departureMin)}|${schedulingPin(from)}>${schedulingPin(to)}`;
 const MATRIX_MODES = {
   traffic: {
     source: 'google_traffic',
-    key: ({ date, from, to, departureMin }, pin) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`,
+    key: schedulingLegKey,
     preference: (batch) => ({ routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() }),
   },
   plain: {
@@ -84,7 +86,7 @@ function createSchedulingTravel({
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
   let requests = 0;
   let elements = 0;
-  const pin = (p) => `${Number(p.lat)},${Number(p.lng)}`;
+  const pin = schedulingPin;
   const mode = MATRIX_MODES[traffic ? 'traffic' : 'plain'];
   const keyFor = (leg) => mode.key(leg, pin);
   const validPin = (p) => p?.lat != null && p?.lng != null
@@ -201,7 +203,7 @@ function createSchedulingTravel({
     }
     await Promise.all(Array.from({ length: Math.min(workers, work.length) }, worker));
   }
-  return { lookup, lookupRaw, preload, diagnostics: () => ({ requests, elements }) };
+  return { lookup, lookupRaw, preload, requestKey: keyFor, diagnostics: () => ({ requests, elements }) };
 }
 
 /**
@@ -675,6 +677,7 @@ module.exports = {
   optimizeRoute,
   callGoogleRoutesAPI,
   createSchedulingTravel,
+  schedulingLegKey,
   hintTravelBudget,
   pickerTravelBudget,
   nearestNeighborOptimize,

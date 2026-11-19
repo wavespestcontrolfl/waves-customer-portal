@@ -21,6 +21,10 @@
 
 const { gateEnvValue } = require('../../config/feature-gates');
 const { GAP_LEGS } = require('./find-time');
+
+// Cost-policy metadata stays out of the leg object handed to travel sources;
+// unchanged eligible legs retain their exact provider request shape.
+const providerIneligible = new WeakSet();
 const logger = require('../logger');
 const { parkedMinutes, withDriveClockPark } = require('./drive-clock');
 
@@ -75,12 +79,18 @@ function chipLegs(chip, nowEt = null) {
   // From home base the van leaves just in time; from a stop it leaves when
   // that stop's window ends.
   const leaveForIn = g.prevIsHome ? Math.max(0, startMin - modelIn) : g.prevEndMin;
+  const eligible = (leg, providerEligible) => {
+    const priced = notBefore(leg, nowEt);
+    if (!providerEligible) providerIneligible.add(priced);
+    return priced;
+  };
   return {
-    in: notBefore({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, nowEt),
-    out: notBefore({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, nowEt),
+    in: eligible({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, g.prevRoadEligible !== false),
+    out: eligible({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, g.nextRoadEligible !== false),
     // From home base the van leaves just in time for the next stop, so the
     // drive it makes anyway is priced at that hour, like the candidate's.
-    base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: baseDeparture(g) }, nowEt),
+    base: eligible({ date: chip.date, from: g.prev, to: g.next, departureMin: baseDeparture(g) },
+      g.prevRoadEligible !== false && g.nextRoadEligible !== false),
   };
 }
 
@@ -116,7 +126,7 @@ async function buyWithinCeilings({ spender, pro = 0, plain = 0 }, send) {
  * drive_source 'google', or the input numbers with drive_source 'estimate'.
  * Never throws.
  */
-async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(), paid = false, spender = null } = {}) {
+async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(), paid = false, cacheOnly = false, spender = null } = {}) {
   // Only gap chips (GAP_LEGS) are re-priced; a capacity chip stays an
   // estimate (Codex #6045 r9: its admission and numbers stay on the model).
   // An hour the route check already drove on Google
@@ -132,10 +142,14 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
     const missing = new Map();
     for (const legs of plans) {
       if (!legs) continue;
-      for (const leg of Object.values(legs)) if (cachedMinutes(leg, t) == null) missing.set(legKey(leg), leg);
+      for (const leg of Object.values(legs)) {
+        // Restored booked stops may consume an answer already cached for
+        // this exact leg, but never make that leg newly provider-eligible.
+        if (!providerIneligible.has(leg) && cachedMinutes(leg, t) == null) missing.set(legKey(leg), leg);
+      }
     }
     let travel = null;
-    if (missing.size) {
+    if (!cacheOnly && missing.size) {
       const factory = travelFactory || (() => {
         const RouteOptimizer = require('../route-optimizer');
         return RouteOptimizer.createSchedulingTravel({
@@ -419,6 +433,7 @@ function createPickerTravel({ spender = null, budget = createPickerBudget(), fac
       await Promise.all(waits);
     },
     lookup,
+    requestKey: leg => resolve(leg, etAt(now()))?.key,
   };
 }
 

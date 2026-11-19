@@ -250,6 +250,22 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test('a booked paid visit with an expired hold stamp stays selectable and can be accepted by id', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
+    });
+    const { appointment } = await getAcceptance(token);
+    expect(appointment.id).toBe(id);
+    expect(appointment).not.toHaveProperty('reservationExpiresAt');
+    const res = await putAccept(token, { existingAppointmentId: id, paymentMethodPreference: 'pay_at_visit' });
+    expect({ status: res.status, error: (await res.json()).error }).toEqual({ status: 200, error: undefined });
+    const booked = await mockTransaction('scheduled_services')
+      .where({ source_estimate_id: estimateId, customer_id: customerId, scheduled_date: CHOSEN_DATE }).pluck('id');
+    expect(booked).toEqual([id]);
+  });
+
   test('/data: an unlinked legacy assessment row (name only) is not offered either', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await visit(mockTransaction, { customerId, key: null, type: 'Waves Assessment', date: ASSESSMENT_DATE });

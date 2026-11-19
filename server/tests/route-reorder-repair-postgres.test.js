@@ -203,6 +203,8 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   });
 
   test('the fenced repair changes only route_order and records before-route measurements', async () => {
+    await mockConnection('scheduled_services').where('id', ids[1])
+      .update({ reservation_expires_at: mockConnection.raw("NOW() - INTERVAL '1 hour'") });
     const before = await mockConnection('scheduled_services').whereIn('id', ids).select('*').orderBy('id');
     const result = await runRouteReorder({ now });
     expect(result).toMatchObject({ applied: 1, failed: 0 });
@@ -227,7 +229,7 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     const result = await getScheduleQualityMeasurements({ date: future, departure_time: '08:00', target_return_time: '17:00', break_minutes: 30 }, mockConnection);
     const day = result.days[0];
     expect(day).toMatchObject({ closed: true, unallocatedVisits: 1, unallocatedServiceMinutes: 60 });
-    expect(day.byTech.find(tech => tech.technicianId === technicianId)).toMatchObject({ scheduledVisits: 1, serviceMinutes: 60,
+    expect(day.byTech.find(tech => tech.technicianId === technicianId)).toMatchObject({ scheduledVisits: 2, serviceMinutes: 180,
       remainingServiceBudgetMinutes: null, uncertaintyReasons: expect.arrayContaining(['unallocated_work_requires_placement', 'scheduled_day_off']) });
   });
 
@@ -240,6 +242,8 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     await mockConnection('schedule_blackout_dates').where('date', future).delete();
     await mockConnection('scheduled_services').whereIn('id', ids).update({ scheduled_date: future, route_order: null });
     await mockConnection('scheduled_services').where('id', ids[2]).update({ technician_id: null });
+    await mockConnection('scheduled_services').where('id', ids[1])
+      .update({ reservation_expires_at: new Date(Date.now() - 60000) });
     await mockConnection('property_preferences').insert({ customer_id: customerId, preferred_time: 'afternoon' });
     const [hold] = await mockConnection('plan_holds').insert({ customer_id: customerId, family_key: 'lawn_care',
       starts_on: future, resume_on: etDateString(addETDays(parseETDateTime(`${future}T12:00`), 10)) }).returning('id');
@@ -249,6 +253,9 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     const candidate = result.days[0].byTech.find(tech => tech.technicianId === technicianId).candidateAnalysis;
     expect(candidate).toMatchObject({ workdayVerified: true, automaticMoveAuthorized: false, reason: 'route_fit_requires_staff_review' });
     expect(candidate.routeFits.length).toBeGreaterThan(0);
+    const offeredHours = candidate.routeFits.map(fit => fit.windowStart);
+    expect(offeredHours).not.toContain('15:00');
+    expect(offeredHours).not.toContain('16:00');
     expect(result.days[0].byTech.find(tech => tech.technicianId === technicianId)).toMatchObject({
       insertionStatus: candidate.reason, feasibleInsertionWindows: candidate.feasibleInsertionWindows,
     });

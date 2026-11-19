@@ -16,6 +16,7 @@ jest.mock('../services/route-optimizer', () => ({
   haversine: (lat1, lng1, lat2, lng2) => Math.abs(lat1 - lat2) + Math.abs(lng1 - lng2),
   fallbackLegMetrics: (miles) => ({ meters: Math.round(miles * 1000), minutes: 0 }),
   optimizeRoute: jest.fn(),
+  nearestNeighborOptimize: jest.fn(),
 }));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
@@ -162,6 +163,13 @@ beforeEach(() => {
     totalDurationSeconds: 600,
     unoptimizedDistanceMeters: 99999,
     source: 'google_routes_api',
+  }));
+  RouteOptimizer.nearestNeighborOptimize.mockImplementation((stops) => ({
+    orderedStops: [...stops].sort((p, q) => p.lng - q.lng),
+    totalDistanceMeters: 12345,
+    totalDurationSeconds: 600,
+    unoptimizedDistanceMeters: 99999,
+    source: 'nearest_neighbor_fallback',
   }));
 });
 
@@ -436,6 +444,23 @@ test('savings above the floor rewrite route_order transactionally in optimized o
   expect(fed).toEqual(['B', 'A', 'C']);
 });
 
+test('a customer-linked stamped visit keeps its day on the local optimizer', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', {
+    customer_id: 'customer-1',
+    reservation_expires_at: '2026-08-12T12:00:00.000Z',
+    hold_lapsed: true,
+  });
+
+  const res = await runRouteReorder({ now: NOW });
+
+  expect(res.applied).toBe(1);
+  expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+  expect(RouteOptimizer.nearestNeighborOptimize).toHaveBeenCalledWith(
+    expect.arrayContaining([expect.objectContaining({ id: 'A' })]),
+    expect.objectContaining({ techId: 't1', endAtStart: true }),
+  );
+});
+
 test('an order violating window chronology is SKIPPED, never written', async () => {
   // The lng-sorted route puts C (13:00 window) before B (09:00 window) —
   // distance says yes, the promised windows say no.
@@ -641,11 +666,15 @@ test('expired estimate holds are excluded: live-hold predicate on the day load A
   expect(res.applied).toBe(1);
   // Every day-load carries the occupancy live-hold predicate…
   expect(loadWhereRaws.length).toBe(BAND.length);
-  for (const { sql } of loadWhereRaws) expect(sql).toContain('reservation_expires_at');
+  for (const { sql } of loadWhereRaws) {
+    expect(sql).toContain('customer_id IS NOT NULL');
+    expect(sql).toContain('reservation_expires_at');
+  }
   // …and the commit-time membership re-read uses the SAME predicate, so the
   // two reads agree on membership (an expired-at-load hold must not resurface
   // as a phantom "joined the tech-day" stale abort).
-  expect(commitWhereRaws.some((sql) => String(sql).includes('reservation_expires_at'))).toBe(true);
+  expect(commitWhereRaws.some((sql) => String(sql).includes('customer_id IS NOT NULL')
+    && String(sql).includes('reservation_expires_at'))).toBe(true);
 });
 
 test('commit-time revalidation: a changed tech-day rolls back untouched (STALE_TECH_DAY)', async () => {
