@@ -45,6 +45,8 @@ let calculateResult;
 // A test can hold it back (gateRead) to model the window before the gate is known.
 let startupRow;
 let gateRead;
+// What the property lookup answers (a test sets it before each lookup).
+let lookupAnswer;
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -52,8 +54,12 @@ beforeEach(() => {
   calculateResult = resultWith();
   startupRow = {};
   gateRead = null;
+  lookupAnswer = { enriched: { poolCageSize: 'MEDIUM' } };
   fetchMock = vi.fn((url) => {
     const path = String(url);
+    if (path.endsWith('/estimator/property-lookup')) {
+      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 1800, lotSqFt: 9000, stories: 1, pool: 'YES', poolCage: 'YES', ...lookupAnswer.enriched }, meta: lookupAnswer.meta, errors: [] }));
+    }
     if (path.includes('/pricing-config/lawn_pricing_v2')) {
       return gateRead ? gateRead.then(() => jsonResponse(startupRow)) : Promise.resolve(jsonResponse(startupRow));
     }
@@ -201,5 +207,50 @@ describe('Pool Cage Size box after a reuse path', () => {
     expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
     // The previous Oversized is gone from the box and the new estimate starts at the default Medium.
     expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM');
+  }, 120000);
+});
+
+// An automatic conversion (a Small or Oversized read once the gate becomes known) is not an operator pick:
+// it keeps its provenance. A later lookup's own two-size answer replaces it; a manual pick is restored.
+describe('Pool Cage Size automatic conversion keeps its provenance', () => {
+  const ADDRESS = '500 Example Court, Venice, FL 34285';
+  const lookUp = async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Property Lookup', exact: true }));
+    await screen.findByRole('region', { name: 'Property lookup results' });
+  };
+  const openWithGateHeld = () => {
+    let release;
+    gateRead = new Promise((resolve) => { release = resolve; });
+    startupRow = { poolCageTwoSizes: true };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
+    return release;
+  };
+
+  it('a lookup-filled Small converted to Medium is replaced by a later lookup that measures Large', async () => {
+    // A lookup from before the flip fills Small; the gate then becomes known.
+    lookupAnswer = { enriched: { poolCageSize: 'SMALL' } };
+    const release = openWithGateHeld();
+    await lookUp();
+    expect(await screen.findByLabelText('Pool Cage Size')).toHaveValue('SMALL');
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM'));
+    // The next lookup's own two-size answer (over 1,000 sq ft) wins: the conversion was not a manual pick.
+    lookupAnswer = { enriched: { poolCageSize: 'LARGE', poolCageSqft: 1200 }, meta: { poolCageTwoSizes: true } };
+    await lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE'));
+  }, 120000);
+
+  it('a manual Small pick converted to Medium stays Medium after that lookup', async () => {
+    lookupAnswer = { enriched: { poolCageSize: 'MEDIUM' } };
+    const release = openWithGateHeld();
+    await lookUp();
+    fireEvent.change(await screen.findByLabelText('Pool Cage Size'), { target: { value: 'SMALL' } });
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('SMALL');
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM'));
+    lookupAnswer = { enriched: { poolCageSize: 'LARGE', poolCageSqft: 1200 }, meta: { poolCageTwoSizes: true } };
+    await lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM'));
   }, 120000);
 });

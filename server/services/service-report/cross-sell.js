@@ -365,17 +365,18 @@ function estimateRequiresFieldVerification(estData) {
 //     wrong premises).
 // Fill-only semantics are enforced downstream in resolvePropertyContext.
 // The accepted estimate's own cage evidence (GATE_CAGE_TWO_SIZES "hold"): the county cage area
-// and/or the four-size answer from its stored profile, engineRequest.profile first, then
-// enriched. Null when neither has it. A seeded cage size is held on THIS evidence, because a
+// and/or the four-size answer (and the legacy key's presence) from its stored profile,
+// engineRequest.profile first, then enriched. Null when neither has any. A seeded cage size is held on THIS evidence, because a
 // lawn-only estimate never priced the cage (it only moves pest).
 function seedCageEvidence(estData) {
-  const { fourBandCageSize, validFour } = require('../property-lookup/cage-sizes');
+  const { fourBandCageSize, validFour, hasLegacyKey } = require('../property-lookup/cage-sizes');
   for (const profile of [estData?.engineRequest?.profile, estData?.enriched]) {
     if (!profile || typeof profile !== 'object') continue;
     const evidence = {};
     if (fourBandCageSize(profile.poolCageSqft) !== null) evidence.poolCageSqft = Number(profile.poolCageSqft);
-    const legacy = validFour(profile.poolCageLegacySize);
-    if (legacy) evidence.poolCageLegacySize = legacy;
+    // The key's PRESENCE marks a profile written under two sizes (cage-sizes.js reads it that
+    // way), so it is copied even when its value is null or not a size.
+    if (hasLegacyKey(profile)) evidence.poolCageLegacySize = validFour(profile.poolCageLegacySize);
     if (Object.keys(evidence).length > 0) return evidence;
   }
   return null;

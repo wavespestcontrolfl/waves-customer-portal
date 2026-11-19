@@ -81,5 +81,5 @@ function twoSizeOf(profile) {
 const isHeldFourSize = (size) => size === 'LARGE' || size === 'OVERSIZED';
 
 module.exports = {
-  fourBandCageSize, twoSizeFromArea, fourToTwo, fourSizeOf, twoSizeOf, isHeldFourSize, validFour,
+  fourBandCageSize, twoSizeFromArea, fourToTwo, fourSizeOf, twoSizeOf, isHeldFourSize, validFour, hasLegacyKey,
 };

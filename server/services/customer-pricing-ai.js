@@ -952,15 +952,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       ? { ...lookupBacked, poolCageReview: true }
       : lookupBacked;
   }
-  // A seeded size is held on the seed's OWN cage evidence (the accepted estimate's county area or
-  // four-size answer): a lawn-only estimate never priced the cage, because it only moves pest.
-  // Only while the priced size is the seed's (not lookup-backed); gated and area-first.
-  if (!lookupFeatureKeys.has('poolCageSize') && propertySeed?.cageEvidence
-    && propertySeed.features && features.poolCage === true
-    && String(features.poolCageSize || '') !== ''
-    && String(features.poolCageSize).toLowerCase() === String(propertySeed.features.poolCageSize || '').toLowerCase()
-    && require('./property-lookup/office-cage-start').customerCageHold(propertySeed.cageEvidence)) {
-    features = { ...features, poolCageReview: true };
+  // A seeded cage size is priced and held by ONE resolver under this call's gate, from the seed's own
+  // cage evidence (null evidence included: a lawn-only estimate never priced the cage). Only while the
+  // priced size is the seed's own, not lookup-backed.
+  if (!lookupFeatureKeys.has('poolCageSize') && propertySeed?.features
+    && String(features.poolCageSize || '').toLowerCase() === String(propertySeed.features.poolCageSize || '').toLowerCase()) {
+    features = require('./property-lookup/office-cage-start').seededCageFeatures(features, propertySeed.cageEvidence);
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);

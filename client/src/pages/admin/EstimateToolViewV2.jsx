@@ -3591,8 +3591,16 @@ export default function EstimateToolViewV2({
     if (!cageTwoSizes) return;
     const size = String(form.poolCageSize || "").toUpperCase();
     const reading = POOL_CAGE_TWO_SIZE_OF[size];
-    if (reading && size !== loadedCageSize) set("poolCageSize", reading);
-  }, [cageTwoSizes, form.poolCageSize, loadedCageSize, set]);
+    if (reading && size !== loadedCageSize) {
+      // Not set(): an automatic conversion is not an operator pick. It must not join _manualFields or
+      // _poolCageSizeEdited, so it keeps its provenance (a later lookup may still replace it). It does the
+      // same estimate invalidation a size change normally causes.
+      setForm((f) => ({ ...f, poolCageSize: reading }));
+      setEstimate(null);
+      setSavedId(null);
+      setSavedViewUrl(null);
+    }
+  }, [cageTwoSizes, form.poolCageSize, loadedCageSize]);
   useEffect(() => {
     (async () => {
       try {

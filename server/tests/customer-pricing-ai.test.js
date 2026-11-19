@@ -2165,22 +2165,21 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
     expect(f.poolCageReview).toBeUndefined();
   });
 
-  test('gate on: a seed whose saved size is the priced size and differs from the lookup is not flagged', async () => {
+  test('gate on: a seed-backed size with no cage evidence is held (a person quotes); the lookup\'s size does not back it', async () => {
     process.env[TWO_SIZES] = 'true';
     // The lookup is silent on the cage size here, so the seed fills it.
     const f = await features(
       { poolCage: 'YES', poolCageSize: undefined, poolCageLegacySize: 'LARGE', pool: 'NO' },
       { homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'small' } },
     );
-    expect(f.poolCageReview).toBeUndefined();
-    // An undecided cage (POSSIBLE) is not lookup-backed: the seed's size prices, even
-    // when it equals the lookup's size, so today's price (no hold) stands.
+    expect(f).toMatchObject({ poolCageSize: 'small', poolCageReview: true });
+    // An undecided cage (POSSIBLE) is not lookup-backed: the seed's size prices, and with no
+    // evidence of its own it is held.
     const undecided = await features(
       { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE', pool: 'NO' },
       { homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'medium' } },
     );
-    expect(undecided).toMatchObject({ poolCage: true, poolCageSize: 'medium' });
-    expect(undecided.poolCageReview).toBeUndefined();
+    expect(undecided).toMatchObject({ poolCage: true, poolCageSize: 'medium', poolCageReview: true });
   });
 
   // The flag follows the same evidence as the size: a current lookup decides it, and a
@@ -2217,8 +2216,9 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
     const undecided = { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM', pool: 'NO' };
     const kept = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true }));
     expect(kept).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+    // With no flag of its own and no evidence, the one resolver still holds it.
     const noFlag = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large' }));
-    expect(noFlag.poolCageReview).toBeUndefined();
+    expect(noFlag.poolCageReview).toBe(true);
   });
 
   // A seeded size is held on the seed's OWN cage evidence (a lawn-only estimate never priced the cage).
@@ -2240,10 +2240,10 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
       expect((await seedFeaturesFor({ poolCageLegacySize: 'OVERSIZED' })).poolCageReview).toBe(true);
     });
 
-    test('gate on: a stored area of 500 sq ft, or no evidence, is not held', async () => {
+    test('gate on: a stored area of 500 sq ft is not held; no evidence at all is held', async () => {
       process.env[TWO_SIZES] = 'true';
       expect((await seedFeaturesFor({ poolCageSqft: 500 })).poolCageReview).toBeUndefined();
-      expect((await seedFeaturesFor(null)).poolCageReview).toBeUndefined();
+      expect((await seedFeaturesFor(null)).poolCageReview).toBe(true);
     });
 
     test('gate off: the same evidence gives no flag', async () => {

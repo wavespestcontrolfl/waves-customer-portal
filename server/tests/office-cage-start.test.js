@@ -76,6 +76,7 @@ const {
   agentDraftCageProfile,
   stampEstimateToolCageStart,
   customerCageHold,
+  seededCageFeatures,
 } = require('../services/property-lookup/office-cage-start');
 const { runDraftPipeline } = require('../services/estimator-engine');
 const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
@@ -278,6 +279,72 @@ describe('customerCageHold (automatic customer prices keep today\'s manual-quote
       expect(require('../services/property-lookup/office-cage-start').customerCageHold(legacy('LARGE'))).toBe(false);
     });
     jest.dontMock('../config/feature-gates');
+  });
+});
+
+describe('seededCageFeatures (an accepted estimate\'s saved cage replayed on a lookup miss)', () => {
+  const seed = (size = 'medium', over = {}) => ({ pool: true, poolCage: true, poolCageSize: size, ...over });
+
+  describe('gate on', () => {
+    beforeEach(() => { process.env[TWO_SIZES] = 'true'; });
+
+    test('a stored area of 750 sq ft is held, and the size stays Medium', () => {
+      expect(seededCageFeatures(seed(), { poolCageSqft: 750 })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+    });
+
+    test('a stored area of 500 sq ft is not held', () => {
+      const out = seededCageFeatures(seed(), { poolCageSqft: 500 });
+      expect(out.poolCageSize).toBe('medium');
+      expect(out.poolCageReview).toBeUndefined();
+    });
+
+    test('a stored area of 1,200 sq ft reads Large and is held', () => {
+      expect(seededCageFeatures(seed('oversized'), { poolCageSqft: 1200 })).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+    });
+
+    test('no evidence is held, with the seed\'s size kept (a two-size Medium may be 601 to 1,000 sq ft)', () => {
+      expect(seededCageFeatures(seed(), null)).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      expect(seededCageFeatures(seed('small'), undefined)).toMatchObject({ poolCageSize: 'small', poolCageReview: true });
+      expect(seededCageFeatures(seed(), {})).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+    });
+
+    test('a legacy-only Large is held; a legacy-only Medium is not', () => {
+      expect(seededCageFeatures(seed(), { poolCageLegacySize: 'LARGE' })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      const out = seededCageFeatures(seed('large'), { poolCageLegacySize: 'MEDIUM' });
+      expect(out.poolCageSize).toBe('medium');
+      expect(out.poolCageReview).toBeUndefined();
+    });
+
+    test('a legacy key with no usable value is not evidence, so a person quotes', () => {
+      expect(seededCageFeatures(seed(), { poolCageLegacySize: null })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+    });
+
+    test('no cage, or no size: the features come back unchanged', () => {
+      const noCage = seed('medium', { poolCage: false });
+      expect(seededCageFeatures(noCage, null)).toBe(noCage);
+      const noSize = { poolCage: true };
+      expect(seededCageFeatures(noSize, null)).toBe(noSize);
+      expect(seededCageFeatures(null, null)).toBeNull();
+    });
+
+    test('a seeded poolCageReview is never removed', () => {
+      expect(seededCageFeatures(seed('medium', { poolCageReview: true }), { poolCageSqft: 500 }).poolCageReview).toBe(true);
+    });
+  });
+
+  describe('gate off (rollback)', () => {
+    test('a seed written under two sizes prices its four-size answer, so the engine holds it', () => {
+      const out = seededCageFeatures(seed(), { poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
+      expect(out.poolCageSize).toBe('large');
+      expect(out.poolCageReview).toBeUndefined();
+    });
+
+    test('a null legacy key alone, gate-off-era evidence (area, no key) and null evidence are unchanged', () => {
+      const features = seed();
+      expect(seededCageFeatures(features, { poolCageLegacySize: null })).toBe(features);
+      expect(seededCageFeatures(features, { poolCageSqft: 750 })).toBe(features);
+      expect(seededCageFeatures(features, null)).toBe(features);
+    });
   });
 });
 

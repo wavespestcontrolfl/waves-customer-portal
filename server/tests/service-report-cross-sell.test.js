@@ -312,6 +312,36 @@ describe('buildReportCrossSell', () => {
         const priced = await seededOffer({ poolCageSqft: 750 });
         expect(priced.mode).toBe('priced');
       });
+
+      // A draft-shaped seed has features but no engineRequest and no enriched: no cage evidence at all.
+      test('a draft-shaped seed (no engineRequest, no enriched) is the quote CTA with the gate on and prices with it off', async () => {
+        const draftOffer = () => buildReportCrossSell(
+          SERVICE(),
+          dbFor({
+            serviceTypes: ['Lawn Care'],
+            turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+            estimates: [{
+              id: 'est-draft', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+              estimate_data: JSON.stringify({
+                engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'medium' } },
+              }),
+            }],
+          }),
+          { propertyLookup: missLookup },
+        );
+        process.env[TWO_SIZES] = 'true';
+        const held = await draftOffer();
+        expect(held.mode).toBe('quote_cta');
+        expect(held.option).toBeNull();
+        delete process.env[TWO_SIZES];
+        expect((await draftOffer()).mode).toBe('priced');
+      });
+
+      test('gate off (rollback): a seed written under two sizes (area 750, legacy Large, saved Medium) is the quote CTA', async () => {
+        const held = await seededOffer({ poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
+        expect(held.mode).toBe('quote_cta');
+        expect(held.option).toBeNull();
+      });
     });
 
     test('loadEstimateSeed reads cageEvidence from engineRequest.profile, falls back to enriched, else null', async () => {
@@ -330,7 +360,15 @@ describe('buildReportCrossSell', () => {
         .toEqual({ poolCageSqft: 640 });
       expect((await seedFor({ enriched: { poolCageLegacySize: 'OVERSIZED', poolCageSize: 'LARGE' } })).cageEvidence)
         .toEqual({ poolCageLegacySize: 'OVERSIZED' });
-      for (const none of [{}, { engineRequest: { profile: { poolCageSqft: 0, poolCageLegacySize: 'NONE' } }, enriched: { poolCageSqft: 'abc' } }]) {
+      // The legacy key's PRESENCE marks a seed written under two sizes: kept even with a null value.
+      expect((await seedFor({ engineRequest: { profile: { poolCageLegacySize: null, poolCageSize: 'MEDIUM' } } })).cageEvidence)
+        .toEqual({ poolCageLegacySize: null });
+      expect((await seedFor({ engineRequest: { profile: { poolCageSqft: 600, poolCageLegacySize: 'bogus' } } })).cageEvidence)
+        .toEqual({ poolCageSqft: 600, poolCageLegacySize: null });
+      // A non-size legacy value still marks the profile as two-size era; the later profile is not read.
+      expect((await seedFor({ engineRequest: { profile: { poolCageSqft: 0, poolCageLegacySize: 'NONE' } }, enriched: { poolCageSqft: 640 } })).cageEvidence)
+        .toEqual({ poolCageLegacySize: null });
+      for (const none of [{}, { engineRequest: { profile: { poolCageSqft: 0 } }, enriched: { poolCageSqft: 'abc' } }]) {
         expect((await seedFor(none)).cageEvidence).toBeNull();
       }
     });
