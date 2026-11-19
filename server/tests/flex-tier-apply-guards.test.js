@@ -475,14 +475,14 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
   // A pool stub answering the preview's member + visit reads and the member
   // guard's own reads (sibling rows, plan alerts, the series and clash reads,
   // anchor evidence, the series fence).
-  function groupConn({ date, allocation = false }) {
+  function groupConn({ date, siblingDate = date, allocation = false }) {
     const members = [
       { id: 's1', status: 'confirmed', scheduled_date: date, window_start: '17:00', window_end: '18:00', estimated_duration_minutes: 60 },
-      { id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+      { id: 's2', status: 'confirmed', scheduled_date: siblingDate, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
         ...(allocation ? { reservation_service_mix: { version: 2, allocatedServiceIds: ['s2', 's3'] } } : {}) },
     ];
     const siblingRow = {
-      id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+      id: 's2', status: 'confirmed', scheduled_date: siblingDate, window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
       technician_id: null, lat: 27.4, lng: -82.5, customer_active: true,
     };
     const conn = jest.fn((table) => {
@@ -500,7 +500,7 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
         whereNotIn: () => q,
         forShare: () => q,
         noWait: () => q,
-        select: async () => (series ? [{ id: 's2', recurring_parent_id: 'p1', scheduled_date: date }] : members),
+        select: async () => (series ? [{ id: 's2', recurring_parent_id: 'p1', scheduled_date: siblingDate }] : members),
         first: async () => null, // no same-series clash
       };
       return q;
@@ -515,7 +515,7 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
     jest.setSystemTime(new Date('2026-10-07T19:00:00Z'));
     const refusal = await previewGroupMove(
       { ...service, scheduled_date: '2026-10-08', window_start: '17:00' },
-      { date: '2026-10-13', start_time: '17:00', end_time: '18:00', technician_id: null },
+      { date: '2026-10-08', start_time: '17:00', end_time: '18:00', technician_id: null },
       { guardMode: 'flex' },
       groupConn({ date: '2026-10-08' }),
     );
@@ -527,11 +527,28 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
     const conn = groupConn({ date: '2026-10-12' });
     await expect(previewGroupMove(
       { ...service, scheduled_date: '2026-10-12', window_start: '17:00' },
-      { date: '2026-10-13', start_time: '17:00', end_time: '18:00', technician_id: null },
+      { date: '2026-10-12', start_time: '17:00', end_time: '18:00', technician_id: null },
       { guardMode: 'flex' },
       conn,
     )).resolves.toBeNull();
     expect(conn.raw).toHaveBeenCalled(); // reached the sibling's series fence and window
+  });
+
+  test.each([
+    ['every member starts on the old date', { date: '2026-10-12' }, '2026-10-13'],
+    ['the group straddles the target date', { date: '2026-10-12', siblingDate: '2026-10-13' }, '2026-10-12'],
+  ])('a cross-day grouped move is refused before recommendation when %s', async (_label, dates, targetDate) => {
+    const conn = groupConn(dates);
+    await expect(previewGroupMove(
+      { ...service, scheduled_date: dates.date, window_start: '17:00' },
+      { date: targetDate, start_time: '17:00', end_time: '18:00', technician_id: null },
+      { guardMode: 'flex' },
+      conn,
+    )).resolves.toEqual({
+      code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD',
+      description: expect.stringContaining('cross-day grouped moves are not atomic'),
+    });
+    expect(conn.raw).not.toHaveBeenCalled();
   });
 
   test('a sibling that joins a version-2 allocation during ranking is refused before a dry-run recommendation', async () => {

@@ -2149,6 +2149,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // member/assignment writers can report their authoritative warning.
         // alignMember repeats the check under the technician's slot-reserve
         // lock at assignment.
+        const unchangedAdvisoryWarnings = [];
         if (options.technicianId) {
           for (const tg of targets) {
             const m = members.find((x) => String(x.id) === String(tg.id));
@@ -2161,14 +2162,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             if (options.overlapAdvisory !== true) {
               throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: tg.id, conflictId: clashId });
             }
-            // Advisory reporting comes from alignMember's locked destination
-            // probe below. This unlocked plan snapshot only rejects hard
-            // conflicts before the first write.
+            // A changing member gets its authoritative warning from its
+            // committed writer / assignment probe below. An unchanged member
+            // runs neither writer, so this locked plan probe is its only
+            // destination verdict and must survive into the manual result.
+            if (tg.alreadyAtTarget) {
+              unchangedAdvisoryWarnings.push(`service ${tg.id} overlaps another job on the destination technician's route (${clashId})`);
+            }
           }
         }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
           customerId: visit.customer_id, propertyId: visit.property_id,
+          unchangedAdvisoryWarnings,
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primary,
@@ -2343,6 +2349,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     return {
       success: true,
       newDate,
+      ...(plan.unchangedAdvisoryWarnings?.length ? { warnings: [...plan.unchangedAdvisoryWarnings] } : {}),
       visitMove: {
         visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String),
         // A stale-but-unrepaired parent keeps the incomplete-move signal
@@ -2448,10 +2455,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   };
   const moved = [];
   const failed = [];
-  // Only advisories observed by committed member writers (and subsequent
-  // locked assignment writes) reach the caller. Planning probes remain a
-  // hard-conflict preflight, never a source of stale/duplicate warnings.
-  const warnings = [];
+  // Changing members report only advisories observed by committed member
+  // writers / locked assignment writes. An unchanged member has neither
+  // writer, so its locked planning verdict is carried once instead.
+  const warnings = [...(plan.unchangedAdvisoryWarnings || [])];
   let primaryResult = null;
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
@@ -2645,7 +2652,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               await acquireOccupancyLock(t, newDateStr);
               await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
               // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
-              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type').catch(() => null);
+              // Lock and read the allocation stamp in the SAME transaction
+              // that reassigns the row. A capacity allocation appearing
+              // after the time move therefore reaches moveGuard and stays
+              // locked through assignDispatchJob instead of being split.
+              const row = await t('scheduled_services').where({ id: target.id }).forUpdate()
+                .first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'reservation_service_mix')
+                .catch(() => null);
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
@@ -2677,7 +2690,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               if (typeof options.moveGuard === 'function') {
                 const memberRow = row && row.service_type !== undefined
                   ? { id: target.id, ...row }
-                  : await t('scheduled_services').where({ id: target.id }).first('id', 'service_type', 'technician_id');
+                  : await t('scheduled_services').where({ id: target.id }).forUpdate()
+                    .first('id', 'service_type', 'technician_id', 'reservation_service_mix');
                 await options.moveGuard({ trx: t, technicianId: options.technicianId, service: memberRow || { id: target.id } });
               }
             }

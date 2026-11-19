@@ -1240,6 +1240,13 @@ async function previewGroupMove(service, best, config, conn = db) {
       };
     }
     if (members.length < 2) return null;
+    const targetDate = String(best.date || '').slice(0, 10);
+    if (members.some((member) => toDateStr(member.scheduled_date) !== targetDate)) {
+      return {
+        code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD',
+        description: 'Grouped visit would be refused at apply — cross-day grouped moves are not atomic',
+      };
+    }
     const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
     const predicted = predictMemberWindows({
       members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,

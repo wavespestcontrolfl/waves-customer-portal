@@ -111,12 +111,14 @@ describe('moveVisitAsUnit', () => {
   // and the RETARGET read (no forUpdate) with `landed`.
   // The pre-primary REVALIDATION read (whereIn id, no forUpdate) answers with
   // `revalidate` (default: the members as planned, i.e. unchanged).
-  const script = ({ visit = VISIT, members, landed = null, maxSeq = 0, revalidate = null }) => ({
+  const script = ({ visit = VISIT, members, landed = null, maxSeq = 0, revalidate = null, first = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: maxSeq } : visit) },
     scheduled_services: { select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
         : ops.some((o) => o[0] === 'forUpdate') ? members
       : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? (revalidate || members.map((m) => ({ ...m, visit_id: 'v1' })))
-        : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))) },
+        : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
+      first: (ops, cols) => (first ? first(ops, cols) : null),
+    },
   });
 
   test('ungrouped row / dissolved visit / single live member ⇒ null (plain move); a non-open non-dissolved visit REFUSES (P0 r36)', async () => {
@@ -153,6 +155,42 @@ describe('moveVisitAsUnit', () => {
     expect(out.visitMove.failed).toEqual([
       expect.objectContaining({ id: 'b', movedButUnassigned: true, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }),
     ]);
+  });
+
+  test('a v2 allocation appearing after the time move is read FOR UPDATE and refuses technician assignment', async () => {
+    const allocation = { version: 2, allocatedServiceIds: ['b', 'capacity-peer'] };
+    const members = [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })];
+    db.__script = script({ members, landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't2' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
+    ], first: (ops) => {
+      const where = ops.find((op) => op[0] === 'where' && op[1]?.id);
+      if (!ops.some((op) => op[0] === 'forUpdate') || !where) return null;
+      return {
+        window_start: where[1].id === 'a' ? '13:00' : '14:00', window_end: where[1].id === 'a' ? '14:00' : '15:00',
+        estimated_duration_minutes: 60, service_type: 'Pest Control',
+        reservation_service_mix: where[1].id === 'b' ? allocation : null,
+      };
+    } });
+    const moveGuard = jest.fn(async ({ service }) => {
+      if (service.reservation_service_mix?.version === 2) {
+        throw Object.assign(new Error('allocation must move as one unit'), { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+      }
+    });
+
+    const out = await moveVisitAsUnit({
+      rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00',
+      initiatedBy: 'auto_dispatch', options: { technicianId: 't2', moveGuard },
+    });
+
+    const bRead = db.__calls.find((call) => call.table === 'scheduled_services' && call.op === 'first'
+      && call.ops.some((op) => op[0] === 'where' && op[1]?.id === 'b')
+      && call.cols.includes('reservation_service_mix'));
+    expect(bRead.ops).toContainEqual(['forUpdate']);
+    expect(bRead.cols).toContain('reservation_service_mix');
+    expect(moveGuard).toHaveBeenCalledWith(expect.objectContaining({ service: expect.objectContaining({ id: 'b', reservation_service_mix: allocation }) }));
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b', movedButUnassigned: true })]);
   });
 
   test('date + window move: members moved first (primary with caller options, siblings with their OWN fence), then the parent retargeted from the rows that landed', async () => {
@@ -1139,6 +1177,65 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
       expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN' }), expect.objectContaining({ id: 'b', code: 'SLOT_TAKEN' }),
     ]);
     expect(assignDispatchJob).not.toHaveBeenCalled();
+  });
+
+  test('an unchanged member keeps its advisory destination warning while changed members use their assignment writer', async () => {
+    const members = [
+      member('a'),
+      member('b', { technician_id: 't9', window_start: '10:00', window_end: '11:00' }),
+    ];
+    const base = script({ members, landed: [
+      { id: 'a', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't9' },
+    ] });
+    db.__script = {
+      ...base,
+      scheduled_services: {
+        ...base.scheduled_services,
+        first: (ops) => (ops.some((op) => op[0] === 'whereRaw') ? { id: 'outside-job' } : null),
+      },
+    };
+
+    const rebooker = fakeRebooker();
+    const out = await moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-08-30',
+      initiatedBy: 'admin', options: { technicianId: 't9', overlapAdvisory: true },
+    });
+
+    expect(out.visitMove).toMatchObject({ moved: ['a'], unchanged: ['b'], failed: [] });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(out.warnings.filter((warning) => /service a overlaps/.test(warning))).toHaveLength(1);
+    expect(out.warnings.filter((warning) => /service b overlaps/.test(warning))).toHaveLength(1);
+  });
+
+  test('an all-unchanged manual no-op still reports each advisory destination clash once', async () => {
+    const members = [
+      member('a', { technician_id: 't9' }),
+      member('b', { technician_id: 't9', window_start: '10:00', window_end: '11:00' }),
+    ];
+    const base = script({ members, landed: members });
+    db.__script = {
+      ...base,
+      scheduled_services: {
+        ...base.scheduled_services,
+        first: (ops) => (ops.some((op) => op[0] === 'whereRaw') ? { id: 'outside-job' } : null),
+      },
+    };
+    const rebooker = fakeRebooker();
+
+    const out = await moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-08-30',
+      initiatedBy: 'admin', options: { technicianId: 't9', overlapAdvisory: true, seriesPolicy: 'single' },
+    });
+
+    expect(out.visitMove).toMatchObject({ moved: [], unchanged: ['a', 'b'], alreadyAtTarget: true });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(assignDispatchJob).not.toHaveBeenCalled();
+    expect(out.warnings).toEqual([
+      'service a overlaps another job on the destination technician\'s route (outside-job)',
+      'service b overlaps another job on the destination technician\'s route (outside-job)',
+    ]);
   });
 
   test('a durable move_hold_until is stamped on every member reminder row before the first write, released only on full success, kept on a partial, and its failure ABORTS the move (owner ruling; codex r28/r29)', async () => {
