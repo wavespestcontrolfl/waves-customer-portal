@@ -2776,13 +2776,22 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
-  const { slots: funneledEligible, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
+  const { slots: funneledEligible, funnel: poolFunnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
   // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another customer late,
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
-  const routeChecked = await routeCheckedPool(funneledEligible, {
-    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
-  });
+  const routeCheckArgs = { coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode };
+  let routeChecked = await routeCheckedPool(funneledEligible, routeCheckArgs);
+  let funnel = poolFunnel;
+  // Per truck only: the route check dropped every funneled opening (the zone-day truck's, or the seed day's). Funnel
+  // the route-checked rest again, as if those openings never existed, so another truck's opening can still seed a day
+  // (Codex pre-push P1 on 068130b3fc). The fleet view keeps today's list.
+  if (funnelTechDays && funneledEligible.length && !routeChecked.length) {
+    const tried = new Set(funneledEligible);
+    const rest = await routeCheckedPool(allBookable.filter((slot) => !tried.has(slot)), routeCheckArgs);
+    const refunneled = applyZoneDayFunnel(rest, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
+    if (refunneled.slots.length) ({ slots: routeChecked, funnel } = refunneled);
+  }
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   const makeRoomArgs = {
     estimateId, pool: routeChecked, coords, durationMinutes: serviceProfile.durationMinutes, candidateExpectedMinutes, dateFrom, dateTo,

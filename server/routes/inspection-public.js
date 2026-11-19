@@ -2295,19 +2295,21 @@ function parseCommitBody(body) {
   return { date, time, addressInput, notes, invalid, offeredTechnicianId };
 }
 
-// Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): true when the list offered this hour on its technician's
-// own far-south zone day, and the commit's rebuild now names a truck that is not on its own zone day there. The
-// rebuild claims each start for a zone-day truck first, so that means no zone-day truck can serve the hour any more:
-// answer SLOT_TAKEN rather than book the other truck. False with the gate off, no offered technician, the same
-// technician, an offer that was not on a zone day (a seeded day), or any lookup failure (logged, fail open).
+// Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): true when the commit's rebuild names another truck than the
+// list offered, the date is still a far-south zone day for some truck, and the rebuilt truck is not on its own zone
+// day there. The rebuild claims each start for a zone-day truck first, so no zone-day truck can serve the hour: answer
+// SLOT_TAKEN rather than send a second truck south. Only the zone stops as they are now count, so a stop that moved
+// since the offer counts where it is now. False with the gate off, no offered technician (a page loaded before
+// 2026-11-19), the same truck (one truck books as today), a date with no zone stop left (every truck makes the same
+// lone trip, and the fleet view books it too), or any lookup failure (logged, fail open).
 async function zoneTruckGone({ date, offeredTechnicianId, slot, address }) {
-  const funnel = require('../services/scheduling/zone-day-funnel');
-  if (!funnel.perTruckLive() || !offeredTechnicianId || !slot || String(slot.technician_id) === String(offeredTechnicianId)) return false;
+  if (!offeredTechnicianId || !slot || String(slot.technician_id) === String(offeredTechnicianId)) return false;
   try {
+    const funnel = require('../services/scheduling/zone-day-funnel');
+    if (!funnel.perTruckLive()) return false;
     const view = await funnel.offerFunnelDays({ address: zoneFunnelText(address), dateFrom: date, dateTo: date, conn: db });
-    if (!view || !view.techDays || !view.days.has(date)) return false;
-    return funnel.onZoneDay(date, offeredTechnicianId, view.days, view.techDays)
-      && !funnel.onZoneDay(date, slot.technician_id, view.days, view.techDays);
+    if (!view || !view.techDays) return false;
+    return view.days.has(date) && !funnel.onZoneDay(date, slot.technician_id, view.days, view.techDays);
   } catch (err) {
     logger.warn(`[inspection-public] zone-day truck check failed (failing open): ${err.message}`);
     return false;

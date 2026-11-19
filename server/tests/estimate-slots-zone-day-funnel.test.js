@@ -426,6 +426,42 @@ describe('getAvailableSlots — funnel end to end', () => {
     }
   });
 
+  // The route check drops every opening of the zone-day truck (each would make another customer late). Per truck the
+  // funnel then runs again over the route-checked rest, so the other truck's opening seeds the day; the fleet view
+  // keeps it as a cluster day. Either way the customer still sees times (Codex pre-push P1 on 068130b3fc).
+  test.each([
+    [undefined, { mode: 'clustered' }, 1],
+    ['true', { mode: 'seeded', seedDate: '2027-05-20' }, 2],
+  ])('route check drops every zone-day opening, GATE_MULTI_TECH_CONFIRM=%s: the other truck still offers the day', async (gate, funnel, checks) => {
+    const prev = process.env.GATE_MULTI_TECH_CONFIRM;
+    if (gate) process.env.GATE_MULTI_TECH_CONFIRM = gate; else delete process.env.GATE_MULTI_TECH_CONFIRM;
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const mode = jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('on');
+    const check = jest.spyOn(routeCheck, 'filterOfferedSlots')
+      .mockImplementation(async ({ slots }) => ({ slots: slots.filter((s) => s.techId !== 'tech-2') }));
+    try {
+      mockDb({
+        scheduledRows: [zoneStopRow({ technician_id: 'tech-2' })],
+        techs: [{ id: 'tech-1', name: 'Fixture One' }, { id: 'tech-2', name: 'Fixture Two' }],
+      });
+      const routeSlot = (techId, detour) => ({
+        date: '2027-05-20', start_time: '10:00', end_time: '11:00', route_mode: 'arrival_windows',
+        technician: { id: techId, name: techId }, detour_minutes: detour, stops_that_day: 1,
+      });
+      findAvailableSlots.mockResolvedValue({ slots: [routeSlot('tech-2', 2), routeSlot('tech-1', 4)], evaluated: 2, total_feasible: 2 });
+      const result = await getAvailableSlots('est-funnel-1', { ...WINDOW, offer: true });
+      const slots = [...(result.primary || []), ...(result.expander || [])];
+      expect(slots.length).toBeGreaterThan(0);
+      expect(new Set(slots.map((s) => `${s.date} ${s.techId}`))).toEqual(new Set(['2027-05-20 tech-1']));
+      expect(result.metadata.zoneDayFunnel).toEqual(funnel);
+      expect(check).toHaveBeenCalledTimes(checks);
+    } finally {
+      mode.mockRestore();
+      check.mockRestore();
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
+  });
+
   test.each([false, true])('capacity preserves south-zone day filtering (clustered=%s)', async clustered => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     try {

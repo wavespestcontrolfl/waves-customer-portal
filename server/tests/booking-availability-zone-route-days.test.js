@@ -202,9 +202,9 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(src.match(/await zoneTruckGone\(\{ date, offeredTechnicianId, slot/g) || []).toHaveLength(2);
   });
 
-  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): the commit answers SLOT_TAKEN when the truck the list
-  // offered on its own far-south zone day lost the hour, rather than book a truck that is not on its zone day.
-  test('zoneTruckGone: true only when the offered zone-day truck lost the hour to a truck off its zone day', async () => {
+  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19): the commit answers SLOT_TAKEN when it would book another
+  // truck than the list offered, off its own zone day, on a date some truck still goes south.
+  test('zoneTruckGone: true only when another truck, off its own zone day, would take a zone day\'s hour', async () => {
     const { zoneTruckGone } = require('../routes/inspection-public')._test;
     const { parseCommitBody } = require('../routes/inspection-public')._internals;
     const saved = process.env.GATE_MULTI_TECH_CONFIRM;
@@ -215,12 +215,16 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     process.env.GATE_MULTI_TECH_CONFIRM = 'true';
     try {
       stopRows = zoneStop('tech-2');
-      expect(await check('tech-2', 'tech-1')).toBe(true);
+      expect(await check('tech-2', 'tech-1')).toBe(true); // the zone-day truck lost the hour
+      expect(await check('tech-1', 'tech-3')).toBe(true); // a seeded offer's truck lost it on another truck's zone day
       expect(await check('tech-2', 'tech-2')).toBe(false); // the same truck still holds it
-      expect(await check('tech-1', 'tech-3')).toBe(false); // the offer was not on a zone day (a seeded day)
       expect(await check(null, 'tech-1')).toBe(false); // a page from before this change sends no technician
-      expect(await check('tech-2', 'tech-1', { date: D })).toBe(false); // no zone stop that day
+      expect(await check('tech-2', 'tech-1', { date: D })).toBe(false); // no zone stop that day: any truck
       expect(await check('tech-2', 'tech-1', { address: SARASOTA })).toBe(false); // outside the funneled zones
+      stopRows = zoneStop('tech-3');
+      expect(await check('tech-2', 'tech-1')).toBe(true); // the offered truck's stop moved to another truck since
+      stopRows = [...zoneStop('tech-2'), ...zoneStop('tech-1')];
+      expect(await check('tech-2', 'tech-1')).toBe(false); // the other truck goes south that day too
       stopRows = zoneStop(null);
       expect(await check('tech-2', 'tech-1')).toBe(false); // an unassigned zone stop: every truck's zone day
       stopRows = zoneStop('tech-2');

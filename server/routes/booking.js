@@ -2137,7 +2137,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const funneledCandidates = await funnelOfferPool(stampedCandidates, {
     address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db, view: truckDays,
   });
-  const candidates = await applyRouteCheck(routeCheck, funneledCandidates);
+  let candidates = await applyRouteCheck(routeCheck, funneledCandidates);
+  // Per truck only (truckDays read): the route check dropped every funneled opening. Funnel the route-checked rest
+  // again, as the estimate page does, so another truck's opening can still seed a day.
+  if (truckDays?.techDays && funneledCandidates.length && !candidates.length) {
+    const tried = new Set(funneledCandidates);
+    candidates = await funnelOfferPool(await applyRouteCheck(routeCheck, stampedCandidates.filter((slot) => !tried.has(slot))), {
+      address: zoneFunnelAddress, dateFrom: rangeFrom, dateTo: rangeTo, routeDaySlug: zoneSlug, conn: db, view: truckDays,
+    });
+  }
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible, bestSlotCount,

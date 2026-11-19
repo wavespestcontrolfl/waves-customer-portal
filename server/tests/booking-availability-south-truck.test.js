@@ -122,6 +122,28 @@ describe('buildBookingAvailability — far-south days per truck (GATE_MULTI_TECH
     expect(offerFunnelDays).toHaveBeenCalledWith(expect.objectContaining({ address: undefined }));
   });
 
+  // The route check drops the zone-day truck's only opening (another customer would be late). The funnel runs again over
+  // the route-checked rest, so the other truck's opening seeds the day instead of an empty list (Codex pre-push P1
+  // on 068130b3fc).
+  test('the route check drops every zone-day opening: the other truck\'s opening seeds the day', async () => {
+    const routeCheck = require('../services/scheduling/customer-route-check');
+    const mode = jest.spyOn(routeCheck, 'customerRouteCheckMode').mockReturnValue('on');
+    const check = jest.spyOn(routeCheck, 'filterOfferedSlots')
+      .mockImplementation(async ({ slots }) => ({ slots: slots.filter((s) => s.technician_id !== 'tech-south') }));
+    try {
+      expect(offers(await build({ zoneFunnelAddress: ADDRESS, surface: 'inspection' }))).toEqual(['11:00:tech-north']);
+      expect(check).toHaveBeenCalledTimes(2);
+      // A route check that keeps the zone-day opening runs once and changes nothing.
+      check.mockClear();
+      check.mockImplementation(async ({ slots }) => ({ slots }));
+      expect(offers(await build({ zoneFunnelAddress: ADDRESS, surface: 'inspection' }))).toEqual(['09:00:tech-south']);
+      expect(check).toHaveBeenCalledTimes(1);
+    } finally {
+      mode.mockRestore();
+      check.mockRestore();
+    }
+  });
+
   test('gate off: no zone read before the claims, first claim by score, as with one truck', async () => {
     delete process.env.GATE_MULTI_TECH_CONFIRM;
     expect(offers(await build({ zoneTruckAddress: ADDRESS }))).toEqual(['09:00:tech-north', '11:00:tech-north']);
