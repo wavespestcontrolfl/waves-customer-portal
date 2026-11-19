@@ -44,7 +44,7 @@ const tableResults = {
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNot', 'orWhereNull', 'orderBy', 'limit', 'offset'];
+    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNot', 'orWhereNull', 'orWhereNotNull', 'orderBy', 'limit', 'offset'];
     for (const m of passthrough) {
       q[m] = (...args) => {
         q._calls = q._calls || [];
@@ -65,7 +65,10 @@ jest.mock('../models/db', () => {
     const calls = q._calls || [];
     const whereArg = (calls.find(([m]) => m === 'where') || [null, [{}]])[1][0] || {};
     if (table === 'invoices') {
-      if (calls.some(([m]) => m === 'whereNotNull')) return tableResults.payerInvoices;
+      if (calls.some(([m]) => m === 'whereNotNull')) {
+        if (tableResults.payerInvoices instanceof Error) throw tableResults.payerInvoices;
+        return tableResults.payerInvoices;
+      }
       // unpaidInvoices uses whereIn('status', …) but terminates with .first();
       // the failed-row status lookup uses whereIn('id', …) with no .first().
       if (wantFirst) return { total: tableResults.unpaidTotal };
@@ -81,7 +84,7 @@ jest.mock('../models/db', () => {
       if (whereArg.status === 'upcoming') return tableResults.upcomingRows;
       // recent-attempts scan (whereIn statuses)
       if (wantFirst) return tableResults.recentAttempts[0] || null;
-      return tableResults.recentAttempts;
+      return tableResults.recentAttempts.map((row) => Object.fromEntries(q._selected.map((key) => [key, row[key]])));
     }
     throw new Error(`Unexpected table ${table}`);
   }));
@@ -117,6 +120,25 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     tableResults.unpaidTotal = '0';
     tableResults.recentAttempts = [];
     tableResults.linkedNonDraftInvoices = [];
+  });
+
+  test('the latest attempt excludes direct and invoice-linked payer rows before choosing the homeowner’s payment', async () => {
+    tableResults.payerInvoices = [{ id: 'payer-invoice', stripe_charge_id: 'ch_payer' }];
+    tableResults.recentAttempts = [
+      { id: 'direct', status: 'failed', payer_id: 'third-party' },
+      { id: 'stamped', status: 'failed', metadata: JSON.stringify({ payer_id: 'third-party' }) },
+      { id: 'linked', status: 'failed', stripe_charge_id: 'ch_payer' },
+      { id: 'alias', status: 'failed', metadata: { waves_invoice_id: 'payer-invoice' } },
+    ];
+    expect(await getBalance()).toMatchObject({ lastPaymentFailed: false, lastPaymentAttemptId: null });
+    tableResults.recentAttempts.push({ id: 'own', status: 'failed' });
+    expect(await getBalance()).toMatchObject({ lastPaymentFailed: true, lastPaymentAttemptId: 'own' });
+  });
+
+  test('the failure banner withholds the attempt when payer ownership cannot be read', async () => {
+    tableResults.payerInvoices = new Error('payer lookup unavailable');
+    tableResults.recentAttempts = [{ id: 'unknown', status: 'failed' }];
+    expect(await getBalance()).toMatchObject({ lastPaymentFailed: false, lastPaymentAttemptId: null });
   });
 
   test('invoice-linked failed row does not double-count the open invoice', async () => {

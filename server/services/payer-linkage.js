@@ -66,6 +66,11 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
   return { failed, payerInvRows, payerInvoiceIds, isPayerLinked };
 }
 
+function excludeDirectPayerPayments(query) {
+  return query.whereNull('payments.payer_id')
+    .whereRaw("COALESCE(payments.metadata->>'payer_id', '') = ''");
+}
+
 // Same query billing-v2 has always run (moved here unchanged). `failed` = the lookup errored: the caller must
 // treat payer ownership as UNKNOWN.
 async function loadPayerLinkage(customerId, dbh = db, { propagateCancellation = false } = {}) {
@@ -172,5 +177,5 @@ function excludeLiveOwnedPayerPayments(qb, linkage) {
 module.exports = {
   LIVE_CANDIDATE_PAYER_SQL, LIVE_SETTLED_EXCLUSION_SQL,
   LIVE_SCAN_MAX_INVOICES, LIVE_SCAN_MAX_RESOLUTIONS, uuidFromMetadata, excludeLiveOwnedPayerPayments,
-  invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage,
+  invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf, buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage, excludeDirectPayerPayments,
 };

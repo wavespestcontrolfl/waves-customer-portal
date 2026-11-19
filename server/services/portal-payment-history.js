@@ -7,7 +7,7 @@ const db = require('../models/db');
 const { excludeHoldDeferralPlaceholders } = require('./collections/collection-hold');
 const StripeService = require('./stripe');
 const logger = require('./logger');
-const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
+const { loadPayerLinkage, excludeDirectPayerPayments, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
 const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, neverRanVisitStatus } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
@@ -578,18 +578,15 @@ async function listPortalPayments(customerId, {
   // stamps (payments.payer_id, metadata.payer_id) are SQL, so the common
   // case (no payer invoice on file) stays one COUNT(*) per page; only an
   // account with payer invoices scans its rows for the invoice-linked ones.
-  const notDirectlyPayerOwned = (q) => q
-    .whereNull('payments.payer_id')
-    .whereRaw("COALESCE(payments.metadata->>'payer_id', '') = ''");
   let total;
   if (payerInvoiceIds.size === 0) {
-    const countRow = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(database('payments')
+    const countRow = await excludeDirectPayerPayments(excludeHoldDeferralPlaceholders(database('payments')
       .where({ customer_id: customerId }), 'payments'))
       .count('* as count')
       .first();
     total = Number(countRow?.count || 0);
   } else {
-    const rows = await notDirectlyPayerOwned(excludeHoldDeferralPlaceholders(database('payments')
+    const rows = await excludeDirectPayerPayments(excludeHoldDeferralPlaceholders(database('payments')
       .where({ customer_id: customerId }), 'payments'))
       .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id');
     total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);

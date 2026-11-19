@@ -3,6 +3,7 @@ const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
 const { listPortalPayments } = require('../services/portal-payment-history');
+const { loadPayerLinkage, excludeDirectPayerPayments, invoiceIdOf } = require('../services/payer-linkage');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -652,31 +653,8 @@ router.get('/balance', async (req, res, next) => {
     // this customer's payer-billed invoice ids once so the failed-balance sum and
     // the "last payment failed" banner can exclude those rows (otherwise an AP
     // payment failure would show as the homeowner's own balance / failure).
-    const payerInvRows = await db('invoices')
-      .where({ customer_id: req.customerId })
-      // …including a WITHDRAWN invoice, whose payer_id stays NULL: without it
-      // a failed Auto Pay attempt on a still-draft packet invoice kept
-      // counting toward the homeowner's balance after the debt moved to AP
-      // (Codex #4311 r36 P1) — drafts are deliberately excluded from
-      // balanceCarryingInvoiceIds, so nothing else filtered it.
-      .where(function payerOwned() {
-        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
-      })
-      .select('id')
-      .catch(() => []);
-    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
-    const metadataInvoiceId = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return m && m.invoice_id != null ? String(m.invoice_id) : null;
-      } catch {
-        return null;
-      }
-    };
-    const isPayerPayment = (p) => {
-      const invId = metadataInvoiceId(p);
-      return !!(invId && payerInvoiceIds.has(invId));
-    };
+    const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(req.customerId, db);
+    const isPayerPayment = (payment) => payerInvoiceIds.has(invoiceIdOf(payment));
 
     // Failed attempts whose retry later collected are superseded — the
     // money arrived on the retry's own paid row, so they must not count
@@ -750,17 +728,17 @@ router.get('/balance', async (req, res, next) => {
     // first page.
     // A never-attempted deferral (see isNeverAttemptedDeferral) is not an
     // attempt either — it must not raise the "last payment failed" banner.
-    const isRealAttempt = (p) => !isPayerPayment(p) && !isNeverAttemptedDeferral(p);
-    const recentAttemptsQuery = () => db('payments')
+    const isRealAttempt = (p) => !isPayerLinked(p) && !isNeverAttemptedDeferral(p);
+    const recentAttemptsQuery = () => excludeDirectPayerPayments(db('payments')
       .where({ customer_id: req.customerId })
       .whereIn('status', ['paid', 'failed', 'refunded'])
-      .whereNull('superseded_by_payment_id')
+      .whereNull('superseded_by_payment_id'))
       .orderBy('payment_date', 'desc')
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
-      .select('id', 'status', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
+      .select('id', 'status', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'retry_count', 'next_retry_at');
     let mostRecentAttempt = null;
-    {
+    if (!payerLookupFailed) {
       const PAGE = 50;
       for (let offset = 0; offset < 500; offset += PAGE) {
         const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
