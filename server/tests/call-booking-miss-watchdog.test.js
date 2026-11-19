@@ -308,8 +308,12 @@ describe('a visit the call agent held', () => {
       call({ id: 'post-call-row', created_at: minutesAgo(11), duration_seconds: 12 * 60, metadata: { source: 'status_callback' }, ai_validation: held() }),
       // Twilio's end stamp wins over created_at + length: ended 5 minutes ago.
       call({ id: 'end-stamped', created_at: minutesAgo(30), duration_seconds: 60, metadata: { ended_at: ended(5) }, ai_validation: held() }),
+      // Pre-push P1 (2026-11-18): an outbound bridge's customer-leg receipt wins over the row's
+      // length, which can count the staff leg's ringing: the customer hung up 5, then 11, minutes ago.
+      call({ id: 'bridge-leg', created_at: minutesAgo(30), duration_seconds: 60, metadata: { customer_leg: { ended_at: ended(5) } }, ai_validation: held() }),
+      call({ id: 'bridge-leg-done', created_at: minutesAgo(30), duration_seconds: 60, metadata: { customer_leg: { ended_at: ended(11) } }, ai_validation: held() }),
     ], [], { now: NOW });
-    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row']);
+    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done']);
     // An unheld call keeps its wait from created_at.
     expect(computeBookingMisses([call({ duration_seconds: 120 * 60 })], [], { now: NOW })).toHaveLength(1);
   });
@@ -361,13 +365,15 @@ describe('a visit the call agent held', () => {
     }
   });
 
-  // Pre-push P1s (2026-11-18): either extractor's opt-out bars contact, and an opt-out alone
+  // Pre-push P1s (2026-11-18): every stored opt-out signal bars contact, and an opt-out alone
   // never proves a hold (in shadow mode V2 does not decide the booking; in enforce mode the
   // processor's hard-veto exit stores no decision).
-  test('an opt-out from either extractor never asks for a call, and alone it does not shorten the wait', () => {
+  test('an opt-out in any stored signal never asks for a call, and alone it does not shorten the wait', () => {
     const optOuts = {
-      V2: { ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) },
-      V1: { ai_extraction: { do_not_contact_request: true } },
+      'V2 consent': { ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) },
+      // A flag-only opt-out: the processor's hard veto reads the flag, with no consent boolean.
+      'V2 triage flag': { ai_extraction_enriched: extraction({ triage_flags: ['do_not_contact_requested'] }) },
+      'V1 extraction': { ai_extraction: { do_not_contact_request: true } },
     };
     for (const [label, over] of Object.entries(optOuts)) {
       expect([label, computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null, ...over })], [], { now: NOW })]).toEqual([label, []]);

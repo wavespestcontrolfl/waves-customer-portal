@@ -279,13 +279,27 @@ function agentHoldReason(validationRaw) {
   return hit ? hit[1] : HOLD_REASON_FALLBACK;
 }
 
-// The caller opted out of contact, as either extractor heard it: the V2 extraction's
-// consent.do_not_contact_request or the V1 extraction's do_not_contact_request, the two
-// signals the processor honors (its v2DoNotContact). It shapes what a bell asks staff to do;
-// it never proves a hold by itself (in shadow mode V2 does not decide the booking).
+// The caller opted out of contact, by any stored signal the processor honors: the V2
+// extraction's consent.do_not_contact_request or its do_not_contact_requested triage flag (a
+// hard veto), or the V1 extraction's do_not_contact_request. It shapes what a bell asks staff
+// to do; it never proves a hold by itself (in shadow mode V2 does not decide the booking).
 function callerOptedOut(call) {
-  return readJson(call.ai_extraction_enriched)?.consent?.do_not_contact_request === true
+  const v2 = readJson(call.ai_extraction_enriched);
+  return v2?.consent?.do_not_contact_request === true
+    || (Array.isArray(v2?.triage_flags) && v2.triage_flags.includes('do_not_contact_requested'))
     || readJson(call.ai_extraction)?.do_not_contact_request === true;
+}
+
+// When a held call's wait starts: when the call ended. An outbound bridge's own customer-leg
+// receipt (metadata.customer_leg.ended_at, stamped by /outbound-dial-complete) is exact and
+// wins, as in call-booking-link-text's callEndFor: the row's length can count the staff leg's
+// ringing before the customer connected. Else callEndedAt (Twilio's end stamp, or start +
+// length), else created_at: a post-call row is written after the call.
+function heldWaitStart(call, createdAt) {
+  const legEndedAt = String(call.direction || '').startsWith('outbound') ? readJson(call.metadata)?.customer_leg?.ended_at : null;
+  const legEnded = legEndedAt ? new Date(legEndedAt) : null;
+  if (legEnded && !Number.isNaN(legEnded.getTime())) return legEnded;
+  return callEndedAt(call) || createdAt;
 }
 
 // The stored decision of the call's last pass, or null. A reprocess keeps the old decision
@@ -427,10 +441,9 @@ function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes =
   for (const call of calls) {
     const createdAt = call.created_at ? new Date(call.created_at) : null;
     const holdReason = callHoldReason(call);
-    // A held call's wait starts when the call ends, so the office gets its 10 minutes after
-    // hanging up: a row inserted at pickup holds the call's start in created_at. A post-call
-    // row with no end stamp has no callEndedAt, and its created_at is already after the call.
-    const clock = holdReason ? (callEndedAt(call) || createdAt) : createdAt;
+    // A held call's wait starts when the call ends (heldWaitStart), so the office gets its 10
+    // minutes after hanging up: a row inserted at pickup holds the call's start in created_at.
+    const clock = holdReason ? heldWaitStart(call, createdAt) : createdAt;
     if (!createdAt || clock > (holdReason ? heldGraceCutoff : graceCutoff)) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
