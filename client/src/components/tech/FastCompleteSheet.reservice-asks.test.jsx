@@ -20,7 +20,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
 
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'talstar', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
 ];
 const VISIT = {
@@ -121,8 +121,8 @@ describe('the short re-service form', () => {
     tap(card('Request form · Oct 6'), 'Treated');
     const picker = within(card('Request form · Oct 6')).getByRole('group', { name: 'Products used for this item' });
     // Every row on the completion is offered (the house mix); none names ants, so they stay in sheet order.
-    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['Taurus SC', 'Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']);
-    tap(picker, 'Atticus Talak 7.9 F');
+    expect(within(picker).getAllByRole('button').map((b) => b.textContent)).toEqual(['Taurus SC', 'LESCO Crosscheck Plus', 'LESCO 90/10 Nonionic Surfactant']);
+    tap(picker, 'LESCO Crosscheck Plus');
     fireEvent.change(within(card('Question · Oct 8')).getByLabelText('Your answer'), { target: { value: 'No, the smell fades fast.' } });
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     expect(screen.queryByText(HINT)).toBeNull();

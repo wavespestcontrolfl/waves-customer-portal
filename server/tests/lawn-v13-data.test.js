@@ -199,7 +199,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME, 'LESCO Crosscheck Plus' /* house bifenthrin since 2026-11-18: a production catalog row */];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -359,7 +359,8 @@ describe('staged migration 20261005120000', () => {
       // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
       // 20261008130000 retires February's Certainty and surfactant rows (Celsius alone in February); the recipe lines are gone.
       const retiredHere = new Set((decemberMigration.RETIRE.find(([key]) => key === windowKey) || [, []])[1]);
-      expect(spots.filter((n) => n !== migration.NAMES.DIS && !retiredHere.has(n)).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      // 20261119010000 (house bifenthrin, owner 2026-11-18) links every staged Talak row to LESCO Crosscheck Plus; the recipe names it.
+      expect(spots.filter((n) => n !== migration.NAMES.DIS && !retiredHere.has(n)).map((n) => (n === migration.NAMES.TAL ? 'LESCO Crosscheck Plus' : n)).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');
@@ -402,7 +403,7 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
     // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22; 20261009100000 uses the existing Topchoice row.
-    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, granuleMigration.GRANULE, advionMigration.NAME];
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, granuleMigration.GRANULE, advionMigration.NAME, 'LESCO Crosscheck Plus' /* house bifenthrin since 2026-11-18: a production catalog row */];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));

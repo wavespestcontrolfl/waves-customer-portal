@@ -285,7 +285,7 @@ const V13_FULL_OUTLINE_CATEGORIES = [
   [/stonewall|dimension/i, 'Pre-emergent weed control', ['barrier']],
   [/nutra-tech/i, 'Micronutrients', ['micros']],
   [/(?:^|[^\d.])\d{1,2}-\d{1,2}-\d{1,2}(?!\d)/, 'Fertilizer and nutrition', ['feeding']],
-  [/tetrino|arena|talak|acelepryn|dylox|advion|topchoice/i, 'Insect control', ['insects']],
+  [/tetrino|arena|talak|crosscheck|acelepryn|dylox|advion|topchoice/i, 'Insect control', ['insects']],
   [/artavia|velista|gravex|headway/i, 'Disease control', ['disease']],
   [/celsius|certainty|blindside|dismiss/i, 'Weed spot treatment', ['weeds']],
   [/dispatch|surfactant/i, 'Wetting agent', ['dry_spots']],

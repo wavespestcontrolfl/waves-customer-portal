@@ -24,7 +24,7 @@ const TANK = {
 // surfactant, whose catalog label is per gallon (20260712100000).
 const HOUSE_MIX = [
   { id: 'taurus', name: 'Taurus SC', category: 'insecticide' },
-  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide' },
+  { id: 'crosscheck', name: 'LESCO Crosscheck Plus', category: 'insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', default_rate: '0.03-0.64', default_unit: 'fl_oz/gal' },
 ];
 // A lawn liquid on a per-1,000 rate: Total = rate x sq ft / 1,000, in fl oz.
@@ -181,7 +181,7 @@ describe('tsp on the pest house seed', () => {
     const byId = Object.fromEntries(body.products.map((product) => [product.productId, product]));
     expect(byId.surfactant).toMatchObject({ totalAmount: 0.25, amountUnit: 'fl_oz' });
     expect(byId.taurus).toMatchObject({ totalAmount: '4', amountUnit: 'oz' });
-    expect(byId.talak).toMatchObject({ totalAmount: 4, amountUnit: 'oz' });
+    expect(byId.crosscheck).toMatchObject({ totalAmount: 4, amountUnit: 'oz' });
   });
 });
 
