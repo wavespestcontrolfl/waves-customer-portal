@@ -62,10 +62,23 @@ function dateOnly(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
 }
 
+// A row with a real arrival window is placed. A windowless row is still a
+// legitimate legacy date-only stop only when neither durable parking marker
+// says it is awaiting placement (Quick Move or recurring dispatch).
+function isPlacedOrLegacyDateOnly(row) {
+  return Boolean(row) && (row.window_start != null
+    || (row.customer_pick_by == null && row.recurring_dispatch_due_date == null));
+}
+
+function placedOrLegacySql(alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  return `(${prefix}window_start IS NOT NULL OR (${prefix}customer_pick_by IS NULL AND ${prefix}recurring_dispatch_due_date IS NULL))`;
+}
+
 function eligibleTargetDate(svc, today) {
   if (!svc) return null;
   if (NOT_A_STOP_STATUSES.includes(svc.status)) return null;
-  if (svc.customer_pick_by && !svc.window_start) return null;
+  if (!isPlacedOrLegacyDateOnly(svc)) return null;
   if ((svc.track_state || 'scheduled') !== 'scheduled') return null;
   if (svc.status === 'en_route' || svc.status === 'on_site') return null;
   const serviceDate = dateOnly(svc.scheduled_date);
@@ -97,7 +110,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // covering the no-technician case.
     const grpRes = await db.raw(
       `SELECT s.id, s.customer_id, s.technician_id, s.scheduled_date, s.window_start,
-              s.customer_pick_by, s.status, s.track_state
+              s.customer_pick_by, s.recurring_dispatch_due_date, s.status, s.track_state
          FROM scheduled_services s, scheduled_services t
         WHERE t.id = ?::uuid
           AND s.technician_id = t.technician_id
@@ -110,8 +123,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     const svc = grpRows.find((r) => r.id === serviceId);
     // The target itself must be a real upcoming stop — terminal visits AND
     // rescheduled placeholders (which can retain track_state='scheduled')
-    // never display a count. An unplaced customer-pick handoff is not a stop,
-    // and the calendar date must still be today's ET route.
+    // never display a count. Neither marked windowless parking shape is a
+    // stop; a markerless legacy date-only visit remains eligible. The
+    // calendar date must still be today's ET route.
     const svcDate = eligibleTargetDate(svc, today);
     if (!svcDate) return null;
     // Only the pre-dispatch scheduled state shows a count. en_route and
@@ -128,7 +142,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // same applies when ANY SIBLING row has advanced (or finished): the
     // physical stop is underway/visited, so a planned count on the
     // untouched sibling's link would be a lie.
-    const siblingAdvanced = grpRows.some((r) => r.id !== svc.id
+    const siblingAdvanced = grpRows.some((r) => r.id !== svc.id && isPlacedOrLegacyDateOnly(r)
       && (['en_route', 'on_site', 'completed'].includes(r.status)
           || ['en_route', 'on_property', 'complete'].includes(r.track_state)));
     if (siblingAdvanced) return null;
@@ -201,7 +215,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND status NOT IN (${liveExcl})
             AND status NOT IN ('en_route', 'on_site')
             AND COALESCE(track_state, 'scheduled') = 'scheduled'
-            AND (customer_pick_by IS NULL OR window_start IS NOT NULL)
+            AND ${placedOrLegacySql()}
        ),
        target AS (
          SELECT tr.customer_id, tr.technician_id, tr.scheduled_date, tr.window_start,
@@ -212,7 +226,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                     AND ss.scheduled_date = tr.scheduled_date
                     AND ss.customer_id = tr.customer_id
                     AND ss.window_start IS NOT DISTINCT FROM tr.window_start
-                    AND (ss.customer_pick_by IS NULL OR ss.window_start IS NOT NULL)
+                    AND ${placedOrLegacySql('ss')}
                     AND ss.stops_ahead_shown_date = ?::date) AS group_floor
            FROM target_row tr
            JOIN LATERAL (
@@ -222,6 +236,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                 AND s.scheduled_date = tr.scheduled_date
                 AND s.customer_id = tr.customer_id
                 AND s.window_start IS NOT DISTINCT FROM tr.window_start
+                AND ${placedOrLegacySql('s')}
                 AND (s.id = tr.id
                      OR (s.status NOT IN (${routeExcl})
                          AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
@@ -239,7 +254,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND s.scheduled_date = t.scheduled_date
             AND NOT (s.customer_id = t.customer_id
                      AND s.window_start IS NOT DISTINCT FROM t.window_start)
-            AND (s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)
+            AND ${placedOrLegacySql('s')}
             AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
             AND s.status NOT IN (${routeExcl})
             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
@@ -380,7 +395,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       const res = await db.raw(
         `WITH locked_group AS MATERIALIZED (
            SELECT id, customer_id, technician_id, scheduled_date, window_start,
-                  status, track_state, customer_pick_by
+                  status, track_state, customer_pick_by, recurring_dispatch_due_date
              FROM scheduled_services
             WHERE technician_id = ?::uuid
               AND scheduled_date = ?::date
@@ -396,7 +411,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
               AND status NOT IN (${liveExcl})
               AND status NOT IN ('en_route', 'on_site')
               AND COALESCE(track_state, 'scheduled') = 'scheduled'
-              AND (customer_pick_by IS NULL OR window_start IS NOT NULL)
+              AND ${placedOrLegacySql()}
          ),
          floor_val AS (
            SELECT LEAST(?::int, MIN(CASE WHEN s.stops_ahead_shown_date = ?::date
@@ -406,7 +421,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
               AND s.scheduled_date = g.scheduled_date
               AND s.customer_id = g.customer_id
               AND s.window_start IS NOT DISTINCT FROM g.window_start
-              AND (s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)
+              AND ${placedOrLegacySql('s')}
          )
          UPDATE scheduled_services u
             SET stops_ahead_min_shown = f.v,
@@ -416,7 +431,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND u.scheduled_date = g.scheduled_date
             AND u.customer_id = g.customer_id
             AND u.window_start IS NOT DISTINCT FROM g.window_start
-            AND (u.customer_pick_by IS NULL OR u.window_start IS NOT NULL)
+            AND ${placedOrLegacySql('u')}
             AND (u.stops_ahead_shown_date IS DISTINCT FROM ?::date
                  OR u.stops_ahead_min_shown IS NULL
                  OR u.stops_ahead_min_shown > f.v)
@@ -447,12 +462,12 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND t.status NOT IN (${liveExcl})
             AND t.status NOT IN ('en_route', 'on_site')
             AND COALESCE(t.track_state, 'scheduled') = 'scheduled'
-            AND (t.customer_pick_by IS NULL OR t.window_start IS NOT NULL)
+            AND ${placedOrLegacySql('t')}
             AND s.technician_id = t.technician_id
             AND s.scheduled_date = t.scheduled_date
             AND s.customer_id = t.customer_id
             AND s.window_start IS NOT DISTINCT FROM t.window_start
-            AND (s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)
+            AND ${placedOrLegacySql('s')}
             AND s.stops_ahead_shown_date = ?::date`,
         [
           svc.id, svc.technician_id, svcDate, svc.window_start,
@@ -491,4 +506,5 @@ module.exports = {
   TERMINAL_STATUSES,
   NOT_A_STOP_STATUSES,
   NOT_A_ROUTE_STOP_STATUSES,
+  isPlacedOrLegacyDateOnly,
 };

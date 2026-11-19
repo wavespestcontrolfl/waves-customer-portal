@@ -47,7 +47,11 @@ const { resolveFreshTechPosition } = require('../services/tracking-vehicle-locat
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
-const { computeStopsAhead, isServiceDateToday } = require('../services/stops-ahead');
+const {
+  computeStopsAhead,
+  isServiceDateToday,
+  isPlacedOrLegacyDateOnly,
+} = require('../services/stops-ahead');
 const { gateEnvValue } = require('../config/feature-gates');
 const { customerTrackState } = require('../services/track-transitions');
 const { dayOnlyVisit } = require('../services/time-display');
@@ -220,7 +224,9 @@ function isUnplacedCustomerPick(row) {
 }
 
 function allowsScheduledRouteTracking(row, customerState) {
-  return customerState === 'scheduled' && row.status !== 'rescheduled' && !isUnplacedCustomerPick(row);
+  return customerState === 'scheduled'
+    && row.status !== 'rescheduled'
+    && isPlacedOrLegacyDateOnly(row);
 }
 
 function publicTrackState(row) {
@@ -676,6 +682,7 @@ router.get('/:token', async (req, res, next) => {
         's.cancelled_at',
         's.cancellation_reason',
         's.customer_pick_by',
+        's.recurring_dispatch_due_date',
         's.service_id',
         's.property_id',
         's.is_recurring',
@@ -890,7 +897,7 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
       .where('s.track_view_token', req.params.token)
       .first(
         's.id', 's.status', 's.track_state', 's.track_token_expires_at',
-        's.customer_pick_by', 's.window_start',
+        's.customer_pick_by', 's.recurring_dispatch_due_date', 's.window_start',
       );
     if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
       return res.status(404).json({ error: 'Not found' });

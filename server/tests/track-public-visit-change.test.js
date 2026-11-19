@@ -176,6 +176,19 @@ describe('public tracker changed-visit recovery', () => {
     expect(allowsScheduledRouteTracking(service, 'scheduled')).toBe(false);
   });
 
+  test('route tracking rejects both marked parked shapes but preserves a markerless legacy date-only visit', () => {
+    const base = { status: 'confirmed', window_start: null };
+    expect(allowsScheduledRouteTracking({
+      ...base, customer_pick_by: '2026-11-20T00:00:00Z', recurring_dispatch_due_date: null,
+    }, 'scheduled')).toBe(false);
+    expect(allowsScheduledRouteTracking({
+      ...base, customer_pick_by: null, recurring_dispatch_due_date: '2026-11-20',
+    }, 'scheduled')).toBe(false);
+    expect(allowsScheduledRouteTracking({
+      ...base, customer_pick_by: null, recurring_dispatch_due_date: null,
+    }, 'scheduled')).toBe(true);
+  });
+
   test('legacy handoff logs decode safely and an unapproved reason exposes no recovery story', async () => {
     expect(handoffReasonCode({ reason_code: 'customer_pick', notes: 'weather_wind' })).toBe('weather_wind');
     installLogs(rainHandoff({ reason_code: 'internal_staff_note' }));

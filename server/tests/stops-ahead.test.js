@@ -19,6 +19,7 @@ function baseSvc(overrides = {}) {
     status: 'confirmed',
     track_state: 'scheduled',
     customer_pick_by: null,
+    recurring_dispatch_due_date: null,
     route_order: null,
     window_start: '10:00:00',
     created_at: '2026-08-01T12:00:00.000Z',
@@ -129,7 +130,7 @@ describe('computeStopsAhead', () => {
     expect(updateSql).toContain('technician_id = ?::uuid');
     expect(updateSql).toContain('scheduled_date = ?::date');
     expect(updateSql).toContain('window_start IS NOT DISTINCT FROM ?::time');
-    expect(updateSql).toContain('(customer_pick_by IS NULL OR window_start IS NOT NULL)');
+    expect(updateSql).toContain('(window_start IS NOT NULL OR (customer_pick_by IS NULL AND recurring_dispatch_due_date IS NULL))');
     expect(updateSql).toContain('u.window_start IS NOT DISTINCT FROM g.window_start');
     expect(updateSql).toContain('RETURNING f.v AS stops_ahead_min_shown');
     // Single-snapshot CTE aggregate: bound to (target id, group-floor
@@ -174,9 +175,10 @@ describe('computeStopsAhead', () => {
     expect(countSql).toMatch(/progressed_beyond/);
     // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
-    // A foreign Quick Move that still owns its technician but has no slot
-    // is not a route contributor for this placed customer's count.
-    expect(countSql).toContain('(s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)');
+    // Neither marked parked shape is a route contributor; markerless legacy
+    // date-only rows remain valid stops.
+    const placedOrLegacyS = '(s.window_start IS NOT NULL OR (s.customer_pick_by IS NULL AND s.recurring_dispatch_due_date IS NULL))';
+    expect(countSql.split(placedOrLegacyS)).toHaveLength(3); // lateral anchor + day_rows
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
     // NULL-safely (track_state can diverge from status).
     expect(countSql).toContain("(dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))");
@@ -221,11 +223,16 @@ describe('computeStopsAhead', () => {
     ]);
   });
 
-  test('a parked NULL-window sibling is excluded from every floor read and write', async () => {
+  test.each([
+    ['Quick Move', { customer_pick_by: '2026-08-14T22:00:00Z' }],
+    ['recurring-dispatch', { recurring_dispatch_due_date: TODAY }],
+  ])('a parked %s NULL-window sibling cannot anchor, suppress, read, or receive the legacy target floor', async (_label, marker) => {
     const target = baseSvc({ window_start: null });
     const parked = baseSvc({
       id: 'svc-parked', window_start: null,
-      customer_pick_by: '2026-08-14T22:00:00Z',
+      status: 'completed', track_state: 'complete',
+      created_at: '2026-07-01T12:00:00.000Z',
+      ...marker,
     });
     const db = makeDb({
       svcRow: target, siblings: [parked], countN: 1,
@@ -236,10 +243,14 @@ describe('computeStopsAhead', () => {
     const [countSql] = db.countCall();
     const [updateSql] = db.updateCalls()[0];
     const [reReadSql] = db.reReadCalls()[0];
-    expect(countSql).toContain('(ss.customer_pick_by IS NULL OR ss.window_start IS NOT NULL)');
-    expect(updateSql).toContain('(s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)');
-    expect(updateSql).toContain('(u.customer_pick_by IS NULL OR u.window_start IS NOT NULL)');
-    expect(reReadSql).toContain('(s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)');
+    expect(countSql).toContain('(window_start IS NOT NULL OR (customer_pick_by IS NULL AND recurring_dispatch_due_date IS NULL))');
+    expect(countSql).toContain('(ss.window_start IS NOT NULL OR (ss.customer_pick_by IS NULL AND ss.recurring_dispatch_due_date IS NULL))');
+    const placedOrLegacyS = '(s.window_start IS NOT NULL OR (s.customer_pick_by IS NULL AND s.recurring_dispatch_due_date IS NULL))';
+    expect(countSql.split(placedOrLegacyS)).toHaveLength(3); // lateral anchor + day_rows
+    expect(updateSql).toContain(placedOrLegacyS);
+    expect(updateSql).toContain('(u.window_start IS NOT NULL OR (u.customer_pick_by IS NULL AND u.recurring_dispatch_due_date IS NULL))');
+    expect(reReadSql).toContain('(t.window_start IS NOT NULL OR (t.customer_pick_by IS NULL AND t.recurring_dispatch_due_date IS NULL))');
+    expect(reReadSql).toContain(placedOrLegacyS);
   });
 
   test('floor only lowers: stored 3, truth 1 → 1', async () => {
@@ -263,6 +274,7 @@ describe('computeStopsAhead', () => {
     ['terminal status', baseSvc({ status: 'completed' })],
     ['rescheduled placeholder (still track_state=scheduled)', baseSvc({ status: 'rescheduled' })],
     ['unplaced customer-pick handoff', baseSvc({ customer_pick_by: '2026-08-14T22:00:00Z', window_start: null })],
+    ['unplaced recurring-dispatch due date', baseSvc({ recurring_dispatch_due_date: TODAY, window_start: null })],
     ['en route to this stop (scheduled card owns the count)', baseSvc({ track_state: 'en_route' })],
     ['on the property already', baseSvc({ track_state: 'on_property' })],
     ['scheduled for a future date', baseSvc({ scheduled_date: '2026-08-15' })],
