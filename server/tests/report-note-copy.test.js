@@ -16,6 +16,7 @@
 const {
   reportNoteCustomerCopy,
   visitReportCustomerCopy,
+  carriesReportNote,
   printedReportSummary,
   reportTechnicianFirstName,
   MAX_REPORT_NOTE_CHARS,
@@ -36,7 +37,12 @@ const MALFORMED = [
   stored({ text: 42 }),
   stored({ text: 'x'.repeat(MAX_REPORT_NOTE_CHARS + 1) }),
   stored({ text: `${NOTE}\nGate code 4471.` }),
+  // Every other line or paragraph break (pre-push P1 on fc43308977).
+  ...['\u2028', '\u2029', '\u0085', '\v', '\f', '\r'].map((brk) => stored({ text: `${NOTE}${brk}Gate code 4471.` })),
 ];
+// Stored notes that cannot be read may hold a note: a cut-off serialized note,
+// or a string that parses to something other than an object.
+const UNREADABLE = ['{not json', '{"reportNote":{"v":1,"text":"I treated the la', '"a string"', '42'];
 
 describe('reportNoteCustomerCopy: the stored shape', () => {
   test('reads the note from an object or a JSON string', () => {
@@ -46,9 +52,19 @@ describe('reportNoteCustomerCopy: the stored shape', () => {
 
   test('a record with no note reads as null, so the titled report may stand', () => {
     expect(reportNoteCustomerCopy(null)).toBeNull();
-    expect(reportNoteCustomerCopy('{not json')).toBeNull();
+    expect(reportNoteCustomerCopy('')).toBeNull();
+    expect(reportNoteCustomerCopy('null')).toBeNull();
     expect(reportNoteCustomerCopy({})).toBeNull();
     expect(reportNoteCustomerCopy({ reportNote: undefined })).toBeNull();
+    expect(carriesReportNote({})).toBe(false);
+  });
+
+  // Pre-push P1 on fc43308977: a parse failure read as "no note".
+  test('stored notes that cannot be read count as a note and read as no text', () => {
+    UNREADABLE.forEach((notes) => {
+      expect(reportNoteCustomerCopy(notes)).toEqual({ body: null, violations: ['report_note_unreadable'], source: null });
+      expect(carriesReportNote(notes)).toBe(true);
+    });
   });
 
   test('a note in any other shape reads as no text, a second line included', () => {
@@ -82,8 +98,10 @@ describe('visitReportCustomerCopy: one rule for a record', () => {
     expect(visitReportCustomerCopy({ technician_notes: TITLED, structured_notes: refused }).body).toBeNull();
   });
 
-  test('a note in any other shape never falls back to a titled report in the notes column', () => {
-    MALFORMED.forEach((notes) => expect(visitReportCustomerCopy({ technician_notes: TITLED, structured_notes: notes }).body).toBeNull());
+  test('a note in any other shape, or notes that cannot be read, never fall back to a titled report in the notes column', () => {
+    [...MALFORMED, ...UNREADABLE].forEach((notes) => (
+      expect(visitReportCustomerCopy({ technician_notes: TITLED, structured_notes: notes }).body).toBeNull()
+    ));
   });
 });
 

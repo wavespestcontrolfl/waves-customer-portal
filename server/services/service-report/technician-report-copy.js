@@ -348,20 +348,32 @@ const REPORT_NOTE_VERSION = 1;
 const REPORT_NOTE_SOURCES = Object.freeze(['cleaned', 'fixed']);
 const MAX_REPORT_NOTE_CHARS = 900;
 
+// Stored notes that cannot be read (a string that does not parse to an
+// object) may hold a note: they count as one, so the raw column beside them
+// is never customer copy.
+const UNREADABLE_NOTES = Symbol('unreadable structured_notes');
+
 // The record's stored note, in whatever shape: undefined = it carries none.
 function storedReportNote(structuredNotes) {
   let notes = structuredNotes;
   if (typeof notes === 'string') {
-    try { notes = JSON.parse(notes); } catch { return undefined; }
+    if (!notes.trim()) return undefined;
+    try { notes = JSON.parse(notes); } catch { return UNREADABLE_NOTES; }
+    if (notes !== null && typeof notes !== 'object') return UNREADABLE_NOTES;
   }
   return notes && typeof notes === 'object' ? notes.reportNote : undefined;
 }
 
-// A record that carries a note (in any shape) keeps the technician's raw
-// note in technician_notes: no line of that column is customer copy.
+// A record that carries a note (in any shape), or notes that cannot be read,
+// keeps the technician's raw note in technician_notes: no line of that
+// column is customer copy.
 function carriesReportNote(structuredNotes) {
   return storedReportNote(structuredNotes) !== undefined;
 }
+
+// Any line or paragraph break: a note is one paragraph, and the text after a
+// break is not part of it.
+const REPORT_NOTE_LINE_BREAK = /[\n\v\f\r\u0085\u2028\u2029]/;
 
 // null = the record carries no note, so the titled report may stand. A record
 // that carries one gets that note or nothing: a note in any other shape, or
@@ -370,9 +382,10 @@ function carriesReportNote(structuredNotes) {
 function reportNoteCustomerCopy(structuredNotes) {
   const note = storedReportNote(structuredNotes);
   if (note === undefined) return null;
+  if (note === UNREADABLE_NOTES) return { body: null, violations: ['report_note_unreadable'], source: null };
   // One paragraph: a note is never titled, and a second line is not part of it.
   const valid = Boolean(note) && note.v === REPORT_NOTE_VERSION && REPORT_NOTE_SOURCES.includes(note.source)
-    && typeof note.text === 'string' && !/[\r\n]/.test(note.text.trim());
+    && typeof note.text === 'string' && !REPORT_NOTE_LINE_BREAK.test(note.text.trim());
   const text = valid ? note.text.replace(/\s+/g, ' ').trim() : '';
   if (!text || text.length > MAX_REPORT_NOTE_CHARS) return { body: null, violations: ['report_note_shape'], source: null };
   const violations = customerCopyViolations(text);
