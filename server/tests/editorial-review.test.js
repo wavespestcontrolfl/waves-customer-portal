@@ -333,6 +333,25 @@ describe('editorial section-answer plan review', () => {
     }
   });
 
+  test('the terminal writer\'s plan-shape check agrees with the local checks reviewPlan makes before it calls a model', async () => {
+    const { planSectionsProblem } = require('../services/content/editorial-plan-shape');
+    const ok = { heading: 'H', question: 'Q?', answer: 'A.' };
+    const cases = [
+      [ok], [ok, ok], [], [{}], [null], ['x'], [{ ...ok, heading: '  ' }], [{ ...ok, question: '' }], [{ ...ok, answer: undefined }],
+      [{ ...ok, heading: 'h'.repeat(500) }], [{ ...ok, heading: 'h'.repeat(501) }],
+      [{ ...ok, question: 'q'.repeat(1000) }], [{ ...ok, question: 'q'.repeat(1001) }],
+      [{ ...ok, answer: 'a'.repeat(4000) }], [{ ...ok, answer: 'a'.repeat(4001) }],
+      Array.from({ length: editorial.LIMITS.sections }, () => ok), Array.from({ length: editorial.LIMITS.sections + 1 }, () => ok),
+      'not a list', undefined,
+    ];
+    for (const plan of cases) {
+      mockDispatch.mockReset();
+      mockDispatch.mockResolvedValue({ ok: false, reason: 'stop here' });
+      await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections: plan });
+      expect(mockDispatch.mock.calls.length > 0).toBe(planSectionsProblem(plan) === null);
+    }
+  });
+
   test('fails closed on missing coverage or provider failure', async () => {
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     const result = await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });

@@ -756,7 +756,7 @@ class AutonomousRunner {
         skip_reason: dispatchResult.code,
         reviewer_notes: dispatchResult.reason,
       });
-      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.recheckMs()), { claimToken });
       return finalized;
     }
     // The terminal held the row: it cannot be written as briefed (owner 2026-11-02, "A").
@@ -1963,10 +1963,12 @@ class AutonomousRunner {
   // run that waited for the draft carries the lane its claim was fenced to.
   // Gate off, kill switch off or any read failure: none (the batch claims by
   // score as before).
-  async _terminalFirstIds(actionType = null) {
+  // `ignoreDraftsFirstSwitch` (Mac mode): the Mac job's rows and the server's
+  // exclusions do not depend on the priority-order switch.
+  async _terminalFirstIds(actionType = null, { ignoreDraftsFirstSwitch = false } = {}) {
     const none = { written: [], held: [] };
     const terminalWriter = require('./terminal-writer');
-    if (!terminalWriter.terminalWriterLive() || !envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true)) return none;
+    if (!terminalWriter.terminalWriterLive() || !(ignoreDraftsFirstSwitch || envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true))) return none;
     try {
       const listing = await terminalWriter.awaitingTerminalDrafts();
       const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
@@ -1982,8 +1984,8 @@ class AutonomousRunner {
   // listed rows are returned to keep out of its claims.
   async _terminalClaimPlan(actionType) {
     const terminalWriter = require('./terminal-writer');
-    const listed = await this._terminalFirstIds(actionType);
-    if (!(terminalWriter.editorialReviewOnMac() && !terminalWriter.runningOnMac())) return { terminalFirst: listed, macOwnedIds: [] };
+    if (!(terminalWriter.editorialReviewOnMac() && !terminalWriter.runningOnMac())) return { terminalFirst: await this._terminalFirstIds(actionType), macOwnedIds: [] };
+    const listed = await this._terminalFirstIds(actionType, { ignoreDraftsFirstSwitch: true });
     return { terminalFirst: { written: [], held: [] }, macOwnedIds: [...listed.written, ...listed.held] };
   }
 
@@ -2001,6 +2003,10 @@ class AutonomousRunner {
     if (!(terminalWriter.editorialReviewOnMac() && terminalWriter.runningOnMac())) {
       return { outcome: 'skipped_not_mac', skipped: true, reason: 'not_the_mac_job', count: 0, runs: [] };
     }
+    // The server cron checks the master gate before runDaily; runNext does not.
+    if (!require('../../config/feature-gates').isEnabled('autonomousContentEngine')) {
+      return { outcome: 'skipped_engine_off', skipped: true, reason: 'content_engine_off', count: 0, runs: [] };
+    }
     return this._withEngineLock('runTerminalDrafts', () => this._runTerminalDraftsInner({ limit }));
   }
 
@@ -2010,7 +2016,7 @@ class AutonomousRunner {
     const runs = [];
     const failedOppIds = [];
     let streak = 0;
-    const terminalFirst = await this._terminalFirstIds();
+    const terminalFirst = await this._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true });
     for (let i = 0; i < batchLimit; i += 1) {
       const scope = terminalFirstScope(terminalFirst);
       if (!scope) break;
@@ -2147,6 +2153,8 @@ class AutonomousRunner {
         continue;
       }
       runs.push(run);
+      // A row the server could only wait on (Mac mode) is not claimed again in this batch.
+      if (run.skip_reason === require('./terminal-writer').AWAITS_MAC) macOwnedIds.push(run.opportunity_id);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
       if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) {

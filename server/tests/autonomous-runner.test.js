@@ -1609,7 +1609,7 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       if (!best) return { outcome: 'skipped_no_opportunity' };
       pending.delete(best.id);
       order.push(best.id);
-      return { outcome: best.outcome, action_type: best.action_type, opportunity_id: best.id };
+      return { outcome: best.outcome, action_type: best.action_type, opportunity_id: best.id, skip_reason: best.skip_reason };
     });
     runner._appendToDailyDigest = jest.fn(async () => {});
     runner._withEngineLock = (label, fn) => fn();
@@ -1759,6 +1759,56 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       ]);
     });
 
+    test('with AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST=false the Mac job still takes its rows and the server still keeps them out of its claims', async () => {
+      process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
+      mac();
+      const server = queueRunner(rows(), { written: ['written_a'], held: ['held_a'] });
+      await server.runner._terminalClaimPlan('new_supporting_blog');
+      expect(server.runner._terminalFirstIds).toHaveBeenCalledWith('new_supporting_blog', { ignoreDraftsFirstSwitch: true });
+      await expect(server.runner._terminalClaimPlan(null)).resolves.toEqual({ terminalFirst: { written: [], held: [] }, macOwnedIds: ['written_a', 'held_a'] });
+      mac({ runner: 'mac' });
+      const job = queueRunner(rows(), { written: ['written_a'] });
+      job.runner._withEngineLock = (label, fn) => fn();
+      await job.runner.runTerminalDrafts();
+      expect(job.runner._terminalFirstIds).toHaveBeenCalledWith(null, { ignoreDraftsFirstSwitch: true });
+      // Mac mode off: the switch keeps its meaning and is not bypassed.
+      mac({ host: null });
+      const plain = queueRunner(rows(), { written: ['written_a'] });
+      await expect(plain.runner._terminalClaimPlan('new_supporting_blog')).resolves.toMatchObject({ macOwnedIds: [] });
+      expect(plain.runner._terminalFirstIds).toHaveBeenCalledWith('new_supporting_blog');
+    });
+
+    test('the server does not claim a row again in the same batch after it could only wait for the Mac', async () => {
+      mac();
+      const { runner, order } = queueRunner([
+        row('new_a', 90, { skip_reason: 'terminal_draft_awaits_mac' }), row('new_b', 80, { skip_reason: 'terminal_draft_awaits_mac' }),
+      ]);
+      await runner.runDaily({ limit: 3 });
+      expect(order).toEqual(['new_a', 'new_b']);
+      expect(runner.runNext.mock.calls.map(([args]) => args.excludeIds)).toEqual([[], ['new_a'], ['new_a', 'new_b']]);
+    });
+
+    test('a wait in Mac mode is rechecked in 30 minutes, not 3 hours, so the Mac job can take a draft written after the server looked', () => {
+      const tw = require('../services/content/terminal-writer');
+      mac({ host: null });
+      expect(tw.recheckMs()).toBe(tw.RECHECK_MS);
+      mac();
+      expect(tw.recheckMs()).toBe(30 * 60 * 1000);
+    });
+
+    test('the Mac job does nothing while the content engine master gate is off: no lock, no listing, no claim, no settle', async () => {
+      mac({ runner: 'mac' });
+      const gates = require('../config/feature-gates');
+      spies.push(jest.spyOn(gates, 'isEnabled').mockImplementation((name) => name !== 'autonomousContentEngine'));
+      const { runner } = queueRunner(rows(), { written: ['written_a'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      await expect(runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'skipped_engine_off', skipped: true, count: 0, runs: [] });
+      expect(runner._withEngineLock).not.toHaveBeenCalled();
+      expect(runner._terminalFirstIds).not.toHaveBeenCalled();
+      expect(runner.runNext).not.toHaveBeenCalled();
+      expect(runner.settleTerminalWork).not.toHaveBeenCalled();
+    });
+
     test('the blog catch-up keeps the same exclusion in its lane', async () => {
       mac();
       const blog = (id, score, over = {}) => row(id, score, { action_type: 'new_supporting_blog', ...over });
@@ -1860,10 +1910,12 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
 
       process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST = 'false';
       await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
+      // Mac mode lists the rows regardless of the priority-order switch.
+      await expect(runnerFor()._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true })).resolves.toEqual({ written: ['w_hi', 'w_lo'], held: ['h_1'] });
       delete process.env.AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST;
       delete process.env.GATE_CONTENT_WRITER_TERMINAL;
       await expect(runnerFor()._terminalFirstIds()).resolves.toEqual(none);
-      expect(listing).toHaveBeenCalledTimes(4);
+      expect(listing).toHaveBeenCalledTimes(5);
     });
 
     test('a pushed draft whose brief is past its 7 days is not taken first (it is briefed again)', async () => {
@@ -5657,6 +5709,21 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(payload).toEqual({ claimToken: claimedAt });
     expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(3 * 3600e3 - 1000);
     expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('in Mac mode the wait is deferred 30 minutes, not 3 hours', async () => {
+    const saved = process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+    process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac';
+    try {
+      const { queue, runner } = setup({ source: { ...waiting, code: 'terminal_draft_awaits_mac', reason: 'the Mac job takes terminal drafts' } });
+      const before = Date.now();
+      await expect(runner.runNext()).resolves.toMatchObject({ outcome: 'deferred_terminal_draft', skip_reason: 'terminal_draft_awaits_mac' });
+      const wait = queue.defer.mock.calls[0][1].getTime() - before;
+      expect(wait).toBeGreaterThanOrEqual(30 * 60e3 - 1000);
+      expect(wait).toBeLessThan(60 * 60e3);
+    } finally {
+      if (saved === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_HOST; else process.env.CONTENT_EDITORIAL_REVIEW_HOST = saved;
+    }
   });
 
   test('a later look with no draft yet keeps the brief the row was handed: nothing is composed', async () => {

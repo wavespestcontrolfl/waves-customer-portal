@@ -125,9 +125,14 @@ const editorialReviewOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_HOST ===
 const runningOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac';
 const AWAITS_MAC = 'terminal_draft_awaits_mac';
 const PLAN_UNAVAILABLE = 'terminal_plan_review_unavailable';
-// editorial-review LIMITS.sections (read lazily: that module loads the model layer).
-const MAX_PLAN_SECTIONS = 80;
 const MAX_PLAN_REASON_CHARS = 700;
+// In Mac mode a wait is rechecked soon, not after RECHECK_MS: the Mac job takes a
+// draft the terminal wrote after the server's look at the row, and its claim
+// cannot take a row still deferred. Other queue deferrals are not touched.
+const MAC_RECHECK_MS = 30 * 60 * 1000;
+const recheckMs = () => (editorialReviewOnMac() ? MAC_RECHECK_MS : RECHECK_MS);
+// A rejected plan stays on its run so the listing does not offer the same commit again.
+const REJECTED_AT_RE = /\s*\[terminal revision ([^\]\s]+)\]$/;
 
 // Briefs the editorial-evidence gate covers (the same test as
 // brief-driven-tools.js registerSessionEditorial). With that gate on, the
@@ -170,13 +175,12 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
   return answerPlanProblem(parsed.answer_plan);
 }
 
-// Shape only (no model): the validate_answer_plan input, when the file has one.
+// Shape only (no model): the validate_answer_plan input, when the file has one,
+// with the same per-section rules reviewPlan applies before it calls a model.
 function answerPlanProblem(plan) {
   if (plan == null) return null;
-  if (!isObject(plan) || !Array.isArray(plan.sections) || !plan.sections.length || plan.sections.length > MAX_PLAN_SECTIONS) {
-    return `answer_plan must be an object with one to ${MAX_PLAN_SECTIONS} sections`;
-  }
-  return null;
+  if (!isObject(plan)) return 'answer_plan must be an object with a sections list';
+  return require('./editorial-plan-shape').planSectionsProblem(plan.sections);
 }
 
 const holdText = (v) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim() : '');
@@ -254,7 +258,8 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
 }
 
 const waitResult = (code, reason) => ({ ok: false, wait: true, code, reason, agent_id: TERMINAL_AGENT_ID, session_id: null });
-const invalidPlan = (why) => waitResult(INVALID, `terminal draft rejected: ${why}`.slice(0, MAX_PLAN_REASON_CHARS + 60));
+// `revision` (the commit that was read) rides on the reason so awaitingTerminalDrafts can tell this file from a rewrite.
+const invalidPlan = (why, revision) => waitResult(INVALID, `${`terminal draft rejected: ${why}`.slice(0, MAX_PLAN_REASON_CHARS + 60)}${revision ? ` [terminal revision ${revision}]` : ''}`);
 
 // The reviewer's own findings, in a bounded sentence.
 function planFindingsText(findings) {
@@ -278,16 +283,16 @@ async function checkAnswerPlan(brief, fetched) {
     context = await tools.editorialPlanContextForBrief(brief);
     if (context.applicable === false) return fetched; // a refresh of a page outside the blog contract
     if (context.unresolved) return waitResult(PLAN_UNAVAILABLE, 'the title for the answer-plan review could not be resolved; the row looks again later');
-    if (!fetched.answer_plan) return invalidPlan('answer_plan is missing: this brief needs the answer plan the blog fact check reviews (see answer_plan_shape in the writing pack)');
+    if (!fetched.answer_plan) return invalidPlan('answer_plan is missing: this brief needs the answer plan the blog fact check reviews (see answer_plan_shape in the writing pack)', fetched.revision);
     review = await require('./editorial-review').reviewPlan({ title: context.title, sections: fetched.answer_plan.sections });
   } catch (err) {
     return waitResult(PLAN_UNAVAILABLE, `the answer-plan review could not run: ${err.message}`);
   }
   // reviewPlan fails closed with no model when it could not reach one.
   if (review?.pass !== true && !review?.model) return waitResult(PLAN_UNAVAILABLE, 'the answer-plan reviewer was unavailable; the row looks again later');
-  if (review?.pass !== true) return invalidPlan(`the answer plan failed review: ${planFindingsText(review?.findings)}`);
+  if (review?.pass !== true) return invalidPlan(`the answer plan failed review: ${planFindingsText(review?.findings)}`, fetched.revision);
   const mismatch = tools.planSectionMismatch(fetched.answer_plan.sections, fetched.draft.body, { partial: context.partial });
-  if (mismatch) return invalidPlan(`the body does not match the answer plan. ${tools.planMismatchDirectives(mismatch).join(' ')}`);
+  if (mismatch) return invalidPlan(`the body does not match the answer plan. ${tools.planMismatchDirectives(mismatch).join(' ')}`, fetched.revision);
   return fetched;
 }
 
@@ -353,11 +358,19 @@ async function cleanupConsumedDrafts(runs, { gh } = {}) {
   }
 }
 
+// The reason the latest run rejected this commit's answer plan, or null.
+function rejectedPlanProblem(row, revision) {
+  if (row.skip_reason !== INVALID || typeof row.reviewer_notes !== 'string') return null;
+  const match = REJECTED_AT_RE.exec(row.reviewer_notes);
+  return match && match[1] === revision ? row.reviewer_notes.replace(REJECTED_AT_RE, '') : null;
+}
+
 /**
  * Pending rows by what their LATEST run says, best score first:
  *   due      it ended waiting and no usable draft for its brief is pushed
  *            (a file the run would reject counts as not pushed)
- *   written  a usable draft is on the branch; the next run takes it
+ *   written  a usable draft is on the branch; the next run takes it (not one
+            whose answer plan the last run rejected at this commit: that is due)
  *   held     a usable hold is on the branch; the next run parks the row
  *   rebrief  the row needs a new brief before the terminal can write: its
  *            draft failed a gate (the next run writes the retry brief), or
@@ -392,7 +405,11 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     const briefAge = row.brief_created_at ? now.getTime() - new Date(row.brief_created_at).getTime() : Infinity;
     if (row.outcome !== AWAITING_OUTCOME || briefAge > MAX_BRIEF_AGE_MS) { rebrief.push(item); continue; }
     const fetched = await fetchTerminalDraft(row.opportunity_id, { gh, expectedBriefId: row.brief_id });
-    if (fetched.ok) written.push(item);
+    // A plan the last run rejected at this very commit is not offered again: it is due,
+    // with the reviewer's reason, until the branch tip changes.
+    const rejected = fetched.ok ? rejectedPlanProblem(row, fetched.revision) : null;
+    if (rejected) due.push({ ...item, problem: rejected });
+    else if (fetched.ok) written.push(item);
     else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold });
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
   }
@@ -669,7 +686,7 @@ module.exports = {
   terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
-  AWAITS_MAC, PLAN_UNAVAILABLE,
+  AWAITS_MAC, PLAN_UNAVAILABLE, MAC_RECHECK_MS, recheckMs,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };

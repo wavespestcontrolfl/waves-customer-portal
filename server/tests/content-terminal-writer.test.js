@@ -308,6 +308,27 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     expect(out.reason.length).toBeLessThan(900);
   });
 
+  test('a rejected plan stays rejected at its commit: the listing makes it due with the reason until the branch tip changes', async () => {
+    asMac();
+    reviewPlan.mockResolvedValue({ pass: false, model: 'claude-opus', findings: [{ sectionIndex: 0, detail: 'Too vague.', action: 'Lead with the cause.' }] });
+    const rejected = await run(blog, withPlan());
+    expect(rejected).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/\[terminal revision commit-1\]$/) });
+    const rowFor = (over = {}) => ({ opportunity_id: ID, brief_id: BRIEF, outcome: tw.AWAITING_OUTCOME, skip_reason: tw.INVALID, reviewer_notes: rejected.reason, brief_created_at: new Date(), score: 50, ...over });
+    const list = (row, sha) => tw.awaitingTerminalDrafts({ deps: { db: { raw: jest.fn(async () => ({ rows: [row] })) }, gh: ghWith(withPlan(), { sha }) } });
+    const same = await list(rowFor(), 'commit-1');
+    expect(same.written).toHaveLength(0);
+    expect(same.due).toHaveLength(1);
+    expect(same.due[0].problem).toMatch(/^terminal draft rejected: the answer plan failed review: section 1: Too vague\./);
+    expect(same.due[0].problem).not.toMatch(/terminal revision/);
+    // Mismatch and missing-plan rejections carry the same marker.
+    expect((await run(blog, good({ body: planBody }))).reason).toMatch(/\[terminal revision commit-1\]$/);
+    expect((await run(blog, withPlan({ body: `${body}\n\n## Why ghost ants trail\n\nText.\n` }))).reason).toMatch(/\[terminal revision commit-1\]$/);
+    // A rewrite (a new tip), a run that was not a plan rejection, or the unavailable-reviewer wait: written again.
+    expect((await list(rowFor(), 'commit-2')).written).toHaveLength(1);
+    expect((await list(rowFor({ reviewer_notes: 'terminal draft rejected: the file is not valid JSON' }), 'commit-1')).written).toHaveLength(1);
+    expect((await list(rowFor({ skip_reason: tw.PLAN_UNAVAILABLE }), 'commit-1')).written).toHaveLength(1);
+  });
+
   test('a reviewer that throws, or fails closed with no model, WAITS with a code that is not INVALID', async () => {
     asMac();
     reviewPlan.mockRejectedValue(new Error('claude -p down'));
@@ -330,7 +351,11 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
   test('a bad answer_plan shape is INVALID before any review, and a good one never reaches a model in the listing', async () => {
     asMac();
     for (const bad of ['text', [], {}, { sections: [] }, { sections: 'x' }, { sections: Array.from({ length: 81 }, () => sections[0]) }]) {
-      expect(await run(blog, withPlan({ answer_plan: bad }))).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/answer_plan must be an object/) });
+      expect(await run(blog, withPlan({ answer_plan: bad }))).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/answer_plan/) });
+    }
+    // Sections reviewPlan would reject with no model (it reads as an outage there) are INVALID here.
+    for (const bad of [[{}], [sections[0], { ...sections[1], answer: '  ' }], [{ ...sections[0], heading: 'x'.repeat(501) }], [null]]) {
+      expect(await run(blog, withPlan({ answer_plan: { sections: bad } }))).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/answer_plan section \d needs a heading/) });
     }
     expect(reviewPlan).not.toHaveBeenCalled();
     const fetched = await tw.fetchTerminalDraft(ID, { gh: ghWith(withPlan()), expectedBriefId: BRIEF });
