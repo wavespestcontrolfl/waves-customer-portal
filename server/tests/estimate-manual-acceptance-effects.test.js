@@ -210,6 +210,18 @@ describe('a dry run', () => {
     ]);
   });
 
+  // A beforeConvert hook makes the converter defer the seeded visits' reminders; only a committed accept registers them.
+  test('with a beforeConvert hook the conversion defers its reminders, and the rolled-back dry run registers none', async () => {
+    const world = makeWorld();
+    const rows = [{ id: 'svc-next', scheduled_date: '2026-12-01', window_start: '09:00' }];
+    const converter = { ...fakeConverter(world, { conversion: { deferredFollowUpReminderRows: rows } }), registerSeededFollowUpReminders: jest.fn() };
+    const result = await markEstimateManuallyAccepted(base(world, converter, { dryRun: true, beforeConvert: async () => {} }));
+    expect(result.dryRun).toBe(true);
+    expect(world.state).toMatchObject({ committed: 0, rolledBack: 1 });
+    expect(converter.convertEstimate.mock.calls[0][1]).toMatchObject({ deferFollowUpReminderRegistration: true });
+    expect(converter.registerSeededFollowUpReminders).not.toHaveBeenCalled();
+  });
+
   test('an already accepted estimate rolls back too, with no effects', async () => {
     const world = makeWorld({ estimateOverrides: { status: 'accepted', accepted_at: '2026-10-02T10:00:00.000Z' } });
     const result = await markEstimateManuallyAccepted(base(world, fakeConverter(world), { dryRun: true }));

@@ -1155,9 +1155,10 @@ async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
     ...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),
     deferCommercialScheduleNotification: true,
     // A caller that links a booked visit BEFORE the conversion (beforeConvert) makes the converter seed the plan's
-    // next visits inside this transaction. Their reminders are registered through the global pool, whose foreign-key
-    // check would wait on this transaction's uncommitted rows, so that caller defers them and registers them after
-    // the commit (conversion.deferredFollowUpReminderRows), as the public accept does.
+    // next visits inside this transaction. Their reminders register through the global pool, whose foreign-key check
+    // would wait on this transaction's uncommitted rows, so whenever a beforeConvert hook runs the converter hands
+    // them back (conversion.deferredFollowUpReminderRows) and the accept registers them after the commit
+    // (registerDeferredFollowUpReminders), as the public accept does.
     ...(ctx.deferFollowUpReminders === true ? { deferFollowUpReminderRegistration: true } : {}),
     ...cardConvertOptions(ctx),
   };
@@ -1362,6 +1363,19 @@ async function acceptInTransaction(trx, ctx) {
   return finishAccept(ctx, outcome);
 }
 
+// The reminders of the visits the converter seeded inside the accept's transaction, registered now that it
+// committed: the converter defers them whenever a beforeConvert hook ran (runConversion). Never throws, because the
+// accept has already committed; a failure is logged, as the public accept does.
+async function registerDeferredFollowUpReminders(claim, ctx) {
+  const rows = claim.conversion?.deferredFollowUpReminderRows;
+  if (!ctx.deferFollowUpReminders || !Array.isArray(rows) || !rows.length) return;
+  try {
+    await ctx.estimateConverter.registerSeededFollowUpReminders(rows, claim.conversion.customerId || claim.acceptedEstimate?.customer_id);
+  } catch (err) {
+    logger.error(`[estimate-manual-acceptance] deferred follow-up reminders failed for estimate ${ctx.estimateId}: ${err.message}`);
+  }
+}
+
 async function runAcceptTransaction(database, ctx) {
   try {
     return await database.transaction((trx) => acceptInTransaction(trx, ctx));
@@ -1448,12 +1462,9 @@ async function markEstimateManuallyAccepted({
   // claimed and before the conversion runs. A throw rolls the whole accept back. Null for every caller today; for the
   // call-phone-yes card's accept (a later PR), which links the visit the call booked here so the converter books the
   // plan from it. A hook that links a visit works only in a real accept without the noLinkedVisits pin: a dry run and
-  // that pin both make the converter refuse a visit linked to the estimate (cardConvertOptions).
+  // that pin both make the converter refuse a visit linked to the estimate (cardConvertOptions). With a hook, the
+  // reminders of the visits the converter seeds wait for the commit (registerDeferredFollowUpReminders).
   beforeConvert = null,
-  // true: the converter does not register the reminders of the visits it seeds inside this transaction; they come
-  // back as conversion.deferredFollowUpReminderRows for the caller to register after the commit. Needed by a caller
-  // whose beforeConvert links a visit (the seeding then runs inside this transaction). False for every other caller.
-  deferFollowUpReminders = false,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
   estimateConverter = EstimateConverter,
@@ -1465,7 +1476,7 @@ async function markEstimateManuallyAccepted({
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
     expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit, beforeConvert,
-    deferFollowUpReminders: deferFollowUpReminders === true,
+    deferFollowUpReminders: typeof beforeConvert === 'function',
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
@@ -1479,6 +1490,7 @@ async function markEstimateManuallyAccepted({
 
   const warnings = [];
   if (claim.shouldRunDownstream) {
+    await registerDeferredFollowUpReminders(claim, ctx);
     await runPostCommitWork(claim, ctx, { leadLinkService, warnings });
     // A promo code the customer typed on this estimate before the office
     // marked it won posts its account credit, as the customer's own accept
