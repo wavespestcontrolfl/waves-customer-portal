@@ -132,9 +132,15 @@ const HOLD_REASONS = [
 // visit already on file, a quote first), so staff check the call before booking it. Dismiss on
 // the call's held row on Dispatch (dismissHeldVisit) records that no visit is needed and closes
 // the call's bells. Dispatch can show no held row (the strip has its own gate,
-// GATE_CALL_HELD_VISIT, and leaves out a call whose cards the office closed): then Done closes
-// the bell. The step asks for no call or text, so it fits every hold reason.
-const HELD_STEP = 'Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or tap Done if dispatch shows none.';
+// GATE_CALL_HELD_VISIT, and leaves out a call whose cards the office closed): then the call's
+// cards are the call-level close (officeClosedCall: once a person closed them all, the bell
+// never repeats), as a repeat bell's own text says. Done closes only the one bell. The step
+// asks for no call or text, so it fits every hold reason.
+const HELD_STEP = "Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or dismiss the call's cards if dispatch shows none.";
+// A held call's date check: a visit is on the calendar on another day. The hold can bear on
+// that visit (an opt-out, a visit on a namesake's account, a cancel request), so staff check
+// the call before they move the visit or contact anyone.
+const HELD_CHECK_STEP = 'Check the call in dispatch before you move the visit or contact the caller.';
 // A hold the live decision names no listed reason for, and a booking a check held after
 // routing approved it (the row names no reason).
 const HOLD_REASON_FALLBACK = 'the call needs a review';
@@ -745,7 +751,9 @@ function callFacts(call) {
 // pass raises when a visit lands on another day: the office booked a visit, but not on the day the call agreed. `name`
 // is null when only the old bell's slot is known. Headline and why follow
 // docs/admin-notifications.md (composeAdminAlert checks them).
-function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
+// A held call (holdReason, owner 2026-11-18) says why the call agent held it and asks staff to
+// check the call first (HELD_CHECK_STEP).
+function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason = null }) {
   const agreedAt = spokenSlot(slot.dateET, slot.minutes);
   const bookedAt = spokenSlot(mismatch.date, windowStartMinutes(mismatch.time));
   const { callAtET, contactPhone, direction } = callFacts(call);
@@ -754,7 +762,9 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
     why: `Booked ${bookedAt}; the call agreed ${agreedAt}.`,
     detail: `${name || 'The caller'} (${contactPhone || 'no number'}) agreed ${service || 'a visit'} for ${agreedAt} ` +
       `on a ${direction} call at ${callAtET} ET. The visit on the calendar is ${bookedAt}. ` +
-      'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
+      (holdReason
+        ? `The call agent held this visit and did not book it, because ${holdReason}. ${HELD_CHECK_STEP}`
+        : 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.'),
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(mismatch.date)}`,
   };
 }
@@ -1048,7 +1058,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
-    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service })
+    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason })
     : bookItAlert(m, repeat);
   const created = await raiseAdminAlert(
     'alert',

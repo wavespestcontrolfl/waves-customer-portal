@@ -324,6 +324,19 @@ describe('a later visit on another day', () => {
     expect(opts.metadata).toMatchObject({ doneWhen: 'visit_booked', subject: { type: 'call', id: CALL_ID }, mismatch: { visit_id: 'visit-7', date: '2026-10-11', time: '16:00' } });
   });
 
+  // Pre-push P1 (2026-11-18): a held call's first date check says why the call agent held it and
+  // asks staff to check the call before they move the visit or contact anyone.
+  test('a held call\'s date check names the hold and asks to check the call first', async () => {
+    mockState.calls = [missCall({ live_decision: { final_action_taken: 'triage_review', blocked_reasons: ['do_not_contact_requested'], created_at: NOW.toISOString() } })];
+    mockState.booked = [otherDay()];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — check Robin Example's visit date");
+    expect(why).toBe('Booked Sun Oct 11 at 4:00 PM; the call agreed Sun Oct 4 at 11:00 AM.');
+    expect(opts.detail).toMatch(/The visit on the calendar is Sun Oct 11 at 4:00 PM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Check the call in dispatch before you move the visit or contact the caller\.$/);
+  });
+
   test('the same-day visit outside the window tolerance also rings the date check', async () => {
     mockState.booked = [otherDay({ sched_date: '2026-10-04', window_start: '15:00:00' })];
     await runCallBookingMissWatchdog({ now: NOW });

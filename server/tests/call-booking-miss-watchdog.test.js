@@ -18,6 +18,7 @@ const {
   confirmedWallClockET,
   rowClearsSlot,
   bookItAlert,
+  dateCheckAlert,
   liveDecision,
   decisionHoldReason,
   GRACE_MINUTES,
@@ -246,7 +247,7 @@ describe('a visit the call agent held', () => {
   const missesOf = (calls, booked = []) => computeBookingMisses(calls, booked, { now: NOW });
   const heldMiss = (over = {}, held = decision()) => missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: held, ...over })])[0];
   // A held bell's last step: it asks for no call or text, so it fits every hold reason.
-  const HELD_STEP = 'Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or tap Done if dispatch shows none.';
+  const HELD_STEP = "Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or dismiss the call's cards if dispatch shows none.";
 
   test('rings after HELD_GRACE_MINUTES with its reason; an unheld call of the same age still waits GRACE_MINUTES', () => {
     const misses = missesOf([
@@ -345,9 +346,9 @@ describe('a visit the call agent held', () => {
 
   // Pre-push P1s (2026-11-18): a held visit may not be one to book as agreed (a cancel request, a
   // visit already on file), so its bell says review and asks staff to check the call first. Done
-  // on the bell alone leaves the held row on Dispatch, so the step names its Dismiss, with Done
-  // only when Dispatch shows no held row (the strip has its own gate and leaves out a call whose
-  // cards the office closed).
+  // closes only the one bell, so the step names the call-level closes: the held row's Dismiss,
+  // else the call's cards when Dispatch shows no held row (the strip has its own gate and leaves
+  // out a call whose cards the office closed).
   test('a held bell says review and why, and asks to check the call; an unheld miss keeps "book" and "nothing is on the calendar"', () => {
     const text = bookItAlert(heldMiss(), false);
     expect(text.action).toBe("review Pat Sample's Waves Assessment");
@@ -375,6 +376,20 @@ describe('a visit the call agent held', () => {
     }
     // The routing-reason form of the opt-out reads the same as the flag.
     expect(decisionHoldReason(decision({ blocked_reasons: ['do_not_contact'] }))).toBe('the caller asked not to be contacted');
+  });
+
+  // Pre-push P1s (2026-11-18): a held call's visit on another day can be on a namesake's
+  // account, or the caller can have opted out, so its date check asks staff to check the call
+  // before they move the visit or contact anyone. An unheld date check keeps main's text.
+  test('a held call\'s date check says why and asks to check the call first', () => {
+    const slot = { dateET: '2026-08-01', minutes: 12 * 60 };
+    const mismatch = { visit_id: 'visit-9', date: '2026-08-03', time: '09:00' };
+    const check = (holdReason) => dateCheckAlert({ name: 'Pat Sample', slot, call: call(), mismatch, service: 'Waves Assessment', holdReason });
+    const held = check('the caller asked not to be contacted');
+    expect(held.why).toBe('Booked Mon Aug 3 at 9:00 AM; the call agreed Sat Aug 1 at 12:00 PM.');
+    expect(held.detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Check the call in dispatch before you move the visit or contact the caller\.$/);
+    expect(held.detail).not.toContain('confirm the new day with the customer');
+    expect(check(null).detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. Move it to the agreed day, or confirm the new day with the customer, then tap Done\.$/);
   });
 
   test('every blocking triage flag has a phrase', () => {

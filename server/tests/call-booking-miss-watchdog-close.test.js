@@ -365,6 +365,20 @@ describe('close pass', () => {
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d1'], payload: { done_by: 'call-booking-miss', resolution: 'The booked visit is gone; replaced by a new alert to book it' } }]);
   });
 
+  // Pre-push P1 (2026-11-18): a held call's replacement date check says why and asks staff to
+  // check the call first, as its first bell does.
+  test('a held call: the replacement date check names the hold and asks to check the call first', async () => {
+    mockState.calls = [call({ live_decision: HELD_DECISION })];
+    mockState.open = [open('n1', '10'), open('n2', '20')];
+    mockState.booked = wrongWeek();
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 2, raised: 1 });
+    const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — check Sam Sample's visit date");
+    expect(opts.detail).toMatch(/The call agent held this visit and did not book it, because the address is not confirmed\. Check the call in dispatch before you move the visit or contact the caller\.$/);
+    expect(opts.detail).not.toContain('confirm the new day with the customer');
+  });
+
   // Pre-push P1 (2026-11-18): the replacement "book it" bell of a call the call agent held
   // names why it was held, as the call's first bell does.
   test('a held call: the replacement bell says why it was held; the close pass reads the live decision', async () => {
