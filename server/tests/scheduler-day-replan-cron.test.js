@@ -156,4 +156,16 @@ describe('hourly route check, shadow (owner 2026-11-19): measures the openings, 
     await expect(routeCheckJob()[1]()).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledWith('[route-check] tick failed: db down');
   });
+
+  test('a run recorded as failed still fails the health lock, and the tick does not throw', async () => {
+    runRouteCheck.mockResolvedValueOnce({ status: 'failed', ad: { decision: 'unknown' } });
+    let lockOutcome;
+    runExclusive.mockImplementationOnce(async (_key, task) => {
+      lockOutcome = task().then(() => 'ok', (err) => err.message);
+      return lockOutcome.then((o) => { if (o !== 'ok') throw new Error(o); });
+    });
+    await expect(routeCheckJob()[1]()).resolves.toBeUndefined();
+    expect(await lockOutcome).toBe('route check run failed (recorded as unknown)');
+    expect(logger.error).toHaveBeenCalledWith('[route-check] tick failed: route check run failed (recorded as unknown)');
+  });
 });

@@ -10,7 +10,10 @@ jest.mock('../services/technician-eligibility', () => ({
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false), listOccupiedWindows: jest.fn(async () => []) }));
-jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes: jest.fn(async () => 480) }));
+jest.mock('../services/scheduling/departure-time', () => ({
+  LEGACY_DEPARTURE_MINUTES: 480, readDepartureSetting: jest.fn(async () => ({ saved: true, minutes: 480 })), effectiveDepartureMinutes: jest.fn((s) => s.minutes),
+}));
+jest.mock('../services/interview-slots', () => ({ bookedInterviewWindowsForDate: jest.fn(async () => []) }));
 jest.mock('../services/scheduling/tech-start-point', () => ({
   loadTechStartPoints: jest.fn(async () => new Map()), homeFromMap: jest.fn(() => ({ lat: 27.4, lng: -82.45 })),
 }));
@@ -22,6 +25,8 @@ const { _internals: replan } = require('../services/day-replan/index');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const { absentTechDays } = require('../services/technician-eligibility');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+const { bookedInterviewWindowsForDate } = require('../services/interview-slots');
+const departure = require('../services/scheduling/departure-time');
 const { occupiedRows } = require('../services/scheduling/visit-capacity');
 const { runRouteCheck, _internals: rc } = require('../services/day-replan/route-check');
 
@@ -242,6 +247,13 @@ describe('the totals and the ad rule shadow', () => {
     expect(rc.summarize([a, b], '2026-11-19').totals.next.slots).toBe(3);
     expect(rc.summarize([a, b], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
     expect(rc.summarize([b, a], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
+  });
+
+  test('the day\'s first opening: the drive may start before the working day, the service may not', () => {
+    // Leaves at 7:30, a block from 9 AM: an 8-9 AM service fits, its drive before 8.
+    const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 540, endMin: 1020 }] });
+    expect(fig.openings).toEqual([expect.objectContaining({ start: 480, min: 60, slots: 1, noticeSlots: 0 })]);
+    expect(rc.hourSlots({ start: 480, min: 60 })).toBe(0); // without the early drive it would not fit
   });
 
   test('a job is the drive, then a service that starts on the hour', () => {
@@ -471,6 +483,32 @@ describe('runRouteCheck', () => {
     const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
     expect(friday.openings).toEqual([expect.objectContaining({ start: 930, min: 90, slots: 1 })]); // drive 3:30-3:50, a 4 PM job
     listOccupiedWindows.mockResolvedValue([]);
+  });
+
+  test("the owner's booked interviews hold dispatch time; an unreadable list marks the date", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    bookedInterviewWindowsForDate.mockImplementation(async (date) => {
+      if (date === '2026-11-20') return [{ start: '08:00', end: '15:30', applicationId: 'app-1' }];
+      if (date === '2026-11-21') throw new Error('timeout');
+      return [];
+    });
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    const days = JSON.parse(writes[0][1].days);
+    expect(days.find((d) => d.date === '2026-11-20').openings).toEqual([expect.objectContaining({ start: 930 })]);
+    expect(days.find((d) => d.date === '2026-11-21')).toMatchObject({ skip: 'FAILED' });
+    bookedInterviewWindowsForDate.mockResolvedValue([]);
+  });
+
+  test('an unreadable departure time (day rules on) records the run as unknown, never an 08:00 guess', async () => {
+    const saved = process.env.GATE_AUTO_DISPATCH_DAY_RULES;
+    process.env.GATE_AUTO_DISPATCH_DAY_RULES = 'true';
+    departure.readDepartureSetting.mockRejectedValueOnce(new Error('timeout'));
+    const { conn, writes } = fakeConn();
+    const result = await runRouteCheck({ conn, now: NOW });
+    if (saved === undefined) delete process.env.GATE_AUTO_DISPATCH_DAY_RULES; else process.env.GATE_AUTO_DISPATCH_DAY_RULES = saved;
+    expect(result).toMatchObject({ status: 'failed', ad: { decision: 'unknown' } });
+    expect(writes[0][1]).toMatchObject({ status: 'failed' });
   });
 
   test("a failed progress read on a Sunday keeps today's technicians, marked FAILED", async () => {

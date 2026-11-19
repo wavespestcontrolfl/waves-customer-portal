@@ -43,7 +43,6 @@ const { promisedWindowOrder, workDuration, currentOrder, staleOrderReasons } = r
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
-const { dayDepartureMinutes } = require('../scheduling/departure-time');
 const { guardedCoordSelects } = require('../scheduling/day-stops');
 
 const TABLE = 'route_check_runs';
@@ -151,11 +150,15 @@ function onSiteStays(stops, arrivedById) {
   });
 }
 
-/** Jobs that fit one opening (pure): for each, the drive, then a JOB_MIN service that starts on the hour. */
-function hourSlots(o) {
+/**
+ * Jobs that fit one opening (pure): for each, the drive, then a JOB_MIN service that starts on the hour, inside the
+ * opening. driveFrom: when the first drive may begin, earlier than the opening for the day's first opening (the van
+ * leaves at its departure minute; the working day bounds the service, not the drive).
+ */
+function hourSlots(o, { driveFrom = o.start } = {}) {
   let count = 0;
   const end = o.start + o.min;
-  for (let at = ceilHour(o.start + DRIVE_MIN); at + JOB_MIN <= end; at = ceilHour(at + JOB_MIN + DRIVE_MIN)) count += 1;
+  for (let at = ceilHour(Math.max(o.start, Math.min(driveFrom, o.start) + DRIVE_MIN)); at + JOB_MIN <= end; at = ceilHour(at + JOB_MIN + DRIVE_MIN)) count += 1;
   return count;
 }
 
@@ -184,9 +187,28 @@ function heldSpans(occupancy, techId, techBlind) {
     .map((r) => ({ startMin: r.startMin, endMin: r.endMin }));
 }
 
-/** Every span holding booked time on a date: the offer side's own read (completed rows in, expired holds out). */
+/**
+ * Every span holding booked time on a date: the offer side's own read (completed rows in, expired holds out), and
+ * the owner's booked interviews with their buffers (interview-slots.js), which dispatch also refuses to book over;
+ * an interview holds every technician's time (no technician_id). A failed read throws: the caller marks the date.
+ */
 async function loadOccupancy(conn, day) {
-  return require('../scheduling/occupancy').listOccupiedWindows({ db: conn, dateFrom: day, dateTo: day });
+  const visits = await require('../scheduling/occupancy').listOccupiedWindows({ db: conn, dateFrom: day, dateTo: day });
+  const interviews = await require('../interview-slots').bookedInterviewWindowsForDate(day, { conn });
+  return [
+    ...visits,
+    ...interviews.map((w) => ({ id: `interview:${w.applicationId}`, technician_id: null, startMin: toMin(w.start), endMin: toMin(w.end) })),
+  ];
+}
+
+/**
+ * The day's departure minute, read strictly: with the day rules on, a failed read throws (the run is then recorded
+ * as unknown) instead of the 08:00 guess dayDepartureMinutes falls back to. Gate off: the legacy 08:00, as before.
+ */
+async function departureMinutes(conn) {
+  const departure = require('../scheduling/departure-time');
+  if (require('../../config/feature-gates').autoDispatchDayRulesLive() !== true) return departure.LEGACY_DEPARTURE_MINUTES;
+  return departure.effectiveDepartureMinutes(await departure.readDepartureSetting(conn));
 }
 
 /** Why a tech-day cannot be simulated, or null. A stop with no time or no place leaves the day out. */
@@ -214,9 +236,12 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
-  const openings = open.filter((b) => b.min >= SLOT_MIN && !(first.length && b.kind === 'start'))
+  // Kept: an opening that holds a job either way. The one at the start of the working day may begin its drive at the
+  // departure minute, before the day, so it can hold a job in under SLOT_MIN.
+  const openings = open.filter((b) => !(first.length && b.kind === 'start'))
     .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
-    .map((o) => ({ ...o, slots: hourSlots(o), noticeSlots: Math.floor(o.min / SLOT_MIN) }));
+    .map((o) => ({ ...o, slots: hourSlots(o, { driveFrom: o.start <= openMin ? departureMin : o.start }), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
+    .filter((o) => o.slots > 0 || o.noticeSlots > 0);
   return {
     stops: all.length,
     driveMin: Math.round(sim.travelMin),
@@ -472,7 +497,7 @@ async function measureRun(conn, now) {
     today,
     nowMin: p.hour * 60 + p.minute,
     homes: await loadTechStartPoints(conn),
-    departureMin: await dayDepartureMinutes(conn),
+    departureMin: await departureMinutes(conn),
     techBlind: !require('../scheduling/occupancy').techScopedConfirmActive(),
   };
   const days = [];
