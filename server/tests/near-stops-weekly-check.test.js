@@ -210,7 +210,7 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([expect.objectContaining({ sameCustomer: true, between: 1 })]);
   });
 
-  test("an unassigned home's stops are judged on its partner's route: another route's stop does not split them", () => {
+  test("an unassigned visit is judged on its partner's route: another route's stop does not split them", () => {
     const rows = [
       { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }), technician_id: null },
       { ...stop({ customer: 'c-x', at: north(8), date: '2027-03-01', start: '10:00' }), technician_id: 'tech-2' },
@@ -359,6 +359,60 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([]);
   });
 
+  test('stops between are counted on the route as the board runs it: a tied hour counts where the route puts it', () => {
+    const route = (customer, at, start, order) => ({ ...stop({ customer, at, date: '2027-03-01', start }), route_order: order });
+    // The route numbers put a third home between two neighbors booked in tied hours...
+    expect(findApartPairs([
+      route('c-a', HOME_A, '09:00', 1), route('c-x', north(20), '09:00', 2), route('c-b', NEXT_DOOR, '10:00', 3),
+    ])).toEqual([expect.objectContaining({ between: 1 })]);
+    // ...or the neighbors back to back, ahead of a stop in the same hour.
+    expect(findApartPairs([
+      route('c-a', HOME_A, '09:00', 1), route('c-b', NEXT_DOOR, '09:00', 2), route('c-x', north(20), '09:00', 3),
+    ])).toEqual([]);
+  });
+
+  test("a third home's back-to-back services between two neighbors are one stop", () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
+      stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }),
+      stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '11:00' }),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '12:00' }),
+    ];
+    expect(findApartPairs(rows)).toEqual([expect.objectContaining({ between: 1 })]);
+  });
+
+  test("an unassigned visit goes on its partner's numbered route where the app's time fallback puts it, never last", () => {
+    const route = (customer, at, start, order) => ({ ...stop({ customer, at, date: '2027-03-01', start }), route_order: order });
+    const rows = [
+      route('c-x', north(20), '08:00', 1),
+      route('c-b', NEXT_DOOR, '10:00', 2),
+      route('c-y', north(22), '13:00', 3),
+      { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '11:00' }), technician_id: null },
+    ];
+    // By hour it goes between the 10:00 neighbor and the 13:00 stop: back to back.
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
+  test('two unassigned neighbors on one day are not judged: neither is on a route yet', () => {
+    const rows = [
+      { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }), technician_id: null },
+      stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '12:00' }),
+      { ...stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '15:00' }), technician_id: null },
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
+  test('linked homes group first: an unlinked visit at an address two properties share never merges them', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', street: '100 Sample Way', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-08', street: '100 Sample Way', property: 'prop-1', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-15', street: '100 Sample Way', property: 'prop-2', plan: true }),
+    ];
+    const pairs = findApartPairs(rows);
+    // One split, the two properties; the unlinked visit cannot be placed, so it pairs with neither.
+    expect(pairs.map((p) => [p.first.id, p.second.id])).toEqual([[rows[1].id, rows[2].id]]);
+  });
+
   test('a visit with no time yet on the same day is not judged', () => {
     const rows = [
       stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
@@ -389,6 +443,10 @@ describe('what holds each visit, in plain words', () => {
   test("the night run's own reason for the visit", () => {
     const log = new Map([['svc-9', { reason_code: 'REMINDER_SENT_FROZEN', action: 'no_change' }]]);
     expect(holdFor(planVisit, log)).toBe('customer already told the time');
+  });
+
+  test('a visit at the move limit says so, never a count the log does not hold', () => {
+    expect(holdFor(planVisit, new Map([['svc-9', { reason_code: 'MOVE_LIMIT_REACHED' }]]))).toBe("already at the night run's move limit");
   });
 
   test('a gain under the night run\'s bar reads as not enough, never as none', () => {

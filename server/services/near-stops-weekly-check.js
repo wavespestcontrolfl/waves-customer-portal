@@ -43,7 +43,8 @@ const { alertEpisodesLive } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { haversine, resolveGeo, milesToDriveMinutes } = require('./auto-dispatch/geo');
 const { samePlace } = require('./auto-dispatch/current-conflict');
-const { effectivePremise } = require('./route-reorder-window-fit');
+const { effectivePremise, currentOrder } = require('./route-reorder-window-fit');
+const { timeFallbackOrder } = require('./scheduling/route-order-time-fallback');
 const { daysBetween } = require('./auto-dispatch/route-tiers');
 const { FLEX_TIER_RADIUS_DAYS } = require('./auto-dispatch/flex-tier');
 const { NIGHT_TRIGGERS, FINISHED_STATUSES } = require('./auto-dispatch/catch-up');
@@ -87,7 +88,7 @@ const HOLD_WORDS = {
   PERSON_PLACED_UNKNOWN: 'staff may have picked the day',
   REMINDER_SENT_FROZEN: 'customer already told the time',
   CUSTOMER_CONFIRMED: 'customer confirmed',
-  MOVE_LIMIT_REACHED: 'night run moved it twice already',
+  MOVE_LIMIT_REACHED: "already at the night run's move limit",
   REMINDER_24H_OFF: '24-hour reminder off',
   NO_ARRIVAL_WINDOW: 'no arrival time yet',
   MAX_CHANGES_REACHED: "the night's move cap was reached",
@@ -179,6 +180,11 @@ function toVisit(row) {
     tech: row.technician_id ? String(row.technician_id) : null,
     done: row.status === SERVED_STATUS, // served: a pairing partner, never a split to report
     nightKind: nightKindOf(row),
+    // The board's order fields (route-reorder-window-fit.js currentOrder).
+    route_order: row.route_order ?? null,
+    window_start: row.window_start ?? null,
+    created_at: row.created_at ?? null,
+    row,
   };
 }
 
@@ -197,23 +203,29 @@ function sameHome(home, row, geo) {
   return !!(home.geo && geo) && haversine(home.geo.lat, home.geo.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES;
 }
 
-// Every row's home, pinned or not: a row with no pin still belongs to its home,
-// and only a home with a pin can be paired.
+// Every row's home, pinned or not. Rows linked to a property go first, one home
+// per property. Each unlinked row then joins the one home it matches; a row that
+// matches none starts its own, and one that matches more than one (one address
+// for two linked homes) cannot be placed: it stays a stop on its route but is
+// never paired. Only a placed home with a pin can be paired.
 function buildPlaces(rows) {
   const places = [];
   const byCustomer = new Map();
-  for (const row of rows) {
+  const linkedFirst = [...rows.filter((r) => r.property_id), ...rows.filter((r) => !r.property_id)];
+  for (const row of linkedFirst) {
     const geo = resolveGeo(row);
     const customerId = String(row.customer_id);
     if (!byCustomer.has(customerId)) byCustomer.set(customerId, []);
     const own = byCustomer.get(customerId);
-    let place = own.find((home) => sameHome(home, row, geo));
+    const matches = own.filter((home) => sameHome(home, row, geo));
+    let place = matches.length === 1 ? matches[0] : null;
     if (!place) {
       place = {
         key: `home-${places.length + 1}`,
         customerId,
         row,
         geo,
+        unplaced: matches.length > 1,
         name: shortName(row),
         city: row.service_address_city || row.customer_city || null,
         visits: [],
@@ -228,7 +240,7 @@ function buildPlaces(rows) {
 }
 
 function nearPairs(places) {
-  const pinned = places.filter((p) => p.geo);
+  const pinned = places.filter((p) => p.geo && !p.unplaced);
   const pairs = [];
   for (let i = 0; i < pinned.length; i += 1) {
     for (let j = i + 1; j < pinned.length; j += 1) {
@@ -266,41 +278,63 @@ function homeDays(place) {
   }));
 }
 
-// An unassigned stop (no technician) may be on either route, so it counts.
-const sameRoute = (a, b) => !a || !b || a === b;
+const routeKey = (date, tech) => `${date}|${tech}`;
 
-// Any stop on the route between the two services splits them, a third home of the
-// same customer too; a stop at one of the two paired homes is part of the pair.
-// A combined visit (two services at one home and hour) is one stop.
-function stopsBetween(dayStops, first, second, pair) {
-  const routeTech = first.tech || second.tech;
-  const between = dayStops.filter((s) => sameRoute(s.tech, routeTech) && s.home !== pair.a.key && s.home !== pair.b.key
-    && s.windowStart > first.windowStart && s.windowStart < second.windowStart);
-  return new Set(between.map((s) => `${s.home}|${s.windowStart}`)).size;
-}
-
-// Every timed service by day, pinned or not: a stop between two homes splits them
-// even when it cannot be placed on the map.
-function stopsByDayOf(places) {
-  const byDay = new Map();
+// Each technician's day as the board runs it (route-reorder-window-fit.js
+// currentOrder, the dispatch board's own order: route number, then hour, then
+// booking), with every service on it, pinned or not, served or not.
+function routesOf(places) {
+  const routes = new Map();
   for (const place of places) {
     for (const visit of place.visits) {
-      if (!visit.windowStart) continue;
-      if (!byDay.has(visit.date)) byDay.set(visit.date, []);
-      byDay.get(visit.date).push(visit);
+      if (!visit.tech) continue;
+      const key = routeKey(visit.date, visit.tech);
+      if (!routes.has(key)) routes.set(key, []);
+      routes.get(key).push(visit);
     }
   }
-  return byDay;
+  for (const [key, visits] of routes) routes.set(key, currentOrder(visits));
+  return routes;
+}
+
+// The route two services are judged on: their technician's day. An unassigned
+// service goes on its partner's route where the app puts a visit with no route
+// number (route-order-time-fallback.js timeFallbackOrder: among the numbered stops
+// by its hour, after any stop done or under way; by hour on a day with no numbers).
+// The day's stops with no number stay last, where the board shows them.
+function routeFor(routes, a, b) {
+  const tech = a.tech || b.tech;
+  const day = routes.get(routeKey(a.date, tech)) || [];
+  const loose = [a, b].find((v) => !v.tech);
+  if (!loose) return day;
+  const ids = day.some((v) => v.route_order != null)
+    ? timeFallbackOrder(day.map((v) => v.row), { ...loose.row, technician_id: tech })
+    : null;
+  if (!ids) return currentOrder([...day, loose]);
+  const byId = new Map([...day, loose].map((v) => [v.id, v]));
+  return [...ids.map((id) => byId.get(String(id))), ...day.filter((v) => v.route_order == null)];
+}
+
+// The stops the route runs between two services: other homes only, one stop per
+// home (its back-to-back services are one trip); a stop at either paired home is
+// part of the pair, a third home of the same customer is not.
+function stopsBetween(route, a, b, pair) {
+  const i = route.indexOf(a);
+  const j = route.indexOf(b);
+  const between = route.slice(Math.min(i, j) + 1, Math.max(i, j));
+  return new Set(between.map((s) => s.home).filter((home) => home !== pair.a.key && home !== pair.b.key)).size;
 }
 
 // How two homes' stops sit on the calendar, with the two services that show it.
-// A null split is not one to report: together (one day, one technician, back to
-// back) or not judged (no times yet). Two days: each stop's lead service. One day:
-// the two homes' nearest open services on one route decide, so a home's second trip
-// that day never hides a back-to-back pair. A same-day split is reported for any two
-// customers: the 4:40 AM day re-plan keeps most stops at their hours (a told time, a
-// first visit, a staff pick, 24 hours out), so it cannot be left to join them.
-function splitOf(x, y, pair, stopsByDay) {
+// A null split is not one to report: together (one day, one route, back to back) or
+// not judged (no time yet, or neither visit on a route yet). Two days: each stop's
+// lead service. One day: the two homes' nearest open services on one route decide,
+// counted on the route as the board runs it, so a home's second trip that day never
+// hides a back-to-back pair and a stop in a tied hour counts where the route puts it.
+// A same-day split is reported for any two customers: the 4:40 AM day re-plan keeps
+// most stops at their hours (a told time, a first visit, a staff pick, 24 hours out),
+// so it cannot be left to join them.
+function splitOf(x, y, pair, routes) {
   if (x.date !== y.date) {
     const [first, second] = [x.lead, y.lead].sort(visitOrder);
     return { first, second, split: { gap: daysBetween(first.date, second.date) } };
@@ -309,13 +343,13 @@ function splitOf(x, y, pair, stopsByDay) {
   let twoTechs = null;
   for (const a of x.visits) {
     for (const b of y.visits) {
-      if (a.done || b.done || !a.windowStart || !b.windowStart) continue;
+      if (a.done || b.done || !a.windowStart || !b.windowStart || (!a.tech && !b.tech)) continue;
       const [first, second] = [a, b].sort(visitOrder);
-      if (first.tech && second.tech && first.tech !== second.tech) {
+      if (a.tech && b.tech && a.tech !== b.tech) {
         twoTechs = twoTechs || { first, second };
         continue;
       }
-      const between = stopsBetween(stopsByDay.get(first.date) || [], first, second, pair);
+      const between = stopsBetween(routeFor(routes, a, b), a, b, pair);
       if (!near || between < near.between) near = { first, second, between };
     }
   }
@@ -333,7 +367,7 @@ const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
 // door (or on the same day with no time to judge) pairs first; the rest pair nearest
 // dates first, then the earlier slots. So each stop meets at most one stop next
 // door, and a round with no partner pairs with nothing. Returns the pairs apart.
-function pairSplits(pair, stopsByDay) {
+function pairSplits(pair, routes) {
   const candidates = [];
   for (const x of homeDays(pair.a)) {
     for (const y of homeDays(pair.b)) {
@@ -341,7 +375,7 @@ function pairSplits(pair, stopsByDay) {
         keys: [x.key, y.key],
         done: x.done || y.done,
         days: Math.abs(daysBetween(x.date, y.date)),
-        ...splitOf(x, y, pair, stopsByDay),
+        ...splitOf(x, y, pair, routes),
       });
     }
   }
@@ -363,10 +397,10 @@ function pairSplits(pair, stopsByDay) {
 // stop is over, and one whose partner is past `until` reports in a later week.
 function findApartPairs(rows, { from = null, until = null } = {}) {
   const places = buildPlaces(rows);
-  const stopsByDay = stopsByDayOf(places);
+  const routes = routesOf(places);
   const apart = [];
   for (const pair of nearPairs(places)) {
-    for (const hit of pairSplits(pair, stopsByDay)) {
+    for (const hit of pairSplits(pair, routes)) {
       if (hit.done || hit.days > LOOKAHEAD_DAYS) continue;
       if ((from && hit.first.date < from) || (until && hit.second.date > until)) continue;
       apart.push({ ...pair, first: hit.first, second: hit.second, ...hit.split });
@@ -587,6 +621,7 @@ async function loadStops(fromDate, untilDate, conn = db) {
     .orderBy([{ column: 's.scheduled_date' }, { column: 's.window_start' }, { column: 's.id' }])
     .select(
       's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id', 's.status',
+      's.route_order', 's.created_at',
       's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng', 's.property_id',
       's.service_address_line1', 's.service_address_line2', 's.service_address_zip', 's.service_address_city',
       'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1',
