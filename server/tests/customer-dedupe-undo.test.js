@@ -1192,36 +1192,49 @@ describe('revertMerge', () => {
       expect(sodRestores(state)).toEqual([]);
     });
 
-    // The sprinkler timer on file the merge cleared from the same moved row: its own journal entry, the same rule.
-    describe('the sprinkler timer the merge cleared on that row', () => {
+    // The sprinkler timer on file of the same moved row: its own journal entry ({ row_id, before, kept, home_changed_at }).
+    describe('the sprinkler timer on that row', () => {
       const X2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+      const RAIN_BIRD = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
       const NO_TIMER = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
-      const journalWithTimer = (before = X2) => {
+      const NO_SOD = { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };
+      const journalWithTimer = (entry) => {
         const journal = journalWithSod();
-        journal.repointed_ids.moved_pref_timer = { row_id: 'pp-1', before };
+        journal.repointed_ids.moved_pref_timer = { row_id: 'pp-1', before: X2, kept: false, home_changed_at: null, ...entry };
         return journal;
       };
       const timerRestores = (state) => state.flagRestores.filter((r) => r.table === 'property_preferences' && 'irrigation_controller_brand' in r.payload);
-
-      it('puts the whole timer back on the row the undo returns to the loser, beside the sod record', async () => {
-        const { trx, state } = buildRevertTrx({ journal: journalWithTimer(), winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
+      const revert = async (journal, { rowNow, stillOnWinner = ['pp-1'] } = {}) => {
+        const tables = tablesFor();
+        tables.property_preferences.stillOnWinner = stillOnWinner;
+        if (rowNow) tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, ...NO_SOD, ...NO_TIMER, irrigation_home_changed_at: null, ...rowNow };
+        const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables });
         db.transaction.mockImplementation(async (fn) => fn(trx));
-        const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+        const outcome = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }).then((result) => ({ result }), (error) => ({ error }));
+        return { state, ...outcome };
+      };
+      const expectRefused = ({ state, error }) => {
+        expect(error).toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer was entered .* after this merge/) });
+        expect(state.repointedBack).toEqual([]);
+        expect(state.flagRestores).toEqual([]);
+        expect(state.journalUpdate).toBeNull();
+      };
+
+      it('a cleared timer goes back whole on the row the undo returns to the loser, beside the sod record', async () => {
+        const { state, result } = await revert(journalWithTimer());
         expect(timerRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: X2 }]);
         expect(sodRestores(state)).toHaveLength(1);
         expect(result.skipped.filter((x) => x.key === 'property_preferences.sprinkler_timer')).toEqual([]);
       });
 
-      it.each([[X2, 'a timer was journaled'], [NO_TIMER, 'the moved row had no timer']])('REFUSES the undo, with zero writes, when the kept customer set a timer after the merge (%#: %s)', async (before) => {
-        const tables = tablesFor();
-        tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, ...NO_TIMER, irrigation_controller_brand: 'rain_bird' };
-        const { trx, state } = buildRevertTrx({ journal: journalWithTimer(before), winner: baseWinner(), loser: baseLoser(), tables });
-        db.transaction.mockImplementation(async (fn) => fn(trx));
-        await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
-          .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer was entered .* after this merge/) });
-        expect(state.repointedBack).toEqual([]);
-        expect(state.flagRestores).toEqual([]);
-        expect(state.journalUpdate).toBeNull();
+      it.each([[X2], [NO_TIMER]])('REFUSES the undo, with zero writes, when the kept customer set a timer after a merge that left none (journaled original %#)', async (before) => {
+        expectRefused(await revert(journalWithTimer({ before }), { rowNow: RAIN_BIRD }));
+      });
+
+      it('an empty journaled timer writes no timer columns when nothing was entered', async () => {
+        const { state, error } = await revert(journalWithTimer({ before: NO_TIMER }));
+        expect(error).toBeUndefined();
+        expect(timerRestores(state)).toEqual([]);
       });
 
       // A merge from before the timer existed journaled no timer entry. The row it moved whole carried none,
@@ -1229,20 +1242,36 @@ describe('revertMerge', () => {
       it.each([['with a new-sod entry', false], ['with row ids only', true]])('a journal with no timer entry, %s: REFUSES when the moved row carries a timer now', async (_label, dropSodEntry) => {
         const journal = journalWithSod();
         if (dropSodEntry) journal.repointed_ids.moved_pref_new_sod = null;
-        const tables = tablesFor();
-        tables.property_preferences.firstRow = { id: 'pp-1', customer_id: WINNER, sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null, ...X2 };
-        const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables });
-        db.transaction.mockImplementation(async (fn) => fn(trx));
-        await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
-          .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/sprinkler timer was entered .* after this merge/) });
-        expect(state.repointedBack).toEqual([]);
-        expect(state.journalUpdate).toBeNull();
+        expectRefused(await revert(journal, { rowNow: X2 }));
       });
 
-      it('an empty journaled timer writes no timer columns when nothing was entered', async () => {
-        const { trx, state } = buildRevertTrx({ journal: journalWithTimer(NO_TIMER), winner: baseWinner(), loser: baseLoser(), tables: tablesFor() });
-        db.transaction.mockImplementation(async (fn) => fn(trx));
-        await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+      describe('a same-home merge left the timer on the row (kept)', () => {
+        const STAMP = Date.parse('2026-11-01T12:00:00.000Z');
+        const kept = () => journalWithTimer({ kept: true, home_changed_at: STAMP });
+
+        it('home unchanged since: the timer on the row, the original or a later pick, goes back with the row untouched', async () => {
+          for (const timerNow of [X2, RAIN_BIRD, NO_TIMER]) {
+            const { state, error } = await revert(kept(), { rowNow: { ...timerNow, irrigation_home_changed_at: new Date(STAMP) } });
+            expect(error).toBeUndefined();
+            expect(state.repointedBack.find((r) => r.table === 'property_preferences')).toMatchObject({ ids: ['pp-1'], payload: { customer_id: LOSER } });
+            expect(timerRestores(state)).toEqual([]);
+          }
+        });
+
+        it('the kept customer moved since and set a timer for the new home: REFUSES', async () => {
+          expectRefused(await revert(kept(), { rowNow: { ...RAIN_BIRD, irrigation_home_changed_at: new Date('2026-11-10T15:00:00.000Z') } }));
+        });
+
+        it('the kept customer moved since (the move cleared the timer): the original goes back to the loser', async () => {
+          const { state, error } = await revert(kept(), { rowNow: { irrigation_home_changed_at: new Date('2026-11-10T15:00:00.000Z') } });
+          expect(error).toBeUndefined();
+          expect(timerRestores(state)).toEqual([{ table: 'property_preferences', where: { id: 'pp-1', customer_id: LOSER }, payload: X2 }]);
+        });
+      });
+
+      it('a preferences row that is no longer the kept customer\'s is not judged: its timer neither blocks the undo nor is written', async () => {
+        const { state, error } = await revert(journalWithTimer(), { rowNow: RAIN_BIRD, stillOnWinner: [] });
+        expect(error).toBeUndefined();
         expect(timerRestores(state)).toEqual([]);
       });
     });
