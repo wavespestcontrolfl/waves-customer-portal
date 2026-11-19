@@ -352,6 +352,40 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
   });
 
+  test('a receipt read between acceptance and promo settlement never promises an exhausted credit', async () => {
+    const { estimateId, token, customerId } = await fixture(mockTransaction);
+    const code = `QA${estimateId.slice(0, 8).toUpperCase()}`;
+    const [discount] = await mockTransaction('discounts').insert({
+      discount_key: `qa_${estimateId}`, name: 'Receipt QA', discount_type: 'fixed_amount',
+      amount: 25, promo_code: code, is_active: true, promo_code_max_uses: 1, promo_code_current_uses: 1,
+    }).returning('id');
+    await mockTransaction('estimate_promo_codes').insert({
+      estimate_id: estimateId, discount_id: discount.id, code, credit_amount: 25, status: 'entered',
+    });
+    const promo = require('../services/estimate-promo-code');
+    const redeem = promo.redeemPromoCodeForAcceptedEstimate;
+    const settlement = jest.spyOn(promo, 'redeemPromoCodeForAcceptedEstimate').mockImplementationOnce(async (args) => {
+      const replay = await putAccept(token);
+      const receipt = await replay.json();
+      expect([replay.status, receipt.alreadyAccepted]).toEqual([200, true]);
+      expect(receipt).not.toHaveProperty('promoCode');
+      expect(await mockTransaction('estimate_promo_codes').where({ estimate_id: estimateId }).first('status'))
+        .toEqual({ status: 'entered' });
+      return redeem(args);
+    });
+    try {
+      const first = await putAccept(token, { paymentMethodPreference: 'pay_at_visit' });
+      expect(first.status).toBe(200);
+      expect(await first.json()).not.toHaveProperty('promoCode');
+      expect(settlement).toHaveBeenCalledTimes(1);
+      expect(await mockTransaction('estimate_promo_codes').where({ estimate_id: estimateId }).first('status', 'void_reason'))
+        .toEqual({ status: 'void', void_reason: 'uses_exhausted' });
+      expect(await mockTransaction('customer_credit_ledger').where({ customer_id: customerId })).toHaveLength(0);
+    } finally {
+      settlement.mockRestore();
+    }
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);

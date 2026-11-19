@@ -751,6 +751,30 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
 });
 
 describe('FIX 2 — already-accepted retry returns the full success payload', () => {
+  test.each(['redeemed', 'void'])('a receipt during promo redemption only reports a posted credit (%s)', async (outcome) => {
+    const accepted = recurringPestEstimate({
+      id: 'est-promo-pending', token: 'tok-promo-pending-0123456789', status: 'accepted', customer_id: 'cust-9',
+    });
+    resetStore(accepted);
+    const code = { estimate_id: accepted.id, code: 'QA25', credit_amount: '25.00', status: 'entered' };
+    db.__state.tables.estimate_promo_codes = [code];
+    const pending = await putAccept(accepted.token);
+    expect(pending.status).toBe(200);
+    expect(pending.data.alreadyAccepted).toBe(true);
+    expect(pending.data).not.toHaveProperty('promoCode');
+    expect(code.status).toBe('entered');
+
+    code.status = outcome;
+    const settled = await putAccept(accepted.token);
+    expect(settled.status).toBe(200);
+    if (outcome === 'redeemed') {
+      expect(settled.data.promoCode?.applied).toEqual({ code: 'QA25', creditAmount: 25, credited: true });
+    } else {
+      expect(settled.data).not.toHaveProperty('promoCode');
+    }
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['estimate_promo_codes', { code: 'QA25', credit_amount: '25.00', status: 'redeemed' },
       { code: 'QA25', creditAmount: 25, credited: true }],

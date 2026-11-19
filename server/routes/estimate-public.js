@@ -19309,6 +19309,10 @@ async function estimatePromoCodeViewFor(estimate) {
   try {
     const open = isEstimateAcceptActive(estimate) && !estimate.price_locked_at;
     const promo = await require('../services/estimate-promo-code').promoCodeViewForEstimate(estimate, { open });
+    // Acceptance commits before the credit posts. An entered promo can still
+    // be voided (for example, when the last use went to another customer).
+    // The receipt may show the credit once redemption has actually posted it.
+    if (estimate.status === 'accepted' && promo?.applied?.credited === false) return null;
     const referral = await require('../services/estimate-referral-code').referralCodeViewForEstimate(estimate, { open });
     if (promo?.applied || !referral) return promo;
     if (referral.applied) return referral;
