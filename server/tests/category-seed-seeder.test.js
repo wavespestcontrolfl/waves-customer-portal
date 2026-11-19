@@ -718,7 +718,8 @@ describe('customer-question manifest 2026-11-18', () => {
       if (sections.length) citing.push(payload.id);
       const required = composeSeedBrief(manifest, payload.id).voice_constraints.operator_brief.required_sources;
       for (const section of sections) {
-        if (!required.some((url) => url.endsWith(`_${section}`))) failures.push(`${payload.id} section ${section}`);
+        // florida.public.law copies end in _<section>; the Florida Senate's pages end in /<section>.
+        if (!required.some((url) => url.endsWith(`_${section}`) || url.endsWith(`/${section}`))) failures.push(`${payload.id} section ${section}`);
       }
     }
     expect(citing).toEqual(['CQ06', 'CQ07']);
