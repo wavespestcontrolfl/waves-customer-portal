@@ -127,6 +127,15 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([expect.objectContaining({ sameCustomer: true, between: 1 })]);
   });
 
+  test("an unassigned home's stops are judged on its partner's route: another route's stop does not split them", () => {
+    const rows = [
+      { ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }), technician_id: null },
+      { ...stop({ customer: 'c-x', at: north(8), date: '2027-03-01', start: '10:00' }), technician_id: 'tech-2' },
+      stop({ customer: 'c-a', at: north(0.3, HOME_A), date: '2027-03-01', start: '11:00' }),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
   test('outside the radius: two customers 0.2 mile apart, or one customer\'s homes 0.6 mile apart', () => {
     const rows = [
       stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01' }),
@@ -237,7 +246,7 @@ function replay({ rows, moves = [], created = [bookingRow()], closed = new Set()
   const movesById = new Map();
   for (const m of moves) movesById.set(m.scheduled_service_id, [...(movesById.get(m.scheduled_service_id) || []), m]);
   const [booking] = groupBookings(created, movesById);
-  const ctx = { rows: [...rows, ...created], movesById, tech: TECH, closed, absent, techStartPoints: false };
+  const ctx = { rows: [...rows, ...created], movesById, tech: TECH, closed, absent, linkLeadDays: 1, techStartPoints: false };
   return replayBooking(booking, ctx);
 }
 
@@ -305,6 +314,20 @@ describe('part 2: the booking replay', () => {
     const created = [bookingRow({ created_at: lateMorning, updated_at: lateMorning })];
     const r = replay({ rows: [besideStop(), acrossStop()], created });
     expect(r.saving).toBe(0);
+  });
+
+  test("a booking link's own first day: no same-day hour for a link booking, as the office would have", () => {
+    const early = parseETDateTime(`${DAY}T07:00`);
+    const office = [bookingRow({ created_at: early, updated_at: early })];
+    expect(replay({ rows: [besideStop(), acrossStop()], created: office }).saving).toBe(56);
+    const link = [bookingRow({ created_at: early, updated_at: early, source: 'inspection_link' })];
+    expect(replay({ rows: [besideStop(), acrossStop()], created: link }).saving).toBe(0);
+  });
+
+  test("a stop on another technician's route those days makes the replay ambiguous: skipped", () => {
+    const otherRoute = { ...acrossStop(), technician_id: 'tech-2' };
+    expect(replay({ rows: [besideStop(), otherRoute] })).toBeNull();
+    expect(replay({ rows: [besideStop(), acrossStop()], created: [bookingRow({ technician_id: 'tech-2' })] })).toBeNull();
   });
 
   test("a closed day, or the technician's day off, offers no hour", () => {
@@ -378,7 +401,7 @@ describe('the notification', () => {
     expect(out.detail).not.toContain('…');
     for (const text of [out.headline, out.summary]) expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}/);
     expect(out.detail.match(/- and 9 more/g)).toHaveLength(2);
-    expect(out.detail).toContain('Not replayed: the office screen\'s arrival-window check and what the customer asked for.');
+    expect(out.detail).toContain('Not checked: arrival windows, customer wishes, office edits the move log missed.');
     expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: last week 0.4 mi in 1.9 min. All since Thu, Aug 27: 1, median 1.9 min.');
     expect(out.metadata).toMatchObject({ weekOf: '2027-03-01', pairsApart: 12, bookingsReplayed: 30, bookingsCostly: 12, costlyMinutes: 672 });
   });
@@ -390,7 +413,7 @@ describe('the notification', () => {
     ];
     const out = composeWeeklyCheck({ apart: findApartPairs(rows), nightLog: new Map(), techCount: 2, weekStart: '2027-03-01' });
     expect(out.detail).toContain('Bookings last week: not replayed. The replay needs one technician to know whose route each stop was on; the schedule has 2.');
-    expect(out.detail).not.toContain('How: the calendar');
+    expect(out.detail).not.toContain('An estimate:');
   });
 
   test('the GPS median of an even count is the mean of the middle two', () => {
