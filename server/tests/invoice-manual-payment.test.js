@@ -535,7 +535,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
+  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, receiptJob = null } = {}) {
     const calls = { update: null, updateArgs: null, paymentsInsert: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
@@ -564,6 +564,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });
         if (table === 'annual_prepay_terms') return answer(table);
+        if (table === 'receipt_delivery_jobs') return recorder({ first: receiptJob });
         throw new Error(`unexpected trx table ${table}`);
       });
       trx.fn = { now: () => 'NOW()' };
@@ -769,13 +770,20 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(closed).toHaveBeenCalledTimes(1);
     });
 
-    test('checkoutTender whose invoice already holds a receipt job (deduped enqueue): reported as a manual receipt, no drain', async () => {
-      settle();
+    test.each([
+      ['completed', { manual: true }, false],
+      ['failed', { manual: true }, false],
+      // Still on its way: it reads the invoice when it sends (now paid), so the sheet must not prompt a second send.
+      ['queued', { queued: true }, true],
+      ['retry_scheduled', { queued: true }, true],
+      ['running', { queued: true }, true],
+    ])('checkoutTender whose invoice already holds a %s receipt job (deduped enqueue) reads %j', async (status, receipt, drained) => {
+      settle({ receiptJob: { status } });
       jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
       ReceiptDeliveryQueue.enqueueReceiptDelivery.mockResolvedValueOnce({ enqueued: false, deduped: true });
       const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
-      expect(out.receipt).toEqual({ manual: true });
-      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).not.toHaveBeenCalled();
+      expect(out.receipt).toEqual(receipt);
+      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).toHaveBeenCalledTimes(drained ? 1 : 0);
       expect(sendReceiptEmail).not.toHaveBeenCalled();
     });
 

@@ -79,9 +79,9 @@
  * send window. `receipt` then reads { queued: true }. The caller fences the amount with amountCents + owedCentsSeen (the figure the
  * sheet showed), so the receipt never confirms a sum the technician did not take. A part-paid invoice (amount_paid > 0 on the locked
  * row) gets no automatic checkout receipt: the receipt reads the whole bill (above), which would name more than this final payment.
- * Nor does one whose invoice already holds a receipt job (the enqueue dedupes on invoice_id: a reopened invoice). `receipt` then
- * reads { manual: true }: the tender sheet tells the technician to send it from the Invoices page (the paid-visit receipt check
- * asks for it too).
+ * Nor does one whose invoice already holds a FINISHED receipt job (the enqueue dedupes on invoice_id: a reopened invoice); one
+ * still queued, retrying or running will deliver the receipt for the paid invoice, so it reads { queued: true }. Otherwise
+ * `receipt` reads { manual: true }: the tender sheet says no receipt went out (the paid-visit receipt check flags it too).
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -612,9 +612,14 @@ async function recordManualPayment(id, {
       const enqueued = await require('./receipt-delivery-queue').enqueueReceiptDelivery({
         invoiceId: id, source: automated ? 'zelle_notice_reconciler' : 'dispatch_checkout', customerInitiated: Boolean(automated), database: trx,
       });
-      // A checkout tender counts only a job it wrote: a deduped enqueue (an older job holds the invoice) queued nothing for
-      // this payment. The Zelle path reports as it always did.
+      // A checkout tender counts a job it wrote, or an older one for this invoice (the enqueue dedupes on invoice_id) still on
+      // its way: that job reads the invoice when it sends, now paid. A finished older job sends nothing more. The Zelle path
+      // reports as it always did.
       receiptQueued = Boolean(automated) || enqueued?.enqueued === true;
+      if (!receiptQueued && enqueued?.deduped) {
+        const prior = await trx('receipt_delivery_jobs').where({ invoice_id: id }).first('status');
+        receiptQueued = Boolean(prior) && !['completed', 'failed'].includes(prior.status);
+      }
     }
     return row;
   });

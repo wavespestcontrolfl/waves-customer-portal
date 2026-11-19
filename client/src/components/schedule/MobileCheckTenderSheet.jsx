@@ -20,7 +20,8 @@ export default function MobileCheckTenderSheet({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   // Set when the server recorded the payment but sent no receipt ({ receipt: { manual: true } }: a part-paid invoice, whose
-  // receipt would name the whole bill). The sheet then says so and closes on Done.
+  // receipt would name the whole bill). The sheet then says so and closes on Done. It does not ask for a resend: the Invoices
+  // page receipt names the whole bill too.
   const [recorded, setRecorded] = useState(null);
   const finish = () => { onRecorded?.(recorded); onClose?.(); };
 
@@ -81,6 +82,8 @@ export default function MobileCheckTenderSheet({
         <button
           type="button"
           onClick={recorded ? finish : onClose}
+          // Disabled while the payment request runs: closing then would drop its result (and the parent's refresh).
+          disabled={saving}
           aria-label="Back"
           className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900"
         >
@@ -129,7 +132,7 @@ export default function MobileCheckTenderSheet({
         </button>
         {recorded && (
           <div className="text-zinc-900" style={{ fontSize: 15, marginTop: 12, textAlign: 'center' }}>
-            Payment recorded. No receipt went out: send it from the Invoices page.
+            Payment recorded. No receipt went out for this payment.
           </div>
         )}
         {error && (

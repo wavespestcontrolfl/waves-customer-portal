@@ -49,10 +49,25 @@ describe('checkout Cash and Check sheets mark the payment as a checkout tender',
     const onClose = vi.fn();
     render(<Sheet desktopVisible invoiceId="inv-1" amount={125} onRecorded={onRecorded} onClose={onClose} />);
     fireEvent.click(screen.getByText(button));
-    expect(await screen.findByText('Payment recorded. No receipt went out: send it from the Invoices page.')).toBeInTheDocument();
+    expect(await screen.findByText('Payment recorded. No receipt went out for this payment.')).toBeInTheDocument();
     expect(onRecorded).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('Done'));
     expect(onRecorded).toHaveBeenCalledWith(expect.objectContaining({ invoice: { id: 'inv-1', status: 'paid' } }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Check', MobileCheckTenderSheet, 'Record Payment'],
+    ['Cash', MobileCashTenderSheet, 'Tender'],
+  ])('%s keeps Back disabled while the payment request runs, so its result is never dropped', async (_name, Sheet, button) => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn(() => 'test-token') });
+    let answer;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { answer = resolve; })));
+    const onRecorded = vi.fn();
+    render(<Sheet desktopVisible invoiceId="inv-1" amount={125} onRecorded={onRecorded} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText(button));
+    await waitFor(() => expect(screen.getByLabelText('Back')).toBeDisabled());
+    answer({ ok: true, json: async () => ({ ok: true, invoice: { id: 'inv-1', status: 'paid' } }) });
+    await waitFor(() => expect(onRecorded).toHaveBeenCalled());
   });
 });
