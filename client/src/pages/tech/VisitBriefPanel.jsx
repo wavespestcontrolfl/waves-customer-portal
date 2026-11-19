@@ -33,6 +33,7 @@ import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSqua
 import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
+import { isProjectBackedCompletion, projectReportClosed } from '../../lib/dispatchCompletionRouting';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
 import { formatETDateTime, formatETTime } from '../../lib/timezone';
 import {
@@ -937,8 +938,11 @@ function ConsultationOutcomeAction({ service, onOutcome, style }) {
 // trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome, onEstimate = null }) {
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
-  const reportDisabled = !closeoutAvailable
-    && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
+  // A linked report speaks for the button only on a visit that completes
+  // through its project: a service-report visit with a leftover legacy project
+  // opens its own sheet or form, as the page routes it.
+  const project = isProjectBackedCompletion(service) ? service.linkedProject : null;
+  const reportDisabled = !closeoutAvailable && (TERMINAL_STATUSES.has(service.status) || projectReportClosed(service));
   const btn = { flex: '1 1 auto' };
   return (
     <div style={{ marginTop: 8 }}>
@@ -964,11 +968,11 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
-          {closeoutAvailable ? 'Open closeout' : service.linkedProject?.status === 'sent'
+          {closeoutAvailable ? 'Open closeout' : project?.status === 'sent'
             ? 'Sent'
-            : service.linkedProject?.status === 'closed' || service.status === 'completed'
+            : project?.status === 'closed' || service.status === 'completed'
               ? 'Completed'
-              : service.linkedProject?.id ? 'Continue' : 'Report'}
+              : project?.id ? 'Continue' : 'Report'}
         </button>
         <button className="tf-button" onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}><Camera aria-hidden="true" />Photos</button>
         {/* Hidden when the schedule feed marks the service trace-ineligible

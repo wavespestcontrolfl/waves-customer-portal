@@ -19,6 +19,7 @@ jest.mock('../config/feature-gates', () => ({
   gateEnvValue: jest.fn(() => false),
   contactLoginLive: () => process.env.GATE_CONTACT_LOGIN === 'true',
   contactLoginHolderOnlyLive: () => process.env.GATE_CONTACT_LOGIN_HOLDER_ONLY === 'true',
+  appFirstStaleTextLive: () => process.env.GATE_APP_FIRST_STALE_TEXT === 'true',
 }));
 
 const db = require('../models/db');
@@ -65,7 +66,7 @@ beforeEach(() => {
     throw new Error(`Unexpected table ${table}`);
   });
 });
-afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; });
+afterEach(() => { delete process.env.GATE_CONTACT_LOGIN; delete process.env.GATE_APP_FIRST_STALE_TEXT; });
 // apns.send(token, ...) — the device token is the first argument.
 const sentTokens = () => apns.send.mock.calls.map((c) => c[0]);
 
@@ -205,6 +206,75 @@ describe('sendToCustomer — a contact device belongs to ONE profile', () => {
   });
 });
 
+describe('sendToCustomer — acceptedCheckedInAt (the stamp the push proof row carries)', () => {
+  const daysAgo = (n) => new Date(Date.now() - n * 24 * 3600000);
+  const phone = (id, token, updated) => ({ ...HOLDER_DEVICE, id, device_token: token, updated_at: updated });
+
+  test('the fresh phone rejects and the stale phone accepts: the stamp is the stale phone\'s check-in', async () => {
+    const stale = daysAgo(40);
+    subs = [phone('s1', 'tok-fresh', daysAgo(1)), phone('s2', 'tok-stale', stale)];
+    apns.send.mockImplementation(async (token) => (token === 'tok-fresh' ? { ok: false, failed: true, reason: 'bad_device_token' } : { ok: true }));
+    expect((await send('tech_en_route')).acceptedCheckedInAt.getTime()).toBe(stale.getTime());
+  });
+
+  test('both phones accept: the newest check-in', async () => {
+    const fresh = daysAgo(1);
+    subs = [phone('s1', 'tok-fresh', fresh), phone('s2', 'tok-stale', daysAgo(40))];
+    apns.send.mockImplementation(async () => ({ ok: true }));
+    expect((await send('tech_en_route')).acceptedCheckedInAt.getTime()).toBe(fresh.getTime());
+  });
+
+  describe('holderMinUpdatedAt counts, never filters: every holder phone still gets the push', () => {
+    const notification = { title: 't', body: 'b', url: '/', category: 'service' };
+    const floor = () => daysAgo(30);
+
+    test('the fresh phone rejects and the stale phone accepts: both are sent, sent is 0 (the text goes), the stale acceptance is reported apart and never stamps', async () => {
+      subs = [phone('s1', 'tok-fresh', daysAgo(1)), phone('s2', 'tok-stale', daysAgo(40))];
+      apns.send.mockImplementation(async (token) => (token === 'tok-fresh' ? { ok: false, failed: true, reason: 'bad_device_token' } : { ok: true }));
+      const result = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder', holderMinUpdatedAt: floor() });
+      expect(sentTokens().sort()).toEqual(['tok-fresh', 'tok-stale']);
+      expect(result.sent).toBe(0);
+      expect(result.subscriptions).toBe(1);
+      expect(result.acceptedCheckedInAt).toBeNull();
+      expect(result.staleHolderDevices).toMatchObject({ sent: 1, subscriptions: 1 });
+    });
+
+    test('the fresh phone accepts: delivered, the stale phone is sent too, and the stamp is the fresh phone\'s check-in only', async () => {
+      const fresh = daysAgo(1);
+      subs = [phone('s1', 'tok-fresh', fresh), phone('s2', 'tok-stale', daysAgo(40))];
+      apns.send.mockImplementation(async () => ({ ok: true }));
+      const result = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder', holderMinUpdatedAt: floor() });
+      expect(sentTokens().sort()).toEqual(['tok-fresh', 'tok-stale']);
+      expect(result.sent).toBe(1);
+      expect(result.acceptedCheckedInAt.getTime()).toBe(fresh.getTime());
+      expect(result.staleHolderDevices).toMatchObject({ sent: 1 });
+    });
+
+    test('a contact phone opened 31 days ago is never below the holder floor; no floor means no staleHolderDevices', async () => {
+      subs = [phone('s1', 'tok-h', daysAgo(1)), { ...CONTACT_DEVICE, updated_at: daysAgo(31) }];
+      apns.send.mockImplementation(async () => ({ ok: true }));
+      const result = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder', holderMinUpdatedAt: floor() });
+      expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h']);
+      expect(result.sent).toBe(1);
+      expect(result.contactDevices).toMatchObject({ sent: 1 });
+      expect(result).not.toHaveProperty('staleHolderDevices');
+      apns.send.mockClear();
+      subs = [phone('s1', 'tok-old', daysAgo(40))];
+      const unfloored = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder' });
+      expect(unfloored.sent).toBe(1);
+      expect(unfloored).not.toHaveProperty('staleHolderDevices');
+    });
+  });
+
+  test('an accepted contact leg never stamps; no accepted holder leg is null', async () => {
+    subs = [phone('s1', 'tok-h', daysAgo(40)), { ...CONTACT_DEVICE, updated_at: daysAgo(1) }];
+    apns.send.mockImplementation(async (token) => (token === 'tok-h' ? { ok: false, failed: true, reason: 'bad_device_token' } : { ok: true }));
+    const result = await send('tech_en_route');
+    expect(result.contactDevices.sent).toBe(1);
+    expect(result.acceptedCheckedInAt).toBeNull();
+  });
+});
+
 describe('customerStatus — per person', () => {
   test('the holder\'s status never counts a contact device; a contact\'s counts only theirs', async () => {
     subs = [CONTACT_DEVICE];
@@ -213,5 +283,20 @@ describe('customerStatus — per person', () => {
     subs = [HOLDER_DEVICE];
     expect((await Push.customerStatus(HOLDER_ID)).registered).toBe(true);
     expect((await Push.customerStatus(HOLDER_ID, undefined, { contactKey: CONTACT_KEY })).registered).toBe(false);
+  });
+
+  test('GATE_APP_FIRST_STALE_TEXT: customerStatus itself bounds `reachable` to a 30 day check-in; off, a stale phone is reachable', async () => {
+    subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 40 * 24 * 3600000) }];
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: true, appStale: false });
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    // appStale: the floor alone excluded the holder's phone app (routing sends the text AND the app alert).
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ registered: true, reachable: false, appStale: true });
+    // The plain shape is untouched, and a phone opened 10 days ago stays reachable.
+    expect(await Push.customerStatus(HOLDER_ID)).not.toHaveProperty('reachable');
+    subs = [{ ...HOLDER_DEVICE, updated_at: new Date(Date.now() - 10 * 24 * 3600000) }];
+    expect((await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).reachable).toBe(true);
+    // No holder phone at all: not stale, so no companion alert.
+    subs = [CONTACT_DEVICE];
+    expect(await Push.customerStatus(HOLDER_ID, undefined, { withReachable: true })).toMatchObject({ reachable: false, appStale: false });
   });
 });

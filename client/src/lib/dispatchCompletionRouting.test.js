@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   invoicedSheetResponse,
+  isProjectBackedCompletion,
   mergePostPaymentService,
   fastCompleteSheetFor,
+  projectReportClosed,
   shouldOpenLawnReserviceFastComplete,
   shouldOpenPestFastComplete,
   shouldOpenSpecialtyFastComplete,
@@ -340,5 +342,49 @@ describe("invoicedSheetResponse", () => {
     expect(invoicedSheetResponse({ checkoutInvoiceId: "inv", invoicedVisitFastCompleteEnabled: false }, response)).toBeNull();
     expect(invoicedSheetResponse({ invoicedVisitFastCompleteEnabled: true }, response)).toBeNull();
     expect(invoicedSheetResponse(null, response)).toBeNull();
+  });
+});
+
+// Shared by admin Dispatch (handleComplete) and the Today page, so both send
+// the same visits to the project editor.
+describe("isProjectBackedCompletion", () => {
+  it("follows an explicit profile: a project-backed or project-required profile completes through a project", () => {
+    expect(isProjectBackedCompletion({ completionProfile: { projectBacked: true, requiresProject: true } })).toBe(true);
+    expect(isProjectBackedCompletion({ completionProfile: { projectBacked: false, requiresProject: true } })).toBe(true);
+    expect(isProjectBackedCompletion({ completionProfile: { projectBacked: false, requiresProject: false } })).toBe(false);
+  });
+
+  it("lets an explicit service-report profile win over a leftover linked project (house review on #2717)", () => {
+    expect(isProjectBackedCompletion({
+      completionProfile: { projectBacked: false, requiresProject: false },
+      linkedProject: { id: "project-fixture" },
+    })).toBe(false);
+  });
+
+  it("falls back to the linked project only for a row with no explicit profile", () => {
+    expect(isProjectBackedCompletion({ linkedProject: { id: "project-fixture" } })).toBe(true);
+    expect(isProjectBackedCompletion({ completionProfile: { category: "lawn_care" }, linkedProject: { id: "project-fixture" } })).toBe(true);
+    expect(isProjectBackedCompletion({ completionProfile: null })).toBe(false);
+    expect(isProjectBackedCompletion({})).toBe(false);
+    expect(isProjectBackedCompletion(null)).toBe(false);
+  });
+});
+
+describe("projectReportClosed (the Today page's Report entry points)", () => {
+  it("ends a project-backed visit whose report is sent or closed, never a draft", () => {
+    for (const status of ["sent", "closed"]) {
+      expect(projectReportClosed({ completionProfile: { projectBacked: true }, linkedProject: { id: "p", status } })).toBe(true);
+      // No profile on the row: the linked project stands for one, as isProjectBackedCompletion reads it.
+      expect(projectReportClosed({ linkedProject: { id: "p", status } })).toBe(true);
+    }
+    expect(projectReportClosed({ completionProfile: { projectBacked: true }, linkedProject: { id: "p", status: "draft" } })).toBe(false);
+  });
+
+  it("leaves a service-report visit with a leftover legacy project open: its profile wins", () => {
+    for (const status of ["sent", "closed", "draft"]) {
+      expect(projectReportClosed({ completionProfile: { projectBacked: false }, linkedProject: { id: "p", status } })).toBe(false);
+    }
+    expect(projectReportClosed({})).toBe(false);
+    expect(projectReportClosed(null)).toBe(false);
   });
 });

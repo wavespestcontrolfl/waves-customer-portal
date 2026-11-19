@@ -66,7 +66,7 @@ import {
   SheetHeader, TimeOnSite, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useDictationSources, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule, detailsHandler,
 } from './FastCompleteParts';
-import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
+import { CollectPayment, CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
 import FastCompleteWrapUp, { useWrapUp } from './FastCompleteWrapUp';
 import { rowsShowSpray } from '../../lib/spray-evidence';
@@ -615,7 +615,9 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
   };
 }
 
-export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
+// `collectOnSheet`: the saved view offers Take payment now (CollectPayment), as on
+// the lawn sheet: for a page that opens no payment prompt of its own (Today).
+export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, onViewDetails, suspended = false, collectOnSheet = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
@@ -650,18 +652,19 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} suspended={suspended}>
       <SheetHeader titleId={titleId} title={done ? 'Tree & shrub complete' : 'Complete tree & shrub'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting || wrapChecking} onFullForm={onFullForm} onViewDetails={detailsHandler(ctx, onViewDetails)} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} onWrapChecking={setWrapChecking} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} onWrapChecking={setWrapChecking} collectOnSheet={collectOnSheet} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, onWrapChecking }) {
+function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, onWrapChecking, collectOnSheet }) {
   if (submission.done) {
     // The server's completion advisories (a 13-0-13 over the county limit, a history rule) are listed under the summary.
     const advisories = (Array.isArray(submission.done.response?.completionAdvisories) ? submission.done.response.completionAdvisories : []).filter((text) => typeof text === 'string' && text);
     return (
       <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         {advisories.map((text) => <p key={text} className="tech-visit-muted tech-visit-status--warn" role="status">{text}</p>)}
+        {collectOnSheet && <CollectPayment result={submission.done.response} />}
       </SavedView>
     );
   }

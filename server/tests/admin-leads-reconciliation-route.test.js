@@ -49,10 +49,17 @@ beforeEach(() => {
   });
 });
 afterAll(() => knex.destroy());
-test('leaves the existing detail response unchanged unless leadReview is explicitly enabled', async () => {
+test('includes source evidence in standard detail and keeps reconciliation opt-in', async () => {
   const { body, error } = await request();
   expect(error).toBeUndefined();
-  expect(body).toEqual({ lead, activities, calls: [] });
+  expect(body).toEqual({
+    lead: { ...lead, source_evidence: {
+      kind: 'unknown', label: 'Source unknown', detail: null,
+      basis: 'No verified source evidence was captured for this lead.',
+    } },
+    activities,
+    calls: [],
+  });
   expect(getLeadStatusReconciliation).not.toHaveBeenCalled();
   expect(callQueries.some(({ sql }) => sql.includes('count(*)'))).toBe(false);
 });

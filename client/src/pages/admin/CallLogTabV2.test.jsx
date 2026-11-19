@@ -12,6 +12,45 @@ function LocationProbe() {
   return <output data-testid="location">{location.pathname}{location.search}</output>;
 }
 
+describe("call source history", () => {
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it("keeps the full month across searches and reads older sorted records without processing them", async () => {
+    const source = { kind: "google_business", label: "Google Business Profile", detail: "Maps listing · Sarasota", basis: "The dialed number belongs to the Sarasota listing." };
+    const recent = { id: "recent", first_name: "Recent caller", direction: "inbound", answered_by: "human", caller_history: "returning", source_evidence: source, created_at: "2022-05-02T01:00:00Z" };
+    const old = { ...recent, id: "older", first_name: "Earlier caller", caller_history: "first", twilio_call_sid: "older-recording", recording_available: true, related_lead: { id: "lead-1", status: "won" } };
+    const month = { start: "2022-05-01", total: 267, sources: [{ ...source, count: 267 }] };
+    const writes = [];
+    vi.stubGlobal("fetch", vi.fn(async (url, opts) => {
+      if (opts?.method && opts.method !== "GET") writes.push(String(url));
+      const request = new URL(url, "http://localhost");
+      let result = {};
+      if (request.pathname.endsWith("/ai/admin/calls")) {
+        if (request.searchParams.get("include_outcomes") === "1") result = { calls: [{ ...old, related_visits: [{ id: "visit-1", status: "completed", scheduled_date: "2022-05-10", invoices: [{ id: "invoice-1", status: "paid" }] }] }] };
+        else if (request.searchParams.get("sort") === "source") result = { calls: [old] };
+        else result = { calls: request.searchParams.has("search") ? [] : [recent], current_month: month };
+      }
+      return { ok: true, json: async () => result };
+    }));
+    render(<MemoryRouter><CallLogTabV2 /></MemoryRouter>);
+    expect(await screen.findByText("Returning caller")).toBeInTheDocument();
+    expect(screen.getByText("inbound calls", { exact: true })).toHaveTextContent("267 inbound calls");
+    fireEvent.click(screen.getByRole("button", { name: "Sort by source, ascending" }));
+    expect(await screen.findByText("First call on file")).toBeInTheDocument();
+    const detail = screen.getByText(source.basis).closest("details");
+    fireEvent.click(detail.querySelector("summary"));
+    expect(await screen.findByRole("link", { name: "Invoice · paid" })).toHaveAttribute("href", "/admin/invoices?invoice=invoice-1");
+    expect(screen.getByRole("link", { name: /May 10 visit · completed/ })).toHaveAttribute("href", "/admin/dispatch?tab=schedule&date=2022-05-10&appointment=visit-1");
+    expect(screen.getByRole("link", { name: "Open linked lead · won" })).toHaveAttribute("href", "/admin/leads?lead=lead-1");
+    expect(screen.getByText("9:00 PM")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Sort by received, descending" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search calls by name or phone" }), { target: { value: "missing" } });
+    expect(await screen.findByText("No matching calls.")).toBeInTheDocument();
+    expect(screen.getByText("inbound calls", { exact: true })).toHaveTextContent("267 inbound calls");
+    expect(writes).toEqual([]);
+  });
+});
+
 describe("CallLogTabV2 standalone navigation", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(async (url) => ({

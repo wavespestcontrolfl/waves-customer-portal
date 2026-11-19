@@ -25,7 +25,9 @@ const CATALOG = [
   // The house mix (lib/pest-default-mix.js). Numeric stock arrives as a
   // string, the way the database sends numerics.
   { id: 'taurus', name: 'Taurus SC', category: 'insecticide', active_ingredient: 'fipronil', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', inventory_unit: 'fl_oz', inventory_on_hand: '120.0000' },
-  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide', active_ingredient: 'bifenthrin', inventory_unit: 'fl_oz', inventory_on_hand: 96 },
+  { id: 'crosscheck', name: 'LESCO Crosscheck Plus', category: 'insecticide', active_ingredient: 'bifenthrin', inventory_unit: 'fl_oz', inventory_on_hand: 96 },
+  // Retired as the house bifenthrin 2026-11-18; still a valid product (leftover stock) the picker lists.
+  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide', active_ingredient: 'bifenthrin', inventory_unit: 'fl_oz', inventory_on_hand: 4 },
   { id: 'lesco', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   // Stock kept in a bare oz says nothing; it is usually recorded in grams.
   { id: 'alpine', name: 'Alpine WSG', category: 'insecticide', active_ingredient: 'dinotefuran', inventory_unit: 'oz', inventory_on_hand: 10 },
@@ -167,7 +169,7 @@ describe('FastCompleteSheet + Other product picker', () => {
     const allPest = within(picker).getByRole('group', { name: 'All pest products' });
     expect(optionNames(allPest)).toEqual([
       'Advion Ant Bait Gel', 'Atticus Talak 7.9 F', 'Bifen XTS', 'Contrac Blox', 'Cyzmic CS', 'Imidacloprid 2F',
-      'LESCO 90/10 Nonionic Surfactant', 'Quali-Pro Imidacloprid 2F', 'Taurus SC', 'Tekko Pro', 'Temprid FX', 'TREE-age G4',
+      'LESCO 90/10 Nonionic Surfactant', 'LESCO Crosscheck Plus', 'Quali-Pro Imidacloprid 2F', 'Taurus SC', 'Tekko Pro', 'Temprid FX', 'TREE-age G4',
     ]);
     expect(option(picker, 'Tekko Pro').textContent).toContain('IGR');
   });
@@ -436,16 +438,16 @@ describe('FastCompleteSheet added product amounts', () => {
     // Neither a catalog oddity (percent_solution) nor a unit that only looks
     // like one of the server's (fl_oz/1000sf is not on its list) is shown or
     // sent: either would make the server refuse the whole visit.
-    const products = CATALOG.map((p) => (p.id === 'talak' ? { ...p, default_rate_per_1000: '0.5', default_unit: 'fl_oz/1000sf' } : p));
+    const products = CATALOG.map((p) => (p.id === 'crosscheck' ? { ...p, default_rate_per_1000: '0.5', default_unit: 'fl_oz/1000sf' } : p));
     const request = await openSheet(makeRequest({ products }));
     enterAmount(addProduct('Cyzmic CS'), 2);
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
-    expect(screen.queryByLabelText('Atticus Talak 7.9 F rate')).toBeNull();
+    expect(screen.queryByLabelText('LESCO Crosscheck Plus rate')).toBeNull();
     expect(screen.queryByLabelText('Cyzmic CS rate')).toBeNull();
     fillVisit();
     const body = await completeBody(request);
     expect(productIn(body, 'cyzmic')).toMatchObject({ totalAmount: 2, amountUnit: 'fl_oz' });
-    expectNoRate(productIn(body, 'talak'));
+    expectNoRate(productIn(body, 'crosscheck'));
     expectNoRate(productIn(body, 'cyzmic'));
   });
 
@@ -512,7 +514,7 @@ describe('FastCompleteSheet added product amounts', () => {
     fillVisit();
     const body = await completeBody(request);
     expect(productIn(body, 'alpine')).toBeUndefined();
-    expect(body.products.map((p) => p.productId).sort()).toEqual(['lesco', 'talak', 'taurus']);
+    expect(body.products.map((p) => p.productId).sort()).toEqual(['crosscheck', 'lesco', 'taurus']);
   });
 });
 

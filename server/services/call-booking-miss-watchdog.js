@@ -12,7 +12,9 @@
  * nothing on it.
  *
  * What counts as a miss: a fully-processed call in the lookback window, past
- * the grace period, whose stored V2 extraction (v2_extraction_status =
+ * the grace period (GRACE_MINUTES from created_at; HELD_GRACE_MINUTES from the
+ * call's end when the call agent itself held the visit, and the bell then names
+ * why), whose stored V2 extraction (v2_extraction_status =
  * 'valid') says scheduling.status === 'confirmed' with a parseable
  * confirmed_start_at — and no scheduled_services row CLEARS it. A row clears
  * the miss only with call-linked evidence, mirroring the processor's
@@ -75,6 +77,7 @@ const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-aler
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { QUIET_AGED_RULE, cardIsNewer } = require('./triage-auto-resolve');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
+const { callEndedAt } = require('../utils/call-timeline');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
 // inside Monday morning's window even after a full weekend of gated-off or
@@ -84,6 +87,75 @@ const LOOKBACK_HOURS = 96;
 // extraction → booking can take a while, and the office may be booking it
 // by hand right now.
 const GRACE_MINUTES = 90;
+// A call the call agent itself held (callHoldReason) is not in flight: its last pass is done
+// and blocked the booking, so only a person will book it. It waits this long after the
+// call ends, for the office booking it by hand right after the call, then
+// rings (owner 2026-11-18, option A of the call booking holds scope: a visit held that
+// day on the address check would have waited 1 hour 42 minutes for its first alert).
+const HELD_GRACE_MINUTES = 10;
+// Why the call agent held it, for the bell's why: the first appointment-blocking flag
+// in this order, else the fallback. Every flag in call-triage-flags.js's
+// BLOCKING_TRIAGE_FLAGS has a phrase (a test keeps it so). Each phrase fits the why's
+// 110 characters behind the longest prefix and slot ("Still unbooked: confirmed Wed Sep 30
+// at 12:00 PM on a call; held because ").
+// A phrase says what the flag means wherever it is raised: address_unverified comes from
+// the address check's verdict, from two readings of the call that disagree on where, or
+// from a stated address that conflicts with the one on file, so it names no provider.
+// One phrase for the opt-out, as a blocking flag and as a routing reason.
+const NO_CONTACT_REASON = 'the caller asked not to be contacted';
+const HOLD_REASONS = [
+  // A reason that limits contact with the caller comes first.
+  ['do_not_contact_requested', NO_CONTACT_REASON],
+  ['caller_phone_missing', 'the call has no callback number'],
+  ['spam_or_wrong_number', 'the call may be spam or misdialed'],
+  ['voicemail', 'the call was a voicemail'],
+  ['out_of_service_area', 'the address is outside our area'],
+  ['commercial_requires_quote', 'a commercial job needs a quote first'],
+  ['hoa_common_area_requires_approval', 'an HOA common area needs approval'],
+  ['caller_not_authorized', 'the caller is not the account holder'],
+  ['cancellation_request', 'the caller asked to cancel'],
+  ['reschedule_or_cancel', 'the caller asked to move or cancel'],
+  ['existing_appointment_coordination', 'it involves a visit already booked'],
+  ['after_hours_emergency', 'it was an after-hours emergency'],
+  ['manual_review_requested', 'a manual review was requested'],
+  ['missing_service_address', 'the call gave no service address'],
+  ['address_unverified', 'the address is not confirmed'],
+  ['address_unverifiable', 'the address could not be checked'],
+  ['address_validation_unavailable', 'the address check was down'],
+  ['low_confidence_address', 'the address was hard to hear'],
+  ['ambiguous_scheduling', 'the agreed time is not clear'],
+  ['ambiguous_pest_or_service', 'the service is not clear'],
+  ['low_extraction_confidence', 'the call details are unclear'],
+  ['on_file_house_number_conflict', 'a different house number was given'],
+];
+// A held bell's last step. A held visit may not be one to book as agreed (a cancel request, a
+// visit already on file, a quote first), so staff review the call before booking it. The step
+// asks for no call or text, so it fits every hold reason, and it names no Dispatch control:
+// which one closes a no-visit call for good depends on gates and on the call's cards (the held
+// row's Dismiss, the cards, Done), and pre-push rounds 12 to 15 each found a state where the
+// named one was wrong. The bell links to Dispatch on the agreed day, where the call's held row
+// offers Book it and Dismiss.
+const HELD_STEP = 'Review the call before booking it.';
+// A held call's date check: a visit is on the calendar on another day. The hold can bear on
+// that visit (an opt-out, a visit on a namesake's account, a cancel request), so staff review
+// the call before they move the visit or contact anyone.
+const HELD_CHECK_STEP = 'Review the call before you move the visit or contact the caller.';
+// A hold the live decision names no listed reason for, and a booking a check held after
+// routing approved it (the row names no reason).
+const HOLD_REASON_FALLBACK = 'the call needs a review';
+// A routing decision that blocked for a reason of its own records it first in
+// blocked_reasons, before the blocking flags: these reasons come first. A reason that cannot
+// stand beside a confirmed slot (no_extraction, not_confirmed, confirmed_without_start_time)
+// is not listed.
+const HOLD_REASONS_BY_ROUTING = new Map([
+  ['v1_only_new_address', 'the address is not the one on file'],
+  ['address_not_validated', 'the address is not confirmed'],
+  ['off_hour_start', 'the start time is not on the hour'],
+  ['low_confidence', 'the call details are unclear'],
+  ['do_not_contact', NO_CONTACT_REASON],
+  ['unsupported_service', 'the service is not auto-bookable'],
+  ['administrative_followup', 'the call is an office follow-up'],
+]);
 // A first enable scans the whole window; cap the bells per run so a backlog
 // rings loudly but not unreadably. Dedupe keys make the remainder ring on
 // subsequent ticks.
@@ -182,6 +254,84 @@ function extractConfirmedSlot(extractionRaw) {
   };
 }
 
+// A jsonb column as an object: pg returns jsonb parsed, and a value stored as JSON text
+// reads the same. Unreadable text is null.
+function readJson(raw) {
+  if (typeof raw !== 'string') return raw && typeof raw === 'object' ? raw : null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// The call agent's own record of its decision: the newest route_decisions row in enforce mode
+// (the mode that decides bookings) for the call's recording. The processor writes it on each
+// pass (created_at refreshed), before it books and before its hard-veto exit (spam, out of
+// area, an opt-out). call_log.ai_validation is not read: it is an audit rebuild that can differ
+// from the live decision (an address recovery routes on the recovered address, the rebuild on
+// the original). Both call_log reads select it with the call row, in one statement, so the
+// two come from one snapshot: two queries could pair the call's slot with a reprocess's new
+// decision.
+const LIVE_DECISION_SELECT = `(SELECT row_to_json(d) FROM (
+    SELECT rd.final_action_taken, rd.blocked_reasons, rd.created_at FROM route_decisions rd
+    WHERE rd.call_log_id = call_log.id AND rd.mode = 'enforce' AND rd.recording_sid = COALESCE(call_log.recording_sid, '')
+    ORDER BY rd.created_at DESC LIMIT 1
+  ) d) AS live_decision`;
+
+// The call's live decision (LIVE_DECISION_SELECT), or null unless the call's last pass wrote
+// it: created at or after processing_started_at, the last claim.
+function liveDecision(call) {
+  const decision = readJson(call.live_decision);
+  const at = decision ? new Date(decision.created_at).getTime() : NaN;
+  if (Number.isNaN(at)) return null;
+  const startedAt = call.processing_started_at ? new Date(call.processing_started_at).getTime() : NaN;
+  return Number.isNaN(startedAt) || at >= startedAt ? decision : null;
+}
+
+// Why the live decision held the visit (a HOLD_REASONS phrase), or null when it did not hold
+// it. 'triage_review': routing blocked the booking, and blocked_reasons lists its own reason
+// (when not 'triage_flags') and then the blocking flags. 'auto_route_skipped': routing
+// approved it and a later booking check held it. 'auto_route' booked it.
+function decisionHoldReason(decision) {
+  if (!decision) return null;
+  if (decision.final_action_taken === 'auto_route_skipped') return HOLD_REASON_FALLBACK;
+  if (decision.final_action_taken !== 'triage_review') return null;
+  const listed = readJson(decision.blocked_reasons);
+  const reasons = Array.isArray(listed) ? listed : [];
+  const byRouting = reasons.find((r) => HOLD_REASONS_BY_ROUTING.has(r));
+  if (byRouting) return HOLD_REASONS_BY_ROUTING.get(byRouting);
+  const hit = HOLD_REASONS.find(([flag]) => reasons.includes(flag));
+  return hit ? hit[1] : HOLD_REASON_FALLBACK;
+}
+
+// When a held call's wait starts: when the call ended. An end receipt wins over every estimate:
+// Twilio's end stamp (callEndedAt reads it first) or an outbound bridge's customer-leg receipt
+// (callEndFor reads it first), the later of the two. Each helper, handed a row that carries only
+// direction and metadata, returns its receipt or null, with its own checks. A row inserted after
+// the call (a recording recovery) has a created_at long after the call, which the helpers read
+// as its end, so it must not outrank a receipt. With no receipt: the later of the two estimates
+// (bridged_at + length, or start + length, with the start backed out of a post-call row). On a
+// bridge the row's start can precede the staff answer and its length can count staff ringing, so
+// either estimate alone can run early. created_at only when neither exists.
+function heldWaitStart(call, createdAt) {
+  const { callEndFor } = require('./call-booking-link-text');
+  const latest = (dates) => {
+    const times = dates.map((d) => (d ? d.getTime() : NaN)).filter((t) => !Number.isNaN(t));
+    return times.length ? new Date(Math.max(...times)) : null;
+  };
+  const receiptsOnly = { direction: call.direction, metadata: call.metadata };
+  return latest([callEndedAt(receiptsOnly), callEndFor(receiptsOnly)])
+    || latest([callEndFor(call), callEndedAt(call)])
+    || createdAt;
+}
+
+// Why the call agent held the call (a HOLD_REASONS phrase), or null when nothing proves it did.
+// The proof is the call's last pass: it finished ('processed'; an 'extraction_failed' pass can
+// still be retried and book the visit, and a 'spam' row keeps the plain wait), and its live
+// decision (liveDecision) held the booking. Every other call keeps GRACE_MINUTES and the plain
+// text.
+function callHoldReason(call) {
+  if (call.processing_status !== 'processed') return null;
+  return decisionHoldReason(liveDecision(call));
+}
+
 function windowStartMinutes(windowStart) {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
   if (!m) return null;
@@ -268,7 +418,12 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
-// ai_extraction_enriched }); `bookedRows` are scheduled_services rows
+// ai_extraction_enriched, live_decision (LIVE_DECISION_SELECT),
+// processing_status, processing_started_at, metadata, duration_seconds,
+// recording_duration_seconds, bridged_at }); a call the call agent held (callHoldReason)
+// waits HELD_GRACE_MINUTES from the call's end (heldWaitStart) instead of
+// GRACE_MINUTES from created_at, and its miss carries that `holdReason` (else
+// null). `bookedRows` are scheduled_services rows
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
 // Date round-trip), window_start, created_at, source_call_log_id, notes }),
 // ANY status: cancelled/rescheduled rows clear only on call provenance
@@ -278,15 +433,21 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // the same first and last name (see loadNamesakeAccounts); their rows clear
 // only through namesakeRowClearsSlot.
 function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes = new Map() } = {}) {
-  const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
+  const cutoff = (minutes) => new Date(now.getTime() - minutes * 60 * 1000);
+  const graceCutoff = cutoff(GRACE_MINUTES);
+  const heldGraceCutoff = cutoff(HELD_GRACE_MINUTES);
   const misses = [];
   for (const call of calls) {
     const createdAt = call.created_at ? new Date(call.created_at) : null;
-    if (!createdAt || createdAt > graceCutoff) continue;
+    const holdReason = callHoldReason(call);
+    // A held call's wait starts when the call ends (heldWaitStart), so the office gets its 10
+    // minutes after hanging up: a row inserted at pickup holds the call's start in created_at.
+    const clock = holdReason ? heldWaitStart(call, createdAt) : createdAt;
+    if (!createdAt || clock > (holdReason ? heldGraceCutoff : graceCutoff)) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
     if (clearingRow(call, slot, bookedRows, namesakes.get(call.id))) continue;
-    misses.push({ call, slot, serviceDateET: slot.dateET });
+    misses.push({ call, slot, serviceDateET: slot.dateET, holdReason });
   }
   return misses;
 }
@@ -596,7 +757,10 @@ function callFacts(call) {
 // pass raises when a visit lands on another day: the office booked a visit, but not on the day the call agreed. `name`
 // is null when only the old bell's slot is known. Headline and why follow
 // docs/admin-notifications.md (composeAdminAlert checks them).
-function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
+// A held call (holdReason, owner 2026-11-18) says why the call agent held it and asks staff to
+// review the call first (HELD_CHECK_STEP); reviewOnly (a stamped slot whose call's new decision
+// holds it) asks the same, naming no reason.
+function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason = null, reviewOnly = false }) {
   const agreedAt = spokenSlot(slot.dateET, slot.minutes);
   const bookedAt = spokenSlot(mismatch.date, windowStartMinutes(mismatch.time));
   const { callAtET, contactPhone, direction } = callFacts(call);
@@ -605,24 +769,32 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
     why: `Booked ${bookedAt}; the call agreed ${agreedAt}.`,
     detail: `${name || 'The caller'} (${contactPhone || 'no number'}) agreed ${service || 'a visit'} for ${agreedAt} ` +
       `on a ${direction} call at ${callAtET} ET. The visit on the calendar is ${bookedAt}. ` +
-      'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
+      (holdReason ? `The call agent held this visit and did not book it, because ${holdReason}. ` : '') +
+      (holdReason || reviewOnly ? HELD_CHECK_STEP : 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.'),
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(mismatch.date)}`,
   };
 }
 
-// The "book it" text: the call confirmed a slot and nothing is on the calendar.
+// The "book it" text: the call confirmed a slot and nothing is on the calendar. A
+// visit the call agent held says why instead (m.holdReason, owner 2026-11-18).
 // The full sentence (phone number, direction, call time) stays in `detail`.
 function bookItAlert(m, repeat) {
   const { callAtET, contactPhone, direction } = callFacts(m.call);
+  const confirmed = `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call`;
+  // reviewOnly: a stamped slot whose call's new decision holds it (planOpenBookingMissBells).
+  const held = Boolean(m.holdReason || m.reviewOnly);
+  const verb = held ? 'review' : 'book';
   return {
-    action: `book ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - 'Schedule — book '.length)}`,
-    why: `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call; nothing is on the calendar.`,
+    // A held visit is one to check before booking (HELD_STEP), so its headline says review.
+    action: `${verb} ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - `Schedule — ${verb} `.length)}`,
+    why: m.holdReason ? `${confirmed}; held because ${m.holdReason}.` : `${confirmed}; nothing is on the calendar.`,
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
     detail: `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${m.slot.dateET} ${clockOf(m.slot.minutes)} ET ` +
       `on a ${direction} call at ${callAtET} ET, but the schedule has no matching appointment ` +
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
+      (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
-      'Book it in dispatch or call back to reset expectations.' +
+      (held ? HELD_STEP : 'Book it in dispatch or call back to reset expectations.') +
       (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
   };
 }
@@ -657,6 +829,8 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
+      // callHoldReason's inputs.
+      'processing_status', 'processing_started_at', db.raw(LIVE_DECISION_SELECT),
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
@@ -666,19 +840,27 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   for (const call of calls) {
     const rows = byCall.get(call.id);
     const stamp = rows.find((r) => r.confirmed_date_et && /^\d{2}:\d{2}/.test(r.confirmed_time_et));
-    const slot = extractConfirmedSlot(call.ai_extraction_enriched) || (stamp && {
+    const ownSlot = extractConfirmedSlot(call.ai_extraction_enriched);
+    const slot = ownSlot || (stamp && {
       dateET: stamp.confirmed_date_et,
       minutes: windowStartMinutes(stamp.confirmed_time_et),
-      name: (/^Schedule — (?:book|check) (.+?)'s /.exec(stamp.title) || [])[1],
-      service: stamp.confirmed_service || (/^Schedule — book .+?'s (.+)$/.exec(stamp.title) || [])[1],
+      name: (/^Schedule — (?:book|review|check) (.+?)'s /.exec(stamp.title) || [])[1],
+      service: stamp.confirmed_service || (/^Schedule — (?:book|review) .+?'s (.+)$/.exec(stamp.title) || [])[1],
     });
-    if (slot) entries.push({ call, slot, rows });
+    // The hold reason belongs to the decision made on the extraction that confirmed the slot:
+    // a stamped slot stands in for a reprocessed call whose new decision is about another
+    // reading of the call, so it carries none. But when that new decision holds the call (it
+    // can restrict contact), the stamped slot's bell still asks only for a review (reviewOnly).
+    // callHoldReason itself needs a finished pass ('processed'), so a call still in processing
+    // carries neither.
+    const held = callHoldReason(call);
+    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? held : null, reviewOnly: !ownSlot && Boolean(held) });
   }
   if (!entries.length) return [];
 
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
-  return entries.map(({ call, slot, rows }) => ({ call, slot, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+  return entries.map(({ call, slot, rows, holdReason, reviewOnly }) => ({ call, slot, holdReason, reviewOnly, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
 }
 
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): a person decided not to book the
@@ -714,13 +896,15 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
   const closeRows = ({ ids, resolution }, callId) => NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
     .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
     .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${callId}: ${err.message}`); return 0; });
-  for (const { call, slot, plan } of plans) {
+  for (const { call, slot, holdReason, reviewOnly, plan } of plans) {
     if (plan.ring) {
       // One alert budget per run (MAX_ALERTS_PER_RUN), shared with the ring path: past
       // it, a plan that needs a new bell waits for the next tick with its old bells open;
       // plain closes still run.
       if (raised >= MAX_ALERTS_PER_RUN) { waiting += 1; continue; }
-      const outcome = await ringMiss({ call, slot, mismatch: plan.ring.mismatch }, { dedupeKey: plan.ring.dedupeKey, repeat: false })
+      // A replacement bell for a call the call agent held says why and asks for a review, as its first bell did.
+      const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason, reviewOnly };
+      const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey, repeat: false })
         .catch((err) => { logger.warn(`[call-booking-miss] failed to raise the replacement bell for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the replacement stands ('rung' or an
       // existing row under the same key). A suppressed or failed raise keeps them.
@@ -787,6 +971,9 @@ async function runInner({ now }) {
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
+      // callHoldReason's inputs, then heldWaitStart's (a held call's wait).
+      'processing_status', 'processing_started_at', db.raw(LIVE_DECISION_SELECT),
+      'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
@@ -882,7 +1069,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
-    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service })
+    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason, reviewOnly: m.reviewOnly })
     : bookItAlert(m, repeat);
   const created = await raiseAdminAlert(
     'alert',
@@ -992,6 +1179,9 @@ module.exports = {
   closeResolvedBookingMissBells,
   closeBookingMissBellsForCall,
   dateCheckAlert,
+  bookItAlert,
+  liveDecision,
+  decisionHoldReason,
   extractConfirmedSlot,
   confirmedWallClockET,
   rowClearsSlot,
@@ -1001,6 +1191,10 @@ module.exports = {
   likelyAccountSentence,
   LOOKBACK_HOURS,
   GRACE_MINUTES,
+  HELD_GRACE_MINUTES,
+  HOLD_REASONS,
+  HOLD_REASON_FALLBACK,
+  HOLD_REASONS_BY_ROUTING,
   MAX_ALERTS_PER_RUN,
   WINDOW_MATCH_TOLERANCE_MINUTES,
   REPEAT_INTERVAL_MINUTES,

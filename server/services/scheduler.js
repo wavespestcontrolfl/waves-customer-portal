@@ -5308,6 +5308,15 @@ function initScheduledJobs() {
         } catch (sweepErr) {
           logger.error(`Invoice follow-ups: autopay hold timeout sweep failed: ${sweepErr.message}`);
         }
+        // A customer the Day 60/90 step marked at_risk goes back to active_customer once that debt is
+        // paid; nothing else clears the stage. Before the due touches, so a customer who still owes
+        // another long-overdue invoice is stamped again in this run. A failure never stops the touch run.
+        try {
+          const cleared = await InvoiceFollowUps.clearAtRiskForSettledLongOverdue();
+          if (cleared.length) logger.info(`Invoice follow-ups: ${cleared.length} customer(s) back from at_risk, long-overdue debt paid: ${cleared.join(', ')}`);
+        } catch (sweepErr) {
+          logger.error(`Invoice follow-ups: at-risk clear sweep failed: ${sweepErr.message}`);
+        }
         const result = await InvoiceFollowUps.runPending();
         logger.info(`Invoice follow-ups done: ${result.sent} sent, ${result.skipped} skipped`);
       });
@@ -5691,6 +5700,25 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Estimate no-time-soon check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY :50, 9 AM to 7 PM ET — Paid-at-the-visit receipt check (owner 2026-11-18). One
+  // Billing bell per invoice paid at its visit that still has no receipt after 2
+  // hours (a tender sheet recorded the payment and no receipt went out); it closes
+  // itself once the receipt goes out. Read-only: sends nothing to a customer,
+  // writes only admin notification rows. No GATE_* (owner rule 2026-11-05).
+  // The plain hour range is deliberate: node-cron 3 reads a stepped range oddly.
+  // =========================================================================
+  cron.schedule('0 50 9-19 * * *', async () => {
+    try {
+      await runExclusive('paid-visit-receipt-check', async () => {
+        const result = await require('./paid-visit-receipt-check').runPaidVisitReceiptCheck();
+        logger.info(`Paid-visit receipt check: ${result.raised} raised, ${result.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Paid-visit receipt check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -9849,6 +9877,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 8:30PM — Stale-app notice check (owner 2026-11-18). Read-only: finds
+  // visits from the last 48 h whose notices all went as app push, no text, to a
+  // customer whose app was not opened in 30 days. One self-closing ops digest.
+  // =========================================================================
+  cron.schedule('30 20 * * *', async () => {
+    try {
+      await runExclusive('app-first-stale-notice-check', async () => {
+        const check = require('./app-first-stale-notice-check');
+        const result = await check.runAppFirstStaleNoticeCheck();
+        // Counts only in the log: the digest result can carry provider text.
+        logger.info(`App-first stale-notice check done: found=${result.found ?? 'n/a'} skipped=${result.skipped || 'none'}`);
+        // A failed run must read as FAILED in job_health (like the sibling digests): throw a fixed code.
+        const failure = check.staleNoticeCheckFailure(result);
+        if (failure) throw new Error(`app-first-stale-notice-check: ${failure}`);
+      });
+    } catch (err) {
+      logger.error(`App-first stale-notice check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
   // (default 365); tasks use their stored 30-day expiry. The sweep runs with
   // either write gate off so pre-existing conversation data still ages out.
@@ -10313,14 +10362,18 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // Call booking-miss watchdog — every 30 min (offset from the ingest
-  // watchdog), ring an admin bell for any call whose V2 extraction confirmed
-  // a concrete appointment slot that never became a scheduled_services row
+  // Call booking-miss watchdog — every 10 min (owner 2026-11-18: a visit the
+  // call agent held rings about 15 minutes after the call, not 1.5-2 hours
+  // later). Its minutes stay 4 min off the ingest watchdog's :07/:37 and off
+  // the nightly checks' own minutes (23:20-23:32, the #3208 rule in
+  // failing-jobs-check.test.js). It rings an admin bell for any call whose V2
+  // extraction confirmed a concrete appointment slot that never became a
+  // scheduled_services row
   // (outbound skip / v2 routing block / missing fields all park silently in
   // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
   // See server/services/call-booking-miss-watchdog.js.
   // =========================================================================
-  cron.schedule('22,52 * * * *', async () => {
+  cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();

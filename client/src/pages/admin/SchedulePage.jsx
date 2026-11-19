@@ -13860,7 +13860,7 @@ export function CompletionPanel({
   }, [isRegularPestVisit, areasServiced, selectedProducts]);
   // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
   // recurring general-pest, one-time pest, and pest re-service completions
-  // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
+  // open with Taurus SC + LESCO Crosscheck Plus + the LESCO 90/10 Nonionic
   // Surfactant already on the Products list, totals prefilled
   // (4 oz / 4 oz / 0.25 oz, marked manual so a rate/area edit can't
   // recompute them). Seeds ONCE per panel open, only into an empty list —
@@ -13869,7 +13869,7 @@ export function CompletionPanel({
   // ignore the untouched seed (merely opening the panel must not mint a
   // restore-prompt draft). "Completed" only, and each row is flagged
   // pestDefaultMixProduct (Codex r3 P1, PR #5049) — picking inspection_only
-  // / customer_declined after this seeds must not leave Taurus/Talak/LESCO
+  // / customer_declined after this seeds must not leave Taurus/Crosscheck/LESCO
   // selected: the outcome-driven clearing effect below removes rows this
   // flag names and re-arms the seed for a return to "completed", exactly
   // like protocolDefaultProduct's own clearing.

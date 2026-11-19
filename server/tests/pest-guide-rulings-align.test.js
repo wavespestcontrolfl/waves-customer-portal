@@ -55,9 +55,9 @@ describe('pest guide follows the owner rulings', () => {
     expect(text).not.toMatch(/\b(kill|kills|killed|killing|die|dies|dead|dying)\b/i);
   });
 
-  test('the bifenthrin is Atticus Talak 7.9 F, and the images are Taurus only', () => {
+  test('the bifenthrin is LESCO Crosscheck Plus (owner 2026-11-18; it replaced Atticus Talak 7.9 F), and the images are Taurus only', () => {
     expect(text).not.toMatch(/Talstar/);
-    expect(row('Primary solutions')).toContain('Atticus Talak 7.9 F (bifenthrin)');
+    expect(row('Primary solutions')).toContain('LESCO Crosscheck Plus (bifenthrin)');
     expect(pest.productImages.images.map((image) => image.file)).toEqual(['product-taurus-sc.png']);
   });
 

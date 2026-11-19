@@ -23,8 +23,8 @@
 //   disposition should surface in a clear "needs review" state.
 import { renderWithDidYouMean } from "../../components/admin/DidYouMean";
 import { useState, useEffect, useMemo, useRef } from "react";
-import { useNavigate } from "react-router-dom";
-import { CheckCircle2, MessageSquare, PhoneCall, Voicemail, XCircle } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronDown, MessageSquare, PhoneCall, PhoneIncoming, PhoneOutgoing, Voicemail, XCircle } from "lucide-react";
 import {
   Badge,
   Button,
@@ -40,9 +40,11 @@ import CallTranscriptSync, {
   segmentsMatchTranscript,
 } from "../../components/admin/CallTranscriptSync";
 import CallIntelligencePanel from "../../components/admin/CallIntelligencePanel";
+import LeadSourceCell from "../../components/admin/LeadSourceCell";
+import SourceVisitLinks from "../../components/admin/SourceVisitLinks";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import { describeProcessResult } from "../../lib/callProcessResult";
-import { formatETDateTime } from "../../lib/timezone";
+import { formatETDate, formatETDateOnly, formatETDateTime, formatETTime } from "../../lib/timezone";
 
 // A 409 from the process route is the documented blocked-claim conflict and
 // carries a classifiable body. Any other non-2xx — an expired session, a
@@ -52,6 +54,46 @@ import { formatETDateTime } from "../../lib/timezone";
 const processConflict = (err) => (err?.status === 409 && err?.body?.reason ? err.body : null);
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+const receivedNewest = "received_desc";
+const historyGrid = "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-2 md:grid-cols-[minmax(0,1.25fr)_minmax(6rem,.55fr)_minmax(0,1fr)_6.5rem]";
+
+function callListQuery(search) {
+  return search ? `?search=${encodeURIComponent(search)}&limit=1000` : "?days=365&limit=200";
+}
+
+function CallSortHeading({ field, label, sort, onChange }) {
+  const active = sort.startsWith(field);
+  const next = active && sort.endsWith("asc") ? "desc" : active ? "asc" : field === "source" ? "asc" : "desc";
+  const Icon = active ? (sort.endsWith("asc") ? ArrowUp : ArrowDown) : ArrowUpDown;
+  return (
+    <button type="button" onClick={() => onChange(`${field}_${next}`)} className="flex w-fit cursor-pointer items-center gap-1 rounded-sm border-0 bg-transparent p-0 text-left font-sans text-14 font-medium text-ink-secondary u-focus-ring"
+      aria-label={`Sort by ${label.toLowerCase()}, ${next === "asc" ? "ascending" : "descending"}`}>
+      {label}<Icon aria-hidden="true" size={14} />
+    </button>
+  );
+}
+
+function CallSourceDetails({ call }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="group min-w-0 text-14" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="flex w-fit cursor-pointer list-none items-center gap-2 rounded-sm py-1 u-focus-ring [&::-webkit-details-marker]:hidden">
+        <LeadSourceCell evidence={call.source_evidence} />
+        <ChevronDown size={14} aria-hidden="true" className="shrink-0 text-zinc-500 group-open:rotate-180" />
+      </summary>
+      <div className="mt-1 space-y-2 border-0 border-l-2 border-solid border-zinc-200 pl-3 leading-snug text-ink-secondary">
+        <p className="m-0">{call.source_evidence?.basis || "No acquisition evidence was recorded for this call."}</p>
+        {call.to_phone && <p className="m-0">Dialed line · {NUMBER_LABEL_MAP[call.to_phone] || call.to_phone}</p>}
+        {call.related_lead?.id && (
+          <Link to={`/admin/leads?lead=${encodeURIComponent(call.related_lead.id)}`} className="block w-fit font-medium text-zinc-900 underline u-focus-ring">
+            Open linked lead{call.related_lead.status ? ` · ${call.related_lead.status.replace(/_/g, " ")}` : ""}
+          </Link>
+        )}
+        {open && <SourceVisitLinks kind="call" id={call.id} read={adminFetch} />}
+      </div>
+    </details>
+  );
+}
 // 'blocked' is amber, not alert red: nothing broke, but nothing ran either —
 // the operator has to hit Reprocess. alert-fg stays reserved for a genuine
 // failure.
@@ -466,6 +508,10 @@ export function SandyTransferCard({ handoff }) {
 export default function CallLogTabV2() {
   const navigate = useNavigate();
   const [calls, setCalls] = useState([]);
+  const [currentMonth, setCurrentMonth] = useState(null);
+  const [historySort, setHistorySort] = useState(receivedNewest);
+  const [loadedSearch, setLoadedSearch] = useState("");
+  const [sortedHistory, setSortedHistory] = useState(null);
   const [routeCalibration, setRouteCalibration] = useState(null);
   // The processing pipeline's live state (GET /admin/call-recordings/stats):
   // what is running, what is stuck, what failed and will retry, what waits on
@@ -554,13 +600,13 @@ export default function CallLogTabV2() {
   const syncedSegmentsById = useMemo(() => {
     const map = new Map();
     if (!transcriptSyncEnabled) return map;
-    for (const c of calls) {
+    for (const c of calls.concat(sortedHistory?.rows || [])) {
       if (!c?.recording_available || !c.transcript_structured) continue;
       const segs = parseTranscriptSegments(c.transcript_structured);
       if (segs.length && segmentsMatchTranscript(segs, c.transcription)) map.set(c.id, segs);
     }
     return map;
-  }, [calls, transcriptSyncEnabled]);
+  }, [calls, sortedHistory, transcriptSyncEnabled]);
   // Evidence "Jump": the intelligence panel hands a verbatim quote to the
   // transcript, which opens and marks it so the office can check a promise
   // against the words in seconds instead of replaying the audio.
@@ -625,9 +671,7 @@ export default function CallLogTabV2() {
   };
 
   const loadCalls = (search = "") => {
-    const q = search
-      ? `?search=${encodeURIComponent(search)}&limit=1000`
-      : "?days=365&limit=200";
+    const q = callListQuery(search);
     loadSeqRef.current += 1;
     const seq = loadSeqRef.current;
     return Promise.allSettled([
@@ -640,6 +684,8 @@ export default function CallLogTabV2() {
         if (callsResult.status !== "fulfilled") throw callsResult.reason;
         const d = callsResult.value;
         setCalls(d.calls || []);
+        setCurrentMonth(d.current_month || null);
+        setLoadedSearch(search);
         setCallsError(false);
         setTranscriptSyncEnabled(d.transcript_sync_enabled === true);
         pinnedFetchRef.current = null;
@@ -654,12 +700,26 @@ export default function CallLogTabV2() {
       .catch(() => {
         if (seq !== loadSeqRef.current) return; // superseded
         setCallsError(true);
+        setCurrentMonth(null);
         // Fail closed: a rejected reload must not leave the gated transcript
         // UI enabled on stale data.
         setTranscriptSyncEnabled(false);
         setLoading(false);
       });
   };
+
+  // Alternate history sorts can bring older recordings into view. Only the
+  // original recent-call feed owns the voicemail queue and auto-processing.
+  useEffect(() => {
+    if (historySort === receivedNewest || loading || callsError) return;
+    let active = true;
+    const [field, order] = historySort.split("_");
+    const query = `${callListQuery(loadedSearch)}&sort=${field}&order=${order}&include_month=0`;
+    adminFetch(`/ai/admin/calls${query}`)
+      .then((data) => { if (active) setSortedHistory({ sort: historySort, search: loadedSearch, rows: data.calls || [] }); })
+      .catch(() => { if (active) setSortedHistory({ sort: historySort, search: loadedSearch, error: true }); });
+    return () => { active = false; };
+  }, [historySort, loadedSearch, calls, loading, callsError]);
 
   useEffect(() => {
     loadCalls();
@@ -986,28 +1046,14 @@ export default function CallLogTabV2() {
   ).length;
   const recentVoicemails = voicemailCalls.slice(0, 5);
 
-  const now = new Date();
-  const thisMonthCalls = calls.filter((c) => {
-    const cd = new Date(c.created_at);
-    return (
-      cd.getMonth() === now.getMonth() && cd.getFullYear() === now.getFullYear()
-    );
-  });
-  const sourceNumberCounts = {};
-  thisMonthCalls.forEach((c) => {
-    // Source = the Waves tracking line an inbound call arrived on. An
-    // outbound call has no source, and its to_phone is the customer —
-    // counting it here surfaced raw customer numbers as "sources".
-    if (c.direction === "outbound") return;
-    const num = c.to_phone || "Unknown";
-    const label = NUMBER_LABEL_MAP[num] || num;
-    sourceNumberCounts[label] = (sourceNumberCounts[label] || 0) + 1;
-  });
-  const sortedSources = Object.entries(sourceNumberCounts).sort(
-    (a, b) => b[1] - a[1],
-  );
-
-  const filteredCalls = calls.filter((c) => {
+  const sortedResult = sortedHistory?.sort === historySort && sortedHistory.search === loadedSearch ? sortedHistory : null;
+  const alternateSort = historySort !== receivedNewest;
+  const historyPending = alternateSort && !sortedResult && !callsError;
+  const historyError = callsError || (alternateSort && sortedResult?.error);
+  const historyRows = alternateSort ? sortedResult?.rows || [] : calls;
+  const pinnedCall = alternateSort && focusCallId && !historyRows.some((c) => c.id === focusCallId)
+    ? calls.find((c) => c.id === focusCallId) : null;
+  const filteredCalls = (pinnedCall ? [pinnedCall, ...historyRows] : historyRows).filter((c) => {
     if (callFilter === "all") return true;
     if (callFilter === "answered") return isAnswered(c);
     if (callFilter === "voicemail")
@@ -1028,7 +1074,7 @@ export default function CallLogTabV2() {
       <div className="hidden md:flex gap-2 flex-wrap">
         {" "}
         <StatButton
-          label="Total"
+          label="Recent calls"
           value={calls.length}
           filter="all"
           active={callFilter === "all"}
@@ -1225,34 +1271,35 @@ export default function CallLogTabV2() {
           </CardBody>
         </Card>
       )}
-      {/* Source analytics — desktop only */}
-      {sortedSources.length > 0 && (
-        <Card className="hidden md:block">
-          {" "}
-          <CardBody>
-            {" "}
-            <div className="text-11 uppercase tracking-label text-ink-tertiary mb-3">
-              Calls Per Source (This Month)
-            </div>{" "}
-            <div className="flex flex-wrap gap-2">
-              {sortedSources.slice(0, 12).map(([label, count]) => (
-                <div
-                  key={label}
-                  className="flex items-center gap-2 px-3 py-1 bg-zinc-50 border-hairline rounded-md"
-                >
-                  {" "}
-                  <span className="text-12 text-ink-secondary">
-                    {label}
-                  </span>{" "}
-                  <span className="text-13 font-mono u-nums text-ink-primary">
-                    {count}
-                  </span>{" "}
-                </div>
-              ))}
-            </div>{" "}
-          </CardBody>{" "}
-        </Card>
-      )}
+      <Card>
+        <CardBody>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="m-0 text-16 font-medium text-ink-primary">Inbound calls by source</h3>
+            {currentMonth && (
+              <span className="text-14 text-ink-secondary">
+                {formatETDateOnly(currentMonth.start, { month: "long", year: "numeric" })} · Eastern time
+              </span>
+            )}
+          </div>
+          {currentMonth ? (
+            <>
+              <p className="my-2 text-14 text-ink-primary"><strong className="font-medium u-nums">{currentMonth.total}</strong> inbound calls</p>
+              {currentMonth.sources.length > 0 && (
+                <ul className="m-0 grid list-none gap-x-5 p-0 sm:grid-cols-2 lg:grid-cols-3">
+                  {currentMonth.sources.map((source) => (
+                    <li key={JSON.stringify([source.kind, source.label, source.detail])} className="flex min-w-0 items-center justify-between gap-3 border-t border-zinc-200 py-2">
+                      <LeadSourceCell evidence={source} />
+                      <span className="text-14 font-medium u-nums">{source.count}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            <p className="mb-0 mt-2 text-14 text-ink-secondary">{loading ? "Loading monthly totals…" : "Monthly source totals unavailable."}</p>
+          )}
+        </CardBody>
+      </Card>
       {pipeline && (
         <Card>
           <CardBody>
@@ -1467,26 +1514,41 @@ export default function CallLogTabV2() {
             </div>{" "}
             <Input
               type="text"
+              aria-label="Search calls by name or phone"
               placeholder="Search calls by name or phone…"
               value={callLogSearch}
               onChange={(e) => setCallLogSearch(e.target.value)}
               className="h-11 min-h-[44px] w-full max-w-none text-16 md:h-9 md:min-h-0 md:max-w-[360px] md:min-w-[200px] md:text-13"
-            />{" "}
+            />
+            <Select aria-label="Sort call history" className="md:hidden" value={historySort} onChange={(e) => setHistorySort(e.target.value)}>
+              <option value="received_desc">Received · newest first</option>
+              <option value="received_asc">Received · oldest first</option>
+              <option value="source_asc">Source · A–Z</option>
+              <option value="source_desc">Source · Z–A</option>
+            </Select>
           </div>
-          {callsError && (
+          {historyError && (
             <div role="alert" className="mb-3 flex flex-wrap items-center gap-2 text-14 text-alert-fg">
               <span>
-                {calls.length === 0
+                {historyRows.length === 0
                   ? "Call history could not load."
                   : "Call history could not refresh. The list below may be out of date."}
               </span>
               <Button size="sm" variant="ghost" onClick={() => loadCalls(callLogSearch.trim())}>Retry</Button>
             </div>
           )}
-          {calls.length === 0 ? (
-            !callsError && (
+          <div className={cn(historyGrid, "hidden border-y border-zinc-200 bg-zinc-50 px-3 py-2 text-14 font-medium text-ink-secondary md:grid")}>
+            <span>Caller</span>
+            <CallSortHeading field="received" label="Received" sort={historySort} onChange={setHistorySort} />
+            <CallSortHeading field="source" label="Source" sort={historySort} onChange={setHistorySort} />
+            <span className="text-right">Call status</span>
+          </div>
+          {historyPending ? (
+            <div role="status" className="p-5 text-center text-14 text-ink-secondary">Loading call history…</div>
+          ) : filteredCalls.length === 0 ? (
+            !historyError && (
               <div className="p-5 text-center text-ink-tertiary text-13">
-                No calls recorded yet.
+                {loadedSearch || callFilter !== "all" ? "No matching calls." : "No calls recorded yet."}
               </div>
             )
           ) : (
@@ -1523,6 +1585,8 @@ export default function CallLogTabV2() {
                   ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, "0")}`
                   : "--";
                 const isUnknown = !c.first_name && !c.customer_id;
+                const displayName = getCallDisplayName(c);
+                const contactNumber = c.direction === "inbound" ? c.from_phone : c.to_phone;
                 const routeDecision = c.routeDecision;
                 const routeFeedback = c.routeFeedback;
                 const routeBlockedReasons = Array.isArray(
@@ -1542,37 +1606,45 @@ export default function CallLogTabV2() {
                     )}
                   >
                     {" "}
-                    <div className="flex min-w-0 items-start gap-2 md:items-center md:gap-3">
-                      {" "}
-                      <span className="w-5 flex-shrink-0 text-center text-14 text-ink-secondary">
-                        {c.direction === "inbound" ? "↓" : "↑"}
-                      </span>{" "}
-                      <div className="flex-1 min-w-0">
-                        {" "}
-                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 text-16 font-medium text-ink-primary md:text-13">
-                          <span className="min-w-0 break-words [overflow-wrap:anywhere]">
-                            {getCallDisplayName(c)}
-                          </span>
-                          <span className="text-12 font-normal text-ink-tertiary md:text-11">
-                            {c.direction === "inbound" ? "Inbound" : "Outbound"}
-                          </span>{" "}
-                        </div>{" "}
-                        <div className="break-words text-13 text-ink-tertiary [overflow-wrap:anywhere] md:text-11">
-                          {getCallPartyLine(c)} · {dur}
-                          {c.caller_city
-                            ? ` · ${c.caller_city}, ${c.caller_state}`
-                            : ""}
-                        </div>{" "}
-                      </div>{" "}
-                      <div className="flex flex-shrink-0 flex-col items-end gap-1">
+                    <div className={historyGrid}>
+                      <div className="order-1 flex min-w-0 items-start gap-2">
+                        <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-600">
+                          {c.direction === "inbound" ? <PhoneIncoming size={16} aria-label="Inbound" /> : <PhoneOutgoing size={16} aria-label="Outbound" />}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-14 font-medium text-ink-primary">
+                            <span className="[overflow-wrap:anywhere]">{displayName}</span>
+                            {c.caller_history && (
+                              <span className="rounded-sm border border-solid border-zinc-200 px-1.5 text-14 font-normal text-ink-secondary">
+                                {c.caller_history === "first" ? "First call on file" : "Returning caller"}
+                              </span>
+                            )}
+                          </div>
+                          <div title={getCallPartyLine(c)} className="mt-0.5 text-14 text-ink-secondary [overflow-wrap:anywhere]">
+                            {contactNumber && contactNumber !== displayName ? contactNumber : c.direction === "inbound" ? "Inbound" : "Outbound"} · {dur}
+                            {c.caller_city ? ` · ${c.caller_city}${c.caller_state ? `, ${c.caller_state}` : ""}` : ""}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="order-4 text-right text-14 leading-snug md:order-2 md:text-left">
+                        {c.created_at && (
+                          <time dateTime={c.created_at} title={`${formatETDateTime(c.created_at)} ET · ${timeAgo(c.created_at)}`}>
+                            <span className="block text-ink-primary">{formatETDate(c.created_at, { month: "short", day: "numeric" })}</span>
+                            <span className="block text-ink-secondary">{formatETTime(c.created_at)}</span>
+                          </time>
+                        )}
+                      </div>
+                      <div className="order-3 min-w-0">
+                        {c.direction === "inbound" ? (
+                          <CallSourceDetails call={c} />
+                        ) : <span className="text-14 text-ink-secondary">Outbound call</span>}
+                      </div>
+                      <div className="order-2 flex flex-col items-end gap-1 md:order-4">
                         {" "}
                         <Badge tone={badgeTone}>{answeredLabel}</Badge>{" "}
                         {isDeadAirVm(c) && (
                           <Badge tone="neutral">Dead air</Badge>
                         )}
-                        <span className="text-12 md:text-11 text-ink-tertiary">
-                          {timeAgo(c.created_at)}
-                        </span>{" "}
                       </div>{" "}
                     </div>
                     {/* Action row — Create Lead for unknown inbound callers.

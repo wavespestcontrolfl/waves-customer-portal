@@ -408,7 +408,7 @@ describe('r20: the confirm is bound to the address the office was shown', () => 
 });
 
 describe('a moved hold stays out of customer self-service (status confirmed, customer_confirmed false)', () => {
-  const { isUnreviewedDispatchOwned, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
+  const { isUnreviewedDispatchOwned, customerVisibleBookingWhere, UNREVIEWED_VOICE_MOVED_SQL } = require('../services/call-booking-source-actions');
   const svc = (extra = {}) => ({ source_action: 'voice_agent', status: 'pending', customer_confirmed: false, ...extra });
 
   test('pending and moved-to-confirmed voice rows are unreviewed; confirmed-by-office, other statuses and other sources are not', () => {
@@ -425,7 +425,8 @@ describe('a moved hold stays out of customer self-service (status confirmed, cus
   test('every customer-facing reader uses it: lists (SQL twin), confirm, reschedule, the bearer-token page and eligibility', () => {
     const read = (f) => fs.readFileSync(require.resolve(f), 'utf8');
     const sched = read('../routes/schedule.js');
-    expect(sched.split('NOT ${UNREVIEWED_VOICE_MOVED_SQL}').length - 1).toBe(4);
+    expect(sched.split('.where(customerVisibleBookingWhere)').length - 1).toBe(4);
+    expect(typeof customerVisibleBookingWhere).toBe('function');
     expect(sched.split('isUnreviewedDispatchOwned(service)').length - 1).toBe(2);
     expect(read('../routes/appointment-public.js')).toContain('return isUnreviewedDispatchOwned(svc);');
     expect(read('../services/reschedule-eligibility.js')).toContain('isUnreviewedDispatchOwned(svc)');

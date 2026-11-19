@@ -233,3 +233,203 @@ describe('fetchPage finalUrl / resolveOnly (step-2 resolver contract)', () => {
     expect(r).toEqual({ status: 0, finalUrl: null, redirectHops: 0, html: null, blocked: false, truncated: false, contentType: null, error: 'ECONNRESET' });
   });
 });
+
+describe('fetchPage carryCookies (EDIS redirects through ask.ifas.ufl.edu)', () => {
+  const { fetchPage } = _internals;
+  const hdrs = (map, setCookie) => ({ get: (k) => { const key = String(k).toLowerCase(); return key === 'set-cookie' ? (setCookie === undefined ? null : setCookie) : (map[key] ?? null); } });
+  const redir = (status, loc, setCookie) => ({ ok: false, status, headers: hdrs({ location: loc }, setCookie), text: async () => '' });
+  const page = (html) => ({ ok: true, status: 200, headers: hdrs({ 'content-type': 'text/html' }), text: async () => html });
+
+  test('EDIS-shaped chain resolves with carryCookies and exhausts the budget without it', async () => {
+    // A 301 -> B; B 307 -> /en/p with cookies; /en/p loops to itself until the
+    // locale cookie comes back, then 307 -> /p; /p answers 200. B's /p is the
+    // same URL that first 307s, so key its answer off the Cookie header.
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push({ url, cookie: opts.headers.Cookie });
+      if (url === 'https://edis.example.edu/publication/IG080') return redir(301, 'https://ask.example.edu/publication/IG080');
+      if (url === 'https://ask.example.edu/publication/IG080') {
+        if (opts.headers.Cookie) return page('<h1>Fire ants</h1>');
+        return redir(307, '/en/publication/IG080', ['NEXT_LOCALE=en; Path=/; Secure', 'TS01823c9d=abc123; Path=/; HttpOnly']);
+      }
+      if (url === 'https://ask.example.edu/en/publication/IG080') {
+        const ok = /(^|; )NEXT_LOCALE=en(;|$)/.test(opts.headers.Cookie || '');
+        return redir(307, ok ? '/publication/IG080' : '/en/publication/IG080');
+      }
+      return null;
+    };
+    const r = await fetchPage('https://edis.example.edu/publication/IG080', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(r.html).toBe('<h1>Fire ants</h1>');
+    expect(r.error).toBeNull();
+    expect(r.finalUrl).toBe('https://ask.example.edu/publication/IG080');
+    expect(r.redirectHops).toBe(3);
+    expect(seen[0].cookie).toBeUndefined(); // edis host never set a cookie
+    expect(seen[1].cookie).toBeUndefined();
+    expect(seen[2].cookie).toBe('NEXT_LOCALE=en; TS01823c9d=abc123');
+    expect(seen[3].cookie).toBe('NEXT_LOCALE=en; TS01823c9d=abc123');
+
+    const off = await fetchPage('https://edis.example.edu/publication/IG080', { fetchFn: async (u, o) => {
+      if (o.headers.Cookie) throw new Error('Cookie sent with the option off');
+      return fetchFn(u, o);
+    }, resolveHostFn: async () => true, maxRedirects: 3 });
+    expect(off.error).toBe('redirect_budget_exhausted');
+    expect(off.html).toBeNull();
+  });
+
+  test('a cookie set by host A is never sent to host B', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push({ url, cookie: opts.headers.Cookie });
+      if (url === 'https://a.example.com/') return redir(302, 'https://b.example.com/', ['sid=secret; Path=/; Domain=example.com']);
+      if (url === 'https://b.example.com/') return redir(302, 'https://a.example.com/back');
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen.map((s) => s.cookie)).toEqual([undefined, undefined, 'sid=secret']);
+  });
+
+  test('a cookie set over https is not sent to the same host over http', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, 'http://a.example.com/plain', ['sid=secret; Path=/; Secure']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  test('option off: no request carries a Cookie header even when a redirect sets one', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers);
+      if (url === 'https://a.example.com/') return redir(302, 'https://a.example.com/next', ['sid=secret; Path=/']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3 });
+    expect(r.status).toBe(200);
+    expect(seen).toHaveLength(2);
+    for (const h of seen) expect(Object.keys(h)).toEqual(['User-Agent']);
+  });
+
+  test('a bad cookie name or a CR/LF/; in the value is dropped; getSetCookie() and a single string both work', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') {
+        return { ok: false, status: 302, headers: { get: (k) => (k === 'location' ? '/next' : null), getSetCookie: () => ['good=1; Path=/', 'bad name=2', 'inj=a\r\nX-Evil: 1', 'ctl=a\nb', '=novalue', 'also_good=3'] }, text: async () => '' };
+      }
+      if (url === 'https://a.example.com/next') return redir(302, '/last', 'single=9; Path=/');
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'good=1; also_good=3', 'good=1; also_good=3; single=9']);
+  });
+
+  test('a cookie goes only to paths its Path covers; with no Path it takes the directory of the URL that set it', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/dir/start') return redir(302, '/b', ['p=1; Path=/a', 'root=1; Path=/', 'dirc=1']);
+      if (url === 'https://a.example.com/b') return redir(302, '/a/x');
+      if (url === 'https://a.example.com/a/x') return redir(302, '/abc');
+      if (url === 'https://a.example.com/abc') return redir(302, '/dir/other');
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/dir/start', { fetchFn, resolveHostFn: async () => true, maxRedirects: 5, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'root=1', 'p=1; root=1', 'root=1', 'dirc=1; root=1']);
+  });
+
+  test('Max-Age=0 or a past Expires clears a cookie, and a Secure cookie set over http is ignored', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, '/two', ['k=1; Path=/', 'old=1; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT', 'keep=1; Path=/; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT']);
+      if (url === 'https://a.example.com/two') return redir(302, '/three', ['k=; Path=/; Max-Age=0']);
+      if (url === 'https://a.example.com/three') return redir(302, 'http://b.example.com/');
+      if (url === 'http://b.example.com/') return redir(302, '/next', ['s=1; Path=/; Secure', 'plain=1; Path=/']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 5, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'k=1; keep=1', 'keep=1', undefined, 'plain=1']);
+  });
+
+  test('a cookie whose Max-Age runs out before the next hop is not sent', async () => {
+    let clock = 1700000000000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      const seen = [];
+      const fetchFn = async (url, opts) => {
+        seen.push(opts.headers.Cookie);
+        if (url === 'https://a.example.com/') return redir(302, '/two', ['short=1; Path=/; Max-Age=1', 'long=1; Path=/; Max-Age=600']);
+        if (url === 'https://a.example.com/two') { clock += 2000; return redir(302, '/three'); }
+        return page('ok');
+      };
+      const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+      expect(r.status).toBe(200);
+      expect(seen).toEqual([undefined, 'short=1; long=1', 'long=1']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a lapsed cookie frees its slot, so a locale cookie still fits a full jar', async () => {
+    let clock = 1700000000000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      const seen = [];
+      const short = Array.from({ length: 20 }, (_, i) => `s${i}=v; Path=/; Max-Age=1`);
+      const fetchFn = async (url, opts) => {
+        seen.push(opts.headers.Cookie);
+        if (url === 'https://a.example.com/') return redir(302, '/two', short);
+        if (url === 'https://a.example.com/two') { clock += 2000; return redir(302, '/three', ['NEXT_LOCALE=en; Path=/']); }
+        return page('ok');
+      };
+      const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+      expect(r.status).toBe(200);
+      expect(seen[1].split('; ')).toHaveLength(20);
+      expect(seen[2]).toBe('NEXT_LOCALE=en');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an oversized cookie is skipped, so a small locale cookie after it still goes out', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, '/next', ['big=' + 'x'.repeat(5000) + '; Path=/', 'NEXT_LOCALE=en; Path=/']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'NEXT_LOCALE=en']);
+  });
+
+  test('caps: 20 cookies per origin and a 4096-character Cookie header', async () => {
+    const seen = [];
+    const many = Array.from({ length: 30 }, (_, i) => `c${i}=v`);
+    const big = ['a=' + 'x'.repeat(3000), 'b=' + 'y'.repeat(3000)];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, '/two', many);
+      if (url === 'https://a.example.com/two') return redir(302, 'https://c.example.com/', null);
+      if (url === 'https://c.example.com/') return redir(302, '/three', big);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 5, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen[1].split('; ')).toHaveLength(20);
+    expect(seen[1]).toContain('c19=v');
+    expect(seen[1]).not.toContain('c20=v');
+    expect(seen[3].length).toBeLessThanOrEqual(4096);
+    expect(seen[3].startsWith('a=')).toBe(true);
+    expect(seen[3]).not.toContain('b=');
+  });
+});

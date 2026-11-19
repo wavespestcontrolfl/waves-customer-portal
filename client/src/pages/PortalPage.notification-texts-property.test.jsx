@@ -84,9 +84,15 @@ describe('Appointment texts per saved property', () => {
   // Contacts also get the report text, and the card says so.
   it('says contacts get the report text', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
-    expect(await screen.findByText(/These people receive appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit for this property/)).toBeInTheDocument();
+    // The promise sits behind a collapsed "What they'll get" dropdown.
+    const summary = await screen.findByText('What they’ll get', { selector: 'summary' });
+    const details = summary.closest('details');
+    expect(details).not.toHaveAttribute('open');
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute('open');
+    expect(screen.getByText(/They get appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit/)).toBeVisible();
     // The tenant exception rides with the promise.
-    expect(screen.getByText(/Contacts our records list as tenants, and contacts on a property manager's account other than a manager or landlord, get appointment texts only\./)).toBeInTheDocument();
+    expect(screen.getByText(/Contacts our records list as tenants, and contacts on a property manager's account other than a manager or landlord, get appointment texts only\./)).toBeVisible();
   });
   it('the PRIMARY house reads the profile row copy', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);

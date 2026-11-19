@@ -6,7 +6,10 @@
 // after migrations 20261022120000 and 20261022160000 (fixture); a product the program names that the fixture lacks
 // fails here, so a new protocol product needs a watering rule first.
 const v13 = require('../config/lawn-protocol-v13.json');
-const RULES = require('./fixtures/lawn-watering-rules-v13-2026-10-22.json');
+const FIXTURE_RULES = require('./fixtures/lawn-watering-rules-v13-2026-10-22.json');
+// LESCO Crosscheck Plus (the house bifenthrin since owner ruling 2026-11-18) got its rule in 20261027190000, after the fixture was cut.
+const crosscheckFill = require('../models/migrations/20261027190000_watering_rule_lawn_label_pass_2').FILL.find((item) => item.name === 'LESCO Crosscheck Plus');
+const RULES = { ...FIXTURE_RULES, 'LESCO Crosscheck Plus': crosscheckFill.rule };
 const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');

@@ -60,7 +60,7 @@ const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invo
 
 function recorder({ first = null, returning = [] } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNotIn', 'whereNot', 'whereRaw', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(() => q);
   // insert() is awaited bare (most callers) or chained to returning() (the payments row, whose id the Undo marker names).
@@ -535,8 +535,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
-    const calls = { update: null, updateArgs: null, paymentsInsert: null };
+  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
+    const calls = { update: null, updateArgs: null, paymentsInsert: null, paymentsQuery: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
       return null || row;
@@ -560,10 +560,13 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
           calls.update = r.update;
           return r;
         }
-        if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
+        // One payments recorder per settlement: the insert and the later sole-money read share it.
+        if (table === 'payments') { calls.paymentsQuery = calls.paymentsQuery || recorder({ first: taggedPayment }); calls.paymentsInsert = calls.paymentsQuery.insert; return calls.paymentsQuery; }
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });
         if (table === 'annual_prepay_terms') return answer(table);
+        // requireSelfPay locks the customer row (and any payer it names) before its locked re-check.
+        if (table === 'customers') return recorder({ first: { id: locked.customer_id, payer_id: locked.payer_id || null } });
         throw new Error(`unexpected trx table ${table}`);
       });
       trx.fn = { now: () => 'NOW()' };
@@ -750,6 +753,94 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(closed).not.toHaveBeenCalled();
       // The pin throws before the ledger insert, inside the transaction: the throw rolls the paid flip back with it.
       expect(calls.paymentsInsert).toBeNull();
+    });
+
+    // GATE_CHECKOUT_TENDER_RECEIPT (owner 2026-11-18): a check taken at the dispatch checkout got no receipt. The checkout tender
+    // queues the receipt with the payment (the queue honors the customer's receipt choices); the closeout is unchanged.
+    test('checkoutTender: the receipt is queued in the settlement trx, not customer-initiated, and the closeout still runs', async () => {
+      settle();
+      const closed = jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(out.receipt).toEqual({ queued: true });
+      // Staff recorded it: not customer-initiated, so the receipt text keeps the send window.
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledWith({ invoiceId: 'inv-1', source: 'dispatch_checkout', customerInitiated: false, database: expect.any(Function) });
+      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).toHaveBeenCalled();
+      // Not the operator send: that writer skips the automatic receipt opt-out by design.
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+      expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+      // The 2026-10-04 same-day rule is unchanged: money received still runs the closeout.
+      expect(closed).toHaveBeenCalledTimes(1);
+    });
+
+    test('checkoutTender whose invoice already holds a receipt job (deduped enqueue, the earlier payment\'s): manual, no drain', async () => {
+      settle();
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      ReceiptDeliveryQueue.enqueueReceiptDelivery.mockResolvedValueOnce({ enqueued: false, deduped: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(out.receipt).toEqual({ manual: true });
+      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).not.toHaveBeenCalled();
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      // A visit prepayment applied to the invoice: its tagged row is what the receipt page would show.
+      ['another payment row tagged to the invoice', {}, { id: 'pay-0' }],
+      ['applied credit', { credit_applied: '10.00' }, null],
+      ['an estimate deposit credit', { line_items: JSON.stringify([{ category: 'deposit_credit', amount: -20 }]) }, null],
+      // A disputed card payment reopens the invoice and keeps the card: the receipt would print it as the payment method.
+      ['card details left from a disputed card payment', { card_brand: 'visa', card_last_four: '4242' }, null],
+    ])('checkoutTender with %s: recorded, no automatic receipt (manual)', async (_why, over, taggedPayment) => {
+      const inv = card(over);
+      const owed = Math.round((117 - Number(over.credit_applied || 0)) * 100);
+      settle({ pre: inv, locked: inv, taggedPayment });
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: owed, owedCentsSeen: owed, recordedByTechnicianId: 'staff-1' });
+      expect(out.receipt).toEqual({ manual: true });
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test('checkoutTender with requireSelfPay (as the route sends it): a payer assigned while the sheet was open writes no payment and no receipt job', async () => {
+      // Same balance, but the Bill-To moved to a payer since the checkout opened.
+      const calls = settle({ pre: card({ payer_id: 'payer-9' }), locked: card({ payer_id: 'payer-9' }) });
+      const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', sendReceipt: true, checkoutTender: true, requireSelfPay: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' }));
+      expect(err.statusCode).toBe(409);
+      expect(calls.paymentsInsert).toBeNull();
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
+    });
+
+    test('checkoutTender with requireSelfPay on a self-pay invoice settles and queues the receipt', async () => {
+      const calls = settle();
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, requireSelfPay: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+      expect(out.receipt).toEqual({ queued: true });
+    });
+
+    test('checkoutTender: the sole-money read names this invoice and leaves out its own new ledger row', async () => {
+      const calls = settle();
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(calls.paymentsQuery.whereRaw).toHaveBeenCalledWith("metadata::jsonb ->> 'invoice_id' = ?", ['inv-1']);
+      // Money rows only: a declined card attempt (a failed row tagged to the invoice) before the cash or check is no money.
+      expect(calls.paymentsQuery.whereIn).toHaveBeenCalledWith('status', ['paid', 'refunded', 'processing']);
+      expect(calls.paymentsQuery.whereNot).toHaveBeenCalledWith({ id: 'pay-1' });
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledTimes(1);
+    });
+
+    test('checkoutTender on a part-paid invoice: the payment is recorded and no receipt goes out (it would name the whole bill)', async () => {
+      // 117.00 with 25.00 paid earlier: the sheet showed and took the 92.00 still owed.
+      const calls = settle({ pre: card({ amount_paid: '25.00' }), locked: card({ amount_paid: '25.00' }) });
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'cash', sendReceipt: true, checkoutTender: true, amountCents: 9200, owedCentsSeen: 9200, recordedByTechnicianId: 'staff-1' });
+      expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
+      // The sheet tells the technician to send it from the Invoices page.
+      expect(out.receipt).toEqual({ manual: true });
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
+      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).not.toHaveBeenCalled();
+      // Nor the operator send in its place.
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+      expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
     });
 
     test('the page path (no fence, or the Zelle fence with no target) passes no approved target', async () => {
