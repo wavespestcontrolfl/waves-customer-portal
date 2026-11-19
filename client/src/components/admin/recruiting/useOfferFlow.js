@@ -13,7 +13,7 @@ const IDLE = { id: null, status: "idle", data: null, error: null };
  *           on screen (refreshError) so an open dialog never goes blank.
  *  - ready: { enabled: true, ... } for THIS application.
  */
-export default function useOfferFlow(applicationId) {
+export default function useOfferFlow(applicationId, applicationStatus) {
   const [state, setState] = useState(IDLE);
   const [form, setForm] = useState(null); // null = closed, else { draft }
   const seq = useRef(0);
@@ -43,6 +43,16 @@ export default function useOfferFlow(applicationId) {
       return null;
     }
   }, []);
+
+  // A stage change on the open application (Interview -> Offer, Hired...) changes
+  // what the offer card may offer, so re-read it. The result is still dropped if
+  // another applicant is on screen by then (reload checks the id).
+  const seen = useRef({ id: null, status: null });
+  useEffect(() => {
+    const prev = seen.current;
+    seen.current = { id: applicationId || null, status: applicationStatus };
+    if (applicationId && prev.id === applicationId && prev.status !== applicationStatus) reload(applicationId);
+  }, [applicationId, applicationStatus, reload]);
 
   useEffect(() => {
     setForm(null);

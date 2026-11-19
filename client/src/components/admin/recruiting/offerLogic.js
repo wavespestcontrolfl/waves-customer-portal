@@ -17,7 +17,12 @@ function parseDay(value) {
   const m = DATE_RE.exec(String(value || ""));
   if (!m) return null;
   const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  return Number.isNaN(d.getTime()) ? null : d;
+  // Round-trip: rejects Feb 30 and years 0000-0099 that Date.UTC would wrap.
+  return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== value ? null : d;
+}
+
+export function isValidDay(value) {
+  return parseDay(value) !== null;
 }
 
 function dayString(d) {
@@ -47,10 +52,12 @@ export function isStartWeekday(value) {
  * date (so day 90 = start + 89 days). Start Mon 2027-01-04 -> 2027-04-05.
  */
 export function stepDateFor(startDate) {
-  if (!parseDay(startDate)) return "";
-  let day = addDays(startDate, 90);
-  while (parseDay(day).getUTCDay() !== 1) day = addDays(day, 1);
-  return day;
+  const start = parseDay(startDate);
+  if (!start) return "";
+  const day91 = new Date(start.getTime() + 90 * DAY_MS);
+  const step = new Date(day91.getTime() + ((8 - day91.getUTCDay()) % 7) * DAY_MS);
+  // Past year 9999 there is no 4-digit date: no step date, never a wrapped one.
+  return step.getUTCFullYear() > 9999 ? "" : dayString(step);
 }
 
 // "Mon, Jan 4, 2027" from a calendar date (no time zone shift).

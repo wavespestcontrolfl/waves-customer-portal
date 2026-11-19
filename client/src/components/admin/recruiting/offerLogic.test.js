@@ -21,6 +21,9 @@ describe('offer helpers', () => {
     // Start Wed 2027-01-06: day 90 is itself Mon 04-05, which is not "after" it; the next Monday wins.
     expect(stepDateFor('2027-01-06')).toBe('2027-04-12');
     expect(stepDateFor('')).toBe('');
+    // A date that cannot be formed, or whose step date would pass year 9999, has no step date.
+    for (const bad of ['9999-12-27', '2027-02-30', '0050-01-04', '275760-09-13', 'nope']) expect(stepDateFor(bad)).toBe('');
+    expect(stepDateFor('9999-01-04')).toMatch(/^9999-/);
   });
 
   it('accepts Monday to Thursday start dates only', () => {

@@ -25,6 +25,7 @@ import {
   expiryLabel,
   formatIssued,
   isStartWeekday,
+  isValidDay,
   maskEmail,
   maskPhone,
   offerErrorMessage,
@@ -166,8 +167,17 @@ function isLocked(needRead, draftId, reviewed) {
   return needRead || Boolean(draftId && !reviewed);
 }
 
+// A start date that cannot be formed, falls on Friday to Sunday, or would push
+// the pay step date past year 9999 gets a plain message (and no step date).
+function startDateError({ startDate, stepRate }) {
+  if (!startDate) return null;
+  if (!isValidDay(startDate)) return "Enter a valid date.";
+  if (!isStartWeekday(startDate)) return "Pick a Monday to Thursday.";
+  return stepRate !== "" && !stepDateFor(startDate) ? "That start date is too far out for a pay step date." : null;
+}
+
 function fieldChecks(fields) {
-  const startError = fields.startDate && !isStartWeekday(fields.startDate) ? "Pick a Monday to Thursday." : null;
+  const startError = startDateError(fields);
   const fieldsOk = Boolean(fields.startDate) && !startError && fields.hourlyRate !== "" && fields.hoursLine.trim() !== "";
   return { startError, fieldsOk };
 }

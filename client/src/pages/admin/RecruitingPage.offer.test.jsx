@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import RecruitingPage from './RecruitingPage';
@@ -798,5 +798,76 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(within(card).getByRole('button', { name: 'Make an offer' })).toBeInTheDocument();
     expect(within(card).queryByRole('button', { name: 'Revise' })).toBeNull();
     expect(within(card).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+  });
+
+  it('shows an invalid-date message and no step date for a start date that cannot be formed or is too far out', async () => {
+    setupFetch({});
+    await openDraftForm({}, () => res(200, offerPayload()));
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '9999-12-27' } });
+    expect(screen.getByText('That start date is too far out for a pay step date.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Step date')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
+  });
+
+  it('re-reads the offer card after a stage change on the open application', async () => {
+    let moved = false;
+    const { calls } = setupFetch(
+      {
+        'PATCH /admin/careers/app-1/status': () => { moved = true; return res(200, { application: detailFixture({ status: 'offer' }), sent: {} }); },
+      },
+      { offer: () => res(200, offerPayload({ current: moved ? offerRecord({ status: 'withdrawn', timeline: [{ at: '2026-12-11T15:20:00Z', kind: 'withdrawn', label: 'Closed earlier' }] }) : null })) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reviewed' })).not.toBeDisabled());
+    expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Reviewed' }));
+    const confirmButton = await screen.findByRole('button', { name: 'Confirm' });
+    await waitFor(() => expect(confirmButton).not.toBeDisabled());
+    fireEvent.click(confirmButton);
+    expect(await screen.findByText('Closed earlier')).toBeInTheDocument();
+    expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer')).toHaveLength(2);
+  });
+
+  it('a send that finishes while the owner is switching applicants does not cancel the switch', async () => {
+    let releaseSend;
+    let releaseB;
+    let sentDone = false;
+    const sendGate = new Promise((resolve) => { releaseSend = resolve; });
+    const bGate = new Promise((resolve) => { releaseB = resolve; });
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      const path = String(url).replace(/^.*\/api/, '');
+      if (path.startsWith('/admin/careers?status=')) {
+        return Promise.resolve(res(200, { applications: [{ id: 'app-1', role: 'technician', status: 'interview', contact_snapshot: { name: 'Jordan Rivera' }, created_at: '2026-09-10T12:00:00Z' }], counts: {} }));
+      }
+      if (method === 'POST' && path.endsWith('/offer/offer-1/send')) return sendGate.then(() => { sentDone = true; return res(200, { offer: offerRecord({ status: 'sent' }), comms: { sms: { outcome: 'sent' }, email: { outcome: 'sent' } } }); });
+      if (path === '/admin/careers/app-1/offer') return Promise.resolve(res(200, offerPayload({ current: offerRecord() })));
+      if (path === '/admin/careers/app-2/offer') return Promise.resolve(res(200, offerPayload()));
+      if (path === '/admin/careers/app-1') return Promise.resolve(res(200, { application: detailFixture({ status: sentDone ? 'offer' : 'interview' }) }));
+      if (path === '/admin/careers/app-2') return bGate.then(() => res(200, { application: detailFixture({ id: 'app-2', contact_snapshot: { name: 'Casey Morgan', phone: '9415550199' } }) }));
+      return Promise.resolve(res(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    function Nav() {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => navigate('/?application=app-2')}>go-b</button>;
+    }
+    render(<MemoryRouter><Nav /><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText('Jordan Rivera'));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    await screen.findByLabelText('Hourly rate ($)');
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    // While the send is pending, the owner starts opening another applicant.
+    fireEvent.click(screen.getByText('go-b'));
+    releaseSend();
+    await screen.findByText(/Offer sent to Jordan/);
+    releaseB();
+    expect(await screen.findByRole('heading', { name: /Casey Morgan — / })).toBeInTheDocument();
   });
 });

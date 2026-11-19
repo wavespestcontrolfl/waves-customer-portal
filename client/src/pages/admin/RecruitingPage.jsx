@@ -1005,19 +1005,23 @@ export default function RecruitingPage() {
   const detailSeq = useRef(0);
 
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, setDetail);
-  const offerFlow = useOfferFlow(detail?.id);
+  const offerFlow = useOfferFlow(detail?.id, detail?.status);
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
 
-  const openDetail = useCallback(async (id) => {
-    const seq = ++detailSeq.current;
+  // refresh: re-read the open applicant in place. It never bumps detailSeq, so a
+  // switch to another applicant that is still opening is not cancelled, and it
+  // applies only while that applicant is still the one on screen.
+  const openDetail = useCallback(async (id, { refresh = false } = {}) => {
+    const seq = refresh ? detailSeq.current : ++detailSeq.current;
     try {
       const data = await adminFetch(`/admin/careers/${id}`);
       if (seq !== detailSeq.current) return; // superseded or dialog closed
+      if (refresh && detailIdRef.current !== id) return;
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
       setSamePhone(data.same_phone || []);
-      stageWorkflow.resetForNewApplicant();
+      if (!refresh) stageWorkflow.resetForNewApplicant();
     } catch (err) {
       if (seq === detailSeq.current) setError(err.message);
     }
@@ -1200,10 +1204,10 @@ export default function RecruitingPage() {
         onClose={offerFlow.closeForm}
         onChanged={offerFlow.reload}
         onSent={async () => {
-          // Only refresh the detail if it is still this applicant's.
+          // Refresh in place: a switch to another applicant stays untouched.
           const sentFor = detail.id;
           await offerFlow.reload();
-          if (detailIdRef.current === sentFor) await openDetail(sentFor);
+          await openDetail(sentFor, { refresh: true });
           load(tab);
         }}
       />
