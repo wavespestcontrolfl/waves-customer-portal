@@ -231,6 +231,21 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test.each([false, true])('a booked visit with an old hold expiry is offered once (already linked: %s)', async (linked) => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: linked ? estimateId : null,
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
+      },
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(id);
+    expect(acceptance.appointment).not.toHaveProperty('reservationExpiresAt');
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);

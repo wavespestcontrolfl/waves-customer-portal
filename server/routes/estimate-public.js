@@ -90,6 +90,7 @@ const {
   lineFlagsBlockPercentDiscount,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
+const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1846,8 +1847,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      liveServiceOrHold(builder);
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -1963,7 +1963,6 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         const cw = baseQuery()
           .where('customer_id', estimate.customer_id)
           .whereNull('source_estimate_id')
-          .whereNull('reservation_expires_at')
           // Candidate rows carry their catalog identity so classification
           // survives stale service_type labels (codex #3228 r5).
           .leftJoin('services', 'services.id', 'scheduled_services.service_id')
@@ -10778,6 +10777,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           window_start: parsed.windowStart,
         })
         .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); })
+        .whereNull('customer_id')
         .whereNotNull('reservation_expires_at')
         // Grace measured by POSTGRES, not this process's clock (pre-push
         // audit P1): commitReservation's authoritative check compares against
@@ -22398,7 +22398,7 @@ function validateRecurringSlotPaymentPreference({
 }
 
 function isReservationHeldAppointment(row = {}) {
-  return !!row?.reservation_expires_at;
+  return row?.customer_id == null && !!row?.reservation_expires_at;
 }
 
 function assertExistingAppointmentUpdateApplied(updatedCount) {
@@ -22835,7 +22835,6 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const committedAppointment = await db('scheduled_services')
     .where({ source_estimate_id: estimate.id })
     .whereNotNull('customer_id')
-    .whereNull('reservation_expires_at')
     .orderBy('scheduled_date', 'asc')
     .first('id');
   const reservationCommitted = !!committedAppointment;

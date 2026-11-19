@@ -49,9 +49,8 @@
  *   - Overlap:  window_start < :end  AND
  *               COALESCE(window_end, window_start + COALESCE(NULLIF(
  *                 estimated_duration_minutes, 0), 60) minutes) > :start
- *   - Holds:    reservation_expires_at IS NULL OR > NOW() — a live
- *     estimate-slot hold occupies real route time; an expired one is dead
- *     weight awaiting cleanup and never blocks.
+ *   - Holds:    a customer-linked appointment is committed regardless of its
+ *     reservation stamp. Only unlinked, stamped holds expire.
  *   - Windowless rows (window_start IS NULL — converter/seeder placeholder
  *     rows): the SQL overlap predicate above evaluates NULL for them, so
  *     every existing gate ignores them. This module deliberately keeps that
@@ -64,12 +63,12 @@
  *     match their own commit semantics exactly — an offer/commit mismatch in
  *     either direction is how the /book 409 dead-end loop happened.
  *
- * NOTE: the estimate-slot surfaces (estimate-slot-availability.js +
- * slot-reservation.js) are verified correct and intentionally NOT refactored
- * onto this module — possible follow-up, not this lane.
+ * The estimate picker and reservation writer share the live-row predicate
+ * while retaining their own technician, zone and capacity rules.
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
 const { multiTechConfirmLive } = require('../../config/feature-gates');
@@ -603,10 +602,7 @@ async function findConflictingVisits({
     .whereNotIn('status', excludeStatuses)
     // Expired estimate-slot holds are dead weight until cleanup reclaims
     // them — same active-reservation predicate every existing gate uses.
-    .where((q) => {
-      q.whereNull('reservation_expires_at')
-        .orWhereRaw('reservation_expires_at > NOW()');
-    })
+    .where(liveServiceOrHold)
     // COALESCE the nullable window_end (admin edits can leave a start with
     // no end) — same predicate as slot-reservation/rebooker/createSelfBooking.
     // window_start-NULL placeholder rows evaluate NULL here and stay inert.
@@ -890,10 +886,7 @@ async function findConflictingVisitsWithTravel({
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.scheduled_date', String(date).split('T')[0])
     .whereNotIn('scheduled_services.status', excludeStatuses)
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .where(liveServiceOrHold)
     .whereNotNull('scheduled_services.window_start');
   if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
   if (scopeTechId) applyTechScope(query, 'scheduled_services.technician_id', scopeTechId);
@@ -971,10 +964,7 @@ async function listOccupiedWindows({
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
       .whereNotIn('scheduled_services.status', excludeStatuses)
-      .where((q) => {
-        q.whereNull('scheduled_services.reservation_expires_at')
-          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      })
+      .where(liveServiceOrHold)
       .whereNotNull('scheduled_services.window_start');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
     rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
@@ -982,10 +972,7 @@ async function listOccupiedWindows({
     const query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', excludeStatuses)
-      .where((q) => {
-        q.whereNull('reservation_expires_at')
-          .orWhereRaw('reservation_expires_at > NOW()');
-      })
+      .where(liveServiceOrHold)
       // Windowless placeholder rows are inert to conflicts (see header).
       .whereNotNull('window_start');
     if (excludeIds.length) query.whereNotIn('id', excludeIds);

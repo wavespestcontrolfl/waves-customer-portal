@@ -956,6 +956,7 @@ describe('always-on advisory occupancy probe', () => {
       /pg_advisory_xact_lock/.test(sql) && bindings?.includes('occupancy:2099-01-15'))).toBe(true);
     // The moving row excludes itself from the probe.
     expect(probe.whereNotIn).toHaveBeenCalledWith('id', ['svc-1']);
+    expect(probe.orWhereRaw).toHaveBeenCalledWith(expect.stringContaining('scheduled_services.customer_id IS NOT NULL'));
   });
 
   test('scoped (techScopedConfirmActive): a row a concurrent reassignment committed onto another route is probed again there (pre-push audit P1)', async () => {

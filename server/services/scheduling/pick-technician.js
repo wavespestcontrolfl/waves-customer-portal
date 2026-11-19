@@ -31,6 +31,7 @@
  * Reads only. The route estimate spends none of the shared Google allowance
  * (providerTravel: false, the conservative model the save checks with).
  */
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -90,7 +91,7 @@ async function stopsByTechnician(conn, date, technicianIds) {
     // The occupancy and route models' own predicates: a windowless
     // placeholder row and an expired estimate hold are not stops.
     .whereNotNull('window_start')
-    .where((q) => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', conn.fn.now()))
+    .where(liveServiceOrHold)
     .groupBy('technician_id')
     .select('technician_id')
     .count('* as stops');
