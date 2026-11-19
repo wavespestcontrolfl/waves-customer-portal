@@ -163,6 +163,24 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
     return new Map();
   }
 
+  // An asynchronous saved-bank failure reopens the invoice and deliberately
+  // clears its PaymentIntent. The resolved charge-attempt row retains the
+  // verified invoice/PI pair, so load that terminal evidence before identity
+  // matching. The invoice ids stay bounded to this customer's candidate set.
+  let resolvedFailedAttempts = [];
+  if (intentIds.length && rows.length) {
+    try {
+      resolvedFailedAttempts = await database('stripe_invoice_charge_attempts')
+        .whereIn('invoice_id', rows.map((row) => row.id))
+        .whereIn('stripe_payment_intent_id', intentIds)
+        .where({ status: 'failed' })
+        .whereNotNull('resolved_at')
+        .select('invoice_id', 'stripe_payment_intent_id');
+    } catch (err) {
+      logger.warn(`[billing] failed-payment charge-attempt lookup failed for customer ${customerId}: ${err.message}`);
+    }
+  }
+
   // Establish identity against every matching invoice before deciding whether
   // it is payable. Otherwise a settled invoice named by metadata could be
   // filtered out first and an unrelated payable invoice sharing another key
@@ -184,6 +202,15 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   const byIntent = rowSetIndex((row) => row.stripe_payment_intent_id);
   const byCharge = rowSetIndex((row) => row.stripe_charge_id);
   const byNumber = rowSetIndex((row) => row.invoice_number);
+  const byResolvedAttemptIntent = new Map();
+  for (const attempt of resolvedFailedAttempts) {
+    const invoiceMatches = byId.get(String(attempt.invoice_id || '').toLowerCase()) || [];
+    if (invoiceMatches.length !== 1 || !attempt.stripe_payment_intent_id) continue;
+    const key = String(attempt.stripe_payment_intent_id);
+    const matches = byResolvedAttemptIntent.get(key) || new Map();
+    matches.set(String(invoiceMatches[0].id), invoiceMatches[0]);
+    byResolvedAttemptIntent.set(key, matches);
+  }
 
   const invoiceByPaymentId = new Map();
   for (const payment of failedPayments) {
@@ -192,7 +219,16 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
     const strictGroups = [...explicitGroups];
     if (invoiceNumber) strictGroups.push(byNumber.get(invoiceNumber) || []);
     const stripeGroups = [];
-    if (payment.stripe_payment_intent_id) stripeGroups.push(byIntent.get(String(payment.stripe_payment_intent_id)) || []);
+    if (payment.stripe_payment_intent_id) {
+      const intentId = String(payment.stripe_payment_intent_id);
+      // Union live invoice stamps with resolved-attempt evidence. A fallback
+      // can restore a cleared binding, but can never hide a conflicting live
+      // binding or a second attempt claiming the same PaymentIntent.
+      const matches = new Map();
+      for (const row of (byIntent.get(intentId) || [])) matches.set(String(row.id), row);
+      for (const row of (byResolvedAttemptIntent.get(intentId)?.values() || [])) matches.set(String(row.id), row);
+      stripeGroups.push([...matches.values()]);
+    }
     if (payment.stripe_charge_id) stripeGroups.push(byCharge.get(String(payment.stripe_charge_id)) || []);
     const candidateGroup = strictGroups[0] || stripeGroups[0];
     const candidate = candidateGroup?.length === 1 ? candidateGroup[0] : null;

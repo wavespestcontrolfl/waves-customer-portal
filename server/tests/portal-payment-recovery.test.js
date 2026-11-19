@@ -51,18 +51,18 @@ beforeEach(() => {
   invoicePayerOwnedNow.mockResolvedValue(false);
 });
 
-function reader(rows) {
-  return jest.fn(() => {
+function reader(rows, resolvedAttempts = []) {
+  return jest.fn((table) => {
     const query = {};
     for (const method of [
-      'where', 'whereNull', 'whereIn', 'orWhere', 'orWhereIn',
+      'where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereIn',
     ]) {
       query[method] = (...args) => {
         if (typeof args[0] === 'function') args[0].call(query);
         return query;
       };
     }
-    query.select = async () => rows;
+    query.select = async () => (table === 'stripe_invoice_charge_attempts' ? resolvedAttempts : rows);
     return query;
   });
 }
@@ -130,6 +130,33 @@ test('serialized null metadata cannot break recovery for a legacy failed row', a
   }], reader([invoice()]));
 
   expect(recovery.get('pay-legacy')?.payUrl).toBe('/pay/tok-a');
+});
+
+test('a resolved saved-bank failure verifies the invoice after its PaymentIntent binding clears', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-bank', status: 'failed', metadata: { invoice_id: INV_A },
+    stripe_payment_intent_id: 'pi-failed-bank',
+  }], reader([
+    invoice({ stripe_payment_intent_id: null }),
+  ], [{
+    invoice_id: INV_A, stripe_payment_intent_id: 'pi-failed-bank', status: 'failed', resolved_at: new Date(),
+  }]));
+
+  expect(recovery.get('pay-bank')?.payUrl).toBe('/pay/tok-a');
+});
+
+test('resolved-attempt evidence cannot hide a conflicting live PaymentIntent binding', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-bank', status: 'failed', metadata: { invoice_id: INV_A },
+    stripe_payment_intent_id: 'pi-reused',
+  }], reader([
+    invoice({ stripe_payment_intent_id: null }),
+    invoice({ id: INV_B, token: 'tok-b', invoice_number: 'WPC-200', stripe_payment_intent_id: 'pi-reused' }),
+  ], [{
+    invoice_id: INV_A, stripe_payment_intent_id: 'pi-reused', status: 'failed', resolved_at: new Date(),
+  }]));
+
+  expect(recovery.has('pay-bank')).toBe(false);
 });
 
 test('conflicting non-explicit identifiers fail closed instead of choosing an invoice', async () => {
