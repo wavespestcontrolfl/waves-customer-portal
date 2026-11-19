@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [] };
+const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -32,7 +32,8 @@ jest.mock('../models/db', () => {
       },
       groupByRaw: () => b,
       orderBy: () => b,
-      select: () => b,
+      // The columns each call_log read asks for (the held-call test checks what the close pass reads).
+      select: (...cols) => { if (table === 'call_log') mockState.callLogSelects.push(cols); return b; },
       first: () => Promise.resolve(undefined),
       pluck: (col) => Promise.resolve(rows().map((r) => r[col])),
       insert: (payload) => { mockState.inserts.push({ table, payload }); return Promise.resolve([]); },
@@ -77,6 +78,7 @@ const AFTER_CALL = '2026-10-20T15:00:00Z';
 const call = (over = {}) => ({
   id: CALL_ID, twilio_call_sid: 'CAsynthetic700', customer_id: 'cust-1', direction: 'outbound', created_at: CALL_AT,
   from_phone: '+19415550100', to_phone: '+19415550111',
+  processing_status: 'processed',
   ai_extraction_enriched: {
     caller: { name_full: 'Sam Sample' },
     service_request: { specific_service_name: 'Waves Assessment' },
@@ -85,6 +87,8 @@ const call = (over = {}) => ({
   ...over,
 });
 const SLOT = { dateET: '2026-11-04', minutes: 16 * 60, name: 'Sam Sample', service: 'Waves Assessment' };
+// The call agent's live decision on the call's last pass: routing held it on the address.
+const HELD_DECISION = { final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: CALL_AT };
 const visit = (over = {}) => ({
   id: 'visit-1', customer_id: 'cust-1', status: 'confirmed', service_type: 'Waves Assessment', sched_date: '2026-11-04', window_start: '16:00:00',
   created_at: AFTER_CALL, source_call_log_id: null, notes: null, internal_notes: null, ...over,
@@ -273,6 +277,7 @@ describe('close pass', () => {
     mockState.updates = [];
     mockState.inserts = [];
     mockState.failClose = false;
+    mockState.callLogSelects = [];
     NotificationService.notifyAdmin.mockReset();
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-date', deduped: false });
     logger.warn.mockClear();
@@ -358,6 +363,79 @@ describe('close pass', () => {
     expect(opts.metadata).toMatchObject({ confirmed_service: 'Waves Assessment' });
     expect(opts.metadata).not.toHaveProperty('mismatch');
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['d1'], payload: { done_by: 'call-booking-miss', resolution: 'The booked visit is gone; replaced by a new alert to book it' } }]);
+  });
+
+  // Pre-push P1 (2026-11-18): a held call's replacement date check says why and asks staff to
+  // check the call first, as its first bell does.
+  test('a held call: the replacement date check names the hold and asks to check the call first', async () => {
+    mockState.calls = [call({ live_decision: HELD_DECISION })];
+    mockState.open = [open('n1', '10'), open('n2', '20')];
+    mockState.booked = wrongWeek();
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 2, raised: 1 });
+    const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — check Sam Sample's visit date");
+    expect(opts.detail).toMatch(/The call agent held this visit and did not book it, because the address is not confirmed\. Review the call before you move the visit or contact the caller\.$/);
+    expect(opts.detail).not.toContain('confirm the new day with the customer');
+  });
+
+  // Pre-push P1 (2026-11-18): the replacement "book it" bell of a call the call agent held
+  // names why it was held, as the call's first bell does.
+  test('a held call: the replacement bell says why it was held; the close pass reads the live decision', async () => {
+    mockState.calls = [call({ live_decision: HELD_DECISION })];
+    mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
+    mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
+    await planOpenBookingMissBells({ now: NOW });
+    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining([
+      'processing_status', 'processing_started_at', expect.objectContaining({ raw: expect.stringContaining('AS live_decision') }),
+    ]));
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — review Sam Sample's Waves Assessment");
+    expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; held because the address is not confirmed.');
+    expect(opts.dedupeKey).toBe(`call-booking-miss-rebook:${CALL_ID}:d1`);
+  });
+
+  // Pre-push P1s (2026-11-18): a reprocessed call that no longer confirms a slot has a new
+  // decision about another reading of the call, so it must not explain the stamped slot; but
+  // when that decision holds the call (here an opt-out) and the visit was then cancelled, the
+  // replacement still asks only for a review, never "book it or call back".
+  test('a reprocessed held call whose stamped slot stands in: the replacement asks for a review and names no reason', async () => {
+    const optOut = { ...HELD_DECISION, blocked_reasons: ['do_not_contact_requested'] };
+    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, live_decision: optOut })];
+    mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
+    mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — review Sam Sample's Waves Assessment");
+    expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; nothing is on the calendar.');
+    expect(opts.detail).not.toContain('The call agent held');
+    expect(opts.detail).toMatch(/Review the call before booking it\.$/);
+    expect(opts.detail).not.toContain('call back');
+  });
+
+  // Pre-push P1s (2026-11-18): mid-(re)processing, a pass has written its new extraction but not
+  // yet its new decision; an 'extraction_failed' pass can still be retried; and a reprocess
+  // keeps the previous pass's decision until it stores its own. None of them proves a hold.
+  test('a held decision from a pass that did not finish, or from an earlier pass, names no hold reason', async () => {
+    const cases = [
+      { processing_status: 'processing' },
+      { processing_status: null },
+      { processing_status: 'extraction_failed' },
+      // The decision predates the row's last claim: a reprocess has not written its own yet.
+      { processing_started_at: AFTER_CALL },
+    ];
+    for (const over of cases) {
+      NotificationService.notifyAdmin.mockClear();
+      mockState.calls = [call({ live_decision: HELD_DECISION, ...over })];
+      mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
+      mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
+      await tick();
+      const [, , why] = NotificationService.notifyAdmin.mock.calls[0];
+      expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; nothing is on the calendar.');
+    }
   });
 
   test('second pass after the replacement: with the call reprocessed, the date check still closes when its visit is done', async () => {
