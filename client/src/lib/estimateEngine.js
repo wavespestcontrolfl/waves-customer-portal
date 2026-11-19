@@ -1498,7 +1498,7 @@ const TRENCHING_TERMITICIDE_PRODUCTS = {
   },
 };
 
-function normalizeTrenchingProductKey(value) {
+export function normalizeTrenchingProductKey(value) {
   const raw = String(value || 'taurus_sc')
     .trim()
     .toLowerCase()
@@ -1552,7 +1552,7 @@ function normalizeTrenchingWarranty(value, product) {
   return aliases[raw] || (product.chemistryType === 'repellent_pyrethroid' ? 'none' : 'one_year_retreat');
 }
 
-function normalizePreSlabProductKey(value) {
+export function normalizePreSlabProductKey(value) {
   const raw = String(value || 'termidor_sc')
     .trim()
     .toLowerCase()

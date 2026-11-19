@@ -841,8 +841,8 @@ describe('termite bait per-application cadence (owner 2026-07-20)', () => {
 });
 
 // Owner 2026-11-18: talstar_p and bifen_it name LESCO Crosscheck Plus under the same keys, so a bifenthrin label check saved before
-// the swap (an engineRequest without the builder's bottle mark) was made for the earlier bottle. The server replay of such a request,
-// with no builder involved, must bring its label review back.
+// the swap (an engineRequest or engine input without the bottle mark) was made for the earlier bottle. The server replay of such a
+// request, with no builder involved, must bring its label review back. The engine enforces it, so every caller follows.
 describe('saved bifenthrin label checks follow the bottle on server replay', () => {
   const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
   const saved = (options) => ({
@@ -894,5 +894,58 @@ describe('saved bifenthrin label checks follow the bottle on server replay', () 
     const other = await replayLines(saved({ trenchingProductKey: 'talstar_p', preslabProductKey: 'talstar_p', bifenthrinLabelBottle: 'atticus_talak' }));
     expect(other.trench.labelConfirmed).toBe(false);
     expect(other.preslab.labelConfirmed).toBe(false);
+  });
+
+  // The public and lead paths store the engine input itself (engineInputs), which replays with no translator: the engine's own rule
+  // brings the review back for a bifenthrin check stored without the mark, and keeps one stored since (the translator writes the
+  // mark into the engine input it builds).
+  test('a stored engineInputs bifenthrin check reprices with its review back on unless the engine input carries the mark', async () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { profile, selectedServices, options } = saved({
+      trenchingProductKey: 'bifen_it', preslabProductKey: 'talak', bifenthrinLabelBottle: 'lesco_crosscheck_plus',
+    }).engineRequest;
+    const stored = JSON.parse(JSON.stringify(translateV2CallToV1Input(profile, selectedServices, options)));
+    expect(stored.services.trenching.labelBottle).toBe('lesco_crosscheck_plus');
+    expect(stored.services.preSlabTermiticide.labelBottle).toBe('lesco_crosscheck_plus');
+    const kept = await replayLines({ engineInputs: stored });
+    expect(kept.trench).toMatchObject({ productKey: 'bifen_it', labelConfirmed: true });
+    expect(kept.preslab).toMatchObject({ productKey: 'talstar_p', labelConfirmed: true });
+
+    const before = JSON.parse(JSON.stringify(stored));
+    delete before.services.trenching.labelBottle;
+    delete before.services.preSlabTermiticide.labelBottle;
+    const old = await replayLines({ engineInputs: before });
+    expect(old.trench).toMatchObject({ productKey: 'bifen_it', labelConfirmed: false });
+    expect(old.trench.manualReviewReasons).toContain('label_confirmation_required');
+    expect(old.preslab).toMatchObject({ productKey: 'talstar_p', labelConfirmed: false });
+    expect(old.preslab.manualReviewReasons).toContain('pre_slab_label_confirmation_required');
+  });
+
+  test('a legacy pre-slab payload that never asked for a check is unchanged; an explicit bifenthrin check there needs the mark', () => {
+    const sp = require('../services/pricing-engine/service-pricing');
+    const legacy = (options) => sp.pricePreSlabTermidor({ slabSqFt: 2500 }, { productKey: 'talstar_p', ...options }).labelConfirmed;
+    expect(legacy({})).toBe(true);
+    expect(legacy({ labelConfirmed: true })).toBe(false);
+    expect(legacy({ labelConfirmed: true, labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE })).toBe(true);
+  });
+
+  // Public price ranges sweep every product with a label check made for its current bottle; a bifenthrin row priced without the
+  // mark would leave the range (its review makes the pre-slab value NaN).
+  test('the public price ranges count the label check on both bifenthrin products (the sweep carries the mark)', () => {
+    const sp = require('../services/pricing-engine/service-pricing');
+    const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
+    const preslab = jest.spyOn(sp, 'pricePreSlabTermiticide');
+    const trench = jest.spyOn(sp, 'priceTrenching');
+    try {
+      computePublicPricingRanges({ refresh: true });
+      const bifenthrin = (spy) => spy.mock.results.map((r) => r.value).filter((r) => ['talstar_p', 'bifen_it'].includes(r.productKey));
+      expect(bifenthrin(preslab).length).toBeGreaterThan(0);
+      expect(bifenthrin(trench).length).toBeGreaterThan(0);
+      for (const r of [...bifenthrin(preslab), ...bifenthrin(trench)]) expect(r.labelConfirmed).toBe(true);
+      expect(bifenthrin(preslab).every((r) => !r.requiresManualReview)).toBe(true);
+    } finally {
+      preslab.mockRestore();
+      trench.mockRestore();
+    }
   });
 });

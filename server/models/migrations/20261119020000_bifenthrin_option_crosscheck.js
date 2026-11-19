@@ -5,9 +5,11 @@
  * only the product they name, its cost and its copy change.
  *
  * Pricing is DB-authoritative (db-bridge loads pricing_config over constants.js), so the persisted rows must follow the code:
- *  1. onetime_preslab.products.{talstar_p,bifen_it}: Talak 96 fl oz at 41.57 -> Crosscheck Plus 128 fl oz at 30.90, plus label,
- *     catalog link, package label and warnings. margin_divisor, product_oz_per_10_sqft and positioning are kept.
- *  2. onetime_trenching.products.{talstar_p,bifen_it}: the same bottle, label and warnings; the rate fields are kept.
+ *  1. onetime_preslab {talstar_p,bifen_it}: Talak 96 fl oz at 41.57 -> Crosscheck Plus 128 fl oz at 30.90, plus label, catalog
+ *     link, package label and warnings. margin_divisor, product_oz_per_10_sqft and positioning are kept.
+ *  2. onetime_trenching {talstar_p,bifen_it}: the same bottle, label and warnings; the rate fields are kept.
+ * Each product moves in every place db-bridge reads one from: the products map, a legacy product_costs map and the top-level key
+ * (its overlays read (products || product_costs)[key] || row[key]), so the quote follows whichever one the bridge reads.
  * A product is rewritten only while it still holds the Talak values, or is exactly the admin seed's Talak product (41.57 / 96 with
  * its rate fields and nothing else: what ensureTable in routes/admin-pricing-config.js inserted from 2026-10-25 until this change,
  * when it creates the table). One already on Crosscheck is left alone silently (re-run); one an admin changed is left alone with a
@@ -43,11 +45,12 @@
  * db-bridge reads `catalogProductName ?? catalog_product_name`, `containerCost ?? container_cost ?? bottleCost ?? bottle_cost`, and so
  * on, so a camelCase or bottle alias would win over the snake_case value written here: the rewrite drops those aliases.
  *
- * Ownership: up() writes one pricing_config_audit row (changed_by TAG) for each pricing_config row it rewrote, one for Step P, one for
- * the stale mark, and one pricing_changelog row when it changed anything; with no pricing_config_audit table it writes nothing
+ * Ownership: up() writes one pricing_config_audit row (changed_by TAG) for each pricing_config row it rewrote, one for each product
+ * Step P priced, one for the stale mark, and one pricing_changelog row when it changed anything; with no pricing_config_audit table it writes nothing
  * (down() could not find its writes). down() restores a product only when this migration's audit row for its row exists AND the
  * product still deep-equals what up() wrote (an admin edit since then is kept); it restores the catalog price only when its audit
- * row exists AND the vendor row and catalog row still hold exactly what up() wrote; it lifts the stale mark only from a row that
+ * row exists AND the vendor row still holds exactly what up() wrote AND the catalog row still holds what up() wrote (or, when up()
+ * left the catalog best price to the next recalculation, exactly what up() saw: no recalculation has run since); it lifts the stale mark only from a row that
  * still holds the mark and the stale price; it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history row, audit rows and changelog row.
  *
@@ -152,6 +155,9 @@ const PLANS = {
 
 const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at'];
 const CATALOG_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at'];
+// What a best-price recalculation rewrites on the catalog row (the stale mark's own columns aside): a vendor-only Step P keeps them
+// as it saw them, so down() can tell no recalculation has read the corrected vendor row since.
+const CATALOG_SEEN_COLUMNS = [...CATALOG_COLUMNS, 'best_vendor_pricing_id', 'unit_size_oz'];
 const REQUIRED_VENDOR_COLUMNS = ['product_id', 'vendor_id', 'vendor_sku', 'is_active', 'approval_status', 'price', 'quantity'];
 const REQUIRED_CATALOG_COLUMNS = ['name', 'active', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'];
 // What recalcBestPriceLocked writes when it keeps a catalog price it cannot trust (routes/admin-inventory.js).
@@ -287,7 +293,12 @@ async function fixProductPrice(knex, productId) {
     price_per_oz: NEW_PER_OZ, normalized_unit_price: NEW_PER_OZ, landed_unit_price: NEW_PER_OZ, last_checked_at: now,
   }, vendorColumns);
   const catalogPatch = pickColumns({ best_price: NEW_PRICE, best_price_amount_cached: NEW_PRICE, best_price_updated_at: now }, catalogColumns);
-  const before = { vendor_pricing: pickColumns(row, vendorColumns), ...(blocker ? {} : { products_catalog: pickColumns(product, catalogColumns) }) };
+  const before = {
+    vendor_pricing: pickColumns(row, vendorColumns),
+    ...(blocker
+      ? { catalog_seen: pickColumns(product, await existingColumns(knex, 'products_catalog', CATALOG_SEEN_COLUMNS)) }
+      : { products_catalog: pickColumns(product, catalogColumns) }),
+  };
 
   await knex('vendor_pricing').where({ id: row.id }).update(vendorPatch);
   if (!blocker) await knex('products_catalog').where({ id: productId }).update(catalogPatch);
@@ -370,11 +381,11 @@ async function restoreProductPrice(knex, before, written) {
   await lockProduct(knex, before.product_id);
   const product = await knex('products_catalog').where({ id: before.product_id }).forUpdate().first();
   const row = await knex('vendor_pricing').where({ id: before.vendor_pricing_id }).forUpdate().first();
-  // With the catalog written, it must still hold what up() wrote; without, it must still hold the stale price (no recalculation
-  // has read the corrected row since).
+  // With the catalog written, it must still hold what up() wrote; without, exactly what up() saw (a recalculation since, which
+  // read the corrected vendor row, rewrites the best price and its time).
   const catalogKept = before.products_catalog && written.products_catalog
     ? product && sameColumns(product, written.products_catalog)
-    : product && holdsStalePrice(product);
+    : product && before.catalog_seen && sameColumns(product, before.catalog_seen);
   if (!row || !catalogKept || !sameColumns(row, written.vendor_pricing)) {
     console.warn(`${LOG} down: the ${CATALOG_NAME} price changed since this migration - leaving it alone`);
     return;
@@ -398,24 +409,40 @@ function toCrosscheck(product, values) {
   return { ...next, ...values };
 }
 
-// Rewrites the Talak products of one row; returns the new data, or null when nothing changed.
+const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+// The places db-bridge's overlays read a product from: (products || product_costs)[key], then the row's own key (null).
+const PRODUCT_PLACES = ['products', 'product_costs', null];
+const placeIn = (data, place) => (place === null ? data : isObject(data[place]) ? data[place] : null);
+const placeName = (place, key) => (place === null ? key : `${place}.${key}`);
+const bridgeReads = (data, key) => (data.products || data.product_costs || {})[key] || data[key];
+
+// Rewrites the Talak products of one row, in every place the bridge reads one from; returns the new data, or null when nothing
+// changed.
 function rewriteRow(configKey, data, plan) {
-  const products = { ...data.products };
+  const next = { ...data };
   let changed = false;
-  for (const key of OPTION_KEYS) {
-    const product = products[key];
-    if (!product || typeof product !== 'object') {
-      console.warn(`${LOG} ${configKey} has no products.${key} - the code default (Crosscheck Plus) applies; leaving it alone`);
-    } else if (holds(product, plan.to)) {
-      // already Crosscheck (a re-run): not ours
-    } else if (!isTalak(product, plan)) {
-      console.warn(`${LOG} ${configKey}.products.${key} was edited since the Talak swap - leaving the admin's values alone`);
-    } else {
-      products[key] = toCrosscheck(product, plan.to);
+  for (const place of PRODUCT_PLACES) {
+    const source = placeIn(data, place);
+    if (!source) continue;
+    const target = place === null ? next : { ...source };
+    for (const key of OPTION_KEYS) {
+      const product = source[key];
+      if (!isObject(product) || holds(product, plan.to)) continue; // none here, or already Crosscheck (a re-run): not ours
+      if (!isTalak(product, plan)) {
+        console.warn(`${LOG} ${configKey}.${placeName(place, key)} was edited since the Talak swap - leaving the admin's values alone`);
+        continue;
+      }
+      target[key] = toCrosscheck(product, plan.to);
       changed = true;
     }
+    if (place !== null) next[place] = target;
   }
-  return changed ? { ...data, products } : null;
+  for (const key of OPTION_KEYS) {
+    if (!isObject(bridgeReads(data, key))) {
+      console.warn(`${LOG} ${configKey} has no ${key} product - the code default (Crosscheck Plus) applies; leaving it alone`);
+    }
+  }
+  return changed ? next : null;
 }
 
 // Returns the config keys it wrote.
@@ -424,11 +451,7 @@ async function rewriteConfigRows(knex) {
   for (const [key, plan] of Object.entries(PLANS)) {
     const row = await knex('pricing_config').where({ config_key: key }).forUpdate().first('data');
     const data = row && parse(row.data);
-    if (!data) continue;
-    if (!data.products || typeof data.products !== 'object') {
-      console.warn(`${LOG} ${key} has no products map - leaving it alone`);
-      continue;
-    }
+    if (!isObject(data)) continue;
     const next = rewriteRow(key, data, plan);
     if (!next) continue;
     await knex('pricing_config').where({ config_key: key }).update({ data: JSON.stringify(next), updated_at: knex.fn.now() });
@@ -452,18 +475,28 @@ async function restoreConfigRows(knex) {
     const written = parse(own.new_value);
     const row = await knex('pricing_config').where({ config_key: key }).forUpdate().first('data');
     const current = row && parse(row.data);
-    if (!current || !current.products || !before || !before.products || !written || !written.products) continue;
-    const products = { ...current.products };
-    for (const option of OPTION_KEYS) {
-      if (isDeepStrictEqual(before.products[option], written.products[option])) continue; // up() did not change this key
-      if (isDeepStrictEqual(current.products[option], written.products[option])) {
-        products[option] = before.products[option];
-      } else {
-        console.warn(`${LOG} down: ${key}.products.${option} changed since this migration - leaving it alone`);
+    if (!isObject(current) || !isObject(before) || !isObject(written)) continue;
+    const next = { ...current };
+    let restored = false;
+    for (const place of PRODUCT_PLACES) {
+      const was = placeIn(before, place);
+      const wrote = placeIn(written, place);
+      if (!was || !wrote) continue;
+      const now = placeIn(current, place);
+      const target = place === null ? next : now && { ...now };
+      for (const option of OPTION_KEYS) {
+        if (isDeepStrictEqual(was[option], wrote[option])) continue; // up() did not change this one
+        if (target && isDeepStrictEqual(now[option], wrote[option])) {
+          target[option] = was[option];
+          restored = true;
+        } else {
+          console.warn(`${LOG} down: ${key}.${placeName(place, option)} changed since this migration - leaving it alone`);
+        }
       }
+      if (place !== null && target) next[place] = target;
     }
-    if (isDeepStrictEqual(products, current.products)) continue; // nothing restored: leave the row (and its updated_at) alone
-    await knex('pricing_config').where({ config_key: key }).update({ data: JSON.stringify({ ...current, products }), updated_at: knex.fn.now() });
+    if (!restored) continue; // nothing restored: leave the row (and its updated_at) alone
+    await knex('pricing_config').where({ config_key: key }).update({ data: JSON.stringify(next), updated_at: knex.fn.now() });
   }
 }
 

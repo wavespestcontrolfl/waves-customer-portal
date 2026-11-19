@@ -7044,6 +7044,17 @@ function resolveTrenchDepthPriceMultiplier(cfg = {}, trenchDepthFt) {
   return 1 + halfFeetAboveBaseline * premiumPerHalfFt;
 }
 
+// Owner 2026-11-18: talstar_p and bifen_it name the LESCO Crosscheck Plus bottle since then, under the same keys. A label check on
+// either counts only when the caller says it was made for that bottle (options.labelBottle: the estimate tool sends it; a request
+// or engine input saved before then lacks it), so a check made for the earlier bottle never carries over to a replay or re-price.
+// The product is the one this engine resolves and prices, aliases included. Fipronil checks are unchanged.
+const BIFENTHRIN_LABEL_BOTTLE = 'lesco_crosscheck_plus';
+const BIFENTHRIN_TERMITICIDE_KEYS = new Set(['talstar_p', 'bifen_it']);
+function labelCheckCounts(options, productKey) {
+  return optionBooleanTrue(options.labelConfirmed)
+    && (!BIFENTHRIN_TERMITICIDE_KEYS.has(productKey) || options.labelBottle === BIFENTHRIN_LABEL_BOTTLE);
+}
+
 function priceTrenching(property = {}, options = {}) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
   const cfg = SPECIALTY.trenching;
@@ -7087,7 +7098,7 @@ function priceTrenching(property = {}, options = {}) {
     ? warrantyResolution.warrantyTier
     : defaultTrenchingWarrantyTier(product);
   const warrantyConfig = cfg.warrantyTiers?.[warrantyTier] || cfg.warrantyTiers?.none || {};
-  const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
+  const labelConfirmed = labelCheckCounts(options, productResolution.productKey);
   const labelConfirmationRequiredForPayload = !legacyTrenchingPayload;
   const warningList = [
     ...(product.warnings || []),
@@ -7440,7 +7451,7 @@ function pricePreSlabTermiticide(input, options = {}) {
   }
   const warrantyExtendedPrice = warrantyExtendedSelected ? cfg.warrantyExtended : 0;
   const warrantyAdder = warrantyExtendedPrice;
-  const labelConfirmed = optionBooleanTrue(options.labelConfirmed);
+  const labelConfirmed = labelCheckCounts(options, productResolution.productKey);
   const requiresLabelConfirmation = product.requiresLabelConfirmation === true;
   const labelManualReviewReasons = requiresLabelConfirmation && !labelConfirmed
     ? ['pre_slab_label_confirmation_required']
@@ -7661,6 +7672,8 @@ function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {})
     productKey: options.productKey || 'termidor_sc',
     volumeDiscount: discountInput,
     labelConfirmed: hasValue(options.labelConfirmed) ? options.labelConfirmed : true,
+    // A legacy payload never asks for a label check (the default above): that default is no check made for an earlier bottle.
+    labelBottle: hasValue(options.labelConfirmed) ? options.labelBottle : BIFENTHRIN_LABEL_BOTTLE,
   });
 }
 
@@ -10342,6 +10355,7 @@ module.exports = {
   resolveBoraCareSqFt,
   resolvePreSlabSqFt,
   normalizePreSlabTermiticideProduct,
+  BIFENTHRIN_LABEL_BOTTLE,
   normalizePestFrequency,
   normalizePestPricingVersion,
   normalizeRoachType,

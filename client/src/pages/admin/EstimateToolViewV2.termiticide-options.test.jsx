@@ -47,6 +47,15 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
     expect(clearPriorBottleLabelChecks(null, form)).toEqual({ form, cleared: [] });
   });
 
+  it("resolves a saved alias such as talak or Crosscheck Plus to its key before it decides, fipronil aliases included", () => {
+    const inputs = saved({ preslabProductKey: "talak", trenchingProductKey: "Crosscheck Plus" });
+    const { form, cleared } = clearPriorBottleLabelChecks(inputs, inputs);
+    expect(cleared).toEqual(["pre-slab", "trenching"]);
+    expect(form).toMatchObject({ preslabLabelConfirmed: false, trenchingLabelConfirmed: false, preslabProductKey: "talak" });
+    const fipronil = saved({ preslabProductKey: "termidor", trenchingProductKey: "taurus" });
+    expect(clearPriorBottleLabelChecks(fipronil, fipronil)).toEqual({ form: fipronil, cleared: [] });
+  });
+
   it("clears only the bifenthrin check when the other key is fipronil", () => {
     const inputs = saved({ trenchingProductKey: "taurus_sc" });
     const { form, cleared } = clearPriorBottleLabelChecks(inputs, inputs);

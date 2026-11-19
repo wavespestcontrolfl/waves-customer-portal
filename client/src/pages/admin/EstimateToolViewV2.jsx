@@ -26,6 +26,8 @@ import {
   rodentBaitWaveguardFlags,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
+  normalizePreSlabProductKey,
+  normalizeTrenchingProductKey,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -127,22 +129,23 @@ export function termiticideProductOptions(kind, selectedKey) {
 // The bottle the bifenthrin keys name. Since 2026-11-18 talstar_p and bifen_it are LESCO Crosscheck Plus (was Atticus Talak
 // 7.9 F under the same keys), so every form carries this mark and a saved estimate shows which bottle its label checks were
 // made for. An estimate saved without the mark predates the swap: its bifenthrin label check was made for the earlier bottle,
-// so a reopen clears it and the quote asks for the Crosscheck Plus label again. Choosing another product also clears its label
+// so a reopen clears it and the quote asks for the Crosscheck Plus label again (a saved alias such as "talak" resolves to its key
+// first, as the engine resolves it). Choosing another product also clears its label
 // check (the form's set()), so on a marked form a check is always for the product selected.
 export const BIFENTHRIN_LABEL_BOTTLE = "lesco_crosscheck_plus";
 const BIFENTHRIN_OPTION_KEYS = new Set(["talstar_p", "bifen_it"]);
 // Each termiticide product field and the label check made for the product it selects.
 const LABEL_CHECKS = [
-  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab" },
-  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching" },
+  { productField: "preslabProductKey", checkField: "preslabLabelConfirmed", name: "pre-slab", resolve: normalizePreSlabProductKey },
+  { productField: "trenchingProductKey", checkField: "trenchingLabelConfirmed", name: "trenching", resolve: normalizeTrenchingProductKey },
 ];
 const LABEL_CHECK_FOR_PRODUCT = Object.fromEntries(LABEL_CHECKS.map(({ productField, checkField }) => [productField, checkField]));
 
 // savedInputs = the stored form snapshot as saved; form = the form a reopen restores from it.
 export function clearPriorBottleLabelChecks(savedInputs, form) {
   if (!savedInputs || savedInputs._bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE) return { form, cleared: [] };
-  const stale = LABEL_CHECKS.filter(({ productField, checkField }) =>
-    BIFENTHRIN_OPTION_KEYS.has(form[productField]) && !!form[checkField]);
+  const stale = LABEL_CHECKS.filter(({ productField, checkField, resolve }) =>
+    BIFENTHRIN_OPTION_KEYS.has(resolve(form[productField])) && !!form[checkField]);
   if (stale.length === 0) return { form, cleared: [] };
   const next = { ...form };
   for (const { checkField } of stale) next[checkField] = false;
