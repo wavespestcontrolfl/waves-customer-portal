@@ -291,36 +291,77 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
 // the carrier fully attested (STIR/SHAKEN 'TN-Validation-Passed-A', stored as
 // metadata.stir_verstat by the voice webhook) counts (pre-push audit): a
 // spoofed earlier call that borrowed a real person's number must never silence
-// that person's own first missed call. A caller who pressed 1 at the screen is a
-// person (pre-push audit): such a call is never judged a repeat, and such history
-// never counts. History with any recording never counts either: the shared
-// silent-hang-up read accepts a recording of 3 s or less, but this rule takes a
-// push away, so it counts only calls that left no recording. Production back-test, 90 days to
-// 2026-11-19: 22 calls from 14 numbers, 13 pushed bells, 0 real callers (no
-// message, no later text, no later call that got through, no lead, no customer).
+// that person's own first missed call. Only calls the press-1 screen never
+// touched count, judged call and history alike (pre-push audit): a pass is a
+// person, and 'gated' may be a pass whose stamp failed; a failed screen is the
+// screen rule's own case. History with any recording never counts either: the
+// shared silent-hang-up read accepts a recording of 3 s or less, but this rule
+// takes a push away, so it counts only calls that left no recording. And a
+// number that shows a person anywhere in the window is never a repeat
+// (numberShowsPerson). Production replay of this rule, read-only, 90 days to
+// 2026-11-19: 12 bells from 7 numbers match, 10 of them pushed (2 were already
+// quiet under another rule); both 941-541 numbers match (7 bells); 0 real
+// callers (no message on a matched call, no text from the number, no later call
+// that got through, no lead, no customer).
 const REPEAT_DAYS = 14;
 const REPEAT_MIN_PRIOR = 2;
 const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
+// Five pre-push audit rounds each found one more sign of a person that the
+// history still counted (a spoofed number, a press-1 pass, a short recording, a
+// pass whose stamp failed). So the rule also reads every sign at once, for the
+// whole number and not only the counted calls: an inbound call from it in the
+// window that reached staff or Sandy, left a recording, rang the voicemail lane,
+// or met the press-1 screen with a key press or a challenge whose result was
+// never saved; or a text from it in the window. Any one means a person uses the
+// number. Read only when the history matched, and bounded like the history.
+async function numberShowsPerson(key, since) {
+  const call = await db('call_log')
+    .modify((qb) => whereNotSandboxCall(qb))
+    .where('direction', 'inbound')
+    .where('created_at', '>=', since)
+    .whereRaw(`${CALLER_KEY} = ?`, [key])
+    .where((sign) => sign
+      .whereIn('answered_by', ['human', 'ai_agent'])
+      .orWhereIn('call_outcome', [...AI_OUTCOMES])
+      .orWhereNotNull('recording_sid').orWhereNotNull('recording_url')
+      .orWhereNotNull('voicemail_callback_alerted_at')
+      .orWhereRaw("metadata->>'preconnect_screen' IN ('passed', 'gated')"))
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
+    .first('id');
+  if (call) return true;
+  const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+  const text = await excludeUnresolvedSendReservations(db('sms_log'))
+    .where('direction', 'inbound')
+    .where('created_at', '>=', since)
+    .whereRaw(`${phoneKeySql('sms_log.from_phone')} = ?`, [key])
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
+    .first('id');
+  return Boolean(text);
+}
+
 async function isRepeatSilentCaller(row) {
-  if (!row || row.customer_id || parseMeta(row.metadata).preconnect_screen === 'passed') return false;
+  if (!row || row.customer_id || parseMeta(row.metadata).preconnect_screen) return false;
   const line = require('../config/twilio-numbers').findByNumber(row.to_phone);
   if (line?.type !== 'gbp_tracking') return false;
   const raw = String(row.from_phone || '').replace(/\D/g, '');
   const plus = String(row.from_phone || '').trim().startsWith('+');
   if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
+  const key = `1${raw.slice(-10)}`;
+  const at = new Date(row.created_at || Date.now());
   const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
   const otherLineSql = otherLines.length ? `${LAST10_SQL('to_phone')} IN (${otherLines.map(() => '?').join(', ')})` : 'false';
-  const found = await silentHangupsBefore(new Date(row.created_at || Date.now()), REPEAT_DAYS, new Date())
+  const found = await silentHangupsBefore(at, REPEAT_DAYS, new Date())
     .whereNot('id', row.id)
-    .whereRaw(`${CALLER_KEY} = ?`, [`1${raw.slice(-10)}`])
+    .whereRaw(`${CALLER_KEY} = ?`, [key])
     .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
-    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') <> 'passed'")
+    .whereRaw("metadata->>'preconnect_screen' IS NULL")
     // No recording at all: even a 2-second recording can hold "call me back".
     .whereNull('recording_sid').whereNull('recording_url')
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
-  return Boolean(found?.other_line) || Number(found?.n || 0) >= REPEAT_MIN_PRIOR;
+  if (!(found?.other_line || Number(found?.n || 0) >= REPEAT_MIN_PRIOR)) return false;
+  return !(await numberShowsPerson(key, new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000)));
 }
 
 const spamGateOn = (name) => require('../config/feature-gates').isEnabled(name);
