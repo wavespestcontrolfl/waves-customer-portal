@@ -1999,7 +1999,7 @@ const SPECIALTY = {
         // Adjustment Chart: 4.0 gal per 10 LF at 0.06%, 2.0 gal at 0.12%). priceTrenching cuts the high-rate volume to match.
         highRateReducesVolume: true,
         standardConcentrationLabel: '0.06%',
-        highConcentrationLabel: '0.12%',
+        highConcentrationLabel: 'high_rate',
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
@@ -2021,7 +2021,7 @@ const SPECIALTY = {
         productOzPerFinishedGallonAtHighRate: 2.0,
         highRateReducesVolume: true, // the same label rule as bifen_it
         standardConcentrationLabel: '0.06%',
-        highConcentrationLabel: '0.12%',
+        highConcentrationLabel: 'high_rate',
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [

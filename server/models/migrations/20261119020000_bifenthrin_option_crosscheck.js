@@ -18,18 +18,17 @@
  * Step P (first, same transaction): production holds a stale SiteOne price for LESCO Crosscheck Plus ($58.42 per 1 gal, entered
  * 2026-09-30; the owner pays $30.90). db-bridge's pre-slab link takes a catalog price within [0.5x, 2x] of the config, and 58.42 is
  * 1.89x of 30.90, so a pre-slab link to that row unfixed would RAISE slab quotes. For each catalog row named LESCO Crosscheck Plus,
- * Step P writes $30.90 on the product's one vendor row, when it is SiteOne's (item D00001542 AND its vendors row named SiteOne:
- * another vendor can list the same number), and the catalog best price exactly the way the inventory price handler does
- * for a manual entry with no shipping or tax (PUT /:productId/pricing + recalcBestPriceLocked: previous price, price, price_amount,
- * landed cost, per-oz figures, last_checked_at, a price_history row holding the OLD price, and the catalog best_price /
- * best_price_amount_cached / best_price_updated_at). It acts only when the rows still look exactly as read on 2026-11-18, the vendor
- * row's price_amount (what costing reads first), its own pack (1 gal, priced per oz: the handler derives the unit cost from it) and
- * an open quote (no expires_at passed: the inventory price rules skip an expired row) included; a vendor row that differs (an
- * edit, shipping or tax: its landed cost would need them) is left alone with a warning. When the catalog best price is not that
- * row's alone (a second vendor row, a winner that is not that row, an inactive product, another catalog size), the stale SiteOne
- * row is still corrected and Step P then runs the handler's own recalculation (recalcBestPrice from routes/admin-inventory, as
- * migrations 20260907000020 and 20260928060000 do; it takes the same product lock, held here already), which picks the winner
- * from current prices: job costing reads the catalog best_price directly (calculateInventoryCost), so it must not keep $58.42.
+ * Step P does what the inventory price handler does for a manual $30.90 entry with no shipping or tax on the product's SiteOne
+ * row (item D00001542 AND its vendors row named SiteOne: another vendor can list the same number): PUT /:productId/pricing writes
+ * the vendor row (previous price, price, price_amount, landed cost, per-oz figures, last_checked_at) and a price_history row
+ * holding the OLD price, then runs its own best-price recalculation in the same transaction (recalcBestPrice from
+ * routes/admin-inventory, as migrations 20260907000020 and 20260928060000 do; it takes the same product lock, held here already).
+ * The recalculation picks the winner from current prices and writes the catalog best price, its flags and its status, a stale or
+ * needs-pricing mark included: the pre-slab and mosquito links read only an unmarked row, and job costing reads best_price
+ * directly (calculateInventoryCost), so the catalog must not keep $58.42 or a mark. Step P acts only while the SiteOne row still
+ * looks exactly as read on 2026-11-18, its price_amount (what costing reads first), its own pack (1 gal, priced per oz: the handler
+ * derives the unit cost from it) and an open quote (no expires_at passed: the inventory price rules skip an expired row) included;
+ * a row that differs (an edit, shipping or tax: its landed cost would need them) is left alone with a warning.
  * server/data/pricing.csv, the sheet the admin pricing import reads first, lists the same gallon at $30.90, so a re-import keeps it.
  *
  * Stale mark: a catalog row named LESCO Crosscheck Plus that still holds the stale $58.42 for 128 oz after Step P (Step P had to
@@ -51,8 +50,8 @@
  * Step P priced, one for the stale mark, and one pricing_changelog row when it changed anything; with no pricing_config_audit table it writes nothing
  * (down() could not find its writes). down() restores a product only when this migration's audit row for its row exists AND the
  * product still deep-equals what up() wrote (an admin edit since then is kept); it restores the catalog price only when its audit
- * row exists AND the vendor row still holds exactly what up() wrote AND the catalog row still holds what up() wrote (when up() ran
- * the recalculation, down() runs it again after the vendor row is restored); it lifts the stale mark only from a row that
+ * row exists AND the vendor row still holds exactly what up() wrote, and then runs the recalculation again, so the catalog follows
+ * the restored row; it lifts the stale mark only from a row that
  * still holds the mark and the prices up() saw; it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history row, audit rows and changelog row.
  *
@@ -156,14 +155,15 @@ const PLANS = {
 };
 
 const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost', 'price_per_oz', 'normalized_unit_price', 'landed_unit_price', 'last_checked_at'];
-const CATALOG_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at'];
-// What a best-price recalculation rewrites on the catalog row (the stale mark's own columns aside): a vendor-only Step P keeps them
-// as it saw them, so down() can tell no recalculation has read the corrected vendor row since.
-const CATALOG_SEEN_COLUMNS = [...CATALOG_COLUMNS, 'best_vendor_pricing_id', 'unit_size_oz'];
+// The catalog prices a recalculation rewrites (the stale mark's own columns aside): the stale mark keeps them as it saw them, so
+// down() can tell no price was entered since.
+const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor_pricing_id', 'unit_size_oz'];
 const REQUIRED_VENDOR_COLUMNS = ['product_id', 'vendor_id', 'vendor_sku', 'is_active', 'approval_status', 'price', 'quantity'];
-const REQUIRED_CATALOG_COLUMNS = ['name', 'active', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'];
+const REQUIRED_CATALOG_COLUMNS = ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'];
 // What recalcBestPriceLocked writes when it keeps a catalog price it cannot trust (routes/admin-inventory.js).
 const STALE_MARK = { needs_pricing: true, best_price_status: 'stale' };
+// Step P's audit entry: the catalog row before and after the recalculation.
+const CATALOG_AUDIT_COLUMNS = [...CATALOG_SEEN_COLUMNS, ...Object.keys(STALE_MARK)];
 
 const parse = (data) => {
   if (typeof data !== 'string') return data;
@@ -195,9 +195,9 @@ const filled = (v) => v !== null && v !== undefined && v !== '';
 // A shipping or tax amount on the row: the handler would fold it into the landed cost, and Step P writes the bare price.
 const carries = (v) => filled(v) && Number(v) !== 0;
 
-// The one vendor row Step P may correct: active, approved, unexpired (vendor-pricing-eligibility: expires_at null or later than
-// now), at the stale price (price_amount too, when set: costing reads it first), the 1 gal pack priced per oz (the handler derives
-// the unit cost from the row's own quantity), with no shipping or tax. Returns null when it is, else the reason it is not.
+// The SiteOne row Step P may correct: active, approved, unexpired (vendor-pricing-eligibility: expires_at null or later than now),
+// at the stale price (price_amount too, when set: costing reads it first), the 1 gal pack priced per oz (the handler derives the
+// unit cost from the row's own quantity), with no shipping or tax. Returns null when it is, else the reason it is not.
 function vendorRowBlocker(row, now) {
   if (row.is_active !== true || row.approval_status !== 'approved' || !same(row.price, STALE_PRICE)
     || (filled(row.price_amount) && !same(row.price_amount, STALE_PRICE))) {
@@ -233,24 +233,6 @@ async function missingColumns(knex) {
   return missing.length ? `a required ${missing.join(' and ')} is missing` : null;
 }
 
-// Returns null when Step P may write the vendor row AND the catalog best price, 'done' when the price is already right, or the
-// reason it may not write the catalog best price.
-async function catalogBlocker(knex, product, rows, now = new Date()) {
-  if (rows.length === 1 && same(rows[0].price, NEW_PRICE)) return 'done';
-  const missing = await missingColumns(knex);
-  if (missing) return missing;
-  if (product.active !== true) return 'the product is not active';
-  if (rows.length !== 1 || !(await isSiteOneRow(knex, rows[0]))) return `it does not have exactly one vendor row, SiteOne's ${STALE_SKU}`;
-  const row = rows[0];
-  const rowBlocker = vendorRowBlocker(row, now);
-  if (rowBlocker) return rowBlocker;
-  if (product.best_vendor_pricing_id !== row.id) return 'the catalog best price is not backed by that vendor row';
-  if (!same(product.best_price, STALE_PRICE) || !same(product.unit_size_oz, STALE_SIZE_OZ)) {
-    return `the catalog best price is ${product.best_price} for ${product.unit_size_oz} oz, not ${STALE_PRICE} for ${STALE_SIZE_OZ}`;
-  }
-  return null;
-}
-
 async function insertPriceHistory(knex, productId, row) {
   if (!(await knex.schema.hasTable('price_history'))) return null;
   const inserted = await knex('price_history')
@@ -260,18 +242,9 @@ async function insertPriceHistory(knex, productId, row) {
   return first && typeof first === 'object' ? first.id : first || null;
 }
 
-// The product's one SiteOne D00001542 row while it is still the stale entry (vendorRowBlocker), else null.
-async function staleVendorRow(knex, rows, now) {
-  const siteOne = [];
-  for (const row of rows) if (await isSiteOneRow(knex, row)) siteOne.push(row);
-  return siteOne.length === 1 && !vendorRowBlocker(siteOne[0], now) ? siteOne[0] : null;
-}
-
-// Mirrors PUT /:productId/pricing (existing row) + recalcBestPriceLocked for a manual $30.90 entry. True when it changed the rows.
-// The vendor row is corrected whenever it is still the stale entry. When that row is the product's only vendor row and backs the
-// best price, the recalculation's result is known ($30.90 for 128 oz) and is written with it; otherwise the handler's own
-// recalculation runs after it and picks the winner from current prices.
-// Each catalog row named LESCO Crosscheck Plus on its own: every check is about that product's own vendor rows and best price.
+// Mirrors PUT /:productId/pricing on the existing SiteOne row for a manual $30.90 entry: the vendor row, its price_history row, then
+// the handler's own recalculation (see the header). Each catalog row named LESCO Crosscheck Plus on its own: every check is about
+// that product's own vendor rows. True when it changed the rows.
 async function fixCatalogPrice(knex) {
   let fixed = false;
   if (!(await knex.schema.hasTable('products_catalog')) || !(await knex.schema.hasTable('vendor_pricing'))) return fixed;
@@ -283,45 +256,35 @@ async function fixCatalogPrice(knex) {
 
 async function fixProductPrice(knex, productId) {
   await lockProduct(knex, productId);
-  const product = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   const rows = await knex('vendor_pricing').where({ product_id: productId }).forUpdate();
+  const siteOne = [];
+  for (const row of rows) if (await isSiteOneRow(knex, row)) siteOne.push(row);
+  const [row] = siteOne;
+  if (siteOne.length === 1 && same(row.price, NEW_PRICE)) return false; // already corrected (a re-run)
   const now = new Date();
-  const blocker = await catalogBlocker(knex, product, rows, now);
-  if (blocker === 'done') return false;
-  let row = rows[0];
-  if (blocker) row = (await missingColumns(knex)) ? null : await staleVendorRow(knex, rows, now);
-  if (blocker && !row) {
+  const blocker = (await missingColumns(knex))
+    || (siteOne.length === 1 ? vendorRowBlocker(row, now) : `it does not have exactly one SiteOne ${STALE_SKU} vendor row`);
+  if (blocker) {
     console.warn(`${LOG} ${CATALOG_NAME} (${productId}) price left alone: ${blocker}`);
     return false;
   }
-  if (blocker) {
-    console.info(`${LOG} ${CATALOG_NAME} (${productId}): ${blocker}, so the inventory recalculation picks the catalog best price after `
-      + 'the stale SiteOne row is corrected.');
-  }
+  const product = await knex('products_catalog').where({ id: productId }).forUpdate().first();
   const vendorColumns = await existingColumns(knex, 'vendor_pricing', VENDOR_COLUMNS);
-  const catalogColumns = blocker ? [] : await existingColumns(knex, 'products_catalog', CATALOG_COLUMNS);
+  const catalogColumns = await existingColumns(knex, 'products_catalog', CATALOG_AUDIT_COLUMNS);
   const vendorPatch = pickColumns({
     previous_price: STALE_PRICE, price: NEW_PRICE, price_amount: NEW_PRICE, landed_cost: NEW_PRICE,
     price_per_oz: NEW_PER_OZ, normalized_unit_price: NEW_PER_OZ, landed_unit_price: NEW_PER_OZ, last_checked_at: now,
   }, vendorColumns);
-  const catalogPatch = pickColumns({ best_price: NEW_PRICE, best_price_amount_cached: NEW_PRICE, best_price_updated_at: now }, catalogColumns);
-  const before = {
-    vendor_pricing: pickColumns(row, vendorColumns),
-    ...(blocker
-      ? { catalog_seen: pickColumns(product, await existingColumns(knex, 'products_catalog', CATALOG_SEEN_COLUMNS)) }
-      : { products_catalog: pickColumns(product, catalogColumns) }),
-  };
+  const before = { vendor_pricing: pickColumns(row, vendorColumns), catalog_seen: pickColumns(product, catalogColumns) };
 
   await knex('vendor_pricing').where({ id: row.id }).update(vendorPatch);
-  if (!blocker) await knex('products_catalog').where({ id: productId }).update(catalogPatch);
   const historyId = await insertPriceHistory(knex, productId, row);
-  if (blocker) await recalcBestPrice(knex, productId);
+  await recalcBestPrice(knex, productId);
 
-  const writtenVendor = await knex('vendor_pricing').where({ id: row.id }).first();
-  const written = { vendor_pricing: pickColumns(writtenVendor, vendorColumns) };
-  const catalogAfter = await knex('products_catalog').where({ id: productId }).first();
-  if (blocker) written.catalog_recalculated = pickColumns(catalogAfter, await existingColumns(knex, 'products_catalog', [...CATALOG_SEEN_COLUMNS, ...Object.keys(STALE_MARK)]));
-  else written.products_catalog = pickColumns(catalogAfter, catalogColumns);
+  const written = {
+    vendor_pricing: pickColumns(await knex('vendor_pricing').where({ id: row.id }).first(), vendorColumns),
+    catalog_recalculated: pickColumns(await knex('products_catalog').where({ id: productId }).first(), catalogColumns),
+  };
   await knex('pricing_config_audit').insert({
     config_key: CATALOG_AUDIT_KEY,
     old_value: JSON.stringify({ product_id: productId, vendor_pricing_id: row.id, price_history_id: historyId, ...before }),
@@ -329,13 +292,13 @@ async function fixProductPrice(knex, productId) {
     changed_by: TAG,
     reason: CATALOG_REASON,
   });
-  console.info(`${LOG} ${CATALOG_NAME}: SiteOne price ${STALE_PRICE} -> ${NEW_PRICE} per ${STALE_SIZE_OZ} oz `
-    + `(${blocker ? 'the inventory recalculation set the catalog best price' : 'catalog best price follows'})`);
+  console.info(`${LOG} ${CATALOG_NAME}: SiteOne price ${STALE_PRICE} -> ${NEW_PRICE} per ${STALE_SIZE_OZ} oz; the inventory `
+    + `recalculation set the catalog best price to ${written.catalog_recalculated.best_price}`);
   return true;
 }
 
 // The inventory price handler's own recalculation (PUT /:productId/pricing runs it in its transaction after the vendor write). It
-// takes the product lock Step P already holds and writes the winner, its flags and status. Loaded only when needed.
+// takes the product lock Step P already holds and writes the winner, its flags and status. Loaded only when a price moves.
 function recalcBestPrice(knex, productId) {
   return require('../../routes/admin-inventory').recalcBestPrice(productId, knex);
 }
@@ -398,25 +361,21 @@ async function restoreCatalogPrice(knex) {
   }
 }
 
+// The SiteOne row back to what up() saw and its price_history row removed, then the recalculation again: the catalog follows the
+// restored row. Only while the row still holds what up() wrote: a price entered since is kept.
 async function restoreProductPrice(knex, before, written) {
   if (!before || !written || !before.vendor_pricing || !written.vendor_pricing) return;
   await lockProduct(knex, before.product_id);
-  const product = await knex('products_catalog').where({ id: before.product_id }).forUpdate().first();
   const row = await knex('vendor_pricing').where({ id: before.vendor_pricing_id }).forUpdate().first();
-  // With the catalog written directly, it must still hold what up() wrote. When up() ran the recalculation instead, the catalog
-  // follows the vendor rows: the vendor row is restored and the recalculation runs again.
-  const recalculated = !before.products_catalog;
-  const catalogKept = recalculated || (product && written.products_catalog && sameColumns(product, written.products_catalog));
-  if (!row || !catalogKept || !sameColumns(row, written.vendor_pricing)) {
+  if (!row || !sameColumns(row, written.vendor_pricing)) {
     console.warn(`${LOG} down: the ${CATALOG_NAME} price changed since this migration - leaving it alone`);
     return;
   }
   await knex('vendor_pricing').where({ id: row.id }).update(before.vendor_pricing);
-  if (!recalculated) await knex('products_catalog').where({ id: product.id }).update(before.products_catalog);
   if (before.price_history_id && await knex.schema.hasTable('price_history')) {
     await knex('price_history').where({ id: before.price_history_id }).del();
   }
-  if (recalculated) await recalcBestPrice(knex, before.product_id);
+  await recalcBestPrice(knex, before.product_id);
 }
 
 // ── pricing_config rows ──────────────────────────────────────────────────────

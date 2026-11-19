@@ -250,7 +250,7 @@ describe('termite measurement overrides and safeguards', () => {
     const standard = trench({});
     const high = trench({ applicationRate: 'high' });
     expect(standard).toMatchObject({ finishedGallons: 80, productOzPerFinishedGallon: 1, productOz: 80, concentrationLabel: '0.06%', price: 4000 });
-    expect(high).toMatchObject({ finishedGallons: 40, dirtFinishedGallons: 40, productOzPerFinishedGallon: 2, productOz: 80, concentrationLabel: '0.12%' });
+    expect(high).toMatchObject({ finishedGallons: 40, dirtFinishedGallons: 40, productOzPerFinishedGallon: 2, productOz: 80, concentrationLabel: 'high_rate' });
     expect(high.allocatedChemicalCost).toBe(standard.allocatedChemicalCost);
     expect(high.includedChemicalCost).toBe(standard.includedChemicalCost); // the install price includes the labeled volume
     expect(high.price).toBe(4480); // the +12% install premium, as before
@@ -1165,8 +1165,8 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     Object.assign(products.taurus_sc, saved.taurus);
     Object.assign(products.talstar_p, saved.talstar);
   });
-  const sentQuote = (extra = {}) => {
-    Object.assign(products.talstar_p, { label: 'Talak 7.9 F - Bifenthrin', containerCost: 41.57, containerOz: 96 });
+  const sentQuote = (extra = {}, bottle = {}) => {
+    Object.assign(products.talstar_p, { label: 'Talak 7.9 F - Bifenthrin', containerCost: 41.57, containerOz: 96, ...bottle });
     try {
       return generateEstimate(input(extra));
     } finally {
@@ -1222,6 +1222,22 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     expect(replay.trenchingKnobSignalForReplay({ result: mapV1ToLegacyShape(engineResult) })).toEqual(PIN);
     expect(replay.trenchingKnobSignalForReplay({ engineResult: { lineItems: [{ service: 'trenching', productKey: 'talstar_p' }] } })).toBeNull();
     expect(replay.trenchingKnobSignalForReplay({})).toBeNull();
+  });
+
+  // A high-rate quote priced before the label fix used the full labeled volume (main's math: 168 oz for 400 LF at 2 oz a finished
+  // gallon). Its pin matches that volume, so both replay paths keep its sent surcharge (pre-push audit 10).
+  test('a quote priced at the full volume before the label fix keeps its sent price on both replay paths', async () => {
+    const engineResult = sentQuote({}, { highRateReducesVolume: false });
+    const pin = { ...PIN, productOz: 168, productSurcharge: 68 };
+    expect(trenchLine(engineResult)).toMatchObject({ price: 4996, finishedGallons: 84, ...pin });
+    const stored = { engineInputs: input(), engineResult };
+    expect(replay.trenchingKnobSignalForReplay(stored)).toEqual(pin);
+    expect(replay.trenchingKnobSignalForReplay({ result: mapV1ToLegacyShape(engineResult) })).toEqual(pin);
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    expect(trenchLine(generateEstimate(extractEngineInputs(stored))).price).toBe(4996);
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4996);
+    expect(priced({}, { ...pin, productOz: 336 }).price).toBe(4928); // any other oz is another quote: it prices fresh
   });
 
   test('both replay paths keep the sent price; a posted save and a planted copy price the new bottle', async () => {

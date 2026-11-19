@@ -7079,11 +7079,12 @@ function labelCheckCounts(options, productKey, product) {
 // set only by the server replay paths from estimate-tree-shrub-knob-replay; a save never carries it) when it prices the same
 // product, rate and product oz. Custom inputs count too: a replay re-prices the stored inputs, and a custom rate, cost or
 // container size still takes the rest of its cost basis from config (a custom cost divides by the configured container oz).
+// A quote priced before the label's volume adjustment stored the product for the full labeled volume, so that oz matches too.
 function trenchReplaySurcharge(replay, priced, surcharge) {
   if (!replay || typeof replay !== 'object') return surcharge;
   const pinned = Number(replay.productSurcharge);
   const samePricing = replay.productKey === priced.productKey && replay.applicationRate === priced.applicationRate
-    && Number(replay.productOz) === priced.productOz;
+    && [priced.productOz, priced.labeledProductOz].includes(Number(replay.productOz));
   return samePricing && Number.isInteger(pinned) && pinned >= 0 ? pinned : surcharge;
 }
 
@@ -7289,6 +7290,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     finishedGallonsPerLFPerFtDepth *
     trenchDepthFt *
     (1 + concreteVolumePadPct);
+  const labeledGallons = labeledDirtGallons + labeledConcreteGallons;
   const dirtFinishedGallons = labeledDirtGallons * volumeFactor;
   const concreteFinishedGallons = labeledConcreteGallons * volumeFactor;
   const finishedGallons = dirtFinishedGallons + concreteFinishedGallons;
@@ -7297,7 +7299,7 @@ function priceTrenching(property = {}, options = {}, replay) {
   const allocatedChemicalCost = productOz * chemicalCostPerOz;
   const includedProduct = cfg.products?.[cfg.defaultIncludedProductKey] || cfg.products?.[cfg.defaultProductKey] || product;
   // The install price includes the included product at its standard rate over the labeled volume, a reduced volume or not.
-  const includedChemicalCost = (labeledDirtGallons + labeledConcreteGallons) *
+  const includedChemicalCost = labeledGallons *
     includedProduct.productOzPerFinishedGallonAtStandardRate *
     (includedProduct.containerCost / includedProduct.containerOz);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
@@ -7305,6 +7307,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     productKey: productResolution.productKey,
     applicationRate: rateResolution.applicationRate,
     productOz: roundMoney(productOz),
+    labeledProductOz: roundMoney(labeledGallons * productOzPerFinishedGallon),
   }, Math.round(chemicalPremiumCost * (cfg.productPremiumMultiplier || 1)));
   const totalLF = Math.max(1, measurements.dirtLF + measurements.concreteLF);
   const chemicalCostPerLF = allocatedChemicalCost / totalLF;
