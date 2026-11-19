@@ -1897,7 +1897,6 @@ function assertShownMembership(shown, visitId, liveMemberIds) {
 // a grouped move writes its primary. The whole visit is excluded as one
 // physical stop, so only outside occupancy can reject the unit.
 async function preflightMemberConflicts(t, { members, targets, newDateStr, options }) {
-  const warnings = [];
   const { probeMoveConflicts, occupancyProbeEnd } = require('./rebooker');
   const memberIds = members.map((m) => String(m.id));
   for (const target of targets.filter((x) => !x.alreadyAtTarget && x.startHHMM)) {
@@ -1926,9 +1925,10 @@ async function preflightMemberConflicts(t, { members, targets, newDateStr, optio
         statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: target.id, conflictId: clashes[0].id,
       });
     }
-    warnings.push(clashes[0].warning || `service ${target.id} overlaps another job at its destination (${clashes[0].id})`);
+    // Advisory conflicts are intentionally not returned from this snapshot.
+    // The member writer re-probes under its own locks and its committed
+    // result is the authority for the final manual-move report.
   }
-  return warnings;
 }
 
 async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
@@ -2141,14 +2141,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // as one physical stop; named-tech unit moves are probed tech-blind
         // because their per-member writes retain the old tech until the
         // canonical assignment step.
-        const conflictWarnings = await preflightMemberConflicts(t, { members, targets, newDateStr, options });
+        await preflightMemberConflicts(t, { members, targets, newDateStr, options });
         // Destination-technician occupancy for EVERY derived member window
         // (local codex audit r24), before the first write: a hard clash
         // refuses the whole unit (SLOT_TAKEN — the callers' existing
-        // handling); on an advisory staff surface (overlapAdvisory) it is a
-        // warning, as the rebooker's own check would be. alignMember repeats
-        // the check under the technician's slot-reserve lock at assignment.
-        const techClashWarnings = [];
+        // handling); an advisory staff surface continues so the committed
+        // member/assignment writers can report their authoritative warning.
+        // alignMember repeats the check under the technician's slot-reserve
+        // lock at assignment.
         if (options.technicianId) {
           for (const tg of targets) {
             const m = members.find((x) => String(x.id) === String(tg.id));
@@ -2161,13 +2161,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             if (options.overlapAdvisory !== true) {
               throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: tg.id, conflictId: clashId });
             }
-            techClashWarnings.push(`service ${tg.id} overlaps another job on the destination technician's route (${clashId})`);
+            // Advisory reporting comes from alignMember's locked destination
+            // probe below. This unlocked plan snapshot only rejects hard
+            // conflicts before the first write.
           }
         }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
           customerId: visit.customer_id, propertyId: visit.property_id,
-          techClashWarnings: [...conflictWarnings, ...techClashWarnings],
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primary,
@@ -2447,7 +2448,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   };
   const moved = [];
   const failed = [];
-  const warnings = [...(plan.techClashWarnings || [])];
+  // Only advisories observed by committed member writers (and subsequent
+  // locked assignment writes) reach the caller. Planning probes remain a
+  // hard-conflict preflight, never a source of stale/duplicate warnings.
+  const warnings = [];
   let primaryResult = null;
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical

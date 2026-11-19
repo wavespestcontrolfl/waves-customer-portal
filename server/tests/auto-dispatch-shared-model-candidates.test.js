@@ -80,6 +80,37 @@ function emptyDb() {
   return () => c;
 }
 
+test('a version-2 primary is refused before slot generation or ranking', async () => {
+  await expect(findValidCandidateSlots(
+    { ...SERVICE, reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'] } },
+    prefs,
+    { ...ctxBase(), db: emptyDb() },
+  )).rejects.toMatchObject({ code: 'VERSION_2_ALLOCATION', skipEvaluation: true });
+  expect(findAvailableSlots).not.toHaveBeenCalled();
+  expect(probeMoveConflicts).not.toHaveBeenCalled();
+});
+
+test('a grouped version-2 sibling is refused by the one group snapshot before slot generation or ranking', async () => {
+  openMembers.mockResolvedValue([{ id: 's1' }, { id: 's2' }]);
+  const db = jest.fn((table) => {
+    const q = {};
+    ['where', 'whereIn', 'whereNotIn'].forEach((method) => { q[method] = () => q; });
+    q.select = async () => [{
+      id: 's2', scheduled_date: SERVICE.scheduled_date, window_start: '10:00', window_end: '11:00',
+      estimated_duration_minutes: 60,
+      reservation_service_mix: { version: 2, allocatedServiceIds: ['s2', 's3'] },
+    }];
+    q.first = async () => (table === 'service_visits' ? { window_start: SERVICE.window_start } : null);
+    return q;
+  });
+
+  await expect(findValidCandidateSlots(
+    { ...SERVICE, visit_id: 'visit-1' }, prefs, { ...ctxBase(), db },
+  )).rejects.toMatchObject({ code: 'VERSION_2_ALLOCATION', skipEvaluation: true });
+  expect(findAvailableSlots).not.toHaveBeenCalled();
+  expect(probeMoveConflicts).not.toHaveBeenCalled();
+});
+
 // A conflicting row shaped just enough for scheduling/occupancy.js's
 // occupiedRows to expand it to a plain {startMin, endMin} span (no
 // reservation_service_mix -> not a version-2 combined allocation, the common

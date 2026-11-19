@@ -316,6 +316,14 @@ function skipEvaluation(code, message, cause) {
 // the tapped row — so the evaluation is abandoned (GROUP_CONTEXT_UNAVAILABLE,
 // which the orchestrator records as a no-change skip).
 const GROUP_CONTEXT_UNAVAILABLE = 'GROUP_CONTEXT_UNAVAILABLE';
+const VERSION_2_ALLOCATION = 'VERSION_2_ALLOCATION';
+function refuseVersion2Allocation(row) {
+  if (row?.reservation_service_mix?.version !== 2) return;
+  throw skipEvaluation(
+    VERSION_2_ALLOCATION,
+    `Service ${row.id} belongs to a version-2 allocation that auto-dispatch cannot move as a single row`,
+  );
+}
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
   const standalone = { excludeIds: new Set([selfId]), siblings: [], visitWindowStart: null };
@@ -332,15 +340,18 @@ async function loadGroupContext(db, service) {
         .select(
           'id', 'scheduled_date', 'technician_id', 'window_start', 'window_end', 'route_order', 'created_at',
           'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback', 'reservation_policy_version',
+          'reservation_service_mix',
         ),
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
     ]);
+    siblings.forEach(refuseVersion2Allocation);
     return {
       excludeIds,
       siblings: siblings.map((sib) => ({ ...sib, preserveCapacity: preservesCapacity(sib) })),
       visitWindowStart: (visit && visit.window_start) || null,
     };
   } catch (err) {
+    if (err?.skipEvaluation === true) throw err;
     throw skipEvaluation(GROUP_CONTEXT_UNAVAILABLE, 'Visit group could not be read', err);
   }
 }
@@ -1225,6 +1236,10 @@ async function unitTerritory(service, geo, ctx) {
 }
 
 async function findValidCandidateSlots(service, prefs, baseCtx) {
+  // Allocation rows have no single-row auto-dispatch writer. Refuse the
+  // primary before geo lookup / slot generation; loadGroupContext below
+  // applies the same gate to every open sibling before any ranking work.
+  refuseVersion2Allocation(service);
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
   // The visit group is read ONCE for this evaluation and shared by the

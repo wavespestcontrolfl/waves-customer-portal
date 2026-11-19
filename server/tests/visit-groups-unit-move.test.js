@@ -542,7 +542,7 @@ describe('moveVisitAsUnit', () => {
     }
   });
 
-  test('advisory preflight carries the arrival-routing warning instead of a self-overlap message', async () => {
+  test('a cleared preflight advisory is absent from the final committed-writer report', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     findConflictingVisits
       .mockResolvedValueOnce([{ id: 'a', warning: 'The promised arrival window cannot be reached in route order.' }])
@@ -553,8 +553,23 @@ describe('moveVisitAsUnit', () => {
       initiatedBy: 'admin', options: { overlapAdvisory: true, adminWindowRules: true },
     });
 
-    expect(out.warnings).toContain('The promised arrival window cannot be reached in route order.');
-    expect(out.warnings).not.toContain(expect.stringContaining('overlaps another job at its destination (a)'));
+    expect(out.warnings).toBeUndefined();
+  });
+
+  test('a persistent advisory is reported once from the committed member writer, not duplicated from preflight', async () => {
+    const warning = 'The promised arrival window cannot be reached in route order.';
+    db.__script = script({ members: [member('a'), member('b')] });
+    findConflictingVisits
+      .mockResolvedValueOnce([{ id: 'outside-job', warning }])
+      .mockResolvedValue([]);
+    const rebooker = fakeRebooker({ a: { warnings: [warning] } });
+
+    const out = await moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'admin', options: { overlapAdvisory: true, adminWindowRules: true },
+    });
+
+    expect(out.warnings).toEqual([warning]);
   });
 
   test('auto-dispatch cross-day groups fail closed when atomic unit commit is required; same-day and manual moves remain', async () => {
@@ -1101,7 +1116,7 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     db.__script = withClash(true, onTech('t9'));
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9', overlapAdvisory: true } });
     expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-    expect(out.warnings.filter((w) => /overlaps another job on the destination technician/.test(w)).length).toBeGreaterThanOrEqual(2);
+    expect(out.warnings.filter((w) => /overlaps another job on the destination technician/.test(w)).length).toBe(2);
     expect(assignDispatchJob).toHaveBeenCalledTimes(2);
     expect(db.__rawCalls.filter((c) => c[1] && c[1][0] === 'slot-reserve' && c[1][1] === 't9:2026-09-02').length).toBe(2);
     // a FAILED member is real occupancy again: it is NOT hidden from the assignment probes (local audit r32)

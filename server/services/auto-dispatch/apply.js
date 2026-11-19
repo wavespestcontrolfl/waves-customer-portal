@@ -1231,7 +1231,14 @@ async function previewGroupMove(service, best, config, conn = db) {
     const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
     const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
       .whereNotIn('status', TERMINAL_ROW_STATUSES)
-      .select('id', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+      .select('id', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'reservation_service_mix');
+    const allocated = members.find((member) => member.reservation_service_mix?.version === 2);
+    if (allocated) {
+      return {
+        code: 'VERSION_2_ALLOCATION',
+        description: `Grouped visit would be refused at apply — service ${allocated.id} belongs to a version-2 allocation`,
+      };
+    }
     if (members.length < 2) return null;
     const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
     const predicted = predictMemberWindows({

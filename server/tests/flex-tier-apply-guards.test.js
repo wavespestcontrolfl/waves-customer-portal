@@ -475,10 +475,11 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
   // A pool stub answering the preview's member + visit reads and the member
   // guard's own reads (sibling rows, plan alerts, the series and clash reads,
   // anchor evidence, the series fence).
-  function groupConn({ date }) {
+  function groupConn({ date, allocation = false }) {
     const members = [
       { id: 's1', status: 'confirmed', scheduled_date: date, window_start: '17:00', window_end: '18:00', estimated_duration_minutes: 60 },
-      { id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
+      { id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+        ...(allocation ? { reservation_service_mix: { version: 2, allocatedServiceIds: ['s2', 's3'] } } : {}) },
     ];
     const siblingRow = {
       id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
@@ -531,6 +532,20 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
       conn,
     )).resolves.toBeNull();
     expect(conn.raw).toHaveBeenCalled(); // reached the sibling's series fence and window
+  });
+
+  test('a sibling that joins a version-2 allocation during ranking is refused before a dry-run recommendation', async () => {
+    const conn = groupConn({ date: '2026-10-12', allocation: true });
+    await expect(previewGroupMove(
+      { ...service, scheduled_date: '2026-10-12', window_start: '17:00' },
+      { date: '2026-10-13', start_time: '17:00', end_time: '18:00', technician_id: null },
+      { guardMode: 'flex' },
+      conn,
+    )).resolves.toEqual({
+      code: 'VERSION_2_ALLOCATION',
+      description: expect.stringContaining('service s2 belongs to a version-2 allocation'),
+    });
+    expect(conn.raw).not.toHaveBeenCalled(); // allocation refusal precedes proofreader/member guards
   });
 
   test('an unreadable group is a failure the run records, not a quiet refusal', async () => {
