@@ -14,7 +14,7 @@
  * expiresAt and signedAt are instants and are formatted in Eastern time.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import {
   CustomerColumn,
@@ -466,6 +466,13 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     try {
       const res = await postJson(token, suffix, payload);
       if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: handled below
+      if (lost && !res.ok && res.status !== 404 && res.status !== 409) {
+        // Refused before the offer was checked (a 429, a 400): the lost send
+        // may still land. Keep it the only action, and read in case it has.
+        setError(res.body?.error || '');
+        await onReload();
+        return;
+      }
       setLost(null); // a definite answer
       if (res.status === 404) return onInvalid();
       if (res.status === 409) {
@@ -490,7 +497,7 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
     } finally {
       setBusy(false);
     }
-  }, [busy, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
+  }, [busy, lost, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
 
   const retry = useCallback(() => (lost ? run(lost.suffix, lost.payload) : undefined), [lost, run]);
   return { busy, error, setError, run, lost: Boolean(lost), retry };
@@ -689,7 +696,7 @@ const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.st
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
 async function readOffer(token) {
-  const res = await fetch(offerUrl(token));
+  const res = token ? await fetch(offerUrl(token)) : { status: 404 };
   if (res.status === 404) {
     const err = new Error('notfound');
     err.notFound = true;
@@ -700,9 +707,17 @@ async function readOffer(token) {
 }
 
 // Keyed by token so a pending write for one link can never land on another.
+// Only the link exactly as it was sent opens the offer: 64 lowercase hex and no
+// percent-encoding in the path. The router would decode other spellings, but a
+// stored message hides only the literal link (server/utils/offer-link-redaction.js,
+// any letter case), so no other spelling may work as a signing credential.
+const SENT_TOKEN_RE = /^[0-9a-f]{64}$/;
+
 export default function CareersOfferPage() {
   const { token } = useParams();
-  return <OfferPage key={token} token={token} />;
+  const { pathname } = useLocation();
+  const sent = SENT_TOKEN_RE.test(token || '') && !pathname.includes('%');
+  return <OfferPage key={token} token={sent ? token : ''} />;
 }
 
 function OfferPage({ token }) {

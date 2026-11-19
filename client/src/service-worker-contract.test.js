@@ -438,7 +438,9 @@ describe('service-worker private link pages', () => {
     await worker.dispatchActivate();
     expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(true);
-    await worker.dispatchFetch('/admin/', { mode: 'navigate' });
+    // The applicant may visit only the offer: that visit retries it too, and is still left to the browser.
+    const { response } = await worker.dispatchFetch(offerPaths[1], { mode: 'navigate' });
+    expect(response).toBeUndefined();
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
   });
 

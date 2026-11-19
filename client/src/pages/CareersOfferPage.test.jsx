@@ -40,7 +40,9 @@ function openPayload(overrides = {}) {
   };
 }
 
-function renderPage(path = '/careers/offer/tok-123') {
+const TOKEN = 'ab'.repeat(32); // 64 lowercase hex, as Send makes it
+
+function renderPage(path = `/careers/offer/${TOKEN}`) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
@@ -70,7 +72,7 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload()));
     renderPage();
     expect(await screen.findByRole('heading', { name: 'Your job offer' })).toBeInTheDocument();
-    expect(globalThis.fetch.mock.calls[0][0]).toMatch(/\/public\/careers\/offer\/tok-123$/);
+    expect(globalThis.fetch.mock.calls[0][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`));
     expect(screen.getByText((_, el) => el.tagName === 'P' && el.textContent === 'Signed by Sam Carter, owner · Dec 11, 2026')).toBeInTheDocument();
     expect(screen.getByText('Pest Control Technician')).toBeInTheDocument();
     expect(screen.getByText('Mon, Jan 4, 2027')).toBeInTheDocument();
@@ -415,6 +417,29 @@ describe('CareersOfferPage — open state', () => {
     expect(bodyOf(fetchMock, 3)).toEqual(bodyOf(fetchMock, 1));
   });
 
+  it('keeps a lost sign the only action when its resend is refused before the offer is checked (429)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // sign: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: not landed yet
+      .mockResolvedValueOnce(jsonResponse({ error: 'Too many requests, please try again shortly.' }, 429)) // the resend
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read after it: still open
+      .mockResolvedValueOnce(jsonResponse({ state: 'signed' }, 409)); // the next resend: it had landed
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Too many requests, please try again shortly.')).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+    expect(screen.getByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/You signed this offer\. Welcome to Waves\./)).toBeInTheDocument();
+    expect(bodyOf(fetchMock, 5)).toEqual({ signedName: 'Jordan Rivera' });
+  });
+
   it('keeps a text choice locked when its resend after a lost reply is refused, until a save settles it', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
@@ -526,6 +551,27 @@ describe('CareersOfferPage — other states', () => {
     expect(screen.getByRole('link', { name: '(941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
     expect(screen.queryByText('Accept and sign')).toBeNull();
     expect(screen.queryByText(/Technician Terms/)).toBeNull();
+  });
+
+  // A stored message hides only the literal link (any letter case), so only
+  // that spelling may open the offer: an encoded or malformed one never asks.
+  it.each([
+    [`/careers/offer/%61${TOKEN.slice(1)}`],
+    [`/careers/%6Fffer/${TOKEN}`],
+    [`/careers/offer/${TOKEN.toUpperCase()}`],
+    ['/careers/offer/tok-123'],
+  ])('shows the not-valid page for %s without reading the offer', async (path) => {
+    globalThis.fetch = vi.fn();
+    renderPage(path);
+    expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('opens the literal link in any letter case of the path', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload()));
+    renderPage(`/Careers/Offer/${TOKEN}`);
+    expect(await screen.findByRole('heading', { name: 'Your job offer' })).toBeInTheDocument();
+    expect(globalThis.fetch.mock.calls[0][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}$`));
   });
 
   it('shows a plain not-valid page on 404', async () => {

@@ -633,6 +633,10 @@ self.addEventListener('fetch', event => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
   if (url.pathname.startsWith('/ws/')) return;
+  // A purge that failed is tried again on every page load, an offer's included.
+  if (!privateLinksPurged && (event.request.mode === 'navigate' || event.request.destination === 'document')) {
+    event.waitUntil(purgePrivateLinkEntries().catch(() => {}));
+  }
   // Nor a job-offer link, in any request mode. A stored response or request
   // keeps its URL, so the link would sit in Cache Storage; and an offline
   // shell served in its place would carry another page's headers, without
@@ -643,7 +647,6 @@ self.addEventListener('fetch', event => {
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
   // never render a blank screen on flaky cellular.
   if (event.request.mode === 'navigate' || event.request.destination === 'document') {
-    if (!privateLinksPurged) event.waitUntil(purgePrivateLinkEntries().catch(() => {}));
     // Order navigations by when they BEGIN, not when their response lands:
     // an earlier request can be answered by the older deploy yet resolve
     // after a later request answered by the newer one.
