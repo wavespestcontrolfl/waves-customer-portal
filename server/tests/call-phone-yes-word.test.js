@@ -64,20 +64,8 @@ describe("the caller's words", () => {
     expect(callerWordsOf(evidence(choice('bill me each time at 9am')), talk(spelled))).toBe(spelled);
   });
 
-  test("the voice agent's marker lines are skipped: segments, reconnects, tool lines, truncation; any other unlabeled line is not", () => {
-    const segments = (recorded) => ({ transcript: `[AI segment]\nAgent: Thanks for calling Waves.\n[tool] lookup_customer {"found":true}\nCaller: I have a quote from you.\n\n[Reconnected]\nAgent: Sorry, you cut out.\n[AI transcript truncated]\n\n[Staff segment]\n${recorded}` });
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), segments('Agent: This is Sam.\nCaller: Just bill me each time.')))
-      .toBe('Just bill me each time.');
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), segments('Just bill me each time.'))).toBeNull();
+  test('any unlabeled line makes the transcript ungroundable', () => {
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: '[Note]\nAgent: Hi.\nCaller: Just bill me each time.' })).toBeNull();
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: 'Agent: Hi.\n[tool]\nCaller: Just bill me each time.' })).toBeNull();
-  });
-
-  test('nothing before a truncation notice is grounded (the cut may be mid-turn); a recorded segment after it is', () => {
-    const cut = '[AI segment]\nAgent: Thanks for calling Waves.\nCaller: Just bill me each time\n[AI transcript truncated]';
-    expect(callerWordsOf(evidence(choice('Just bill me each time')), { transcript: cut })).toBeNull();
-    expect(callerWordsOf(evidence(choice('Just bill me each time')), { transcript: `${cut}\n\n[Staff segment]\nAgent: This is Sam.\nCaller: Okay, just bill me each time.` }))
-      .toBe('Okay, just bill me each time.');
   });
 
   test('a quote across two sentences is found', () => {

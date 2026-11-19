@@ -26215,6 +26215,9 @@ CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
 // The one service-contact slot writer, for the family-account card's Attach as contact action (routes/admin-triage.js).
 CallRecordingProcessor.persistCallSecondaryContact = persistCallSecondaryContact;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
+// Shared with call-phone-yes-word.js: the outbound test, and a stored composite's recorded part.
+CallRecordingProcessor.isOutboundCall = isOutboundCall;
+CallRecordingProcessor.recordedPartOfComposite = recordedPartOfComposite;
 
 /**
  * leads.address is ONE free-text varchar(255), so the unit/suite from

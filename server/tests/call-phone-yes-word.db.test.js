@@ -219,6 +219,30 @@ describeDb("the caller's word (PostgreSQL)", () => {
       .resolves.toMatchObject({ choice: 'per_application', callLogId: callId, quote: WORDS });
   });
 
+  test("the voice agent's own text is never evidence; a call it handed to staff is read in its recorded part", async () => {
+    const heardOn = async (over) => {
+      const customerId = await customer();
+      await call(customerId, 'per_application', over);
+      return (await latestBillingChoice(trx, { customerId, since: since() })).quote;
+    };
+    const aiPart = `[AI segment]\nAgent: Thanks for calling Waves.\nCaller: ${WORDS}\n[tool] lookup_customer {"found":true}`;
+    // The agent's own text: it can clip a turn without a mark.
+    await expect(heardOn({ transcription_provider: 'conversation_relay', transcription: `Agent: Thanks for calling Waves.\nCaller: ${WORDS}\nAgent: Okay.` })).resolves.toBeNull();
+    await expect(heardOn({ transcription_provider: 'conversation_relay', transcription: aiPart })).resolves.toBeNull();
+    // Handed to staff: the recorded part is read, and only it.
+    await expect(heardOn({ transcription: `${aiPart}\n\n[Staff segment]\nAgent: This is Sam.\nCaller: Yes. ${WORDS}` })).resolves.toBe(`Yes. ${WORDS}`);
+    await expect(heardOn({ transcription: `${aiPart}\n\n[Staff segment]\nAgent: This is Sam.\nCaller: Thanks.` })).resolves.toBeNull();
+  });
+
+  test('a direction in any case is read the processor\'s way: an outbound call with no staff introduction grounds nothing', async () => {
+    const transcription = `Agent: Hello?\nCaller: ${WORDS}\nAgent: Okay.`;
+    for (const [direction, quote] of [['Outbound-API', null], ['outbound-dial', null], ['inbound', WORDS]]) {
+      const customerId = await customer();
+      await call(customerId, 'per_application', { direction, transcription });
+      await expect(latestBillingChoice(trx, { customerId, since: since() })).resolves.toMatchObject({ choice: 'per_application', quote });
+    }
+  });
+
   test.each([
     ['the yes came after the booking call', { yesHoursAgo: 1, bookingHoursAgo: 2 }, 'yes_after_booking'],
     ['the booking call could not be read', { bookingOver: { v2_extraction_status: 'failed' } }, 'booking_call_unread'],

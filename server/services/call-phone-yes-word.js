@@ -9,8 +9,10 @@
  * "okay" after a price question and an unclear word are no choice; the caller must name or plainly pick the plan; a
  * changed mind takes the final choice. This module judges no words itself, because a word screen cannot keep up with
  * free speech. It checks only what code can check: the choice's evidence is the caller's own words, word for word in a
- * caller turn of that call (the shared grounding tools). It gives the office the caller's latest turn that says them,
- * whole, so any condition or "no" is in front of the person who decides, and that person decides every card. And it waits, for a bounded time, for any recent call that is not read yet (owedReadSql).
+ * caller turn of the call's recording transcript (the shared grounding tools; the voice agent's own text is never
+ * evidence). It gives the office the caller's latest turn that says them, whole, so any condition or "no" is in front
+ * of the person who decides, and that person decides every card. And it waits, for a bounded time, for any recent
+ * call that is not read yet (owedReadSql).
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
@@ -21,7 +23,7 @@ const { callStartedAt } = require('../utils/call-timeline');
 const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds',
   'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
 // A call's columns for its word: the extraction and the transcript come from one row read.
-const WORD_COLUMNS = [...CALL_COLUMNS, 'transcription'];
+const WORD_COLUMNS = [...CALL_COLUMNS, 'transcription', 'transcription_provider'];
 // The extraction's evidence pointer for the caller's plan choice (JSON pointer; a dotted path in older rows).
 const BILLING_CHOICE_PATHS = new Set(['/service_request/billing_choice', 'service_request.billing_choice']);
 const CHOICE_SCAN_LIMIT = 50;
@@ -30,13 +32,6 @@ const CHOICE_SCAN_LIMIT = 50;
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
 // The call reader's cancel flag (triage_flags) takes it back the same way, whatever service_intent says.
 const CANCEL_FLAG = 'cancellation_request';
-// The voice agent's transcript holds its own non-speech lines between the labeled turns (voice-agent/relay-transcript.js
-// and relay-segments.js): the segment headers of a call it handed on, the separator between socket sessions, and its
-// tool lines. Only these exact lines are dropped; any other unlabeled line still makes the transcript ungroundable.
-const RELAY_MARKER_LINE = /^\s*(?:\[(?:AI|Staff|Voicemail) segment\]|\[Reconnected\]|\[tool\] .*)\s*$/;
-// Its truncation notice ends an AI part cut at a character, maybe mid-turn: nothing before it is grounded, and a
-// recorded segment after it still is.
-const TRUNCATED_LINE = /^\s*\[AI transcript truncated\]\s*$/;
 
 // How long a call can still be read for the first time or retried after its row last changed: the processor reads a
 // call within minutes, its retries come 10 minutes apart, and a call with no recording is recovered from its live text
@@ -62,23 +57,31 @@ function owedReadSql(t) {
 // When the call began, as SQL (the twin of callStartedAt).
 const startedSql = () => require('./sms-pending-conversations').callStartedAtSql('call_log');
 
+// The transcript the caller's words are grounded in: a recording's, or null. The voice agent's own text is never
+// evidence: its writer (voice-agent/relay-transcript.js) clips a long turn and the whole text without a mark, so a turn
+// can look whole when it is not. A call it handed to staff keeps its recorded part whole after its own text, and only
+// that part is read (the processor's recordedPartOfComposite); a call it handled alone has no recording transcript.
+function recordingTranscriptOf(row) {
+  const text = String(row.transcription || '');
+  const { TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
+  if (row.transcription_provider === TRANSCRIPTION_PROVIDER && !text.startsWith('[AI segment]')) return null;
+  return require('./call-recording-processor').recordedPartOfComposite(text);
+}
+
 // The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
-// evidence quote labeled the caller's (a short one must be a whole caller turn), with outbound labels oriented the way
-// the triage flags read them and the voice agent's marker lines dropped. Nothing is grounded in an unlabeled or
-// one-speaker transcript, before a truncation notice, or on an outbound call whose roles are not known: there the
-// labels may be swapped unless the agent side, and only it, introduces itself as Waves staff (the triage flags' test). The
-// words are the caller's latest turn that says a grounded quote at any length, found with the tools' own normalization
-// ("9am" = "9 a.m."), and always the whole turn: a later turn, or a later sentence, that takes the choice back is in
-// front of the office.
+// evidence quote labeled the caller's in a recording transcript (a short quote must be a whole caller turn), with
+// outbound labels oriented the way the triage flags read them. Nothing is grounded in an unlabeled or one-speaker
+// transcript, or on an outbound call whose roles are not known: there the labels may be swapped unless the agent
+// side, and only it, introduces itself as Waves staff (the triage flags' test). The words are the caller's latest turn
+// that says a grounded quote at any length, found with the tools' own normalization ("9am" = "9 a.m."), and always the
+// whole turn: a later turn, or a later sentence, that takes the choice back is in front of the office.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
   if (!quotes.length) return null;
   const { parseTurns, turnsHolding, normalize } = require('./call-reschedule-agreement').groundingTools;
   const { orientTranscriptForOutbound, STAFF_INTRO_RE } = require('./call-triage-flags');
-  const lines = String(transcript || '').split(/\r?\n/);
-  const labeled = lines.slice(lines.findIndex((line) => TRUNCATED_LINE.test(line)) + 1).filter((line) => !RELAY_MARKER_LINE.test(line));
-  const turns = parseTurns(orientTranscriptForOutbound(labeled.join('\n'), outbound));
+  const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
   const introduces = (agent) => turns.some((t) => t.agent === agent && STAFF_INTRO_RE.test(t.raw));
   if (outbound && (!introduces(true) || introduces(false))) return null;
@@ -101,14 +104,15 @@ function wordOfCall(row) {
   if (cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: callStartedAt(row) };
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!choice) return null;
-  const quote = callerWordsOf(extraction, { transcript: row.transcription, outbound: String(row.direction || '').startsWith('outbound') });
+  const { isOutboundCall } = require('./call-recording-processor');
+  const quote = callerWordsOf(extraction, { transcript: recordingTranscriptOf(row), outbound: isOutboundCall(row) });
   return { choice, callLogId: row.id, at: callStartedAt(row), quote };
 }
 
 // The customer's latest word on a call that began since `since`: the newest read, valid, two-party call whose
-// extraction names a billing choice or a cancellation (intent or flag) or one-time ask, as wordOfCall gives it, or null. SQL keeps only rows that name a
-// word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation, so voicemails never hide the last
-// word. Sandbox calls do not count.
+// extraction names a billing choice or a cancellation (intent or flag) or one-time ask, as wordOfCall gives it, or
+// null. SQL keeps only rows that name a word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation,
+// so voicemails never hide the last word. Sandbox calls do not count.
 async function latestBillingChoice(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { BILLING_CHOICES } = require('./call-prepay-choice');
