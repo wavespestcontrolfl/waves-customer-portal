@@ -74,6 +74,14 @@ it('no application fits: seeds the mix without Taurus, keeps Crosscheck and the 
   expect(screen.getByText("Taurus left out: this home reached the label's yearly limit (4 this year).")).toBeTruthy();
 });
 
+it('phone layout: shows the same left-out line beside the products', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+  await openPanel({ taurusYearly: FULL });
+  await screen.findByText('LESCO Crosscheck Plus');
+  expect(screen.queryByText('Taurus SC')).toBeNull();
+  expect(screen.getByText("Taurus left out: this home reached the label's yearly limit (4 this year).")).toBeTruthy();
+});
+
 it('room under the label: seeds the whole mix and says nothing', async () => {
   await openPanel({ taurusYearly: ROOM });
   await screen.findByText('Taurus SC');

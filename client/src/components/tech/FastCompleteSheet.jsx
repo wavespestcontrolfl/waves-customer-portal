@@ -1492,8 +1492,9 @@ function writerSources({ productCount, photoCount, marked, rated }) {
 // Taurus SC's yearly label limit at this home: the line saying it was left off the house mix, or the warning when it
 // is on the sheet over the limit. Warns only; null when the count is under the limit.
 function taurusNoteFor(ctx, active, sprayMethod) {
-  // A typed Taurus rate above the house mix's 0.4 fl oz/gal is a 0.06% application: judged on its own label scenario.
-  const rows = active.map((row) => ({ name: row.name, ...rowRate(row, sprayMethod) }));
+  // A Taurus row mixed above the house mix (rate or amount, same rule as the ledger) is a 0.06% application:
+  // judged on its own label scenario.
+  const rows = active.map((row) => ({ name: row.name, totalAmount: row.totalAmount, amountUnit: row.amountUnit, ...rowRate(row, sprayMethod) }));
   return taurusYearlyNote(ctx?.taurusYearly, rows, { mixVisit: ctx?.houseMix === true });
 }
 

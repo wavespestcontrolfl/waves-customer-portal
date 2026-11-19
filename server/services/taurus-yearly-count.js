@@ -104,10 +104,13 @@ const flOzAmount = (value, unit) => {
 /** 'high' (a 0.06% application) or 'low' (0.03%) for one ledger row. */
 function applicationConcentration(row) {
   if (String(row.application_date || '').slice(0, 10) < TAURUS_LOW_RATE_SINCE) return 'high';
-  if (unitKey(row.rate_unit) === 'fl_oz/gal' && Number(row.application_rate) > LOW_RATE_MAX_FL_OZ_PER_GAL) return 'high';
+  // A recorded concentration decides when the row has one: a dilution, else a fl_oz/gal rate.
   const dilution = parseFloat(String(row.dilution_rate ?? '').replace('%', ''));
-  if (Number.isFinite(dilution) && dilution >= HIGH_DILUTION_PERCENT) return 'high';
-  // An amount above the house mix (a bare oz / fl oz quantity, or a bare oz rate that is the tank amount).
+  if (Number.isFinite(dilution) && dilution > 0) return dilution >= HIGH_DILUTION_PERCENT ? 'high' : 'low';
+  const rate = Number(row.application_rate);
+  if (unitKey(row.rate_unit) === 'fl_oz/gal' && Number.isFinite(rate) && rate > 0) return rate > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
+  // No usable concentration: an amount above the house mix (a bare oz / fl oz quantity, or a bare oz rate
+  // that is the tank amount) is read as the old 0.06% tank (one 4-gal tank per home).
   const amounts = [flOzAmount(row.quantity_applied, row.quantity_unit), flOzAmount(row.application_rate, row.rate_unit)];
   return amounts.some((amount) => amount > HOUSE_TAURUS_FL_OZ) ? 'high' : 'low';
 }

@@ -29,11 +29,24 @@ export function taurusYearlyOf(taurusYearly) {
 const known = (taurusYearly) => taurusYearlyOf(taurusYearly) !== null;
 const exhausted = (taurusYearly) => known(taurusYearly) && taurusYearly.eligible === false;
 
-// A selected row mixed stronger than the house mix: a fl_oz/gal rate above 0.4 (1.6 fl oz per 4 gal is 0.4, 0.03%).
+// A selected row mixed stronger than the house mix, by the same rule the server applies to a saved ledger row
+// (services/taurus-yearly-count.js applicationConcentration): a fl_oz/gal rate decides when the row has one
+// (above 0.4 = 0.06%; 1.6 fl oz per 4 gal is 0.4, 0.03%); with no such rate, a bare oz / fl oz rate or amount
+// above the 1.6 fl oz house mix reads as the old 0.06% tank (one 4-gal tank per home).
 const HOUSE_FL_OZ_PER_GAL = 0.4;
-export const isHighTaurusRate = (row) => (
-  String(row?.rateUnit ?? '').trim().toLowerCase().replace(/\s+/g, '_') === 'fl_oz/gal' && Number(row?.rate) > HOUSE_FL_OZ_PER_GAL
-);
+const HOUSE_TAURUS_FL_OZ = 1.6;
+const unitKey = (unit) => String(unit ?? '').trim().toLowerCase().replace(/[\s.]+/g, '_');
+const isFlOzUnit = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
+export const isHighTaurusRate = (row) => {
+  const rate = Number(row?.rate);
+  if (unitKey(row?.rateUnit) === 'fl_oz/gal' && Number.isFinite(rate) && rate > 0) return rate > HOUSE_FL_OZ_PER_GAL;
+  const amountUnit = row?.amountUnit ?? row?.unit;
+  const amounts = [
+    isFlOzUnit(row?.rateUnit) ? rate : 0,
+    amountUnit == null || isFlOzUnit(amountUnit) ? Number(row?.totalAmount ?? row?.amount) : 0,
+  ];
+  return amounts.some((n) => Number.isFinite(n) && n > HOUSE_TAURUS_FL_OZ);
+};
 
 // pestDefaultMixSelections(...) rows, minus Taurus SC unless the home is known to have room under the label.
 export function applyTaurusYearlyLimit(selections, taurusYearly) {
@@ -53,7 +66,7 @@ export function taurusLeftOutLine(taurusYearly) {
 
 // The warning when a Taurus row is on the list although the label has no room for it at this home; null otherwise.
 // A row mixed above 0.4 fl_oz/gal is a 0.06% application and is judged by `eligibleHigh`, any other by `eligible`.
-// `products` are the selected rows ({ name, rate, rateUnit }) or catalog entries; warns only, never blocks.
+// `products` are the selected rows ({ name, rate, rateUnit, totalAmount, amountUnit }) or catalog entries; warns only, never blocks.
 export function taurusOverLimitWarning(taurusYearly, products) {
   if (!known(taurusYearly)) return null;
   const list = Array.isArray(products) ? products : [];

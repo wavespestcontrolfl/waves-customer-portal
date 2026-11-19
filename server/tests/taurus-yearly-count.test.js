@@ -84,6 +84,13 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ quantity_applied: 2, quantity_unit: 'gal' }))).toBe('low');
     expect(applicationConcentration(row({ quantity_applied: 3.2 }))).toBe('low');
   });
+
+  it('lets a recorded concentration decide over the amount (two house-strength tanks stay 0.03%)', () => {
+    expect(applicationConcentration(row({ application_rate: '0.4', rate_unit: 'fl_oz/gal', quantity_applied: '3.2', quantity_unit: 'fl_oz' }))).toBe('low');
+    expect(applicationConcentration(row({ dilution_rate: '0.03%', quantity_applied: 3.2, quantity_unit: 'fl_oz' }))).toBe('low');
+    expect(applicationConcentration(row({ dilution_rate: '0.06%', application_rate: '0.4', rate_unit: 'fl_oz/gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: '0.8', rate_unit: 'fl_oz/gal', quantity_applied: '1.6', quantity_unit: 'fl_oz' }))).toBe('high');
+  });
 });
 
 describe('etYearBounds', () => {

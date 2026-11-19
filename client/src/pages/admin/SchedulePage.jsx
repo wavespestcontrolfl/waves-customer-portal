@@ -19745,6 +19745,8 @@ export function CompletionPanel({
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : null
   );
+  // Taurus SC's yearly label limit at this home, shown in both layouts. Warns only, never blocks the save.
+  const taurusNoteText = taurusYearlyNote(taurusYearly, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
   if (isMobile) {
     const M = {
       page: "#FAFAFA",
@@ -21222,6 +21224,7 @@ export function CompletionPanel({
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
+              {taurusNoteText ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{taurusNoteText}</p> : null}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -23707,11 +23710,7 @@ export function CompletionPanel({
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
-          {(() => {
-            // Taurus SC's yearly label limit at this home. Warns only, never blocks the save.
-            const note = taurusYearlyNote(taurusYearly, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
-            return note ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{note}</p> : null;
-          })()}
+          {taurusNoteText ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{taurusNoteText}</p> : null}
           {quickComplete ? (
             <div
               style={{

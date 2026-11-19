@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { pestDefaultMixSelections } from './pest-default-mix';
 import {
   applyTaurusYearlyLimit,
+  isHighTaurusRate,
   isTaurusProduct,
   taurusLeftOutLine,
   taurusOverLimitWarning,
@@ -118,5 +119,27 @@ describe('isTaurusProduct', () => {
     expect(isTaurusProduct({ productName: 'taurus sc' })).toBe(true);
     expect(isTaurusProduct({ name: 'LESCO Crosscheck Plus' })).toBe(false);
     expect(isTaurusProduct(null)).toBe(false);
+  });
+});
+
+describe('isHighTaurusRate (the same rule the server applies to a saved ledger row)', () => {
+  it('lets a fl_oz/gal rate decide when the row has one', () => {
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'fl_oz/gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(false);
+  });
+
+  it('reads a bare oz rate or an amount above the 1.6 fl oz house mix as the old 0.06% tank', () => {
+    expect(isHighTaurusRate({ rate: '3.2', rateUnit: 'oz' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(true);
+    expect(isHighTaurusRate({ totalAmount: 3.2 })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', totalAmount: 1.6, amountUnit: 'fl_oz' })).toBe(false);
+    expect(isHighTaurusRate({ totalAmount: 3.2, amountUnit: 'gal' })).toBe(false);
+    expect(isHighTaurusRate({ name: 'Taurus SC' })).toBe(false);
+  });
+
+  it('warns when a 3.2 oz edit is made after three 0.03% applications (no 0.06% slot left after them)', () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    expect(taurusOverLimitWarning(threeLow, [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }])).toBeNull();
+    expect(taurusOverLimitWarning(threeLow, [{ name: 'Taurus SC', rate: '3.2', rateUnit: 'oz' }])).toBe("Over the label's yearly Taurus limit at this home.");
   });
 });
