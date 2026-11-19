@@ -48,6 +48,7 @@ const {
   promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
 } = require('../route-reorder-window-fit');
 const { SHIFT } = require('../scheduling/policy');
+const { allocationKey } = require('../scheduling/visit-capacity');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -96,7 +97,8 @@ const withResolvedWindow = (row) => {
  * coVisitGroups). Groups of one visit (one visit_id, which promisedWindowOrder keeps adjacent) are one stop on
  * tracking's own boundary (visit-groups.js): same customer and property, and windows that form one connected chain.
  * A visit with a morning and an afternoon service is two stops, as tracking keeps them; a legacy promised time
- * counts as its resolved interval (withResolvedWindow).
+ * counts as its resolved interval (withResolvedWindow). A version-2 allocation's services are one stop too, by the key
+ * dispatch groups them by (visit-capacity allocationKey; pre-push audit round 31).
  */
 function physicalStops(rows) {
   const { windowedMembersConnected } = require('../visit-groups');
@@ -110,7 +112,18 @@ function physicalStops(rows) {
     if (sameVisit) last.push(group);
     else stops.push([group]);
   }
-  return stops;
+  const merged = [];
+  const byAllocation = new Map();
+  for (const stop of stops) {
+    const key = stop.flat().map(allocationKey).find((k) => k != null);
+    const earlier = key == null ? null : byAllocation.get(key);
+    if (earlier) earlier.push(...stop);
+    else {
+      if (key != null) byAllocation.set(key, stop);
+      merged.push(stop);
+    }
+  }
+  return merged;
 }
 
 /**
@@ -133,7 +146,9 @@ function hourSlots(o) {
  *     their work summed;
  *   - each stop's planned minutes (planning-minutes.js plannedWorkMinutes): every row carries preserveCapacity, as
  *     dispatch stamps it (pre-push audit round 30), and the stops read selects every input the table reads;
- *   - its order rule: the stored order, or promised-window order when the stored one is stale (storedOrderStale);
+ *   - its order rule (its sequencers): the stored order; when that is stale (storedOrderStale), promised-window order
+ *     too. Between orders that both run, dispatch's own choice (selectWinningOrder): the least drive, then the least
+ *     waiting; the stored order on a tie (pre-push audit round 31);
  *   - its row mapping (a grouped stop's raw estimate is its summed work; an ordinary row keeps its raw estimate and
  *     is charged its work minutes);
  *   - its day end: the van home by DISPATCH_DAY_END, the drive home included (round 30);
@@ -144,25 +159,29 @@ function hourSlots(o) {
  * it runs a visit's services one by one, sums co-visit siblings' raw estimates and drives on the plain model.
  * Pre-push audit rounds 26, 28, 29 and 30 each found a part of this model that the check's own copy lacked.
  * { skip: 'GROUP_UNMODELED' } when dispatch cannot group the day either (its own code: a visit's services apart in the
- * order or at two places, or promises that do not overlap); { skip: 'NO_SIMULATION' } when the simulation fails,
- * including a booked day that ends after DISPATCH_DAY_END (dispatch refuses every placement on it).
+ * order or at two places, or promises that do not overlap); { skip: 'NO_SIMULATION' } when no order runs (dispatch's
+ * dayIsOvercommitted), including a booked day that ends after DISPATCH_DAY_END (dispatch refuses every placement on it).
  */
 function simulateBookedDay(rows, { origin, departureMin, blocks, date }) {
   const stamped = rows.map((row) => ({ ...row, preserveCapacity: true }));
   const grouped = groupRouteStops(stamped);
   if (!grouped) return { skip: 'GROUP_UNMODELED' };
-  const order = storedOrderStale(grouped, stamped) ? clockOrder(grouped) : currentOrder(grouped);
+  const orders = storedOrderStale(grouped, stamped) ? [currentOrder(grouped), clockOrder(grouped)] : [currentOrder(grouped)];
   const travel = RouteOptimizer.createSchedulingTravel({ maxRequests: 0 });
-  const seq = order.map((stop) => ({ ...stop,
-    raw_estimate_minutes: stop.memberIds ? stop.estimated_duration_minutes
-      : ('raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes),
-    estimated_duration_minutes: stop.memberIds ? stop.estimated_duration_minutes : workDuration(stop) }));
-  const sim = simulateArrivalRoute(RouteOptimizer, (row) => row.arrivalRange || effectiveWindowRange(row), seq, {
-    startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals: serviceBlocks(blocks),
-    dayEndMin: DISPATCH_DAY_END, includeReturnInFinish: true,
-    legMinutes: (from, to, departMin) => travel.lookup({ date, from, to, departureMin: departMin }).minutes,
-  });
-  return sim ? { sim } : { skip: 'NO_SIMULATION' };
+  const run = (order) => simulateArrivalRoute(RouteOptimizer, (row) => row.arrivalRange || effectiveWindowRange(row),
+    order.map((stop) => ({ ...stop,
+      raw_estimate_minutes: stop.memberIds ? stop.estimated_duration_minutes
+        : ('raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes),
+      estimated_duration_minutes: stop.memberIds ? stop.estimated_duration_minutes : workDuration(stop) })), {
+      startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals: serviceBlocks(blocks),
+      dayEndMin: DISPATCH_DAY_END, includeReturnInFinish: true,
+      legMinutes: (from, to, departMin) => travel.lookup({ date, from, to, departureMin: departMin }).minutes,
+    });
+  const sims = orders.map(run).filter(Boolean);
+  if (!sims.length) return { skip: 'NO_SIMULATION' };
+  const sim = sims.reduce((best, s) => (s.travelMin < best.travelMin
+    || (s.travelMin === best.travelMin && s.waitingMin < best.waitingMin) ? s : best));
+  return { sim };
 }
 
 /**

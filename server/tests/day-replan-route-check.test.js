@@ -120,12 +120,32 @@ describe('one tech-day', () => {
     expect(rc.measureTechDay({ ...open, rows: [am, pm, noon] })).toEqual({ stops: 3, skip: 'GROUP_UNMODELED' });
   });
 
-  test("the stored route order when it is a real plan, else each stop at its own promised time", () => {
+  test("dispatch's order rule: the stored order when it is a real plan; when it is stale, both orders run (round 31)", () => {
+    const { storedOrderStale } = require('../services/scheduling/arrival-route')._internals;
+    const ids = (rows) => rc.simulateBookedDay(rows, { origin: HQ, departureMin: 480, blocks: [], date: MONDAY }).sim.arrivals.map((x) => x.id);
     const a = stop('a', '09:00:00', '12:00:00', { route_order: 2 });
     const b = stop('b', '09:00:00', '12:00:00', { route_order: 1, customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    const ids = (rows) => rc.simulateBookedDay(rows, { origin: HQ, departureMin: 480, blocks: [], date: MONDAY }).sim.arrivals.map((x) => x.id);
-    expect(ids([a, b])).toEqual(['b', 'a']);
-    expect(ids([{ ...a, route_order: null }, b])).toEqual(['a', 'b']); // a null: promised-window order
+    expect(ids([a, b])).toEqual(['b', 'a']); // a real plan: the stored order alone
+    // Stale numbering (a gap, an earlier promise behind a later one): both orders run, and dispatch's choice wins
+    // (selectWinningOrder): here promised-window order z, x, y drives less than the stored x, z, y.
+    const at = (id, start, order, lat) => stop(id, start, null, { route_order: order, customer_id: `cust-${id}`, lat, lng: -82.45 });
+    const line = [at('x', '10:00:00', 1, 27.5), at('z', '09:00:00', 2, 27.45), at('y', '11:00:00', 4, 27.6)];
+    expect(storedOrderStale(line)).toBe(true);
+    expect(ids(line)).toEqual(['z', 'x', 'y']);
+    // The stored order still runs when promised-window order brings the van home after 18:00.
+    const day = [at('near', '14:00:00', 3, 27.41), at('far', '14:30:00', 1, 27.9)];
+    expect(storedOrderStale(day)).toBe(true);
+    expect(ids(day)).toEqual(['far', 'near']);
+  });
+
+  test("a version-2 allocation's services are one stop, also with no street address (round 31)", () => {
+    const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
+    const member = (id) => stop(id, '09:00:00', null, {
+      visit_id: null, customer_id: 'cust-1', scheduled_date: MONDAY, estimated_duration_minutes: 30, reservation_service_mix: mix,
+    });
+    const rows = [member('a1'), member('a2')];
+    expect(rc.physicalStops(rows)).toHaveLength(1);
+    expect(rc.measureTechDay({ ...open, rows })).toMatchObject({ stops: 1 });
   });
 
   test('a schedule block takes its time out of the openings', () => {
