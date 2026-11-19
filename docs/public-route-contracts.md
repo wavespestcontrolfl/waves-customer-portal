@@ -4749,6 +4749,11 @@ unfinished intent, and the locked read re-judges the full accept-active
 gate (declined / expired / archived / off-surface → 409 "Estimate is no
 longer active"), so no fresh capture is minted (and no checkout step
 recorded) for an estimate that turned terminal after the route's read.
+Before binding a recurring setup, acceptance checks its saved local disposition
+under the estimate lock. A recorded discard returns `402 RECURRING_CARD_REQUIRED`
+even while Stripe is still processing retirement. If checkout cannot read the
+disposition, it returns `503 RECURRING_CARD_VERIFICATION_UNAVAILABLE` for a retry.
+An estimate with no recorded disposition follows the existing live Stripe check.
 The `setup_intent.succeeded` webhook backstop re-reads an UNSTAMPED
 (legacy / flag-off) capture live from Stripe before enrolling and never
 enrolls a retired one. A chain head is judged by what it captured, like the accept

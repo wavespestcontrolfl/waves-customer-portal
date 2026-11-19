@@ -13009,8 +13009,15 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // Stripe under the same lock, so a retirement that committed since
       // the pre-transaction verify is seen here and aborts the accept
       // (402 → the client re-mints, which follows the replacement chain).
+      const captureDisposition = recurringCardVerification?.ok
+        ? await require('../services/estimate-recurring-capture-dispositions').findCaptureDisposition(trx, {
+          estimateId: estimate.id,
+          setupIntentId: recurringCardVerification.setupIntentId,
+        })
+        : null;
       if (recurringCardVerification?.ok
-        && !(await RecurringCards.verifyRecurringCardIntentUnderLock({ setupIntentId: recurringCardVerification.setupIntentId }))) {
+        && (captureDisposition?.discard_requested_at
+          || !(await RecurringCards.verifyRecurringCardIntentUnderLock({ setupIntentId: recurringCardVerification.setupIntentId })))) {
         const err = new Error('Save a card for Auto Pay to confirm your recurring plan');
         err.status = 402;
         err.code = 'RECURRING_CARD_REQUIRED';

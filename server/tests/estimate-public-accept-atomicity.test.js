@@ -3249,6 +3249,35 @@ describe('PAF-B r2 — captured intent / attestation vs the LIVE card policy', (
       [verifySpy, bankSpy, driftSpy, underLockSpy, enrollSpy].forEach((spy) => spy.mockRestore());
     });
 
+    test('a recorded discard prevents binding a setup whose provider update is still pending', async () => {
+      db.__state.tables.estimate_recurring_capture_dispositions = [{
+        estimate_id: storedEstimate().id, setup_intent_id: AFTER_VISIT.recurringCardSetupIntentId,
+        discard_requested_at: new Date().toISOString(), retired_at: null, legacy_recovery_claimed_at: null,
+      }];
+      const response = await putAccept(TOKEN, AFTER_VISIT);
+      expect(response.status).toBe(402);
+      expect(response.data.code).toBe('RECURRING_CARD_REQUIRED');
+      expect(underLockSpy).not.toHaveBeenCalled();
+      expect(enrollSpy).not.toHaveBeenCalled();
+      expect(storedEstimate().status).toBe('sent');
+    });
+
+    test('an unavailable discard decision returns a retry without binding the card', async () => {
+      db.__state.onTable = (table) => {
+        if (table === 'estimate_recurring_capture_dispositions') throw new Error('synthetic private query details');
+      };
+      try {
+        const response = await putAccept(TOKEN, AFTER_VISIT);
+        expect(response.status).toBe(503);
+        expect(response.data.error).toBe('We could not verify your saved payment method. Please try again.');
+        expect(underLockSpy).not.toHaveBeenCalled();
+        expect(enrollSpy).not.toHaveBeenCalled();
+        expect(storedEstimate().status).toBe('sent');
+      } finally {
+        db.__state.onTable = null;
+      }
+    });
+
     test('attached first-application invoice + card tender + after-visit attestation: accepted, variant stamped, enrollment records it', async () => {
       conversion('ss-first');
       const res = await putAccept(TOKEN, AFTER_VISIT);
