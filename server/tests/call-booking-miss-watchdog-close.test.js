@@ -379,6 +379,21 @@ describe('close pass', () => {
     expect(opts.dedupeKey).toBe(`call-booking-miss-rebook:${CALL_ID}:d1`);
   });
 
+  // Pre-push P1 (2026-11-18): a reprocessed call that no longer confirms a slot has a new
+  // decision about another reading of the call; it must not explain the stamped slot.
+  test('a reprocessed held call whose stamped slot stands in: the replacement bell names no hold reason', async () => {
+    const newDecision = { mode: 'enforce', routing: { allowed: false, reason: 'low_confidence', appointment_blocking_flags: [] } };
+    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, ai_validation: newDecision })];
+    mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
+    mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 1, raised: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — book Sam Sample's Waves Assessment");
+    expect(why).toBe('Confirmed Wed Nov 4 at 4:00 PM on a call; nothing is on the calendar.');
+    expect(opts.detail).not.toContain('The call agent held');
+  });
+
   test('second pass after the replacement: with the call reprocessed, the date check still closes when its visit is done', async () => {
     // The call no longer confirms a slot; the date check's own stamps (date, time, service) stand in.
     mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } } })];

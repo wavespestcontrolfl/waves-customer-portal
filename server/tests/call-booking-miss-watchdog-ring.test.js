@@ -133,7 +133,7 @@ describe('a visit the call agent held', () => {
   const HELD = { mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
   const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
 
-  test('rings 15 minutes after the call and names why; the scan reads ai_validation', async () => {
+  test('rings 15 minutes after the call and names why; the scan reads the decision and the call-end inputs', async () => {
     mockState.calls = [missCall({ created_at: minutesAgo(15), ai_validation: HELD })];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result).toMatchObject({ misses: 1, alerted: 1 });
@@ -141,7 +141,9 @@ describe('a visit the call agent held', () => {
     expect(title).toBe("Schedule — book Robin Example's Wasp Nest Removal");
     expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because the address is not confirmed.');
     expect(opts.bell).toBe(true);
-    expect(mockState.callLogSelects.some((cols) => cols.includes('ai_validation'))).toBe(true);
+    // ai_validation (the hold) and callEndedAt's inputs (where a held call's wait starts).
+    const needed = ['ai_validation', 'metadata', 'duration_seconds', 'recording_duration_seconds'];
+    expect(mockState.callLogSelects.some((cols) => needed.every((col) => cols.includes(col)))).toBe(true);
   });
 
   test('an unheld call of the same age still waits out GRACE_MINUTES', async () => {

@@ -76,6 +76,7 @@ const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-aler
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { QUIET_AGED_RULE, cardIsNewer } = require('./triage-auto-resolve');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
+const { callEndedAt } = require('../utils/call-timeline');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
 // inside Monday morning's window even after a full weekend of gated-off or
@@ -107,8 +108,26 @@ const HOLD_REASONS = [
   ['low_confidence_address', 'the address was hard to hear'],
   ['ambiguous_pest_or_service', 'the service is not clear'],
   ['low_extraction_confidence', 'the call details are unclear'],
+  ['on_file_house_number_conflict', 'a different house number was given'],
 ];
+// The house-number hold (the processor's houseNumberDisputed) blocks an allowed decision
+// after the fact: it stores no routing reason and no blocking flag, only this flag in
+// routing.flags.
+const HOUSE_NUMBER_FLAG = 'on_file_house_number_conflict';
 const HOLD_REASON_FALLBACK = 'the call needs a review';
+// A routing decision that blocked for a reason of its own names it in routing.reason, with
+// an empty or less exact appointment_blocking_flags: these reasons come first. A reason
+// that cannot stand beside a confirmed slot (no_extraction, not_confirmed,
+// confirmed_without_start_time) is not listed.
+const HOLD_REASONS_BY_ROUTING = new Map([
+  ['v1_only_new_address', 'the address is not the one on file'],
+  ['address_not_validated', 'the address is not confirmed'],
+  ['off_hour_start', 'the start time is not on the hour'],
+  ['low_confidence', 'the call details are unclear'],
+  ['do_not_contact', 'the caller asked not to be contacted'],
+  ['unsupported_service', 'the service is not auto-bookable'],
+  ['administrative_followup', 'the call is an office follow-up'],
+]);
 // A first enable scans the whole window; cap the bells per run so a backlog
 // rings loudly but not unreadably. Dedupe keys make the remainder ring on
 // subsequent ticks.
@@ -217,7 +236,9 @@ function agentHoldReason(validationRaw) {
   }
   const routing = validation && validation.mode === 'enforce' ? validation.routing : null;
   if (!routing || routing.allowed !== false) return null;
+  if (HOLD_REASONS_BY_ROUTING.has(routing.reason)) return HOLD_REASONS_BY_ROUTING.get(routing.reason);
   const flags = new Set(Array.isArray(routing.appointment_blocking_flags) ? routing.appointment_blocking_flags : []);
+  if (routing.reason == null && Array.isArray(routing.flags) && routing.flags.includes(HOUSE_NUMBER_FLAG)) flags.add(HOUSE_NUMBER_FLAG);
   const hit = HOLD_REASONS.find(([flag]) => flags.has(flag));
   return hit ? hit[1] : HOLD_REASON_FALLBACK;
 }
@@ -308,9 +329,10 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
-// ai_extraction_enriched, ai_validation }); a call the call agent held
-// (agentHoldReason) waits HELD_GRACE_MINUTES instead of GRACE_MINUTES, and its
-// miss carries `holdReason`. `bookedRows` are scheduled_services rows
+// ai_extraction_enriched, ai_validation, metadata, duration_seconds,
+// recording_duration_seconds }); a call the call agent held (agentHoldReason)
+// waits HELD_GRACE_MINUTES from the call's end (callEndedAt) instead of
+// GRACE_MINUTES from created_at, and its miss carries `holdReason`. `bookedRows` are scheduled_services rows
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
 // Date round-trip), window_start, created_at, source_call_log_id, notes }),
 // ANY status: cancelled/rescheduled rows clear only on call provenance
@@ -327,7 +349,11 @@ function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes =
   for (const call of calls) {
     const createdAt = call.created_at ? new Date(call.created_at) : null;
     const holdReason = agentHoldReason(call.ai_validation);
-    if (!createdAt || createdAt > (holdReason ? heldGraceCutoff : graceCutoff)) continue;
+    // A held call's wait starts when the call ends, so the office gets its 10 minutes after
+    // hanging up: a row inserted at pickup holds the call's start in created_at. A post-call
+    // row with no end stamp has no callEndedAt, and its created_at is already after the call.
+    const clock = holdReason ? (callEndedAt(call) || createdAt) : createdAt;
+    if (!createdAt || clock > (holdReason ? heldGraceCutoff : graceCutoff)) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
     if (clearingRow(call, slot, bookedRows, namesakes.get(call.id))) continue;
@@ -714,19 +740,23 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   for (const call of calls) {
     const rows = byCall.get(call.id);
     const stamp = rows.find((r) => r.confirmed_date_et && /^\d{2}:\d{2}/.test(r.confirmed_time_et));
-    const slot = extractConfirmedSlot(call.ai_extraction_enriched) || (stamp && {
+    const ownSlot = extractConfirmedSlot(call.ai_extraction_enriched);
+    const slot = ownSlot || (stamp && {
       dateET: stamp.confirmed_date_et,
       minutes: windowStartMinutes(stamp.confirmed_time_et),
       name: (/^Schedule — (?:book|check) (.+?)'s /.exec(stamp.title) || [])[1],
       service: stamp.confirmed_service || (/^Schedule — book .+?'s (.+)$/.exec(stamp.title) || [])[1],
     });
-    if (slot) entries.push({ call, slot, rows });
+    // The hold reason belongs to the decision made on the extraction that confirmed the slot:
+    // a stamped slot stands in for a reprocessed call whose new decision is about another
+    // reading of the call, so it carries none.
+    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? agentHoldReason(call.ai_validation) : null });
   }
   if (!entries.length) return [];
 
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
-  return entries.map(({ call, slot, rows }) => ({ call, slot, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+  return entries.map(({ call, slot, rows, holdReason }) => ({ call, slot, holdReason, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
 }
 
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): a person decided not to book the
@@ -762,14 +792,14 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
   const closeRows = ({ ids, resolution }, callId) => NotificationService._private.openToCloser(db('notifications').where({ recipient_type: 'admin' }).whereIn('id', ids), BELL_DEDUPE_PREFIX)
     .update(NotificationService._private.doneColumns({ by: BELL_DEDUPE_PREFIX, resolution, keepExisting: true, conn: db }))
     .catch((err) => { logger.warn(`[call-booking-miss] failed to close bell(s) for call ${callId}: ${err.message}`); return 0; });
-  for (const { call, slot, plan } of plans) {
+  for (const { call, slot, holdReason, plan } of plans) {
     if (plan.ring) {
       // One alert budget per run (MAX_ALERTS_PER_RUN), shared with the ring path: past
       // it, a plan that needs a new bell waits for the next tick with its old bells open;
       // plain closes still run.
       if (raised >= MAX_ALERTS_PER_RUN) { waiting += 1; continue; }
       // A replacement "book it" bell for a call the call agent held says why, as its first bell did.
-      const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason: agentHoldReason(call.ai_validation) };
+      const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason };
       const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey, repeat: false })
         .catch((err) => { logger.warn(`[call-booking-miss] failed to raise the replacement bell for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the replacement stands ('rung' or an
@@ -837,6 +867,8 @@ async function runInner({ now }) {
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
+      // callEndedAt's inputs, for a held call's wait.
+      'metadata', 'duration_seconds', 'recording_duration_seconds',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
@@ -1056,6 +1088,7 @@ module.exports = {
   HELD_GRACE_MINUTES,
   HOLD_REASONS,
   HOLD_REASON_FALLBACK,
+  HOLD_REASONS_BY_ROUTING,
   MAX_ALERTS_PER_RUN,
   WINDOW_MATCH_TOLERANCE_MINUTES,
   REPEAT_INTERVAL_MINUTES,

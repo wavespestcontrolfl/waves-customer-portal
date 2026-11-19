@@ -23,6 +23,7 @@ const {
   HELD_GRACE_MINUTES,
   HOLD_REASONS,
   HOLD_REASON_FALLBACK,
+  HOLD_REASONS_BY_ROUTING,
 } = require('../services/call-booking-miss-watchdog');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 
@@ -271,6 +272,42 @@ describe('a visit the call agent held', () => {
     expect(agentHoldReason(held([]))).toBe(HOLD_REASON_FALLBACK);
   });
 
+  // Pre-push P1 (2026-11-18): some blocked decisions carry their cause in routing.reason,
+  // with empty or less exact blocking flags.
+  test('a routing reason of its own names the hold before the flags do', () => {
+    const blocked = (reason, flags = []) => ({ mode: 'enforce', routing: { allowed: false, reason, appointment_blocking_flags: flags } });
+    expect(agentHoldReason(blocked('off_hour_start'))).toBe('the start time is not on the hour');
+    expect(agentHoldReason(blocked('address_not_validated'))).toBe('the address is not confirmed');
+    expect(agentHoldReason(blocked('low_confidence'))).toBe('the call details are unclear');
+    expect(agentHoldReason(blocked('v1_only_new_address', ['address_unverified']))).toBe('the address is not the one on file');
+    expect(agentHoldReason(blocked('triage_flags', ['caller_not_authorized']))).toBe('the caller is not the account holder');
+    expect(agentHoldReason(blocked(null))).toBe(HOLD_REASON_FALLBACK);
+    // The house-number hold stores no reason and no blocking flag; its flag rides routing.flags.
+    const houseNumber = (reason) => ({ mode: 'enforce', routing: { allowed: false, reason, flags: ['on_file_house_number_conflict'], appointment_blocking_flags: [] } });
+    expect(agentHoldReason(houseNumber(null))).toBe('a different house number was given');
+    // Beside a decision blocked for its own reason, the same flag is advice, not the hold.
+    expect(agentHoldReason(houseNumber('triage_flags'))).toBe(HOLD_REASON_FALLBACK);
+  });
+
+  // Pre-push P1 (2026-11-18): the /voice webhook inserts the row when the call begins, so a
+  // long call would ring while the office is still booking it right after hanging up.
+  test('a held call waits from the end of the call, not from its start', () => {
+    const ended = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+    const misses = computeBookingMisses([
+      // Inserted at pickup, 12 minutes long: ended 3 minutes ago, still waiting.
+      call({ id: 'long-call', created_at: minutesAgo(15), duration_seconds: 12 * 60, ai_validation: held() }),
+      // The same call 8 minutes later: ended 11 minutes ago.
+      call({ id: 'long-call-done', created_at: minutesAgo(23), duration_seconds: 12 * 60, ai_validation: held() }),
+      // A post-call row: created_at is already after the call.
+      call({ id: 'post-call-row', created_at: minutesAgo(11), duration_seconds: 12 * 60, metadata: { source: 'status_callback' }, ai_validation: held() }),
+      // Twilio's end stamp wins over created_at + length: ended 5 minutes ago.
+      call({ id: 'end-stamped', created_at: minutesAgo(30), duration_seconds: 60, metadata: { ended_at: ended(5) }, ai_validation: held() }),
+    ], [], { now: NOW });
+    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row']);
+    // An unheld call keeps its wait from created_at.
+    expect(computeBookingMisses([call({ duration_seconds: 120 * 60 })], [], { now: NOW })).toHaveLength(1);
+  });
+
   test('the bell says why it was held; an unheld miss keeps "nothing is on the calendar"', () => {
     const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held() })], [], { now: NOW });
     const text = bookItAlert(miss, false);
@@ -283,7 +320,7 @@ describe('a visit the call agent held', () => {
 
   test('every reason fits the why rules behind the longest prefix and slot', () => {
     const slot = { dateET: '2026-09-30', minutes: 12 * 60, name: 'Pat Sample', service: 'Waves Assessment' };
-    for (const holdReason of [...HOLD_REASONS.map(([, phrase]) => phrase), HOLD_REASON_FALLBACK]) {
+    for (const holdReason of [...HOLD_REASONS.map(([, phrase]) => phrase), ...HOLD_REASONS_BY_ROUTING.values(), HOLD_REASON_FALLBACK]) {
       for (const repeat of [false, true]) {
         const text = bookItAlert({ call: call(), slot, holdReason }, repeat);
         expect(() => composeAdminAlert({
