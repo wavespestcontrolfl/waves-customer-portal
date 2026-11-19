@@ -289,15 +289,25 @@ async function liveAdModes(conn) {
 
 /**
  * Today's stops done or on site, per technician (the van's progress): a completed stop's place and finish, and an
- * on-site stop's arrival (its other fields come from the live rows).
+ * on-site stop's arrival (its other fields come from the live rows). Finish and arrival follow the completion
+ * writer's own precedence (service-duration-capture.js): the dispatch end/start fields first, then the tracker's,
+ * so a completion whose tracker update failed still has its finish.
  */
 async function loadProgress(conn, day) {
-  return conn('scheduled_services')
+  const { firstFiniteDate } = require('../../utils/service-duration-capture');
+  const rows = await conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.scheduled_date', day)
     .whereIn('scheduled_services.status', ['completed', 'on_site'])
     .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.status',
-      'scheduled_services.completed_at', 'scheduled_services.arrived_at', ...guardedCoordSelects(conn));
+      'scheduled_services.completed_at', 'scheduled_services.actual_end_time', 'scheduled_services.check_out_time',
+      'scheduled_services.arrived_at', 'scheduled_services.actual_start_time', 'scheduled_services.check_in_time',
+      ...guardedCoordSelects(conn));
+  return rows.map((r) => ({
+    id: r.id, technician_id: r.technician_id, status: r.status, lat: r.lat, lng: r.lng,
+    completed_at: firstFiniteDate(r.actual_end_time, r.check_out_time, r.completed_at),
+    arrived_at: firstFiniteDate(r.actual_start_time, r.check_in_time, r.arrived_at),
+  }));
 }
 
 async function eligibility(conn, from, to) {

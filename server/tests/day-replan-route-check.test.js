@@ -426,6 +426,16 @@ describe('runRouteCheck', () => {
     expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ON_SITE_NOT_IN_ROUTE' });
   });
 
+  test("a completion whose tracker update failed: the dispatch finish time sets the van's clock", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn({ progress: [{
+      id: 'd1', technician_id: TECH, status: 'completed', completed_at: null, check_out_time: null,
+      actual_end_time: '2026-11-19T15:20:00Z', lat: 27.5, lng: -82.4, // 10:20 ET
+    }] });
+    await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', van: 'completed' });
+  });
+
   test("a failed progress read on a Sunday keeps today's technicians, marked FAILED", async () => {
     replan.loadDayStops.mockResolvedValue([]);
     const { conn, writes } = fakeConn();
