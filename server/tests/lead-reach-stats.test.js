@@ -150,16 +150,72 @@ describe('judgeReach', () => {
       ...none,
       texts: [{ key: phoneKey(c), scope: 'phone', customerId: null, at: at(5) }, { key: phoneKey(d), scope: 'phone', customerId: null, at: at(40) }],
       estimates: [
-        { leadId: '1', at: at(2), automated: true, deliveries: 2 }, // automated, then sent again by someone unknown
-        { leadId: '2', at: at(2), automated: true, deliveries: 1 }, // automated only: no person reached the lead
-        { leadId: '3', at: at(2), automated: true, deliveries: 2 }, // a person's text inside 15 minutes settles it
-        { leadId: '4', at: at(2), automated: true, deliveries: 3 }, // a later text does not
+        { leadId: '1', at: at(2), automated: true, deliveries: 2, autoDeliveries: 1 }, // automated, then sent again by someone unknown
+        { leadId: '2', at: at(2), automated: true, deliveries: 1, autoDeliveries: 1 }, // automated only: no person reached the lead
+        { leadId: '3', at: at(2), automated: true, deliveries: 2, autoDeliveries: 1 }, // a person's text inside 15 minutes settles it
+        { leadId: '4', at: at(2), automated: true, deliveries: 3, autoDeliveries: 1 }, // a later text does not
       ],
     });
     expect(result.get('1')).toBe(NOT_JUDGED);
     expect(result.get('2')).toBeNull();
     expect(result.get('3')).toBe(5);
     expect(result.get('4')).toBe(NOT_JUDGED);
+  });
+
+  // Round 3, finding 1: the moving job's overnight email and its recorded morning text are both known automation.
+  test('only deliveries beyond the ones the automation records prove leave a lead not judged', () => {
+    const a = lead(1);
+    const b = lead(2);
+    const result = judgeReach([a, b], {
+      ...none,
+      estimates: [
+        { leadId: '1', at: at(2), automated: true, deliveries: 2, autoDeliveries: 2 }, // email + recorded morning text
+        { leadId: '2', at: at(2), automated: true, deliveries: 3, autoDeliveries: 2 }, // one more nobody accounts for
+      ],
+    });
+    expect(result.get('1')).toBeNull();
+    expect(result.get('2')).toBe(NOT_JUDGED);
+  });
+
+  // Round 3, finding 2: a staff-bridge call row starts when the employee is rung, not when the customer answers.
+  test('an outbound call is reached when the customer leg connected; with none, a call across the 15-minute edge is not judged', () => {
+    const a = lead(1);
+    const b = lead(2);
+    const c = lead(3);
+    const d = lead(4);
+    const call = (l, fields) => ({ key: phoneKey(l), scope: 'phone', customerId: null, sid: null, stampedTo: null, spanEnd: null, ...fields });
+    const result = judgeReach([a, b, c, d], {
+      ...none,
+      calls: [
+        call(a, { at: at(16), spanEnd: null }), // started at 14, the customer leg connected at 16: later, not within
+        call(b, { at: at(14), spanEnd: at(22) }), // no customer leg; started inside, ended outside: unknown
+        call(c, { at: at(3), spanEnd: at(9) }), // started and ended inside: reached
+        call(d, { at: at(20), spanEnd: at(30) }), // started after the window: later
+      ],
+    });
+    expect(result.get('1')).toBe(16);
+    expect(result.get('2')).toBe(NOT_JUDGED);
+    expect(result.get('3')).toBe(3);
+    expect(result.get('4')).toBe(20);
+  });
+
+  // Round 3, finding 3: one call, one owner: settled stamp, then the originating sid, then the phone.
+  test('an originating call credits the lead that owns its sid, not an older lead on the caller phone', () => {
+    const older = lead(1, { phone: '+19415550500', first_contact_at: new Date(at(-600)).toISOString() });
+    const caller = lead(2, { phone: '+19415550501', twilio_call_sid: 'CA-origin-2' });
+    const result = judgeReach([older, caller], {
+      ...none,
+      calls: [{ key: phoneKey(older), scope: 'phone', customerId: null, sid: 'CA-origin-2', stampedTo: null, at: at(-1) }],
+    });
+    expect(result.get('2')).toBe(0);
+    expect(result.get('1')).toBeNull();
+    // A settled stamp outranks the sid: the call goes to lead 1 alone.
+    const stamped = judgeReach([older, caller], {
+      ...none,
+      calls: [{ key: phoneKey(older), scope: 'phone', customerId: null, sid: 'CA-origin-2', stampedTo: '1', at: at(4) }],
+    });
+    expect(stamped.get('1')).toBe(604);
+    expect(stamped.get('2')).toBeNull();
   });
 });
 
@@ -272,10 +328,38 @@ describe('loadLeadReachStats', () => {
 
   test('a lead whose only estimate was automated and then sent again is left out of every count', async () => {
     const conn = fakeConn({
-      estimates: [{ id: 'e1', linked_lead_id: 1, at: new Date(at(2)).toISOString(), automated: true, deliveries: 2 }],
+      estimates: [{ id: 'e1', linked_lead_id: 1, at: new Date(at(2)).toISOString(), automated: true, auto_deliveries: 1, deliveries: 2 }],
     });
     const stats = await loadLeadReachStats([lead(1), lead(2)], { conn });
     expect(stats).toEqual({ cohort: 1, reachedWithin: 0, reachedLater: 0, neverReached: 1, notJudged: 1, withinMinutes: 15 });
+  });
+
+  test('a moving estimate emailed and then texted by the app is counted as never reached, not left out', async () => {
+    const conn = fakeConn({
+      estimates: [{ id: 'e1', linked_lead_id: 1, at: new Date(at(2)).toISOString(), automated: true, auto_deliveries: 2, deliveries: 2 }],
+    });
+    const stats = await loadLeadReachStats([lead(1)], { conn });
+    expect(stats).toMatchObject({ cohort: 1, neverReached: 1, notJudged: 0 });
+  });
+
+  // Round 3, finding 4: the stamped-call lookup does not depend on which other leads are in the window.
+  test('an email-only lead is reached by a later call the processor settled onto it', async () => {
+    const mine = lead(7, { phone: null, email: 'pat.fixture@example.invalid' });
+    const conn = fakeConn({
+      call_log: [{ peer: '9415550999', sid: 'CA-later', at: new Date(at(5)), direction: 'inbound', stamp_lead_id: '7', settled: true, customer_id: null }],
+    });
+    const stats = await loadLeadReachStats([mine], { conn });
+    expect(conn.calls).toContain('call_log');
+    expect(stats).toMatchObject({ cohort: 1, reachedWithin: 1, neverReached: 0 });
+  });
+
+  // Round 3, finding 5: the SEO outreach job sends from the same Gmail account and stores each pitch's thread.
+  test('the sent-email read leaves out the SEO outreach job\'s Gmail threads', async () => {
+    const conn = fakeConn({});
+    await loadLeadReachStats([lead(1, { email: 'pat.fixture@example.invalid' })], { conn });
+    const sql = conn.raws.emails.join(' | ');
+    expect(sql).toContain('seo_link_prospects');
+    expect(sql).toContain('outreach_thread_ref IN (er.gmail_thread_id, er.gmail_id)');
   });
 
   test('an empty cohort runs no query', async () => {
