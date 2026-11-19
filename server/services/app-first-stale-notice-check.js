@@ -210,8 +210,19 @@ async function runAppFirstStaleNoticeCheck({ database = db, now = new Date() } =
   return { found: rows.length, digest };
 }
 
+// Did the run fail to do its job? A query failure, or a digest that was not delivered (the send
+// threw, or the email fallback was refused or failed). Clean runs and delivered findings are not
+// failures. The cron callback throws on it, so job_health records a failed tick like its siblings;
+// the code is a fixed word, never row data or provider text.
+function staleNoticeCheckFailure(result) {
+  if (result?.skipped === 'query_failed') return 'query_failed';
+  const digest = result?.digest;
+  return digest?.ok === false || digest?.error === true ? 'digest_failed' : null;
+}
+
 module.exports = {
   OPS_DIGEST_KEY,
+  staleNoticeCheckFailure,
   STALE_DAYS,
   staleRows,
   groupByVisit,

@@ -1705,7 +1705,7 @@ const TwilioService = {
           messageType: options.messageType,
           appointmentId: options.appointmentId || null,
           preSendCheck: options.preSendCheck,
-          ...(staleAppCompanion ? { staleApp: true } : {}),
+          ...(staleAppCompanion ? { staleApp: true, invoiceId: options.invoiceId, notificationEventKey: options.notificationEventKey } : {}),
         }).catch(() => {});
       }
 

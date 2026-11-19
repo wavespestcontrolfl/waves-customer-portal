@@ -271,6 +271,47 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     expect(mockNotifyCustomer).not.toHaveBeenCalled();
   });
 
+  it('sendCompanionPush staleApp carries invoiceId and the event key: two receipts keep distinct tags, and the bell dedupes on the event key', async () => {
+    mockPrefs = { payment_receipt_channel: 'sms' };
+    mockSendToCustomer.mockResolvedValue({ sent: 1 });
+    const companion = (invoiceId) => PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Your receipt is ready.', messageType: 'receipt',
+      staleApp: true, invoiceId, notificationEventKey: `receipt:${invoiceId}` });
+    await companion('inv-1');
+    await companion('inv-2');
+    expect(mockSendToCustomer).toHaveBeenCalledTimes(2);
+    const tags = mockSendToCustomer.mock.calls.map((c) => c[1].tag);
+    expect(new Set(tags).size).toBe(2);
+    expect(tags[0]).toContain('inv-1');
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(2);
+    expect(mockNotifyCustomer.mock.calls[0][4]).toMatchObject({ dedupeKey: 'receipt:inv-1' });
+    expect(mockNotifyCustomer.mock.calls[1][4]).toMatchObject({ dedupeKey: 'receipt:inv-2' });
+  });
+
+  it('sendCompanionPush without staleApp passes no identifiers (push_and_sms unchanged): the type-wide bell, no dedupe key', async () => {
+    mockDevices.push(device({ updated_at: hoursAgo(2) }));
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Reminder.', messageType: 'appointment_reminder', appointmentId: 'visit-1' });
+    expect(mockNotifyCustomer.mock.calls[0][4].dedupeKey).toBeUndefined();
+  });
+
+  it('fresh phone rejects and a stale phone accepts: delivered false, not_sent, no proof row, the text goes (same as contact accepted, holder failed)', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ updated_at: hoursAgo(2) }));
+    mockSendToCustomer.mockResolvedValue({ sent: 0, staleHolderDevices: { sent: 1, subscriptions: 1 }, acceptedCheckedInAt: null });
+    expect(await send()).toEqual({ delivered: false, deliveryOutcome: 'not_sent' });
+    expect(mockProofRows).toHaveLength(0);
+    const opts = mockSendToCustomer.mock.calls[0][2];
+    expect(opts.holderMinUpdatedAt).toBeInstanceOf(Date);
+  });
+
+  it('fresh phone accepts (the stale phone was sent too): delivered, and the stamp is the fresh phone\'s check-in only', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    const fresh = hoursAgo(2);
+    mockDevices.push(device({ updated_at: fresh }));
+    mockSendToCustomer.mockResolvedValue({ sent: 1, staleHolderDevices: { sent: 1, subscriptions: 1 }, acceptedCheckedInAt: fresh });
+    expect((await send()).delivered).toBe(true);
+    expect(JSON.parse(mockProofRows[0].metadata).app_checked_in_at).toBe(fresh.toISOString());
+  });
+
   it('sendCompanionPush without staleApp: unchanged (the holder freshness gate and the heartbeat floor apply)', async () => {
     await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Reminder.', messageType: 'appointment_reminder' });
     expect(mockSendToCustomer).not.toHaveBeenCalled();

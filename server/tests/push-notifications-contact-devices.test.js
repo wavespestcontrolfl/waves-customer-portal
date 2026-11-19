@@ -224,14 +224,46 @@ describe('sendToCustomer — acceptedCheckedInAt (the stamp the push proof row c
     expect((await send('tech_en_route')).acceptedCheckedInAt.getTime()).toBe(fresh.getTime());
   });
 
-  test('holderMinUpdatedAt drops a stale HOLDER phone only: a contact phone opened 31 days ago keeps its push', async () => {
-    subs = [phone('s1', 'tok-h', daysAgo(1)), phone('s2', 'tok-h-old', daysAgo(40)), { ...CONTACT_DEVICE, updated_at: daysAgo(31) }];
-    apns.send.mockImplementation(async () => ({ ok: true }));
-    const result = await Push.sendToCustomer(HOLDER_ID, { title: 't', body: 'b', url: '/', category: 'service' },
-      { messageType: 'appointment_reminder', holderMinUpdatedAt: daysAgo(30) });
-    expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h']);
-    expect(result.sent).toBe(1);
-    expect(result.contactDevices).toMatchObject({ sent: 1 });
+  describe('holderMinUpdatedAt counts, never filters: every holder phone still gets the push', () => {
+    const notification = { title: 't', body: 'b', url: '/', category: 'service' };
+    const floor = () => daysAgo(30);
+
+    test('the fresh phone rejects and the stale phone accepts: both are sent, sent is 0 (the text goes), the stale acceptance is reported apart and never stamps', async () => {
+      subs = [phone('s1', 'tok-fresh', daysAgo(1)), phone('s2', 'tok-stale', daysAgo(40))];
+      apns.send.mockImplementation(async (token) => (token === 'tok-fresh' ? { ok: false, failed: true, reason: 'bad_device_token' } : { ok: true }));
+      const result = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder', holderMinUpdatedAt: floor() });
+      expect(sentTokens().sort()).toEqual(['tok-fresh', 'tok-stale']);
+      expect(result.sent).toBe(0);
+      expect(result.subscriptions).toBe(1);
+      expect(result.acceptedCheckedInAt).toBeNull();
+      expect(result.staleHolderDevices).toMatchObject({ sent: 1, subscriptions: 1 });
+    });
+
+    test('the fresh phone accepts: delivered, the stale phone is sent too, and the stamp is the fresh phone\'s check-in only', async () => {
+      const fresh = daysAgo(1);
+      subs = [phone('s1', 'tok-fresh', fresh), phone('s2', 'tok-stale', daysAgo(40))];
+      apns.send.mockImplementation(async () => ({ ok: true }));
+      const result = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder', holderMinUpdatedAt: floor() });
+      expect(sentTokens().sort()).toEqual(['tok-fresh', 'tok-stale']);
+      expect(result.sent).toBe(1);
+      expect(result.acceptedCheckedInAt.getTime()).toBe(fresh.getTime());
+      expect(result.staleHolderDevices).toMatchObject({ sent: 1 });
+    });
+
+    test('a contact phone opened 31 days ago is never below the holder floor; no floor means no staleHolderDevices', async () => {
+      subs = [phone('s1', 'tok-h', daysAgo(1)), { ...CONTACT_DEVICE, updated_at: daysAgo(31) }];
+      apns.send.mockImplementation(async () => ({ ok: true }));
+      const result = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder', holderMinUpdatedAt: floor() });
+      expect(sentTokens().sort()).toEqual(['tok-c', 'tok-h']);
+      expect(result.sent).toBe(1);
+      expect(result.contactDevices).toMatchObject({ sent: 1 });
+      expect(result).not.toHaveProperty('staleHolderDevices');
+      apns.send.mockClear();
+      subs = [phone('s1', 'tok-old', daysAgo(40))];
+      const unfloored = await Push.sendToCustomer(HOLDER_ID, notification, { messageType: 'appointment_reminder' });
+      expect(unfloored.sent).toBe(1);
+      expect(unfloored).not.toHaveProperty('staleHolderDevices');
+    });
   });
 
   test('an accepted contact leg never stamps; no accepted holder leg is null', async () => {

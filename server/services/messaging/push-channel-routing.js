@@ -585,8 +585,8 @@ function anyDeviceSend(explicitPushOnly) {
 // counts phone apps only): a stale browser subscription that accepts must never
 // stand in for delivery and skip the text. Otherwise: the 72 hour floor. With
 // GATE_APP_FIRST_STALE_TEXT the 30-day floor applies to the HOLDER's phones only
-// (holderMinUpdatedAt): a contact's phone keeps the reach it had (a stale second holder phone's
-// acceptance must not stand in for the text when the fresh phone failed).
+// (holderMinUpdatedAt): every phone still gets the push, but a below-floor holder phone's acceptance
+// never counts as the holder's delivery, so it cannot stand in for the text when the fresh phone failed.
 function fanOutReach(anyDevice) {
   if (!anyDevice) return { minUpdatedAt: heartbeatCutoff() };
   const staleFloor = staleTextFloor();
@@ -1012,7 +1012,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null, staleApp = false }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null, staleApp = false, invoiceId = null, notificationEventKey = null }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
     // staleApp (GATE_APP_FIRST_STALE_TEXT): the holder is already known stale, so the freshness
@@ -1030,8 +1030,12 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
       shouldContinue: windowGuardFrom(preSendCheck),
       ...companionReach(staleApp),
       appointmentId,
+      // staleApp: the identifiers the any-device delivered path passes, so two receipts keep their own
+      // collapse tags and the bell opens its own destination. Unset (push_and_sms) = as before.
+      invoiceId,
+      eventKey: notificationEventKey,
     });
-    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId);
+    if (delivered) await recordBell(customerId, messageType, body, notificationEventKey || undefined, appointmentId, invoiceId);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }

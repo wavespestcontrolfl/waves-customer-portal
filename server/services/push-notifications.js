@@ -309,13 +309,7 @@ class PushNotificationService {
       const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
       if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
       if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-      // opts.holderMinUpdatedAt: a floor for the account HOLDER's devices only
-      // (GATE_APP_FIRST_STALE_TEXT, push-channel-routing fanOutReach). The 30-day
-      // rule decides whether the holder gets the text; a contact's phone keeps its reach.
-      // Unset = NaN = no floor.
-      const holderFloor = new Date(opts.holderMinUpdatedAt).getTime();
-      subs = (await contactDevicesAllowed(await query, contactPurpose, customerId))
-        .filter((sub) => Number.isNaN(holderFloor) || sub.contact_phone_key || new Date(sub.updated_at).getTime() >= holderFloor);
+      subs = await contactDevicesAllowed(await query, contactPurpose, customerId);
     } catch (err) {
       logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
       return { ...summarize([], 0), reason: 'subscription_lookup_failed' };
@@ -388,7 +382,7 @@ class PushNotificationService {
       }
       const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
-      results.push({ ...result, contactDevice: Boolean(sub.contact_phone_key), checkedInAt: sub.updated_at });
+      results.push({ ...result, ...legMeta(sub, opts) });
       if (claimLost) break;
       if (acceptedHolderLeg(sub, result) && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
@@ -532,10 +526,22 @@ function acceptedHolderLeg(sub, result) {
 // a contact device's accepted push never stands in for a holder whose own
 // device failed. Contact legs are accounted apart, under `contactDevices`,
 // present only when a contact device was in the fan-out.
+// What each fan-out leg carries for summarizeFanOut. opts.holderMinUpdatedAt (GATE_APP_FIRST_STALE_TEXT,
+// push-channel-routing fanOutReach): every holder phone still gets the push, but a holder leg last
+// checked in below this floor is marked belowHolderFloor, so its acceptance never counts as the
+// holder's delivery (and never suppresses the text). Unset = NaN = no floor.
+function legMeta(sub, opts) {
+  const contactDevice = Boolean(sub.contact_phone_key);
+  const belowHolderFloor = !contactDevice && new Date(sub.updated_at).getTime() < new Date(opts.holderMinUpdatedAt).getTime();
+  return { contactDevice, checkedInAt: sub.updated_at, belowHolderFloor };
+}
+
 function summarizeFanOut(results) {
-  const holder = results.filter((r) => !r.contactDevice);
+  const stale = results.filter((r) => r.belowHolderFloor);
+  const holder = results.filter((r) => !r.contactDevice && !r.belowHolderFloor);
   const contact = results.filter((r) => r.contactDevice);
   const stats = summarize(holder, holder.length);
+  if (stale.length) stats.staleHolderDevices = summarize(stale, stale.length);
   // The newest check-in among the ACCEPTED holder legs (null when none): the phone that took the push.
   stats.acceptedCheckedInAt = newestCheckIn(holder.filter((r) => r.sent));
   if (contact.length) stats.contactDevices = summarize(contact, contact.length);

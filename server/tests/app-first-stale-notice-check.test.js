@@ -133,3 +133,18 @@ describe('mail guards sit inside sendEmail, so the in-app row is always written'
     expect(await deliverOpsDigest.mock.calls[0][0].sendEmail()).toEqual({ ok: false, error: 'mailer_unconfigured' });
   });
 });
+
+describe('staleNoticeCheckFailure: a failed run reads as failed to cron health; clean and delivered runs do not', () => {
+  test('query failure and an undelivered digest are failures, with fixed codes', async () => {
+    expect(Check.staleNoticeCheckFailure(await Check.runAppFirstStaleNoticeCheck({ database: { raw: jest.fn(async () => { throw new Error('boom'); }) } }))).toBe('query_failed');
+    deliverOpsDigest.mockRejectedValueOnce(new Error('rejected for someone@example.invalid'));
+    expect(Check.staleNoticeCheckFailure(await Check.runAppFirstStaleNoticeCheck({ database: dbReturning(stale) }))).toBe('digest_failed');
+    expect(Check.staleNoticeCheckFailure({ found: 1, digest: { ok: false, channel: 'email', error: 'send failed' } })).toBe('digest_failed');
+  });
+
+  test('a clean run and a delivered finding are not failures', async () => {
+    expect(Check.staleNoticeCheckFailure(await Check.runAppFirstStaleNoticeCheck({ database: dbReturning([]) }))).toBeNull();
+    deliverOpsDigest.mockResolvedValueOnce({ ok: true, channel: 'in_app', id: 'n-1' });
+    expect(Check.staleNoticeCheckFailure(await Check.runAppFirstStaleNoticeCheck({ database: dbReturning(stale) }))).toBeNull();
+  });
+});
