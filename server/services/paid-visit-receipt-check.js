@@ -13,11 +13,16 @@
 //     invoice.js resolves a post-completion invoice) and the ET calendar day of paid_at is that visit's scheduled_date
 //     ("paid at the visit": a back-office reconciliation of an old check is skipped);
 //   - paid_at is between 7 days and 2 hours ago;
+//   - today's closeout item does not own it: with GATE_CLOSEOUT_MONEY_COMMS_ALERTS on (closeout-alerts.js
+//     moneyCommsAlertsEnabled), a completed visit scheduled today already shows its paid_receipt_not_sent gap in
+//     closeout_gaps_today (dashboard-alerts.js). That item covers today only, so this bell takes over from the next day;
 //   - the customer is not an internal test customer and has not turned payment receipts off
 //     (notification_prefs.payment_receipt = false);
 //   - no receipt email for it was accepted (email_messages with trigger_event_id `invoice_receipt:<id>`, which every
-//     templated receipt send stamps: the queue, a manual send, the inspection-credit resend), by status or by a
-//     delivered_at / opened_at / clicked_at stamp (a later unsubscribe or spam report rewrites the status, not those);
+//     templated receipt send stamps: the queue, a manual send, the inspection-credit resend), by status (a spam report
+//     or an unsubscribe can only follow a delivered email) or by a delivered_at / opened_at / clicked_at stamp;
+//   - no receipt text for it was accepted (sms_log outbound, notificationEventKey `invoice:<id>:receipt`, status sent or
+//     delivered: the key visit-completion-summary.js reads; an SMS-only send whose stamp write failed leaves only this);
 //   - no third-party payer owns it RIGHT NOW (invoicePayerOwnership: a payer assigned through the visit or the customer
 //     default after the invoice was minted leaves payer_id NULL); an ownership that cannot be verified fails closed;
 //   - its receipt_delivery_jobs row (one per invoice) did not deliver a leg (email_result.ok or sms_result.sent: a
@@ -59,8 +64,11 @@ const CATEGORY = 'billing';
 const MIN_AGE_MS = 2 * 60 * 60 * 1000;
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DONE_JOB_STATUSES = ['completed', 'failed'];
-// email_messages statuses that mean the provider took the receipt email.
-const EMAILED_STATUSES = ['sent', 'delivered', 'opened', 'clicked'];
+// email_messages statuses that mean the provider took the receipt email. A spam report or an unsubscribe can only follow
+// a delivered email, and the webhook writes them over 'delivered'.
+const EMAILED_STATUSES = ['sent', 'delivered', 'opened', 'clicked', 'spam_report', 'unsubscribed'];
+// sms_log statuses that mean the carrier took the receipt text (queued and failed attempts do not count).
+const TEXTED_STATUSES = ['sent', 'delivered'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const idOf = (key) => String(key).slice(KEY_PREFIX.length);
 // Tender words for the why; any other method reads without one.
@@ -97,8 +105,17 @@ async function loadCandidates(conn, now) {
     .where('i.paid_at', '<=', new Date(now.getTime() - MIN_AGE_MS))
     .select('i.id', 'i.customer_id', 'i.scheduled_service_id', 'i.service_record_id', 'i.payer_id', 'i.payer_statement_id',
       'i.invoice_number', 'i.total', 'i.payment_method', 'i.paid_at', 'i.status',
-      'i.receipt_sent_at', 'i.receipt_sms_sent_at', 'i.archived_at', 's.scheduled_date', 'c.first_name', 'c.last_name');
-  return rows.filter((row) => !settledReason(row) && paidAtVisit(row) && !isInternalTestCustomerId(row.customer_id));
+      'i.receipt_sent_at', 'i.receipt_sms_sent_at', 'i.archived_at', 's.scheduled_date', 's.status as visit_status', 'c.first_name', 'c.last_name');
+  const ownedByCloseout = closeoutOwnsToday(now);
+  return rows.filter((row) => !settledReason(row) && paidAtVisit(row) && !isInternalTestCustomerId(row.customer_id) && !ownedByCloseout(row));
+}
+
+// Today's closeout item (closeout_gaps_today: completed visits scheduled today) already shows a paid visit's missing
+// receipt while GATE_CLOSEOUT_MONEY_COMMS_ALERTS is on: one alert owner for that case. Returns a row predicate.
+function closeoutOwnsToday(now) {
+  const on = require('./closeout-alerts').moneyCommsAlertsEnabled();
+  const today = etDateString(now);
+  return (row) => on && String(row.visit_status || '').toLowerCase() === 'completed' && dateOnlyString(row.scheduled_date) === today;
 }
 
 // A jsonb leg result (an object from pg, a string from some drivers).
@@ -115,6 +132,11 @@ async function receiptNotOwed(conn, row) {
     .where((q) => q.whereIn('status', EMAILED_STATUSES).orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
     .first('id');
   if (emailed) return 'receipt emailed';
+  const texted = row.customer_id ? await conn('sms_log').where({ customer_id: row.customer_id, direction: 'outbound' })
+    .whereRaw("metadata->>'notificationEventKey' = ?", [`invoice:${row.id}:receipt`])
+    .whereIn('status', TEXTED_STATUSES)
+    .first('id') : null;
+  if (texted) return 'receipt texted';
   // One job row per invoice (receipt_delivery_jobs.invoice_id is the enqueue's conflict key).
   const job = await conn('receipt_delivery_jobs').where({ invoice_id: row.id }).first('status', 'sms_result', 'email_result');
   const sms = legOf(job?.sms_result);
