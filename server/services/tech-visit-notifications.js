@@ -561,29 +561,34 @@ async function newerCardExists(notice, conn) {
 // visit_* card, the detector's still-overdue read for a tracking notice —
 // and, for either, no newer card for this tech and visit. A clean "stale"
 // skips the push; a recheck ERROR sends anyway (owner steer: a missed alert
-// is worse than a rare misordered one).
+// is worse than a rare misordered one), as its first line only: the visit's
+// details go only to a device whose recheck passed. The sender builds each
+// device's payload right after that device's recheck, so clearing the
+// second line there reaches that device and every later one.
 async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
     let stale = false;
-    const beforeHandoff = async () => {
-      try {
-        if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
-        else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
-      } catch (err) {
-        logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending`);
-        return true;
-      }
-      return !stale;
-    };
-    await PushService.sendToAdminUser(notice.technicianId, {
+    const push = {
       title: notice.pushTitle,
       // A tracking notice carries no detail: its push stays one line.
       body: notice.pushBody || '',
       url: '/tech',
       tag: `visit-${notice.visitId}`,
       priority: 'high',
-    }, { beforeHandoff });
+    };
+    const beforeHandoff = async () => {
+      try {
+        if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
+        else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
+      } catch (err) {
+        push.body = '';
+        logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending the first line only`);
+        return true;
+      }
+      return !stale;
+    };
+    await PushService.sendToAdminUser(notice.technicianId, push, { beforeHandoff });
     if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
@@ -1004,7 +1009,7 @@ async function visitNotice(technicianId, visitId, cards, conn) {
 
 // The bundle as it stands now: one notice per visit still worth a push. A
 // visit whose recheck ERRORS stays in (owner steer: a missed alert is worse
-// than a rare stale one).
+// than a rare stale one), unverified: the push then names no visit.
 async function bundlePlan(technicianId, rows, conn) {
   const byVisit = new Map();
   for (const row of rows) {
@@ -1017,15 +1022,16 @@ async function bundlePlan(technicianId, rows, conn) {
       const notice = await visitNotice(technicianId, visitId, cards, conn);
       if (notice) plan.push(notice);
     } catch (err) {
-      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${visitId} (${errorTag(err)}); keeping it`);
-      plan.push(bundledNotice(technicianId, cards[cards.length - 1]));
+      logger.warn(`[tech-visit-notifications] bundle recheck failed for visit ${visitId} (${errorTag(err)}); keeping it, unnamed`);
+      plan.push({ ...bundledNotice(technicianId, cards[cards.length - 1]), unverified: true });
     }
   }
   return plan;
 }
 
-// Several visits under one count line: one line each, soonest first, at most
-// BUNDLE_LISTED, then "+N more". A mixed bundle says what happened to each.
+// Several visits under one count line: one line each (name, service, day and
+// time, street), soonest first, at most BUNDLE_LISTED, then "+N more". A
+// mixed bundle says what happened to each.
 const BUNDLE_LISTED = 3;
 const KIND_WORD = Object.freeze({ assigned: 'New', unassigned: 'Moved off', rescheduled: 'Moved', cancelled: 'Cancelled' });
 const slotKey = ({ parts }) => `${parts.date || '9999-12-31'} ${parts.start || '99:99'}`;
@@ -1033,21 +1039,23 @@ function bundleDetail(plan) {
   const mixed = new Set(plan.map((notice) => notice.kind)).size > 1;
   const sorted = [...plan].sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
   const lines = sorted.slice(0, BUNDLE_LISTED).map(({ kind, parts }) => {
-    const line = [parts.name, capitalized(parts.when), parts.street].filter(Boolean).join(' · ');
+    const line = [parts.name, parts.service, capitalized(parts.when), parts.street].filter(Boolean).join(' · ');
     return mixed ? `${KIND_WORD[kind]}: ${line}` : line;
   });
   if (sorted.length > BUNDLE_LISTED) lines.push(`+${sorted.length - BUNDLE_LISTED} more`);
   return lines.join('\n');
 }
 
-// The push for a plan: one visit = exactly its own per-visit push; more = one count.
+// The push for a plan: one visit = exactly its own per-visit push; more = one
+// count. A plan with an unverified visit names none: its first line only.
 function bundlePush(plan) {
+  const named = plan.every((notice) => !notice.unverified);
   if (plan.length === 1) {
-    return { title: plan[0].pushTitle, body: pushDetail(plan[0].parts), url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
+    return { title: plan[0].pushTitle, body: named ? pushDetail(plan[0].parts) : '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
   }
   return {
     title: bundleTitle(plan.map((notice) => notice.kind)),
-    body: bundleDetail(plan),
+    body: named ? bundleDetail(plan) : '',
     url: '/admin/today',
     tag: `route-changes-${[...plan].map((notice) => String(notice.cardId)).sort()[0]}`,
     priority: 'high',
@@ -1113,7 +1121,8 @@ async function heldOutsideBundle(technicianId, ids) {
 // took the cards over (BundleLost). Once a device has it, a later device gets
 // it only while the fresh plan still reads the same: the push names each
 // visit, so a changed copy would show a stale line, and a retry would push
-// the first device twice; the rest are skipped, as for a per-visit push.
+// the first device twice; the rest are skipped, as for a per-visit push. A
+// recheck ERROR sends, as the first line only (see pushCard).
 async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
@@ -1136,7 +1145,8 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
       }
       return same;
     } catch (err) {
-      logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending`);
+      push.body = '';
+      logger.warn(`[tech-visit-notifications] bundle push recheck failed for tech ${technicianId} (${errorTag(err)}); sending the first line only`);
       return true;
     }
   };

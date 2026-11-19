@@ -79,3 +79,15 @@ test('onDelivered is told as each device accepts, never for a failed or skipped 
   expect(seen).toEqual(['b', 'c']);
   expect(out).toMatchObject({ sent: 2 });
 });
+
+test('each device\'s payload is read after its own check: a change made there reaches that device and every later one', async () => {
+  // tech-visit-notifications relies on this: a recheck error drops the
+  // push's second line (the visit's details) before the device gets it.
+  primeSubs([IOS('a'), IOS('b'), IOS('c')]);
+  const push = { title: 'x', body: 'detail' };
+  const bodies = [];
+  mockApnsSend.mockImplementation(async (_token, n) => { bodies.push(n.body); return { ok: true }; });
+  const steps = [() => true, () => { push.body = ''; return true; }, () => true];
+  await Push.sendToAdminUser('tech-1', push, { beforeHandoff: jest.fn(async () => steps.shift()()) });
+  expect(bodies).toEqual(['detail', '', '']);
+});

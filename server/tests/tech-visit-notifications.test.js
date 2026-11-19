@@ -58,6 +58,8 @@ const cardRows = [];
 let bundleLeaseCutoff = null;
 // How many bundle clears (payload - 'push_bundle') fail before one succeeds.
 let mockClearFailures = 0;
+// How many claim renewals (a bundle's handoff recheck) throw before one succeeds.
+let mockRenewFailures = 0;
 function cardsTable() {
   let runFilter = null;
   let idFilter = null;
@@ -111,6 +113,10 @@ function cardsTable() {
       const apply = () => {
         // A claim renewal: this owner's cards get a fresh claim time.
         if (sql.includes("jsonb_set(payload, '{push_claimed_at}'")) {
+          if (mockRenewFailures > 0) {
+            mockRenewFailures -= 1;
+            throw new Error('db down');
+          }
           const mine = cardRows.filter((r) => idFilter.includes(String(r.id)) && r.payload.push_claim === claimFilter);
           for (const r of mine) r.payload.push_claimed_at = claimedAt;
           return mine.map((r) => ({ id: r.id }));
@@ -530,7 +536,7 @@ describe('notifyTechVisitChange', () => {
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
-  test('a recheck ERROR still sends (a missed alert is worse than a rare misordered one) and never throws', async () => {
+  test('a recheck ERROR still sends (a missed alert is worse than a rare misordered one), as its first line only, and never throws', async () => {
     newerCard = null;
     const realFirst = newerCardsQuery;
     db.mockImplementation((table) => {
@@ -547,6 +553,8 @@ describe('notifyTechVisitChange', () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
     expect(out).toEqual({ sent: true });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    // Unverified: the visit's details go only to a device whose recheck passed.
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
   });
 
@@ -767,6 +775,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     mockAfterCheck = null;
     bundleLeaseCutoff = null;
     mockClearFailures = 0;
+    mockRenewFailures = 0;
     prime({ techs, visits: visitRows });
   });
   afterAll(() => {
@@ -787,7 +796,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
     // Three visits listed, one line each, then the rest as a count.
-    const line = 'Ana Ruiz · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', {
       title: '17 visits on your route moved', body: [line, line, line, '+14 more'].join('\n'),
       url: '/admin/today', tag: `route-changes-${cardRows[0].id}`, priority: 'high',
@@ -857,11 +866,11 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 2 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: '2 visits on your route changed',
-      body: 'Moved: Ana Ruiz · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W\nNew: Ana Ruiz · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Moved: Ana Ruiz · Pest Control · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W\nNew: Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-2', expect.objectContaining({
       title: 'You have 2 new visits on your route',
-      body: 'Ana Ruiz · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W\nAna Ruiz · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W\nAna Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
     }));
   });
 
@@ -1041,16 +1050,40 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     }));
   });
 
+  test('a handoff recheck ERROR still sends the bundle, as its first line only (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockRenewFailures = 1;
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+    for (const r of cardRows) expect(r.payload).not.toHaveProperty('push_bundle');
+  });
+
+  test('a visit whose recheck ERRORS stays in the bundle, unnamed: the push names no visit (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    Object.defineProperty(visitRows, 'v-2', { get() { throw new Error('db down'); }, configurable: true });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a single unverified visit gets its own first line only', async () => {
+    await officeMove('v-1', { kind: 'assigned' });
+    Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '', tag: 'visit-v-1' }));
+  });
+
   test('a cancelled visit sorts by the start its card was written with: an early cancel is listed, not folded into "+N more" (pre-push audit P1)', async () => {
     for (const id of ['v-1', 'v-2', 'v-3']) await officeMove(id, { kind: 'assigned' });
     visitRows['v-4'] = { ...VISIT, id: 'v-4', status: 'cancelled', window_start: '07:00:00', window_end: '08:00:00' };
     await notices.notifyTechVisitChange({ visitId: 'v-4', kind: 'cancelled', technicianId: 'tech-1', actorId: 'admin' });
     expect(cardRows[3].payload).toMatchObject({ window_start: '07:00' });
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
-    const added = 'New: Ana Ruiz · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    const added = 'New: Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
       title: '4 visits on your route changed',
-      body: ['Cancelled: Ana Ruiz · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W', added, added, '+1 more'].join('\n'),
+      body: ['Cancelled: Ana Ruiz · Pest Control · Thu Sep 10, 7–8 AM · 4312 Cortez Rd W', added, added, '+1 more'].join('\n'),
     }));
   });
 
