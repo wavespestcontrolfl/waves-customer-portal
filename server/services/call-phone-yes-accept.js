@@ -101,12 +101,17 @@ const parseJson = (value) => {
   try { return JSON.parse(value); } catch { return {}; }
 };
 
-// When the customer was sent an estimate: its FIRST real handoff when the send path recorded one
-// (deliveryState.firstDeliveredAt, kept across resends: call-commitments' FIRST_HANDOFF_SQL), else sent_at. A resend
-// moves sent_at, never this. Null for an estimate never sent. SQL over the unaliased `estimates` table.
-const handoffSql = () => `LEAST(${require('./call-commitments').FIRST_HANDOFF_SQL}, estimates.sent_at)`;
+// When the customer was sent an estimate. A row the send path recorded (a deliveryState object): its FIRST real
+// handoff (deliveryState.firstDeliveredAt, kept across resends: call-commitments' FIRST_HANDOFF_SQL) or the first view,
+// whichever came first, and null while every send was held back or failed (the send path stamps sent_at even then).
+// A row with no deliveryState (an older send): sent_at. A resend moves sent_at, never this. Null for an estimate never
+// sent. SQL over the unaliased `estimates` table.
+const handoffSql = () => `(CASE WHEN jsonb_typeof(estimates.estimate_data -> 'deliveryState') = 'object'
+  THEN LEAST(${require('./call-commitments').FIRST_HANDOFF_SQL}, estimates.viewed_at) ELSE estimates.sent_at END)`;
 
-// The estimate's send time, the earliest moment a yes to it can count (the loaders read handoffSql as handoff_at).
+// The estimate's send time, the earliest moment a yes to it can count (the loaders read handoffSql as handoff_at). An
+// estimate whose every send was held back counts from that attempt, as the candidate query reads it, so its card still
+// files (its shadow line says it was never delivered); as another estimate it bounds nothing and was open to no one.
 function sentAnchorOf(estimate) {
   const at = new Date(estimate.handoff_at || estimate.sent_at || estimate.created_at || 0);
   return Number.isNaN(at.getTime()) ? new Date(0) : at;
@@ -474,8 +479,12 @@ async function applyCardState(card, state) {
     if (!row) return false;
     const stamp = new Date();
     if (state.close) {
+      // A dismissed card is never filed again, so the close is read again under the lock: evidence that changed since
+      // the first read (a re-read that dropped a cancel, a visit put back) keeps the card, and the next run reads it.
+      const again = await cardState({ ...card, payload: row.payload });
+      if (!again?.close) return false;
       await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-        status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: state.close,
+        status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: again.close,
         resolved_at: stamp, updated_at: stamp,
       });
       await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
@@ -581,7 +590,7 @@ async function sweepCandidates({ now, after, pageSize }) {
         .whereIn('estimates.status', OPEN_ESTIMATE_STATUSES)
         .whereNull('estimates.archived_at')
         // Sent by the time the call began (callStartedAtSql's default alias is this call_log row).
-        .whereRaw(`COALESCE(${handoffSql()}, estimates.created_at) <= ${require('./sms-pending-conversations').callStartedAtSql()}`)
+        .whereRaw(`COALESCE(${handoffSql()}, estimates.sent_at, estimates.created_at) <= ${require('./sms-pending-conversations').callStartedAtSql()}`)
         .where((qb) => qb.whereNull('estimates.expires_at').orWhere('estimates.expires_at', '>', now));
     })
     .whereNotExists(function cardAlreadyFiled() {
@@ -604,6 +613,6 @@ module.exports = {
   runCallPhoneYesSweep,
   closeMootCards,
   cardSummary,
-  // Tests only: filing under the lock, without the sweep's own check.
-  _private: { fileCardForTest: fileCard },
+  // Tests only: the two writes under the lock, without the sweep's own reads first.
+  _private: { fileCardForTest: fileCard, applyCardStateForTest: applyCardState },
 };

@@ -641,6 +641,20 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: yesCallId });
   });
 
+  // The send path stamps sent_at even when every channel was held back; such a send reached no one, so it bounds nothing.
+  test('a newer estimate whose send was held back bounds nothing: a later cancel still closes the card', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await sweep();
+    await estimate(customerId, {
+      sent_at: new Date(Date.now() - 3600000),
+      estimate_data: JSON.stringify({ ...planData(), deliveryState: { attemptedAt: new Date(Date.now() - 3600000).toISOString(), sentChannels: [], failedChannels: ['sms'], channels: [] } }),
+    });
+    await call(customerId, null, { created_at: new Date(Date.now() - 1200000) }, 'cancellation_request');
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+  });
+
   test('another estimate open at the yes and sent again after it: the shadow line still says the yes may be about it', async () => {
     const { customerId, bookingCallId } = await phoneYes();
     await estimate(customerId, {
@@ -660,6 +674,17 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
     const [card] = await cards(bookingCallId);
     expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: true });
+  });
+
+  // The close is read again under the lock: evidence that changed after the first read keeps the card.
+  test('a close whose evidence changed before the write keeps the card open', async () => {
+    const { bookingCallId } = await phoneYes();
+    await sweep();
+    const [card] = await cards(bookingCallId);
+    const { applyCardStateForTest } = require('../services/call-phone-yes-accept')._private;
+    await expect(applyCardStateForTest(card, { close: 'No longer applies: test.' })).resolves.toBe(false);
+    const [after] = await cards(bookingCallId);
+    expect(after.status).toBe('open');
   });
 
   // A resend claims 'sending', then restores the status: a sweep in between keeps the card and its link.
