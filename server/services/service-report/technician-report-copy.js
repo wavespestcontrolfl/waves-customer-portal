@@ -411,7 +411,19 @@ function customerCopyViolations(text) {
   return violations;
 }
 
+// Both Home surfaces display the same bounded excerpt. Screen the source and
+// the final excerpt because a later sentence may qualify the first.
+function completionSummarySentence(value) {
+  if (!value || customerCopyViolations(value).length) return null;
+  const firstLine = String(value || '').trim().split(/\r?\n/, 1)[0].trim();
+  if (!firstLine) return null;
+  const sentence = firstLine.match(/^.*?[.!?](?=\s|$)/)?.[0] || firstLine;
+  const excerpt = sentence.length > 280 ? `${sentence.slice(0, 277).trimEnd()}...` : sentence;
+  return customerCopyViolations(excerpt).length ? null : excerpt;
+}
+
 module.exports = {
+  completionSummarySentence,
   technicianReportCustomerCopy,
   fourSectionReport,
   containsReportAccessCode,

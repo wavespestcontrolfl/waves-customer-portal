@@ -9,13 +9,13 @@ jest.mock('../services/account-properties', () => ({ applyPropertyPredicate: jes
 const db = require('../models/db');
 const { listPortalServiceHistory } = require('../services/portal-service-history');
 
-function wire() {
+function wire(rows = {}) {
   const builders = [];
   db.mockImplementation((table) => {
     const b = { table };
     for (const m of ['where', 'leftJoin', 'select', 'orderBy', 'limit', 'offset', 'count', 'whereRaw']) b[m] = jest.fn(() => b);
     b.first = jest.fn(async () => ({ count: '0' }));
-    b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+    b.then = (resolve, reject) => Promise.resolve(rows[table] || []).then(resolve, reject);
     builders.push(b);
     return b;
   });
@@ -47,6 +47,39 @@ test('without completedOnly every record is listed', async () => {
   expect(siblingFilters(builders)).toEqual([0, 0]);
 });
 
+test('scheduledServiceId fences both the canonical list and its count to one stop', async () => {
+  const builders = wire();
+  await listPortalServiceHistory('cust-1', { scheduledServiceId: 'visit-1', completedOnly: true });
+  const records = builders.filter((b) => b.table === 'service_records');
+  expect(records).toHaveLength(2);
+  for (const builder of records) {
+    expect(builder.where).toHaveBeenCalledWith('service_records.scheduled_service_id', 'visit-1');
+    expect(builder.where).toHaveBeenCalledWith('scheduled_services.customer_id', 'cust-1');
+  }
+  expect(siblingFilters(builders)).toEqual([1, 1]);
+});
+
+test.each(['internal_only', 'disabled'])('a project URL stays suppressed when portalAttached conflicts with %s delivery', async (typedReportDelivery) => {
+  const projectUrl = '/api/projects/private-report.pdf';
+  wire({
+    service_records: [{
+      id: 'project-record', customer_id: 'cust-1', completion_source: 'project_completion',
+      structured_notes: { typedReportDelivery, projectCompletion: true, portalAttached: true, projectReport: { url: projectUrl } },
+    }],
+  });
+  const { services } = await listPortalServiceHistory('cust-1');
+  expect(services[0]).toMatchObject({
+    projectReportPortalAttached: false,
+    reportUrl: null,
+    reportPdfUrl: null,
+    reportToken: null,
+    reportGeneratedAt: null,
+    reportViewedAt: null,
+    reportAvailable: false,
+  });
+  expect(JSON.stringify(services[0])).not.toContain(projectUrl);
+});
+
 test('a legacy NULL-status record counts as completed in the list, the total and the sibling pick', () => {
   const source = require('fs').readFileSync(require('path').join(__dirname, '../services/portal-service-history.js'), 'utf8');
   expect(source).toMatch(/COMPLETED_RECORD = "COALESCE\(service_records\.status, 'completed'\) = 'completed'"/);
@@ -67,4 +100,42 @@ test('the kept sibling prefers the customer-visible record, then the one carryin
 test('GET /api/services asks for completed visits only', () => {
   const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/services.js'), 'utf8');
   expect(source).toMatch(/listPortalServiceHistory\(req\.customerId, \{\s*limit, offset, type, scope, completedOnly: true,/);
+});
+
+test('history uses the address frozen on the report before later property data', async () => {
+  wire({ service_records: [{
+    id: 'completed', customer_id: 'homeowner', visit_customer_id: 'homeowner',
+    property_line1: '100 New Road', service_address_line1: '200 Rescheduled Road',
+    service_data: { reportIdentitySnapshot: { version: 1, address: { line1: '300 Report Road', city: 'Sample' } } },
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
+  expect(services[0].propertyAddress).toBe('300 Report Road, Sample');
+});
+
+test.each([
+  [{ service_address_line1: '100 Palm Rd', service_address_line2: '', service_address_city: ' ' }, '100 Palm Rd, Unit 4, Sarasota'],
+  [{ service_address_line1: '100 Palm Rd Apt 2' }, '100 Palm Rd Apt 2, Sarasota'],
+  [{ service_address_line1: '200 Other Road' }, '200 Other Road'],
+  [{ service_address_line1: '100 Palm Rd', service_address_zip: '34205' }, '100 Palm Rd'],
+])('legacy history labels only inherit missing details at a matching property (%j)', async (stamp, expected) => {
+  wire({ service_records: [{
+    id: 'legacy', customer_id: 'homeowner', visit_customer_id: 'homeowner',
+    property_line1: '100 Palm Road', property_line2: 'Unit 4', property_city: 'Sarasota', property_zip: '34236',
+    ...stamp,
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
+  expect(services[0].propertyAddress).toBe(expected);
+});
+
+test.each([['Door inspection', 'Door inspection'], ['This treatment is completely safe', null], [undefined, null]])('Completed history project notes use only the attached report title (%s)', async (projectTitle, expected) => {
+  const { customerSafeVisitNotes } = require('../services/context-aggregator');
+  customerSafeVisitNotes.mockImplementationOnce((record) => record.technician_notes);
+  wire({ service_records: [{
+    id: 'reused-record', customer_id: 'homeowner', completion_source: 'project_completion',
+    technician_notes: 'Internal handoff from the prior record.',
+    structured_notes: { projectTitle, portalAttached: true, projectReport: { url: '/projects/example' } },
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
+  expect(services[0].notes).toBe(expected);
+  expect(JSON.stringify(services)).not.toContain('Internal handoff');
 });

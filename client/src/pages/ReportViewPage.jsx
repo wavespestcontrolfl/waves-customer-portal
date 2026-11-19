@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
@@ -6781,6 +6781,7 @@ function visualProofMomentIntro(moments = []) {
 }
 
 function ServiceReportV1({ data, token, mode = 'live' }) {
+  const location = useLocation();
   // The live web view takes the shared customer header and the stacked layout (reportTemplate.css).
   // The PDF document and the static render never do.
   const sharedTemplate = mode === 'live' && usesSharedReportTemplate(data);
@@ -6833,11 +6834,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
   const orderedProofMoments = useMemo(() => orderVisualProofMoments(proofMoments), [proofMoments]);
+  const viewSource = useMemo(() => (
+    new URLSearchParams(location.search).get('source') === 'portal_home' ? 'portal_home' : null
+  ), [location.search]);
 
   useEffect(() => {
     if (mode !== 'live') return;
-    trackReportEvent(token, 'service_report_viewed');
-  }, [mode, token]);
+    trackReportEvent(token, 'service_report_viewed', viewSource ? { source: viewSource } : {});
+  }, [mode, token, viewSource]);
 
   useEffect(() => {
     if (mode !== 'live') return;
