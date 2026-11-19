@@ -97,8 +97,14 @@ function etYearBounds(now = new Date()) {
 
 const unitKey = (unit) => String(unit || '').trim().toLowerCase().replace(/[\s.]+/g, '_');
 const isFlOz = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
-// A per-gallon rate in fl oz: the catalog's "fl_oz/gal" and the also-supported "oz/gal".
-const isFlOzPerGal = (unit) => ['fl_oz/gal', 'oz/gal', 'floz/gal'].includes(unitKey(unit));
+// A recorded tank concentration in fl oz per gallon: "fl_oz/gal" / "oz/gal", or the per-100-gallon units the
+// completion API also accepts ("fl_oz/100gal" / "oz/100gal"), divided by 100. null for any other unit.
+const PER_GAL_UNITS = { 'fl_oz/gal': 1, 'oz/gal': 1, 'floz/gal': 1, 'fl_oz/100gal': 100, 'oz/100gal': 100, 'floz/100gal': 100 };
+const flOzPerGal = (value, unit) => {
+  const divisor = PER_GAL_UNITS[unitKey(unit)];
+  const n = Number(value);
+  return divisor && Number.isFinite(n) && n > 0 ? n / divisor : null;
+};
 const TSP_PER_FL_OZ = 6;
 const flOzAmount = (value, unit) => {
   if (unitKey(unit) === 'tsp') { const t = Number(value); return Number.isFinite(t) && t > 0 ? t / TSP_PER_FL_OZ : 0; }
@@ -112,8 +118,8 @@ function applicationConcentration(row) {
   // rate (a visit closed out on the rollout day at 0.4 fl oz/gal is 0.03%).
   const dilution = parseFloat(String(row.dilution_rate ?? '').replace('%', ''));
   if (Number.isFinite(dilution) && dilution > 0) return dilution >= HIGH_DILUTION_PERCENT ? 'high' : 'low';
-  const rate = Number(row.application_rate);
-  if (isFlOzPerGal(row.rate_unit) && Number.isFinite(rate) && rate > 0) return rate > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
+  const perGal = flOzPerGal(row.application_rate, row.rate_unit);
+  if (perGal != null) return perGal > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
   // No recorded concentration: a row before the 0.03% ruling is the owner's earlier 0.06% mix.
   if (String(row.application_date || '').slice(0, 10) < TAURUS_LOW_RATE_SINCE) return 'high';
   // Later, an amount above the house mix (a bare oz / fl oz quantity, or a bare oz rate

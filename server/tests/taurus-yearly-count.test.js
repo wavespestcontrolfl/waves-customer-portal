@@ -105,6 +105,12 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ quantity_applied: 19.2, quantity_unit: 'tsp' }))).toBe('high'); // 3.2 fl oz
     expect(applicationConcentration(row({ quantity_applied: 9.6, quantity_unit: 'tsp' }))).toBe('low'); // 1.6 fl oz
   });
+
+  it('reads a per-100-gallon rate as fl oz per gallon (80 fl_oz/100gal = 0.8 fl oz/gal)', () => {
+    expect(applicationConcentration(row({ application_rate: '80', rate_unit: 'fl_oz/100gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: 80, rate_unit: 'oz/100gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: '40', rate_unit: 'fl_oz/100gal', quantity_applied: 3.2, quantity_unit: 'fl_oz' }))).toBe('low');
+  });
 });
 
 describe('etYearBounds', () => {

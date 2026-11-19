@@ -39,8 +39,16 @@ export const HOUSE_FL_OZ_PER_GAL = 0.4;
 const HOUSE_TAURUS_FL_OZ = 1.6;
 const unitKey = (unit) => String(unit ?? '').trim().toLowerCase().replace(/[\s.]+/g, '_');
 const isFlOzUnit = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
-// A per-gallon rate in fl oz: the catalog's "fl_oz/gal" and the also-supported "oz/gal".
-export const isFlOzPerGal = (unit) => ['fl_oz/gal', 'oz/gal', 'floz/gal'].includes(unitKey(unit));
+// A tank concentration in fl oz per gallon: "fl_oz/gal" / "oz/gal", or the per-100-gallon units the completion
+// API also accepts, divided by 100 (the server's rule). null for any other unit.
+const PER_GAL_UNITS = { 'fl_oz/gal': 1, 'oz/gal': 1, 'floz/gal': 1, 'fl_oz/100gal': 100, 'oz/100gal': 100, 'floz/100gal': 100 };
+const flOzPerGal = (value, unit) => {
+  const divisor = PER_GAL_UNITS[unitKey(unit)];
+  const n = Number(value);
+  return divisor && Number.isFinite(n) && n > 0 ? n / divisor : null;
+};
+// A per-gallon fl oz unit (the house Taurus row's seed applies only in "fl_oz/gal" / "oz/gal").
+export const isFlOzPerGal = (unit) => PER_GAL_UNITS[unitKey(unit)] === 1;
 // An amount in fl oz: teaspoons (the sheet shows small amounts in tsp) are converted first.
 const flOzOf = (value, unit) => {
   const n = Number(value);
@@ -50,7 +58,8 @@ const flOzOf = (value, unit) => {
 };
 export const isHighTaurusRate = (row) => {
   const rate = Number(row?.rate);
-  if (isFlOzPerGal(row?.rateUnit) && Number.isFinite(rate) && rate > 0) return rate > HOUSE_FL_OZ_PER_GAL;
+  const perGal = flOzPerGal(row?.rate, row?.rateUnit);
+  if (perGal != null) return perGal > HOUSE_FL_OZ_PER_GAL;
   const amounts = [
     row?.rateUnit == null ? 0 : flOzOf(rate, row.rateUnit),
     flOzOf(row?.totalAmount, row?.amountUnit),

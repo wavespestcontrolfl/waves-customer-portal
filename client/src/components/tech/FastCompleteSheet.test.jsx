@@ -185,9 +185,10 @@ describe('FastCompleteSheet', () => {
     // The unit follows the method, as the full form's resolver seeds it: at
     // spot treatment Taurus's per-basis label (fl oz/gal) records fl oz.
     expect(taurus).toMatchObject({ totalAmount: 1.6, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
-    // The rate is resolved at the method actually sent: spot treatment
-    // takes the catalog label band's low end in its own unit.
-    expect(taurus).toMatchObject({ rate: 0.2, rateUnit: 'fl_oz/gal' });
+    // The rate is resolved at the method actually sent, in the label's own
+    // unit; the house Taurus row is the house mix's concentration (1.6 fl oz
+    // in 4 gal = 0.4 fl oz/gal), not the label band's low end.
+    expect(taurus).toMatchObject({ rate: 0.4, rateUnit: 'fl_oz/gal' });
     expect(body.expectedVisit).toEqual({
       customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
       serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
@@ -461,8 +462,9 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
-    // Spot treatment resolves Taurus's label band 0.2-0.8 fl oz/gal.
-    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.2');
+    // Spot treatment resolves Taurus's label band 0.2-0.8 fl oz/gal; the house
+    // row opens at the house mix's 0.4 fl oz/gal.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.4');
     expect(screen.queryByText(/label max/)).toBeNull();
     fireEvent.change(screen.getByLabelText('Taurus SC rate'), { target: { value: '1.2' } });
     expect(screen.getByText('> label max 0.8')).toBeTruthy();

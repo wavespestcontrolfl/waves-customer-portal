@@ -178,9 +178,9 @@ export default function ServiceRecapModal({
               return;
             }
             preselect.add(cat.id);
-            // Only an amount with its unit: the ledger count reads no amount without one.
-            if (Number(rp.total_amount) > 0 && rp.amount_unit) {
-              seededAmounts[cat.id] = { totalAmount: Number(rp.total_amount), amountUnit: rp.amount_unit };
+            // The ledger's quantity (the recap's own rows keep no amounts), with its unit: the yearly count reads it.
+            if (Number(rp.ledger_quantity) > 0 && rp.ledger_quantity_unit) {
+              seededAmounts[cat.id] = { totalAmount: Number(rp.ledger_quantity), amountUnit: rp.ledger_quantity_unit };
             }
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,

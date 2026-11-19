@@ -404,6 +404,19 @@ async function traceOnReportForVisit(svc, profile, knex = db) {
   return visitTraceOnReport(svc, profile, lane, knex);
 }
 
+/** Non-retracted ledger quantities on one service record; [] on any failure. */
+async function ledgerQuantitiesFor(recordId, knex) {
+  try {
+    const rows = await knex('property_application_history')
+      .where({ service_record_id: recordId })
+      .whereNull('retracted_at')
+      .select(['product_id', 'quantity_applied', 'quantity_unit']);
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
 async function buildRecapContext(serviceId, knex = db, { includeCommonProducts = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
@@ -458,9 +471,6 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       .select([
         'product_name', 'product_category', 'active_ingredient', 'moa_group',
         'application_rate', 'rate_unit',
-        // The recorded amount, for the Taurus yearly-limit warning on a reopened recap (it reads the amount
-        // when the row records no concentration, as the ledger count does).
-        'total_amount', 'amount_unit',
         ...(hasProductIdCol ? ['product_id'] : []),
       ])
       .catch(() => {
@@ -468,6 +478,22 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
         return [];
       })
     : [];
+
+  // The compliance ledger's quantity for each recorded product, for the Taurus yearly-limit warning on a
+  // reopened recap. A recap save replaces its product rows without amounts, but the ledger keeps the quantity,
+  // and the yearly count reads the ledger. Matched by catalog id; fail-soft (no quantity, no warning input).
+  if (existingRecord && hasProductIdCol && existingProducts.length) {
+    const ledgerRows = await ledgerQuantitiesFor(existingRecord.id, knex);
+    const byProduct = new Map(ledgerRows.filter((row) => row.product_id != null && Number(row.quantity_applied) > 0 && row.quantity_unit)
+      .map((row) => [String(row.product_id), row]));
+    for (const sp of existingProducts) {
+      const ledger = sp.product_id != null ? byProduct.get(String(sp.product_id)) : null;
+      if (ledger) {
+        sp.ledger_quantity = Number(ledger.quantity_applied);
+        sp.ledger_quantity_unit = ledger.quantity_unit;
+      }
+    }
+  }
 
   // null when the caller did not ask for the list.
   const commonProducts = await commonProductsLoad;

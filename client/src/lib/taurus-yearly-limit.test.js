@@ -145,6 +145,12 @@ describe('isHighTaurusRate (the same rule the server applies to a saved ledger r
     expect(isHighTaurusRate({ rate: 9.6, rateUnit: 'tsp' })).toBe(false);
   });
 
+  it('reads a per-100-gallon rate as fl oz per gallon, as the server does', () => {
+    expect(isHighTaurusRate({ rate: '80', rateUnit: 'fl_oz/100gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: 80, rateUnit: 'oz/100gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '40', rateUnit: 'fl_oz/100gal', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(false);
+  });
+
   it('warns when a 3.2 oz edit is made after three 0.03% applications (no 0.06% slot left after them)', () => {
     const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
     expect(taurusOverLimitWarning(threeLow, [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }])).toBeNull();

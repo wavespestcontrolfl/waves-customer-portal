@@ -25,25 +25,36 @@ const visit = {
   cust_address_line1: '100 Example Court', cust_city: 'Example City', cust_state: 'FL', cust_zip: '34201',
 };
 
-function contextDb({ svc = visit, catalog = [], catalogError = null, commonRows = [], commonError = null } = {}) {
-  const seen = { catalogWhere: null, catalogColumns: null, raw: [], timeout: [] };
+function contextDb({
+  svc = visit, catalog = [], catalogError = null, commonRows = [], commonError = null,
+  record = null, recordedProducts = [], ledgerRows = [], ledgerError = null,
+} = {}) {
+  const seen = { catalogWhere: null, catalogColumns: null, raw: [], timeout: [], ledgerWhere: null, ledgerNull: null };
   const knex = jest.fn((table) => {
     const q = {
-      where: jest.fn((arg) => { if (table === 'products_catalog') seen.catalogWhere = arg; return q; }),
+      where: jest.fn((arg) => {
+        if (table === 'products_catalog') seen.catalogWhere = arg;
+        if (table === 'property_application_history') seen.ledgerWhere = arg;
+        return q;
+      }),
+      whereNull: jest.fn((column) => { if (table === 'property_application_history') seen.ledgerNull = column; return q; }),
       leftJoin: jest.fn(() => q),
       orderBy: jest.fn(() => q),
-      first: jest.fn().mockResolvedValue(table === 'scheduled_services' ? svc : null),
+      first: jest.fn().mockResolvedValue(table === 'scheduled_services' ? svc : table === 'service_records' ? record : null),
       select: jest.fn((...columns) => {
         if (table === 'scheduled_services') return q;
         if (table === 'products_catalog') {
           seen.catalogColumns = columns;
           return catalogError ? Promise.reject(catalogError) : Promise.resolve(catalog);
         }
+        if (table === 'service_products') return Promise.resolve(recordedProducts.map((row) => ({ ...row })));
+        if (table === 'property_application_history') return ledgerError ? Promise.reject(ledgerError) : Promise.resolve(ledgerRows);
         return Promise.resolve([]);
       }),
     };
     return q;
   });
+  knex.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
   knex.raw = jest.fn((sql, bindings) => {
     seen.raw.push({ sql, bindings });
     return {
@@ -177,4 +188,39 @@ test('a catalog load failure is distinguishable from an authoritative empty cata
   const empty = await buildRecapContext(visit.id, contextDb({ catalog: [] }).knex);
   expect(empty.products).toEqual([]);
   expect(empty.catalogLoadFailed).toBe(false);
+});
+
+test('a reopened recap carries each recorded product\'s ledger quantity (the recap rows keep no amounts)', async () => {
+  const { knex, seen } = contextDb({
+    record: { id: 'rec-1', technician_notes: null, status: 'completed' },
+    recordedProducts: [
+      { product_name: 'Taurus SC', application_rate: '1.6000', rate_unit: 'oz', product_id: 'p-taurus' },
+      { product_name: 'LESCO Crosscheck Plus', application_rate: '4.0000', rate_unit: 'oz', product_id: 'p-cross' },
+    ],
+    ledgerRows: [
+      { product_id: 'p-taurus', quantity_applied: '3.200', quantity_unit: 'fl_oz' },
+      { product_id: 'p-cross', quantity_applied: null, quantity_unit: 'fl_oz' },
+    ],
+  });
+
+  const result = await buildRecapContext(visit.id, knex);
+
+  expect(seen.ledgerWhere).toEqual({ service_record_id: 'rec-1' });
+  expect(seen.ledgerNull).toBe('retracted_at');
+  const [taurus, cross] = result.existingRecord.products;
+  expect(taurus).toMatchObject({ product_id: 'p-taurus', ledger_quantity: 3.2, ledger_quantity_unit: 'fl_oz' });
+  expect(cross).not.toHaveProperty('ledger_quantity');
+});
+
+test('a failed ledger read leaves the recorded products without a quantity and the context ok', async () => {
+  const { knex } = contextDb({
+    record: { id: 'rec-1', technician_notes: null, status: 'completed' },
+    recordedProducts: [{ product_name: 'Taurus SC', application_rate: '1.6000', rate_unit: 'oz', product_id: 'p-taurus' }],
+    ledgerError: new Error('boom'),
+  });
+
+  const result = await buildRecapContext(visit.id, knex);
+
+  expect(result.ok).toBe(true);
+  expect(result.existingRecord.products[0]).not.toHaveProperty('ledger_quantity');
 });
