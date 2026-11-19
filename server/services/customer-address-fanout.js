@@ -199,9 +199,8 @@ function snapshotMatchesLine1(snapshot, line1) {
 // stamp fields (an undo leaves the stamp in place), so clearing there could not be
 // undone. The merge instead keeps the winner's own record, never copies the loser's
 // (mergeSingletonPrefRow), and clears a moved-whole loser row's record itself with a
-// journaled before-image (executeMerge / revertMerge). That last step is for the
-// sod record only: a loser row that moves whole keeps its timer, like its other
-// sprinkler settings.
+// journaled before-image (executeMerge / revertMerge), the sod record and the
+// timer each under its own journal entry.
 async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod = true } = {}) {
   if (!customerId) return 0;
   // Same customer-scoped lock the prefs PUT serializes on: an autosave begun

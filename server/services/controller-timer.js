@@ -49,7 +49,14 @@ function settleControllerTimer(updates, { fresh = true } = {}) {
 // Whole or nothing, like every other write of this record. Returns the columns to set ({} = leave the row alone).
 function controllerTimerToCarry(winnerRow, loserRow) {
   if (winnerRow?.[BRAND] || !loserRow?.[BRAND]) return {};
-  return Object.fromEntries(CONTROLLER_TIMER_FIELDS.map((field) => [field, loserRow[field] ?? null]));
+  return controllerTimerOf(loserRow);
 }
 
-module.exports = { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerProblem, controllerTimerToCarry, settleControllerTimer };
+// The timer on a property_preferences row as plain values, keyed by column (a column the row lacks reads as null).
+function controllerTimerOf(row) {
+  return Object.fromEntries(CONTROLLER_TIMER_FIELDS.map((field) => [field, row?.[field] ?? null]));
+}
+
+module.exports = {
+  CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerOf, controllerTimerProblem, controllerTimerToCarry, settleControllerTimer,
+};
