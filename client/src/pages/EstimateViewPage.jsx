@@ -4788,16 +4788,17 @@ export function EstimateErrorBanner({ error }) {
 // The accept said the 15-minute hold ran out. The customer already chose this
 // time and confirmed it, so hold it again if it is still free (the server
 // re-checks every conflict, so a time someone else took still refuses). Answers
-// { held } with the new hold, { taken } when the time is gone, { review } when the
+// { held } with the new hold, { taken } when the time is shown gone, { review } when the
 // office parked the estimate, { noBooking } when staff reshaped the estimate meanwhile
-// so it books nothing online, or { failed } for anything else (the caller then reopens
-// the time list). Never throws.
+// so it books nothing online, or { failed } for anything else (the caller then shows the
+// plain expiry recovery and reopens the time list). Never throws.
 // A signed time offer lapses 45 minutes after its list was built, and reserve then
-// refuses even a free time. So before "taken", read the picked day for a fresh
-// signed offer (freshOfferForSameTime) and hold it once more with its new id. When
-// availability cannot be read, the answer is { failed } (the plain expiry copy),
-// never "taken". The page keeps its own id: accept finds the hold by date, time and
-// technician, not by the signature.
+// refuses even a free time. So read the picked day for a fresh signed offer
+// (freshOfferForSameTime) and hold it once more with its new id. "Taken" needs proof:
+// that fresh offer was refused too. A day list without the time is no proof (the list
+// is ranked and capped), and neither is an unreadable one: both are { failed }. The page
+// keeps its own id: accept finds the hold by date, time and technician, not by the
+// signature.
 export async function holdSameTimeAgain(args) {
   const { token, slotId } = args || {};
   if (!token || !slotId) return { failed: true };
@@ -4814,13 +4815,15 @@ export async function holdSameTimeAgain(args) {
   }
 }
 
-// One POST /reserve for the re-hold, with the body the first pick sent. Answers the
-// result for holdSameTimeAgain, or { lapsedOrTaken }: "slot no longer available" is a
-// taken time or a lapsed signed offer.
+// One POST /reserve for the re-hold, with the body the first pick sent plus `rehold: true`:
+// this page's hold is gone, so the server refuses (OTHER_LIVE_HOLD) instead of deleting a
+// hold another tab took meanwhile. Answers the result for holdSameTimeAgain, or
+// { lapsedOrTaken }: "slot no longer available" is a taken time or a lapsed signed offer.
 async function reserveForRehold({ token, serviceMode, selectedFrequency, serviceCadences }, slotId) {
   const payload = { slotId, serviceMode };
   if (serviceMode !== 'one_time' && selectedFrequency) payload.selectedFrequency = selectedFrequency;
   if (serviceMode !== 'one_time' && serviceCadences) payload.serviceCadences = serviceCadences;
+  payload.rehold = true;
   const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -4834,6 +4837,8 @@ async function reserveForRehold({ token, serviceMode, selectedFrequency, service
   // Parked for the office (B18): the caller takes it through the one transition.
   if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') return { answer: { review: body } };
   if (isNoBookingRefusal(body)) return { answer: { noBooking: true } };
+  // Another tab holds a newer time: keep it, and show the plain expiry recovery here.
+  if (r.status === 409 && body.code === 'OTHER_LIVE_HOLD') return { answer: { failed: true } };
   if (r.status === 409 && /slot no longer available/i.test(body.error || '')) return { lapsedOrTaken: true };
   return { answer: { failed: true } };
 }
@@ -4841,9 +4846,10 @@ async function reserveForRehold({ token, serviceMode, selectedFrequency, service
 // A fresh signed offer for the same time, read from the picked day with the slot
 // picker's own query: that list carries the customer filters (the refusal's own list
 // does not, so it is never used). Answers { slotId }, or { answer } for
-// holdSameTimeAgain: { taken } when the day does not offer the time, { review } or
-// { noBooking } when the day read says the estimate stopped booking online meanwhile,
-// { failed } when the day cannot be read. A thrown read is { failed } in the caller.
+// holdSameTimeAgain: { review } or { noBooking } when the day read says the estimate
+// stopped booking online meanwhile, { failed } when the day cannot be read or does not
+// list the time (a ranked, capped list can leave out a free time). A thrown read is
+// { failed } in the caller.
 async function freshOfferForSameTime({ token, slotId, serviceMode, selectedFrequency, serviceCadences }) {
   const day = /^(\d{4}-\d{2}-\d{2})_/.exec(String(slotId));
   if (!day) return { answer: { failed: true } };
@@ -4859,7 +4865,7 @@ async function freshOfferForSameTime({ token, slotId, serviceMode, selectedFrequ
   if (isNoBookingRefusal(body)) return { answer: { noBooking: true } };
   if (!r.ok || !body || (!Array.isArray(body.primary) && !Array.isArray(body.expander))) return { answer: { failed: true } };
   const fresh = sameTimeOnFreshList(body, slotId);
-  return fresh ? { slotId: fresh } : { answer: { taken: true } };
+  return fresh ? { slotId: fresh } : { answer: { failed: true } };
 }
 
 // The same time on a fresh signed list, or null. A slot id is date, start time and

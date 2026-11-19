@@ -1103,6 +1103,10 @@ async function reserveSlot({
   // read (trenching review, the contact_review park) cannot consume capacity. Staff / system callers that
   // reserve for an estimate that cannot be parked (one-tap-purchase's own linked draft) omit it.
   revalidateEstimate = null,
+  // The estimate page's own re-hold after an accept said the hold ran out (body `rehold: true` on /reserve). That
+  // page's hold is gone, so any OTHER live hold for this estimate is newer: another tab or device took it. Ordinary
+  // reserve semantics would delete it; this refuses instead (OTHER_LIVE_HOLD), judged on the locked rows below.
+  refuseIfOtherLiveHold = false,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
   // every synchronous lunch/day-end check below — see
@@ -1643,6 +1647,11 @@ async function reserveSlot({
         && (!capacityEnabled() || hold.reservation_policy_version === 2)
         && require('node:util').isDeepStrictEqual(hold.reservation_service_mix || null,
           serviceProfile?.reservationServiceMix || null));
+      if (refuseIfOtherLiveHold && (liveHolds || []).some((hold) => !sameSlotHold || hold.id !== sameSlotHold.id)) {
+        const err = new Error('another live hold exists for this estimate');
+        err.code = 'OTHER_LIVE_HOLD';
+        throw err;
+      }
       if (sameSlotHold) {
         const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
         if (staleIds.length) {

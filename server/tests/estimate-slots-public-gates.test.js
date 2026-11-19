@@ -341,6 +341,35 @@ describe('slot endpoints privacy/cache headers (parity with /:token/data)', () =
   });
 });
 
+// The estimate page re-holds its time by itself after an accept says the hold ran out. That request says so
+// (`rehold: true`), and the service then refuses instead of deleting a hold another tab took meanwhile.
+describe('reserve: the page\'s own re-hold', () => {
+  const post = (body) => fetch(`${base}/${TOKEN}/reserve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  beforeEach(() => {
+    currentEstimate = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
+  });
+
+  test('only a literal rehold: true asks the service to refuse over another live hold', async () => {
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'scheduled-1', expiresAt: '2027-05-20T13:15:00.000Z' });
+    expect((await post({ slotId: '2027-05-20_09-00_tech-1', rehold: true })).status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenLastCalledWith(expect.objectContaining({ refuseIfOtherLiveHold: true }));
+    for (const rehold of [undefined, false, 'true', 1]) {
+      expect((await post({ slotId: '2027-05-20_09-00_tech-1', rehold })).status).toBe(201);
+      expect(slotReservation.reserveSlot).toHaveBeenLastCalledWith(expect.objectContaining({ refuseIfOtherLiveHold: false }));
+    }
+  });
+
+  test('the refusal is a 409 with its own code, never "slot no longer available"', async () => {
+    slotReservation.reserveSlot.mockRejectedValue(Object.assign(new Error('another live hold exists for this estimate'), { code: 'OTHER_LIVE_HOLD' }));
+    const res = await post({ slotId: '2027-05-20_09-00_tech-1', rehold: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+});
+
 // The money/slot mirror of the accept/send/manual-accept suppression gates
 // (codex #3272 r5 P0): while GATE_BERMUDA_SUPPRESSION is off, a persisted
 // suppression estimate exposes no availability, takes no reservation, and —

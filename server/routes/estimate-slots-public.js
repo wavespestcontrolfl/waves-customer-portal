@@ -791,6 +791,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         estimateId: estimate.id,
         slotId,
         ...slotOpts,
+        // The page's automatic re-hold after an expired accept: never replace a hold another tab took meanwhile.
+        refuseIfOtherLiveHold: req.body?.rehold === true,
         // The same blocking states the checks above refuse, re-judged on the LOCKED row inside the service
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
@@ -822,6 +824,9 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       if (svcErr.code === 'ESTIMATE_NO_BOOKING' && svcErr.response) {
         // The locked revalidation refused: the same status and body the route's own checks above return.
         return respondNoBookingRefusal(res, estimate, svcErr.response);
+      }
+      if (svcErr.code === 'OTHER_LIVE_HOLD') {
+        return res.status(409).json({ error: 'another time is held for this estimate', code: 'OTHER_LIVE_HOLD' });
       }
       if (svcErr.code === 'SLOT_UNAVAILABLE') {
         // Refresh slot availability for the estimate so the caller can

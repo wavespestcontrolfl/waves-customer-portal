@@ -1729,6 +1729,63 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('the page\'s own re-hold (refuseIfOtherLiveHold) refuses, and deletes nothing, while another live hold exists', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      // The page's hold ran out; another tab then held a different time. The re-hold must not delete that hold.
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-other-tab',
+        scheduled_date: '2027-05-19',
+        window_start: '11:00:00',
+        technician_id: 'tech-1',
+        estimated_duration_minutes: 90,
+        reservation_expires_at: '2027-05-01T15:10:00.000Z',
+      }]);
+      const deleteBuilder = makeDeleteBuilder();
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-new', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [liveHoldsBuilder, deleteBuilder, makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder],
+      });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+        refuseIfOtherLiveHold: true,
+      })).rejects.toMatchObject({ code: 'OTHER_LIVE_HOLD' });
+      expect(liveHoldsBuilder.forUpdate).toHaveBeenCalled(); // judged on the locked rows
+      expect(deleteBuilder.del).not.toHaveBeenCalled();
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the page\'s own re-hold with no other live hold takes the time as an ordinary reserve does', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const insertBuilder = makeInsertBuilder({ id: 'scheduled-new', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder],
+      });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+        selectedFrequency: 'quarterly',
+        refuseIfOtherLiveHold: true,
+      })).resolves.toEqual({ scheduledServiceId: 'scheduled-new', expiresAt: '2027-05-20T13:15:00.000Z' });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reselecting a same-total offer replaces stale combined member allowances', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
