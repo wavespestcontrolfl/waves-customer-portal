@@ -1,8 +1,6 @@
-// Repair databases that ran the original cancellation backfill, which could
-// copy a canceled PI into an attempt that the charge worker had never bound.
-// A different or absent cancellation ID proves the existing PI did not come
-// from that copy. An equal pair remains untrusted because its history is
-// ambiguous; the original worker may bind it again and stamp provenance.
+// Earlier workers, failure webhooks, and the cancellation backfill all wrote
+// stripe_payment_intent_id. Those rows have no record of which writer supplied
+// the ID. Only a charge worker with its own Stripe response may stamp it.
 exports.up = async function up(knex) {
   const hasBindingProvenance = await knex.schema.hasColumn(
     'stripe_invoice_charge_attempts', 'stripe_payment_intent_bound_at',
@@ -12,13 +10,6 @@ exports.up = async function up(knex) {
       table.timestamp('stripe_payment_intent_bound_at', { useTz: true });
     });
   }
-
-  await knex('stripe_invoice_charge_attempts')
-    .whereNotNull('stripe_payment_intent_id')
-    .where((query) => query.whereNull('authentication_canceled_intent_id')
-      .orWhereColumn('authentication_canceled_intent_id', '<>', 'stripe_payment_intent_id'))
-    .whereNull('stripe_payment_intent_bound_at')
-    .update({ stripe_payment_intent_bound_at: knex.ref('updated_at') });
 };
 
 exports.down = async function down(knex) {

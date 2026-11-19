@@ -120,7 +120,7 @@ what was asked; never dump full tables or the variable store.
 
 ### Verify a historical saved-card cancellation
 
-Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. The row must already contain the exact `stripe_payment_intent_id` recorded by the original charge worker and a non-null `stripe_payment_intent_bound_at`; Stripe metadata or cancellation history cannot create that binding. Supply a reachable `SAVED_CARD_CANCELLATION_DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. The verifier deliberately ignores the application's ambient `DATABASE_URL`. Apply both cancellation-evidence migrations first.
+Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. The row must already contain the exact `stripe_payment_intent_id` recorded by the original charge worker and a non-null `stripe_payment_intent_bound_at`; Stripe metadata or cancellation history cannot create that binding. Supply a reachable `SAVED_CARD_CANCELLATION_DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. The verifier deliberately ignores the application's ambient `DATABASE_URL`. Apply both cancellation-evidence migrations first. A legacy ID alone cannot establish who wrote it. An earlier failure webhook could have populated it before the worker returned. Those cases stay held.
 
 ```sh
 SAVED_CARD_CANCELLATION_DATABASE_URL=<postgres-url> \
@@ -129,7 +129,7 @@ SAVED_CARD_CANCELLATION_DATABASE_URL=<postgres-url> \
 
 The verifier uses the effective PostgreSQL host (including a URL `host` override and `PGHOST` when the URL host is empty): loopback synthetic databases stay plain, while every remote DNS name or IP address gets explicit certificate-identity verification with Node's public roots by default. A private provider root may be supplied via `PG_CA_FILE`, `PGSSLROOTCERT`, or URL `sslrootcert`; URL downgrade options are ignored. Do not put credentials in diagnostic output.
 
-For a provider TCP proxy whose certificate names the database rather than the proxy, set both the provider root and the certificate DNS name; the chain remains verified and hostname checking uses that explicit name:
+For a provider TCP proxy whose certificate names the database rather than the proxy, set both the provider root and the certificate DNS name; the TLS handshake sends that database name through the proxy and verifies the certificate against it:
 
 ```sh
 PG_CA_FILE=~/ops-oneshots/certs/provider-root.pem \

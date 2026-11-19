@@ -1,5 +1,6 @@
 // MUTATES with --execute. The default verifies one historical cancellation.
 const fs = require('node:fs');
+const { lookup } = require('node:dns/promises');
 const { isIP } = require('node:net');
 const tls = require('node:tls');
 const { parseArgs } = require('node:util');
@@ -59,6 +60,19 @@ function databaseConfig(connectionString) {
   };
 }
 
+async function databaseDriverConfig(connectionString, resolveHost = lookup) {
+  const config = databaseConfig(connectionString);
+  const { host, ssl } = config.connection;
+  const requestedName = String(process.env.PGSSL_SERVER_NAME || '').trim();
+  if (requestedName && requestedName !== host && ssl?.checkServerIdentity && !isIP(host)) {
+    // pg sets SNI to its TCP host when that host is a DNS name. Connect to
+    // the proxy address so TLS can send and verify the database hostname.
+    const { address } = await resolveHost(host);
+    config.connection.host = address;
+  }
+  return config;
+}
+
 async function main() {
   const { values } = parseArgs({ options: {
     attempt: { type: 'string' }, intent: { type: 'string' },
@@ -70,7 +84,7 @@ async function main() {
     throw new Error(`Supply ${DATABASE_ENV} and STRIPE_SECRET_KEY for the same environment.`);
   }
   const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-  const database = require('knex')(databaseConfig(process.env[DATABASE_ENV]));
+  const database = require('knex')(await databaseDriverConfig(process.env[DATABASE_ENV]));
   try {
     const result = await verifySavedCardCancellation({
       attemptId: values.attempt, intentId: values.intent, execute: values.execute, stripe, database,
@@ -87,4 +101,4 @@ if (require.main === module) main().catch((err) => {
   process.exitCode = 1;
 });
 
-module.exports = { databaseConfig };
+module.exports = { databaseConfig, databaseDriverConfig };

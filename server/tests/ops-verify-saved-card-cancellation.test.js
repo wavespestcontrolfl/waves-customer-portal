@@ -3,7 +3,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('node:child_process');
 
-const { databaseConfig } = require('../../ops/agents/verify-saved-card-cancellation');
+const { databaseConfig, databaseDriverConfig } = require('../../ops/agents/verify-saved-card-cancellation');
 
 const ENV_KEYS = ['PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGPASSWORD', 'PG_CA_FILE', 'PGSSLROOTCERT', 'PGSSL_SERVER_NAME'];
 
@@ -82,6 +82,40 @@ test('a provider proxy can verify its database certificate name without weakenin
     })).toHaveProperty('message', expect.stringContaining('does not match'));
   } finally {
     fs.unlinkSync(root);
+  }
+});
+
+test('the PostgreSQL handshake through a DNS proxy sends the requested database hostname', async () => {
+  const tls = require('node:tls');
+  const net = require('node:net');
+  const { Client } = require('pg');
+  const receivedName = jest.fn();
+  const tlsServer = tls.createServer({ SNICallback(name, done) {
+    receivedName(name);
+    done(new Error('Synthetic handshake ends after SNI'));
+  } });
+  const gateway = net.createServer((socket) => {
+    socket.once('data', (packet) => {
+      if (packet.length !== 8 || packet.readUInt32BE(4) !== 80877103) return socket.destroy();
+      socket.write('S');
+      tlsServer.emit('connection', socket);
+    });
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const resolveProxy = jest.fn(async () => ({ address: '127.0.0.1' }));
+    const config = await withEnv({ PGSSL_SERVER_NAME: 'database.provider.test' }, () =>
+      databaseDriverConfig(`postgres://synthetic:synthetic@proxy.provider.test:${gateway.address().port}/billing`, resolveProxy));
+    const client = new Client({ ...config.connection, connectionTimeoutMillis: 5000 });
+    try {
+      await expect(client.connect()).rejects.toThrow();
+      expect(resolveProxy).toHaveBeenCalledWith('proxy.provider.test');
+      expect(receivedName).toHaveBeenCalledWith('database.provider.test');
+    } finally {
+      await client.end();
+    }
+  } finally {
+    await new Promise((resolve) => gateway.close(resolve));
   }
 });
 

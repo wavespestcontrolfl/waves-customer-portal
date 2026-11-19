@@ -254,7 +254,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     });
   });
 
-  test('additive migration distrusts a legacy copied candidate and backfills only independent bindings', async () => {
+  test('a legacy failure webhook cannot establish the original PI even when the cancellation arrives later', async () => {
     await app.transaction(async (trx) => {
       await migration.down(trx);
       await trx.schema.alterTable('stripe_invoice_charge_attempts', (table) => {
@@ -279,10 +279,25 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       expect(await verdict(copied.invoiceId, trx, { checkout: true }))
         .toMatchObject({ chargeAttemptId: copied.attemptId });
       expect(await trx('stripe_invoice_charge_attempts').where({ id: independent.attemptId }).first())
-        .toMatchObject({ stripe_payment_intent_bound_at: expect.any(Date) });
+        .toMatchObject({ stripe_payment_intent_bound_at: null });
       await recordAuthenticationCancellation(independent.intent, trx);
-      expect(await verdict(independent.invoiceId, trx, { checkout: true })).toBeNull();
+      expect(await verdict(independent.invoiceId, trx, { checkout: true }))
+        .toMatchObject({ chargeAttemptId: independent.attemptId });
     });
+  });
+
+  test('only the matching worker response can bind an already resolved failure webhook', async () => {
+    const { attemptId, invoiceId, intent } = await authenticationFixture(app);
+    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ stripe_payment_intent_id: intent.id });
+    await recordAuthenticationCancellation(intent, app);
+    const worker = (authenticationIntentId) => StripeService.resolveNoFundsSavedCardChargeAttempt({
+      attemptId, invoiceId, declineCode: 'authentication_required', authenticationIntentId, database: app,
+    });
+    expect(await worker('pi_unrelated')).toBe(false);
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    expect(await worker(intent.id)).toEqual({ resolved: true, reopened: false });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+    expect(await worker(intent.id)).toBe(false);
   });
 
   test('a signed cancellation follows the active row-precise invoice merge chain', async () => {
