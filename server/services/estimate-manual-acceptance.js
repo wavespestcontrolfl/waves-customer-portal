@@ -1154,12 +1154,13 @@ async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
     // Only the annual-prepay manual accept mints an invoice, so only it bills the misting install (a Mark Won that bills nothing raises no install bell).
     ...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),
     deferCommercialScheduleNotification: true,
-    // A caller that links a booked visit BEFORE the conversion (beforeConvert) makes the converter seed the plan's
-    // next visits inside this transaction. Their reminders register through the global pool, whose foreign-key check
-    // would wait on this transaction's uncommitted rows, so whenever a beforeConvert hook runs the converter hands
-    // them back (conversion.deferredFollowUpReminderRows) and the accept registers them after the commit
-    // (registerDeferredFollowUpReminders), as the public accept does.
-    ...(ctx.deferFollowUpReminders === true ? { deferFollowUpReminderRegistration: true } : {}),
+    // The converter seeds the plan's next visits inside this transaction when a visit is linked to the estimate (one
+    // linked before the accept, or by a beforeConvert hook). Registered inline, their reminders go through a second
+    // connection (appointment-reminders), which cannot see this transaction's new visits: each registration failed
+    // its foreign key, and the reminder self-heal sweep armed the rows later. So the converter always hands them back
+    // (conversion.deferredFollowUpReminderRows) and the accept registers them after the commit
+    // (registerDeferredFollowUpReminders), as the public accept and the termite activation do.
+    deferFollowUpReminderRegistration: true,
     ...cardConvertOptions(ctx),
   };
   if (ctx.annualPrepaySelected) await applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayAmount, convertOptions);
@@ -1364,11 +1365,12 @@ async function acceptInTransaction(trx, ctx) {
 }
 
 // The reminders of the visits the converter seeded inside the accept's transaction, registered now that it
-// committed: the converter defers them whenever a beforeConvert hook ran (runConversion). Never throws, because the
-// accept has already committed; a failure is logged, as the public accept does.
+// committed (the converter defers them for every manual accept: runConversion). The same function and options as the
+// converter's inline path (sendConfirmation: false). Never throws, because the accept has already committed; a failure
+// is logged, as the public accept does (the 15-minute reminder self-heal sweep backfills a missed row).
 async function registerDeferredFollowUpReminders(claim, ctx) {
   const rows = claim.conversion?.deferredFollowUpReminderRows;
-  if (!ctx.deferFollowUpReminders || !Array.isArray(rows) || !rows.length) return;
+  if (!Array.isArray(rows) || !rows.length) return;
   try {
     await ctx.estimateConverter.registerSeededFollowUpReminders(rows, claim.conversion.customerId || claim.acceptedEstimate?.customer_id);
   } catch (err) {
@@ -1462,8 +1464,7 @@ async function markEstimateManuallyAccepted({
   // claimed and before the conversion runs. A throw rolls the whole accept back. Null for every caller today; for the
   // call-phone-yes card's accept (a later PR), which links the visit the call booked here so the converter books the
   // plan from it. A hook that links a visit works only in a real accept without the noLinkedVisits pin: a dry run and
-  // that pin both make the converter refuse a visit linked to the estimate (cardConvertOptions). With a hook, the
-  // reminders of the visits the converter seeds wait for the commit (registerDeferredFollowUpReminders).
+  // that pin both make the converter refuse a visit linked to the estimate (cardConvertOptions).
   beforeConvert = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
@@ -1476,7 +1477,6 @@ async function markEstimateManuallyAccepted({
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
     expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit, beforeConvert,
-    deferFollowUpReminders: typeof beforeConvert === 'function',
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
@@ -1490,6 +1490,8 @@ async function markEstimateManuallyAccepted({
 
   const warnings = [];
   if (claim.shouldRunDownstream) {
+    // First after the commit, where the converter's own-transaction path registers them, so a post-commit step that
+    // throws cannot skip them.
     await registerDeferredFollowUpReminders(claim, ctx);
     await runPostCommitWork(claim, ctx, { leadLinkService, warnings });
     // A promo code the customer typed on this estimate before the office
