@@ -96,7 +96,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     // drops NULL technician/customer/date targets (NULL never equals),
     // covering the no-technician case.
     const grpRes = await db.raw(
-      `SELECT s.id, s.technician_id, s.scheduled_date, s.window_start,
+      `SELECT s.id, s.customer_id, s.technician_id, s.scheduled_date, s.window_start,
               s.customer_pick_by, s.status, s.track_state
          FROM scheduled_services s, scheduled_services t
         WHERE t.id = ?::uuid
@@ -377,18 +377,25 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
       // locks, and WAL on every poll of every open portal). A write is
       // needed only when the date rolls over or the floor lowers.
       const res = await db.raw(
-        `WITH grp AS (
-           SELECT customer_id, technician_id, scheduled_date, window_start
+        `WITH locked_group AS MATERIALIZED (
+           SELECT id, customer_id, technician_id, scheduled_date, window_start,
+                  status, track_state, customer_pick_by
              FROM scheduled_services
-            WHERE id = ?::uuid
-              AND technician_id = ?::uuid
+            WHERE technician_id = ?::uuid
               AND scheduled_date = ?::date
+              AND customer_id = ?::uuid
               AND window_start IS NOT DISTINCT FROM ?::time
+            ORDER BY id
+            FOR UPDATE
+         ),
+         grp AS (
+           SELECT customer_id, technician_id, scheduled_date, window_start
+             FROM locked_group
+            WHERE id = ?::uuid
               AND status NOT IN (${liveExcl})
               AND status NOT IN ('en_route', 'on_site')
               AND COALESCE(track_state, 'scheduled') = 'scheduled'
               AND (customer_pick_by IS NULL OR window_start IS NOT NULL)
-            FOR UPDATE
          ),
          floor_val AS (
            SELECT LEAST(?::int, MIN(CASE WHEN s.stops_ahead_shown_date = ?::date
@@ -412,7 +419,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                  OR u.stops_ahead_min_shown > f.v)
           RETURNING f.v AS stops_ahead_min_shown`,
         [
-          svc.id, svc.technician_id, svcDate, svc.window_start,
+          svc.technician_id, svcDate, svc.customer_id, svc.window_start, svc.id,
           ...NOT_A_STOP_STATUSES,
           clamped, today, today, today,
         ]

@@ -13,6 +13,7 @@ const TODAY = '2026-08-14';
 function baseSvc(overrides = {}) {
   return {
     id: 'svc-self',
+    customer_id: 'customer-1',
     technician_id: 'tech-1',
     scheduled_date: TODAY,
     status: 'confirmed',
@@ -52,7 +53,7 @@ function makeDb({
     return q;
   });
   dbFn.raw = jest.fn((sql, bindings) => {
-    if (/SELECT s\.id, s\.technician_id/.test(sql)) {
+    if (/SELECT s\.id, s\.customer_id, s\.technician_id/.test(sql)) {
       // Sibling-group eligibility fetch: the target row plus any sibling
       // rows of the same (customer, slot). A NULL-technician target
       // yields no rows (the self-join drops it), matching Postgres.
@@ -117,12 +118,13 @@ describe('computeStopsAhead', () => {
     // floor lands on EVERY sibling row, not just the requested one.
     expect(db.updateCalls()).toHaveLength(1);
     expect(db.updateCalls()[0][1]).toEqual([
-      'svc-self', 'tech-1', TODAY, '10:00:00',
+      'tech-1', TODAY, 'customer-1', '10:00:00', 'svc-self',
       ...NOT_A_STOP_STATUSES,
       2, TODAY, TODAY, TODAY,
     ]);
     const [updateSql] = db.updateCalls()[0];
-    expect(updateSql).toContain('WITH grp AS');
+    expect(updateSql).toContain('WITH locked_group AS MATERIALIZED');
+    expect(updateSql).toContain('FROM locked_group');
     expect(updateSql).toContain('technician_id = ?::uuid');
     expect(updateSql).toContain('scheduled_date = ?::date');
     expect(updateSql).toContain('window_start IS NOT DISTINCT FROM ?::time');
@@ -177,8 +179,10 @@ describe('computeStopsAhead', () => {
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
     // NULL-safely (track_state can diverge from status).
     expect(countSql).toContain("(dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))");
-    // Floor persistence rechecks and locks the eligible target before it
-    // updates siblings, so a status-only office rebook cannot race the stamp.
+    // Every same-stop token locks the sibling group in the same order, then
+    // rechecks the target from those locked rows before updating the floor.
+    // This avoids cross-token deadlocks and fences a status-only rebook.
+    expect(updateSql).toContain('ORDER BY id');
     expect(updateSql).toContain('FOR UPDATE');
   });
 
@@ -210,7 +214,7 @@ describe('computeStopsAhead', () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 3, groupFloor: null });
     expect((await computeStopsAhead(db, 'svc-self', { today: TODAY }))?.stopsAhead).toBe(3);
     expect(db.updateCalls()[0][1]).toEqual([
-      'svc-self', 'tech-1', TODAY, '10:00:00',
+      'tech-1', TODAY, 'customer-1', '10:00:00', 'svc-self',
       ...NOT_A_STOP_STATUSES,
       3, TODAY, TODAY, TODAY,
     ]);

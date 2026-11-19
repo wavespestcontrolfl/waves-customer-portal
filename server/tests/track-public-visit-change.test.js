@@ -16,20 +16,31 @@ const {
 } = trackPublicRouter._test;
 
 function installLogs(handoff, latest = handoff) {
+  const placementLatest = latest && (
+    latest.notes === 'customer_pick'
+    || latest.reason_code === 'customer_pick'
+    || (latest.new_date != null && latest.new_date !== latest.original_date)
+    || (latest.new_window != null && latest.new_window !== (latest.original_window || ''))
+  ) ? latest : handoff;
   mockDb.mockImplementation((table) => {
     if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
     let handoffOnly = false;
     const chain = {
       where: jest.fn((arg) => {
         if (typeof arg === 'function') {
-          handoffOnly = true;
+          handoffOnly = arg.name === 'customerPickLog';
           arg.call(chain);
         }
         return chain;
       }),
-      orWhere: jest.fn(() => chain),
+      whereNotNull: jest.fn(() => chain),
+      whereRaw: jest.fn(() => chain),
+      orWhere: jest.fn((arg) => {
+        if (typeof arg === 'function') arg.call(chain);
+        return chain;
+      }),
       orderBy: jest.fn(() => chain),
-      first: jest.fn(async () => (handoffOnly ? handoff : latest)),
+      first: jest.fn(async () => (handoffOnly ? handoff : placementLatest)),
     };
     return chain;
   });
@@ -202,6 +213,21 @@ describe('public tracker changed-visit recovery', () => {
     await expect(buildVisitChange({
       id: 'visit-1', scheduled_date: '2026-12-02', window_start: '10:00:00', customer_pick_by: null,
     }, 'scheduled')).resolves.toBeNull();
+  });
+
+  test('a later audit-only row does not hide a still-waiting customer-pick handoff', async () => {
+    installLogs(rainHandoff(), {
+      original_date: '2026-11-18', original_window: '09:00:00-11:00:00',
+      new_date: null, new_window: null, reason_code: 'customer_noshow',
+      initiated_by: 'system', created_at: '2026-11-18T17:00:00.000Z',
+    });
+    await expect(buildVisitChange({
+      id: 'visit-1', scheduled_date: '2026-11-26', window_start: null,
+      customer_pick_by: '2026-11-20T00:00:00Z',
+    }, 'scheduled')).resolves.toMatchObject({
+      kind: 'customer_pick', stage: 'awaiting_customer',
+      action: { kind: 'portal_visits', href: '/?tab=schedule' },
+    });
   });
 
   test('a stale handoff marker cannot turn a different parked date into a customer action', async () => {

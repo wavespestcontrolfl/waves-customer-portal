@@ -243,6 +243,21 @@ async function latestRescheduleLog(serviceId, { customerPickOnly = false, failur
       query.where(function customerPickLog() {
         this.where('notes', 'customer_pick').orWhere('reason_code', 'customer_pick');
       });
+    } else {
+      // Audit-only rows (for example customer_noshow resolution evidence)
+      // do not supersede the handoff or a later slot placement. A placement
+      // must either be the handoff itself or carry a changed date/window.
+      query.where(function placementOrHandoffLog() {
+        this.where('notes', 'customer_pick')
+          .orWhere('reason_code', 'customer_pick')
+          .orWhere(function changedDate() {
+            this.whereNotNull('new_date').whereRaw('new_date IS DISTINCT FROM original_date');
+          })
+          .orWhere(function changedWindow() {
+            this.whereNotNull('new_window')
+              .whereRaw("new_window IS DISTINCT FROM COALESCE(original_window, '')");
+          });
+      });
     }
     return await query.orderBy('created_at', 'desc').first(...RESCHEDULE_LOG_FIELDS);
   } catch (err) {
