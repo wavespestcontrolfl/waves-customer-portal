@@ -138,6 +138,13 @@ postgres('plan choice on the first invoice of an accepted per-application plan',
     // A repeat (a double tap, a reload) answers with the same link.
     const again = await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
     expect(again).toEqual(first);
+    // Under that answer sits the switch's own guard: a second mint that got
+    // past the pending check (two requests at once) queues on the customer's
+    // prepay lock and is refused by the first one's term.
+    const second = await require('../routes/admin-schedule').runPrepaySwitch({
+      visitId: f.visitId, acknowledgeNoticedAmount: false, actor: {}, switchLane: true, auditSource: 'invoice pay page', payPageInvoiceId: f.invoiceId,
+    });
+    expect(second.httpStatus).toBe(409);
     const prepays = await prepayInvoices(f);
     expect(prepays).toHaveLength(1);
     expect(first.payUrl).toContain(`/pay/${prepays[0].token}`);
@@ -252,6 +259,17 @@ postgres('plan choice on the first invoice of an accepted per-application plan',
     expect(await prepayInvoices(f)).toHaveLength(1);
     expect((await visit(f.laterVisitIds[0])).prepaid_method).toBeNull();
     expect((await trx('customers').where({ id: f.customerId }).first()).billing_mode).toBe('per_application');
+  });
+
+  test('a release that failed at payment time is retried by the daily sweep', async () => {
+    const f = await acceptedPlan();
+    await PayPlanChoice.selectAnnualPrepay(await firstInvoice(f));
+    // The first invoice is paid, and the payment sync's release never ran.
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    await AnnualPrepayRenewals.reconcileCoveredTermsSweep();
+    const [prepay] = await prepayInvoices(f);
+    expect(prepay.status).toBe('void');
+    expect(await termOf(f)).toMatchObject({ status: 'cancelled' });
   });
 
   test('a close that stopped after the void finishes the visit stamp on the next sync', async () => {

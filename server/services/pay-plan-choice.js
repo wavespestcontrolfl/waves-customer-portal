@@ -43,8 +43,9 @@ const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // The note on the prepay invoice this lane mints. It is customer-visible, and
 // it is also the durable link from the prepay to the first invoice it
 // replaces: the payment follow-through closes only the invoice it names.
+const PREPAY_NOTE_PREFIX = 'Annual prepay chosen on the pay page of invoice ';
 function prepayInvoiceNote(firstInvoiceNumber) {
-  return `Annual prepay chosen on the pay page of invoice ${firstInvoiceNumber}. Paying this closes that invoice.`;
+  return `${PREPAY_NOTE_PREFIX}${firstInvoiceNumber}. Paying this closes that invoice.`;
 }
 
 function prepayNoteNamesInvoice(prepayNotes, firstInvoiceNumber) {
@@ -146,6 +147,7 @@ async function selectAnnualPrepay(invoice) {
 
 module.exports = {
   OPEN_INVOICE_STATUSES,
+  PREPAY_NOTE_PREFIX,
   prepayInvoiceNote,
   prepayNoteNamesInvoice,
   planChoiceForInvoice,

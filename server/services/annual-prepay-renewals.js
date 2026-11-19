@@ -3564,6 +3564,37 @@ async function releaseUnpaidPlanChoicePrepay(invoiceId) {
   }
 }
 
+// The daily retry of that release: the payment sync runs it best-effort, so a
+// void that failed there (a Stripe read, a dropped connection) would leave the
+// prepay's pay link live beside a first invoice already paid. Every unpaid
+// plan-choice prepay is re-checked here; one release failing never stops the
+// rest.
+async function retryPlanChoicePrepayReleases() {
+  const PayPlanChoice = require('./pay-plan-choice');
+  const pending = await db('annual_prepay_terms as t')
+    .join('invoices as p', 'p.id', 't.prepay_invoice_id')
+    .where('t.status', PAYMENT_PENDING_STATUS)
+    .whereNull('t.renewal_decision')
+    .whereNotNull('t.source_estimate_id')
+    .whereIn('p.status', PayPlanChoice.OPEN_INVOICE_STATUSES)
+    .where('p.notes', 'like', `${PayPlanChoice.PREPAY_NOTE_PREFIX}%`)
+    .select('t.customer_id', 't.source_estimate_id', 'p.notes');
+  for (const row of pending) {
+    try {
+      const paidFirsts = await db('invoices')
+        .where({ customer_id: row.customer_id })
+        .whereIn('status', ['paid', 'prepaid'])
+        .where('notes', 'like', `Auto-generated from accepted estimate #${String(row.source_estimate_id)}%`)
+        .select('id', 'invoice_number');
+      for (const first of paidFirsts) {
+        if (PayPlanChoice.prepayNoteNamesInvoice(row.notes, first.invoice_number)) await releaseUnpaidPlanChoicePrepay(first.id);
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] plan-choice prepay release retry failed for customer ${row.customer_id}: ${err.message}`);
+    }
+  }
+}
+
 // voidInvoice opens its own global-pool transaction and Stripe triage, so
 // inside a caller transaction the close waits for that commit (the same
 // posture as reconcileBornPaidTerm below); a rollback drops it with the term.
@@ -6877,6 +6908,12 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   // Paid-late declined terms whose historical reconcile has not completed —
   // expired ones too (they are outside the dated loop above).
   await retryPaidLapseReconciles(conn);
+  try {
+    await retryPlanChoicePrepayReleases();
+  } catch (err) {
+    logger.warn(`[annual-prepay] plan-choice prepay release retry failed: ${err.message}`);
+    notePassFailed(summary, 'plan-choice prepay release retry');
+  }
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
   }
