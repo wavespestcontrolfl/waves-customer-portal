@@ -13,6 +13,7 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
+const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
@@ -179,6 +180,7 @@ function exemptFromPlanning(rows, planningMinutes) {
 
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
+  includeClaimedReservations = false,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
   // false: every stop on the route keeps its own window/estimate length
   // (planning-minutes.js `planning_exempt`, the convention the placed visit
@@ -246,8 +248,9 @@ async function loadArrivalRouteContext({
     select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
       // An unstamped row inherits the customer's premise, and the co-visit
       // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
-      ...CUSTOMER_PREMISE_ALIASES],
-  }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
+      ...CUSTOMER_PREMISE_ALIASES,
+      ...(includeClaimedReservations ? [conn.raw('scheduled_services.reservation_expires_at <= NOW() AS reservation_lapsed')] : [])],
+  }).where(includeClaimedReservations ? bookedVisitOrLiveHold : q => q.whereNull('scheduled_services.reservation_expires_at')
       .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
     .where({ date }).whereNot('block_type', 'available')
@@ -278,7 +281,8 @@ async function loadArrivalRouteContext({
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
-    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes);
+    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at
+      && (!includeClaimedReservations || row.customer_id == null))), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
@@ -1163,10 +1167,15 @@ function capacityError(reason = 'route_changed') {
 
 async function prepareArrivalCapacity(options) {
   if (!capacityEnabled() && !options.preserveCapacity) return null;
-  const context = await loadArrivalRouteContext(options);
+  const context = await loadArrivalRouteContext({ ...options, includeClaimedReservations: true });
   if (!context) throw capacityError('route_unverified');
-  await certifyArrivalPlacement(context, options);
-  return { options, fingerprint: routeFingerprint(context), travel: context.travel };
+  // Keep the existing road requests. The locked fit below includes every booked
+  // visit and uses the conservative travel model for any leg without a road time.
+  const travelRows = context.rows.filter(row => !row.reservation_lapsed
+    && !(options.excludeEstimateId && row.source_estimate_id === options.excludeEstimateId && row.reservation_expires_at));
+  const travelContext = { ...context, rows: travelRows };
+  await certifyArrivalPlacement(travelContext, options);
+  return { options, fingerprint: routeFingerprint(context), travel: travelContext.travel };
 }
 
 // Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
@@ -1201,7 +1210,7 @@ async function verifyArrivalCapacity(prepared, {
     if (error.code === '55P03') throw capacityError('route_busy');
     throw error;
   }
-  const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel });
+  const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel, includeClaimedReservations: true });
   if (!context || routeFingerprint(context) !== prepared.fingerprint) throw capacityError();
   const fit = evaluateArrivalPlacement(context, { ...prepared.options,
     ...(windowStart ? { windowStart } : {}), ...(windowEnd ? { windowEnd } : {}),

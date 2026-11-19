@@ -1365,6 +1365,11 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+A confirmed visit keeps its place when staff book it from an estimate hold, even
+after the original hold expires. Confirmation counts that visit in the fixed-hour
+conflict check and in the locked arrival-window route check. An unclaimed hold
+frees its time at expiry.
+
 Tech-aware confirm conflict checks for a second field technician
 (`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; owner
 2026-10-30: it no longer needs `GATE_SCHEDULING_CAPACITY`, so two technicians can
@@ -2047,6 +2052,13 @@ allocation order at the certified anchor, using a nonblocking day fence for
 callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
+
+An estimate picker can still display an opening after staff book its last available
+time. Reserving that opening or accepting a competing hold returns the existing
+409 response so the customer can choose again. If the submitted reservation
+already belongs to another customer, checkout keeps the original customer and
+price and returns the same recovery used for a missing hold.
+
 Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
 try the shared day fence — rung 1 date occupancy plus the tech-day or
 unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
