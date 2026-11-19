@@ -50,7 +50,7 @@ const EYEBROW = {
   fontWeight: 700,
   letterSpacing: '0.06em',
   textTransform: 'uppercase',
-  color: MUTED,
+  color: TEXT,
   marginBottom: 6,
 };
 
@@ -538,7 +538,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
       <BrandCard padding={24}>
         <p style={BODY_STYLE}>
           Signed by {data.owner?.name || 'Adam'}, {data.owner?.title || 'owner'}
-          {data.owner?.sentOn ? ` · ${formatSentOn(data.owner.sentOn)}` : ''}
+          {data.owner?.sentOn ? <>{' · '}<span style={{ whiteSpace: 'nowrap' }}>{formatSentOn(data.owner.sentOn)}</span></> : null}
         </p>
         <OfferSummary data={data} />
         <TermsSection terms={data.terms} />

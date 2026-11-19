@@ -174,7 +174,10 @@ const rate = {
 // Job offer link for an applicant. Fictional people only; the token is 64 hex
 // like the interview link. Dates are computed from today so the open state
 // never ages into an expired one.
-const OFFER_START = etDateString(addETDays(new Date(), 30));
+// A Monday, like a real offer (start days are Monday to Thursday).
+let offerStart = addETDays(new Date(), 30);
+while (new Date(`${etDateString(offerStart)}T12:00:00Z`).getUTCDay() !== 1) offerStart = addETDays(offerStart, 1);
+const OFFER_START = etDateString(offerStart);
 const OFFER_STEP = etDateString(addETDays(new Date(), 120));
 const OFFER_SENT = etDateString(addETDays(new Date(), -1));
 const OFFER_EXPIRES = addETDays(new Date(), 6).toISOString();
@@ -214,6 +217,10 @@ const careersOffer = {
     {
       name: 'signed', ready: 'Welcome to Waves',
       handle: offerHandle({ ...OFFER_PAYLOAD, state: 'signed', signedName: 'Jordan Rivera', signedAt: OFFER_SIGNED }),
+    },
+    {
+      name: 'date-requested', ready: 'Sam will look at your new date',
+      handle: offerHandle({ ...OFFER_PAYLOAD, state: 'date_requested', requestedStartDate: OFFER_START }),
     },
     {
       name: 'expired', ready: 'Please call',
