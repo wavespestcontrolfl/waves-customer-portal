@@ -146,6 +146,40 @@ describe("insertDictatedText", () => {
     expect(el.value).toBe("Hello");
   });
 
+  // A modal opened while the words came back: the box stays enabled but out of reach, and focus
+  // sits on the modal's input. The browser's insert writes into whatever has focus.
+  const insertIntoFocused = () => vi.fn((cmd, _ui, text) => {
+    document.activeElement.value += text;
+    return true;
+  });
+
+  it.each([
+    ["inert", '<div inert><textarea>Hello</textarea></div><input id="modal">'],
+    ["aria-hidden", '<div aria-hidden="true"><textarea>Hello</textarea></div><input id="modal">'],
+    ["display none", '<textarea style="display: none">Hello</textarea><input id="modal">'],
+  ])("a box out of sight (%s) is hidden: no words, no resend, nothing in the modal's input", (_name, html) => {
+    const el = box(html);
+    const modal = document.getElementById("modal");
+    modal.focus();
+    document.execCommand = insertIntoFocused();
+    expect(dictationRefusal(el, { start: 5, end: 5 })).toBe("hidden");
+    expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: false, reason: "hidden" });
+    expect(el.value).toBe("Hello");
+    expect(modal.value).toBe("");
+  });
+
+  it("focus that stays on another field (a modal's focus trap) never gets the browser insert", () => {
+    const el = box('<textarea>Hello</textarea><input id="modal">');
+    const modal = document.getElementById("modal");
+    modal.focus();
+    el.focus = () => {}; // the trap keeps focus on the modal's input
+    document.execCommand = insertIntoFocused();
+    expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: true });
+    expect(document.execCommand).not.toHaveBeenCalled();
+    expect(modal.value).toBe("");
+    expect(el.value).toBe("Hello world");
+  });
+
   it("drops the words when the box left the page or is locked now", () => {
     const el = box("<textarea>Hello</textarea>");
     el.disabled = true;

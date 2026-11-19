@@ -23,6 +23,7 @@ const NOTICE_MS = 6000;
 const NOTICES = {
   gone: "Dictation: the text box was closed before the words came back, so they were not added.",
   locked: "Dictation: the text box is locked now, so the words were not added.",
+  hidden: "Dictation: the text box is hidden or covered now, so the words were not added.",
   full: "Dictation: the text box is full, so the words were not added.",
   wait: "Dictation: wait for the words to appear in the box, then press that button again.",
 };

@@ -16,6 +16,16 @@ function locked(el) {
   return el.disabled || el.readOnly || (typeof el.matches === "function" && el.matches(":disabled"));
 }
 
+// Out of the person's sight or reach now: hidden (it or a parent), or behind a modal (inert, or
+// hidden from assistive tech the way modals hide the page under them). Without checkVisibility
+// (older browsers, jsdom) only the box's own style is checked.
+function outOfSight(el) {
+  if (el.closest("[inert], [aria-hidden='true']")) return true;
+  if (typeof el.checkVisibility === "function") return !el.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true });
+  const style = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
+  return Boolean(style) && (style.display === "none" || style.visibility === "hidden");
+}
+
 export function isEligibleBox(el) {
   if (!el || el.tagName !== "TEXTAREA") return false;
   if (locked(el)) return false;
@@ -74,7 +84,7 @@ function nativeSet(el, value) {
  * undo history and React's onChange both see an ordinary typed edit; if the
  * value did not change, the native value setter plus a bubbling `input` event
  * does the same job for React.
- * Returns { ok: true } or { ok: false, reason: "gone" | "locked" | "full" }.
+ * Returns { ok: true } or { ok: false, reason: "gone" | "locked" | "hidden" | "full" }.
  */
 // Where dictated words go in the box now: the selection they replace, the space put before them,
 // and the characters the box still takes there.
@@ -86,19 +96,21 @@ function placement(el, selection) {
 
 /**
  * Why a box cannot take dictated words now: "gone" (left the page), "locked" (disabled or
- * read-only) or "full" (no room at the caret for a word after the space put before it); null
- * when it can. The one check for the insert below and for FocusedBoxMic's resend question.
+ * read-only), "hidden" (out of sight, or behind a modal) or "full" (no room at the caret for a
+ * word after the space put before it); null when it can. The one check for the insert below and
+ * for FocusedBoxMic's resend question.
  */
 export function dictationRefusal(el, selection) {
   if (!el || !el.isConnected) return "gone";
   if (locked(el)) return "locked";
+  if (outOfSight(el)) return "hidden";
   const { lead, room } = placement(el, selection);
   return room <= lead.length ? "full" : null;
 }
 
 export function insertDictatedText(el, text, selection) {
   const refusal = dictationRefusal(el, selection);
-  if (refusal === "gone" || refusal === "locked") return { ok: false, reason: refusal };
+  if (refusal === "gone" || refusal === "locked" || refusal === "hidden") return { ok: false, reason: refusal };
   const words = String(text || "").trim();
   if (!words) return { ok: true };
   if (refusal === "full") return { ok: false, reason: "full" };
@@ -111,7 +123,9 @@ export function insertDictatedText(el, text, selection) {
   } catch {
     /* a box that cannot hold a selection still takes the value below */
   }
-  if (browserInsert(payload) && el.value !== before) return { ok: true };
+  // The browser's insert writes into whatever has focus: it runs only when that is this box (a
+  // modal's focus trap can keep focus on its own input); otherwise the value is set below.
+  if (document.activeElement === el && browserInsert(payload) && el.value !== before) return { ok: true };
   // The browser declined (or has no execCommand): set the value ourselves.
   payload = payload.slice(0, room);
   nativeSet(el, before.slice(0, start) + payload + before.slice(end));
