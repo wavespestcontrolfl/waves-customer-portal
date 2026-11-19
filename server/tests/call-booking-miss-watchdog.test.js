@@ -390,26 +390,14 @@ describe('a visit the call agent held', () => {
     }
   });
 
-  // Pre-push P1s (2026-11-18): the bell shows, and offers a callback on, the processor's own
-  // contact number. Our own line is never one (the fixtures' from_phone stands in for it, so the
-  // cases below leave it out: the test env has no list of our numbers).
-  test('the number shown and the callback step follow the processor\'s contact number', () => {
-    const detailOf = (over) => bookItAlert(computeBookingMisses([call({ from_phone: null, ...over })], [], { now: NOW })[0], false).detail;
-    const withheld = detailOf({ to_phone: 'anonymous' });
-    expect(withheld).toMatch(/^Pat Sample \(no number\) confirmed /);
-    expect(withheld).toContain('Book it in dispatch; the call left no number to call back.');
-    const spoken = detailOf({ to_phone: null, ai_extraction: { phone: '+19415550123' } });
-    expect(spoken).toMatch(/^Pat Sample \(\+19415550123\) confirmed /);
-    expect(spoken).toContain('Book it in dispatch or call back to reset expectations.');
-    // A form-callback bridge dials staff first: the lead's number is the customer's, not the staff leg.
-    const bridge = detailOf({ source: 'lead-webhook-auto-bridge', to_phone: '+19415550177', metadata: { type: 'lead_auto_bridge', leadPhone: '+19415550188' } });
-    expect(bridge).toMatch(/^Pat Sample \(\+19415550188\) confirmed /);
-    // Pre-push P1 (2026-11-18): a dictated number counts where the processor would adopt it, but
-    // never on a no-text call (the hard-veto exit stores V1 before the processor's scrub).
-    const dictated = { ai_extraction: { phone: '+19415557788' } };
-    expect(detailOf(dictated)).toMatch(/^Pat Sample \(\+19415557788\) confirmed /);
-    const noText = detailOf({ ...dictated, ai_extraction_enriched: extraction({ caller: { name_full: 'Pat Sample', ani_cannot_text: true } }) });
-    expect(noText).toMatch(/^Pat Sample \(\+19415550111\) confirmed /);
+  // The watchdog makes no contact rule of its own: the number a bell shows is main's (the
+  // customer's leg of the call), and only a stored opt-out or a no-number hold changes the step.
+  test('the number shown is the customer\'s leg of the call, and a missing number alone keeps the callback step', () => {
+    const detailOf = (over) => bookItAlert(computeBookingMisses([call(over)], [], { now: NOW })[0], false).detail;
+    expect(detailOf({})).toMatch(/^Pat Sample \(\+19415550111\) confirmed /);
+    const noLine = detailOf({ to_phone: null });
+    expect(noLine).toMatch(/^Pat Sample \(no number\) confirmed /);
+    expect(noLine).toContain('Book it in dispatch or call back to reset expectations.');
   });
 
   // Pre-push P1 (2026-11-18): the date check follows the same contact rule as "book it".
@@ -419,14 +407,13 @@ describe('a visit the call agent held', () => {
     const check = (c, holdReason = null) => dateCheckAlert({ name: 'Pat Sample', slot, call: c, mismatch, service: 'Waves Assessment', holdReason }).detail;
     expect(check(call())).toMatch(/Move it to the agreed day, or confirm the new day with the customer, then tap Done\.$/);
     const optedOut = check(call({ ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) }));
-    expect(optedOut).toMatch(/Move it to the agreed day or keep the booked day, then tap Done; do not call or text the caller\.$/);
+    // Pre-push P1 (2026-11-18): with no way to confirm a new day, the step never offers to keep the booked one.
+    expect(optedOut).toMatch(/Move it to the agreed day, then tap Done; do not call or text the caller\.$/);
+    expect(optedOut).not.toContain('keep the booked day');
     expect(optedOut).not.toContain('confirm the new day with the customer');
     expect(check(call(), 'the caller asked not to be contacted')).toContain('do not call or text the caller');
-    // Our own line (the fixture's from_phone) is never a number to reach the caller on.
-    expect(check(call({ to_phone: null, from_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
-    expect(check(call({ to_phone: 'anonymous', from_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
     expect(check(call({ ai_extraction: { do_not_contact_request: true } }))).toContain('do not call or text the caller');
-    expect(check(call(), 'the call has no callback number')).toMatch(/the call left no number to confirm a new day\.$/);
+    expect(check(call(), 'the call has no callback number')).toMatch(/Move it to the agreed day, then tap Done; the call left no number to confirm a new day\.$/);
   });
 
   test('every blocking triage flag has a phrase', () => {

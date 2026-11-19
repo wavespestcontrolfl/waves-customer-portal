@@ -342,7 +342,7 @@ describe('close pass', () => {
     expect(result).toMatchObject({ closed: 2, raised: 1 });
     const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Schedule — check Sam Sample's visit date");
-    expect(opts.detail).toMatch(/Move it to the agreed day or keep the booked day, then tap Done; do not call or text the caller\.$/);
+    expect(opts.detail).toMatch(/Move it to the agreed day, then tap Done; do not call or text the caller\.$/);
     expect(opts.detail).not.toContain('confirm the new day with the customer');
   });
 
@@ -387,7 +387,7 @@ describe('close pass', () => {
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     await planOpenBookingMissBells({ now: NOW });
-    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['ai_validation', 'processing_status', 'processing_started_at', 'source', 'metadata', 'ai_extraction']));
+    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['ai_validation', 'processing_status', 'processing_started_at', 'ai_extraction']));
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];

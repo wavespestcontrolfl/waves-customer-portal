@@ -78,7 +78,6 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const { QUIET_AGED_RULE, cardIsNewer } = require('./triage-auto-resolve');
 const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 const { callEndedAt } = require('../utils/call-timeline');
-const { aniCannotText } = require('./call-triage-flags');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
 // inside Monday morning's window even after a full weekend of gated-off or
@@ -130,7 +129,8 @@ const HOLD_REASONS = [
   ['on_file_house_number_conflict', 'a different house number was given'],
 ];
 // The detail's last step, by alert and by what the call allows (contactLimit): no bell tells
-// staff to contact a caller who opted out, or to call back a call that left no number.
+// staff to contact a caller who opted out, or to call back a call the call agent held for
+// having no number. With no way to confirm a new day, the date check asks for the agreed day.
 const LAST_STEP = {
   book: {
     none: 'Book it in dispatch or call back to reset expectations.',
@@ -139,8 +139,8 @@ const LAST_STEP = {
   },
   check: {
     none: 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
-    opted_out: 'Move it to the agreed day or keep the booked day, then tap Done; do not call or text the caller.',
-    no_number: 'Move it to the agreed day or keep the booked day, then tap Done; the call left no number to confirm a new day.',
+    opted_out: 'Move it to the agreed day, then tap Done; do not call or text the caller.',
+    no_number: 'Move it to the agreed day, then tap Done; the call left no number to confirm a new day.',
   },
 };
 // The house-number hold (the processor's houseNumberDisputed) blocks an allowed decision
@@ -327,12 +327,13 @@ function callHoldReason(call) {
   return agentHoldReason(currentDecision(call));
 }
 
-// What the call lets staff do next (LAST_STEP): 'opted_out' (the extraction or the hold says
-// so), 'no_number' (the router held it for no callback number, or the call gave no number to
-// reach the caller on; see callFacts), or 'none'.
+// What the call lets staff do next (LAST_STEP): 'opted_out' (a stored opt-out signal, or the
+// hold, says so), 'no_number' (the call agent held it for having no number to call), or
+// 'none'. Only those two facts change the step; which number a bell shows is main's rule
+// (callFacts), and the call's own cards carry its other contact limits.
 function contactLimit(call, holdReason) {
   if (holdReason === NO_CONTACT_REASON || callerOptedOut(call)) return 'opted_out';
-  if (holdReason === NO_NUMBER_REASON || !callFacts(call).contactPhone) return 'no_number';
+  if (holdReason === NO_NUMBER_REASON) return 'no_number';
   return 'none';
 }
 
@@ -422,7 +423,7 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
-// source, ai_extraction_enriched, ai_extraction, ai_validation,
+// ai_extraction_enriched, ai_extraction, ai_validation,
 // processing_status, processing_started_at, metadata, duration_seconds,
 // recording_duration_seconds, bridged_at }); a call the call agent held (callHoldReason)
 // waits HELD_GRACE_MINUTES from the call's end (heldWaitStart) instead of
@@ -745,20 +746,14 @@ async function loadBookingRows(entries, namesakes) {
 }
 
 // The call facts both bell texts name in `detail`: when it was (ET), the
-// number to reach the customer on, and which way it went. The number is the
-// processor's own (resolveCallContactPhone): a form-callback bridge's lead number, not its
-// staff leg; never one of our lines, a staff phone, or a withheld caller ID ("anonymous").
-// The V1 extraction's dictated number takes part (as call-last-name-lookup passes it) except
-// on a no-text call (ani_cannot_text): there the processor keeps every number that is not one
-// of the call's own legs off the caller, and its hard-veto exit stores V1 before that scrub.
+// customer's number, and which way it went.
 function callFacts(call) {
-  const { resolveCallContactPhone } = require('./call-recording-processor');
-  const dictated = aniCannotText(readJson(call.ai_extraction_enriched)?.caller) ? null : readJson(call.ai_extraction)?.phone;
+  const outbound = String(call.direction || '').startsWith('outbound');
   return {
     callAtET: new Date(call.created_at).toLocaleString('en-US', {
       timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
     }),
-    contactPhone: resolveCallContactPhone(call, dictated || null),
+    contactPhone: outbound ? call.to_phone : call.from_phone,
     direction: call.direction || 'unknown-direction',
   };
 }
@@ -831,9 +826,8 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
-      'processing_status', 'processing_started_at',
-      // callFacts' and callerOptedOut's inputs.
-      'source', 'metadata', 'ai_extraction',
+      // callHoldReason's inputs, and callerOptedOut's V1 signal.
+      'processing_status', 'processing_started_at', 'ai_extraction',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
@@ -971,10 +965,10 @@ async function runInner({ now }) {
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
-      // callHoldReason's inputs, then callEndedAt's, for a held call's wait; then callFacts' and
-      // callerOptedOut's (metadata serves both).
+      // callHoldReason's inputs, then heldWaitStart's (a held call's wait), then callerOptedOut's
+      // V1 signal.
       'processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at',
-      'source', 'ai_extraction',
+      'ai_extraction',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
@@ -1067,9 +1061,6 @@ function likelyAccountSentence(account) {
 // reporting "alert fired" (owner ruling 2026-09-30: this alarm always
 // rings). Returns 'rung', 'deduped' or 'silenced'.
 async function ringMiss(m, { dedupeKey, repeat }) {
-  // callFacts' number skips technicians' own phones from a cached set; load it first, as the
-  // processor does before it resolves a call's number (refresh never throws; 60 s cache).
-  await require('./staff-sender-phones').refresh();
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
