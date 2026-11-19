@@ -759,13 +759,7 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
               // bell instead of overwriting it.
               const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
               const bothOpen = !estimateId && !existingMeta.estimateId;
-              // A run bound to its ask's row (askBellId) that brings no draft
-              // leaves the row as it is. The row had no draft when the ask
-              // landed on it, so a draft there now came from a run for the
-              // same row (two texts merged under the ask lock): it is not a
-              // new task, and a fresh "send it" bell would duplicate it.
-              const boundNoDraft = !!askBellId && !estimateId;
-              if (sameDraft || bothOpen || boundNoDraft) return landed(existing.id);
+              if (sameDraft || bothOpen) return landed(existing.id);
               if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
             }
           }
@@ -805,20 +799,22 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
       });
       return created ? landed(created.id) : { ok: false, bellId: null };
     };
-    // A fresh ask's lookup and the insert it may lead to hold one lock per
-    // number, as notifyAdmin's dedupeKey path does: two texts that both pass
-    // the cooldown cannot both find no open bell and both ring. An outcome
-    // needs none: it updates its own ask's row.
-    if (dedupe?.openOnly) {
+    // Every text-thread bell write (a fresh ask, a clarify resume, a run's
+    // outcome) holds one lock per number around its lookup and its write, as
+    // notifyAdmin's dedupeKey path does. Two texts that both pass the
+    // cooldown cannot both find no open bell and both ring, and two runs on
+    // one bell cannot both read it draftless and overwrite each other's draft:
+    // the second sees the first's draft and gets its own bell.
+    if (!callSid && threadKey) {
       return await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`estimator-ask:${threadKey}`]);
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`estimator-bell:${threadKey}`]);
         return standOrRaise(trx);
       });
     }
     return await standOrRaise(db);
   } catch (err) {
     // A code, never err.message: a Knex error echoes its bound values, and
-    // the thread key and the ask lock both carry the sender's phone digits.
+    // the thread key and the bell lock both carry the sender's phone digits.
     logger.warn(`[estimator-engine] admin notify failed: ${require('../notification-service').safeErrorSummary(err)}`);
     return { ok: false, bellId: null };
   }

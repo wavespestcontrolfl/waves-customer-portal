@@ -337,11 +337,11 @@ customer's message by this rule.
    with no customer and no lead, leaves the bell open. Re-armed like every class if the evidence goes.
    A text-origin bell (a `smsThreadKey`, no `callSid`) is not in the class. A new quote text merges for
    7 days into the number's OPEN bell only (`notifyBell` with `newAsk`,
-   `server/services/estimator-engine/index.js`, under one lock per number): an ask after that bell is
-   done (a person's Done, the quiet fall-off) gets a fresh bell, except inside the 10-minute per-number
-   cooldown (`startSmsThreadDraft`, before any paid call), which raises none. The draft run's outcome
-   updates the row its own ask landed on, open or done. A clarify reply keeps the number's newest bell,
-   open or done.
+   `server/services/estimator-engine/index.js`): an ask after that bell is done (a person's Done, the
+   quiet fall-off) gets a fresh bell, except inside the 10-minute per-number cooldown
+   (`startSmsThreadDraft`, before any paid call), which raises none. The draft run's outcome updates the
+   row its own ask landed on, open or done. A clarify reply keeps the number's newest bell, open or done.
+   Every text-bell write holds one lock per number.
    A new text from the same sender rings a fresh bell: the thread row is rewritten, rung and
    re-opened. The sweep never contacts a customer.
 3. **Budget.** Rows that are not a customer reaching out should ring at most 10 times a

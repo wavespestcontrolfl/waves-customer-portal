@@ -2,7 +2,7 @@
  * Text-quote bells dedupe on the phone's thread key for 7 days, three ways
  * (notifyBell in services/estimator-engine/index.js):
  *  - A NEW ASK (the placeholder startSmsThreadDraft raises for a fresh quote
- *    text, `newAsk: true`) matches OPEN bells only, under one lock per number.
+ *    text, `newAsk: true`) matches OPEN bells only.
  *    Before, a done bell inside the window still matched: a new ask with no
  *    draft "stood" on it, so the ask raised nothing. In production 3 asks
  *    between 11-10 and 11-18 got no bell this way, each behind a bell the
@@ -11,6 +11,7 @@
  *    landed on, open or done.
  *  - Anything else with the key (a clarify-reply resume) keeps the newest
  *    bell of the key, open or done, as before.
+ * Every text-bell write holds one lock per number around its lookup and write.
  *
  * Drives the real notifyBell() over a fake notifications table that applies
  * the filters the query asks for (thread key or row id, the 7-day window,
@@ -151,7 +152,7 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
   test('the lookup and the insert run on one transaction that first takes the number\'s lock', async () => {
     await askPlaceholder();
 
-    expect(mockLog).toEqual([`lock:estimator-ask:${KEY}`, 'lookup:trx', 'insert:trx']);
+    expect(mockLog).toEqual([`lock:estimator-bell:${KEY}`, 'lookup:trx', 'insert:trx']);
   });
 
   test('a second ask after the first one\'s insert stands on that bell: one bell for both runs', async () => {
@@ -183,7 +184,7 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
   test('a failed lock is not a bell, and its log line carries a code, never the phone digits', async () => {
     // Knex puts the SQL and its bound values in err.message.
     mockLockError = Object.assign(
-      new Error(`SELECT pg_advisory_xact_lock(hashtext('estimator-ask:${KEY}')) - canceling statement due to lock timeout`),
+      new Error(`SELECT pg_advisory_xact_lock(hashtext('estimator-bell:${KEY}')) - canceling statement due to lock timeout`),
       { code: '55P03' },
     );
 
@@ -211,8 +212,8 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(0);
-    // An outcome takes no lock: it writes only its own ask's row.
-    expect(mockLog).toEqual(['lookup:db']);
+    // The outcome's lookup and write hold the number's lock too.
+    expect(mockLog).toEqual([`lock:estimator-bell:${KEY}`, 'lookup:trx']);
   });
 
   test('a draft outcome reopens that closed row in place, with the draft (unchanged)', async () => {
@@ -223,23 +224,36 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
     expect(mockUpdates).toHaveLength(1);
     expect(mockUpdates[0].ids).toEqual(['bell-ask']);
+    expect(mockUpdates[0].on).toBe('trx');
     expect(mockUpdates[0].patch.done_at).toBeNull();
     expect(JSON.parse(mockUpdates[0].patch.metadata).estimateId).toBe('est-8');
   });
 
-  test('two texts on one bell: a late no-draft outcome keeps the first run\'s draft there and raises no second bell', async () => {
+  test('two runs on one bell: a second, different draft gets its own bell instead of overwriting the first', async () => {
     const first = await askPlaceholder();
     const second = await askPlaceholder();
     expect(second.bellId).toBe(first.bellId);
-    // Run 1 puts its draft on the shared bell.
     await outcome(first.bellId, { estimateId: 'est-10', lane: 'green' });
 
-    // Run 2 finishes red on the same row.
-    await expect(outcome(second.bellId)).resolves.toEqual({ ok: true, bellId: first.bellId });
+    // Under the lock the second run reads the row after the first run's write.
+    const late = await outcome(second.bellId, { estimateId: 'est-11', lane: 'green' });
 
-    // One insert (the first ask) and one rewrite (the draft): no new "send it" bell.
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
-    expect(mockUpdates).toHaveLength(1);
+    expect(late).toEqual({ ok: true, bellId: 'bell-new-2' });
+    expect(mockRows.find((row) => row.id === first.bellId).metadata.estimateId).toBe('est-10');
+    expect(mockNotifyAdmin.mock.calls[1][3].metadata.estimateId).toBe('est-11');
+  });
+
+  test('two runs on one bell: a red after the first run\'s draft raises its own bell, so a second ask is never hidden', async () => {
+    const first = await askPlaceholder();
+    await askPlaceholder();
+    await outcome(first.bellId, { estimateId: 'est-10', lane: 'green' });
+
+    // The code cannot tell a repeat of the drafted ask from an ask about a
+    // second property, so the red keeps its own "send it" bell (as on main).
+    await outcome(first.bellId);
+
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
+    expect(mockNotifyAdmin.mock.calls[1][1]).toBe('Quote asked by text — send it');
     expect(mockRows.find((row) => row.id === first.bellId).metadata.estimateId).toBe('est-10');
   });
 
@@ -267,6 +281,6 @@ describe('a clarify-reply resume keeps the newest bell of the number, open or do
     })).resolves.toEqual({ ok: true, bellId: 'bell-closed' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
-    expect(mockLog).toEqual(['lookup:db']);
+    expect(mockLog).toEqual([`lock:estimator-bell:${KEY}`, 'lookup:trx']);
   });
 });
