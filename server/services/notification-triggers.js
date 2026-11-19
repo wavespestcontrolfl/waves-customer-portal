@@ -1557,6 +1557,10 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // Set when the recipient lookup or the push dispatch THREW, so a caller that must tell a failed push from a disabled one
     // (estimate-call-today-push.js) can: both leave `push: null`. Additive field on the returned stats; no other caller reads it.
     let pushFailed = null;
+    // Set as the first device's banner is built, right before its provider send (sendToAdminUsers builds each
+    // device's banner just before sending it): from then on a throw may come after a handoff. A throw before it
+    // (the subscription lookup) reached no provider: pushFailed 'before_handoff'.
+    let pushHandoffStarted = false;
     try {
       let recipientQuery = db('technicians').where({ active: true });
       // Delivery follows the same fail-closed model as the persisted feed
@@ -1847,6 +1851,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
+            pushHandoffStarted = true;
             const wantsSound = wantsSoundByUser.get(adminUserId);
             const badgeInfo = badgeByUser.get(adminUserId);
             // A technician recipient gets its own copy when the trigger names techOmit keys.
@@ -1883,7 +1888,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
-      stats.pushFailed = 'push_dispatch';
+      stats.pushFailed = pushHandoffStarted ? 'push_dispatch' : 'before_handoff';
       // A resumed event owns its retry: a failure before any handoff (the
       // subscription lookup) must not read as a delivered push.
       if (dedupeKey) { stats.push = null; stats.retryable = true; stats.error = e.message; }

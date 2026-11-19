@@ -60,7 +60,7 @@ beforeEach(() => {
   const listQuery = () => {
     let limit = Infinity;
     const q = {};
-    for (const name of ['leftJoin', 'select', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn']) {
+    for (const name of ['leftJoin', 'select', 'clearSelect', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn']) {
       q[name] = (...args) => { estimateCalls.push([name, ...args]); return q; };
     }
     q.limit = (n) => { limit = n; estimateCalls.push(['limit', n]); return q; };
@@ -131,7 +131,7 @@ describe('the count is the page list', () => {
     const route = fs.readFileSync(path.join(repo, 'server/routes/admin-estimates.js'), 'utf8');
     const push = fs.readFileSync(path.join(repo, 'server/services/estimate-call-today-push.js'), 'utf8');
     expect(route).toMatch(/estimateListQuery\(db, \{/);
-    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
+    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.clearSelect\(\)\.select\(CALL_TODAY_COLUMNS\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
     expect(route).not.toMatch(/db\('estimates'\)\s*\.leftJoin\('technicians'/);
   });
 
@@ -285,11 +285,11 @@ describe('the banner', () => {
       expect(mockTrigger).toHaveBeenCalledTimes(1);
     });
 
-    test('the dispatcher says its recipient lookup threw before any push: an error, the claim is released, a rerun sends', async () => {
-      mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'recipient_lookup' });
-      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'recipient_lookup_failed' });
+    test.each(['recipient_lookup', 'before_handoff'])('the dispatcher says it threw before any push reached a provider (%s): an error, the claim is released, a rerun sends', async (marker) => {
+      mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: marker });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_failed_before_handoff' });
       expect([...claimed]).toEqual([]);
-      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: recipient lookup failed before any push; claim released');
+      expect(logger.error).toHaveBeenCalledWith(`[estimate-call-today] 2026-11-19: push failed before any handoff (${marker}); claim released`);
       // The database is back: the same-day rerun takes the claim and sends.
       await expect(run()).resolves.toMatchObject({ count: 1, sent: true });
       expect(mockTrigger).toHaveBeenCalledTimes(2);
@@ -300,7 +300,7 @@ describe('the banner', () => {
       releaseFails = true;
       await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'claim_release_failed' });
       expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
-      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: recipient lookup failed before any push; claim release failed');
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: push failed before any handoff (recipient_lookup); claim release failed');
     });
 
     test('a skip whose claim release fails is claim_release_failed, and the log says the release failed', async () => {

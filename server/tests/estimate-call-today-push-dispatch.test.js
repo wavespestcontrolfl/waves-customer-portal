@@ -41,7 +41,7 @@ beforeEach(() => {
   });
   db.mockImplementation((table) => {
     const q = {};
-    for (const name of ['leftJoin', 'select', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn', 'groupBy', 'max']) q[name] = () => q;
+    for (const name of ['leftJoin', 'select', 'clearSelect', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn', 'groupBy', 'max']) q[name] = () => q;
     if (table === 'estimates') {
       q.limit = () => Promise.resolve([viewedRow]);
     } else if (table === 'short_codes') {
@@ -61,12 +61,19 @@ beforeEach(() => {
 
 const run = () => runEstimateCallTodayPush({ now: NOW });
 
-test('the dispatcher marks a thrown recipient lookup and a thrown push dispatch with pushFailed', async () => {
+// sendToAdminUsers builds each device's banner just before its provider send, so a throw before the first build (its
+// subscription lookup) reached no provider, and a throw after it may have.
+const throwAfterFirstBuild = async (ids, build) => { build(ids[0], {}); throw new Error('provider down'); };
+
+test('the dispatcher marks where its push failed: recipient lookup, before any handoff, or after a send began', async () => {
   admins = async () => { throw new Error('connection reset'); };
   await expect(triggerNotification('estimate_call_today', { count: 1, day: '2026-11-19' }, { pushOnly: true }))
     .resolves.toMatchObject({ push: null, pushFailed: 'recipient_lookup' });
   admins = async () => [{ id: 'admin-1', role: 'admin' }];
-  PushService.sendToAdminUsers.mockRejectedValue(new Error('provider down'));
+  PushService.sendToAdminUsers.mockRejectedValueOnce(new Error('push_subscriptions query failed'));
+  await expect(triggerNotification('estimate_call_today', { count: 1, day: '2026-11-19' }, { pushOnly: true }))
+    .resolves.toMatchObject({ push: null, pushFailed: 'before_handoff' });
+  PushService.sendToAdminUsers.mockImplementationOnce(throwAfterFirstBuild);
   await expect(triggerNotification('estimate_call_today', { count: 1, day: '2026-11-19' }, { pushOnly: true }))
     .resolves.toMatchObject({ push: null, pushFailed: 'push_dispatch' });
 });
@@ -82,19 +89,35 @@ test('no pushFailed on a delivered push, a disabled push or a push with no recip
 
 test('a failed recipient lookup is an error with nothing handed off: the claim is released, and a rerun after the database recovers sends', async () => {
   admins = async () => { throw new Error('connection reset'); };
-  await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'recipient_lookup_failed' });
+  await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_failed_before_handoff' });
   expect([...claimed]).toEqual([]);
   expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
-  expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: recipient lookup failed before any push; claim released');
+  expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: push failed before any handoff (recipient_lookup); claim released');
   admins = async () => [{ id: 'admin-1', role: 'admin' }];
   await expect(run()).resolves.toMatchObject({ count: 1, sent: true });
   expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
 });
 
-test('a thrown push dispatch is an error with the claim kept', async () => {
-  PushService.sendToAdminUsers.mockRejectedValue(new Error('provider down'));
+test('a failed subscription lookup reached no provider: the claim is released, and a rerun sends', async () => {
+  PushService.sendToAdminUsers.mockRejectedValueOnce(new Error('push_subscriptions query failed'));
+  await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_failed_before_handoff' });
+  expect([...claimed]).toEqual([]);
+  await expect(run()).resolves.toMatchObject({ count: 1, sent: true });
+});
+
+test('a push dispatch that threw after a device send began is an error with the claim kept', async () => {
+  PushService.sendToAdminUsers.mockImplementation(throwAfterFirstBuild);
   await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_dispatch_failed' });
   expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+});
+
+test('the count reads only the columns the rule and the call lookup use', () => {
+  const { CALL_TODAY_COLUMNS } = require('../services/estimate-call-today-push');
+  const { callTodayFields } = require('../services/estimate-call-list');
+  const full = { ...viewedRow, estimate_data: { big: true }, customer_name: 'Synthetic Name' };
+  const picked = Object.fromEntries(CALL_TODAY_COLUMNS.map((c) => c.replace('estimates.', '')).map((c) => [c, full[c]]));
+  expect(callTodayFields(picked)).toEqual(callTodayFields(full));
+  expect(CALL_TODAY_COLUMNS).not.toContain('estimates.estimate_data');
 });
 
 test('a really disabled push (no admin to send to) stays a skip and frees the claim', async () => {

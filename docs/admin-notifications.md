@@ -639,8 +639,9 @@ trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, 
 day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
 is not made up). The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
 (a later run may try); after a device failure, or any result it does not recognize, it is kept (no second banner). The dispatcher marks a
-thrown recipient lookup or push dispatch (`pushFailed`; both leave `push: null`, like a push that is off): a failed lookup comes before any
-handoff, so its claim is released, and a failed dispatch may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure
+throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
+block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a
+device send began may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure
 throws inside the cron's `runExclusive` callback, so job health records the run as failed; a skip stays a success. The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
 (Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
 

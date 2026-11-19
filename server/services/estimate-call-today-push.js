@@ -32,12 +32,21 @@ const { isCallTodayEstimate } = require('../../shared/estimate-call-today.cjs');
 const { ESTIMATE_LIST_LIMIT, estimateListQuery, lastCalledAtByEstimateId, callTodayFields } = require('./estimate-call-list');
 
 const CLAIM_PREFIX = 'estimate_call_today:';
+// The dispatcher's `pushFailed` markers for a throw before any push reached a provider: its recipient lookup, or the
+// push block before the first device send (the subscription lookup). 'push_dispatch' may have reached a phone.
+const PRE_HANDOFF_FAILURES = new Set(['recipient_lookup', 'before_handoff']);
+// The columns the count reads: callTodayFields, lastCalledAtByEstimateId (id, status, customer_phone) and the filter in
+// candidateRows. The rows and their order stay the list route's; estimate_data is not loaded for 2,000 rows.
+const CALL_TODAY_COLUMNS = Object.freeze([
+  'estimates.id', 'estimates.status', 'estimates.customer_phone', 'estimates.archived_at',
+  'estimates.sent_at', 'estimates.viewed_at', 'estimates.last_viewed_at', 'estimates.last_follow_up_at',
+]);
 
 // The rows the Estimates page loads (its sent list: the list route's own selection, newest ESTIMATE_LIST_LIMIT, the
-// selection BEFORE any filtering), then the ones the rule can pass: viewed, not archived, with a phone. The row
-// selection keeps its full width, so the column list stays the list route's.
+// selection BEFORE any filtering), then the ones the rule can pass: viewed, not archived, with a phone. Only the
+// columns the count reads are fetched (CALL_TODAY_COLUMNS).
 async function candidateRows() {
-  const rows = await estimateListQuery(db, { sentOnly: true }).limit(ESTIMATE_LIST_LIMIT);
+  const rows = await estimateListQuery(db, { sentOnly: true }).clearSelect().select(CALL_TODAY_COLUMNS).limit(ESTIMATE_LIST_LIMIT);
   return rows.filter((row) => row.status === 'viewed' && !row.archived_at && String(row.customer_phone || '').trim());
 }
 
@@ -93,11 +102,11 @@ async function releaseDay(day) {
 // off (push null) or a RECOGNIZED nothing-to-send-to result (no device, expired devices, a policy skip: sent 0 with no
 // failure counted) is a skip: the claim is released so a later run may try. Anything else (a device failed, a retry is
 // pending, or a result shape we do not recognize, such as missing counters) is uncertain: the claim stays, so there is
-// never a second banner that day. The dispatcher's own `pushFailed` marker (its recipient lookup or push dispatch
-// threw, which also leaves push null) is a failure, not a disabled push, and the run reports an error. A failed
-// recipient lookup comes before any push is handed off, so its claim is released (a same-day rerun may send once the
-// database recovers); a thrown push dispatch may have reached a device, so its claim stays. A claim release that
-// fails is reported as claim_release_failed, never as a released claim. The log lines are fixed text.
+// never a second banner that day. The dispatcher's own `pushFailed` marker (its recipient lookup or push block threw,
+// which also leaves push null) is a failure, not a disabled push, and the run reports an error. A throw before any
+// push reached a provider (PRE_HANDOFF_FAILURES) releases the claim, so a same-day rerun may send once the database
+// recovers; a thrown push dispatch after a device send began may have reached a phone, so its claim stays. A claim
+// release that fails is reported as claim_release_failed, never as a released claim. The log lines are fixed text.
 function isRecognizedNoDelivery(push) {
   if (push === null) return true;
   if (!push || typeof push !== 'object' || push.sent !== 0) return false;
@@ -113,10 +122,10 @@ async function settle(day, count, result) {
     logger.error(`[estimate-call-today] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})${released ? '' : '; claim release failed'}`);
     return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
   }
-  if (result.pushFailed === 'recipient_lookup') {
+  if (PRE_HANDOFF_FAILURES.has(result.pushFailed)) {
     const released = await releaseDay(day);
-    logger.error(`[estimate-call-today] ${day}: recipient lookup failed before any push; ${released ? 'claim released' : 'claim release failed'}`);
-    return { count, sent: false, error: released ? 'recipient_lookup_failed' : 'claim_release_failed' };
+    logger.error(`[estimate-call-today] ${day}: push failed before any handoff (${result.pushFailed}); ${released ? 'claim released' : 'claim release failed'}`);
+    return { count, sent: false, error: released ? 'push_failed_before_handoff' : 'claim_release_failed' };
   }
   if (result.pushFailed) {
     logger.error(`[estimate-call-today] ${day}: push dispatch failed (${String(result.pushFailed)}); claim kept`);
@@ -180,4 +189,4 @@ async function runEstimateCallTodayPush({ now = new Date() } = {}) {
   return claimAndSend(day, count);
 }
 
-module.exports = { runEstimateCallTodayPush, countCallToday };
+module.exports = { runEstimateCallTodayPush, countCallToday, CALL_TODAY_COLUMNS };
