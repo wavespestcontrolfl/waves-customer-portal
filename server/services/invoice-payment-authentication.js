@@ -84,6 +84,13 @@ function matchingCancellation(identity, database) {
     })
     .where(function compatibleIntent() {
       this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', intent.id);
+    })
+    .where(function compatibleCancellation() {
+      // A signed cancellation can arrive before the charging worker binds the
+      // intent. Keep that candidate until the worker identifies the actual PI.
+      this.whereNull('authentication_canceled_intent_id')
+        .orWhere('authentication_canceled_intent_id', intent.id)
+        .orWhere('stripe_payment_intent_id', intent.id);
     });
   if (methodId) query.where({ stripe_payment_method_id: methodId });
   return { query, evidence };
@@ -131,10 +138,7 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
     // UPDATE repeats every identity check, including any intervening binding.
     const match = matchingCancellation(identity, conn);
     const { query, evidence } = match;
-    query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
-      .where(function compatibleEvidence() {
-        this.whereNull('authentication_canceled_intent_id').orWhere('authentication_canceled_intent_id', intentId);
-      });
+    query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at');
     if (!evidence.stripe_payment_intent_id) query.where({ stripe_payment_intent_id: intentId });
     return match;
   };

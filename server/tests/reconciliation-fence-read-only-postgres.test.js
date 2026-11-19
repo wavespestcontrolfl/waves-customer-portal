@@ -330,6 +330,18 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await attempt().update({ stripe_payment_intent_id: null });
     await recordAuthenticationCancellation({ ...intent, payment_method: 'pm_other' }, app);
     expect(await attempt().first()).toMatchObject({ authentication_canceled_intent_id: null });
+
+    await attempt().update({ authentication_canceled_intent_id: 'pi_previousCandidate' });
+    await recordAuthenticationCancellation(intent, app);
+    expect(await attempt().first()).toMatchObject({
+      stripe_payment_intent_id: null, authentication_canceled_intent_id: 'pi_previousCandidate',
+    });
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    // Once the charging worker binds the exact PI, its verified cancellation
+    // is conclusive even if a different, unbound candidate arrived first.
+    await attempt().update({ stripe_payment_intent_id: intent.id });
+    await recordAuthenticationCancellation(intent, app);
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
   });
 
   test('an operator can preview and record one old cancellation without a retained webhook or a stored PI', async () => {
