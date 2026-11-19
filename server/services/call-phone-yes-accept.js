@@ -99,6 +99,7 @@ const REASONS = {
   has_addons: 'The booked visit has add-on lines.',
   visit_priced: 'The booked visit has a price or a discount that is not the plan price.',
   visit_invoiced: 'The booked visit already has an invoice.',
+  visit_payer: "The booked visit has its own billing party (a payer, or self-pay). The plan's next visits would not.",
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -278,6 +279,9 @@ async function visitProblem(conn, visit, estimate, now) {
   if (visit.estimated_price != null || require('./completion-pricing').visitPriceDecisionRecorded(visit)) return 'visit_priced';
   // An invoice completion would reuse (a pre-minted one) or park the visit on: the bill would not be the plan price.
   if ((await require('./completion-invoice-candidate').completionInvoicesOnVisits(conn, [visit.id])).length) return 'visit_invoiced';
+  // A billing party set on this visit alone (a third-party payer, or a self-pay override): the converter's next visits
+  // do not carry it, so the plan's first visit and the rest would bill different parties.
+  if (visit.payer_id != null || visit.self_pay_override === true) return 'visit_payer';
   const { estimateFamilyKeysForAdoption, appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
   const families = estimateFamilyKeysForAdoption(estimate, parseJson(estimate.estimate_data), { serviceMode: 'recurring' });
   if (!families.size || !appointmentMatchesEstimateFamily(await withCatalog(conn, visit), families)) return 'service_mismatch';
@@ -706,7 +710,7 @@ async function sweepCandidates({ now, after, pageSize }) {
 const ACCEPT_SOURCE = 'call_phone_yes';
 const cents = (n) => Math.round(Number(n) * 100);
 
-// Why the tap cannot accept, in plain words. The list shows it on the card before any tap; a refused tap leads with
+// Why the tap cannot accept, in plain words. The card shows it before any tap; a refused tap leads with
 // "Nothing was accepted." A reason from the accept's own checks (REASONS) reads the same way.
 const TAP_UNAVAILABLE = {
   changed_since_check: 'The estimate, the visit or the call changed since the card loaded. Reload and look again.',
@@ -738,8 +742,8 @@ function tapRefusal(reason) {
 }
 const stop = (reason) => Object.assign(new Error(reason), { phoneYesRefusal: reason });
 
-// What the card showed, as one opaque token: the estimate and its row version, and the booked visit as read. The list
-// stamps it (tapStateOf) and the tap sends it back, so an edit or a reschedule since asks for a fresh look.
+// What the card showed, as one opaque token: the estimate and its row version, and the booked visit as read. The card
+// reads it (tapStateOf, GET /:id/call-phone-yes) and the tap sends it back, so an edit or a reschedule since asks for a fresh look.
 function tapPreviewTokenOf(evaluation) {
   const Manual = require('./estimate-manual-acceptance');
   const facts = [
@@ -757,7 +761,7 @@ function tapWordOf(evaluation) {
   return { since: evaluation.wordSince, until: evaluation.wordUntil, key: wordKeyOf(heardFields(evaluation.yes, { noYes: evaluation.noYes })) };
 }
 
-// What the list stamp and the tap both check first. { ok: true, evaluation, customerId }, or { ok: false, reason, note }
+// What the card's read (tapStateOf) and the tap both check first. { ok: true, evaluation, customerId }, or { ok: false, reason, note }
 // (note: the card's text before any tap). No tap has run yet, so a note never says "Nothing was accepted" (the office
 // may have accepted the estimate by hand).
 async function tapCheck(shown, { now }) {
@@ -796,7 +800,8 @@ async function tapCheck(shown, { now }) {
 }
 
 /**
- * What the tap on an open card can do now, read live: the server decides, so the screen holds no copy of the rule.
+ * What the tap on an open card can do now, read live when the card shows (GET /:id/call-phone-yes; the list reads
+ * nothing for it): the server decides, so the screen holds no copy of the rule.
  * @returns {{can_accept:true, preview_token, estimate_id, visit_id, visit_date, message:null}
  *   |{can_accept:false, preview_token:null, message}}
  */
@@ -894,9 +899,12 @@ function priceSeriesStep({ customerId, visit, seen }) {
       .where({ 's.id': visit.id, 's.is_recurring': true, 's.source_estimate_id': estimate.id })
       .whereNull('s.recurring_parent_id').whereNotNull('s.recurring_pattern')
       .whereIn('c.service_key', Object.values(PEST_CADENCE_CATALOG_KEYS))
-      .first('s.id', 's.service_id', ...MONEY_FIELDS.map((f) => `s.${f}`));
-    if (!parent) throw stop('series_not_booked');
-    const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id }).select('id', 'service_id', ...MONEY_FIELDS);
+      .first('s.id', 's.service_id', 's.recurring_pattern', 'c.service_key', 's.payer_id', 's.self_pay_override', ...MONEY_FIELDS.map((f) => `s.${f}`));
+    // The catalog row of the cadence booked, not only some pest cadence row: the converter can keep a visit's own
+    // service when the cadence's row is missing, so a quarterly series could carry a monthly identity.
+    if (!parent || PEST_CADENCE_CATALOG_KEYS[parent.recurring_pattern] !== parent.service_key) throw stop('series_not_booked');
+    const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id })
+      .select('id', 'service_id', 'payer_id', 'self_pay_override', ...MONEY_FIELDS);
     const series = [parent, ...children];
     const seriesIds = new Set(series.map((r) => String(r.id)));
     const linked = await require('./estimate-manual-acceptance').estimateLinkedVisitsQuery(trx, estimate.id).select('id');
@@ -907,8 +915,28 @@ function priceSeriesStep({ customerId, visit, seen }) {
     if (series.some((r) => (r.estimated_price != null && cents(r.estimated_price) !== cents(amount)) || visitPriceDecisionRecorded(r))) {
       throw stop('visit_priced');
     }
+    // Every visit of the plan bills the account's own party: none carries a payer or a self-pay override of its own.
+    if (series.some((r) => r.payer_id != null || r.self_pay_override === true)) throw stop('visit_payer');
     await trx('scheduled_services').whereIn('id', [...seriesIds]).update({ estimated_price: amount, updated_at: new Date() });
     Object.assign(seen, { seriesIds: [...seriesIds], amount });
+  };
+}
+
+// The accept's last read before the commit: the calls the caller's word is read from, locked FOR SHARE and held to the
+// commit, then the word read again (the link step read it before the conversion). A re-read of one of those calls (a
+// reprocess that changes or takes back the quote) either committed before this read, which then sees it and refuses, or
+// waits for the commit. One in flight right now refuses at once (NOWAIT): this step never waits on a call row.
+function wordStillStep({ customerId, word }) {
+  return async (trx) => {
+    try {
+      await Word.lockCallsSince(trx, { customerId, since: word.since });
+    } catch (err) {
+      if (err.code === '55P03') throw stop('call_still_processing');
+      throw err;
+    }
+    if (await Word.unreadCallSince(trx, { customerId, since: word.since })) throw stop('call_still_processing');
+    const heard = await Word.callerWord(trx, { customerId, since: word.since, until: word.until });
+    if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
   };
 }
 
@@ -935,6 +963,7 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
   const Manual = require('./estimate-manual-acceptance');
   const { estimate, visit } = evaluation;
   const seen = {};
+  const word = tapWordOf(evaluation);
   let result;
   try {
     result = await Manual.markEstimateManuallyAccepted({
@@ -943,10 +972,12 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
       // no add-on line. A change since refuses (preview_changed) before anything is written.
       expected: { ...Manual.estimateRowPin(estimate), bookedVisits: { ids: [visit.id], pin: Manual.bookedVisitsPinOf([visit]), noAddons: true } },
       beforeConvert: linkVisitStep({
-        visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word: tapWordOf(evaluation),
+        visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word,
       }),
       beforeCommit: async (trx, ctx) => {
         await priceSeriesStep({ customerId, visit, seen })(trx, ctx);
+        // The caller's word, read again last, with its calls locked through the commit.
+        await wordStillStep({ customerId, word })(trx);
         // The card closes with the accept, in its transaction: a card another admin closed or changed since rolls the
         // whole accept back.
         if (resolveCard && (await resolveCard(trx)) !== 'ok') throw stop('card_changed');
@@ -986,6 +1017,6 @@ module.exports = {
   _private: {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
     // The tap's two steps inside the accept, driven directly.
-    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, tapWordOfForTest: tapWordOf,
+    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
   },
 };

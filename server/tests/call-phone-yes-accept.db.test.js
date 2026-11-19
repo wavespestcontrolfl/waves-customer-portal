@@ -292,6 +292,14 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     return id;
   };
 
+  test("a yes on a visit that bills a third-party payer of its own: auto would accept no, visit_payer", async () => {
+    const [{ id: payerId }] = await trx('payers').insert({ display_name: 'Sample Property Managers' }).returning('id');
+    const { bookingCallId } = await phoneYes({ visitOver: { payer_id: payerId } });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'visit_payer', auto_message: REASONS.visit_payer });
+  });
+
   test('a yes on a visit that already has an invoice (a pre-minted one): auto would accept no, visit_invoiced', async () => {
     const { customerId, visitId, bookingCallId } = await phoneYes();
     await invoiceOn(customerId, visitId);
@@ -309,6 +317,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the visit carries a primary-line price', { visitOver: { primary_line_price: 99 } }, 'visit_priced'],
     ['the visit carries a recorded line discount', { visitOver: { line_discount_type: 'fixed_amount', line_discount_dollars: 10 } }, 'visit_priced'],
     ['the visit carries an appointment discount', { visitOver: { discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10 } }, 'visit_priced'],
+    // A billing party on this visit alone: the plan's next visits would bill the account's own party.
+    ['the visit is set to self-pay', { visitOver: { self_pay_override: true } }, 'visit_payer'],
     ['the visit date has passed', { visitOver: { scheduled_date: inDays(-5) } }, 'visit_in_past'],
     ['the customer is already a WaveGuard member', { customerOver: { waveguard_tier: 'Silver' } }, 'existing_plan'],
     ['the estimate is a commercial proposal', { estimateOver: { estimate_data: JSON.stringify(planData({ proposal: { enabled: true } })) } }, 'commercial_estimate'],
@@ -979,10 +989,19 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       const res = await fetch(`${base}/admin/triage/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
       return { status: res.status, body: await res.json() };
     }
-    // The card as the list shows it, with what the tap can do now.
+    async function get(path, headers = {}) {
+      const res = await fetch(`${base}/admin/triage/${path}`, { headers });
+      return { status: res.status, body: await res.json() };
+    }
+    // The card as the list shows it, with what the tap can do now: the list only marks the card (call_phone_yes_tap);
+    // the card reads the state from its own route, as the screen does.
     async function listed(cardId, headers = {}) {
       const { items } = await (await fetch(`${base}/admin/triage?status=open`, { headers })).json();
-      return items.find((i) => i.id === cardId) || null;
+      const row = items.find((i) => i.id === cardId) || null;
+      if (!row?.call_phone_yes_tap) return row;
+      const read = await get(`${cardId}/call-phone-yes`, headers);
+      expect(read.status).toBe(200);
+      return { ...row, call_phone_yes: read.body };
     }
     async function filed(opts) {
       const ctx = await phoneYes(opts);
@@ -1212,20 +1231,31 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         const { card } = ctx;
         const tech = await listed(card.id, { 'x-test-role': 'technician' });
         expect(tech).toBeNull();
+        expect((await get(`${card.id}/call-phone-yes`, { 'x-test-role': 'technician' })).status).toBe(403);
+        // The list reads nothing for the tap: it marks the open card; the card's own route reads the state.
+        const { items } = await (await fetch(`${base}/admin/triage?status=open`)).json();
+        const row = items.find((i) => i.id === card.id);
+        expect(row).toMatchObject({ call_phone_yes_tap: true });
+        expect(row).not.toHaveProperty('call_phone_yes');
         expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at }, { 'x-test-role': 'technician' })).status).toBe(403);
         expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: '2020-01-01T00:00:00Z' })).status).toBe(409);
         expect((await post(`${card.id}/accept-call-phone-yes`, {})).status).toBe(409);
         const other = randomUUID();
         await trx('triage_items').insert({ id: other, call_log_id: ctx.bookingCallId, category: 'service_unknown', reason_code: 'quote_promised', status: 'open', payload: '{}' });
         expect((await post(`${other}/accept-call-phone-yes`, { expected_updated_at: new Date().toISOString() })).status).toBe(400);
+        expect((await get(`${other}/call-phone-yes`)).status).toBe(400);
         process.env[GATE] = 'false';
         expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at })).status).toBe(404);
+        expect((await get(`${card.id}/call-phone-yes`)).status).toBe(404);
+        const { items: gateOff } = await (await fetch(`${base}/admin/triage?status=open`)).json();
+        expect(gateOff.find((i) => i.id === card.id)).not.toHaveProperty('call_phone_yes_tap');
         process.env[GATE] = 'true';
         // Without a token the tap refuses before the accept.
         const noToken = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at });
         expect(noToken).toMatchObject({ status: 409, body: { code: 'changed_since_check' } });
         await trx('triage_items').where({ id: card.id }).update({ status: 'resolved' });
         expect((await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at })).status).toBe(409);
+        expect(await get(`${card.id}/call-phone-yes`)).toMatchObject({ status: 200, body: { can_accept: false, preview_token: null } });
         expect(spy).not.toHaveBeenCalled();
       } finally { spy.mockRestore(); }
     });
@@ -1280,6 +1310,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       const invoiceId = await invoiceOn(customerId, visitId);
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
       await trx('invoices').where({ id: invoiceId }).del();
+      await trx('scheduled_services').where({ id: visitId }).update({ self_pay_override: true });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      await trx('scheduled_services').where({ id: visitId }).update({ self_pay_override: false });
       // Another estimate was opened.
       const second = await estimate(customerId, { sent_at: new Date() });
       await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'more_than_one_estimate' });
@@ -1319,10 +1352,87 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       await trx('scheduled_services').where({ id: childId }).update({ primary_line_price: null, discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10 });
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'visit_priced' });
       await trx('scheduled_services').where({ id: childId }).update({ discount_type: null, discount_amount: null, discount_dollars: null });
+      // A series on another cadence's catalog row than the one booked (a quarterly series with a monthly identity).
+      const monthly = await trx('services').where({ service_key: 'pest_general_monthly' }).first('id');
+      await trx('scheduled_services').whereIn('id', [visitId, childId]).update({ service_id: monthly.id });
+      await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'series_not_booked' });
+      await trx('scheduled_services').whereIn('id', [visitId, childId]).update({ service_id: catalog.id });
+      // A row of the series with a billing party of its own.
+      await trx('scheduled_services').where({ id: childId }).update({ self_pay_override: true });
+      await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'visit_payer' });
+      await trx('scheduled_services').where({ id: childId }).update({ self_pay_override: false });
       // A clean series is stamped at the plan price.
       await run(conversion);
       const stamped = await trx('scheduled_services').whereIn('id', [visitId, childId]).select('estimated_price');
       expect(stamped.map((r) => Number(r.estimated_price))).toEqual([PER_VISIT, PER_VISIT]);
+    });
+
+    describe('the final word check, on two connections', () => {
+      // These rows are committed, on a pool of their own, so a second connection sees them; each test deletes its own.
+      let pool; let made = null;
+      beforeAll(() => { pool = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } }); });
+      afterAll(async () => { await pool.destroy(); });
+      afterEach(async () => {
+        if (!made) return;
+        const { customerId } = made;
+        made = null;
+        await pool('scheduled_services').where({ customer_id: customerId }).del();
+        await pool('call_log').where({ customer_id: customerId }).del();
+        await pool('estimates').where({ customer_id: customerId }).del();
+        await pool('customers').where({ id: customerId }).del();
+      });
+
+      test("a re-read of a call the word is read from: in flight, it refuses at once; committed first, it refuses; after, it waits for the accept's commit", async () => {
+        const perTest = trx;
+        let ev;
+        try {
+          trx = pool;
+          mockConn = pool;
+          made = await phoneYes();
+          ev = await evaluatePhoneYes({ callLogId: made.bookingCallId, customerId: made.customerId });
+        } finally {
+          trx = perTest;
+          mockConn = perTest;
+        }
+        const { customerId, yesCallId, bookingCallId } = made;
+        expect(ev).toMatchObject({ card: true, acceptProblem: null });
+        const word = PhoneYesPrivate.tapWordOfForTest(ev);
+        const check = (conn) => PhoneYesPrivate.wordStillStepForTest({ customerId, word })(conn);
+        const asJson = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+        const readOf = async (id) => asJson((await pool('call_log').where({ id }).first('ai_extraction_enriched')).ai_extraction_enriched);
+        const yesRead = await readOf(yesCallId);
+        const noYesRead = await readOf(bookingCallId);
+
+        // The word as checked: the accept's last check passes.
+        let accept = await pool.transaction();
+        await expect(check(accept)).resolves.toBeUndefined();
+        await accept.rollback();
+
+        // A re-read of the yes call in flight on another connection (written, not yet committed): the check refuses at
+        // once, without waiting on the call row.
+        const reread = await pool.transaction();
+        await reread('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: noYesRead });
+        accept = await pool.transaction();
+        await expect(check(accept)).rejects.toMatchObject({ phoneYesRefusal: 'call_still_processing' });
+        await accept.rollback();
+        // The re-read committed first: the check reads it and refuses.
+        await reread.commit();
+        accept = await pool.transaction();
+        await expect(check(accept)).rejects.toMatchObject({ phoneYesRefusal: 'word_changed' });
+        await accept.rollback();
+
+        // The yes back. The check passes and holds the calls to the commit: a re-read that comes after waits.
+        await pool('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: yesRead });
+        accept = await pool.transaction();
+        await check(accept);
+        await expect(pool.transaction(async (later) => {
+          await later.raw("SET LOCAL lock_timeout = '300ms'");
+          await later('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: noYesRead });
+        })).rejects.toMatchObject({ code: '55P03' });
+        await accept.commit();
+        // Once the accept committed, the re-read goes through.
+        await expect(pool('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: noYesRead })).resolves.toBe(1);
+      });
     });
   });
 });

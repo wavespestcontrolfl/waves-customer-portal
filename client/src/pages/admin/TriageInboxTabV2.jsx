@@ -462,11 +462,22 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
 // call_phone_yes (GATE_CALL_PHONE_YES_ACCEPT, admin only): a call booked a pest visit while the customer had an open
 // estimate, and nothing accepted the estimate. The card says what the call reader heard: the caller's yes in their own
 // words, or "No yes heard" (the sweep keeps it current). The shadow line is what an automatic accept would have done
-// when the card was filed. The server reads what the tap can do right now (phoneYes: can_accept, visit_date, message),
-// so this screen holds no copy of the rule. The tap runs the office's own accept, as Mark accepted does: the visit the
+// when the card was filed. The server reads what the tap can do right now (can_accept, visit_date, message), so this
+// screen holds no copy of the rule. The list carries no tap state: an open card an admin can tap (tapUrl) asks the
+// server when it shows, and again on each list load (tapFor). phoneYes, when given, is that state already read. The tap runs the office's own accept, as Mark accepted does: the visit the
 // call booked becomes the plan's first visit, and the customer gets what Mark accepted sends (the membership email).
-export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = false, phoneYes = null, onAcceptPhoneYes = null }) {
+export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = false, phoneYes = null, tapUrl = null, tapFor = null, onAcceptPhoneYes = null }) {
   const p = parsePayload(payload) || {};
+  const [read, setRead] = useState(null);
+  useEffect(() => {
+    if (phoneYes || !tapUrl || !isOpenView || !isAdmin) return undefined;
+    let gone = false;
+    setRead({ loading: true });
+    adminFetch(tapUrl)
+      .then((state) => { if (!gone) setRead(state || {}); })
+      .catch(() => { if (!gone) setRead({ can_accept: false, message: "The estimate could not be read just now. Reload and try again." }); });
+    return () => { gone = true; };
+  }, [phoneYes, tapUrl, tapFor, isOpenView, isAdmin]);
   // The card's one estimate, or (with more than one open) each estimate sent before the call.
   const estimateIds = p.estimate_id ? [p.estimate_id] : (Array.isArray(p.estimate_ids) ? p.estimate_ids.filter(Boolean) : []);
   const saidAt = p.yes_at
@@ -486,7 +497,7 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
   ].filter(([, value]) => value);
   // What the tap area shows, decided once: nothing on a closed card, the admin-only note, the server's reason, or the
   // button.
-  const live = phoneYes || {};
+  const live = phoneYes || read || {};
   const tap = !isOpenView ? null : !isAdmin ? "admin" : live.can_accept ? "accept" : "refused";
   // A card that names more than one estimate says which one the tap accepts (the server checks it is one of them).
   const acceptsNth = estimateIds.length > 1 ? estimateIds.map(String).indexOf(String(live.estimate_id)) : -1;
@@ -509,13 +520,14 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
         </div>
       )}
       {tap === "admin" && <div className="mt-1 text-12 text-ink-tertiary">Accepting needs an admin.</div>}
+      {tap === "refused" && live.loading && <div className="mt-1 text-12 text-ink-tertiary">Checking what the tap can do…</div>}
       {tap === "refused" && live.message && <div className="mt-1 text-14 text-zinc-900">{live.message}</div>}
       {tap === "accept" && (
         <>
           <div className="mt-1 text-14 text-ink-secondary">
             {`${acceptsNth >= 0 ? `It accepts estimate ${acceptsNth + 1}. ` : ""}The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
           </div>
-          <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={onAcceptPhoneYes}
+          <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={() => onAcceptPhoneYes?.(live.preview_token || null)}
             title="Accepts the customer's estimate as pay per application, as Mark accepted does, and books the plan from the visit this call booked.">
             {busy ? "Accepting…" : "Accept as pay per application"}
           </Button>
@@ -1256,12 +1268,12 @@ export default function TriageInboxTabV2({ isAdmin }) {
   };
   // GATE_CALL_PHONE_YES_ACCEPT: Accept as pay per application. Version-bound like the other card actions; the server refuses
   // with a plain message (estimate already accepted, visit moved, another estimate open) and changes nothing.
-  const acceptCallPhoneYes = (item) => {
+  const acceptCallPhoneYes = (item, previewToken) => {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/accept-call-phone-yes`, {
       method: "POST",
-      // preview_token: the estimate and the visit this card shows; an edit or a reschedule since the list loaded is refused.
-      body: JSON.stringify({ expected_updated_at: item.updated_at, preview_token: item.call_phone_yes?.preview_token || null }),
+      // preview_token: the estimate and the visit this card shows; an edit or a reschedule since the card read it is refused.
+      body: JSON.stringify({ expected_updated_at: item.updated_at, preview_token: previewToken || null }),
     })
       .then((res) => {
         setActioning(null);
@@ -1625,7 +1637,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item), callPrepay: item.call_prepay || null, onAcceptPrepay: () => acceptCallPrepay(item), phoneYes: item.call_phone_yes || null, onAcceptPhoneYes: () => acceptCallPhoneYes(item) })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, livePhone: item.customer_phone, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, canAttach: item.can_attach_contact === true, canNewCustomer: item.can_new_customer === true, busy: actioning === busyKey, onSave: () => saveContactNote(item), onAttach: (customerId, role) => attachContact(item, customerId, role), onNewCustomer: () => newCustomerFromCard(item), callPrepay: item.call_prepay || null, onAcceptPrepay: () => acceptCallPrepay(item), tapUrl: item.call_phone_yes_tap ? `/admin/triage/${item.id}/call-phone-yes` : null, tapFor: item, onAcceptPhoneYes: (token) => acceptCallPhoneYes(item, token) })}
                     {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (

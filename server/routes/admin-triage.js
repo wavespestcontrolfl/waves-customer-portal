@@ -611,7 +611,7 @@ router.get('/', async (req, res) => {
     stampSaveContactNote(items);
     stampFamilyCardActions(items, req.techRole === 'admin');
     await stampCallPrepayActions(items, req.techRole === 'admin');
-    await stampCallPhoneYesActions(items, req.techRole === 'admin');
+    stampCallPhoneYesActions(items, req.techRole === 'admin');
 
     res.json({ items, counts });
   } catch (err) {
@@ -1954,22 +1954,13 @@ async function stampCallPrepayActions(items, isAdmin = false) {
   }
 }
 
-// GATE_CALL_PHONE_YES_ACCEPT: what the one-tap "Accept as pay per application" on a call_phone_yes card can do RIGHT NOW, read live
-// (call-phone-yes-accept.js tapStateOf: the visit may have moved, or the estimate been accepted, since the card was filed):
-// { can_accept, preview_token, visit_date, message }. The server decides, so the screen holds no second copy of the rule. A
-// failed read offers nothing.
-async function stampCallPhoneYesActions(items, isAdmin = false) {
+// GATE_CALL_PHONE_YES_ACCEPT: the list only marks the open call_phone_yes cards whose one tap ("Accept as pay per
+// application") an admin can use, with no reads. Each card reads what its tap can do RIGHT NOW when it shows
+// (GET /:id/call-phone-yes, below), so open phone-yes cards never slow the rest of the inbox.
+function stampCallPhoneYesActions(items, isAdmin = false) {
   if (!isAdmin || require('../config/feature-gates').callPhoneYesAcceptLive?.() !== true) return;
-  const cards = items.filter((i) => i.reason_code === 'call_phone_yes' && OPEN_STATES.includes(i.status));
-  if (!cards.length) return;
-  const { tapStateOf } = require('../services/call-phone-yes-accept');
-  for (const item of cards) {
-    try {
-      item.call_phone_yes = await tapStateOf(item);
-    } catch (err) {
-      logger.warn(`[admin-triage] phone-yes tap read failed for card ${item.id}: ${err.code || err.name || 'error'}`);
-      item.call_phone_yes = { can_accept: false, preview_token: null, message: 'The estimate could not be read just now. Reload and try again.' };
-    }
+  for (const item of items) {
+    if (item.reason_code === 'call_phone_yes' && OPEN_STATES.includes(item.status)) item.call_phone_yes_tap = true;
   }
 }
 
@@ -2132,6 +2123,31 @@ router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
     // Code/name only: a knex message embeds bound values.
     logger.error(`[admin-triage] accept-call-prepay failed: ${err.code || err.name || 'error'}`);
     return res.status(500).json({ error: 'Failed to accept as annual prepay' });
+  }
+});
+
+// GET /api/admin/triage/:id/call-phone-yes
+// What the tap on one open call_phone_yes card can do right now (GATE_CALL_PHONE_YES_ACCEPT, admin only), read live:
+// { can_accept, preview_token, estimate_id, visit_id, visit_date, message }. The card asks when it shows; the accept
+// below checks everything again.
+router.get('/:id/call-phone-yes', requireAdmin, async (req, res) => {
+  try {
+    must(require('../config/feature-gates').callPhoneYesAcceptLive?.() === true, 404, 'Not found');
+    must(UUID_RE.test(req.params.id), 400, 'Invalid card id');
+    const item = await db('triage_items').where({ id: req.params.id }).first();
+    must(item, 404, 'Triage item not found');
+    must(item.reason_code === 'call_phone_yes' && item.call_log_id, 400, 'Not a phone-yes card');
+    if (!OPEN_STATES.includes(item.status)) return res.json({ can_accept: false, preview_token: null, message: null });
+    try {
+      return res.json(await require('../services/call-phone-yes-accept').tapStateOf(item));
+    } catch (err) {
+      logger.warn(`[admin-triage] phone-yes tap read failed for card ${item.id}: ${err.code || err.name || 'error'}`);
+      return res.json({ can_accept: false, preview_token: null, message: 'The estimate could not be read just now. Reload and try again.' });
+    }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
+    logger.error(`[admin-triage] call-phone-yes read failed: ${err.code || err.name || 'error'}`);
+    return res.status(500).json({ error: 'Failed to read the card' });
   }
 });
 
