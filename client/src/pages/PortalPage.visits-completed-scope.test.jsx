@@ -84,6 +84,22 @@ describe('Completed visits by property', () => {
     expect(api.getServices).toHaveBeenCalledWith({ limit: 100, historyProperty: 'all' });
   });
 
+  it('labels and requests profile-wide history when the current holder profile is positively closed', async () => {
+    const closedSelection = { key: null, customerId: customer.id, propertyId: null, closed: true };
+    api.getServices.mockResolvedValue({
+      historyProperty: 'all', historyCustomerId: customer.id, total: 1,
+      services: [{ id: 'retired', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Retired property address' }],
+    });
+    openCompleted({ properties: [], activePropertyId: customer.id, selectedProperty: closedSelection });
+
+    expect(await screen.findByText('Retired property address')).toBeInTheDocument();
+    const scope = screen.getByRole('combobox', { name: /Show completed visits for/ });
+    expect(scope).toHaveValue('all');
+    expect(scope).toBeDisabled();
+    expect(screen.getByRole('option', { name: 'All properties on this profile' })).toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledWith({ limit: 100, historyProperty: 'all' });
+  });
+
   it('withholds records served for another property or by an older server', async () => {
     const refreshProperties = vi.fn();
     api.getServices.mockResolvedValue({ services: [{ id: 'wrong', type: 'Wrong house' }], historyProperty: 'pb', historyCustomerId: customer.id });
@@ -376,6 +392,9 @@ describe('Completed visits by property', () => {
     { properties: profileShaped, activePropertyId: 'cust-1' },
     { customer: { ...customer, actor: { kind: 'contact' } } },
     { customer: { ...customer, cancelled: true } },
+    { properties: [], activePropertyId: customer.id, selectedProperty: { key: null, customerId: customer.id, propertyId: null, closed: true }, customer: { ...customer, actor: { kind: 'contact' } } },
+    { properties: [], activePropertyId: customer.id, selectedProperty: { key: null, customerId: 'another-profile', propertyId: null, closed: true } },
+    { properties: [], activePropertyId: 'another-profile', selectedProperty: { key: null, customerId: customer.id, propertyId: null, closed: true } },
   ])('keeps the existing read path when property history is unavailable', async (props) => {
     openCompleted(props);
     expect(await screen.findByText('No completed visits yet')).toBeInTheDocument();

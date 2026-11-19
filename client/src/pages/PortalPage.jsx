@@ -7,7 +7,7 @@ import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
 import api from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
-import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
@@ -13555,7 +13555,13 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     // Completion lives on /today after /active stops returning terminal
     // visits. Only refresh the report for the stop already on screen: a
     // different or missing visit must not swap or clear the completed card.
-    api.getTodayTracker()
+    let timer;
+    Promise.race([
+      api.getTodayTracker(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Report refresh timed out')), READ_TIMEOUT_MS);
+      }),
+    ])
       .then(d => {
         if (seq !== trackerSeqRef.current) return;
         const { entry, saved, named, refresh } = scopeRef.current;
@@ -13572,7 +13578,10 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
         setTracker(d.tracker);
       })
       .catch(() => {})
-      .finally(() => { if (seq === trackerSeqRef.current) setReportRefreshing(false); });
+      .finally(() => {
+        clearTimeout(timer);
+        if (seq === trackerSeqRef.current) setReportRefreshing(false);
+      });
   };
   const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };
@@ -17476,8 +17485,18 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
   const [showAllProperties, setShowAllProperties] = useState(false);
   const entry = properties.find(p => p.id === activePropertyId);
   const historyPropertyId = selectedProperty?.propertyId || entry?.propertyId;
-  const canFilterHistory = historyPropertyId && customer?.actor?.kind !== 'contact' && !customer?.cancelled;
-  const historyProperty = canFilterHistory ? (showAllProperties ? 'all' : historyPropertyId) : null;
+  const holderCanReadPropertyHistory = customer?.actor?.kind !== 'contact' && !customer?.cancelled;
+  // Positive server-resolved signal only: every saved address on THIS holder
+  // profile retired. A missing selection by itself may be gate-off, contact,
+  // or legacy profile shape and must keep the unfiltered read.
+  const closedHolderHistory = holderCanReadPropertyHistory
+    && selectedProperty?.closed === true
+    && selectedProperty.key == null
+    && selectedProperty.propertyId == null
+    && String(selectedProperty.customerId || '') === String(customer?.id || '')
+    && String(activePropertyId || '') === String(customer?.id || '');
+  const canFilterHistory = Boolean(historyPropertyId && holderCanReadPropertyHistory);
+  const historyProperty = closedHolderHistory ? 'all' : (canFilterHistory ? (showAllProperties ? 'all' : historyPropertyId) : null);
   const card = {
     background: B.white,
     border: '1px solid #E7E2D7',
@@ -17544,11 +17563,11 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
       </section>
       {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} onSavedScopeUnavailable={onSavedScopeUnavailable} switchingPropertyId={switchingPropertyId} /> : (
         <>
-          {canFilterHistory && (
+          {(canFilterHistory || closedHolderHistory) && (
             <label style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 4, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
               Show completed visits for
-              <CustomerSelect fullWidth style={{ textOverflow: 'ellipsis' }} value={showAllProperties ? 'all' : 'selected'} onChange={e => setShowAllProperties(e.target.value === 'all')}>
-                <option value="selected">This property{entry?.propertyId === historyPropertyId && entry.address?.line1 ? ` · ${formatAddress(entry.address)}` : ''}</option>
+              <CustomerSelect fullWidth disabled={closedHolderHistory} style={{ textOverflow: 'ellipsis' }} value={closedHolderHistory || showAllProperties ? 'all' : 'selected'} onChange={e => setShowAllProperties(e.target.value === 'all')}>
+                {!closedHolderHistory && <option value="selected">This property{entry?.propertyId === historyPropertyId && entry.address?.line1 ? ` · ${formatAddress(entry.address)}` : ''}</option>}
                 <option value="all">All properties on this profile</option>
               </CustomerSelect>
             </label>

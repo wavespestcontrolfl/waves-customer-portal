@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { PortalReadProvider } from '../hooks/usePortalRead';
+import { PortalReadProvider, READ_TIMEOUT_MS } from '../hooks/usePortalRead';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const nativeState = vi.hoisted(() => ({ enabled: false, platform: 'web' }));
@@ -121,6 +121,25 @@ describe('completed visit report handoff on Home', () => {
     expect(screen.getByRole('button', { name: 'Check for report' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: "View today's report" })).not.toBeInTheDocument();
     expect(screen.getByText('Service summary')).toBeInTheDocument();
+  });
+
+  it('lets the customer retry a stalled report check and ignores the expired response', async () => {
+    todayTracker = completeTracker({ reportPending: true });
+    render(<ServiceTracker />);
+    const check = await screen.findByRole('button', { name: 'Check for report' });
+    let finishOldRequest;
+    api.getTodayTracker.mockImplementationOnce(() => new Promise((resolve) => { finishOldRequest = resolve; }));
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(check);
+      expect(check).toBeDisabled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS); });
+      expect(check).toBeEnabled();
+      await act(async () => { finishOldRequest({ tracker: completeTracker({ reportUrl: '/report/expired' }) }); });
+      expect(screen.queryByRole('link', { name: "View today's report" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('clears the pending stop immediately when the server echoes another property, even if picker refresh fails', async () => {
