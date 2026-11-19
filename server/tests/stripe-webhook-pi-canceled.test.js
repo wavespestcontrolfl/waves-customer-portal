@@ -77,6 +77,7 @@ function resetMockState() {
     linkedInvoice: null, // invoices row bound to the PI
     customer: { first_name: 'Pat', last_name: 'Doe' },
     updates: [], // { table, wheres, patch }
+    locks: [], // invoice FOR SHARE reads used by cancellation evidence writers
   });
 }
 
@@ -91,7 +92,9 @@ function mockMakeBuilder(table) {
   });
   b.whereNull = (col) => { b._wheres.push({ whereNull: col }); return b; };
   b.whereNotNull = (col) => { b._wheres.push({ whereNotNull: col }); return b; };
+  b.forShare = () => { b._forShare = true; return b; };
   b.first = async () => {
+    if (b._forShare) mockState.locks.push({ table, wheres: b._wheres });
     if (table === 'stripe_invoice_charge_attempts') return mockState.attemptRow;
     if (table === 'payments') return mockState.processingRow;
     if (table === 'invoices') return mockState.linkedInvoice;
@@ -111,7 +114,13 @@ jest.mock('../models/db', () => {
   const db = jest.fn((table) => mockMakeBuilder(table));
   db.raw = jest.fn(async () => ({ rowCount: 0 }));
   db.fn = { now: jest.fn(() => 'NOW()') };
-  db.transaction = jest.fn(async (fn) => fn(db));
+  db.transaction = jest.fn(async (fn) => {
+    const trx = jest.fn((table) => mockMakeBuilder(table));
+    trx.isTransaction = true;
+    trx.raw = db.raw;
+    trx.fn = db.fn;
+    return fn(trx);
+  });
   return db;
 });
 
@@ -141,7 +150,9 @@ test('a saved-card cancellation records its exact attempt even when the invoice 
   const metadata = {
     source: 'admin_card_on_file', waves_invoice_id: randomUUID(), waves_customer_id: randomUUID(), saved_card_attempt_id: randomUUID(),
   };
+  mockState.linkedInvoice = { id: metadata.waves_invoice_id, customer_id: metadata.waves_customer_id };
   await handleCanceled({ id: 'pi_auth', status: 'canceled', metadata, payment_method: 'pm_auth' });
+  expect(mockState.locks).toEqual([{ table: 'invoices', wheres: [{ id: metadata.waves_invoice_id }] }]);
   const evidence = mockState.updates.filter((entry) => entry.table === 'stripe_invoice_charge_attempts');
   expect(evidence).toHaveLength(1);
   expect(evidence[0].wheres).toContainEqual({ id: metadata.saved_card_attempt_id, invoice_id: metadata.waves_invoice_id });
