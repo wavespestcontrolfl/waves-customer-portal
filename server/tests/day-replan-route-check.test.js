@@ -221,30 +221,18 @@ describe('the totals and the ad rule shadow', () => {
     expect(ad).toEqual({ decision: 'full', slotsAhead: 2, techBlind: false, unmeasured: 0 });
   });
 
-  test('tech-blind: two technicians free at the same hours count that room once', () => {
+  test('tech-blind: a date counts the most any one technician can take, in any order, never the sum', () => {
     const TECH2 = '00000000-0000-4000-8000-000000000002';
-    const free = { openings: [{ kind: 'start', start: 540, min: 200, slots: 2 }], slots: 2 }; // 9:00 and 11:00
-    const days = [day('2026-11-20', free), { ...day('2026-11-20', free), technician_id: TECH2 }];
-    expect(rc.summarize(days, '2026-11-19').totals.next.slots).toBe(4);
-    // Bookings 9-10 (A), 10-11 (B), 11-12 (A): each technician keeps the drive after the job; the bookings never overlap.
-    expect(rc.summarize(days, '2026-11-19', { techBlind: true }).totals.next.slots).toBe(3);
-  });
-
-  test('tech-blind: the shared conflict is the booked hour, the drive is each technician\'s own', () => {
-    // A free 9:00-10:20, B free 10:00-11:20: a 9 AM job for A and a 10 AM job for B, whose bookings only touch.
-    expect(rc.blindSlots([{ start: 540, min: 80 }, { start: 600, min: 80 }])).toBe(2);
-    // One technician: the next job waits for the drive (the whole slot), as hourSlots counts it.
-    expect(rc.blindSlots([{ start: 540, min: 200 }])).toBe(rc.hourSlots({ start: 540, min: 200 }));
+    const a = day('2026-11-20', { slots: 2 });
+    const b = { ...day('2026-11-20', { slots: 1 }), technician_id: TECH2 };
+    expect(rc.summarize([a, b], '2026-11-19').totals.next.slots).toBe(3);
+    expect(rc.summarize([a, b], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
+    expect(rc.summarize([b, a], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
   });
 
   test('a job starts on the hour: a 10:30-11:50 opening holds none', () => {
     expect(rc.hourSlots({ start: 630, min: 80 })).toBe(0);
     expect(rc.hourSlots({ start: 600, min: 80 })).toBe(1);
-    expect(rc.blindSlots([{ start: 630, min: 80 }])).toBe(0);
-  });
-
-  test("tech-blind: every job fits one technician's opening (no job is handed from one to the other)", () => {
-    expect(rc.blindSlots([{ start: 540, min: 120 }, { start: 660, min: 120 }])).toBe(2); // A 9-11, B 11-1: two, not three
   });
 
   test('the 1% floor when no dispatch room exists in that window', () => {
@@ -472,6 +460,19 @@ describe('runRouteCheck', () => {
     expect(days.find((d) => d.date === '2026-11-24')).toMatchObject({ skip: 'FAILED' });
     expect(days.find((d) => d.date === '2026-11-23').skip).toBeUndefined();
     listOccupiedWindows.mockResolvedValue([]);
+  });
+
+  test('a drive running long: the en-route stop is reached no earlier than now', () => {
+    const far = stop('e1', '09:00:00', null, { status: 'en_route', lat: 27.6, lng: -82.3 });
+    const mine = [{ id: 'e1', status: 'en_route', en_route_at: '2026-11-19T14:00:00Z' }]; // left at 9:00
+    const van = { clockMin: 480 };
+    const dep = rc.enRouteDeparture({ first: [far], mine, van, origin: HQ, nowMin: 630, day: '2026-11-19' }); // 10:30
+    expect(dep).toBeLessThan(630); // the drive under way is credited
+    expect(dep).toBeGreaterThan(540); // but the stop is not reached before now
+    // Still driving on time (now 9:05): it departs when it set off.
+    expect(rc.enRouteDeparture({ first: [far], mine, van, origin: HQ, nowMin: 545, day: '2026-11-19' })).toBe(540);
+    // No set-off time: from now.
+    expect(rc.enRouteDeparture({ first: [far], mine: [], van, origin: HQ, nowMin: 630, day: '2026-11-19' })).toBe(630);
   });
 
   test('one stop on site and another en route leave today unmeasured', async () => {

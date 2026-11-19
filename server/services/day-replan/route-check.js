@@ -7,7 +7,9 @@
  * demand view), for each technician who works that day. It records one row in route_check_runs:
  *   - each opening that holds a new job and its drive (close-gaps SLOT_MIN), and the jobs dispatch can place there
  *     (`slots`: each starts on the hour, AGENTS.md; `noticeSlots`: the 07:05 notice's own whole-slot count, to compare).
- *     While the occupancy check is tech-blind, a date's room is counted once across technicians;
+ *     While the occupancy check is tech-blind (one booking holds its time for every technician), a date's room is the
+ *     most any one technician can take: a lower bound, never a sum. Combining technicians comes with the second
+ *     technician's shift build (page D4);
  *   - what the ad budget rule WOULD do (`ad_shadow`): full budget while dispatch room exists today or in the next
  *     STAFFED_DAYS staffed days, the 1% floor when none, and `unknown` when none is found but one of those days could
  *     not be measured. It changes no budget. Every opening's start and length are stored, so another rule can be
@@ -49,9 +51,6 @@ const STAFFED_DAYS = 3;
 const DEMAND_DAYS = 7;
 // How far ahead to look for STAFFED_DAYS staffed days (a holiday week can close several in a row).
 const SCAN_DAYS = 14;
-// The booked part of a job slot (close-gaps SLOT_MIN: a 60-minute median job and its drive). Tech-blind, one booking
-// holds this time for every technician; the drive is the technician's own.
-const BOOKED_MIN = 60;
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
 const toMin = (value) => {
@@ -143,27 +142,6 @@ function hourSlots(o) {
 }
 
 /**
- * Dispatch jobs across several technicians' openings when one booking holds its time for all of them (pure): each job
- * starts on the hour and fits a whole SLOT_MIN slot inside one opening (its drive included), after that opening's
- * last job; no two bookings (BOOKED_MIN from the start) overlap in time. Earliest booked-end placement.
- */
-function blindSlots(openings) {
-  let shared = -Infinity;
-  const after = openings.map(() => -Infinity);
-  let count = 0;
-  for (;;) {
-    const fits = openings
-      .map((o, i) => ({ i, at: ceilHour(Math.max(o.start, shared, after[i])) }))
-      .filter(({ i, at }) => at + SLOT_MIN <= openings[i].start + openings[i].min);
-    if (!fits.length) return count;
-    const pick = fits.reduce((best, f) => (f.at < best.at ? f : best));
-    count += 1;
-    shared = pick.at + BOOKED_MIN;
-    after[pick.i] = pick.at + SLOT_MIN;
-  }
-}
-
-/**
  * Booked time that holds one technician (pure), from the booking surfaces' own occupancy read: the technician's own
  * rows (a stop done early still holds its booked window), unassigned rows, and every other technician's while
  * tech-blind (scheduling/occupancy.js). Each span is as listOccupiedWindows gives it (a version-2 allocation's
@@ -252,8 +230,8 @@ function datesToMeasure(elig, today, stopsOn) {
 
 /**
  * Totals and the ad rule's shadow decision from the measured tech-days (pure). techBlind (GATE_MULTI_TECH_CONFIRM
- * off): one booking holds its time for every technician (scheduling/occupancy.js), so a date's room is the jobs that
- * each fit one technician's opening and never overlap (blindSlots), not the sum per technician.
+ * off): one booking holds its time for every technician (scheduling/occupancy.js), so a date's room is the most any
+ * one technician can take (each technician's count already holds the others' booked time), never the sum.
  */
 function summarize(days, today, { techBlind = false } = {}) {
   const counted = days.filter((d) => d.staffed && !d.skip);
@@ -261,7 +239,7 @@ function summarize(days, today, { techBlind = false } = {}) {
   const slotsOf = (list) => {
     if (!techBlind) return sum(list, (d) => d.slots);
     const dates = [...new Set(list.map((d) => d.date))];
-    return sum(dates, (date) => blindSlots(list.filter((d) => d.date === date).flatMap((d) => d.openings)));
+    return sum(dates, (date) => Math.max(...list.filter((d) => d.date === date).map((d) => d.slots)));
   };
   const pick = (filter) => ({ slots: slotsOf(counted.filter(filter)) });
   const todayFig = pick((d) => d.date === today);
@@ -364,6 +342,19 @@ function todaysStops(own, mine) {
   return { live, onSite, enRoute, rest: rest.flatMap((s) => s.flat()) };
 }
 
+/**
+ * When today's simulation sets off. En route: the van left at en_route_at, so the drive under way is credited, but
+ * the van reaches the stop no earlier than now (a drive running long): it departs at the latest of its clock, when
+ * it set off, and now less the drive. Otherwise: the later of now and the van's clock.
+ */
+function enRouteDeparture({ first, mine, van, origin, nowMin, day }) {
+  const setOff = first.map((r) => etMinuteOn(mine.find((p) => String(p.id) === String(r.id))?.en_route_at, day)).filter((m) => m != null);
+  if (!first.length || !setOff.length) return Math.max(nowMin, van.clockMin);
+  const leg = simulate(first.slice(0, 1), { origin, departureMin: 0 });
+  const driveMin = leg?.arrivals?.[0]?.driveMin ?? 0;
+  return Math.max(van.clockMin, Math.min(nowMin, ...setOff), nowMin - driveMin);
+}
+
 /** One technician on one date: today from the van's progress, a later day as booked. Never throws. */
 async function measureOne(conn, env, { day, techId, rows, progress, occupancy }) {
   try {
@@ -399,11 +390,8 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
       home, departureMin: env.departureMin, nowMin: env.nowMin, day,
     });
     if (!van.origin) return { stops: live.length, skip: 'LAST_STOP_WITHOUT_COORDINATES' };
-    // En route: the van set off at en_route_at, so the drive under way is simulated from then, not again from now
-    // (openings still start at now).
     const first = enRoute.flatMap((s) => s.flat());
-    const setOff = first.map((r) => etMinuteOn(mine.find((p) => String(p.id) === String(r.id))?.en_route_at, env.today)).filter((m) => m != null);
-    const departureMin = setOff.length ? Math.max(van.clockMin, Math.min(env.nowMin, ...setOff)) : Math.max(env.nowMin, van.clockMin);
+    const departureMin = enRouteDeparture({ first, mine, van, origin: van.origin, nowMin: env.nowMin, day });
     const fig = measureTechDay({
       ...common, rows: rest, first, origin: van.origin, end: home, departureMin, openMin: Math.max(DAY_OPEN, env.nowMin),
     });
@@ -480,7 +468,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, blindSlots, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
     etMinuteOn, STAFFED_DAYS, DEMAND_DAYS,
   },
 };
