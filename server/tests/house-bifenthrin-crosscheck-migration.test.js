@@ -610,3 +610,52 @@ describe('house bifenthrin crosscheck migration: down', () => {
     expect(snapshot(knex)).toEqual(after);
   });
 });
+
+// Follow-up 20261119010100: migration 20261027190000 wrote the label holds on the Crosscheck row that existed then; the row
+// step 0 adds on a repo-built catalog gets the same entry of that migration's FILL list, each column only while empty.
+describe('follow-up 20261119010100: the Crosscheck row gets the 10-27 label holds', () => {
+  const holds = require('../models/migrations/20261119010100_crosscheck_seeded_row_holds');
+  const fill = require('../models/migrations/20261027190000_watering_rule_lawn_label_pass_2').FILL.find((item) => item.name === 'LESCO Crosscheck Plus');
+  const COLUMNS = ['id', 'name', 'category', 'active_ingredient', 'formulation', 'container_size', 'unit_size_oz', 'epa_reg_number',
+    'default_rate_per_1000', 'rate_unit', 'active', 'needs_pricing', 'label_source_note', 'created_at', 'updated_at',
+    'post_application_watering', 'mow_hold_days'];
+  const holdEvents = (knex) => knex.tables.audit_log.filter((e) => String(e.action).startsWith(`migration:${holds.MIGRATION}:`));
+
+  test('the row step 0 added: the 24 h label hold and the 1-day mow hold, one audit row each; a re-run and down() change nothing', async () => {
+    const tables = baseTables();
+    tables.products_catalog.splice(1, 1);
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
+    await migration.up(knex);
+    await holds.up(knex);
+    const row = knex.tables.products_catalog.find((r) => r.name === 'LESCO Crosscheck Plus');
+    expect(fill.rule).toMatchObject({ mode: 'hold', source: 'label', hold_hours: 24 });
+    expect(JSON.parse(row.post_application_watering)).toEqual(fill.rule);
+    expect(row.mow_hold_days).toBe(1);
+    expect(holdEvents(knex).map((e) => e.action).sort()).toEqual([
+      `migration:${holds.MIGRATION}:mow_hold_seeded`, `migration:${holds.MIGRATION}:seeded`,
+    ]);
+    for (const e of holdEvents(knex)) expect(e.action.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await holds.up(knex);
+    await holds.down(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test('a row that already holds both (production, read 2026-11-18) or an admin edit is never touched', async () => {
+    const tables = baseTables();
+    Object.assign(tables.products_catalog[1], { post_application_watering: JSON.stringify({ mode: 'none', source: 'owner' }), mow_hold_days: 2 });
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
+    const before = snapshot(knex);
+    await holds.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+
+  test('no audit_log table: nothing is written', async () => {
+    const tables = baseTables();
+    delete tables.audit_log;
+    const knex = makeKnex(tables, { columns: { products_catalog: COLUMNS } });
+    const before = snapshot(knex);
+    await holds.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
