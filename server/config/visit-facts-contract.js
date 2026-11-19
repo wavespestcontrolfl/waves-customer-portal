@@ -555,8 +555,8 @@ function genericCompletionFacts(opts = {}) {
         },
         {
           file: REPORT_DATA,
-          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse; the raw column never egresses',
-          readerSymbol: 'technicianReportCustomerCopy',
+          section: 'Visit summary / Today\'s Result body — ONLY the screened WHAT WE DID / WHAT WE FOUND parse (visitReportCustomerCopy; a record carrying the technician\'s own note, structured_notes.reportNote, shows that note and never this column); the raw column never egresses',
+          readerSymbol: 'visitReportCustomerCopy',
         },
       ]),
       whenMissing: 'fallback',

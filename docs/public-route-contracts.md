@@ -2994,6 +2994,32 @@ fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
 from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
 are absent for every other report.
 
+Technician's own note (owner 2026-11-19): a record whose
+`structured_notes.reportNote` is `{ v: 1, text, source }` uses that text as the
+report summary on the same `/api/reports/:token/*` payload, under the same rule
+as the titled report (`technicianReportDrivesSummary`) and with `summarySource:
+'technician_report'`. `summary` is then one untitled paragraph and the payload
+carries no `reportSections`, so the page prints its own What to expect card. A
+`source: 'cleaned'` note (the technician's own words) ends with ` — <first
+name>`, the first name of the report's technician; a `source: 'fixed'` note
+(the standard sentence written by code) has no signature. On such a record a
+Today's Result card (`typedReport.todaysResult`, `companionReports[].todaysResult`)
+with `bodySource: 'technician_report'` prints that same summary text, whatever
+body it froze at completion, because the page shows that card's body in place
+of the summary; when the note is not the summary, the card keeps its headline
+and has no `body`, `bodySource` or `bodyFormat`. The customer-copy screens run
+on every read (`technician-report-copy.js` `reportNoteCustomerCopy`): a note
+that fails, or a `reportNote` in any other shape, shows no note and the summary
+falls back as it does today. The raw notes column holds the technician's raw
+note for these records and never egresses: a record that carries `reportNote`
+never parses that column, and its `[Found]` / `[Action]` / `[Protocol]` /
+`[Next]` lines never join `protocol.actions`, `protocol.observations` or
+`protocol.recommendations`. The PDF cache key hashes the summary as printed,
+signature included. The same text (unsigned) is the visit's customer-safe note
+on every other customer surface (`customerSafeVisitNotes`). Read from the
+record, not from a gate: no record carries the field until a completion writes
+it.
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the

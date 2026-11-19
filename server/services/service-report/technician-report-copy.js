@@ -41,6 +41,8 @@
 
 const crypto = require('crypto');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+const { formatTechnicianForCustomer, isGenericTechnicianLabel } = require('../../utils/technician-name');
 
 // Code-noun anchored credential detector (shared with the generate-report
 // output gate): a token counts as a credential only beside an actual
@@ -334,6 +336,83 @@ function technicianReportCustomerCopy(notes) {
   };
 }
 
+// The technician's own note (owner 2026-11-19): a report whose summary is the
+// note the technician gave, cleaned up, in place of the titled report. The
+// completion writes it to structured_notes.reportNote = { v: 1, text, source }
+// after its own screens; technician_notes then holds the raw note, which never
+// parses as a report and so never reaches a customer. `source` is 'cleaned'
+// (the technician's words: the report signs it with their first name) or
+// 'fixed' (the standard sentence code wrote: no signature).
+// Read from the record alone, never from a gate: a report that went out keeps
+// its note. The customer-copy screens run again on every read.
+const REPORT_NOTE_VERSION = 1;
+const REPORT_NOTE_SOURCES = Object.freeze(['cleaned', 'fixed']);
+const MAX_REPORT_NOTE_CHARS = 900;
+
+// The record's stored note, in whatever shape: undefined = it carries none.
+function storedReportNote(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { return undefined; }
+  }
+  return notes && typeof notes === 'object' ? notes.reportNote : undefined;
+}
+
+// A record that carries a note (in any shape) keeps the technician's raw
+// note in technician_notes: no line of that column is customer copy.
+function carriesReportNote(structuredNotes) {
+  return storedReportNote(structuredNotes) !== undefined;
+}
+
+// null = the record carries no note, so the titled report may stand. A record
+// that carries one gets that note or nothing: a note in any other shape, or
+// one the screens refuse, reads as { body: null }, because the raw notes
+// column beside it holds the technician's raw note.
+function reportNoteCustomerCopy(structuredNotes) {
+  const note = storedReportNote(structuredNotes);
+  if (note === undefined) return null;
+  // One paragraph: a note is never titled, and a second line is not part of it.
+  const valid = Boolean(note) && note.v === REPORT_NOTE_VERSION && REPORT_NOTE_SOURCES.includes(note.source)
+    && typeof note.text === 'string' && !/[\r\n]/.test(note.text.trim());
+  const text = valid ? note.text.replace(/\s+/g, ' ').trim() : '';
+  if (!text || text.length > MAX_REPORT_NOTE_CHARS) return { body: null, violations: ['report_note_shape'], source: null };
+  const violations = customerCopyViolations(text);
+  return { body: violations.length ? null : text, violations, source: note.source };
+}
+
+// The first name a report prints for its technician (the tips greeting, the
+// signature on a technician's own note): the record's technician row as its
+// identity snapshot froze it, never a generic label. The report signs with
+// it and the PDF key hashes it, so both read the same name.
+function reportTechnicianFirstName(service = {}) {
+  const row = applyReportIdentitySnapshot(service || {});
+  const first = String(row.technician_first_name || '').trim();
+  const name = formatTechnicianForCustomer({
+    name: row.technician_name, first_name: row.technician_first_name, last_name: row.technician_last_name,
+  });
+  return first || (isGenericTechnicianLabel(name) ? null : name.split(/\s+/)[0]);
+}
+
+// The summary a visit's report text prints as: a note in the technician's
+// own words ('cleaned') signed " — <first name>" when the record names its
+// technician; the standard sentence ('fixed') and the titled report as they
+// are. The report prints it and the PDF key hashes it.
+function printedReportSummary(parsed, service = {}) {
+  if (!parsed?.body) return null;
+  const signer = parsed.source === 'cleaned' ? reportTechnicianFirstName(service) : null;
+  return signer ? `${parsed.body} — ${signer}` : parsed.body;
+}
+
+// The customer copy of a visit record's report text: the technician's own
+// note when the record carries one (a refused or malformed note shows
+// nothing: the raw notes column is never the fallback), else the titled
+// report parsed from technician_notes. One rule for every reader that holds
+// the record.
+function visitReportCustomerCopy(record) {
+  return reportNoteCustomerCopy(record?.structured_notes)
+    || technicianReportCustomerCopy(record?.technician_notes);
+}
+
 /**
  * PDF cache-key component. Stored report PDFs are keyed on the Pest
  * Pressure visibility signature only, so a summary now driven by the
@@ -370,7 +449,7 @@ function summaryCopySignature(service = {}) {
     snapshot = null;
     companionSnapshots = [];
   }
-  const parsed = technicianReportCustomerCopy(service.technician_notes);
+  const parsed = visitReportCustomerCopy(service);
   // Mirrors report-data's promotion gate exactly (codex r35 #3420): the
   // governing typed story must have ACCEPTED the body — bodySource stamped
   // or a frozen reconcileConfirmed (the person's override) — else the PDF
@@ -385,7 +464,10 @@ function summaryCopySignature(service = {}) {
         && snap.activity?.score !== 0));
   const drivesSummary = !!parsed?.body && typedStoryAcceptedBody;
   if (!drivesSummary) return '';
-  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
+  // The key hashes the summary as the report prints it (a note in the
+  // technician's own words signed), so every other summary keeps its key:
+  // its body.
+  return `-tr${crypto.createHash('sha256').update(printedReportSummary(parsed, service)).digest('hex').slice(0, 8)}`;
 }
 
 // The full customer-copy screen the notes parser applies — shared banned
@@ -413,6 +495,14 @@ function customerCopyViolations(text) {
 
 module.exports = {
   technicianReportCustomerCopy,
+  reportNoteCustomerCopy,
+  visitReportCustomerCopy,
+  carriesReportNote,
+  printedReportSummary,
+  reportTechnicianFirstName,
+  REPORT_NOTE_VERSION,
+  REPORT_NOTE_SOURCES,
+  MAX_REPORT_NOTE_CHARS,
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,

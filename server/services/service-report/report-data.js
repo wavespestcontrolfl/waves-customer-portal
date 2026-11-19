@@ -45,7 +45,7 @@ const {
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
-const { technicianReportCustomerCopy } = require('./technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, reportTechnicianFirstName } = require('./technician-report-copy');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
 } = require('./same-line-visit');
@@ -80,7 +80,6 @@ const { resolveTechPhotoUrl } = require('../tech-photo');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const {
   formatTechnicianForCustomer,
-  isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
@@ -2084,16 +2083,20 @@ function buildProtocolPayload(record) {
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
   const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
+  // A record that carries the technician's own note keeps their raw note in
+  // technician_notes: none of its lines is report copy, tagged or not, and
+  // whatever shape the own note is in (docs/public-route-contracts.md).
+  const noteLines = carriesReportNote(record.structured_notes) ? '' : record.technician_notes;
   return {
     actions: withoutAccessCodeLines(uniqueStrings([
       ...parseJsonArray(protocol.actions),
       ...parseJsonArray(structured.protocolActionsCompleted),
-      ...taggedNoteLines(record.technician_notes, ['protocol', 'protocol optional', 'action']),
+      ...taggedNoteLines(noteLines, ['protocol', 'protocol optional', 'action']),
     ])),
     observations: withoutAccessCodeLines(uniqueStrings([
       ...parseJsonArray(protocol.observations),
       ...parseJsonArray(structured.observations),
-      ...taggedNoteLines(record.technician_notes, ['found']),
+      ...taggedNoteLines(noteLines, ['found']),
     ])),
     // Safe customer-facing provenance: completion form/chip values only.
     // Never substitute the merged observations list, which also contains
@@ -2110,7 +2113,7 @@ function buildProtocolPayload(record) {
     recommendations: withoutAccessCodeLines(uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
-      ...taggedNoteLines(record.technician_notes, ['next']),
+      ...taggedNoteLines(noteLines, ['next']),
     ])),
     // Provenance-guaranteed source ONLY: structured_notes.formRecommendations
     // is written at completion from the form's recommendation field alone.
@@ -2235,6 +2238,21 @@ function withoutDarkFourSectionBody(snapshot) {
   if (!result || result.bodyFormat !== 'four_section' || featureGates.reportWriterRulesLive()) return snapshot;
   const { body: _body, bodySource: _bodySource, bodyFormat: _bodyFormat, ...rest } = result;
   return { ...snapshot, todaysResult: rest };
+}
+
+// On a record that carries the technician's own note, a Today's Result card
+// that carries the summary (bodySource 'technician_report') prints the
+// summary as the report prints it, never a body frozen at completion: the
+// page shows that card in place of the summary (ReportViewPage
+// todaysResultCarriesSummary). When the note is not the summary (the screens
+// refuse it, it is in another shape, or the summary rule turns it down) the
+// card keeps its headline and drops the body, as withoutDarkFourSectionBody
+// does. ownNoteBody undefined = the record carries no own note.
+function withOwnNoteBody(snapshot, ownNoteBody) {
+  const result = snapshot?.todaysResult;
+  if (ownNoteBody === undefined || result?.bodySource !== 'technician_report') return snapshot;
+  const { body: _body, bodySource, bodyFormat: _bodyFormat, ...rest } = result;
+  return { ...snapshot, todaysResult: ownNoteBody ? { ...rest, bodySource, body: ownNoteBody } : rest };
 }
 
 // The report's next-appointment shape for a scheduled_services row.
@@ -4512,15 +4530,41 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
+  const staffViewer = opts.staffViewer === true;
   // Typed specialty completion snapshot (persisted at completion — the
   // immutable source for Today's Result + customer-labeled findings). Its
   // presence suppresses Pest Pressure for this report and swaps in the
   // activity gauge for trend types.
-  const typedSnapshot = serviceData.typedReportSnapshot
+  const frozenTypedSnapshot = serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object'
     && serviceData.typedReportSnapshot.type
     ? withoutDarkFourSectionBody(serviceData.typedReportSnapshot)
     : null;
+  const frozenCompanionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
+    : [];
+  // Tech-reviewed report copy: the technician's own note when the record
+  // carries one (structured_notes.reportNote, owner 2026-11-19), else the
+  // titled "Generate AI report" copy, as the screens read it now
+  // (visitReportCustomerCopy). THE rule for whether it stands as the
+  // summary (activity-indicators technicianReportDrivesSummary): the
+  // completion-time rejection frozen into service_data (codex r58), the
+  // governing typed story's acceptance (codex r26/r42/r78/r80) and the
+  // rodent trapping screens for this viewer (codex P1 r18; pre-push P1 on
+  // 256c1f9), on the snapshots as the dark four-section transform leaves
+  // them. Read once, here, before any builder below reads a card. Every
+  // other customer render of the note (context-aggregator.js
+  // customerSafeVisitNotes) runs the same rule, so none can show a body
+  // this report refuses.
+  const technicianReport = visitReportCustomerCopy(service);
+  const technicianReportSummary = technicianReport?.body
+    && require('./activity-indicators').technicianReportDrivesSummary({
+      serviceData, body: technicianReport.body, staffViewer, typedSnapshot: frozenTypedSnapshot, companionSnapshots: frozenCompanionSnapshots,
+    })
+    ? printedReportSummary(technicianReport, service)
+    : null;
+  const ownNoteBody = carriesReportNote(service.structured_notes) ? technicianReportSummary : undefined;
+  const typedSnapshot = withOwnNoteBody(frozenTypedSnapshot, ownNoteBody);
 
   // GATE_TS_TECH_FINDINGS_COPY: the technician's frozen decisions for a tree &
   // shrub visit (null = gate off or another service line). They govern every
@@ -4970,10 +5014,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // suppressed-report read path uses) get every section, flagged
   // internalOnly. Per-entry activity-history failures are non-fatal — a
   // bad history must not take down the report.
-  const staffViewer = opts.staffViewer === true;
-  const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
-    ? serviceData.companionReportSnapshots.filter((s) => s && typeof s === 'object' && s.type).map(withoutDarkFourSectionBody)
-    : [];
+  const companionSnapshots = frozenCompanionSnapshots.map((snapshot) => withOwnNoteBody(snapshot, ownNoteBody));
   const companionReports = await Promise.all(
     companionSnapshots
       .filter((snapshot) => staffViewer || snapshot.delivery === 'auto_send')
@@ -5739,6 +5780,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     first_name: service.technician_first_name,
     last_name: service.technician_last_name,
   });
+  // The technician's first name for the tech tips greeting: the same rule
+  // that signs a technician's own note (reportTechnicianFirstName).
+  const technicianFirstName = reportTechnicianFirstName(service);
   // Withheld (not just left null upstream) when the identity snapshot froze a
   // different technician name than the one currently joined — see
   // applyReportIdentitySnapshot, which nulls technician_fdacs_id itself in
@@ -7217,25 +7261,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // matches the card above it instead of reverting to the generic recap
   // (Codex P2 #2709) — and a body the snapshot rejected (zero state, old
   // snapshot) never resurfaces via the summary.
-  {
-    const technicianReport = technicianReportCustomerCopy(service.technician_notes);
-    // THE rule (activity-indicators technicianReportDrivesSummary): the
-    // completion-time rejection frozen into service_data (codex r58), the
-    // governing typed story's acceptance (codex r26/r42/r78/r80) and the
-    // rodent trapping screens for this viewer (codex P1 r18; pre-push P1 on
-    // 256c1f9), on the snapshots this report already normalised. Every
-    // other customer render of the note (context-aggregator.js
-    // customerSafeVisitNotes) runs the same rule, so none can show a body
-    // this report refuses.
-    const drivesSummary = technicianReport?.body
-      && require('./activity-indicators').technicianReportDrivesSummary({
-        serviceData, body: technicianReport.body, staffViewer, typedSnapshot, companionSnapshots,
-      });
-    if (drivesSummary) {
-      visitSummary = technicianReport.body;
-      visitSummarySource = 'technician_report';
-      reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
-    }
+  // The technician's own note (structured_notes.reportNote, owner 2026-11-19)
+  // takes the same slot under the same rule, read where the snapshots load
+  // (technicianReportSummary), with no titles: every rewriter below already
+  // leaves a 'technician_report' summary alone.
+  if (technicianReportSummary) {
+    visitSummary = technicianReportSummary;
+    visitSummarySource = 'technician_report';
+    reportSections = Array.isArray(technicianReport.sections) ? technicianReport.sections : null;
   }
   if (
     serviceLine === 'pest'
@@ -7584,8 +7617,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     techNote: featureGates.gateEnvValue?.('GATE_TECH_TIPS') === true && (stage1TechTips(protocol.techTips, { serviceLine, reportV2 }) || []).length
       ? {
         tips: stage1TechTips(protocol.techTips, { serviceLine, reportV2 }),
-        technicianFirstName: String(service.technician_first_name || '').trim()
-          || (technicianName && !isGenericTechnicianLabel(technicianName) ? technicianName.split(/\s+/)[0] : null),
+        technicianFirstName,
       }
       : null,
     // "From the Waves blog" (GATE_REPORT_BLOG_POST, live report only: the

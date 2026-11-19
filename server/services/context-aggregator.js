@@ -14,7 +14,7 @@ const {
   OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS, isUncountedPartialDueInvoice,
 } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
-const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
+const { visitReportCustomerCopy } = require('./service-report/technician-report-copy');
 const { etDateString, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -236,7 +236,9 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
       const serviceData = typeof record.service_data === 'string'
         ? JSON.parse(record.service_data || '{}')
         : (record.service_data || {});
-      const body = technicianReportCustomerCopy(record.technician_notes)?.body || null;
+      // The technician's own note (structured_notes.reportNote) when the record
+      // carries one, else the titled report in the notes column.
+      const body = visitReportCustomerCopy({ technician_notes: record.technician_notes, structured_notes: structured })?.body || null;
       const { technicianReportDrivesSummary } = require('./service-report/activity-indicators');
       if (!technicianReportDrivesSummary({ serviceData, body })) return null;
       copy = customerSafeServiceNotes(body, structured);

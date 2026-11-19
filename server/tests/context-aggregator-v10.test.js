@@ -111,6 +111,24 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     expect(customerSafeVisitNotes(record({ service_data: '{not json' }))).toBeNull();
   });
 
+  // The technician's own note (structured_notes.reportNote): the record's
+  // customer text, with the raw note in the notes column.
+  test("a record with the technician's own note returns that note, never the raw note beside it", () => {
+    const reportNote = { v: 1, text: 'I treated the lanai and swept the webs.', source: 'cleaned' };
+    const own = record({ technician_notes: 'treated lanai swept webs, gate code 4545', structured_notes: { reportNote } });
+    expect(customerSafeVisitNotes(own)).toBe('I treated the lanai and swept the webs.');
+    expect(customerSafeVisitNotes({ ...own, structured_notes: JSON.stringify({ reportNote }) })).toBe('I treated the lanai and swept the webs.');
+    // A refused note shows nothing: the raw note is never the fallback, and
+    // neither is a titled report left in the notes column.
+    const refused = { reportNote: { ...reportNote, text: 'I treated the lanai. It is safe for pets now.' } };
+    expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: refused }))).toBeNull();
+    // Nor is a note in any other shape.
+    expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: { reportNote: { ...reportNote, v: 2 } } }))).toBeNull();
+    expect(customerSafeVisitNotes(record({ technician_notes: REVIEWED, structured_notes: { reportNote: null } }))).toBeNull();
+    // The completion's frozen rejection holds for a note as for a report.
+    expect(customerSafeVisitNotes({ ...own, service_data: { technicianReportBodyRejected: 'trade_name' } })).toBeNull();
+  });
+
   test('a typed report held from customers shows nothing', () => {
     expect(customerSafeVisitNotes(record({ structured_notes: { typedReportDelivery: 'internal_only' } }))).toBeNull();
     expect(customerSafeVisitNotes(record({ structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }) }))).toBeNull();
@@ -149,30 +167,43 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     // only completion-time screening, the web report (which runs the same
     // technicianReportDrivesSummary) and this rule call the parse (Codex
     // #5522: the legacy public report and its PDF went through it directly).
+    // The record's own reader (visitReportCustomerCopy: the technician's own
+    // note, else the titled report) is held to the same list.
     const fs = require('fs');
     const path = require('path');
     const root = path.join(__dirname, '../..');
-    const callers = [];
+    const callers = { 'technicianReportCustomerCopy(': [], 'visitReportCustomerCopy(': [], 'reportNoteCustomerCopy(': [] };
     const walk = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (!['node_modules', 'tests'].includes(entry.name)) walk(full);
-        } else if (entry.name.endsWith('.js') && fs.readFileSync(full, 'utf8').includes('technicianReportCustomerCopy(')) {
-          callers.push(path.relative(root, full).split(path.sep).join('/'));
+        } else if (entry.name.endsWith('.js')) {
+          const source = fs.readFileSync(full, 'utf8');
+          for (const call of Object.keys(callers)) {
+            if (source.includes(call)) callers[call].push(path.relative(root, full).split(path.sep).join('/'));
+          }
         }
       }
     };
     walk(path.join(root, 'server'));
-    callers.sort();
-    expect(callers).toEqual([
-      'server/routes/admin-schedule.js',
-      'server/services/complete-scheduled-service.js',
-      'server/services/context-aggregator.js',
-      'server/services/service-report/report-data.js',
-      'server/services/service-report/report-reconciliation.js',
-      'server/services/service-report/technician-report-copy.js',
-    ]);
+    Object.values(callers).forEach((files) => files.sort());
+    expect(callers).toEqual({
+      'technicianReportCustomerCopy(': [
+        'server/routes/admin-schedule.js',
+        'server/services/complete-scheduled-service.js',
+        'server/services/service-report/report-reconciliation.js',
+        'server/services/service-report/technician-report-copy.js',
+      ],
+      'visitReportCustomerCopy(': [
+        'server/services/context-aggregator.js',
+        'server/services/service-report/report-data.js',
+        'server/services/service-report/technician-report-copy.js',
+      ],
+      'reportNoteCustomerCopy(': [
+        'server/services/service-report/technician-report-copy.js',
+      ],
+    });
   });
 
   test('a four-section report shows only while the writer rules are on, like the web report', () => {
