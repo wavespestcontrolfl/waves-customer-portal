@@ -330,6 +330,48 @@ describe('fetchPage carryCookies (EDIS redirects through ask.ifas.ufl.edu)', () 
     expect(seen).toEqual([undefined, 'good=1; also_good=3', 'good=1; also_good=3; single=9']);
   });
 
+  test('a cookie goes only to paths its Path covers; with no Path it takes the directory of the URL that set it', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/dir/start') return redir(302, '/b', ['p=1; Path=/a', 'root=1; Path=/', 'dirc=1']);
+      if (url === 'https://a.example.com/b') return redir(302, '/a/x');
+      if (url === 'https://a.example.com/a/x') return redir(302, '/abc');
+      if (url === 'https://a.example.com/abc') return redir(302, '/dir/other');
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/dir/start', { fetchFn, resolveHostFn: async () => true, maxRedirects: 5, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'root=1', 'p=1; root=1', 'root=1', 'dirc=1; root=1']);
+  });
+
+  test('Max-Age=0 or a past Expires clears a cookie, and a Secure cookie set over http is ignored', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, '/two', ['k=1; Path=/', 'old=1; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT', 'keep=1; Path=/; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT']);
+      if (url === 'https://a.example.com/two') return redir(302, '/three', ['k=; Path=/; Max-Age=0']);
+      if (url === 'https://a.example.com/three') return redir(302, 'http://b.example.com/');
+      if (url === 'http://b.example.com/') return redir(302, '/next', ['s=1; Path=/; Secure', 'plain=1; Path=/']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 5, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'k=1; keep=1', 'keep=1', undefined, 'plain=1']);
+  });
+
+  test('an oversized cookie is skipped, so a small locale cookie after it still goes out', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, '/next', ['big=' + 'x'.repeat(5000) + '; Path=/', 'NEXT_LOCALE=en; Path=/']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, 'NEXT_LOCALE=en']);
+  });
+
   test('caps: 20 cookies per origin and a 4096-character Cookie header', async () => {
     const seen = [];
     const many = Array.from({ length: 30 }, (_, i) => `c${i}=v`);

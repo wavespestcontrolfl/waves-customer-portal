@@ -231,7 +231,9 @@ function withDeadline(promise, ms, fallback) {
 // Opt-in cookie carry for ONE fetchPage call's redirect chain. EDIS now
 // redirects through ask.ifas.ufl.edu, which answers 307 to itself until its
 // locale cookie comes back. Origin-only: a cookie goes back only to the exact
-// scheme, host and port that set it; Domain, Path and Expires are ignored.
+// scheme, host and port that set it (Domain is ignored), and only to a path
+// its Path covers (RFC 6265 5.1.4). Max-Age=0 or a past Expires clears it, and
+// a Secure cookie set over plain http is ignored.
 const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const MAX_COOKIES_PER_ORIGIN = 20;
 const MAX_COOKIE_HEADER = 4096;
@@ -246,29 +248,62 @@ function readSetCookies(res) {
   return Array.isArray(raw) ? raw.filter((v) => typeof v === 'string') : [];
 }
 
-function storeCookies(jar, origin, res) {
+function defaultCookiePath(pathname) {
+  const last = String(pathname || '').lastIndexOf('/');
+  return last <= 0 ? '/' : pathname.slice(0, last);
+}
+
+function cookiePathMatches(cookiePath, requestPath) {
+  if (requestPath === cookiePath) return true;
+  return requestPath.startsWith(cookiePath) && (cookiePath.endsWith('/') || requestPath[cookiePath.length] === '/');
+}
+
+function parseSetCookie(line, url, now) {
+  const [pair, ...attrs] = line.split(';');
+  const eq = pair.indexOf('=');
+  if (eq < 1) return null;
+  const name = pair.slice(0, eq).trim();
+  const value = pair.slice(eq + 1).trim();
+  if (!COOKIE_NAME_RE.test(name) || /[\r\n]/.test(value)) return null;
+  let path = null; let maxAge = null; let expires = null; let secure = false;
+  for (const attr of attrs) {
+    const i = attr.indexOf('=');
+    const key = (i < 0 ? attr : attr.slice(0, i)).trim().toLowerCase();
+    const val = i < 0 ? '' : attr.slice(i + 1).trim();
+    if (key === 'path' && val.startsWith('/')) path = val;
+    else if (key === 'max-age' && /^-?\d+$/.test(val)) maxAge = Number(val);
+    else if (key === 'expires' && !Number.isNaN(Date.parse(val))) expires = Date.parse(val);
+    else if (key === 'secure') secure = true;
+  }
+  if (secure && url.protocol !== 'https:') return null; // a Secure cookie set over http is ignored
+  const expired = maxAge !== null ? maxAge <= 0 : expires !== null && expires <= now; // Max-Age wins over Expires
+  return { name, value, path: path || defaultCookiePath(url.pathname), expired };
+}
+
+function storeCookies(jar, url, res) {
   if (!jar) return;
   for (const line of readSetCookies(res)) {
-    const pair = line.split(';')[0];
-    const eq = pair.indexOf('=');
-    if (eq < 1) continue;
-    const name = pair.slice(0, eq).trim();
-    const value = pair.slice(eq + 1).trim();
-    if (!COOKIE_NAME_RE.test(name) || /[\r\n;]/.test(value)) continue;
-    let cookies = jar.get(origin);
-    if (!cookies) { cookies = new Map(); jar.set(origin, cookies); }
-    if (!cookies.has(name) && cookies.size >= MAX_COOKIES_PER_ORIGIN) continue;
-    cookies.set(name, value);
+    const cookie = parseSetCookie(line, url, Date.now());
+    if (!cookie) continue;
+    let cookies = jar.get(url.origin);
+    if (!cookies) { cookies = new Map(); jar.set(url.origin, cookies); }
+    const key = `${cookie.name}=${cookie.path}`; // a token name has no "="
+    if (cookie.expired) { cookies.delete(key); continue; }
+    if (!cookies.has(key) && cookies.size >= MAX_COOKIES_PER_ORIGIN) continue;
+    cookies.set(key, { name: cookie.name, value: cookie.value, path: cookie.path });
   }
 }
 
-function cookieHeaderFor(jar, origin) {
-  const cookies = jar && jar.get(origin);
+function cookieHeaderFor(jar, url) {
+  const cookies = jar && jar.get(url.origin);
   if (!cookies) return null;
+  const eligible = [...cookies.values()]
+    .filter((c) => cookiePathMatches(c.path, url.pathname))
+    .sort((a, b) => b.path.length - a.path.length); // RFC 6265 5.4: longer paths first
   let out = '';
-  for (const [name, value] of cookies) {
+  for (const { name, value } of eligible) {
     const next = out ? `${out}; ${name}=${value}` : `${name}=${value}`;
-    if (next.length > MAX_COOKIE_HEADER) break;
+    if (next.length > MAX_COOKIE_HEADER) continue; // skip one that does not fit; a smaller one may
     out = next;
   }
   return out || null;
@@ -298,7 +333,7 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const reqHeaders = { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' };
-    const cookie = cookieHeaderFor(jar, u.origin);
+    const cookie = cookieHeaderFor(jar, u);
     if (cookie) reqHeaders.Cookie = cookie;
     try {
       const res = await fetchFn(current, {
@@ -311,7 +346,7 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
       if (res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
         const loc = res.headers.get('location');
         if (!loc) return fail(res.status, false, 'redirect_without_location');
-        storeCookies(jar, u.origin, res);
+        storeCookies(jar, u, res);
         current = new URL(loc, current).toString(); // re-validated on next loop
         redirectHops++;
         continue;
