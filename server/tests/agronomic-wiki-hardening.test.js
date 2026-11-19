@@ -570,7 +570,7 @@ describe('updateProductPage', () => {
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
         if (whereObj?.slug === `product/${ALIAS.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.substring(0, 198)) {
-          return [{ id: 'ke-dupe', slug: whereObj.slug }];
+          return [{ id: 'ke-dupe', slug: whereObj.slug, source_treatment_ids: ['o1'] }];
         }
         return [];
       },
@@ -717,7 +717,7 @@ describe('updateProductPage', () => {
       // The visits that recorded "Talstar P" stored Talak (production: 147 rows, read 2026-11-18).
       service_products: [{ product_id: 'pc-talak', product_name: 'Talstar P' }],
       treatment_outcomes: [{ id: 'o-1', service_record_id: null, treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] }],
-      knowledge_entries: (rec) => (['product/talstar-p', 'product/crosscheck-plus'].includes(pageOf(rec)) ? [{ id: `ke-${pageOf(rec)}`, slug: pageOf(rec) }] : []),
+      knowledge_entries: (rec) => (['product/talstar-p', 'product/crosscheck-plus'].includes(pageOf(rec)) ? [{ id: `ke-${pageOf(rec)}`, slug: pageOf(rec), source_treatment_ids: ['o-1'] }] : []),
       knowledge_base: [],
       knowledge_bridge: [],
       knowledge_contradictions: [],
@@ -727,6 +727,35 @@ describe('updateProductPage', () => {
     expect(merged.some((r) => r.includes('product/crosscheck-plus'))).toBe(true);
     expect(merged.some((r) => r.includes('product/talstar-p'))).toBe(false);
     expect(state.deletes.knowledge_entries).toBe(1); // only the Crosscheck-only page
+  });
+
+  // The merge deletes the variant page. outcomesForProduct leaves out an outcome that names only an alias with no stored product id,
+  // so a variant page holding one keeps it; the vision token in a fingerprint is not an outcome.
+  test.each([
+    ['holds an outcome the refreshed page left out (an alias-only outcome, no stored product)', ['o-own', 'o-alias'], false],
+    ['records no source list', null, false],
+    ['holds only outcomes the refreshed page holds, plus its vision token', ['o-own', 'vision-scored:1:1700000000000'], true],
+  ])('a variant page that %s: merged %s', async (_label, sources, merged) => {
+    const pageOf = (rec) => rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0]?.slug;
+    const state = useDb({
+      products_catalog: (rec) => (rec.ops.some(([m, a]) => m === 'whereRaw' && a[1]?.[0] === 'lesco crosscheck plus')
+        ? [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }] : []),
+      product_aliases: (rec) => (rec.ops.some(([m, a]) => m === 'where' && a[0]?.product_id === 'pc-cross') ? [{ alias_name: 'Crosscheck Plus' }] : []),
+      service_products: [],
+      treatment_outcomes: [
+        { id: 'o-own', service_record_id: null, treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
+        { id: 'o-alias', service_record_id: null, treatment_date: '2026-12-05', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
+      ],
+      knowledge_entries: (rec) => (pageOf(rec) === 'product/crosscheck-plus'
+        ? [{ id: 'ke-variant', slug: 'product/crosscheck-plus', source_treatment_ids: sources }] : []),
+      knowledge_base: [],
+      knowledge_bridge: [],
+      knowledge_contradictions: [],
+    });
+    await wiki.updateProductPage('LESCO Crosscheck Plus');
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids)).toEqual(['o-own']);
+    expect(state.deletes.knowledge_entries).toBe(merged ? 1 : undefined);
+    expect((state.inserts.knowledge_update_log || []).some((r) => r.action === 'merge')).toBe(merged);
   });
 
   test('when the shared-name check fails, no variant page merges (a merge deletes)', async () => {
@@ -853,7 +882,7 @@ describe('mergeVariantProductPages back-pointer', () => {
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
         if (whereObj?.slug && whereObj.slug !== CANON_SLUG) {
-          return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: 'kb-42' }];
+          return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: 'kb-42', source_treatment_ids: ['o1'] }];
         }
         return [];
       },

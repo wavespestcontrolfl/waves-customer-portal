@@ -1158,55 +1158,109 @@ describe('follow-up 20261119010600: each service type keeps one Crosscheck usage
   });
 });
 
-// Follow-up 20261119010800: a usage row 20261119010600 removed comes back when it costs its service type differently.
+// Follow-up 20261119010800: a usage row the swap's migrations removed comes back when it costs its service type differently.
 describe('follow-up 20261119010800: a removed usage row with another cost comes back', () => {
+  const legacy = require('../models/migrations/20261119010400_legacy_bifenthrin_links');
   const onePerType = require('../models/migrations/20261119010600_crosscheck_usage_one_per_type');
   const conflicts = require('../models/migrations/20261119010800_crosscheck_usage_conflicts_stay');
-  // u6 repeats u1's cost; pg hands a decimal back as a string.
+  const BIFEN = 'dddddddd-0000-4000-8000-000000000004';
+  const TALSTAR = 'eeeeeeee-0000-4000-8000-000000000005';
+  // Each migration that removes a row by service type alone removes a row that repeats a kept cost and a row with another
+  // amount, unit or rate. pg hands a decimal back as a string.
   const conflictTables = () => {
     const tables = usageTables();
-    tables.service_product_usage.push({ id: 'u6', product_id: TALAK, service_type: 'Mosquito', usage_amount: '1.0000' });
+    tables.products_catalog.push({ id: BIFEN, name: 'Bifen I/T', active: true }, { id: TALSTAR, name: 'Talstar P', active: false });
+    tables.service_product_usage.push(
+      { id: 'u6', product_id: TALAK, service_type: 'Mosquito', usage_amount: '1.0000' }, // 20261119010600 removes it: repeats u1
+      { id: 'u10', product_id: TALAK, service_type: 'Already Mapped', usage_amount: 2, usage_unit: 'gal' }, // 20261119010000: not u3's unit
+      { id: 'u11', product_id: BIFEN, service_type: 'Barrier', usage_amount: 3 }, // 20261119010400 moves it
+      // 20261119010400 removes it before u12 (table order); its cost is new too, and u12 has the lower id, so u12 comes back.
+      { id: 'u15', product_id: TALSTAR, service_type: 'Barrier', usage_amount: 1 },
+      { id: 'u12', product_id: TALSTAR, service_type: 'Barrier', usage_amount: 1 }, // 20261119010400 removes it: not u11's amount
+      { id: 'u13', product_id: TALSTAR, service_type: 'Already Mapped', usage_amount: 2 }, // 20261119010400 removes it: repeats u3
+      { id: 'u14', product_id: TALSTAR, service_type: 'Already Mapped', usage_amount: '2.0000', usage_per_1000sf: '0.5000' }, // not u3's rate
+    );
     return tables;
   };
+  const removersUp = async (knex) => {
+    await migration.up(knex);
+    await legacy.up(knex);
+    await onePerType.up(knex);
+  };
+  const RESTORED = ['u10', 'u12', 'u14', 'u5']; // migration by migration, and by id within one
+  const logged = () => logSpy.mock.calls.flat().join('\n');
   let logSpy;
   beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
   afterEach(() => logSpy.mockRestore());
 
-  test('up: the row with another amount comes back, a copy of the kept row stays out; its events; a re-run and down() change nothing', async () => {
+  test('up: a row any of the three migrations removed comes back on Crosscheck when its amount, unit or rate is new to its service type; a repeat stays out; one event each; a re-run changes nothing', async () => {
     const knex = makeKnex(conflictTables());
-    await migration.up(knex);
-    await onePerType.up(knex);
-    expect([usage(knex, 'u5'), usage(knex, 'u6')]).toEqual([undefined, undefined]);
+    await removersUp(knex);
+    for (const id of [...RESTORED, 'u2', 'u6', 'u13', 'u15']) expect(usage(knex, id)).toBeUndefined();
     knex.locks.length = 0;
     await conflicts.up(knex);
+    expect(conflicts.REMOVERS).toEqual([migration.actionFor(migration.STEPS.usage), legacy.actionFor(legacy.STEPS.usage), onePerType.ACTION]);
     expect(knex.locks.map(([table]) => table)).toEqual(['service_product_usage']);
-    expect(usage(knex, 'u1')).toMatchObject({ product_id: CROSS, service_type: 'Mosquito', usage_amount: 1 });
+    expect(usage(knex, 'u10')).toMatchObject({ product_id: CROSS, service_type: 'Already Mapped', usage_amount: 2, usage_unit: 'gal' });
+    expect(usage(knex, 'u12')).toMatchObject({ product_id: CROSS, service_type: 'Barrier', usage_amount: 1 });
+    expect(usage(knex, 'u14')).toMatchObject({ product_id: CROSS, service_type: 'Already Mapped', usage_amount: '2.0000', usage_per_1000sf: '0.5000' });
     expect(usage(knex, 'u5')).toMatchObject({ product_id: CROSS, service_type: 'Mosquito', usage_amount: 4 });
-    expect(usage(knex, 'u6')).toBeUndefined();
-    const events = eventsOf(knex, conflicts.ACTION);
-    expect(events.map((event) => [event.resource_id, meta(event)])).toEqual([['u5', expect.objectContaining({ kind: 'restored', service_type: 'Mosquito', kept: 'u1' })]]);
-    const removal = eventsOf(knex, onePerType.ACTION).find((event) => event.resource_id === 'u5');
-    expect(eventsOf(knex, onePerType.ROLLBACK_ACTION).map(meta)).toEqual([expect.objectContaining({ from_audit_id: String(removal.id) })]);
-    expect(logSpy.mock.calls.flat().join('\n')).toMatch(/"Mosquito": usage rows u1 and u5/);
-    expect(conflicts.ACTION.length).toBeLessThanOrEqual(96);
+    for (const id of ['u2', 'u6', 'u13', 'u15']) expect(usage(knex, id)).toBeUndefined();
+    const [swapUsage, legacyUsage, onePerTypeUsage] = conflicts.REMOVERS;
+    const removal = (action, id) => String(eventsOf(knex, action).find((event) => event.resource_id === id).id);
+    expect(eventsOf(knex, conflicts.ACTION).map((event) => [event.resource_id, meta(event)])).toEqual([
+      ['u10', expect.objectContaining({ kind: 'restored', service_type: 'Already Mapped', from_action: swapUsage, from_audit_id: removal(swapUsage, 'u10'), product_before: TALAK })],
+      ['u12', expect.objectContaining({ kind: 'restored', service_type: 'Barrier', from_action: legacyUsage, from_audit_id: removal(legacyUsage, 'u12'), product_before: TALSTAR })],
+      ['u14', expect.objectContaining({ kind: 'restored', service_type: 'Already Mapped', from_action: legacyUsage, from_audit_id: removal(legacyUsage, 'u14'), product_before: TALSTAR })],
+      ['u5', expect.objectContaining({ kind: 'restored', service_type: 'Mosquito', from_action: onePerTypeUsage, from_audit_id: removal(onePerTypeUsage, 'u5'), product_before: CROSS })],
+    ]);
+    // No other migration's trail gets an event: each removal stays its own migration's to roll back.
+    expect(knex.tables.audit_log.filter((event) => event.action.endsWith(':rollback'))).toEqual([]);
+    for (const [type, id] of [['Already Mapped', 'u10'], ['Barrier', 'u12'], ['Already Mapped', 'u14'], ['Mosquito', 'u5']]) {
+      expect(logged()).toContain(`service type "${type}": usage row ${id} costs LESCO Crosscheck Plus differently`);
+    }
+    expect(conflicts.ROLLBACK_ACTION.length).toBeLessThanOrEqual(96);
     const after = snapshot(knex);
     await conflicts.up(knex);
-    await conflicts.down(knex);
     expect(snapshot(knex)).toEqual(after);
   });
 
-  test('the full rollback: 20261119010600 puts back only the copy, never u5 a second time; the swap\'s down() ends where it began', async () => {
+  test('the full rollback, each down() in reverse order: 20261119010800 takes back only its own rows, each earlier down() puts its rows back once, and every table ends where it began', async () => {
     const knex = makeKnex(conflictTables());
     const start = snapshot(knex);
-    await migration.up(knex);
-    await onePerType.up(knex);
+    await removersUp(knex);
     await conflicts.up(knex);
+    const beforeDown = snapshot(knex).audit_log;
     await conflicts.down(knex);
+    for (const id of RESTORED) expect(usage(knex, id)).toBeUndefined();
+    expect(eventsOf(knex, conflicts.ROLLBACK_ACTION).map((event) => event.resource_id)).toEqual(RESTORED);
+    expect(knex.tables.audit_log.slice(0, beforeDown.length)).toEqual(beforeDown);
+    await conflicts.down(knex);
+    expect(eventsOf(knex, conflicts.ROLLBACK_ACTION)).toHaveLength(RESTORED.length);
     await onePerType.down(knex);
-    expect(knex.tables.service_product_usage.filter((row) => row.id === 'u5')).toHaveLength(1);
-    expect(usage(knex, 'u6')).toMatchObject({ product_id: CROSS, usage_amount: '1.0000' });
+    await legacy.down(knex);
     await migration.down(knex);
+    const ids = knex.tables.service_product_usage.map((row) => row.id);
+    expect(ids).toHaveLength(new Set(ids).size);
     expect(withoutAudit(snapshot(knex))).toEqual(withoutAudit(start));
+  });
+
+  test.each([
+    ['the office changed its amount since up()', (knex) => { usage(knex, 'u12').usage_amount = 2; }, ['u12']],
+    ['its own product, Talstar P, is gone (no down() could put it back)', (knex) => {
+      knex.tables.products_catalog = knex.tables.products_catalog.filter((row) => row.id !== TALSTAR);
+    }, ['u12', 'u14']],
+  ])('down keeps a row it put back when %s: it stays on Crosscheck, and the earlier down() leaves it be', async (_label, edit, keptIds) => {
+    const knex = makeKnex(conflictTables());
+    await removersUp(knex);
+    await conflicts.up(knex);
+    edit(knex);
+    const kept = keptIds.map((id) => ({ ...usage(knex, id) }));
+    await conflicts.down(knex);
+    await legacy.down(knex);
+    expect(keptIds.map((id) => knex.tables.service_product_usage.filter((row) => row.id === id))).toEqual(kept.map((row) => [row]));
+    expect(eventsOf(knex, conflicts.ROLLBACK_ACTION).map((event) => event.resource_id)).toEqual(RESTORED.filter((id) => !keptIds.includes(id)));
+    for (const id of keptIds) expect(logged()).toContain(`usage row ${id} is no longer as up() wrote it, or its own product is gone: kept`);
   });
 
   test('a removal 20261119010600 already rolled back stays as the office left it, even after the office deleted that row', async () => {
@@ -1278,8 +1332,8 @@ describe('follow-up 20261119010900: the Crosscheck low-stock threshold is set in
   });
 
   test.each([
-    [' Gal ', 1], ['qt', 4], ['pt', 8], ['each', null],
-  ])('a row counted in "%s": one jug is %s', async (unit, jug) => {
+    [' Gal ', 1], ['Gallons', 1], ['quart', 4], ['pt', 8], ['ml', 3785.4143], ['l', 3.7854], ['lb', null], ['each', null],
+  ])('a row counted in "%s": one jug is %s (the inventory converter, at 4 decimals; none where it has no conversion)', async (unit, jug) => {
     const knex = makeKnex(stockTables(unit));
     await migration.up(knex);
     await threshold.up(knex);
@@ -1289,6 +1343,8 @@ describe('follow-up 20261119010900: the Crosscheck low-stock threshold is set in
 
   test.each([
     ['the row already counts in fl_oz', 'fl_oz', () => {}],
+    ['the row counts in floz, which the converter equates with fl_oz', 'floz', () => {}],
+    ['the row counts in oz, which the converter equates with fl_oz', 'oz', () => {}],
     ['the swap filled the unit too; a later unit change is not the swap\'s', null, (knex) => { byId(knex, 'products_catalog', CROSS).inventory_unit = 'gal'; }],
     ['the office changed the threshold since the swap', 'gal', (knex) => { byId(knex, 'products_catalog', CROSS).low_stock_threshold = 3; }],
     ['the swap\'s catalog step was rolled back', 'gal', (knex) => {

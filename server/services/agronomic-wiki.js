@@ -951,7 +951,7 @@ const AgronomicWiki = {
       const mergeSafe = result && ['generated', 'skipped'].includes(result.writeState)
         && entry && !entry.content?.includes('*Pending AI generation');
       if (mergeSafe) {
-        await mergeVariantProductPages(entry, await mergeableVariants(variants, resolved.productId), slug);
+        await mergeVariantProductPages(entry, await mergeableVariants(variants, resolved.productId), slug, data.allOutcomeIds);
 
         // The merge re-points variant contradictions onto the canonical page —
         // a page stamped trusted moments ago may have inherited an open
@@ -1953,13 +1953,18 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
 // ══════════════════════════════════════════════════════════════
 
 // source_treatment_ids is jsonb — pg usually returns it parsed, but tolerate
-// a raw string from older rows or mocks.
-function sameSourceIds(existingIds, newIds) {
-  let parsed = existingIds;
+// a raw string from older rows or mocks. Anything but a list is null.
+function sourceIdList(value) {
+  let parsed = value;
   if (typeof parsed === 'string') {
-    try { parsed = JSON.parse(parsed); } catch { return false; }
+    try { parsed = JSON.parse(parsed); } catch { return null; }
   }
-  if (!Array.isArray(parsed)) return false;
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+function sameSourceIds(existingIds, newIds) {
+  const parsed = sourceIdList(existingIds);
+  if (!parsed) return false;
   if (parsed.length !== newIds.length) return false;
   const a = [...parsed].sort();
   const b = [...newIds].sort();
@@ -2010,21 +2015,35 @@ async function mergeableVariants(variants, productId) {
   return variants.filter((name) => !shared.has(key(name)));
 }
 
+// The merge deletes the variant page, so it goes only when the refreshed canonical page holds every outcome the variant was built
+// from. outcomesForProduct can leave an outcome out (one that names only an alias, with no stored product id), and only the variant
+// page then holds it. The vision token in a fingerprint (countVisionScored) is not an outcome. A page with no source list stays.
+function variantPageCovered(page, covered) {
+  const ids = sourceIdList(page.source_treatment_ids);
+  if (!ids) return false;
+  return ids.filter((id) => !String(id).startsWith('vision-scored:')).every((id) => covered.has(String(id)));
+}
+
 // Delete leftover product pages that were keyed on a non-canonical name
 // variant, re-pointing every cross-system reference at the canonical page
 // first — knowledge_bridge rows would otherwise be dropped by the ON DELETE
 // CASCADE and knowledge_contradictions links nulled by SET NULL (migrations
 // 20260414000018/19), silently losing curated links and contradiction
 // history.
-async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug) {
+async function mergeVariantProductPages(canonicalEntry, variants, canonicalSlug, canonicalOutcomeIds = []) {
+  const covered = new Set(canonicalOutcomeIds.map(String));
   for (const variant of variants) {
     const variantSlug = `product/${slugify(variant)}`;
     if (variantSlug === canonicalSlug) continue;
     try {
       const dupe = await db('knowledge_entries')
         .where({ slug: variantSlug, category: 'product' })
-        .first('id', 'slug', 'kb_entry_id');
+        .first('id', 'slug', 'kb_entry_id', 'source_treatment_ids');
       if (!dupe) continue;
+      if (!variantPageCovered(dupe, covered)) {
+        logger.info(`[agronomic-wiki] Kept ${variantSlug}: ${canonicalSlug} does not hold every outcome it was built from`);
+        continue;
+      }
 
       // Carry the direct wiki→KB back-pointer if the variant was the only
       // linked page — the bridge dashboard and unified search read it.

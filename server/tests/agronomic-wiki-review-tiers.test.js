@@ -364,7 +364,7 @@ describe('post-merge contradiction recheck', () => {
       treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] })),
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
-        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null, source_treatment_ids: ['o0'] }];
         return [];
       },
       // the canonical page is NEW (no pre-merge contradiction lookup runs);
@@ -396,7 +396,7 @@ describe('post-merge contradiction recheck', () => {
       treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] })),
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
-        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null, source_treatment_ids: ['o0'] }];
         return [];
       },
       knowledge_contradictions: [],
@@ -423,7 +423,7 @@ describe('post-merge contradiction recheck', () => {
       treatment_outcomes: Array.from({ length: 3 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] })),
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
-        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
+        if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null, source_treatment_ids: ['o0'] }];
         return [];
       },
       knowledge_contradictions: [{ id: 'kc-1' }],

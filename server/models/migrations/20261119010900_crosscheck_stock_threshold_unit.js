@@ -6,27 +6,28 @@
  * 128 gal, and the row would show low stock at 2 gal and at every level under 128 gal.
  *
  * 20261119010000 is pushed, so it cannot change. Where its catalog event (not rolled back) filled the threshold but not the unit,
- * and the row still holds that 128 in another unit, the threshold becomes one jug in the row's unit (1 gal, 4 qt, 8 pt). In a unit
- * with no such conversion it goes back to NULL, as before the swap. The write is guarded by the unit and threshold it read. One
- * audit_log event records it. Nothing is done without exactly one Crosscheck catalog row or without audit_log. down() is a
- * documented no-op (waves-db: a data correction that keeps office edits is never reverted): after a full rollback the row keeps
- * one jug, because 20261119010000's down() keeps a column that changed since its up().
+ * and the row still holds that 128 in another unit, the threshold becomes one jug in the row's unit, as the inventory converter
+ * gives it (convertInventoryQuantity: 1 gal, 4 qt, 8 pt, 3785.4143 ml, 3.7854 l), at the column's 4 decimals. In a unit the
+ * converter cannot reach from fl_oz (a weight, a count, an unknown unit) it goes back to NULL, as before the swap. The write is
+ * guarded by the unit and threshold it read. One audit_log event records it. Nothing is done without exactly one Crosscheck
+ * catalog row or without audit_log. down() is a documented no-op (waves-db: a data correction that keeps office edits is never
+ * reverted): after a full rollback the row keeps one jug, because 20261119010000's down() keeps a column that changed since its
+ * up().
  */
 const MIGRATION = '20261119010900_crosscheck_stock_threshold_unit';
 const LOG = '[crosscheck-stock-threshold-unit]';
 const SWAP_CATALOG = 'migration:20261119010000_house_bifenthrin_crosscheck:catalog';
 const ACTION = `migration:${MIGRATION}:catalog`;
 const CROSSCHECK = 'LESCO Crosscheck Plus';
-const SWAP_THRESHOLD = 128; // 20261119010000's FILL_IF_NULL value, in its fl_oz
-// One 1 gal jug in each unit the row may count stock in. fl_oz is the swap's own unit, so its 128 stays.
-const ONE_JUG = new Map([['fl_oz', 128], ['gal', 1], ['gallon', 1], ['gallons', 1], ['qt', 4], ['pt', 8]]);
+// 20261119010000's FILL_IF_NULL values: one 1 gal jug, in fl_oz. In fl_oz (or a unit the converter equates with it) the 128 stays.
+const SWAP_THRESHOLD = 128;
+const SWAP_UNIT = 'fl_oz';
 
 const asObject = (value) => {
   if (value && typeof value === 'object') return value;
   if (typeof value !== 'string') return {};
   try { return JSON.parse(value) || {}; } catch { return {}; }
 };
-const unitKey = (unit) => String(unit).trim().toLowerCase().replace(/[\s.]+/g, '_');
 
 async function hasTables(knex, tables) {
   for (const table of tables) if (!(await knex.schema.hasTable(table))) return false;
@@ -69,8 +70,10 @@ exports.up = async function up(knex) {
   const [row] = named;
   if (row.inventory_unit == null || Number(row.low_stock_threshold) !== SWAP_THRESHOLD) return;
   if (!(await swapFilledThresholdOnly(knex, row.id))) return;
-  const unit = unitKey(row.inventory_unit);
-  const after = ONE_JUG.has(unit) ? ONE_JUG.get(unit) : null;
+  const { convertInventoryQuantity } = require('../../services/inventory-units');
+  const converted = convertInventoryQuantity(SWAP_THRESHOLD, SWAP_UNIT, row.inventory_unit);
+  // low_stock_threshold is numeric(12,4), so the event records the value the column holds.
+  const after = converted == null ? null : Number(converted.toFixed(4));
   if (after === SWAP_THRESHOLD) return;
   const changed = await knex('products_catalog')
     .where({ id: row.id, inventory_unit: row.inventory_unit, low_stock_threshold: row.low_stock_threshold })
