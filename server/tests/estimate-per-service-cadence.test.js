@@ -1203,15 +1203,18 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   const LAWN = { name: 'Lawn Care', mo: 69.75 };
   const PEST = { name: 'Pest Control', mo: 45 };
 
-  test('the server-rendered page: pest alone shows the setup fee; a second service in the root block removes it', () => {
-    const control = renderPage('prepay-ssr-fee-one', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
-    expect(control).toContain('<span>WaveGuard Membership Setup</span>');
-    const split = renderPage('prepay-ssr-fee-split', lead(), {
+  // A legacy plan split across the two recurring blocks: the page's fee reader sees one block and shows the $99
+  // setup fee, accept reads both and bills none. Which reader is right is the owner's ruling (CLAUDE.md rule 22), so
+  // the multi-service veto leaves such a page as it was (closing prepay would make that fee read as due).
+  test('the server-rendered page: a second service in the root block beside a fee leaves the page as it was', () => {
+    const control = renderPage('prepay-ssr-fee', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+    const split = renderPage('prepay-ssr-fee', lead(), {
       ...data([{ name: 'Pest Control', mo: 45 }]),
       recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 69.75 }] },
     }, null);
-    expect(split).not.toContain('<span>WaveGuard Membership Setup</span>');
-    expect(split).not.toContain('data-payment-setup="prepay_annual"');
+    expect(control).toContain('<span>WaveGuard Membership Setup</span>');
+    expect(split).toContain('<span>WaveGuard Membership Setup</span>');
+    expect(split.includes('data-payment-setup="prepay_annual"')).toBe(control.includes('data-payment-setup="prepay_annual"'));
   });
 
   test('the server-rendered page offers it for one service and not for two', () => {
@@ -1264,23 +1267,25 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   // two-service cases here offer no one-time choice.
   const NO_ONE_TIME_CHOICE = { show_one_time_option: false };
 
-  test('a mosquito ladder with a second service in the root recurring block offers no tier prepay', async () => {
+  test('a mosquito ladder with pest in the root block shows a fee accept never bills: the veto leaves the bundle as built', async () => {
     // Control: solo mosquito reaches the tier stamp, its monthly tier can prepay, and it carries the setup fee.
     const solo = await buildPricingBundle(mosquitoEstimate('solo'));
     expect(offersPrepay(solo)).toBe(true);
     expect(JSON.stringify(solo)).toContain('"waveguard_setup"');
+    // The fee reader sees the mosquito block alone; accept reads mosquito and pest (two units, no fee). The owner
+    // rules which is right (rule 22); until then the veto changes nothing here.
     const legacy = await buildPricingBundle(mosquitoEstimate('with-root-pest', ROOT_PEST, NO_ONE_TIME_CHOICE));
-    expect(offersPrepay(legacy)).toBe(false);
-    // With prepay closed, nothing promises "waived when you pay the year".
-    expect(JSON.stringify(legacy)).not.toContain('"waivedWithPrepay":true');
+    expect(JSON.stringify(legacy)).toContain('"waveguard_setup"');
+    expect(offersPrepay(legacy)).toBe(offersPrepay(solo));
   });
 
-  test('a priced engine line beside the stored rows counts as a second service, as the converter reads it', async () => {
+  test('a priced engine line beside the stored rows: accept counts two services, the fee reader one, so the veto leaves the bundle as built', async () => {
+    const solo = await buildPricingBundle(mosquitoEstimate('solo-engine-control'));
     const withEngineLawn = await buildPricingBundle(mosquitoEstimate('with-engine-lawn', {
       engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 900, monthly: 75 }] },
     }));
-    expect(offersPrepay(withEngineLawn)).toBe(false);
-    expect(JSON.stringify(withEngineLawn)).not.toContain('"waivedWithPrepay":true');
+    expect(JSON.stringify(withEngineLawn)).toContain('"waveguard_setup"');
+    expect(offersPrepay(withEngineLawn)).toBe(offersPrepay(solo));
   });
 
   // An estimate that also offers a one-time pest visit: a recurring choice keeps only the pest rows (accept persists
@@ -1322,5 +1327,37 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
     expect(offersPrepay(bundle)).toBe(offersPrepay(control));
     const html = renderPage('prepay-pest-choice-ssr', { ...lead(), showOneTimeOption: true }, split.estimate_data, null);
     expect(html).toContain('<span>WaveGuard Membership Setup</span>');
+  });
+
+  describe('withMultiServicePrepayClosed', () => {
+    const { withMultiServicePrepayClosed } = require('../routes/estimate-public');
+    const NO_CHOICE = { show_one_time_option: false };
+    const pestRow = { service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 };
+    const lawnRow = { service: 'lawn_care', name: 'Lawn Care', mo: 69.75, visitsPerYear: 9 };
+    const bundle = (extra = {}) => ({
+      annualPrepayEligible: true,
+      frequencies: [{ key: 'quarterly', annualPrepayEligible: true }],
+      ...extra,
+    });
+
+    test('a frozen bundle\'s hidden lawn tiers close with the visible ones: accept resolves a submitted key from both', () => {
+      const out = withMultiServicePrepayClosed(
+        bundle({ hiddenLawnFrequencies: [{ key: 'lawn_6', annualPrepayEligible: true }] }),
+        { result: { recurring: { services: [lawnRow, pestRow] } } },
+        NO_CHOICE,
+      );
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+      expect(out.hiddenLawnFrequencies).toEqual([{ key: 'lawn_6', annualPrepayEligible: false }]);
+    });
+
+    test('a bundle showing a setup fee accept never bills comes back as it was', () => {
+      const shown = bundle({
+        firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
+        hiddenLawnFrequencies: [{ key: 'lawn_6', annualPrepayEligible: true }],
+      });
+      const split = { result: { recurring: { services: [pestRow] } }, recurring: { services: [lawnRow] } };
+      expect(withMultiServicePrepayClosed(shown, split, NO_CHOICE)).toBe(shown);
+    });
   });
 });

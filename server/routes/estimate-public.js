@@ -6213,10 +6213,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
   // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  // The mix comes from the rows accept reads (planRecurringRowsAsAccepted), not the rendered list alone: a legacy
-  // estimate can keep a second service in the root recurring block or the engine lines.
   const hasWaveGuardMembership = require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData, estimate));
+    .recurringMixHasMembershipFeeService(recurring);
   // Operator-stated waiver removes the fee outright (no strike-through, no
   // invoice) — zeroing it here keeps every downstream SSR figure (fee row,
   // pay-per-application invoice copy, prepay math) consistent.
@@ -6432,9 +6430,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // lawn plan) are not a sellable incentive — treat them like the at-floor
   // case and hide the prepay option instead of advertising ~$0 savings.
   // A plan with more than one recurring service cannot prepay: accept and the
-  // converter refuse it (withMultiServicePrepayClosed, same unit count).
+  // converter refuse it (withMultiServicePrepayClosed, same unit count). A page
+  // that shows a setup fee accept never bills is left as it was
+  // (acceptBillsNoSetupFee).
+  const multiServicePrepayClosed = multiServicePrepayUnits(estData, estimate) > 1
+    && !(membershipFee > 0 && acceptBillsNoSetupFee(estData, estimate));
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && !(multiServicePrepayUnits(estData, estimate) > 1)
+    && !multiServicePrepayClosed
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -28396,10 +28398,28 @@ function multiServicePrepayUnits(estData, estimate) {
   } catch { return 0; }
 }
 
+// The page's setup-fee readers each see one recurring block (and its supplements); accept reads the plan it bills
+// (planRecurringRowsAsAccepted). On a legacy plan split across the blocks they can disagree, and the page shows a $99
+// WaveGuard setup fee that accept never bills. Which reader is right is the owner's ruling (CLAUDE.md rule 22), so
+// the prepay veto leaves such a page as it was: closing prepay there would turn that waivable fee into one that reads
+// as due.
+function acceptBillsNoSetupFee(estData, estimate) {
+  return !require('../services/estimate-converter')
+    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData, estimate));
+}
+
+function bundleShowsSetupFee(payload) {
+  const isSetupRow = (row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {});
+  return (Array.isArray(payload.firstVisitFees) && payload.firstVisitFees.some(isSetupRow))
+    || payload.setupFee?.service === 'waveguard_setup'
+    || (Array.isArray(payload.oneTimeBreakdown?.items) && payload.oneTimeBreakdown.items.some(isSetupRow));
+}
+
 function withMultiServicePrepayClosed(payload, estData, estimate) {
   const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
   const multi = multiServicePrepayUnits(estData, estimate) > 1;
   if (!combos.length && !multi) return payload;
+  if (bundleShowsSetupFee(payload) && acceptBillsNoSetupFee(estData, estimate)) return payload;
   const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
   // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
   const noWaiver = (fee) => (fee && fee.waivedWithPrepay === true ? { ...fee, waivedWithPrepay: false } : fee);
@@ -28407,6 +28427,9 @@ function withMultiServicePrepayClosed(payload, estData, estimate) {
     ...payload,
     ...(multi && payload.annualPrepayEligible === true ? { annualPrepayEligible: false } : {}),
     ...(multi && Array.isArray(payload.frequencies) ? { frequencies: payload.frequencies.map(closed) } : {}),
+    // A cached or frozen bundle can carry tiers moved off the page; accept still resolves a submitted key from them.
+    ...(multi && Array.isArray(payload.hiddenLawnFrequencies)
+      ? { hiddenLawnFrequencies: payload.hiddenLawnFrequencies.map(closed) } : {}),
     ...(multi && Array.isArray(payload.firstVisitFees) ? { firstVisitFees: payload.firstVisitFees.map(noWaiver) } : {}),
     ...(multi && payload.setupFee ? { setupFee: noWaiver(payload.setupFee) } : {}),
     ...(combos.length ? { serviceCadenceCombos: combos.map(closed) } : {}),
@@ -32834,6 +32857,7 @@ module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.withPestOnlyRecurringChoice = withPestOnlyRecurringChoice;
+module.exports.withMultiServicePrepayClosed = withMultiServicePrepayClosed;
 module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
