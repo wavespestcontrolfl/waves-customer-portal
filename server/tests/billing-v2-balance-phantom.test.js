@@ -99,15 +99,28 @@ jest.mock('../models/db', () => {
       return tableResults.unpaidTotal;
     }
     if (table === 'payments') {
-      const project = (rows) => rows.map((row) => Object.fromEntries(q._selected.map((key) => [key, row[key]])));
+      const project = (rows) => rows.map((row) => Object.fromEntries(q._selected.map((key) => {
+        if (String(key).includes('payment_date::text AS payment_date_cursor')) {
+          return ['payment_date_cursor', row.payment_date_cursor ?? row.payment_date];
+        }
+        if (String(key).includes('created_at::text AS created_at_cursor')) {
+          return ['created_at_cursor', row.created_at_cursor ?? row.created_at];
+        }
+        return [key, row[key]];
+      })));
       if (whereArg.status === 'failed') return project(tableResults.failedRows);
       if (whereArg.status === 'upcoming') return project(tableResults.upcomingRows);
       // recent-attempts scan (whereIn statuses)
       if (wantFirst) return tableResults.recentAttempts[0] || null;
       recentAttemptQueryCalls.push(calls);
       const limit = (calls.find(([method]) => method === 'limit') || [null, [tableResults.recentAttempts.length]])[1][0];
-      const offset = (calls.find(([method]) => method === 'offset') || [null, [0]])[1][0];
-      return project(tableResults.recentAttempts.slice(offset, offset + limit));
+      const keyset = calls.find(([method, args]) => method === 'whereRaw'
+        && String(args[0]).includes('(payments.payment_date, payments.created_at, payments.id) <'));
+      const start = keyset
+        ? tableResults.recentAttempts.findIndex((row) => row.payment_date_cursor === keyset[1][1][0]
+          && row.created_at_cursor === keyset[1][1][1] && row.id === keyset[1][1][2]) + 1
+        : 0;
+      return project(tableResults.recentAttempts.slice(start, start + limit));
     }
     throw new Error(`Unexpected table ${table}`);
   }));
@@ -226,20 +239,28 @@ describe('GET /balance — phantom failed-row exclusion', () => {
   test('the latest-attempt scan pages through every ineligible payer row before the homeowner attempt', async () => {
     const payerInvoiceId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
     tableResults.payerInvoices = [{ id: payerInvoiceId }];
+    const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
     tableResults.recentAttempts = [
       ...Array.from({ length: 550 }, (_, index) => ({
-        id: `payer-${String(index).padStart(3, '0')}`,
+        id: uuid(1000 - index),
         status: 'failed',
         metadata: { waves_invoice_id: payerInvoiceId },
+        payment_date_cursor: '2026-11-19',
+        // The first page shares one JS millisecond but keeps distinct
+        // microseconds, proving the cursor does not round through Date.
+        created_at_cursor: `2026-11-19 12:00:00.${String(999999 - index).padStart(6, '0')}+00`,
       })),
-      { id: 'homeowner-visible', status: 'failed', metadata: null },
+      {
+        id: uuid(1), status: 'failed', metadata: null,
+        payment_date_cursor: '2026-11-19', created_at_cursor: '2026-11-19 12:00:00.999449+00',
+      },
     ];
 
     const body = await getBalance();
 
     expect(body).toMatchObject({
       lastPaymentFailed: true,
-      lastPaymentAttemptId: 'homeowner-visible',
+      lastPaymentAttemptId: uuid(1),
     });
     expect(recentAttemptQueryCalls).toHaveLength(12);
     expect(recentAttemptQueryCalls[0]).toEqual(expect.arrayContaining([
@@ -247,11 +268,20 @@ describe('GET /balance — phantom failed-row exclusion', () => {
       ['orderBy', ['created_at', 'desc']],
       ['orderBy', ['id', 'desc']],
       ['limit', [50]],
-      ['offset', [0]],
     ]));
+    expect(recentAttemptQueryCalls[0].some(([method]) => method === 'offset')).toBe(false);
+    expect(recentAttemptQueryCalls[1]).toEqual(expect.arrayContaining([[
+      'whereRaw', [
+        '(payments.payment_date, payments.created_at, payments.id) < (?::date, ?::timestamptz, ?::uuid)',
+        ['2026-11-19', '2026-11-19 12:00:00.999950+00', uuid(951)],
+      ],
+    ]]));
     expect(recentAttemptQueryCalls[11]).toEqual(expect.arrayContaining([
       ['limit', [50]],
-      ['offset', [550]],
+      ['whereRaw', [
+        '(payments.payment_date, payments.created_at, payments.id) < (?::date, ?::timestamptz, ?::uuid)',
+        ['2026-11-19', '2026-11-19 12:00:00.999450+00', uuid(451)],
+      ]],
     ]));
   });
 

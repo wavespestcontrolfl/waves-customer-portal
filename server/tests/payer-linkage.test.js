@@ -9,8 +9,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 // the LIVE linkage (loadLivePayerLinkage — round-41/42) also asks the shared live-ownership verdict; these cases have no live-owned invoices
 jest.mock('../services/invoice-payer-ownership', () => ({ liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })) }));
+jest.mock('../services/visit-completion-packets', () => ({ liveThirdPartyPayerForPacket: jest.fn(async () => null) }));
 const { buildPayerLinkage, loadPayerLinkage, loadLivePayerLinkage } = require('../services/payer-linkage');
 const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
+const { liveThirdPartyPayerForPacket } = require('../services/visit-completion-packets');
 
 const PAYER_INV = { id: '11111111-1111-4111-8111-111111111111', stripe_payment_intent_id: 'pi_ap', stripe_charge_id: 'ch_ap', invoice_number: 'WPC-2026-0500' };
 const linkage = buildPayerLinkage([PAYER_INV]);
@@ -110,7 +112,10 @@ describe('loadLivePayerLinkage is bounded', () => {
     return q;
   };
   const invoices = (n) => Array.from({ length: n }, (_, i) => ({ id: `i${i}`, customer_id: 'c1', scheduled_service_id: `s${i}`, invoice_number: `WPC-2026-${1000 + i}` }));
-  beforeEach(() => liveInvoiceOwnership.mockClear());
+  beforeEach(() => {
+    liveInvoiceOwnership.mockClear();
+    liveThirdPartyPayerForPacket.mockClear();
+  });
 
   test('reads at most 1000 candidate invoices (limit 1001); more history than that is UNVERIFIABLE (failed) and makes no resolver lookup', async () => {
     const scan = chain([invoices(1001)]);
@@ -140,6 +145,7 @@ describe('loadLivePayerLinkage is bounded', () => {
     expect(scan.whereRaw).toHaveBeenCalledWith(LIVE_CANDIDATE_PAYER_SQL);
     expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/customers c WHERE c\.id = invoices\.customer_id AND c\.payer_id IS NOT NULL/);
     expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/ss\.id = invoices\.scheduled_service_id AND ss\.customer_id = invoices\.customer_id AND ss\.payer_id IS NOT NULL/);
+    expect(LIVE_CANDIDATE_PAYER_SQL).toMatch(/invoices\.visit_completion_packet_id IS NOT NULL/);
   });
   // Codex round-76 P2: a payer assigned later must not take the customer's settled self-pay history with it
   test('the live scan re-resolves only UNSETTLED invoices', async () => {
@@ -156,6 +162,37 @@ describe('loadLivePayerLinkage is bounded', () => {
     const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([invoices(5)]));
     const out = await loadLivePayerLinkage('c1', dbh);
     expect(out.failed).toBe(false);
+  });
+
+  test('a nonrepresentative billed packet member can make the invoice payer-owned through the canonical packet reader', async () => {
+    const packetId = '00000000-0000-4000-8000-000000000101';
+    const row = { ...invoices(1)[0], visit_completion_packet_id: packetId };
+    const scan = chain([[row]]);
+    const dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(scan);
+    liveThirdPartyPayerForPacket.mockResolvedValueOnce('payer-from-second-billed-member');
+
+    const out = await loadLivePayerLinkage('c1', dbh);
+
+    expect(scan.select).toHaveBeenCalledWith(expect.stringMatching(/^id$/), expect.anything(), expect.anything(), expect.anything(),
+      'visit_completion_packet_id', expect.anything(), expect.anything(), expect.anything());
+    expect(liveThirdPartyPayerForPacket).toHaveBeenCalledWith(packetId, dbh);
+    expect(out.failed).toBe(false);
+    expect(out.liveOwnedIds).toEqual(new Set([row.id]));
+    expect(out.isPayerLinked({ metadata: { invoice_id: row.id } })).toBe(true);
+  });
+
+  test('packet ownership lookup errors and an over-bound packet set fail closed', async () => {
+    const one = { ...invoices(1)[0], visit_completion_packet_id: 'packet-error' };
+    let dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([[one]]));
+    liveThirdPartyPayerForPacket.mockRejectedValueOnce(new Error('packet read unavailable'));
+    await expect(loadLivePayerLinkage('c1', dbh)).resolves.toMatchObject({ failed: true });
+
+    const overBound = invoices(31).map((row, index) => ({ ...row, visit_completion_packet_id: `packet-${index}` }));
+    dbh = jest.fn().mockReturnValueOnce(chain([[]])).mockReturnValueOnce(chain([overBound]));
+    const before = liveThirdPartyPayerForPacket.mock.calls.length;
+    const out = await loadLivePayerLinkage('c1', dbh);
+    expect(out.failed).toBe(true);
+    expect(liveThirdPartyPayerForPacket.mock.calls).toHaveLength(before);
   });
 });
 

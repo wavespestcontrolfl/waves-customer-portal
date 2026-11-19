@@ -27,15 +27,25 @@ jest.mock('../config/stripe-config', () => ({}));
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/invoice-payer-ownership', () => ({
+  liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })),
+}));
+jest.mock('../services/visit-completion-packets', () => ({
+  liveThirdPartyPayerForPacket: jest.fn(async () => null),
+}));
 
 const { isEnabled } = require('../config/feature-gates');
+const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
+const { liveThirdPartyPayerForPacket } = require('../services/visit-completion-packets');
 
 // Programmable table results, set per test.
 const tableResults = {
   payerInvoices: [],
+  liveInvoiceRows: [],
   failedRows: [],
   upcomingRows: [],
   unpaidTotal: '0',
+  unpaidInvoiceRows: null,
   recentAttempts: [],
   linkedNonDraftInvoices: [],
   linkedInvoiceLookupError: null,
@@ -44,12 +54,13 @@ const tableResults = {
   // which is how the mock below routes to it.
   openInvoiceRows: [],
   lastOpenInvoicesCalls: null,
+  transactionOptions: null,
 };
 
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereNot', 'orWhereNull', 'orWhereNotNull', 'orderBy', 'limit', 'offset'];
+    const passthrough = ['where', 'whereIn', 'whereNotIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereNot', 'orWhereNull', 'orWhereNotNull', 'orderBy', 'limit', 'offset'];
     for (const m of passthrough) {
       q[m] = (...args) => {
         q._calls = q._calls || [];
@@ -73,20 +84,36 @@ jest.mock('../models/db', () => {
     if (table === 'customers') return { id: 'cust-1', payer_id: null };
     if (table === 'invoices') {
       if (calls.some(([m]) => m === 'whereNotNull')) return tableResults.payerInvoices;
-      if (q._selected?.includes('scheduled_service_id')) return [];
+      if (q._selected?.includes('scheduled_service_id')) return tableResults.liveInvoiceRows;
       // unpaidInvoices SUM terminates with .first() (checked before whereNull:
       // it also filters whereNull('payer_id')).
-      if (wantFirst) return { total: tableResults.unpaidTotal };
+      if (wantFirst) {
+        if (tableResults.unpaidInvoiceRows) {
+          const excluded = new Set(calls
+            .filter(([method, args]) => method === 'whereNotIn' && args[0] === 'id')
+            .flatMap(([, args]) => args[1]).map(String));
+          const total = tableResults.unpaidInvoiceRows
+            .filter((row) => !excluded.has(String(row.id)))
+            .reduce((sum, row) => sum + Math.max(Number(row.total || 0) - Number(row.credit_applied || 0) - Number(row.amount_paid || 0), 0), 0);
+          return { total: String(total) };
+        }
+        return { total: tableResults.unpaidTotal };
+      }
       // Pay-now open-invoice list: whereNull filters, list terminal.
       if (calls.some(([m]) => m === 'whereNull')) {
         tableResults.lastOpenInvoicesCalls = calls;
+        const excludedIds = new Set(calls
+          .filter(([m, args]) => m === 'whereNotIn' && args[0] === 'id')
+          .flatMap(([, args]) => args[1]).map(String));
         const failedDraftIds = new Set(calls
           .filter(([m, args]) => m === 'whereIn' && args[0] === 'id')
           .flatMap(([, args]) => args[1]).map(String));
         return tableResults.openInvoiceRows.filter((row) => (
-          row.status == null
-          || ['sent', 'viewed', 'overdue'].includes(row.status)
-          || (row.status === 'draft' && failedDraftIds.has(String(row.id)))
+          !excludedIds.has(String(row.id)) && (
+            row.status == null
+            || ['sent', 'viewed', 'overdue'].includes(row.status)
+            || (row.status === 'draft' && failedDraftIds.has(String(row.id)))
+          )
         ));
       }
       // failed-row status lookup (whereIn('id', …) + whereNot draft)
@@ -101,16 +128,25 @@ jest.mock('../models/db', () => {
       if (whereArg.status === 'upcoming') return tableResults.upcomingRows;
       if (wantFirst) return tableResults.recentAttempts[0] || null;
       const limit = (calls.find(([method]) => method === 'limit') || [null, [tableResults.recentAttempts.length]])[1][0];
-      const offset = (calls.find(([method]) => method === 'offset') || [null, [0]])[1][0];
-      return tableResults.recentAttempts.slice(offset, offset + limit);
+      const keyset = calls.find(([method, args]) => method === 'whereRaw'
+        && String(args[0]).includes('(payments.payment_date, payments.created_at, payments.id) <'));
+      const start = keyset
+        ? tableResults.recentAttempts.findIndex((row) => row.payment_date_cursor === keyset[1][1][0]
+          && row.created_at_cursor === keyset[1][1][1] && row.id === keyset[1][1][2]) + 1
+        : 0;
+      return tableResults.recentAttempts.slice(start, start + limit);
     }
     throw new Error(`Unexpected table ${table}`);
   }));
   dbFn.raw = (sql) => sql;
   const trxFn = jest.fn((table) => dbFn(table));
   trxFn.raw = dbFn.raw;
+  trxFn.isTransaction = true;
   dbFn.__balanceTrx = trxFn;
-  dbFn.transaction = jest.fn((callback) => callback(trxFn));
+  dbFn.transaction = jest.fn((callback, options) => {
+    tableResults.transactionOptions = options;
+    return callback(trxFn);
+  });
   return dbFn;
 });
 
@@ -134,14 +170,19 @@ async function getBalance() {
 describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', () => {
   beforeEach(() => {
     tableResults.payerInvoices = [];
+    tableResults.liveInvoiceRows = [];
     tableResults.failedRows = [];
     tableResults.upcomingRows = [];
     tableResults.unpaidTotal = '0';
+    tableResults.unpaidInvoiceRows = null;
     tableResults.recentAttempts = [];
     tableResults.linkedNonDraftInvoices = [];
     tableResults.linkedInvoiceLookupError = null;
     tableResults.openInvoiceRows = [];
     tableResults.lastOpenInvoicesCalls = null;
+    tableResults.transactionOptions = null;
+    liveInvoiceOwnership.mockResolvedValue({ ownedIds: new Set(), unverifiable: false });
+    liveThirdPartyPayerForPacket.mockResolvedValue(null);
     isEnabled.mockImplementation(() => true);
   });
 
@@ -233,6 +274,29 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     expect(tableResults.lastOpenInvoicesCalls.filter(
       ([method, args]) => method === 'whereIn' && args[0] === 'id',
     )).toEqual([]);
+  });
+
+  test('a payer on only a nonrepresentative billed packet member hides both the balance and bearer pay token', async () => {
+    const invoiceId = '55555555-5555-4555-8555-555555555555';
+    const packetId = '66666666-6666-4666-8666-666666666666';
+    const invoice = {
+      id: invoiceId, customer_id: 'cust-1', scheduled_service_id: 'representative-self-pay',
+      visit_completion_packet_id: packetId, status: 'sent', token: 'must-not-egress',
+      invoice_number: 'INV-COMBINED', total: '92.00', credit_applied: '0', amount_paid: '0',
+    };
+    tableResults.liveInvoiceRows = [invoice];
+    tableResults.unpaidInvoiceRows = [invoice];
+    tableResults.openInvoiceRows = [invoice];
+    liveThirdPartyPayerForPacket.mockResolvedValueOnce('payer-on-second-billed-member');
+
+    const body = await getBalance();
+
+    expect(liveInvoiceOwnership).toHaveBeenCalledWith('cust-1', [invoice], expect.any(Function),
+      { maxResolutions: 30, byCandidatePayer: true });
+    expect(liveThirdPartyPayerForPacket).toHaveBeenCalledWith(packetId, require('../models/db').__balanceTrx);
+    expect(tableResults.transactionOptions).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    expect(body.currentBalance).toBe(0);
+    expect(body.openInvoices).toEqual([]);
   });
 
   test('the failed-id shortcut rechecks draft status before returning a bearer token', async () => {

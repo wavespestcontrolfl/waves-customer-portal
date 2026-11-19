@@ -750,28 +750,41 @@ router.get('/balance', async (req, res, next) => {
     // completed attempt failed — not when there's any failed row in history.
     // Skip payer-linked attempts so an AP failure doesn't flip the homeowner's
     // banner.
-    // Bounded pages: advance past payer rows and never-attempted deferrals
-    // until a homeowner attempt or actual ledger exhaustion. Each query stays
-    // bounded and the repeatable-read snapshot plus unique id tiebreaker makes
-    // offset paging stable; the common case still resolves on the first page.
+    // Bounded keyset pages: advance past payer rows and never-attempted
+    // deferrals until a homeowner attempt or actual ledger exhaustion. The
+    // cursor uses PostgreSQL's full-precision timestamp text; a JS Date would
+    // round microseconds away and could skip an attempt at a page boundary.
     // A never-attempted deferral (see isNeverAttemptedDeferral) is not an
     // attempt either — it must not raise the "last payment failed" banner.
     const isRealAttempt = (p) => !isPayerLinked(p) && !isNeverAttemptedDeferral(p);
-    const recentAttemptsQuery = () => excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(balanceDb('payments')
-      .where({ customer_id: req.customerId })
-      .whereIn('status', ['paid', 'failed', 'refunded'])
-      .whereNull('superseded_by_payment_id')), payerLinkage)
-      .orderBy('payment_date', 'desc')
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
-      .select('id', 'status', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'retry_count', 'next_retry_at');
+    const recentAttemptsQuery = (cursor) => {
+      const query = excludeLiveOwnedPayerPayments(excludeDirectPayerPayments(balanceDb('payments')
+        .where({ customer_id: req.customerId })
+        .whereIn('status', ['paid', 'failed', 'refunded'])
+        .whereNull('superseded_by_payment_id')), payerLinkage);
+      if (cursor) {
+        query.whereRaw(
+          '(payments.payment_date, payments.created_at, payments.id) < (?::date, ?::timestamptz, ?::uuid)',
+          [cursor.paymentDate, cursor.createdAt, cursor.id],
+        );
+      }
+      return query.orderBy('payment_date', 'desc')
+        .orderBy('created_at', 'desc')
+        .orderBy('id', 'desc')
+        .select('id', 'status', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'retry_count', 'next_retry_at',
+          balanceDb.raw('payments.payment_date::text AS payment_date_cursor'),
+          balanceDb.raw('payments.created_at::text AS created_at_cursor'));
+    };
     let mostRecentAttempt = null;
+    let cursor = null;
     const PAGE = 50;
-    for (let offset = 0; ; offset += PAGE) {
-      const batch = await recentAttemptsQuery().limit(PAGE).offset(offset);
+    for (;;) {
+      const batch = await recentAttemptsQuery(cursor).limit(PAGE);
       if (!batch.length) break;
       mostRecentAttempt = batch.find(isRealAttempt) || null;
       if (mostRecentAttempt || batch.length < PAGE) break;
+      const last = batch[batch.length - 1];
+      cursor = { paymentDate: last.payment_date_cursor, createdAt: last.created_at_cursor, id: last.id };
     }
 
     // Portal "Pay now" (GATE_PORTAL_PAY_NOW, audit S2-1): the customer's own
