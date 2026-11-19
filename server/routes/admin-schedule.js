@@ -26572,10 +26572,10 @@ router.get('/:id/card-request', async (req, res, next) => {
     if (!(await technicianOwnsScheduledService(req, req.params.id))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
-    const { isSecureCardLaneReady } = require('../services/appointment-card-request');
+    const { isSecureCardLaneReady, visitCardLinkClosedReason } = require('../services/appointment-card-request');
     const visit = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'card_link_sent_at');
+      .first('id', 'customer_id', 'card_link_sent_at', 'status', 'scheduled_date');
     if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
     const request = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
@@ -26593,6 +26593,10 @@ router.get('/:id/card-request', async (req, res, next) => {
       enabled: await isSecureCardLaneReady(),
       autopayActive,
       cardLinkSentAt: visit.card_link_sent_at || null,
+      // Non-null once the visit can no longer take a card link (tech en route
+      // or on site, done, cancelled, or a past date): the panel shows why in
+      // place of a send button the funnel would refuse.
+      closedReason: visitCardLinkClosedReason(visit),
       request: request
         ? {
           status: request.status,
@@ -26620,6 +26624,9 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
     if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
     const { requestCardForAppointment } = require('../services/appointment-card-request');
     const result = await requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin' });
+    // A skip answers 200 and writes no row, so this line is the only record
+    // of why an office tap sent nothing (2026-11-19: read from body size).
+    logger.info(`[schedule] office card-link tap for ${visit.id}: ${result.action} (${result.reason})`);
     res.json({ requested: result.requested, action: result.action, reason: result.reason });
   } catch (err) { next(err); }
 });
