@@ -85,7 +85,7 @@ const SERVICE = {
 const FIXTURES = {
   service_products: [], property_geometries: [], property_zones: [], service_findings: [], service_photos: [], scheduled_services: [],
 };
-const build = (overrides = {}) => buildReportV1Data({ ...SERVICE, ...overrides }, 'token-own-note', makeKnex(FIXTURES));
+const build = (overrides = {}, fixtures = {}) => buildReportV1Data({ ...SERVICE, ...overrides }, 'token-own-note', makeKnex({ ...FIXTURES, ...fixtures }));
 const notes = (extra = {}) => JSON.stringify({ ...stored(), ...extra });
 const typedCard = (todaysResult) => ({
   type: 'one_time_pest_treatment', visitSequence: 1, values: {},
@@ -170,23 +170,46 @@ describe('the report payload', () => {
       protocolActionsCompleted: ['Treated the perimeter', 'Skipped the shed per office'],
       recommendations: ['Trim shrubs back from the wall', 'Ask about the second lot', 'Call the office about the gate'],
     };
+    // One value in each form list fails the complete customer-copy screen.
     const form = {
-      formObservations: ['Light ant activity'],
-      formProtocolActions: ['Treated the perimeter'],
-      formRecommendations: ['Trim shrubs back from the wall'],
+      formObservations: ['Light ant activity', 'Toxic mold by the AC unit'],
+      formProtocolActions: ['Treated the perimeter', 'Treatment is safe for pets'],
+      formRecommendations: ['Trim shrubs back from the wall', 'Use gate code 4471 next time'],
     };
     const serviceData = JSON.stringify({ protocol: { actions: ['Skipped the shed per office'], recommendations: ['Ask about the second lot'] } });
     for (const note of [stored(), stored({ v: 2 })]) {
       const data = await build({ technician_notes: tagged, structured_notes: JSON.stringify({ ...note, ...merged, ...form }), service_data: serviceData });
-      expect(JSON.stringify(data.protocol)).not.toMatch(/side yard|the shed|second lot|the gate/i);
+      expect(JSON.stringify(data.protocol)).not.toMatch(/side yard|the shed|second lot|the gate|toxic|safe for pets|4471/i);
       expect(data.protocol.actions).toEqual(['Treated the perimeter']);
       expect(data.protocol.observations).toEqual(['Light ant activity']);
       expect(data.protocol.recommendations).toEqual(['Trim shrubs back from the wall']);
+      expect(data.protocol.structuredRecommendations).toEqual(['Trim shrubs back from the wall']);
     }
     // A record with no note keeps today's merged lists.
     const legacy = await build({ technician_notes: tagged, structured_notes: JSON.stringify({ ...merged, ...form }) });
     expect(legacy.protocol.observations).toContain('Dog loose in the side yard');
     expect(legacy.protocol.recommendations).toContain('Ask about the second lot');
+  });
+
+  test('findings drop a bare-title row, and the render adds no "no activity" row beside a note', async () => {
+    const row = (title, detail = null) => ({
+      id: `f-${title.length}`, service_record_id: SERVICE.id, category: 'observation', severity: 'low', title, detail, recommendation: null,
+    });
+    // A [Found] line of the raw note, saved as a bare title; a form label
+    // the record proves; a finding with its own detail.
+    const findings = [row('Dog loose in the side yard'), row('Light ant activity'), row('Mulch against the slab', 'Mulch touches the slab by the lanai.')];
+    const structured = JSON.stringify({ ...stored(), formObservations: ['Light ant activity'] });
+    const data = await build({ structured_notes: structured }, { service_findings: findings });
+    expect(data.findings.map((f) => f.title)).toEqual(['Light ant activity', 'Mulch against the slab']);
+    expect(JSON.stringify(data)).not.toContain('side yard');
+    // Only the bare row: nothing is left, and no "no activity" row is added.
+    const bare = await build({}, { service_findings: [row('Dog loose in the side yard')] });
+    expect(bare.findings).toEqual([]);
+    expect((await build()).findings).toEqual([]);
+    // A record with no note keeps every row, and its clean visit keeps the fallback.
+    const legacy = await build({ structured_notes: '{}' }, { service_findings: findings });
+    expect(legacy.findings.map((f) => f.title)).toContain('Dog loose in the side yard');
+    expect((await build({ structured_notes: '{}' })).findings.map((f) => f.category)).toEqual(['no_activity']);
   });
 
   test('the PDF key hashes the summary the report prints', async () => {

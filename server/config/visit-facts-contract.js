@@ -539,7 +539,7 @@ function genericCompletionFacts(opts = {}) {
       writers: [COMPLETE_SERVICE],
       readers: withExtra('form_protocol_actions', [{ file: REPORT_DATA, section: 'What we did, on a record that carries the technician\'s own note (buildProtocolPayload)' }]),
       whenMissing: 'hidden',
-      notes: 'The picked action labels only. protocolActionsCompleted also folds in [Protocol] / [Protocol optional] / [Action] technician-note lines; on a record that carries structured_notes.reportNote the notes column is the raw note, so the report reads this list instead.',
+      notes: 'The picked action labels that pass customerCopyViolations, nothing else. protocolActionsCompleted also folds in [Protocol] / [Protocol optional] / [Action] technician-note lines; on a record that carries structured_notes.reportNote the notes column is the raw note, so the report reads this list instead.',
     },
     {
       key: 'protocol_action_scopes_completed',

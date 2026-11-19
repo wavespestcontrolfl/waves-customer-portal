@@ -126,7 +126,7 @@ const { inferTreeShrubOrdinanceZone, validateTreeShrubCloseout, validateTreeShru
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
-const { technicianReportCustomerCopy, fourSectionReport } = require('../services/service-report/technician-report-copy');
+const { technicianReportCustomerCopy, fourSectionReport, customerCopyViolations } = require('../services/service-report/technician-report-copy');
 const { writerRulesRejection, groundedTimeframePhrases, draftDatePhrases, activeIngredientsMentioned } = require('../services/service-report/report-writer-rules');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 
@@ -4668,11 +4668,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Provenance-kept copy of ONLY the picked action labels: the merged list
     // above folds in [Protocol] / [Protocol optional] / [Action] note lines.
     // A record that carries the technician's own note shows only this list
-    // (report-data buildProtocolPayload). Persisted beside the merged list as
-    // structured_notes.formProtocolActions, as formRecommendations is.
+    // (report-data buildProtocolPayload), so a label that fails the complete
+    // customer-copy screen is left out as it stores (AGENTS.md). Persisted
+    // beside the merged list as structured_notes.formProtocolActions.
     const formProtocolActions = normalizeCompletionTextArray(
       Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : [],
-    );
+    ).filter((label) => !customerCopyViolations(label).length);
     // Structured scope for each completed action — authoritative interior/
     // exterior signal for the re-entry advisory (see report-data treatmentScope).
     // Specialty preset lanes replace this list with server-derived metadata

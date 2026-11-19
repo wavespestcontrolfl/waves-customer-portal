@@ -45,7 +45,7 @@ const {
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
-const { visitReportCustomerCopy, carriesReportNote, printedReportSummary } = require('./technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, customerCopyViolations } = require('./technician-report-copy');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
 } = require('./same-line-visit');
@@ -2083,15 +2083,18 @@ function buildProtocolPayload(record) {
   const structured = parseJsonObject(record.structured_notes);
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
-  const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
   // A record that carries the technician's own note keeps the raw note in
   // technician_notes, and the merged lists fold in its tagged lines and the
   // parked [Next] lines: such a record's lists hold only what the completion
   // form recorded (formProtocolActions, formObservations, formRecommendations;
-  // docs/public-route-contracts.md).
+  // docs/public-route-contracts.md), and each value passes the complete
+  // customer-copy screen as it renders, as the note does (AGENTS.md).
   const formOnly = carriesReportNote(record.structured_notes);
+  const formList = (key) => uniqueStrings(parseJsonArray(structured[key]))
+    .filter((value) => !formOnly || !customerCopyViolations(value).length);
+  const structuredObservations = formList('formObservations');
   return {
-    actions: withoutAccessCodeLines(uniqueStrings(formOnly ? parseJsonArray(structured.formProtocolActions) : [
+    actions: withoutAccessCodeLines(formOnly ? formList('formProtocolActions') : uniqueStrings([
       ...parseJsonArray(protocol.actions),
       ...parseJsonArray(structured.protocolActionsCompleted),
       ...taggedNoteLines(record.technician_notes, ['protocol', 'protocol optional', 'action']),
@@ -2113,7 +2116,7 @@ function buildProtocolPayload(record) {
     ...(structuredObservations.length ? {
       structuredObservationsProvenance: 'completion_form_snapshot',
     } : {}),
-    recommendations: withoutAccessCodeLines(uniqueStrings(formOnly ? parseJsonArray(structured.formRecommendations) : [
+    recommendations: withoutAccessCodeLines(formOnly ? formList('formRecommendations') : uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
@@ -2126,7 +2129,7 @@ function buildProtocolPayload(record) {
     // egress on a customer report (AGENTS.md; codex P1 r3 + inline on
     // #3516). Records predating the field render findings recommendations
     // only. The merged list above stays for its internal/recap consumers.
-    structuredRecommendations: uniqueStrings(parseJsonArray(structured.formRecommendations)),
+    structuredRecommendations: formList('formRecommendations'),
     // Tips from your tech, frozen at completion (freezeTechTips): registry
     // copy resolved server-side from ids, plus at most one screened line in
     // the technician's own words. Read verbatim — the note shows what the
@@ -4633,7 +4636,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
-  const findings = dbFindings.map((finding) => ({
+  let findings = dbFindings.map((finding) => ({
     id: finding.id,
     zoneId: finding.zone_id || null,
     category: finding.category,
@@ -4693,6 +4696,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       recommendation: '',
     });
   }
+  // A record that carries the technician's own note: a row with a bare title
+  // (no detail, no recommendation) is free text the form's observations
+  // carried, a [Found] line of the raw note among them, never proven form
+  // copy. It never reaches the report (ServiceReportDocument drops it too).
+  if (ownNote) findings = findings.filter((finding) => finding.detail || finding.recommendation);
 
   let lawnHistory = opts.lawnHistory || null;
   if (propertyHistoryEnabled && serviceLine === 'lawn' && !lawnHistory) {
@@ -4881,8 +4889,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
   // Typed reports carry their real findings in the snapshot (rendered by
   // TypedFindingsCard) — the legacy no-activity fallback would contradict
-  // e.g. an active cockroach visit's snapshot.
-  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal
+  // e.g. an active cockroach visit's snapshot. A record that carries the
+  // technician's own note never gets it either: its lists hold only the
+  // form's values, so their being empty proves nothing (a [Found] line of
+  // the raw note is not among them). Completion writes its own no-activity
+  // row from the merged lists.
+  if (!typedSnapshot && !ownNote && !findings.length && !hasLawnAssessmentSignal
     && !(serviceLine === 'lawn' && productsLoadFailed)
     && shouldAddNoActivityFinding({ service, structured, protocol, interiorOnlyLane })) {
     findings.push({
