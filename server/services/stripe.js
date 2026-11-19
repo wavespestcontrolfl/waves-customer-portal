@@ -4068,12 +4068,33 @@ const StripeService = {
             stripeCustomerId = await this.ensureStripeCustomer(ownerId);
           }
         }
-        const lockedInvoice = await trx('invoices')
-          .where({ id: invoiceId })
-          .forUpdate()
-          .first();
+        // An older combined checkout can still stamp siblings after the
+        // feature is disabled. Lock that whole PI allocation in canonical
+        // invoice-id order before taking the target row or doing any Stripe
+        // cancel/stamp cleanup. Gate-on setup already holds the stable customer
+        // reservation above; gate-off setup cannot grow an allocation, so it
+        // deliberately keeps the pre-gate advisory-lock behavior while still
+        // serializing every stale stamped row.
+        const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+        const setupPiId = invoice.stripe_payment_intent_id || null;
+        const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+          id: invoiceId,
+          piId: setupPiId,
+          customerId: invoice.customer_id,
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice);
+        // The canonical query locked the allocation from the unlocked setup
+        // snapshot. A replacement checkout that won meanwhile may have a
+        // different sibling set, so refuse before touching either intent.
+        if ((lockedInvoice.stripe_payment_intent_id || null) !== setupPiId) {
+          const staleErr = new Error('Payment session changed. Please refresh the invoice and try again.');
+          staleErr.statusCode = 409;
+          staleErr.staleBalance = true;
+          throw staleErr;
+        }
         // Preserve the original collectible status and provenance. Full
         // account-credit coverage below changes lockedInvoice to prepaid,
         // which the deposit guard correctly skips for pre-existing invoices.

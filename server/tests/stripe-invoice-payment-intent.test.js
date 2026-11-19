@@ -61,11 +61,16 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     };
     const lockedInvoiceQuery = {
       where: jest.fn(() => lockedInvoiceQuery),
+      whereRaw: jest.fn(() => lockedInvoiceQuery),
+      orderBy: jest.fn(() => lockedInvoiceQuery),
       forUpdate: jest.fn(() => lockedInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
       whereNotIn: jest.fn(() => lockedInvoiceQuery),
       update: updateInvoice,
     };
+    // Canonical allocation locking awaits the query itself when an older PI
+    // is attached, returning the target among every stamped member.
+    lockedInvoiceQuery.then = (resolve, reject) => Promise.resolve([invoiceRow]).then(resolve, reject);
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
       whereNull: jest.fn(() => paymentsQuery),

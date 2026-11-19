@@ -83,6 +83,17 @@ postgres('voidInvoice({ requireUnsettled: true }) — real Postgres chokepoint',
     return { customerId, invoiceId };
   }
 
+  async function waitForBlockedBackend(blocker) {
+    const { rows: [session] } = await blocker.raw('select pg_backend_pid() as pid');
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const result = await db.raw('select exists(select 1 from pg_stat_activity a where ? = any(pg_blocking_pids(a.pid))) as waiting', [session.pid]);
+      if (result.rows[0].waiting) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('The renewal void never waited on the invoice row');
+  }
+
   test('a genuinely unpaid, collectible invoice voids normally under requireUnsettled', async () => {
     const { invoiceId } = await insertInvoice({ status: 'sent' });
     const result = await InvoiceService.voidInvoice(invoiceId, { requireUnsettled: true });
@@ -107,6 +118,40 @@ postgres('voidInvoice({ requireUnsettled: true }) — real Postgres chokepoint',
     // committed the throwing branch's own write).
     expect(fresh.status).toBe('prepaid');
     expect(Number(fresh.credit_applied)).toBe(249);
+  });
+
+  test('a renewal void waiting on the row preserves the typed refusal when settlement changes sent to prepaid', async () => {
+    const { invoiceId } = await insertInvoice({ status: 'sent' });
+    const blocker = await db.transaction();
+    const StripeService = require('../services/stripe');
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent')
+      .mockRejectedValue(new Error('Unexpected simulated Stripe cancellation'));
+    try {
+      await blocker('invoices').where({ id: invoiceId }).forUpdate().first('id');
+
+      // voidInvoice's unlocked snapshot sees `sent`, then its own transaction
+      // waits here. Account-credit settlement wins while it waits.
+      const voiding = InvoiceService.voidInvoice(invoiceId, { requireUnsettled: true })
+        .then(() => null, (err) => err);
+      await waitForBlockedBackend(blocker);
+      await blocker('invoices').where({ id: invoiceId }).update({
+        status: 'prepaid',
+        credit_applied: 249,
+        prepaid_at: new Date(),
+      });
+      await blocker.commit();
+
+      await expect(voiding).resolves.toMatchObject({
+        code: 'INVOICE_SETTLED_REFUSE_VOID',
+        invoiceStatus: 'prepaid',
+      });
+      expect(cancel).not.toHaveBeenCalled();
+      await expect(db('invoices').where({ id: invoiceId }).first('status', 'credit_applied'))
+        .resolves.toMatchObject({ status: 'prepaid', credit_applied: '249.00' });
+    } finally {
+      cancel.mockRestore();
+      if (!blocker.isCompleted()) await blocker.rollback();
+    }
   });
 
   // Codex #4971 round-4 (post-merge audit) P1: a PARTIAL credit application
