@@ -61,7 +61,12 @@ function recorder(byTable) {
     });
     return chain;
   };
-  const conn = jest.fn((table) => { calls.push(['table', table]); return chainFor(byTable[table]); });
+  // A table's result may be a function: each query on that table then gets its next result.
+  const conn = jest.fn((table) => {
+    calls.push(['table', table]);
+    const result = byTable[table];
+    return chainFor(typeof result === 'function' ? result() : result);
+  });
   return { conn, calls };
 }
 
@@ -165,6 +170,15 @@ describe('part 1: next-door stops booked apart', () => {
     const keys = (rows) => composeWeeklyCheck({ apart: findApartPairs(rows), nightLog: new Map(), weekStart: '2027-03-01' }).itemKeys;
     expect(keys([lawn, pest, home])).toEqual(keys([home, pest, lawn]));
     expect(keys([home, lawn, pest])).toEqual(keys([home, pest, lawn]));
+  });
+
+  test("each split is judged on its two stops' own pins, never an older visit's", () => {
+    const at = (pin, date, status = 'pending') => stop({ customer: 'c-a', at: pin, date, street: '100 Sample Way', status, plan: true });
+    const neighbor = stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true });
+    const far = north(1, HOME_A);
+    // The office corrected the home's pin; last month's served visit keeps the old one.
+    expect(findApartPairs([at(far, '2027-02-10', 'completed'), at(HOME_A, '2027-03-01'), neighbor])).toEqual([expect.objectContaining({ gap: 3 })]);
+    expect(findApartPairs([at(HOME_A, '2027-02-10', 'completed'), at(far, '2027-03-01'), neighbor])).toEqual([]);
   });
 
   test('a split keeps its key when another service at the same stop comes first', () => {
@@ -636,26 +650,34 @@ describe('what the check reads', () => {
     expect(calls).toContainEqual(['whereNull', 's.reservation_expires_at']);
   });
 
-  test("the re-plan's newest plan for each visit's day and technician wins; only same-day pairs are read", async () => {
+  test("the re-plan's newest run only, and its newest plan for each visit's day and technician; only same-day pairs are read", async () => {
     const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: null } };
     const twoTechs = { twoTechs: true, first: { id: 'svc-5', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-6', date: '2027-03-01', tech: 'tech-2' } };
     const twoDays = { gap: 3, first: { id: 'svc-3', date: '2027-03-02', tech: 'tech-3' }, second: { id: 'svc-4', date: '2027-03-05', tech: 'tech-3' } };
-    const { conn, calls } = recorder({
-      day_replan_plans: [
-        { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'time_told' }] },
-        { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'within_24h' }, { id: 'svc-2', why: 'person_placed' }] },
-        { service_date: '2027-03-01', technician_id: 'tech-2', fixed: [] },
-      ],
-    });
+    const results = [{ run_id: 'run-2' }, [
+      { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'time_told' }] },
+      { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'within_24h' }, { id: 'svc-2', why: 'person_placed' }] },
+      { service_date: '2027-03-01', technician_id: 'tech-2', fixed: [] },
+    ]];
+    const { conn, calls } = recorder({ day_replan_plans: () => results.shift() });
     const plans = await loadReplanFixed([sameDay, twoTechs, twoDays], NOW, conn);
     expect(plans).toEqual(new Map([
       ['2027-03-01|tech-1', new Map([['svc-1', 'time_told']])],
       ['2027-03-01|tech-2', new Map()],
     ]));
     expect(calls).toContainEqual(['table', 'day_replan_plans']);
+    expect(calls).toContainEqual(['first', 'run_id']);
+    expect(calls).toContainEqual(['where', { run_id: 'run-2' }]);
     expect(calls).toContainEqual(['whereIn', 'service_date', ['2027-03-01']]);
     expect(calls).toContainEqual(['whereIn', 'technician_id', ['tech-1', 'tech-2']]);
     expect(calls).toContainEqual(['orderBy', [{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]]);
+  });
+
+  test('no re-plan run in the window: no plan to read, and no second query', async () => {
+    const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: 'tech-1' } };
+    const { conn, calls } = recorder({ day_replan_plans: () => undefined });
+    expect(await loadReplanFixed([sameDay], NOW, conn)).toEqual(new Map());
+    expect(calls.filter((c) => c[0] === 'table')).toHaveLength(1);
   });
 
   test('the newest finished night run of either mode: a dry run marks its lines', async () => {

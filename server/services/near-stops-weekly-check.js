@@ -297,8 +297,9 @@ function customerHomes(entries) {
   };
 }
 
-// Every row's home, pinned or not (customerHomes). A home's pin, name and city come
-// from its earliest visit; only a placed home with a pin can be paired.
+// Every row's home, pinned or not (customerHomes). A home's name and city come from
+// its earliest visit, and it keeps every pin its visits carry; only a placed home
+// with a pin can be paired.
 function buildPlaces(rows) {
   const byCustomer = new Map();
   for (const raw of rows) {
@@ -307,7 +308,7 @@ function buildPlaces(rows) {
     const row = { ...raw, lat: geo ? geo.lat : null, lng: geo ? geo.lng : null };
     const customerId = String(row.customer_id);
     if (!byCustomer.has(customerId)) byCustomer.set(customerId, []);
-    byCustomer.get(customerId).push({ row, geo, premise: effectivePremise(row), visit: toVisit(row) });
+    byCustomer.get(customerId).push({ row, geo, premise: effectivePremise(row), visit: { ...toVisit(row), geo } });
   }
   const places = [];
   const addPlace = (entries, unplaced) => {
@@ -317,6 +318,7 @@ function buildPlaces(rows) {
       key: `home-${places.length + 1}`,
       customerId: String(first.customer_id),
       geo: ordered.find((e) => e.geo)?.geo || null,
+      pins: [...new Map(ordered.filter((e) => e.geo).map((e) => [`${e.geo.lat},${e.geo.lng}`, e.geo])).values()],
       unplaced,
       name: shortName(first),
       city: first.service_address_city || first.customer_city || null,
@@ -332,16 +334,22 @@ function buildPlaces(rows) {
   return places;
 }
 
+const milesApart = (x, y) => haversine(x.lat, x.lng, y.lat, y.lng);
+
+// Two placed homes that some of their pins put next door (any customers) or near
+// (one customer's own homes). Each split is then judged on its own two stops' pins,
+// so an older visit's pin (a pin the office later corrected) decides nothing.
 function nearPairs(places) {
-  const pinned = places.filter((p) => p.geo && !p.unplaced);
+  const pinned = places.filter((p) => p.pins.length && !p.unplaced);
   const pairs = [];
   for (let i = 0; i < pinned.length; i += 1) {
     for (let j = i + 1; j < pinned.length; j += 1) {
       const a = pinned[i];
       const b = pinned[j];
       const sameCustomer = a.customerId === b.customerId;
-      const miles = haversine(a.geo.lat, a.geo.lng, b.geo.lat, b.geo.lng);
-      if (miles <= (sameCustomer ? OWN_HOMES_MILES : NEXT_DOOR_MILES)) pairs.push({ a, b, miles, sameCustomer });
+      const limit = sameCustomer ? OWN_HOMES_MILES : NEXT_DOOR_MILES;
+      const closest = Math.min(...a.pins.flatMap((x) => b.pins.map((y) => milesApart(x, y))));
+      if (closest <= limit) pairs.push({ a, b, sameCustomer, limit });
     }
   }
   return pairs;
@@ -367,14 +375,18 @@ function homeDays(place) {
     if (!days.has(visit.date)) days.set(visit.date, []);
     days.get(visit.date).push(visit);
   }
-  return [...days.values()].map((visits) => ({
-    key: `${place.key}|${visits[0].date}`,
-    date: visits[0].date,
-    visits,
-    lead: visits.find((v) => !v.done) || visits[0],
-    anchor: [...visits].sort(bookedFirst)[0].id,
-    done: visits.every((v) => v.done),
-  }));
+  return [...days.values()].map((visits) => {
+    const lead = visits.find((v) => !v.done) || visits[0];
+    return {
+      key: `${place.key}|${visits[0].date}`,
+      date: visits[0].date,
+      visits,
+      lead,
+      pin: lead.geo || visits.find((v) => v.geo)?.geo || place.geo, // the stop's own pin
+      anchor: [...visits].sort(bookedFirst)[0].id,
+      done: visits.every((v) => v.done),
+    };
+  });
 }
 
 const routeKey = (date, tech) => `${date}|${tech}`;
@@ -475,7 +487,10 @@ function pairSplits(pair, routes) {
   const candidates = [];
   for (const x of homeDays(pair.a)) {
     for (const y of homeDays(pair.b)) {
+      const miles = milesApart(x.pin, y.pin); // the two stops' own pins decide
+      if (miles > pair.limit) continue;
       candidates.push({
+        miles,
         keys: [x.key, y.key],
         key: [x.anchor, y.anchor].sort().join('|'),
         done: x.done || y.done,
@@ -508,7 +523,7 @@ function findApartPairs(rows, { from = null, until = null } = {}) {
     for (const hit of pairSplits(pair, routes)) {
       if (hit.done || hit.days > LOOKAHEAD_DAYS) continue;
       if ((from && hit.first.date < from) || (until && hit.second.date > until)) continue;
-      apart.push({ ...pair, key: hit.key, first: hit.first, second: hit.second, ...hit.split });
+      apart.push({ ...pair, miles: hit.miles, key: hit.key, first: hit.first, second: hit.second, ...hit.split });
     }
   }
   // Same-day splits first, then the pairs the fewest days apart: the easiest to join.
@@ -622,9 +637,9 @@ function pairLead(p) {
 }
 
 
-function capped(lines) {
-  if (lines.length <= MAX_LINES) return lines;
-  return [...lines.slice(0, MAX_LINES), `- and ${lines.length - MAX_LINES} more`];
+function capped(items, line) {
+  const shown = items.slice(0, MAX_LINES).map(line);
+  return items.length > MAX_LINES ? [...shown, `- and ${items.length - MAX_LINES} more`] : shown;
 }
 
 // Five pair lines keep the detail under 2,000 characters; the cut is a last
@@ -643,7 +658,7 @@ function composeWeeklyCheck(data) {
     `Week of ${dayLabel(weekStart)}. Read-only: this check moved nothing and texted nobody.`,
     '',
     `Next-door stops apart in the next ${LOOKAHEAD_DAYS} days: ${apart.length}`,
-    ...capped(apart.map((p) => pairLine(p, nightLog, replan))),
+    ...capped(apart, (p) => pairLine(p, nightLog, replan)),
     '',
     gpsLine(drives),
   ];
@@ -771,10 +786,17 @@ async function loadNightLog(visitIds, now = new Date(), conn = db) {
 async function loadReplanFixed(apart, now = new Date(), conn = db) {
   const visits = apart.filter((p) => p.first.date === p.second.date).flatMap((p) => [p.first, p.second]).filter((v) => v.tech);
   if (!visits.length) return new Map();
+  // The newest run in the window, as the open-blocks alert picks it, so an older
+  // run's plan never stands in for a day the newest run skipped.
+  const run = await conn('day_replan_plans')
+    .where('created_at', '>=', new Date(now.getTime() - NIGHT_LOG_HOURS * 3600000))
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .first('run_id');
+  if (!run) return new Map();
   const rows = await conn('day_replan_plans')
+    .where({ run_id: run.run_id })
     .whereIn('service_date', [...new Set(visits.map((v) => v.date))])
     .whereIn('technician_id', [...new Set(visits.map((v) => v.tech))])
-    .where('created_at', '>=', new Date(now.getTime() - NIGHT_LOG_HOURS * 3600000))
     .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .select('service_date', 'technician_id', 'fixed');
   const plans = new Map();
