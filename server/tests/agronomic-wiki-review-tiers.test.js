@@ -361,7 +361,7 @@ describe('post-merge contradiction recheck', () => {
     const state = useDb({
       products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
       product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
-      treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] })),
+      treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] })),
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
         if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
@@ -393,7 +393,7 @@ describe('post-merge contradiction recheck', () => {
     const state = useDb({
       products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
       product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
-      treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] })),
+      treatment_outcomes: Array.from({ length: 25 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] })),
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
         if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];
@@ -420,7 +420,7 @@ describe('post-merge contradiction recheck', () => {
     const state = useDb({
       products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
       product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
-      treatment_outcomes: Array.from({ length: 3 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] })),
+      treatment_outcomes: Array.from({ length: 3 }, (_, i) => ({ id: `o${i}`, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] })),
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
         if (whereObj?.slug && whereObj.slug !== CANON_SLUG) return [{ id: 'ke-dupe', slug: whereObj.slug, kb_entry_id: null }];

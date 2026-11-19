@@ -364,7 +364,9 @@ async function restoreAliases(knex) {
     const meta = asObject(event.metadata);
     let restored = 0;
     if (meta.kind === 'inserted') {
-      restored = await knex('product_aliases').where({ id: event.resource_id, product_id: meta.product_id, alias_name: meta.alias_name }).del();
+      // up() inserted a global row (no vendor): one the office has since given a vendor is the office's mapping and stays.
+      restored = await knex('product_aliases').where({ id: event.resource_id, product_id: meta.product_id, alias_name: meta.alias_name })
+        .whereNull('vendor_id').del();
     } else if (meta.kind === 'moved' && meta.from && meta.to && await productExists(knex, meta.from)) {
       restored = await knex('product_aliases').where({ id: event.resource_id, product_id: meta.to }).update({ product_id: meta.from });
     } else if (meta.kind === 'removed' && meta.row && meta.row.id) {

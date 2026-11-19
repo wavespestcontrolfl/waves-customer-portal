@@ -126,11 +126,11 @@ function familyConvert(amount, unit, capUnit) {
 
 // The history rows a v13 yearly amount cap counts: the product's own, or, when the cap says the label's maximum is shared (Advion Insect
 // Granule and the pest-control Advion WDG Granular are one granule, EPA 100-1483), every catalog row with that EPA number. A cap for one
-// service line's applications (history_service_line) also reads each row's visit type and add-on key, for countsForServiceLine.
+// service line's applications (history_service_line) also reads each row's visit type, add-on key and method, for countsForServiceLine.
 function amountHistoryProducts(query, database, product, limit) {
   if (limit.history_service_line) {
     query.leftJoin('service_records as amount_sr', 'pah.service_record_id', 'amount_sr.id')
-      .select('amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key');
+      .select('amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key', 'pah.application_method as history_application_method');
   }
   if (!limit.history_epa_reg_number) return query.where('pah.product_id', product.id);
   return query.whereIn('pah.product_id', database('products_catalog').where({ epa_reg_number: limit.history_epa_reg_number }).select('id'));
@@ -147,19 +147,32 @@ function knownOtherServiceLine(serviceType, line) {
   return detected !== 'pest' || NAMES_PEST_WORK.test(String(serviceType));
 }
 
+// An application that records lawn work itself, whatever its visit's type: a treated area, or a broadcast. A mosquito or pest visit
+// can carry a lawn broadcast. Production 2026-11-18: no pest visit's bifenthrin row recorded an area or a broadcast; its perimeter
+// and spot sprays are recorded per gallon with no area, and so, counted, each would read as a full-rate lawn pass.
+const BROADCAST_METHODS = new Set(['broadcast_spray', 'granular_broadcast']);
+function recordsLawnWork(areaSqft, method) {
+  return Number(areaSqft) > 0 || BROADCAST_METHODS.has(String(method || '').trim().toLowerCase());
+}
+
 // Whether a history row counts toward a cap for one service line's applications (history_service_line; LESCO Crosscheck Plus: lawn, as
 // its label limit is for turf and the same bottle is the pest, mosquito and termite bifenthrin). A row counts unless its visit is known
-// to be another line: an area add-on row counts (the closeout audits add-on rows as lawn work), and so does a row with no visit.
+// to be another line and the row itself records no lawn work: an area add-on row counts (the closeout audits add-on rows as lawn work),
+// and so do a row with no visit and, for the lawn, a row with a treated area or a broadcast on any visit.
 function countsForServiceLine(row, limit) {
   if (!limit.history_service_line || row.history_area_addon_key || !row.history_service_type) return true;
+  if (limit.history_service_line === 'lawn' && recordsLawnWork(row.area_treated_sqft, row.history_application_method)) return true;
   return !knownOtherServiceLine(row.history_service_type, limit.history_service_line);
 }
 
 // Whether the application being judged is work of the cap's service line. A cap on one line's applications (history_service_line)
-// does not judge another line's work: a perimeter spray of the house bifenthrin is not a lawn application. ctx.serviceType is the
-// type of the visit being planned or checked; a caller that names none (the lawn plan, the lawn brief, a status read) is judged.
+// does not judge another line's work: a perimeter spray of the house bifenthrin is not a lawn application. It passes unjudged only
+// when the caller names both the visit type (ctx.serviceType), known to be another line's work, and the method (ctx.applicationMethod),
+// one that is not lawn work (a perimeter or spot spray, not a broadcast). A caller that names neither (the lawn plan, the lawn brief,
+// a status read), or only one, is judged.
 function judgedForServiceLine(limit, ctx) {
-  if (!limit.history_service_line || !ctx.serviceType) return true;
+  if (!limit.history_service_line || !ctx.serviceType || !ctx.applicationMethod) return true;
+  if (limit.history_service_line === 'lawn' && recordsLawnWork(null, ctx.applicationMethod)) return true;
   return !knownOtherServiceLine(ctx.serviceType, limit.history_service_line);
 }
 
@@ -283,8 +296,9 @@ class ApplicationLimitChecker {
   // count and its minimum interval (and the v13 yearly amount) at that PLACE of the lawn: the rows placed elsewhere on the
   // lawn are left out, a row with no place on record still counts. The shared active-ingredient cap, the MOA rotation and
   // every limit that is not about this product's own applications stay lawn-wide.
-  // opts.serviceType (the visit's service type) lets a v13 yearly amount cap kept to one service line's applications (LESCO
-  // Crosscheck Plus: the lawn) pass work that is known to be another line's, a perimeter pest spray (judgedForServiceLine).
+  // opts.serviceType (the visit's service type) with opts.applicationMethod (perimeter_spray, broadcast_spray, ...) lets a v13 yearly
+  // amount cap kept to one service line's applications (LESCO Crosscheck Plus: the lawn) pass work known to be another line's that is
+  // not lawn work, a perimeter pest spray (judgedForServiceLine). One of them alone judges the application.
   async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };

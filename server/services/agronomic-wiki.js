@@ -110,12 +110,14 @@ async function resolveCanonicalProduct(productName) {
   }
 }
 
-// The outcomes one catalog product's page aggregates. A name can move to another product (owner 2026-11-18: "Talstar P" named the
-// Atticus Talak bottle until the house bifenthrin became LESCO Crosscheck Plus, and names Crosscheck after), so a name match alone
-// does not prove what a past visit applied: the product id its service_products row stored decides. An outcome counts when its
-// visit recorded this product under any name, or recorded a matching name with no product id; it does not count when every
-// matching row on its visit recorded another product. With no catalog product (productId null) the name match decides, as before.
-async function outcomesForProduct(variants, productId) {
+// The outcomes one catalog product's page aggregates. An alias can move to another product (owner 2026-11-18: "Talstar P" named the
+// Atticus Talak bottle until the house bifenthrin became LESCO Crosscheck Plus, and names Crosscheck after), so an alias alone says
+// nothing about which bottle a past visit used: the product id its visit's service_products row stored decides. An outcome counts
+// when its visit stored this product's id, under any name. A name alone counts only when it is the catalog name itself: a visit row
+// with no product id, and an outcome with no visit (or whose visit stored no product rows), count only when they name it. With no
+// catalog product (productId null) the name match decides, as before. Production 2026-11-18: all 76 outcomes have a visit, and no
+// outcome visit has a product row without an id.
+async function outcomesForProduct(variants, productId, catalogName) {
   const outcomes = await db('treatment_outcomes')
     .where(function () {
       for (const variant of variants) {
@@ -124,19 +126,23 @@ async function outcomesForProduct(variants, productId) {
       if (productId) this.orWhereRaw('service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', [productId]);
     })
     .orderBy('treatment_date', 'desc');
+  if (!productId) return outcomes;
+  const own = String(catalogName || '').trim().toLowerCase();
   const visits = [...new Set(outcomes.map((o) => o.service_record_id).filter(Boolean).map(String))];
-  if (!productId || !visits.length) return outcomes;
-  const rows = await db('service_products').whereIn('service_record_id', visits).select('service_record_id', 'product_id', 'product_name');
-  const names = variants.map((variant) => String(variant || '').toLowerCase()).filter(Boolean);
-  const counts = new Map(); // visit -> true (this product's) | false (only another product's rows matched)
+  const rows = visits.length ? await db('service_products').whereIn('service_record_id', visits).select('service_record_id', 'product_id', 'product_name') : [];
+  const recorded = new Set(); // visits that stored product rows
+  const mine = new Set(); // visits that stored this product
   for (const row of rows || []) {
     const visit = String(row.service_record_id);
-    const mine = row.product_id != null && String(row.product_id) === String(productId);
-    const named = names.some((name) => String(row.product_name || '').toLowerCase().includes(name));
-    if (mine || (named && row.product_id == null)) counts.set(visit, true);
-    else if (named && !counts.has(visit)) counts.set(visit, false);
+    recorded.add(visit);
+    const stored = row.product_id == null ? null : String(row.product_id);
+    if (stored === String(productId) || (stored == null && own && String(row.product_name || '').trim().toLowerCase() === own)) mine.add(visit);
   }
-  return outcomes.filter((o) => counts.get(String(o.service_record_id)) !== false);
+  return outcomes.filter((o) => {
+    const visit = o.service_record_id == null ? null : String(o.service_record_id);
+    if (visit && recorded.has(visit)) return mine.has(visit);
+    return Boolean(own) && JSON.stringify(o.products_applied ?? '').toLowerCase().includes(own);
+  });
 }
 
 function getSeason(month) {
@@ -889,7 +895,7 @@ const AgronomicWiki = {
       const { canonicalName, variants, productId } = await resolveCanonicalProduct(productName);
       const slug = `product/${slugify(canonicalName)}`;
 
-      const outcomes = await outcomesForProduct(variants, productId);
+      const outcomes = await outcomesForProduct(variants, productId, canonicalName);
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);

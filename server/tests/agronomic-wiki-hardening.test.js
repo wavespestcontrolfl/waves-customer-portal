@@ -565,7 +565,7 @@ describe('updateProductPage', () => {
         ? [{ product_id: 'pc-1' }]
         : [{ alias_name: ALIAS }, { alias_name: RAW_NAME }]),
       treatment_outcomes: [
-        { id: 'o1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] },
+        { id: 'o1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: CANONICAL }] },
       ],
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
@@ -673,16 +673,22 @@ describe('updateProductPage', () => {
 
   // Owner 2026-11-18: "Talstar P" named the Atticus Talak bottle, then moved to LESCO Crosscheck Plus with the house bifenthrin.
   // A past visit's stored product id, not today's alias, decides which page its outcome counts on.
-  test('a name that moved products: each outcome counts on the page of the product its visit recorded', async () => {
+  test('a name that moved products: an outcome counts on the page of the product its visit stored; a name alone only when it is the catalog name', async () => {
     const outcomes = [
       { id: 'o-talak', service_record_id: 'sr-1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
-      { id: 'o-cross', service_record_id: 'sr-2', treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
-      { id: 'o-typed', service_record_id: 'sr-3', treatment_date: '2026-12-05', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
+      { id: 'o-cross', service_record_id: 'sr-2', treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
+      // Before the switch, "Talstar P" meant the Talak bottle: a typed alias with no stored product, or with no visit, proves nothing.
+      { id: 'o-typed-alias', service_record_id: 'sr-3', treatment_date: '2026-07-05', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
+      { id: 'o-no-visit-alias', service_record_id: null, treatment_date: '2026-07-06', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
+      // The catalog name itself does.
+      { id: 'o-typed-own', service_record_id: 'sr-4', treatment_date: '2026-12-05', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
+      { id: 'o-no-visit-own', service_record_id: null, treatment_date: '2026-12-06', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
     ];
     const servicePrd = [
       { service_record_id: 'sr-1', product_id: 'pc-talak', product_name: 'Talstar P' },
-      { service_record_id: 'sr-2', product_id: 'pc-cross', product_name: 'LESCO Crosscheck Plus' },
-      { service_record_id: 'sr-3', product_id: null, product_name: 'Talstar P' }, // a typed name with no product: the name decides
+      { service_record_id: 'sr-2', product_id: 'pc-cross', product_name: 'Talstar P' }, // after the switch the alias stores Crosscheck
+      { service_record_id: 'sr-3', product_id: null, product_name: 'Talstar P' },
+      { service_record_id: 'sr-4', product_id: null, product_name: 'LESCO Crosscheck Plus' },
     ];
     const state = useDb({
       products_catalog: [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }],
@@ -695,7 +701,7 @@ describe('updateProductPage', () => {
 
     await wiki.updateProductPage('LESCO Crosscheck Plus');
 
-    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids).sort()).toEqual(['o-cross', 'o-typed']);
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids).sort()).toEqual(['o-cross', 'o-no-visit-own', 'o-typed-own']);
     // The outcome query also takes every visit that recorded the product by id, whatever name it carried then.
     const outcomeOps = state.calls.treatment_outcomes[0].ops.filter(([m]) => m === 'orWhereRaw').map(([, a]) => a);
     expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
@@ -765,7 +771,7 @@ describe('mergeVariantProductPages back-pointer', () => {
     const state = useDb({
       products_catalog: (rec, idx) => (idx === 0 ? [] : [{ id: 'pc-1', name: 'LESCO High Manganese Combo' }]),
       product_aliases: (rec, idx) => (idx === 0 ? [{ product_id: 'pc-1' }] : [{ alias_name: 'LESCO HMC Variant' }]),
-      treatment_outcomes: [{ id: 'o1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [] }],
+      treatment_outcomes: [{ id: 'o1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO High Manganese Combo' }] }],
       knowledge_entries: (rec) => {
         const whereObj = rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0];
         if (whereObj?.slug && whereObj.slug !== CANON_SLUG) {

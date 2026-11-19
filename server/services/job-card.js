@@ -944,11 +944,12 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     .every((t) => siteRows.some((h) => Date.parse(h.startTime) === t));
   // One table: a label heat line (Celsius: no adjuvant above 90°F) and a label wind line first, then the catalog
   // limits. When two rows of a kind fire, the caution keeps the first, so the label's words show. A wind line for
-  // one kind of job (Cyper TC: on-grade termite sprays) needs a service on the visit that names it.
+  // one kind of job (Cyper TC: on-grade termite sprays) needs a service on the visit that names it; a label with a line
+  // for each use (LESCO Crosscheck Plus: 10 mph on-grade termite, 15 mph else) lists them stricter first.
   const siteLimitChecks = (limits, rule, productId) => {
     const { heat } = rule || {};
     const services = rainRules.services?.[productId] || [];
-    const wind = rule?.wind && (!rule.wind.services || services.some((s) => rule.wind.services.test(s))) ? rule.wind : null;
+    const wind = [].concat(rule?.wind || []).find((line) => !line.services || services.some((s) => line.services.test(s))) || null;
     return [
       ...(heat ? [{ key: 'temperatureF', kind: 'temperature', source: 'label', action: heat.action, value: heat.aboveF, breaks: (v, l) => v > l, text: (v, at) => `${v}°F at ${at} — label: ${heat.text}` }] : []),
       ...(wind ? [{ key: 'windMph', kind: 'wind', source: 'label', value: wind.mph, breaks: wind.orMore ? (v, l) => v >= l : (v, l) => v > l, text: (v, at, dir) => `wind ${v} mph${windFrom(dir)} at ${at} — label: ${wind.text || `no spraying above ${wind.mph} mph`}` }] : []),

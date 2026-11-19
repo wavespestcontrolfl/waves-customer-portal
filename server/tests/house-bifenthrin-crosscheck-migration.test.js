@@ -514,6 +514,18 @@ describe('house bifenthrin crosscheck migration: down', () => {
     expect(meta(catalogRollback).restored).toContain('signal_word');
   });
 
+  test('an added alias the office gave a vendor since up is kept: down deletes only the global row it inserted', async () => {
+    const knex = makeKnex(baseTables());
+    await migration.up(knex);
+    const [added] = eventsOf(knex, migration.actionFor(migration.STEPS.aliases)).filter((row) => meta(row).kind === 'inserted');
+    byId(knex, 'product_aliases', added.resource_id).vendor_id = OTHER;
+    await migration.down(knex);
+    expect(byId(knex, 'product_aliases', added.resource_id)).toMatchObject({ product_id: CROSS, vendor_id: OTHER });
+    expect(rollbacksOf(knex, migration.STEPS.aliases).map((row) => meta(row).from_audit_id)).not.toContain(String(added.id));
+    // The moved office names still go back to Talak.
+    expect(['a1', 'a2', 'a3', 'a4'].map((id) => byId(knex, 'product_aliases', id).product_id)).toEqual([TALAK, TALAK, TALAK, TALAK]);
+  });
+
   test('a later down finishes an item that holds what up wrote again, and never repeats a reversed one', async () => {
     const knex = makeKnex(baseTables());
     await migration.up(knex);

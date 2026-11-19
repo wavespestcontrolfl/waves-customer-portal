@@ -197,41 +197,50 @@ describe('a v13 yearly amount cap for one service line', () => {
     // detectServiceLine answers 'pest' for a type it cannot place: such a row is not known to be pest work, so it counts.
     row('Service Visit'),
     row('Callback'),
+    // A row that records lawn work itself counts on any visit: a broadcast (a mosquito visit can carry a lawn broadcast), a treated area.
+    row('Mosquito Barrier Treatment', { history_application_method: 'broadcast_spray' }),
+    row('Quarterly Pest Control Service', { area_treated_sqft: 4000 }),
+    // Perimeter and spot sprays on a pest visit, recorded per gallon with no area, do not.
+    row('Quarterly Pest Control Service', { history_application_method: 'perimeter_spray' }),
+    row('Quarterly Pest Control Service', { history_application_method: 'spot_treatment' }),
   ];
 
-  test('counts lawn visits, add-on rows, rows with no visit and visit types it cannot place; leaves out known pest, mosquito and termite work', async () => {
+  test('counts lawn visits, add-on rows, rows with no visit, visit types it cannot place and lawn work on any visit; leaves out the rest of known pest, mosquito and termite work', async () => {
     const { share } = await applicationLimits.lawnAmountShare(null, ROWS, LIMIT, { propertyId: 'prop-1' });
-    expect(share).toBeCloseTo(0.5 * 5, 6);
+    expect(share).toBeCloseTo(0.5 * 7, 6);
   });
 
   test('a cap that names no service line counts every row, as before', async () => {
     const { share } = await applicationLimits.lawnAmountShare(null, ROWS, { ...LIMIT, history_service_line: undefined }, { propertyId: 'prop-1' });
-    expect(share).toBeCloseTo(0.5 * 8, 6);
+    expect(share).toBeCloseTo(0.5 * 12, 6);
   });
 
-  test('the application being judged: known pest, mosquito and termite work passes unjudged; lawn, unknown and unnamed types are judged', () => {
+  test('the application being judged passes unjudged only when its visit is known pest, mosquito or termite work AND its method is not lawn work', () => {
     for (const serviceType of ['Quarterly Pest Control Service', 'Pest Control Re-Service', 'Mosquito Treatment - Essential Barrier', 'Slab Pre-Treat Termite Service']) {
-      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType })).toBe(false);
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: 'perimeter_spray' })).toBe(false);
+      // The visit type alone does not say the work is off the lawn, and a broadcast is lawn work on any visit.
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType })).toBe(true);
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: 'broadcast_spray' })).toBe(true);
     }
     for (const serviceType of ['Every 6 Weeks Lawn Care Service', 'Lawn Care Visit #4 + Quarterly Pest Control', 'Service Visit', null, undefined]) {
-      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType })).toBe(true);
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: 'perimeter_spray' })).toBe(true);
     }
-    expect(applicationLimits.judgedForServiceLine({ ...LIMIT, history_service_line: undefined }, { serviceType: 'Quarterly Pest Control Service' })).toBe(true);
+    expect(applicationLimits.judgedForServiceLine({ ...LIMIT, history_service_line: undefined }, { serviceType: 'Quarterly Pest Control Service', applicationMethod: 'perimeter_spray' })).toBe(true);
   });
 
   test('evaluateV13AmountCap passes a pest perimeter proposal without reading the ledger', async () => {
     const database = jest.fn(() => { throw new Error('the ledger must not be read'); });
     const check = await applicationLimits.evaluateV13AmountCap(LIMIT, { id: 'prod-1', name: 'LESCO Crosscheck Plus' },
-      { customerId: 'c', serviceType: 'Quarterly Pest Control Service', proposal: true, proposedDate: new Date('2026-11-18T12:00:00Z') }, database);
+      { customerId: 'c', serviceType: 'Quarterly Pest Control Service', applicationMethod: 'perimeter_spray', proposal: true, proposedDate: new Date('2026-11-18T12:00:00Z') }, database);
     expect(check).toEqual({ violated: false });
     expect(database).not.toHaveBeenCalled();
   });
 
-  test('the history query reads the visit type and the add-on key only for a cap that names a service line', () => {
+  test('the history query reads the visit type, the add-on key and the method only for a cap that names a service line', () => {
     const scoped = chain();
     applicationLimits.amountHistoryProducts(scoped, null, { id: 'prod-1' }, LIMIT);
     expect(scoped.calls).toContainEqual(['leftJoin', 'service_records as amount_sr', 'pah.service_record_id', 'amount_sr.id']);
-    expect(scoped.calls).toContainEqual(['select', 'amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key']);
+    expect(scoped.calls).toContainEqual(['select', 'amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key', 'pah.application_method as history_application_method']);
     expect(scoped.calls).toContainEqual(['where', 'pah.product_id', 'prod-1']);
     const plain = chain();
     applicationLimits.amountHistoryProducts(plain, null, { id: 'prod-1' }, { ...LIMIT, history_service_line: undefined });
