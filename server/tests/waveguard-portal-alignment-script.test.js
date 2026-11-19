@@ -124,6 +124,24 @@ describe('WaveGuard portal alignment script helpers', () => {
     expect(detectServiceKeys({ service_type: 'Lawn Care Callback Visit' })).toEqual([]);
   });
 
+  test('an at_risk member keeps the stage: the Day 60/90 debt stamp is not drift, and --apply must not undo it', () => {
+    // 2026-11-11: the daily lead-to-cash sweep reported a member as drift the day after the Day 90
+    // notice marked them at_risk, while the invoice was still owed. A 'won' member with the same
+    // fields is still moved, so only at_risk is left alone.
+    const member = {
+      active: true,
+      waveguard_tier: 'Bronze',
+      monthly_rate: 36,
+      billing_mode: 'annual_prepay',
+      member_since: '2026-01-01',
+    };
+    expect(buildCustomerUpdates({ ...member, pipeline_stage: 'at_risk' }, ['pest_control_quarterly'], customerColumns, '2026-11-11')).toEqual({});
+    expect(buildCustomerUpdates({ ...member, pipeline_stage: 'won' }, ['pest_control_quarterly'], customerColumns, '2026-11-11')).toEqual({
+      pipeline_stage: 'active_customer',
+      pipeline_stage_changed_at: expect.any(Date),
+    });
+  });
+
   test('re-aligns enrolled members and fills missing fields without overwriting positive rates', () => {
     // Enrolled member (has a tier) missing portal fields -> filled. The
     // monthly_rate backfill additionally requires the explicit

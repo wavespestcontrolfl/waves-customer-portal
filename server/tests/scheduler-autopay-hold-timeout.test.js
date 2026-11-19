@@ -28,6 +28,7 @@ jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest
 jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
 jest.mock('../services/invoice-followups', () => ({
   releaseStaleAutopayHolds: jest.fn().mockResolvedValue({ mode: 'true' }),
+  clearAtRiskForSettledLongOverdue: jest.fn().mockResolvedValue([]),
   runPending: jest.fn().mockResolvedValue({ sent: 0, skipped: 0 }),
 }));
 
@@ -71,6 +72,26 @@ test('a sweep that throws is logged and the touch run still happens', async () =
   InvoiceFollowUps.releaseStaleAutopayHolds.mockRejectedValueOnce(new Error('boom'));
   await expect(followupTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Invoice follow-ups: autopay hold timeout sweep failed: boom');
+  expect(InvoiceFollowUps.runPending).toHaveBeenCalledTimes(1);
+});
+
+// The at-risk clear sweep (clearAtRiskForSettledLongOverdue) shares this tick: after the hold sweep,
+// before the due touches, so a customer who still owes another long-overdue invoice is stamped again
+// in the same run. Its SQL rule is tested on PostgreSQL in invoice-followups-at-risk-clear-postgres.test.js.
+test('the at-risk clear sweep runs once, after the hold sweep and before the due touches', async () => {
+  const order = [];
+  InvoiceFollowUps.releaseStaleAutopayHolds.mockImplementationOnce(async () => { order.push('holds'); });
+  InvoiceFollowUps.clearAtRiskForSettledLongOverdue.mockImplementationOnce(async () => { order.push('at-risk'); return ['c1', 'c2']; });
+  InvoiceFollowUps.runPending.mockImplementationOnce(async () => { order.push('touches'); return { sent: 0, skipped: 0 }; });
+  await followupTick();
+  expect(order).toEqual(['holds', 'at-risk', 'touches']);
+  expect(logger.info).toHaveBeenCalledWith('Invoice follow-ups: 2 customer(s) back from at_risk, long-overdue debt paid: c1, c2');
+});
+
+test('an at-risk clear sweep that throws is logged and the touch run still happens', async () => {
+  InvoiceFollowUps.clearAtRiskForSettledLongOverdue.mockRejectedValueOnce(new Error('boom'));
+  await expect(followupTick()).resolves.toBeUndefined();
+  expect(logger.error).toHaveBeenCalledWith('Invoice follow-ups: at-risk clear sweep failed: boom');
   expect(InvoiceFollowUps.runPending).toHaveBeenCalledTimes(1);
 });
 
