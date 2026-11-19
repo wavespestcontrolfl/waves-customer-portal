@@ -283,7 +283,14 @@ describe('buildPrompt cast', () => {
   test('body action framing agrees with the cast', () => {
     const framing = (cast) => gen.buildPrompt({ keyword: 'Sealing the vents', topic: 'lead', mode: 'blog-body', shot: 'action', plan: { ...PLAN, cast } });
     expect(framing('technician')).toContain('Framing: the Waves technician actively doing what this section describes');
-    expect(framing('homeowner')).toContain('Framing: a homeowner actively doing what this section describes');
+    // A homeowner only observes: "doing what this section describes" would show a
+    // homeowner in casual clothes applying a treatment on a treatment section.
+    expect(framing('homeowner')).toContain('Framing: a homeowner looking closely at what this section describes');
+    expect(framing('homeowner')).not.toMatch(/homeowner actively doing/);
+    for (const mode of ['blog-hero', 'blog-body']) {
+      expect(gen.buildPrompt({ keyword: 'Applying the treatment', mode, shot: 'action', plan: { ...PLAN, cast: 'homeowner' } }))
+        .toContain('they never apply a pesticide or any other product, hold a sprayer, or do a treatment');
+    }
     expect(framing('none')).toContain('Framing: the task this section describes caught mid-way — the tools and materials in place where the work happens, no person in frame.');
     expect(framing('none')).not.toMatch(/Framing: a person/);
     // Other shots are unchanged by the cast.
@@ -342,19 +349,6 @@ describe('screenGeneratedImage', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["How to Stop Ants"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: ['readable text: How to Stop Ants'], violations: 1 });
     expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).not.toMatch(/ALLOWED|1 OFF/);
-  });
-
-  test('a drawn check mark or cross fails the screen with no readable text and no logo, once the drawn-marks exclusion is named (GATE_BLOG_IMAGE_MARKS_SCREEN)', async () => {
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "forbidden_scenes": [1]}' });
-    const r = await screenGeneratedImage({ buffer, avoidDepicting: [gen.DRAWN_MARKS_EXCLUSION] });
-    expect(r).toMatchObject({ ok: false, readableText: [], logos: [], forbidden: [gen.DRAWN_MARKS_EXCLUSION], violations: 1 });
-    expect(r.reasons).toEqual([`forbidden scene: ${gen.DRAWN_MARKS_EXCLUSION}`]);
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain(`1. "${gen.DRAWN_MARKS_EXCLUSION}"`);
-    // Not named (the gate is off): the same answer has nothing to fail on, and the prompt does not ask.
-    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, forbidden: [] });
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).not.toContain('check mark');
-    // The exclusion is one list item: a semicolon would split the screen's numbered list.
-    expect(gen.DRAWN_MARKS_EXCLUSION).not.toMatch(/[;"]/);
   });
 
   test('a brief exclusion the provider ignored fails the screen; only exclusions the caller named count (Codex r8 P2 on #3964)', async () => {

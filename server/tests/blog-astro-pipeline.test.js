@@ -49,7 +49,7 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
-  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), DRAWN_MARKS_EXCLUSION: 'drawn marks', IMAGE_CHAIN_BUDGET_MS: 360000,
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), IMAGE_CHAIN_BUDGET_MS: 360000,
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
@@ -4508,35 +4508,6 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
       .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ON'], logos: [], reasons: ['readable text: ON'], violations: 1 });
     const out = await AstroPublisher.generatePlannedImage(args);
     expect(out.screen.readableText).toEqual(['ON']);
-  });
-
-  test('GATE_BLOG_IMAGE_MARKS_SCREEN: off, the screen is asked only the brief exclusions; on, it is also asked about drawn marks, and a detection regenerates the slot once', async () => {
-    const imageGenerator = require('../services/content/image-generator');
-    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
-    const clean = { ok: true, checked: true, readableText: [], logos: [], reasons: [] };
-    const marked = { ok: false, checked: true, readableText: [], logos: [], forbidden: ['drawn marks'], reasons: ['forbidden scene: drawn marks'], violations: 1 };
-    const prior = process.env.GATE_BLOG_IMAGE_MARKS_SCREEN;
-    try {
-      delete process.env.GATE_BLOG_IMAGE_MARKS_SCREEN;
-      imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
-      screenGeneratedImage.mockClear();
-      screenGeneratedImage.mockResolvedValueOnce(clean);
-      await AstroPublisher.generatePlannedImage({ ...args, avoidDepicting: ['irrigation repair scenes'] });
-      expect(screenGeneratedImage.mock.calls.at(-1)[0].avoidDepicting).toEqual(['irrigation repair scenes']);
-      expect(imageGenerator.generate).toHaveBeenCalledTimes(1);
-
-      process.env.GATE_BLOG_IMAGE_MARKS_SCREEN = 'true';
-      imageGenerator.generate.mockClear();
-      screenGeneratedImage.mockClear();
-      screenGeneratedImage.mockResolvedValueOnce(marked).mockResolvedValueOnce(clean);
-      const out = await AstroPublisher.generatePlannedImage({ ...args, avoidDepicting: ['irrigation repair scenes'] });
-      expect(screenGeneratedImage).toHaveBeenCalledTimes(2);
-      for (const [call] of screenGeneratedImage.mock.calls) expect(call.avoidDepicting).toEqual(['irrigation repair scenes', 'drawn marks']);
-      expect(imageGenerator.generate).toHaveBeenCalledTimes(2); // the marked picture is regenerated once: the paid call the gate holds back
-      expect(out.screen.ok).toBe(true);
-    } finally {
-      if (prior === undefined) delete process.env.GATE_BLOG_IMAGE_MARKS_SCREEN; else process.env.GATE_BLOG_IMAGE_MARKS_SCREEN = prior;
-    }
   });
 
   test('identification rides into BOTH plans (first and screen retry); a body slot passes nothing', async () => {

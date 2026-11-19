@@ -224,10 +224,13 @@ const BODY_IMAGE_FRAMING = {
 };
 // A planned picture's action framing agrees with the plan's cast: the generic
 // line above names "a technician or homeowner", which would put a person in a
-// picture whose cast is none (or a technician in a homeowner picture).
+// picture whose cast is none (or a technician in a homeowner picture). The
+// homeowner only observes: "doing what this section describes" would show a
+// homeowner in casual clothes applying a treatment whenever the section is
+// about one.
 const BODY_ACTION_FRAMING = {
   technician: 'Framing: the Waves technician actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
-  homeowner: 'Framing: a homeowner actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
+  homeowner: 'Framing: a homeowner looking closely at what this section describes — pointing at it or checking it, hands visible and empty of products and spray equipment, candid documentary feel.',
   none: 'Framing: the task this section describes caught mid-way — the tools and materials in place where the work happens, no person in frame.',
 };
 function bodyFramingFor(shot, cast) {
@@ -453,7 +456,7 @@ const WAVES_UNIFORM_LOGO_LINE = [
 // person; a homeowner or an empty picture REPLACES the uniform clause (and the
 // logo reference is not attached, see _logoReference).
 const TECHNICIAN_CAST_LINE = 'People: exactly one Waves technician in the scene, and no other uniformed worker.';
-const HOMEOWNER_CAST_LINE = 'People: one adult homeowner in ordinary casual clothes — no uniform, no cap, no red shirt, no logo. No technician and no service worker in this picture.';
+const HOMEOWNER_CAST_LINE = 'People: one adult homeowner in ordinary casual clothes — no uniform, no cap, no red shirt, no logo. The homeowner looks at, points to or checks the thing the picture is about; they never apply a pesticide or any other product, hold a sprayer, or do a treatment. No technician and no service worker in this picture.';
 const NO_PEOPLE_CAST_LINE = 'People: none. No person, hand, arm, silhouette or figure anywhere in the frame — no technician and no homeowner. The place, the object or the condition itself is the whole picture.';
 const IDENTIFICATION_NO_PEST_CLOSEUP_LINE = 'Do not show the pest in an identifiable close-up; it may appear small in the scene or not at all.';
 // The people clause of a prompt: the plan's cast line, or the legacy uniform
@@ -473,10 +476,6 @@ function peopleClauseFor(plan, uniform) {
 // Blog scene pictures state no verdict: an image model given a section
 // heading drew check marks and crosses that contradicted the post (owner
 // 2026-11-19).
-// The screen-side twin of the sentence below: the one exclusion the publisher
-// names to the picture screen when GATE_BLOG_IMAGE_MARKS_SCREEN is on, so a
-// drawn mark fails the screen without any readable text or logo.
-const DRAWN_MARKS_EXCLUSION = 'a graphic mark drawn on top of the picture, not a real object in the scene: a check mark, a cross or X mark, a prohibition sign, an arrow, a callout bubble, a magnified inset, a split panel or a before-and-after comparison';
 const NO_DRAWN_MARKS_LINE = 'Show one real scene with nothing drawn over it: no check marks, crosses, prohibition signs, arrows, callout bubbles, magnified insets, split panels or before-and-after comparisons — the picture states no verdict.';
 
 // What each combination of attached references changes in a scene prompt,
@@ -938,7 +937,6 @@ module.exports.ImageGenerator = ImageGenerator;
 module.exports.planFor = planFor;
 module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
-module.exports.DRAWN_MARKS_EXCLUSION = DRAWN_MARKS_EXCLUSION;
 module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
 module.exports.uniformLogoEnabled = uniformLogoEnabled;
 module.exports.vanWrapEnabled = vanWrapEnabled;
@@ -961,7 +959,6 @@ module.exports._internals = {
   NO_PEOPLE_CAST_LINE,
   IDENTIFICATION_NO_PEST_CLOSEUP_LINE,
   NO_DRAWN_MARKS_LINE,
-  DRAWN_MARKS_EXCLUSION,
   BODY_ACTION_FRAMING,
   technicianSlotFor,
   vanSlotFor,

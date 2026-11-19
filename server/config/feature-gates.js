@@ -203,7 +203,6 @@
  *   GATE_SMS_GRATITUDE_REPLIES=true (allow the delayed gratitude-only auto-reply lane; independent of GATE_SMS_AUTO_SEND)
  *   SMS_GRATITUDE_ACTIVATED_AT=<ISO timestamp with offset> (strict live-webhook cutoff for gratitude replies)
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
- *   GATE_BLOG_IMAGE_MARKS_SCREEN=true (blog picture screen, dark; owner decision pending 2026-11-19: the screen of a generated blog picture is also asked whether a graphic mark is drawn over the scene (a check mark, a cross, a prohibition sign, an arrow, a callout bubble, an inset, a split panel, a before-and-after comparison); a detection fails the screen, so the slot regenerates once, and that second picture is a paid image call (about $0.17); off = the screen asks exactly what it asked before; read at call time via blogImageMarksScreenLive(); kill = unset)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
@@ -2932,8 +2931,6 @@ const gates = {
   // exactly 'true' — it adds two image-generation calls per publish. Kill =
   // unset.
   blogBodyImages: process.env.GATE_BLOG_BODY_IMAGES === 'true',
-  // GATE_BLOG_IMAGE_MARKS_SCREEN (drawn-marks question in the blog picture screen, dark: a detection costs one paid retry picture). Boot-log entry only; the call-time reader is blogImageMarksScreenLive().
-  blogImageMarksScreen: process.env.GATE_BLOG_IMAGE_MARKS_SCREEN === 'true',
 
   // Owner-authorized unattended blog publishing. Explicit false disables
   // competitor autopublishing; comparison/content checks remain mandatory.
@@ -9171,12 +9168,6 @@ function sameQuestionCheckLive() {
   return process.env.GATE_SAME_QUESTION_CHECK === 'true';
 }
 
-// GATE_BLOG_IMAGE_MARKS_SCREEN read at CALL time, strict `=== 'true'`, dark in every environment. Off = the blog picture screen asks exactly
-// what it asked before. On, astro-publisher adds one named exclusion (drawn marks) to the screen's list; a detection regenerates the slot once.
-function blogImageMarksScreenLive() {
-  return process.env.GATE_BLOG_IMAGE_MARKS_SCREEN === 'true';
-}
-
 // GATE_PORTAL_MESSAGES read at CALL time, strict `=== 'true'`, dark in every environment.
 // Off, the Portal tab has no Reply in portal, the customer portal has no Messages page, and the portal-messages
 // routes answer 404.
@@ -9356,8 +9347,6 @@ module.exports.callCancelGuardLive = callCancelGuardLive;
 module.exports.aiChangeCheckLive = aiChangeCheckLive;
 // GATE_SAME_QUESTION_CHECK reader, on its own line so gate PRs never conflict.
 module.exports.sameQuestionCheckLive = sameQuestionCheckLive;
-// GATE_BLOG_IMAGE_MARKS_SCREEN reader, on its own line so gate PRs never conflict.
-module.exports.blogImageMarksScreenLive = blogImageMarksScreenLive;
 // GATE_ROUTE_ENGINE_SUMMARY reader, on its own line so gate PRs never conflict.
 module.exports.routeEngineSummaryLive = routeEngineSummaryLive;
 // GATE_PAYER_PACKET_AUTOSEND reader, on its own line so gate PRs never conflict.

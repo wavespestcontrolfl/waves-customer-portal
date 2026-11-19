@@ -928,16 +928,6 @@ async function compressToWebp(buffer, { width = 1600 } = {}) {
 // regenerates ONCE under a fresh seed; a second failure ships the image with
 // a warning rather than parking the publish (the screen is a vision judgment
 // and must not become a hard gate on its own — owner direction 2026-09-05).
-// What the screen is asked to forbid: the brief's own exclusions, plus the
-// drawn-marks exclusion when GATE_BLOG_IMAGE_MARKS_SCREEN is on (dark; owner
-// decision pending 2026-11-19). The prompt already forbids those marks; this
-// makes the screen fail a picture that carries one anyway, and a failed screen
-// regenerates the slot once — a paid image call, which is why it is a gate.
-function screenExclusions(avoidDepicting = []) {
-  let on = false;
-  try { on = require('../../config/feature-gates').blogImageMarksScreenLive?.() === true; } catch (_) { on = false; }
-  return on ? [...avoidDepicting, require('../content/image-generator').DRAWN_MARKS_EXCLUSION] : avoidDepicting;
-}
 async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, identification = false, avoidDepicting = [], deadlineAt = null }) {
   const imageGenerator = require('../content/image-generator');
   const { screenGeneratedImage } = require('../content/hero-alt-vision');
@@ -985,7 +975,7 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     // screened as before.
     const allowUniformLogo = gen.logoReference === true;
     const allowVanWrap = gen.vanWrapReference === true;
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', avoidDepicting: screenExclusions(avoidDepicting), allowUniformLogo, allowVanWrap, timeoutMs: deadlineAt - Date.now() });
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', avoidDepicting, allowUniformLogo, allowVanWrap, timeoutMs: deadlineAt - Date.now() });
     // deadlineAt rides along so the caller's alt-text vision pass runs
     // inside the same slot budget (Codex r9 P2).
     const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, logoReference: allowUniformLogo, vanWrapReference: allowVanWrap, deadlineAt };
@@ -1393,7 +1383,7 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
           // marker).
           heroImage.logoReference = dataUrl.logoReference === true;
           heroImage.vanWrapReference = dataUrl.vanWrapReference === true;
-          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png', avoidDepicting: screenExclusions(), allowUniformLogo: heroImage.logoReference, allowVanWrap: heroImage.vanWrapReference });
+          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png', allowUniformLogo: heroImage.logoReference, allowVanWrap: heroImage.vanWrapReference });
         }
       } catch (mediaErr) {
         const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
