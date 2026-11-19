@@ -2291,6 +2291,61 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     });
   });
 
+  // beforeConvert: a caller's step after the claim and before the conversion (the call-phone-yes card's accept, a later
+  // PR, links the visit the call booked here); deferFollowUpReminders: the converter hands back the seeded reminders.
+  describe('beforeConvert and deferFollowUpReminders', () => {
+    const run = (database, converter, options = {}) => markEstimateManuallyAccepted({
+      estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: pins,
+      database, estimateConverter: converter,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      ...options,
+    });
+
+    test('beforeConvert runs once, after the claim and before the conversion, inside the transaction', async () => {
+      const { database } = dbWith(estimateRow(), customerRow());
+      const order = [];
+      const converter = { convertEstimate: jest.fn(async () => { order.push('convert'); return { customerId: 'customer-pins' }; }) };
+      const beforeConvert = jest.fn(async (trx, { estimate }) => {
+        order.push('beforeConvert');
+        expect(trx).toBe(database);
+        expect(estimate.status).toBe('accepted');
+      });
+      const beforeCommit = jest.fn(async () => { order.push('beforeCommit'); });
+      await expect(run(database, converter, { beforeConvert, beforeCommit }))
+        .resolves.toMatchObject({ estimate: expect.objectContaining({ status: 'accepted' }) });
+      expect(beforeConvert).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['beforeConvert', 'convert', 'beforeCommit']);
+    });
+
+    test('a beforeConvert throw rejects the whole accept with that error and converts nothing', async () => {
+      const { database } = dbWith(estimateRow(), customerRow());
+      const converter = { convertEstimate: jest.fn() };
+      const stop = Object.assign(new Error('changed'), { code: 'changed_since_check' });
+      await expect(run(database, converter, { beforeConvert: async () => { throw stop; } })).rejects.toBe(stop);
+      expect(converter.convertEstimate).not.toHaveBeenCalled();
+    });
+
+    test('beforeCommit receives the conversion the converter returned', async () => {
+      const { database } = dbWith(estimateRow(), customerRow());
+      const conversion = { customerId: 'customer-pins', deferredFollowUpReminderRows: [] };
+      const converter = { convertEstimate: jest.fn().mockResolvedValue(conversion) };
+      const beforeCommit = jest.fn(async () => {});
+      await run(database, converter, { beforeCommit });
+      expect(beforeCommit.mock.calls[0][1].conversion).toBe(conversion);
+    });
+
+    test('deferFollowUpReminders asks the converter to hand back the seeded reminders; without it nothing is asked', async () => {
+      const { database } = dbWith(estimateRow(), customerRow());
+      const deferred = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+      await run(database, deferred, { deferFollowUpReminders: true });
+      expect(deferred.convertEstimate.mock.calls[0][1]).toMatchObject({ deferFollowUpReminderRegistration: true });
+      const { database: again } = dbWith(estimateRow(), customerRow());
+      const plain = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+      await run(again, plain);
+      expect(plain.convertEstimate.mock.calls[0][1]).not.toHaveProperty('deferFollowUpReminderRegistration');
+    });
+  });
+
   test('refuses under the locks when a visit was linked to the estimate after the card, and converts nothing', async () => {
     const { database, updates } = dbWith(estimateRow(), customerRow(), { linkedVisit: { id: 'svc-late' } });
     const converter = { convertEstimate: jest.fn() };

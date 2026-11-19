@@ -1154,6 +1154,11 @@ async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
     // Only the annual-prepay manual accept mints an invoice, so only it bills the misting install (a Mark Won that bills nothing raises no install bell).
     ...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),
     deferCommercialScheduleNotification: true,
+    // A caller that links a booked visit BEFORE the conversion (beforeConvert) makes the converter seed the plan's
+    // next visits inside this transaction. Their reminders are registered through the global pool, whose foreign-key
+    // check would wait on this transaction's uncommitted rows, so that caller defers them and registers them after
+    // the commit (conversion.deferredFollowUpReminderRows), as the public accept does.
+    ...(ctx.deferFollowUpReminders === true ? { deferFollowUpReminderRegistration: true } : {}),
     ...cardConvertOptions(ctx),
   };
   if (ctx.annualPrepaySelected) await applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayAmount, convertOptions);
@@ -1328,6 +1333,10 @@ async function acceptInTransaction(trx, ctx) {
     throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
   }
 
+  // A caller's step before the conversion (the call-phone-yes card's accept, a later PR: lock, re-check and link the
+  // visit the call booked, so the converter books the plan from it). A throw rolls the whole accept back.
+  if (typeof ctx.beforeConvert === 'function') await ctx.beforeConvert(trx, { estimate: updatedEstimate });
+
   let win = { proposalCustomer: null, conversion: null };
   const before = isCommercialProposal ? null : await captureStateBefore(trx, ctx, updatedEstimate);
   if (isCommercialProposal) win = { ...win, ...(await winCommercialProposal(trx, updatedEstimate)) };
@@ -1340,9 +1349,9 @@ async function acceptInTransaction(trx, ctx) {
     estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
   });
   await recordTableChanges(trx, ctx, updatedEstimate);
-  // A caller's last step inside this transaction (call-prepay-choice: lock, re-check, link). A throw rolls the
-  // whole accept back: no invoice, no term.
-  if (typeof ctx.beforeCommit === 'function') await ctx.beforeCommit(trx, { estimate: updatedEstimate });
+  // A caller's last step inside this transaction (call-prepay-choice: lock, re-check, link; the call-phone-yes card's
+  // accept, a later PR: check the plan the conversion booked). A throw rolls the whole accept back: no invoice, no term.
+  if (typeof ctx.beforeCommit === 'function') await ctx.beforeCommit(trx, { estimate: updatedEstimate, conversion: win.conversion });
   const outcome = await settleEffects(trx, ctx, {
     acceptedEstimate: updatedEstimate,
     alreadyAccepted: false,
@@ -1431,10 +1440,20 @@ async function markEstimateManuallyAccepted({
   // Run every step in the accept's own transaction, collect the effects, roll
   // back and return them. Nothing commits and nothing is sent.
   dryRun = false,
-  // async (trx, { estimate }) => void: the caller's last step inside the accept's transaction, after the
-  // conversion and before the commit. A throw rolls the whole accept back. Null for every caller but the
-  // call-prepay-choice card.
+  // async (trx, { estimate, conversion }) => void: the caller's last step inside the accept's transaction, after the
+  // conversion and before the commit; `conversion` is the converter's result (null for a commercial proposal). A
+  // throw rolls the whole accept back. Null for every caller but the call-prepay-choice card today.
   beforeCommit = null,
+  // async (trx, { estimate }) => void: the caller's step inside the accept's transaction after the estimate row is
+  // claimed and before the conversion runs. A throw rolls the whole accept back. Null for every caller today; for the
+  // call-phone-yes card's accept (a later PR), which links the visit the call booked here so the converter books the
+  // plan from it. A hook that links a visit works only in a real accept without the noLinkedVisits pin: a dry run and
+  // that pin both make the converter refuse a visit linked to the estimate (cardConvertOptions).
+  beforeConvert = null,
+  // true: the converter does not register the reminders of the visits it seeds inside this transaction; they come
+  // back as conversion.deferredFollowUpReminderRows for the caller to register after the commit. Needed by a caller
+  // whose beforeConvert links a visit (the seeding then runs inside this transaction). False for every other caller.
+  deferFollowUpReminders = false,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
   estimateConverter = EstimateConverter,
@@ -1445,7 +1464,8 @@ async function markEstimateManuallyAccepted({
     estimateId, adminUserId, source, billingTerm: normalizedBillingTerm,
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
-    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit,
+    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit, beforeConvert,
+    deferFollowUpReminders: deferFollowUpReminders === true,
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
