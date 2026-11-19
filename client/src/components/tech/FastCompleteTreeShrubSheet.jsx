@@ -458,18 +458,20 @@ function useProductRows(ctx) {
       : row)));
   }, []);
   const addProduct = useCallback((product) => {
-    const heldReason = ctx.monthProductHolds.find((item) => item.name === product.name)?.reason
-      || flagsOf(product).nutriRootHoldReason || '';
+    const flags = flagsOf(product);
+    const monthHoldReason = ctx.monthProductHolds.find((item) => item.name === product.name)?.reason || '';
+    const heldReason = monthHoldReason || flags.nutriRootHoldReason || '';
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
       {
         ...productRow(product, {
           method: catalogMethod(product), last: lastAmounts[String(product.id)] || null, added: true, bedSqft: ctx.bedSqft, heldReason,
         }),
-        // Adding a history-held product exposes the hold before the tech marks
-        // it applied. They can still record a true application accurately;
-        // the completion advisory then routes it for office review.
-        active: !flagsOf(product).npBlackout && !heldReason,
+        // An interval/history hold is advisory for an application the tech is
+        // already recording, so selecting the catalog result opens its editor.
+        // NutriRoot's ordinance/evidence hold requires a separate confirmation
+        // tap before its application-basis controls and actuals are enabled.
+        active: !flags.npBlackout && !flags.nutriRootHoldReason,
       },
     ]));
   }, [lastAmounts, ctx.bedSqft, ctx.monthProductHolds]);
