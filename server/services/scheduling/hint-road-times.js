@@ -21,6 +21,10 @@
 
 const { gateEnvValue } = require('../../config/feature-gates');
 const { GAP_LEGS } = require('./find-time');
+
+// Cost-policy metadata stays out of the leg object handed to travel sources;
+// unchanged eligible legs retain their exact provider request shape.
+const providerIneligible = new WeakSet();
 const logger = require('../logger');
 const { parkedMinutes, withDriveClockPark } = require('./drive-clock');
 
@@ -75,12 +79,18 @@ function chipLegs(chip, nowEt = null) {
   // From home base the van leaves just in time; from a stop it leaves when
   // that stop's window ends.
   const leaveForIn = g.prevIsHome ? Math.max(0, startMin - modelIn) : g.prevEndMin;
+  const eligible = (leg, providerEligible) => {
+    const priced = notBefore(leg, nowEt);
+    if (!providerEligible) providerIneligible.add(priced);
+    return priced;
+  };
   return {
-    in: notBefore({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, nowEt),
-    out: notBefore({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, nowEt),
+    in: eligible({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, g.prevRoadEligible !== false),
+    out: eligible({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, g.nextRoadEligible !== false),
     // From home base the van leaves just in time for the next stop, so the
     // drive it makes anyway is priced at that hour, like the candidate's.
-    base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: baseDeparture(g) }, nowEt),
+    base: eligible({ date: chip.date, from: g.prev, to: g.next, departureMin: baseDeparture(g) },
+      g.prevRoadEligible !== false && g.nextRoadEligible !== false),
   };
 }
 
@@ -132,7 +142,11 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
     const missing = new Map();
     for (const legs of plans) {
       if (!legs) continue;
-      for (const leg of Object.values(legs)) if (cachedMinutes(leg, t) == null) missing.set(legKey(leg), leg);
+      for (const leg of Object.values(legs)) {
+        // Restored booked stops may consume an answer already cached for
+        // this exact leg, but never make that leg newly provider-eligible.
+        if (!providerIneligible.has(leg) && cachedMinutes(leg, t) == null) missing.set(legKey(leg), leg);
+      }
     }
     let travel = null;
     if (missing.size) {

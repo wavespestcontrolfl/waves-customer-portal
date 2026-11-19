@@ -125,3 +125,24 @@ test('an hour Google leaves ahead of the whole band joins it and is driven too',
   expect(best.fit.travelSource).toBe('google_traffic');
   expect(onGoogle(placements).some((start) => !firstBand.includes(start))).toBe(true);
 });
+
+test("a restored stop cannot choose a new paid band, including the previous calendar's widening", async () => {
+  const slowMidday = (leg, model) => (touchesTarget(leg) && part(leg.departureMin) === 12 ? model + 30 : model);
+  const previous = route(fakeTravel(slowMidday));
+  await preloadBandLegs(previous.context.travel, [previous]);
+
+  const restored = route(fakeTravel(slowMidday));
+  restored.context.previousRoadRows = restored.context.rows;
+  restored.context.rows = [...restored.context.rows, {
+    ...stop('restored', '09:00', 27.3, -82.3),
+    window_end: '10:00', estimated_duration_minutes: 15,
+  }];
+  // The restored calendar's own model ranking would omit early hours that
+  // the previous picker selected. It must still replay that previous
+  // selection (and any widening) rather than buying its newly selected band.
+  const currentStarts = enumerateArrivalPlacements(restored.context, restored.limits).placements.map((p) => p.windowStart);
+  expect(currentStarts).not.toContain('09:00');
+  await preloadBandLegs(restored.context.travel, [restored]);
+
+  expect([...restored.context.travel.bought.entries()]).toEqual([...previous.context.travel.bought.entries()]);
+});

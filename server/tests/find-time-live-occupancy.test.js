@@ -5,7 +5,7 @@ jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: as
 jest.mock('../services/auto-dispatch/geo', () => ({ HQ: { lat: 27, lng: -82 }, driveMin: () => 0 }));
 
 const db = require('../models/db');
-const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { findAvailableSlots, GAP_LEGS } = require('../services/scheduling/find-time');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const DATE = etDateString(addETDays(new Date(), 10));
 const OPTIONS = { lat: 27, lng: -82, dateFrom: DATE, dateTo: DATE, durationMinutes: 60, includeWeekends: true };
@@ -73,6 +73,18 @@ test('expired holds release the route while live holds still block it', async ()
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
   wire([stop({ customer_id: 'booked-customer', reservation_expires_at: new Date(Date.now() - 60_000) })]);
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
+});
+
+test('a restored booking blocks its gaps without making its chip legs provider-eligible', async () => {
+  wire([stop({
+    customer_id: 'booked-customer', reservation_expires_at: new Date(Date.now() - 60_000),
+    road_pricing_eligible: false, window_start: '10:00', window_end: '11:00',
+  })]);
+  const { slots } = await findAvailableSlots(OPTIONS);
+  const before = slots.find(slot => slot.start_time === '08:00');
+  const after = slots.find(slot => slot.start_time === '11:00');
+  expect(before[GAP_LEGS]).toMatchObject({ prevRoadEligible: true, nextRoadEligible: false });
+  expect(after[GAP_LEGS]).toMatchObject({ prevRoadEligible: false, nextRoadEligible: true });
 });
 
 test('untimed placeholders do not invent a morning stop', async () => {
