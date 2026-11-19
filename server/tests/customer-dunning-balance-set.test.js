@@ -200,7 +200,7 @@ describe('parity with pay-v2\'s preview set for the same anchor', () => {
     const anchorCalls = mockReconcile.mock.calls.filter((c) => c[0] === 'A');
     expect(anchorCalls).toHaveLength(1);
     expect(anchorCalls[0][1]).toBe(database);
-    expect(anchorCalls[0][2]).toEqual({ readOnly: true });
+    expect(anchorCalls[0][2]).toEqual({ readOnly: true, checkout: true });
     // the page's sibling read never ran (only the anchor was fenced)
     expect(mockReconcile.mock.calls.every((c) => c[0] === 'A')).toBe(true);
   });
@@ -385,7 +385,10 @@ describe('every read goes through the database handle it was given', () => {
     for (const call of mockOpenBalance.mock.calls) expect(call[1].database).toBe(database);
     for (const call of mockResolveForInvoice.mock.calls) expect(call[0].database).toBe(database);
     for (const call of mockStopped.mock.calls) expect(call[1].database).toBe(database);
-    for (const call of mockReconcile.mock.calls) { expect(call[1]).toBe(database); expect(call[2]).toEqual({ readOnly: true }); }
+    for (const [, connection, options] of mockReconcile.mock.calls) {
+      expect(connection).toBe(database);
+      expect(options).toEqual({ readOnly: true, checkout: true });
+    }
     // (the pool handle is a mock that throws if touched; the run above passed)
   });
 });
