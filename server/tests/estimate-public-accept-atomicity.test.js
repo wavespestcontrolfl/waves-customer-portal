@@ -4758,9 +4758,12 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     }),
     ...overrides,
   });
+  // The account's one premises is the estimate's own address (recurringPestEstimate's), as the
+  // accept's single-premises re-check requires.
   const leadCustomer = (overrides = {}) => ({
     id: 'cust-9', active: true, pipeline_stage: 'new_lead', deleted_at: null,
     first_name: 'Pat', last_name: 'Tester', phone: '(941) 555-0123', email: 'pat@example.com',
+    address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL',
     ...overrides,
   });
 
@@ -4791,5 +4794,14 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     const res = await putAccept('tok-plan-start-3-x012345');
     expect(res.status).toBe(200);
     expect(storedEstimate().status).toBe('accepted');
+  });
+
+  test('an account that moved since the mint refuses the accept (409) and rolls back', async () => {
+    resetStore(planStartEstimate({ id: 'est-plan-start-4', token: 'tok-plan-start-4-x012345' }));
+    db.__state.tables.customers = [leadCustomer({ address_line1: '9 Oak Ave' })];
+    const res = await putAccept('tok-plan-start-4-x012345');
+    expect(res.status).toBe(409);
+    expect(storedEstimate().status).toBe('sent');
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 });

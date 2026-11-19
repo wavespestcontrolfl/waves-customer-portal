@@ -352,7 +352,9 @@ const LEAD = { ...CUSTOMER, active: true, pipeline_stage: 'new_lead', waveguard_
 // An engine line, and what the card shows for it through the REAL quoteAmountFromLine — so a
 // test's `shown` matches its recompute unless the test drifts one amount on purpose.
 function engineLine(service, monthly, extra = {}) {
-  return { service, monthlyAfterDiscount: monthly, annualAfterDiscount: Math.round(monthly * 1200) / 100, visitsPerYear: 4, ...extra };
+  const annual = Math.round(monthly * 1200) / 100;
+  // annual too, as the real engine line carries it: the converter reads recurring lines by it.
+  return { service, monthlyAfterDiscount: monthly, annualAfterDiscount: annual, annual, visitsPerYear: 4, ...extra };
 }
 function shownOf(line) {
   const amount = require('../services/customer-pricing-ai').quoteAmountFromLine(line);
@@ -684,14 +686,24 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates[0].onetime_total).toBe(99);
     });
 
-    test('the mint freezes the setup fee where the accept bills it: a $79 fee bills $79, not the $99 code constant (codex pre-push P0)', async () => {
-      const FEE_LINE_79 = { ...PEST_LINE, initialFee: 79 };
-      recompute.mockResolvedValue(pricedAs(FEE_LINE_79, { setupFee: 79 }));
-      await mint({ shown: shownOf(FEE_LINE_79) });
+    test.each([
+      ['a $79 solo pest fee bills $79, not the $99 code constant', { ...PEST_LINE, initialFee: 79 }, 79],
+      ['a $0 solo pest fee bills no fee, not the $99 fallback', PEST_LINE, 0],
+    ])('the mint freezes the setup fee where the accept bills it: %s (codex pre-push P0s)', async (_label, line, fee) => {
+      recompute.mockResolvedValue(pricedAs(line, { setupFee: fee }));
+      await mint({ shown: shownOf(line) });
       const stored = JSON.parse(tables.estimates[0].estimate_data);
-      expect(stored.setupFeeQuote).toEqual({ amount: 79, kind: 'waveguard_membership' });
-      // The public accept stamps acceptedSetupFeeAmount and invoices the fee through this resolver.
-      expect(require('../services/estimate-converter').frozenSetupFeeAmount(stored)).toBe(79);
+      expect(stored.setupFeeQuote).toEqual({ amount: fee, kind: 'waveguard_membership' });
+      // The public accept's own decision: whether a fee applies, then the amount it stamps and invoices.
+      const converter = require('../services/estimate-converter');
+      const applies = converter.shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: converter.recurringServicesFromEstimateData(stored), estimateData: stored });
+      expect(applies ? converter.frozenSetupFeeAmount(stored) : 0).toBe(fee);
+    });
+
+    test('a lawn quote, where no setup fee applies, freezes none', async () => {
+      recompute.mockResolvedValue(pricedAs(LAWN_LINE));
+      await mint({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE) });
+      expect(JSON.parse(tables.estimates[0].estimate_data).setupFeeQuote).toBeUndefined();
     });
 
     test('a live quote minted before the setup-fee freeze is archived and re-minted, never handed back (codex pre-push P0s)', async () => {
@@ -843,6 +855,7 @@ describe('assertPlanStartAcceptEligible', () => {
   });
 
   test.each([
+    ['was reclassified commercial since the mint (codex pre-push P0)', () => { tables.customers = [{ ...LEAD, property_type: 'commercial' }]; }],
     ['moved since the mint: the quote is addressed to another home', () => { tables.customers = [{ ...LEAD, address_line1: '9 Oak Ave' }]; }],
     ['is flagged multi-home since the mint', () => { tables.customers = [{ ...LEAD, has_multi_home: true }]; }],
     ['added a second property since the mint', () => {
@@ -853,7 +866,7 @@ describe('assertPlanStartAcceptEligible', () => {
     }],
     ['has no street with a city or zip', () => { tables.customers = [{ ...LEAD, city: null, zip: null }]; }],
     ['has an estimate with no stored address', () => { delete tables.estimates[0].address; }],
-  ])('an account that %s refuses: the mint\'s single-premises bar again (codex pre-push P1)', async (_label, arrange) => {
+  ])('an account that %s refuses: the mint\'s bar again (codex pre-push P1s)', async (_label, arrange) => {
     arrange();
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });

@@ -2219,6 +2219,20 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     }
   });
 
+  test('absent for an account stored as commercial, even when a trusted lookup prices it residential: the mint refuses it (codex pre-push P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const askWith = (customer) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, propertyType: 'single_family' } }),
+      prompt: 'I am interested in adding lawn care',
+      customer,
+    });
+    expect((await askWith(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const commercial = await askWith(plain({ property_type: 'commercial' }));
+    expect(commercial.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in commercial).toBe(false);
+  });
+
   test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
     const result = await ask(plain());
     expect('planStart' in result).toBe(false);

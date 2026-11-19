@@ -1436,6 +1436,9 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
     .map((option) => option.id);
   if (!optionIds.length) return {};
   try {
+    // A stored commercial type: the mint's stored-type guard refuses it (a resolved commercial
+    // type prices commercial lines, which the review check above already drops).
+    if (require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType: customer.property_type })) return {};
     // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
     // term still covering today owns a plan: no offer.
     if (await restart.ownsAnyRecurringService(db, customer.id)) return {};

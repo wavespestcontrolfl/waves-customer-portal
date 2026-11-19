@@ -654,6 +654,24 @@ function engineResultNeedsReview(raw) {
   )) || (Array.isArray(raw?.fieldVerify) && raw.fieldVerify.length > 0);
 }
 
+// The WaveGuard setup fee a quote discloses, frozen where every charging path
+// reads it (estimate_data.setupFeeQuote, the website quote's shape; codex
+// pre-push P0s). Without a freeze the public accept bills
+// EstimateConverter.frozenSetupFeeAmount's code constant and the page falls
+// back to a positive fee, so a fee live config prices otherwise, zero
+// included, would show or bill another amount. Frozen only where the fee
+// applies (the converter's solo pest or mosquito mix, the rule the engine's
+// mapper prices the fee by and the mixes the website quote freezes,
+// setupFeeQuoteBasisForEstimate), at the stored result's amount. A zero
+// freeze is the "no fee" the page and the accept both read.
+function disclosedSetupFeeQuote(estimateData) {
+  const fee = estimateData.result?.oneTime?.membershipFee;
+  if (fee == null || !(Number(fee) >= 0)) return null;
+  const converter = require('../estimate-converter');
+  if (!converter.recurringMixHasMembershipFeeService(converter.recurringServicesFromEstimateData(estimateData))) return null;
+  return { amount: toCents(fee) / 100, kind: 'waveguard_membership' };
+}
+
 // THE shared mint core (plan restart + plan start — one mechanism, two
 // entries). Runs inside the caller's transaction, under the locks the entry
 // already took (comms advisory lock, then the customers row FOR UPDATE), with
@@ -862,14 +880,8 @@ async function mintPricedEstimate({
   }
 
   estimateData.result = recomputed.serverResult;
-  // Freeze the WaveGuard setup fee the quote discloses where every charging
-  // path reads it (estimate_data.setupFeeQuote, as the website quote does):
-  // the public accept stamps and invoices EstimateConverter.
-  // frozenSetupFeeAmount, which falls back to the code constant without it,
-  // so a fee live config prices otherwise would show one amount and bill
-  // another (codex pre-push P0).
-  const disclosedSetupFee = toCents(recomputed.serverResult?.oneTime?.membershipFee);
-  if (disclosedSetupFee > 0) estimateData.setupFeeQuote = { amount: disclosedSetupFee / 100, kind: 'waveguard_membership' };
+  const setupFeeQuote = disclosedSetupFeeQuote(estimateData);
+  if (setupFeeQuote) estimateData.setupFeeQuote = setupFeeQuote;
   if (recomputed.pestPricingVersion && estimateData.engineInputs.services.pest
     && typeof estimateData.engineInputs.services.pest === 'object') {
     estimateData.engineInputs.services.pest.version = recomputed.pestPricingVersion;
@@ -1366,9 +1378,10 @@ async function assertRestartAcceptEligible(trx, estimate) {
 // qualifiers), so a plan added since, of any family, changes the price this
 // estimate froze (members keep the request flow). The account must still have
 // one provable premises, the one this estimate is addressed to: a move or a
-// second property since the mint is a different home (codex pre-push P1).
-// FAIL CLOSED: drift or an unreadable state is the 409 the estimate page
-// renders.
+// second property since the mint is a different home (codex pre-push P1). A
+// stored property type staff since corrected to commercial refuses too, the
+// mint's own stored-type guard (codex pre-push P0). FAIL CLOSED: drift or an
+// unreadable state is the 409 the estimate page renders.
 async function assertPlanStartAcceptEligible(trx, estimate) {
   const refuse = (message) => {
     const err = new Error(message);
@@ -1379,6 +1392,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   let quoted;
   let quotedStreet;
   let fresh;
+  let commercial;
   let ownsPlan;
   let premisesStreet;
   try {
@@ -1393,8 +1407,11 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     fresh = row?.customer_id
       ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first()
       : null;
-    ownsPlan = fresh ? await ownsAnyRecurringService(trx, fresh.id) : false;
-    premisesStreet = fresh ? await singlePremisesStreet(trx, fresh) : null;
+    if (fresh) {
+      commercial = require('../pricing-engine/commercial-helpers').isCommercialProperty({ propertyType: fresh.property_type });
+      ownsPlan = await ownsAnyRecurringService(trx, fresh.id);
+      premisesStreet = await singlePremisesStreet(trx, fresh);
+    }
   } catch (err) {
     logger.warn(`[plan-start] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
     throw refuse('We could not re-verify this estimate just now — please try again in a moment.');
@@ -1402,10 +1419,10 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   const changed = () => refuse('This account changed since this estimate was created — please go back to your portal for a current price.');
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
   if (!quoted || !quoted.length || !fresh) throw changed();
-  // The mint's bar again (the price was standalone): no plan membership on the
-  // row, no live recurring service of any kind, and the one premises the
-  // estimate is addressed to.
-  if (!planStartAccountOpen(fresh) || ownsPlan || !premisesStreet || quotedStreet !== premisesStreet) throw changed();
+  // The mint's bar again (the price was standalone and residential): no plan
+  // membership on the row, no commercial type, no live recurring service of
+  // any kind, and the one premises the estimate is addressed to.
+  if (!planStartAccountOpen(fresh) || commercial || ownsPlan || !premisesStreet || quotedStreet !== premisesStreet) throw changed();
 }
 
 module.exports = {

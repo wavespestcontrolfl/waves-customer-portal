@@ -499,20 +499,29 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
-  test('the restart freezes the setup fee its quote discloses, where the accept bills it; a quote minted before the freeze is re-minted (codex pre-push P0s)', async () => {
+  test.each([
+    ['a $79 fee', 79],
+    ['a $0 fee', 0],
+  ])('a pest restart freezes %s where the accept bills it; a quote minted before the freeze is re-minted (codex pre-push P0s)', async (_label, fee) => {
+    tables.cancellation_cases[0].scope = JSON.stringify(['pest_control']);
     recompute.mockResolvedValue({
       recomputed: true,
-      serverResult: { engineVersion: 'v9.9', lineItems: [], oneTime: { membershipFee: 79, total: 79 } },
-      rawEngineResult: { waveGuard: { tier: 'Silver' }, lineItems: [] },
-      serverTotals: { monthlyTotal: 138, annualTotal: 1656, onetimeTotal: 79 },
+      // A solo pest plan, the mix the setup fee applies to.
+      serverResult: { engineVersion: 'v9.9', lineItems: [{ service: 'pest_control', annual: 452 }], oneTime: { membershipFee: fee, total: fee } },
+      rawEngineResult: { waveGuard: { tier: 'Bronze' }, lineItems: [] },
+      serverTotals: { monthlyTotal: 37.67, annualTotal: 452, onetimeTotal: fee },
     });
     const first = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
     const { setupFeeQuote, ...preChange } = JSON.parse(tables.estimates[0].estimate_data);
-    expect(setupFeeQuote).toEqual({ amount: 79, kind: 'waveguard_membership' });
-    // The public accept stamps and invoices the fee through this resolver; without the freeze it bills the $99 constant.
-    const { frozenSetupFeeAmount } = require('../services/estimate-converter');
-    expect(frozenSetupFeeAmount({ ...preChange, setupFeeQuote })).toBe(79);
-    expect(frozenSetupFeeAmount(preChange)).toBe(99);
+    expect(setupFeeQuote).toEqual({ amount: fee, kind: 'waveguard_membership' });
+    // The public accept's own decision: whether a fee applies, then the amount it stamps and invoices.
+    const converter = require('../services/estimate-converter');
+    const bills = (data) => (converter.shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: converter.recurringServicesFromEstimateData(data), estimateData: data,
+    }) ? converter.frozenSetupFeeAmount(data) : 0);
+    expect(bills({ ...preChange, setupFeeQuote })).toBe(fee);
+    // Without the freeze the accept bills the $99 code constant.
+    expect(bills(preChange)).toBe(99);
     // A live quote minted before the freeze, otherwise today's offer, is never handed back.
     tables.estimates[0].estimate_data = JSON.stringify(preChange);
     const again = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('bbcdef0123456789') });
