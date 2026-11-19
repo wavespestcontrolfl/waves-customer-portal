@@ -673,27 +673,30 @@ describe('updateProductPage', () => {
 
   // Owner 2026-11-18: "Talstar P" named the Atticus Talak bottle, then moved to LESCO Crosscheck Plus with the house bifenthrin.
   // A past visit's stored product id, not today's alias, decides which page its outcome counts on.
-  test('a name that moved products: an outcome counts on the page of the product its visit stored; a name alone only when it is the catalog name', async () => {
+  test('a name that moved products: an outcome counts on the page of the product its visit stored; a name alone only when no other product carries it', async () => {
     const outcomes = [
       { id: 'o-talak', service_record_id: 'sr-1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
       { id: 'o-cross', service_record_id: 'sr-2', treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
       // Before the switch, "Talstar P" meant the Talak bottle: a typed alias with no stored product, or with no visit, proves nothing.
       { id: 'o-typed-alias', service_record_id: 'sr-3', treatment_date: '2026-07-05', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
       { id: 'o-no-visit-alias', service_record_id: null, treatment_date: '2026-07-06', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
-      // The catalog name itself does.
+      // The catalog name itself does, and so does an alias no other product carries (a stable vendor name).
       { id: 'o-typed-own', service_record_id: 'sr-4', treatment_date: '2026-12-05', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
       { id: 'o-no-visit-own', service_record_id: null, treatment_date: '2026-12-06', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
+      { id: 'o-typed-stable', service_record_id: 'sr-5', treatment_date: '2026-07-07', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
+      { id: 'o-no-visit-stable', service_record_id: null, treatment_date: '2026-07-08', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
     ];
     const servicePrd = [
       { service_record_id: 'sr-1', product_id: 'pc-talak', product_name: 'Talstar P' },
       { service_record_id: 'sr-2', product_id: 'pc-cross', product_name: 'Talstar P' }, // after the switch the alias stores Crosscheck
       { service_record_id: 'sr-3', product_id: null, product_name: 'Talstar P' },
       { service_record_id: 'sr-4', product_id: null, product_name: 'LESCO Crosscheck Plus' },
+      { service_record_id: 'sr-5', product_id: null, product_name: 'Crosscheck Plus' },
     ];
     const state = useDb({
       products_catalog: [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }],
       // an exact catalog name: the only alias read is the product's alias listing
-      product_aliases: [{ alias_name: 'Talstar P' }],
+      product_aliases: [{ alias_name: 'Talstar P' }, { alias_name: 'Crosscheck Plus' }],
       treatment_outcomes: outcomes,
       service_products: servicePrd,
       knowledge_entries: [],
@@ -701,7 +704,7 @@ describe('updateProductPage', () => {
 
     await wiki.updateProductPage('LESCO Crosscheck Plus');
 
-    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids).sort()).toEqual(['o-cross', 'o-no-visit-own', 'o-typed-own']);
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids).sort()).toEqual(['o-cross', 'o-no-visit-own', 'o-no-visit-stable', 'o-typed-own', 'o-typed-stable']);
     // The outcome query also takes every visit that recorded the product by id, whatever name it carried then.
     const outcomeOps = state.calls.treatment_outcomes[0].ops.filter(([m]) => m === 'orWhereRaw').map(([, a]) => a);
     expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
@@ -729,22 +732,25 @@ describe('updateProductPage', () => {
     expect(state.deletes.knowledge_entries).toBe(1); // only the Crosscheck-only page
   });
 
-  // The merge deletes the variant page. outcomesForProduct leaves out an outcome that names only an alias with no stored product id,
-  // so a variant page holding one keeps it; the vision token in a fingerprint is not an outcome.
+  // The merge deletes the variant page. outcomesForProduct leaves out an outcome whose visit stored other products (or one that names
+  // only a name another product carries), so a variant page holding one keeps it; the vision token in a fingerprint is not an outcome.
   test.each([
-    ['holds an outcome the refreshed page left out (an alias-only outcome, no stored product)', ['o-own', 'o-alias'], false],
+    ['holds an outcome the refreshed page left out (its visit stored other products)', ['o-own', 'o-other-visit'], false],
     ['records no source list', null, false],
-    ['holds only outcomes the refreshed page holds, plus its vision token', ['o-own', 'vision-scored:1:1700000000000'], true],
+    ['holds only outcomes the refreshed page holds, plus its vision token', ['o-own', 'o-alias', 'vision-scored:1:1700000000000'], true],
   ])('a variant page that %s: merged %s', async (_label, sources, merged) => {
     const pageOf = (rec) => rec.ops.find(([m, a]) => m === 'where' && a[0] && typeof a[0] === 'object')?.[1][0]?.slug;
     const state = useDb({
       products_catalog: (rec) => (rec.ops.some(([m, a]) => m === 'whereRaw' && a[1]?.[0] === 'lesco crosscheck plus')
         ? [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }] : []),
       product_aliases: (rec) => (rec.ops.some(([m, a]) => m === 'where' && a[0]?.product_id === 'pc-cross') ? [{ alias_name: 'Crosscheck Plus' }] : []),
-      service_products: [],
+      service_products: [{ service_record_id: 'sr-9', product_id: 'pc-celsius', product_name: 'Celsius WG' }],
       treatment_outcomes: [
         { id: 'o-own', service_record_id: null, treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
+        // A stable alias no other product carries counts by name alone.
         { id: 'o-alias', service_record_id: null, treatment_date: '2026-12-05', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
+        // Its visit stored products, and not Crosscheck: it is left out.
+        { id: 'o-other-visit', service_record_id: 'sr-9', treatment_date: '2026-12-06', grass_track: 'st_augustine', products_applied: [{ name: 'Crosscheck Plus' }] },
       ],
       knowledge_entries: (rec) => (pageOf(rec) === 'product/crosscheck-plus'
         ? [{ id: 'ke-variant', slug: 'product/crosscheck-plus', source_treatment_ids: sources }] : []),
@@ -753,7 +759,7 @@ describe('updateProductPage', () => {
       knowledge_contradictions: [],
     });
     await wiki.updateProductPage('LESCO Crosscheck Plus');
-    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids)).toEqual(['o-own']);
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids)).toEqual(['o-own', 'o-alias']);
     expect(state.deletes.knowledge_entries).toBe(merged ? 1 : undefined);
     expect((state.inserts.knowledge_update_log || []).some((r) => r.action === 'merge')).toBe(merged);
   });

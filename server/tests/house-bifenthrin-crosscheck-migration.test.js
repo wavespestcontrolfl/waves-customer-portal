@@ -17,6 +17,7 @@ const CROSS = 'bbbbbbbb-0000-4000-8000-000000000002';
 const OTHER = 'cccccccc-0000-4000-8000-000000000003';
 const JSON_COLUMNS = {
   services: ['default_products'], products_catalog: ['application_zones', 'target_pests', 'service_lines'], lawn_protocol_products: ['gates'],
+  lawn_protocol_product_substitutions: ['metadata'],
 };
 
 // `defaults`: column defaults an insert takes, as Postgres applies them (production's products_catalog defaults, read 2026-11-18).
@@ -1470,6 +1471,139 @@ describe('follow-up 20261119011000: an approved substitution on an open visit fo
     const knex = makeKnex(shape(subTables()));
     const before = snapshot(knex);
     await follow.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
+
+// Follow-up 20261119011100: rebooked, restored and inactive-keyed visits, which 20261119011000 left on the old product.
+describe('follow-up 20261119011100: every substitution the plan can still use follows to Crosscheck', () => {
+  const follow = require('../models/migrations/20261119011000_crosscheck_substitutions_follow');
+  const reconcile = require('../models/migrations/20261119011100_crosscheck_substitutions_reconcile');
+  const BIFEN = 'dddddddd-0000-4000-8000-000000000004';
+  const TALSTAR = 'eeeeeeee-0000-4000-8000-000000000005';
+  const sub = (id, visit, original, extra = {}) => ({
+    id, scheduled_service_id: visit, original_product_id: original, substitute_product_id: OTHER, rate_per_1000: null, rate_unit: null,
+    reason: 'out of stock', approved_by: null, approved_at: '2026-11-01T14:00:00.000Z', active: true, metadata: {}, ...extra,
+  });
+  const reconcileTables = () => {
+    const tables = baseTables();
+    tables.products_catalog.push({ id: BIFEN, name: 'Bifen I/T', active: true }, { id: TALSTAR, name: 'Talstar P', active: false });
+    tables.technicians = [{ id: 't1' }];
+    tables.scheduled_services = [
+      { id: 'v05', status: 'on_site' }, { id: 'v07', status: 'rescheduled' }, { id: 'v08', status: 'cancelled' },
+      { id: 'v09', status: 'completed' }, { id: 'v10', status: 'confirmed' },
+    ];
+    tables.lawn_protocol_product_substitutions = [
+      sub('s05', 'v05', TALAK, { rate_per_1000: '0.4000', rate_unit: 'fl_oz' }), // 20261119011000 left it: s06 held the key
+      sub('s06', 'v05', CROSS, { active: false, approved_by: 't1', metadata: { note: 'an earlier choice' } }),
+      sub('s16', 'v07', TALSTAR), // read first, but v07's Talak row (s11) goes first
+      sub('s11', 'v07', TALAK), // rescheduled: rebooked on this row
+      sub('s12', 'v08', BIFEN), // cancelled: can return to a live status
+      sub('s13', 'v09', TALAK), // a completed visit keeps its record
+      sub('s14', 'v10', TALAK), // v10's active Crosscheck row stays its Crosscheck substitution
+      sub('s15', 'v10', CROSS, { substitute_product_id: TALAK }),
+      sub('s17', 'v08', OTHER, { substitute_product_id: TALAK }), // the office chose Talak as a substitute: its own choice
+    ];
+    return tables;
+  };
+  const originals = (knex) => Object.fromEntries(knex.tables.lawn_protocol_product_substitutions.map((row) => [row.id, row.original_product_id]));
+  const logged = () => logSpy.mock.calls.flat().join('\n');
+  let logSpy;
+  beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('up: rebooked and restorable visits follow, an inactive Crosscheck row goes whole into its event so the active approval takes the key; the rest stay; a re-run changes nothing', async () => {
+    const knex = makeKnex(reconcileTables());
+    await follow.up(knex);
+    expect(originals(knex)).toMatchObject({ s05: TALAK, s11: TALAK, s12: BIFEN, s16: TALSTAR });
+    knex.locks.length = 0;
+    await reconcile.up(knex);
+    expect(originals(knex)).toEqual({ s05: CROSS, s11: CROSS, s16: TALSTAR, s12: CROSS, s13: TALAK, s14: TALAK, s15: CROSS, s17: OTHER });
+    expect(byId(knex, 'lawn_protocol_product_substitutions', 's05')).toMatchObject({ substitute_product_id: OTHER, rate_per_1000: '0.4000', rate_unit: 'fl_oz', active: true });
+    expect(byId(knex, 'lawn_protocol_product_substitutions', 's17')).toMatchObject({ substitute_product_id: TALAK });
+    expect(eventsOf(knex, reconcile.ACTION).map((event) => [event.resource_id, meta(event)])).toEqual([
+      ['s06', expect.objectContaining({ kind: 'removed', scheduled_service_id: 'v05', row: expect.objectContaining({ id: 's06', active: false, approved_by: 't1', metadata: { note: 'an earlier choice' } }) })],
+      ['s05', expect.objectContaining({ kind: 'keyed', scheduled_service_id: 'v05', from: TALAK, to: CROSS, substitute: OTHER })],
+      ['s11', expect.objectContaining({ kind: 'keyed', scheduled_service_id: 'v07', from: TALAK, to: CROSS })],
+      ['s12', expect.objectContaining({ kind: 'keyed', scheduled_service_id: 'v08', from: BIFEN, to: CROSS })],
+    ]);
+    expect(knex.locks.map(([table]) => table)).toEqual(['lawn_protocol_product_substitutions']);
+    expect(logged()).toContain('visit v07: substitution s16 stays keyed on its old product');
+    expect(logged()).toContain('visit v10: substitution s14 stays keyed on its old product');
+    expect(reconcile.ROLLBACK_ACTION.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await reconcile.up(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test('the full rollback: each row goes back to its old product, the inactive row comes back whole, and the table ends where it began', async () => {
+    const knex = makeKnex(reconcileTables());
+    const start = snapshot(knex);
+    await follow.up(knex);
+    await reconcile.up(knex);
+    const beforeDown = snapshot(knex).audit_log;
+    await reconcile.down(knex);
+    expect(eventsOf(knex, reconcile.ROLLBACK_ACTION)).toHaveLength(4);
+    expect(knex.tables.audit_log.slice(0, beforeDown.length)).toEqual(beforeDown);
+    await reconcile.down(knex);
+    expect(eventsOf(knex, reconcile.ROLLBACK_ACTION)).toHaveLength(4);
+    await follow.down(knex);
+    expect(withoutAudit(snapshot(knex))).toEqual(withoutAudit(start));
+  });
+
+  test('a rolled-back event is done: a row the office keys on Crosscheck again stays there on a second down()', async () => {
+    const knex = makeKnex(reconcileTables());
+    await follow.up(knex);
+    await reconcile.up(knex);
+    await reconcile.down(knex);
+    byId(knex, 'lawn_protocol_product_substitutions', 's11').original_product_id = CROSS;
+    await reconcile.down(knex);
+    expect(byId(knex, 'lawn_protocol_product_substitutions', 's11').original_product_id).toBe(CROSS);
+  });
+
+  test('down keeps a row on Crosscheck when its visit has a new row keyed on the old product (one per visit and original product)', async () => {
+    const knex = makeKnex(reconcileTables());
+    await follow.up(knex);
+    await reconcile.up(knex);
+    knex.tables.lawn_protocol_product_substitutions.push(sub('s19', 'v07', TALAK));
+    await reconcile.down(knex);
+    expect(byId(knex, 'lawn_protocol_product_substitutions', 's11').original_product_id).toBe(CROSS);
+    const keys = knex.tables.lawn_protocol_product_substitutions.map((row) => `${row.scheduled_service_id}:${row.original_product_id}`);
+    expect(keys).toHaveLength(new Set(keys).size);
+    expect(logged()).toContain('substitution s11 cannot go back as it was');
+  });
+
+  test.each([
+    ['its approver was deleted since: it comes back with none, as ON DELETE SET NULL leaves it', (knex) => { knex.tables.technicians = []; }, 'back', null],
+    ['the office keyed another row on Crosscheck for that visit since', (knex) => {
+      byId(knex, 'lawn_protocol_product_substitutions', 's05').original_product_id = OTHER;
+      knex.tables.lawn_protocol_product_substitutions.push(sub('s18', 'v05', CROSS));
+    }, 'out', undefined],
+    ['its visit was deleted since (its substitutions go with it: ON DELETE CASCADE)', (knex) => {
+      knex.tables.scheduled_services = knex.tables.scheduled_services.filter((visit) => visit.id !== 'v05');
+      knex.tables.lawn_protocol_product_substitutions = knex.tables.lawn_protocol_product_substitutions.filter((row) => row.scheduled_service_id !== 'v05');
+    }, 'out', undefined],
+  ])('down and the inactive row: %s', async (_label, edit, outcome, approver) => {
+    const knex = makeKnex(reconcileTables());
+    await follow.up(knex);
+    await reconcile.up(knex);
+    edit(knex);
+    await reconcile.down(knex);
+    const row = byId(knex, 'lawn_protocol_product_substitutions', 's06');
+    if (outcome === 'back') expect(row).toMatchObject({ original_product_id: CROSS, active: false, approved_by: approver, metadata: { note: 'an earlier choice' } });
+    else expect(row).toBeUndefined();
+    if (outcome === 'out') expect(logged()).toContain('substitution s06 cannot go back as it was');
+  });
+
+  test.each([
+    ['production: no substitution rows', (tables) => { tables.lawn_protocol_product_substitutions = []; return tables; }],
+    ['no substitutions table', (tables) => { delete tables.lawn_protocol_product_substitutions; return tables; }],
+    ['no audit_log table', (tables) => { delete tables.audit_log; return tables; }],
+    ['two catalog rows named Crosscheck', (tables) => { tables.products_catalog.push({ id: 'cross-2', name: 'LESCO Crosscheck Plus' }); return tables; }],
+  ])('%s: nothing changes', async (_label, shape) => {
+    const knex = makeKnex(shape(reconcileTables()));
+    const before = snapshot(knex);
+    await reconcile.up(knex);
     expect(snapshot(knex)).toEqual(before);
   });
 });

@@ -116,13 +116,15 @@ async function resolveCanonicalProduct(productName, productId = null) {
 }
 
 // The outcomes one catalog product's page aggregates. An alias can move to another product (owner 2026-11-18: "Talstar P" named the
-// Atticus Talak bottle until the house bifenthrin became LESCO Crosscheck Plus, and names Crosscheck after), so an alias alone says
-// nothing about which bottle a past visit used: the product id its visit's service_products row stored decides. An outcome counts
-// when its visit stored this product's id, under any name. A name alone counts only when it is the catalog name itself: a visit row
-// with no product id, and an outcome with no visit (or whose visit stored no product rows), count only when they name it. With no
-// catalog product (productId null) the name match decides, as before. A recorded name matches only whole ("Headway G" is not
-// "Headway"). Production 2026-11-18: all 76 outcomes have a visit, and no outcome visit has a product row without an id.
-async function outcomesForProduct(variants, productId, catalogName) {
+// Atticus Talak bottle until the house bifenthrin became LESCO Crosscheck Plus, and names Crosscheck after), so a name another
+// product carries says nothing about which bottle a past visit used: the product id its visit's service_products row stored
+// decides. An outcome counts when its visit stored this product's id, under any name. A name alone (a visit row with no product id,
+// or an outcome with no visit, or whose visit stored no product rows) counts when it is the catalog name, or an alias no other
+// product carries (`unshared`: see unsharedVariants), so a stable vendor alias keeps its history; a name that moved or is shared
+// needs the stored id. With no catalog product (productId null) the name match decides, as before. A recorded name matches only
+// whole ("Headway G" is not "Headway"). Production 2026-11-18: all 76 outcomes have a visit, and no outcome visit has a product
+// row without an id.
+async function outcomesForProduct(variants, productId, catalogName, unshared = []) {
   const outcomes = await db('treatment_outcomes')
     .where(function () {
       for (const variant of variants) {
@@ -132,7 +134,8 @@ async function outcomesForProduct(variants, productId, catalogName) {
     })
     .orderBy('treatment_date', 'desc');
   if (!productId) return outcomes;
-  const own = String(catalogName || '').trim().toLowerCase();
+  const key = (name) => String(name || '').trim().toLowerCase();
+  const byName = new Set([catalogName, ...unshared].map(key).filter(Boolean));
   const visits = [...new Set(outcomes.map((o) => o.service_record_id).filter(Boolean).map(String))];
   const rows = visits.length ? await db('service_products').whereIn('service_record_id', visits).select('service_record_id', 'product_id', 'product_name') : [];
   const recorded = new Set(); // visits that stored product rows
@@ -141,12 +144,12 @@ async function outcomesForProduct(variants, productId, catalogName) {
     const visit = String(row.service_record_id);
     recorded.add(visit);
     const stored = row.product_id == null ? null : String(row.product_id);
-    if (stored === String(productId) || (stored == null && own && String(row.product_name || '').trim().toLowerCase() === own)) mine.add(visit);
+    if (stored === String(productId) || (stored == null && byName.has(key(row.product_name)))) mine.add(visit);
   }
   return outcomes.filter((o) => {
     const visit = o.service_record_id == null ? null : String(o.service_record_id);
     if (visit && recorded.has(visit)) return mine.has(visit);
-    return Boolean(own) && recordedProducts(o.products_applied).some((p) => String(p.name).trim().toLowerCase() === own);
+    return recordedProducts(o.products_applied).some((p) => byName.has(key(p.name)));
   });
 }
 
@@ -922,7 +925,9 @@ const AgronomicWiki = {
       const { canonicalName, variants } = resolved;
       const slug = `product/${slugify(canonicalName)}`;
 
-      const outcomes = await outcomesForProduct(variants, resolved.productId, canonicalName);
+      // The names no other product carries: a name alone attributes an outcome, and a leftover page may fold in, only under these.
+      const unshared = await unsharedVariants(variants, resolved.productId);
+      const outcomes = await outcomesForProduct(variants, resolved.productId, canonicalName, unshared);
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);
@@ -951,7 +956,7 @@ const AgronomicWiki = {
       const mergeSafe = result && ['generated', 'skipped'].includes(result.writeState)
         && entry && !entry.content?.includes('*Pending AI generation');
       if (mergeSafe) {
-        await mergeVariantProductPages(entry, await mergeableVariants(variants, resolved.productId), slug, data.allOutcomeIds);
+        await mergeVariantProductPages(entry, unshared, slug, data.allOutcomeIds);
 
         // The merge re-points variant contradictions onto the canonical page —
         // a page stamped trusted moments ago may have inherited an open
@@ -1987,11 +1992,12 @@ function extractSummary(content) {
   return line?.trim()?.substring(0, 500) || '';
 }
 
-// The variant names whose leftover pages may fold into this product's page: never a name another product carries (its catalog
-// name or an alias) or that a visit stored under another product's id. An alias can move (owner 2026-11-18: "Talstar P" named the
-// Talak bottle, then LESCO Crosscheck Plus), and a page under such a name may hold the other product's history, which the merge
-// deletes. The lookup names (variants) stay whole for outcome matching. When the check fails, nothing merges: a merge deletes.
-async function mergeableVariants(variants, productId) {
+// The variant names no other product carries: not another product's catalog name or alias, and never stored by a visit under
+// another product's id. An alias can move (owner 2026-11-18: "Talstar P" named the Talak bottle, then LESCO Crosscheck Plus), and
+// such a name may stand for the other product's history. Only these names attribute an outcome by name alone (outcomesForProduct)
+// and only their leftover pages may fold into this product's page (the merge deletes). The lookup names (variants) stay whole for
+// outcome matching. When the check fails, the list is empty: only the catalog name attributes by name, and nothing merges.
+async function unsharedVariants(variants, productId) {
   if (!productId) return variants;
   const key = (name) => String(name || '').trim().toLowerCase();
   const names = [...new Set(variants.map(key))];
@@ -2016,8 +2022,8 @@ async function mergeableVariants(variants, productId) {
 }
 
 // The merge deletes the variant page, so it goes only when the refreshed canonical page holds every outcome the variant was built
-// from. outcomesForProduct can leave an outcome out (one that names only an alias, with no stored product id), and only the variant
-// page then holds it. The vision token in a fingerprint (countVisionScored) is not an outcome. A page with no source list stays.
+// from. outcomesForProduct can leave out an outcome that page was built from (one whose visit stored other products, or one that
+// names only a name another product carries), and only the variant page then holds it. The vision token in a fingerprint (countVisionScored) is not an outcome. A page with no source list stays.
 function variantPageCovered(page, covered) {
   const ids = sourceIdList(page.source_treatment_ids);
   if (!ids) return false;
