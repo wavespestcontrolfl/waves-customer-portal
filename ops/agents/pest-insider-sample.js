@@ -87,7 +87,7 @@ const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml, withToolBlock } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
-const { TOOLS, TOOL_PROBLEMS } = require('../../server/services/pest-insider/tools');
+const { loadTools } = require('../../server/services/pest-insider/tools');
 
 // An impossible day (2027-02-30) is refused here too, before any file is written.
 for (const d of dates) {
@@ -108,9 +108,10 @@ async function main() {
   const livePosts = new Set(livePostFactIds.map(postUrl)).size;
   console.log(`blog posts: ${livePosts} of ${POST_URLS.length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}; ${livePostFactIds.length} of ${Object.keys(POSTS).length} linked facts can lead`);
   fs.mkdirSync(outDir, { recursive: true });
-  const liveToolIds = assumeTools ? TOOLS.map((t) => t.productId) : [];
-  console.log(`tools: ${liveToolIds.length} of ${TOOLS.length} reviewed tools ${assumeTools ? 'counted as live (--assume-tools)' : 'live (this script checks no Amazon page)'}`);
-  for (const p of TOOL_PROBLEMS) console.log(`tool left out: ${p}`);
+  const tools = loadTools();
+  const liveToolIds = assumeTools ? tools.tools.map((t) => t.productId) : [];
+  console.log(`tools: ${liveToolIds.length} of ${tools.tools.length} reviewed tools ${assumeTools ? 'counted as live (--assume-tools)' : 'live (this script checks no Amazon page)'}`);
+  for (const p of tools.problems) console.log(`tool left out: ${p}`);
   const recent = { factIds: [], speciesSlugs: [], toolIds: [] };
   let failed = 0;
   for (const sendDate of dates) {

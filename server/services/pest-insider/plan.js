@@ -9,7 +9,7 @@
 const crypto = require('crypto');
 const { listEntries, isApproved } = require('../species-catalog');
 const { factsForSend, factById, sendDateET } = require('./facts');
-const { TOOLS } = require('./tools');
+const { loadTools } = require('./tools');
 
 /** How many past issues count as "recent": the caller passes the last six. */
 const RECENT_WINDOW = 6;
@@ -107,13 +107,14 @@ function pickLeadFact(dateET, recentFactIds, recheckedFactIds, livePostFactIds) 
   return { fact: top[pickIndex(`${dateET}:lead`, top.length)], reason: null };
 }
 
-// "A tool we'd use": only a tool whose product page passed this send's live
-// check, and not one of the last two issues' tools. A tool for the lead
-// fact's service comes first, then any such tool; the send date picks
-// inside that pool. None: the issue has no tool item (it still builds).
+// "A tool we'd use": only a tool that is usable in the registry now and
+// whose product page passed this send's live check, and not one of the last
+// two issues' tools. A tool for the lead fact's service comes first, then
+// any such tool; the send date picks inside that pool. None: the issue has
+// no tool item (it still builds).
 function pickTool({ dateET, fact, recentToolIds, liveToolIds }) {
   const used = new Set(recentToolIds.slice(-TOOL_RECENT_WINDOW));
-  const live = TOOLS.filter((t) => liveToolIds.includes(t.productId) && !used.has(t.productId));
+  const live = loadTools().tools.filter((t) => liveToolIds.includes(t.productId) && !used.has(t.productId));
   const forService = live.filter((t) => t.services.includes(fact.service));
   const pool = forService.length ? forService : live;
   return pool.length ? pool[pickIndex(`${dateET}:${fact.id}:tool`, pool.length)] : null;

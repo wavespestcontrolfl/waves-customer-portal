@@ -444,10 +444,15 @@ function titleProblem(title, subject, fact, source) {
 // a word of the name; Amazon's name is only in the renderer's fixed link
 // text and sentence (BRAND_RE bans it here). Owner 2026-11-19, on Amazon
 // links in this email: never "buy to support us". So a line says what the
-// tool shows or does, and has no sales word.
+// tool shows or does, and has no sales word. A line is one plain sentence:
+// letters, spaces, commas, apostrophes and hyphens, then one period, so it
+// can carry no link, address, number, tag or markup (pre-push PR 3 r3: a
+// URL in a line would turn clickable in the text part).
+const PLAIN_SENTENCE = /^[A-Z][A-Za-z ,'-]*[a-z]\.$/;
 const SALES_RE = /\b(?:buy|buying|bought|purchas\w*|orders?|ordering|support\w*|commissions?|earn\w*|affiliates?|deals?|discount\w*|coupons?|sale|sales|bargains?)\b|\bhelps? us\b/i;
 function toolLineProblem(text, tool) {
   if (!text) return 'empty sentence';
+  if (!PLAIN_SENTENCE.test(text)) return 'not one plain sentence: letters, spaces, commas, apostrophes and hyphens, then one period (no link, address, number or symbol)';
   const name = String(tool.name || '');
   const source = { units: null, labels: [], facts: name, names: name };
   return sentenceProblem(text, source) || openerProblem(text, source)

@@ -75,9 +75,10 @@ describe('renderIssue', () => {
       .toBe(`\nA TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n`);
   });
 
-  test('withToolBlock refuses a tool id that is not a reviewed tool', () => {
+  test('withToolBlock leaves the shared copy for a tool that is not usable now (pre-push PR 3 r3)', () => {
+    const shared = renderIssue(BASE);
     for (const toolId of ['ks-adjustable-door-sweep', 'no-such-tool', '', null, 7]) {
-      expect(() => withToolBlock(renderIssue(BASE), toolId)).toThrow(/must be a reviewed tool/);
+      expect(withToolBlock(shared, toolId)).toBe(shared);
     }
   });
 

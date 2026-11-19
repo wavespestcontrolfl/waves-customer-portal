@@ -8,18 +8,21 @@
  * server/data/pest-insider-tools-v1.json names a product of the vendored
  * affiliate registry (packages/affiliate-registry; the owner's astro merge
  * is the approval record), and its link is that row's approved URL, never a
- * URL from the list. A listed item whose registry row is not an active,
- * green Amazon product, or whose name or line fails the copy rule, is left
- * out of TOOLS and named in TOOL_PROBLEMS. CI holds the shipped list to no
- * problem: the list and the registry ship in the same repo, so a test
- * catches a mismatch. At run time a bad item, or a registry file that
- * cannot be read (it loads as empty: the registry's dark posture), only
- * drops tools, so an issue without a tool still builds (pre-push PR 3 r2).
- * A green row's state does not change with the clock (only a yellow row's
- * label review ages).
- * The registry's allowed_placements and allowed_post_types name places on
- * the blog; this email is not one of them, and the owner's 11-19 ruling is
- * its approval, so they are not read here.
+ * URL from the list. The registry's allowed_placements and
+ * allowed_post_types name places on the blog; this email is not one of
+ * them, and the owner's 11-19 ruling is its approval, so they are not read
+ * here.
+ *
+ * Two kinds of check. The list's own checks (name, lines, services) read
+ * only the file, so they run once. The registry's checks (an active, green
+ * Amazon row with a tagged product link) run on the registry as it is each
+ * time a tool is picked or rendered (loadTools): the registry reloads its
+ * file when it changes, so a row paused or relinked while the process runs
+ * takes effect at once (pre-push PR 3 r3). An item that fails a check is
+ * left out and named in `problems`. The tests hold the shipped list to no
+ * problem; at run time a bad item, or a registry file that cannot be read
+ * (it loads as empty: the registry's dark posture), only drops tools, so an
+ * issue without a tool still builds (pre-push PR 3 r2).
  *
  * A product page can die or change after review (the door sweep's did), so
  * a send names the tools whose page passed a live check (`liveToolIds`) and
@@ -47,22 +50,16 @@ const SERVICES = new Set(FACTS.map((f) => f.service));
 // generic name uses none.
 const brandWords = (displayName) => String(displayName || '').split(/[\s()/,-]+/).filter((w) => /^[A-Z0-9]/.test(w)).map((w) => w.toLowerCase());
 
-function toolProblem(entry, index, counts) {
+const idOf = (entry) => (entry && typeof entry.product_id === 'string' && entry.product_id) || '(no product_id)';
+
+// The list's own checks: they read only the file.
+function entryProblem(entry, counts) {
   if (!entry || typeof entry !== 'object') return 'entry is not an object';
   const id = entry.product_id;
   if (typeof id !== 'string' || !id) return 'product_id is missing';
   if (counts.get(id) > 1) return 'is listed twice';
-  const hit = index.get(id);
-  if (!hit) return 'is not in the affiliate registry';
-  if (hit.state !== 'active') return `its registry row is ${hit.state}, not active`;
-  if (hit.row.risk_class !== 'green') return `its registry row is ${hit.row.risk_class}, not green (no pesticide in this email)`;
-  if (hit.row.merchant !== 'amazon') return 'its registry row is not an Amazon product';
-  if (!AMAZON_URL.test(String(hit.row.approved_affiliate_url))) return 'its registry URL is not a tagged Amazon product page';
   const { name } = entry;
   if (typeof name !== 'string' || !NAME.test(name) || bannedReason(name)) return 'name must be a plain generic name in sentence case ("Rain gauge")';
-  const brands = brandWords(hit.row.display_name);
-  const brand = name.toLowerCase().split(' ').find((w) => brands.includes(w));
-  if (brand) return `name uses the brand word "${brand}"`;
   if (!Array.isArray(entry.lines) || entry.lines.length < 1 || entry.lines.length > 2) return 'needs 1 or 2 lines';
   for (const line of entry.lines) {
     if (typeof line !== 'string' || !line.trim() || line !== line.trim() || /[\r\n]/.test(line)) return 'each line must be one trimmed line of text';
@@ -75,26 +72,45 @@ function toolProblem(entry, index, counts) {
   return null;
 }
 
-/**
- * @param {{ tools: object[] }} raw  the tools file
- * @param {Map<string, { row: object, state: string }>} [index]  registry.productIndex()
- * @returns {{ tools: ReadonlyArray<{ productId: string, name: string, lines: string[], services: string[], url: string }>,
- *   problems: ReadonlyArray<string> }}  the usable tools, and one line for each item left out.
- *   A product listed twice is left out both times.
- */
-function checkTools(raw, index = registry.productIndex()) {
-  if (!raw || !Array.isArray(raw.tools)) return { tools: Object.freeze([]), problems: Object.freeze(['the file has no tools list']) };
+// The registry's checks, on the row as it is now.
+function rowProblem(entry, index) {
+  const hit = index.get(entry.product_id);
+  if (!hit) return 'is not in the affiliate registry';
+  if (hit.state !== 'active') return `its registry row is ${hit.state}, not active`;
+  if (hit.row.risk_class !== 'green') return `its registry row is ${hit.row.risk_class}, not green (no pesticide in this email)`;
+  if (hit.row.merchant !== 'amazon') return 'its registry row is not an Amazon product';
+  if (!AMAZON_URL.test(String(hit.row.approved_affiliate_url))) return 'its registry URL is not a tagged Amazon product page';
+  const brands = brandWords(hit.row.display_name);
+  const brand = entry.name.toLowerCase().split(' ').find((w) => brands.includes(w));
+  return brand ? `name uses the brand word "${brand}"` : null;
+}
+
+// Runs the list's own checks once: the entries that pass, and a line for
+// each item left out. A product listed twice is left out both times.
+function listCheck(raw) {
+  if (!raw || !Array.isArray(raw.tools)) return { entries: [], problems: ['the file has no tools list'] };
   const counts = new Map();
   for (const entry of raw.tools) {
     const id = entry && entry.product_id;
     if (typeof id === 'string') counts.set(id, (counts.get(id) || 0) + 1);
   }
-  const tools = [];
+  const entries = [];
   const problems = [];
   for (const entry of raw.tools) {
-    const problem = toolProblem(entry, index, counts);
+    const problem = entryProblem(entry, counts);
+    if (problem) problems.push(`${idOf(entry)}: ${problem}`);
+    else entries.push(entry);
+  }
+  return { entries, problems };
+}
+
+function withRegistry({ entries, problems }, index) {
+  const tools = [];
+  const all = [...problems];
+  for (const entry of entries) {
+    const problem = rowProblem(entry, index);
     if (problem) {
-      problems.push(`${(entry && typeof entry.product_id === 'string' && entry.product_id) || '(no product_id)'}: ${problem}`);
+      all.push(`${entry.product_id}: ${problem}`);
     } else {
       tools.push(Object.freeze({
         productId: entry.product_id,
@@ -105,15 +121,27 @@ function checkTools(raw, index = registry.productIndex()) {
       }));
     }
   }
-  return { tools: Object.freeze(tools), problems: Object.freeze(problems) };
+  return { tools: Object.freeze(tools), problems: Object.freeze(all) };
 }
 
-const { tools: TOOLS, problems: TOOL_PROBLEMS } = checkTools(data);
+/**
+ * Both checks on a tools list, against a registry index (the tests use it).
+ * @param {{ tools: object[] }} raw  a tools file
+ * @param {Map<string, { row: object, state: string }>} [index]  registry.productIndex()
+ * @returns {{ tools: ReadonlyArray<{ productId: string, name: string, lines: string[], services: string[], url: string }>,
+ *   problems: ReadonlyArray<string> }}  the usable tools, and one line for each item left out
+ */
+const checkTools = (raw, index = registry.productIndex()) => withRegistry(listCheck(raw), index);
 
-/** A usable tool by its product id, or null. */
-const toolById = (productId) => TOOLS.find((t) => t.productId === productId) || null;
+const LIST = listCheck(data);
+
+/** The reviewed list's usable tools and problems, against the registry as it is now. */
+const loadTools = () => withRegistry(LIST, registry.productIndex());
+
+/** A usable tool by its product id, against the registry as it is now, or null. */
+const toolById = (productId) => loadTools().tools.find((t) => t.productId === productId) || null;
 
 /** The tool's link text: its generic name, then where it is sold. */
 const toolLinkText = (tool) => `${tool.name} on Amazon`;
 
-module.exports = { TOOLS, TOOL_PROBLEMS, AMAZON_DISCLOSURE, toolById, toolLinkText, checkTools };
+module.exports = { AMAZON_DISCLOSURE, loadTools, toolById, toolLinkText, checkTools };

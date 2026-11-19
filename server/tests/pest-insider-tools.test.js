@@ -2,12 +2,19 @@
 // vendored affiliate registry (owner 2026-11-19: approved registry products
 // only, Amazon only, Amazon's exact sentence) and to the tool copy rule.
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const registry = require('../../packages/affiliate-registry');
 const data = require('../data/pest-insider-tools-v1.json');
-const { TOOLS, TOOL_PROBLEMS, AMAZON_DISCLOSURE, toolById, toolLinkText, checkTools } = require('../services/pest-insider/tools');
+const { AMAZON_DISCLOSURE, loadTools, toolById, toolLinkText, checkTools } = require('../services/pest-insider/tools');
 const { toolLineProblem } = require('../services/pest-insider/claim-check');
+const { planIssue } = require('../services/pest-insider/plan');
+const { FACTS } = require('../services/pest-insider/facts');
+const { POST_URLS } = require('../services/pest-insider/posts');
+const { renderIssue, withToolBlock } = require('../services/pest-insider/render');
+
+const { tools: TOOLS, problems: TOOL_PROBLEMS } = loadTools();
 
 const index = registry.productIndex();
 const MESH = 'stuff-it-copper-mesh';
@@ -29,7 +36,7 @@ describe('the reviewed tool list', () => {
       expect(row).toMatchObject({ risk_class: 'green', merchant: 'amazon' });
       expect(tool.url).toBe(row.approved_affiliate_url);
       expect(tool.url).toMatch(/^https:\/\/www\.amazon\.com\/dp\/[A-Z0-9]{10}\?tag=wavespestcont-20$/);
-      expect(toolById(tool.productId)).toBe(tool);
+      expect(toolById(tool.productId)).toEqual(tool);
       expect(toolLinkText(tool)).toBe(`${tool.name} on Amazon`);
     }
     expect(toolById('ks-adjustable-door-sweep')).toBeNull(); // dead listing: not listed
@@ -62,6 +69,10 @@ describe('the reviewed tool list', () => {
     ['three lines', { lines: ['A.', 'B.', 'C.'] }, index, /1 or 2 lines/],
     ['a line on two lines', { lines: ['It fills gaps.\nIt lasts.'] }, index, /one trimmed line/],
     ['a line with a number', { lines: ['It fills gaps up to 2 inches wide.'] }, index, /number/],
+    ['a line with a link', { lines: ['It shows the reading at https://example.org/tools.'] }, index, /plain sentence/],
+    ['a line with a bare web address', { lines: ['See example.org for the rest.'] }, index, /plain sentence/],
+    ['a line with markup', { lines: ['It fills <b>small</b> gaps.'] }, index, /plain sentence/],
+    ['a line with no period', { lines: ['It fills small gaps'] }, index, /plain sentence/],
     ['a line with a month', { lines: ['It works best in June.'] }, index, /month or season/],
     ['a line naming Amazon', { lines: ['Amazon sells it in rolls.'] }, index, /brand/],
     ['a line with "safe"', { lines: ['It is safe around pets.'] }, index, /safe/],
@@ -92,7 +103,7 @@ describe('the reviewed tool list', () => {
     const probe = [
       "const { buildIssue } = require('./services/pest-insider');",
       "const { POSTS } = require('./services/pest-insider/posts');",
-      "const { TOOLS, TOOL_PROBLEMS } = require('./services/pest-insider/tools');",
+      "const { tools: TOOLS, problems: TOOL_PROBLEMS } = require('./services/pest-insider/tools').loadTools();",
       "const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS), liveToolIds: ['acurite-glass-rain-gauge', 'stuff-it-copper-mesh'] });",
       "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, toolId: r.toolId, tools: TOOLS.length, problems: TOOL_PROBLEMS }) + '\\n');",
     ].join('\n');
@@ -107,6 +118,50 @@ describe('the reviewed tool list', () => {
       ok: true, toolId: null, tools: 0, problems: data.tools.map((t) => `${t.product_id}: is not in the affiliate registry`),
     });
   }, 60000);
+});
+
+describe('the registry as it is now (pre-push PR 3 r3)', () => {
+  test('a row paused or relinked while the process runs takes effect at the next pick and render', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-registry-'));
+    const file = path.join(dir, 'registry.json');
+    const base = registry.loadRegistry();
+    // The registry reloads its file when the file's time changes.
+    const write = (change, when) => {
+      fs.writeFileSync(file, JSON.stringify({ ...base, products: base.products.map(change) }));
+      fs.utimesSync(file, when, when);
+    };
+    const NEW_URL = 'https://www.amazon.com/dp/B000000001?tag=wavespestcont-20';
+    const FEB = '2027-02-04'; // leads with a pest fact: copper mesh fits it
+    const plan = (liveToolIds) => planIssue({ sendDate: FEB, livePostFactIds: FACTS.map((f) => f.id), liveToolIds }).tool;
+    const shared = renderIssue({
+      subject: 's', preview: 'p', lead: { headline: 'h', sentences: [{ text: 'a' }], postUrl: POST_URLS[0] },
+      idItem: { text: 'x', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
+    });
+    const before = process.env.AFFILIATE_REGISTRY_PATH;
+    try {
+      process.env.AFFILIATE_REGISTRY_PATH = file;
+      write((row) => row, new Date('2026-11-01T00:00:00Z'));
+      expect(loadTools()).toEqual({ tools: TOOLS, problems: [] });
+      expect(plan([MESH]).productId).toBe(MESH);
+
+      write((row) => {
+        if (row.product_id === MESH) return { ...row, status: 'paused' };
+        if (row.product_id === 'acurite-glass-rain-gauge') return { ...row, approved_affiliate_url: NEW_URL };
+        return row;
+      }, new Date('2026-11-02T00:00:00Z'));
+      expect(loadTools().problems).toEqual([`${MESH}: its registry row is inactive, not active`]);
+      expect(toolById(MESH)).toBeNull();
+      expect(plan([MESH])).toBeNull();
+      expect(withToolBlock(shared, MESH)).toBe(shared);
+      expect(toolById('acurite-glass-rain-gauge').url).toBe(NEW_URL);
+      expect(withToolBlock(shared, 'acurite-glass-rain-gauge').html_body).toContain(`href="${NEW_URL}"`);
+    } finally {
+      if (before === undefined) delete process.env.AFFILIATE_REGISTRY_PATH;
+      else process.env.AFFILIATE_REGISTRY_PATH = before;
+      registry._resetCache();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('toolLineProblem', () => {

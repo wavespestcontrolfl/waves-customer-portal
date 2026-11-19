@@ -30,7 +30,7 @@ const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
 const { POST_LINK_TEXT, withToolBlock } = require('../services/pest-insider/render');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
-const { TOOLS, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
+const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 
 // Every main fact's post answers as live, unless a case says otherwise.
 const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
@@ -41,7 +41,7 @@ const WFA = SPECIES.find((s) => s.slug === 'white-footed-ant');
 // A fixed plan: fact A01 (white-footed ants) and the White-footed Ant species,
 // so these cases test check -> render -> validate, not the planner's rotation.
 const usePlan = (leadFact, idItem = WFA, tool = null) => planIssue.mockImplementation(() => ({ leadFact, idItem, tool }));
-const ALL_TOOLS = TOOLS.map((t) => t.productId);
+const ALL_TOOLS = loadTools().tools.map((t) => t.productId);
 
 afterEach(() => {
   planIssue.mockReset();

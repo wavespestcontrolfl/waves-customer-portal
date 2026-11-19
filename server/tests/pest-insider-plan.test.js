@@ -1,7 +1,7 @@
 // Pest Insider plan: which fact leads and which species fills "What's this?".
 const { planIssue, SPECIES, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS, TOOL_RECENT_WINDOW } = require('../services/pest-insider/plan');
 const { factsForSend, factById, FACTS } = require('../services/pest-insider/facts');
-const { TOOLS } = require('../services/pest-insider/tools');
+const { tools: TOOLS } = require('../services/pest-insider/tools').loadTools();
 
 // Every fact counts as having a live post here, so these cases test the
 // rotation; the live-post rule has its own cases below.

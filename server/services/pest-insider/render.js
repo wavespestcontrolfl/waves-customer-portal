@@ -83,10 +83,8 @@ function identifierBlock({ idItem }) {
 
 // "A tool we'd use": the reviewed tool's lines and link, and Amazon's exact
 // sentence right after the link, in both parts. Every word comes from the
-// tool list; the caller passes only the product id.
-function toolBlock(toolId) {
-  const tool = toolById(toolId);
-  if (!tool) throw new Error('pest-insider render: the tool must be a reviewed tool (tools.js)');
+// tool list.
+function toolBlock(tool) {
   const about = tool.lines.join(' ');
   const html = [
     headingHtml(2, "A tool we'd use"),
@@ -136,12 +134,17 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
  * readers who opted in, so the shared issue (renderIssue), which the archive
  * serves to anyone, never has the tool. The send path (PR 4) adds it per
  * recipient, only for a reader with opt-in evidence, and checks that body
- * before it sends.
+ * before it sends. The tool is looked up in the registry as it is now: a
+ * tool that is not usable now (paused or relinked since the build, unknown,
+ * or the registry cannot be read) is left out, and the same `issue` object
+ * comes back, so the reader gets the shared copy.
  * @param {{ subject: string, preview: string, html_body: string, text_body: string }} issue  renderIssue's result
  * @param {string} toolId  a reviewed tool's product id (tools.js)
  */
 function withToolBlock(issue, toolId) {
-  const block = toolBlock(toolId);
+  const tool = toolById(toolId);
+  if (!tool) return issue;
+  const block = toolBlock(tool);
   return { ...issue, html_body: `${issue.html_body}\n${wrapBlock(block)}`, text_body: `${issue.text_body}\n${block.text}\n` };
 }
 
