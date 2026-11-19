@@ -173,14 +173,16 @@ const NUMERIC_DATE = /(?<![\d/.])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/
 // first date stays a deadline in two cases only: the text calls that date an end ("order by
 // Nov 20 - Nov 25 delivery"), or the range is a rep's time off or a closed branch ("on PTO
 // May 21-May 26"), where its first day is the one to order before.
-const DASH = String.raw`(?:-|–|—|&ndash;|&mdash;|&#821[12];|&#x201[34];)`;
+const DASH = String.raw`(?:-|‐|‑|‒|–|—|−|&ndash;|&mdash;|&#821[12];|&#x201[34];)`;
 // What joins a range's two dates: a dash (SiteOne's text part keeps the HTML entity) or
 // to/through/thru/until, with or without spaces or &nbsp; around it.
 const RANGE_DASH = String.raw`(?:\s|&nbsp;)*(?:${DASH}|to|through|thru|until|till)(?:\s|&nbsp;)*`;
-// The whole text between a range's two dates: the join, maybe a weekday after it. Also all the
-// text after a range's first date when the text stops before the second ("Offer valid Nov 1 –"
-// at the end of an excerpt): the range's end was cut off.
-const RANGE_JOIN = new RegExp(String.raw`^${RANGE_DASH}(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?(?:\s|&nbsp;)*)?$`, 'i');
+// The whole text between a range's two dates: the join, maybe a weekday in brackets before it
+// ("Nov 2 (Mon) – Nov 6") or a weekday after it ("Nov 2 – Friday, Nov 6"). Also all the text
+// after a range's first date when the text stops before the second ("Offer valid Nov 1 –" at
+// the end of an excerpt): the range's end was cut off.
+const WEEKDAY = String.raw`(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?`;
+const RANGE_JOIN = new RegExp(String.raw`^(?:\s*\(${WEEKDAY}\))?${RANGE_DASH}(?:${WEEKDAY},?(?:\s|&nbsp;)*)?$`, 'i');
 // "between Nov 1 and Nov 30": the join, and the word right before the first date.
 const BETWEEN_JOIN = /^(?:\s|&nbsp;)+and(?:\s|&nbsp;)+$/i;
 const BETWEEN_BEFORE = /\bbetween(?:\s|&nbsp;)+$/i;
@@ -192,18 +194,19 @@ const BETWEEN_BEFORE = /\bbetween(?:\s|&nbsp;)+$/i;
 //   clause's end ("Nov 1 – 30, 2026", "Nov 1 through 30.", "Nov 1 - 30 only"). A spaced number
 //   with words after it is often a quantity ("Nov 1 - 2 free cases", "Nov 2 - 3 PM"), and a
 //   colon, comma or period before a digit ends no clause ("Nov 2 - 3:00 PM").
-const QUANTITY_WORD = String.raw`(?:%|percent|am|pm|free|off|for\s*\$|each|per|x|or more|cases?|bags?|units?|items?|pcs|pieces?|packs?|boxes?|bottles?|jugs?|pails?|cans?|pallets?|gal|gallons?|lbs?|pounds?|oz|ounces?|qts?|quarts?|pts?|pints?|tons?|acres?)`;
+const QUANTITY_WORD = String.raw`(?:%|percent|am|pm|[ap]\.m\b\.?|free|off|for\s*\$|each|per|x|or more|cases?|bags?|units?|items?|pcs|pieces?|packs?|boxes?|bottles?|jugs?|pails?|cans?|pallets?|gal|gallons?|lbs?|pounds?|oz|ounces?|qts?|quarts?|pts?|pints?|tons?|acres?)`;
 const TIGHT_DAY_FOLLOWER = String.raw`(?<=${DASH}\d{1,2}(?:st|nd|rd|th)?)(?![%/:.,]\d|[\s-]*${QUANTITY_WORD}(?![a-z]))`;
 const SPACED_DAY_FOLLOWER = String.raw`(?=,?\s+20\d{2}\b|[^\S\n]*(?:only\b|[;!?)\]*\n]|[,:.](?!\d)|$))`;
 const SAME_MONTH_END = new RegExp(String.raw`${RANGE_DASH}(?<day>\d{1,2})(?:st|nd|rd|th)?\b(?:${TIGHT_DAY_FOLLOWER}|${SPACED_DAY_FOLLOWER})(?:,?\s+(?<year>20\d{2})\b)?`, 'iy');
-// "11/1 - 11/30 in stores": NUMERIC_DATE drops 11/30, as "in" also means inches. After a numeric
-// date and a join, an m/d with "in" after it is the range's end when it has the same month and a
-// later day. A fraction range fails that test: "1/2 - 3/4 in" changes the top number, and
-// "1/8 - 1/4 in" lowers the bottom one.
-const NUMERIC_END_BEFORE_IN = new RegExp(String.raw`${RANGE_DASH}(?<month>\d{1,2})\/(?<day>\d{1,2})(?:\/(?<year>\d{4}|\d{2}))?(?![\d/])(?=\s*in\b)`, 'iy');
+// "11/15 - 12/15 in stores": NUMERIC_DATE drops 12/15, as "in" also means inches. After a numeric
+// date and a join, an m/d with "in" after it is the range's end when it is a later date and no
+// inch fraction, so a size range ("1/2 - 3/4 in") reads as before. An inch fraction is in lowest
+// terms: an odd top number over 2, 4, 8 or 16 (1/2, 3/4, 5/8, 7/16).
+const INCH_FRACTION = String.raw`(?:1\/2|[13]\/4|[1357]\/8|(?:[13579]|11)\/16)\b`;
+const NUMERIC_END_BEFORE_IN = new RegExp(String.raw`${RANGE_DASH}(?!${INCH_FRACTION})(?<month>\d{1,2})\/(?<day>\d{1,2})(?:\/(?<year>\d{4}|\d{2}))?(?![\d/])(?=\s*in\b)`, 'iy');
 // Words right before a date that make it an end, so no range opens on it ("ends Nov 20",
 // "order by Friday, Nov 20").
-const END_WORD_BEFORE = /\b(?:ends?|ending|expires?|expiring|by|before|through|thru|until|till)\b[\s:,]*(?:on\s+)?(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s*)?$/i;
+const END_WORD_BEFORE = new RegExp(String.raw`\b(?:ends?|ending|expires?|expiring|by|before|through|thru|until|till)\b[\s:,]*(?:on\s+)?(?:${WEEKDAY},?\s*)?$`, 'i');
 // A rep's time off or a closed branch.
 const AWAY_WORD = /\b(?:pto|ooo|out of (?:the )?office|vacation|on leave|time off|days? off|travel(?:l?ing)|closed|closure)\b|\b(?:be|i['’]m|i am|we['’]re|we are)\s+(?:out|off|away)\b/i;
 // A sentence ends at . ! or ? before a space or the end of the text. A decimal point ("$24.99"),
@@ -307,12 +310,10 @@ function extractDeadline(text, receivedAt) {
     // A range end that the date list does not hold: a bare day ("Nov 1-30"), or an m/d before "in".
     const endRe = date.named ? SAME_MONTH_END : NUMERIC_END_BEFORE_IN;
     endRe.lastIndex = end;
-    const rangeEnd = endRe.exec(body)?.groups ?? {};
-    if (Number(rangeEnd.month ?? date.month) === date.month && Number(rangeEnd.day) > date.day && opensOffer(body, start, endRe.lastIndex)) {
-      consider(date.month, Number(rangeEnd.day), rangeEnd.year || date.year);
-    } else {
-      consider(date.month, date.day, date.year);
-    }
+    const { month = date.month, day, year = date.year } = endRe.exec(body)?.groups ?? {};
+    const later = Number(month) > date.month || (Number(month) === date.month && Number(day) > date.day);
+    if (later && opensOffer(body, start, endRe.lastIndex)) consider(Number(month), Number(day), year);
+    else consider(date.month, date.day, date.year);
   });
   return candidates.length ? candidates.sort()[0] : null;
 }

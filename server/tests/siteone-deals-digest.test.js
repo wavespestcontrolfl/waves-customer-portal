@@ -156,6 +156,9 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Valid 11/1 - 11/30', received)).toBe('2026-11-30');
     // "in" after a numeric date also means inches; after a same-month range start it is a word.
     expect(extractDeadline('Offer valid 11/1 - 11/30 in stores', received)).toBe('2026-11-30');
+    expect(extractDeadline('Offer valid 11/15 - 12/15 in stores', received)).toBe('2026-12-15');
+    expect(extractDeadline('Promotion runs Nov 2 (Mon) - Nov 6 (Fri)', received)).toBe('2026-11-06');
+    expect(extractDeadline('Valid Nov 1 ‒ Nov 30', received)).toBe('2026-11-30');
     expect(extractDeadline('Promotion runs Monday, Nov 2 through Friday, Nov 6', received)).toBe('2026-11-06');
     expect(extractDeadline('Valid Nov 1-30, 2026', received)).toBe('2026-11-30');
     // The offer word can follow the range, as in a date-first subject.
@@ -198,6 +201,7 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Promo through Nov 1 - 2 for $50', received)).toBe('2026-11-01');
     expect(extractDeadline('Special pickup Nov 2 - 3 PM', received)).toBe('2026-11-02');
     expect(extractDeadline('Special pickup Nov 2 - 3:00 PM', received)).toBe('2026-11-02');
+    expect(extractDeadline('Special pickup Nov 2-3 p.m.', received)).toBe('2026-11-02');
     expect(extractDeadline('Offer ends Nov 20 - order now', received)).toBe('2026-11-20');
   });
 
