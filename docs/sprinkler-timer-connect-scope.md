@@ -8,7 +8,8 @@ API access.
 The idea: a lawn customer connects the sprinkler timer on their wall to the
 Waves app. After a treatment whose instruction is to skip watering for a
 time, Waves pauses the lawn zones on its own. When the weekly plan says
-water, the customer starts it with one tap.
+water, the customer starts it with one tap, or has the timer run it at a
+day and time they set.
 
 ## What the owner said (2026-11-19)
 
@@ -18,10 +19,13 @@ water, the customer starts it with one tap.
 - The common Hunter in Lakewood Ranch is the **X2** (identified from the
   Home Depot listing for the 6-station model).
 - Scope the build and show the screens in the app.
+- Can the weekly watering email drive the timer: when it says water 20
+  minutes this week, the timer runs 20 minutes at a set time, with no tap.
+  This is step 4.
 
 ## Verdict
 
-Worth building for Hunter, in three steps. Rain Bird stays on the hand-run
+Worth building for Hunter, in four steps. Rain Bird stays on the hand-run
 guides until Rain Bird offers a way in.
 
 - The portal already decides what each lawn needs: the Monday watering plan
@@ -33,8 +37,12 @@ guides until Rain Bird offers a way in.
 - Rain Bird has no public API for home timers. Nothing in this scope can
   reach one.
 - Step 1 (record which timer each customer has) needs no vendor and ships
-  on its own. It also gives the number that decides how much steps 2 and 3
-  are worth: nothing on file today says how many homes are on Hydrawise.
+  on its own. It also gives the number that decides how much the later
+  steps are worth: nothing on file today says how many homes are on
+  Hydrawise.
+- Step 4 is the one that makes the weekly plan run itself. It is also the
+  only step where Waves starts water with nobody watching, so it comes
+  last and carries the most conditions.
 
 ## What the app would do
 
@@ -44,11 +52,11 @@ guides until Rain Bird offers a way in.
 | Connect | Customer signs in with their Hydrawise account and marks which zones water grass. | Customer |
 | Pause after a treatment | When a lawn visit's instruction is "keep it dry until a set time", the turf zones are paused until that time. The pause ends on the timer itself. | Waves, automatically |
 | Run this week's plan | Starts the turf zones for the plan's minutes. | Customer, one tap |
+| Follow the weekly plan | At the day and time the customer set, starts the turf zones for that week's minutes. No run in a week the plan says skip, or after enough rain. | Waves, at the customer's set time |
 
-Not in this scope: starting water without a tap, skipping a week
-automatically, editing the customer's schedule, Rain Bird, confirming a
-water-in on the service report, and any change to the texts customers
-receive. See "Later".
+Not in this scope: editing the customer's schedule, Rain Bird, confirming a
+water-in on the service report, and any change to the texts and emails
+customers receive. See "Later".
 
 ## Screens
 
@@ -211,12 +219,63 @@ Its own gate. About 3 days.
 - **Gate** `GATE_IRRIGATION_CONTROLLER_AUTO_PAUSE`, which needs the connect
   gate. The named risk is acting without a tap.
 
+### Step 4 · Follow the weekly plan automatically
+
+Its own gate and its own customer opt-in. About 5 days on top of steps 2
+and 3.
+
+- **What it does.** At the day and start time on file, Waves starts the
+  turf zones for the week's minutes. A week whose plan is `hold` gets no
+  run, so a skip week is real with nothing to pause. A plan with two runs
+  uses two slots.
+- **Who sets the time.** The customer picks their watering day and a start
+  time once, the same statement they make today when they program a timer.
+  Where the restriction policy can establish the home's day or hours (the
+  house-number weekday under a one-day order,
+  `server/config/irrigation-restrictions.js:238`; `allowedHours` when the
+  policy carries them), the app offers only those. Where it cannot, the
+  customer confirms the day is their permitted one. Waves never picks a day
+  it was not given and cannot establish.
+- **Rain check, automatic.** The plan's own rule is that half an inch of
+  rain before a run skips that run. Before each run the worker reads the
+  observed rain for the home's water area, the figure the daily
+  property-alerts sweep already uses (`rainRuleCandidates`,
+  `server/services/property-alerts.js:89`), and skips at half an inch or
+  more.
+- **After a treatment.** A run that falls inside a pause waits for the
+  pause to end and still has to land in a permitted slot. Otherwise it is
+  dropped, the rule the report already applies (`renderWeekPlanNotBefore`,
+  `server/services/irrigation-week-plan.js:539`).
+- **The timer's own lawn schedule has to be empty.** Otherwise the lawn is
+  watered twice. The opt-in says so, and the card warns while the timer
+  still shows lawn runs of its own. Beds and drip keep their schedule.
+- **Minutes.** The plan gives minutes only when the turf has one head type
+  (`packages/irrigation-runtime/index.js:238`). A yard with spray and rotor
+  zones needs each zone's head type marked on the zone screen. Until then
+  it stays on the tap.
+- **When a run cannot happen** (timer offline, Hunter unreachable, Waves
+  down) the lawn is not watered. This is the reverse of today, where the
+  timer waters no matter what the plan says. The card shows the missed run
+  and offers Run; repeated misses raise one admin alert.
+- **Plumbing.** The ledger and sweep cron from step 3. A week's runs are
+  written when Monday's plan is published (the transaction that sets
+  `published_at` in `server/services/irrigation-weekly-email.js`) and
+  applied by the worker at their time.
+- **The connect sheet changes** for a customer who switches this on: "never
+  starts watering on its own" becomes "starts watering only at the day and
+  time you set".
+- **Gate** `GATE_IRRIGATION_CONTROLLER_AUTO_RUN`, which needs the connect
+  gate. The named risk is starting water with nobody watching.
+
+A safer form to ask Hunter about: carry the plan in the timer's own
+schedule, by setting its run time each week, so the lawn is still watered
+when Waves cannot reach it. Whether the API can change a schedule is not
+established.
+
 ### Later, not scoped
 
-- Making a skip week real: Monday's `hold` pauses the turf zones for the
-  week. This is the larger water saving, and the larger risk to a lawn.
-- Running in the next allowed window. It needs the watering day and hours
-  per address to be an authority, which they are not yet.
+- A skip week for a customer who keeps their own lawn schedule: Monday's
+  `hold` would pause the turf zones for the week.
 - Reading back what the timer did: confirming a water-in on the service
   report, and feeding measured watering into the next week's plan, which
   today assumes last week's prescription was followed.
@@ -226,8 +285,10 @@ Its own gate. About 3 days.
 ## Rules it sits under
 
 - Watering restrictions are a hard limit above the model (owner
-  2026-08-28). So Waves only removes water on its own. Adding water always
-  needs the customer's tap and a plan that says run.
+  2026-08-28). So steps 2 and 3 only remove water on their own, and a run
+  needs the customer's tap and a plan that says run. Step 4 starts water
+  without a tap, only at a day and time the customer set and the policy
+  does not contradict.
 - Never test on a real customer's record. Testing uses a bench timer (an X2
   with a WAND needs no valves to answer the API) and the owner's own
   account.
@@ -247,17 +308,18 @@ Its own gate. About 3 days.
 - Admin alerts go through `raiseAdminAlert`.
 - Customer surface rules: glass theme, 16px prose, `npm run
   check:portal-brand`.
-- Review tier is Full for steps 2 and 3 (schema, a public route, a
-  credential store).
+- Review tier is Full for steps 2 to 4 (schema, a public route, a
+  credential store, unattended watering).
 
 ## Outside the code
 
 1. **Ask Hunter for commercial API access** (their page says to use the
-   support form with "GraphQL" in the subject), with five questions: what
+   support form with "GraphQL" in the subject), with six questions: what
    the sign-in flow is; whether one zone can be suspended until a set time
-   and run for a set time; the call limits; the terms, fees and branding
-   rules; and whether the WAND fits every X2 (one review says only those
-   built after December 2022).
+   and run for a set time; whether a schedule's run time can be changed;
+   the call limits; the terms, fees and branding rules; and whether the
+   WAND fits every X2 (one review says only those built after December
+   2022).
 2. **A bench timer**: an X2-600 (about $88) and a WAND (about $109).
 3. **Licensing and insurance**: whether a lawn company changing a setting
    on a customer's timer counts as irrigation contracting in Florida or the
@@ -283,6 +345,10 @@ Its own gate. About 3 days.
 6. **Who installs a module** when a customer wants one: the customer, or an
    irrigation contractor Waves refers.
 7. **The pilot list** after the bench test.
+8. **Step 4.** Whether Waves may start watering on a schedule at all; that
+   the customer, not Waves, sets the day and time; and what a missing
+   rain reading does (recommended: the run goes ahead, because skipping on
+   missing data leaves a lawn dry week after week).
 
 ## Risks and unknowns
 
@@ -297,8 +363,12 @@ Its own gate. About 3 days.
 - Whether starting several zones queues them or replaces the running one
   is unknown until the bench test. If they do not queue, the run needs a
   small sequencer.
-- Liability for a dry lawn or a watering-rule fine after Waves acted on a
-  timer. Belongs with decision 1 and the insurance question.
+- Liability for a dry lawn, a watering-rule fine, or water from a broken
+  head after Waves acted on a timer. Step 4 raises all three. Belongs with
+  decisions 1 and 8 and the insurance question.
+- Whether a run started through the API obeys the timer's rain sensor is
+  unknown until the bench test. Step 4's own rain check does not depend on
+  it.
 
 ## Sources
 
