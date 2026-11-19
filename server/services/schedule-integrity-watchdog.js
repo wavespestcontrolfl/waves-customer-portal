@@ -795,14 +795,14 @@ async function runInner({ now = new Date() } = {}) {
   // above under the per-run cap.
   const churned = await churnedLiveWorkAlerts(todayET);
   alerts.push(...churned.alerts);
-  // After that, two visits at one start: a schedule fix with days to spare, so
-  // it takes only what is left of the cap.
+  // Two visits at one start: a schedule fix with days to spare. Found here so
+  // the close pass judges its bells with the rest, but rung only after the
+  // combined-booking check below, with what is left of the shared budget.
   const sameStart = await sameStartVisitAlerts(todayET);
-  alerts.push(...sameStart.alerts);
 
   const delivered = await deliverAlerts({
-    alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
-    churnedWorkCheckFailed: churned.failed, sameStartCheckFailed: sameStart.failed,
+    alerts, lateAlerts: sameStart.alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed,
+    acceptedScheduleCheckFailed, churnedWorkCheckFailed: churned.failed, sameStartCheckFailed: sameStart.failed,
   });
 
   // Combined-booking check (owner request 2026-09-29): a multi-service accept's
@@ -824,6 +824,9 @@ async function runInner({ now = new Date() } = {}) {
     logger.error(`[schedule-integrity] combined-booking check failed: ${err.message}`);
   }
 
+  // Last: two visits at one start, within what is left of the shared budget.
+  const sameStartRang = await ringWithinBudget(sameStart.alerts, { episodes, budget: lateBudget(delivered, combinedBooking) });
+
   return {
     skipped: false,
     todayET,
@@ -842,71 +845,91 @@ async function runInner({ now = new Date() } = {}) {
     combinedBookingCheckFailed,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
+    alerted: delivered.alerted + sameStartRang,
   };
+}
+
+// One finding to the bell: [dedupeKey, title, body, metadata, options].
+// Returns true for a REAL ring (a row created or re-rung); false for a silent
+// dedupe onto a standing row or a suppressed internal-test alert.
+async function ringAlert(episodes, dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) {
+  // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
+  // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
+  // site-level tag these money-loss pages would return a suppressed
+  // sentinel instead of ringing.
+  // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
+  // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
+  // here instead of a local read-then-insert (the old alreadyAlerted())
+  // that raced across overlapping ticks and could double-ring.
+  const alertOpts = {
+    link,
+    ...(detail ? { detail } : {}),
+    bell: true,
+    dedupeKey,
+    ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
+    ...(ringOnRefresh ? { ringOnRefresh } : {}),
+    ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
+    metadata: { dedupeKey, ...metadata },
+  };
+  // Episodes: the reopen wrapper (an auto-cleared row rings again; a
+  // standing one is a silent dedupe). Killed: exactly the pre-episode call.
+  const created = episodes
+    ? await alertEpisodes.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
+    : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
+  // NotificationService.create swallows insert errors into a null result;
+  // this job's ONLY output is the bell, so a lost bell must fail the run
+  // loudly instead of logging success. Internal-test suppression
+  // ({ suppressed: true }) is a deliberate success-without-a-row.
+  if (!created || (created.id == null && !created.suppressed)) {
+    throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
+  }
+  // A deduped result (the standing row already exists and either matched
+  // or was just refreshed) is not a NEW alert for this run's count. Under
+  // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
+  // or a refresh that rang) — never a silent dedupe onto a standing row.
+  // A suppressed alert (an internal test customer) made no bell in either
+  // mode, so it never takes a cap slot from a real one.
+  return !(created.suppressed || (episodes ? !created.rang : created.deduped));
+}
+
+// What the classes rung so far and the combined-booking check left of the run's
+// shared budget. The check's time-critical problems ring whatever the budget,
+// and those rings count here too. A failed check (null) reports no rings.
+function lateBudget(delivered, combinedBooking) {
+  return Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted - (Number(combinedBooking?.rings) || 0));
+}
+
+const capHit = () => logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
+
+// Rings `alerts` in order until `budget` real rings are spent; the rest ring on
+// a later run (their condition is found again). Returns the real rings.
+async function ringWithinBudget(alerts, { episodes, budget }) {
+  let rang = 0;
+  for (const alert of alerts) {
+    if (rang >= budget) { capHit(); break; }
+    if (await ringAlert(episodes, ...alert)) rang += 1;
+  }
+  return rang;
 }
 
 // Delivers one run's findings: rings them in order, capped at
 // MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
 // standing bell the findings no longer name (closeResolvedAlerts).
-async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed, sameStartCheckFailed }) {
+// `lateAlerts` are findings rung later in the run (ringWithinBudget): they
+// count as live here, so the close pass never closes a bell that is still
+// standing, but this pass does not ring them.
+async function deliverAlerts({ alerts, lateAlerts = [], episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed, sameStartCheckFailed }) {
   let alerted = 0;
-  const capped = () => {
-    if (alerted < MAX_ALERTS_PER_RUN) return false;
-    logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
-    return true;
-  };
-  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch', detail, refreshOnDedupe, ringOnRefresh, dedupeVersion } = {}) => {
-    // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
-    // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
-    // site-level tag these money-loss pages would return a suppressed
-    // sentinel instead of ringing.
-    // Forever-dedupe (or refreshed-on-change with dedupeVersion) now runs
-    // through notifyAdmin's own advisory-locked dedupe — passing dedupeKey
-    // here instead of a local read-then-insert (the old alreadyAlerted())
-    // that raced across overlapping ticks and could double-ring.
-    const alertOpts = {
-      link,
-      ...(detail ? { detail } : {}),
-      bell: true,
-      dedupeKey,
-      ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}),
-      ...(ringOnRefresh ? { ringOnRefresh } : {}),
-      ...(dedupeVersion !== undefined ? { dedupeVersion } : {}),
-      metadata: { dedupeKey, ...metadata },
-    };
-    // Episodes: the reopen wrapper (an auto-cleared row rings again; a
-    // standing one is a silent dedupe). Killed: exactly the pre-episode call.
-    const created = episodes
-      ? await alertEpisodes.raiseAdminAlertWithReopen('alert', title, body, alertOpts)
-      : await NotificationService.notifyAdmin('alert', title, body, alertOpts);
-    // NotificationService.create swallows insert errors into a null result;
-    // this job's ONLY output is the bell, so a lost bell must fail the run
-    // loudly instead of logging success. Internal-test suppression
-    // ({ suppressed: true }) is a deliberate success-without-a-row.
-    if (!created || (created.id == null && !created.suppressed)) {
-      throw new Error(`[schedule-integrity] notification insert failed for ${dedupeKey} — pager output lost`);
-    }
-    // A deduped result (the standing row already exists and either matched
-    // or was just refreshed) is not a NEW alert for this run's count. Under
-    // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
-    // or a refresh that rang) — never a silent dedupe onto a standing row.
-    // A suppressed alert (an internal test customer) made no bell in either
-    // mode, so it never takes a cap slot from a real one.
-    if (created.suppressed || (episodes ? !created.rang : created.deduped)) return false;
-    alerted += 1;
-    return true;
-  };
-
   // Live keys per class, from the COMPLETE findings — computed before the
   // loop so the per-run cap (which only limits new rings) never changes
   // what the close pass judges.
-  const liveKeys = new Set(alerts.map((alert) => alert[0]));
+  const liveKeys = new Set([...alerts, ...lateAlerts].map((alert) => alert[0]));
   // Keys this run actually delivered (created, re-rung, or standing): a
   // finding the cap held back has no bell yet.
   const deliveredKeys = new Set();
   for (const alert of alerts) {
-    if (capped()) break;
-    await ring(...alert);
+    if (alerted >= MAX_ALERTS_PER_RUN) { capHit(); break; }
+    if (await ringAlert(episodes, ...alert)) alerted += 1;
     deliveredKeys.add(alert[0]);
   }
   if (!episodes) return { alerted };

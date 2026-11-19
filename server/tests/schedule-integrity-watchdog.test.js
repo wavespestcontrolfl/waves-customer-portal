@@ -1166,18 +1166,26 @@ describe('same-start visits (class 5)', () => {
     `same-start-visits:${customerId}`,
     "Schedule — split Pat Example's visits at the same time",
     '2 visits start at 11 AM on Aug 10; split them so they run back to back, one hour each.',
-    { customer_id: customerId, day_keys: ['2026-08-10 11:00'] },
+    { customer_id: customerId, itemKeys: ['2026-08-10'] },
     { link: `/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-${customerId}`, detail: 'Aug 10 at 11 AM: Lawn and Pest.',
       refreshOnDedupe: true, ringOnRefresh: () => false },
   ];
   const openKeysByPrefix = (byPrefix) => episodeHelpers.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => byPrefix[prefix] || []);
   const closedBy = () => Object.fromEntries(episodeHelpers.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [reason, keys]));
 
-  test('its bells ring last, after the churned class, with the copy, link and detail the check built', async () => {
+  test('its bells ring last, after the churned class and the combined-booking check, with the copy, link and detail the check built', async () => {
     sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1')], failed: false });
     makeDbMock({ coverageRows: [unpricedChild()], churnedRows: [{ id: 'cust-churned-1', live_visits: 1, unsent_invoices: 0 }] });
+    let keysWhenCombinedRan = null;
+    runCombinedBookingCheck.mockImplementationOnce(async () => {
+      keysWhenCombinedRan = episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey);
+      return { checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0, rings: 0 };
+    });
     const result = await runInner({ now: NOW });
     expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04');
+    // The combined-booking check ran with the budget the two classes left, before any same-start bell.
+    expect(runCombinedBookingCheck.mock.calls[0][0].ringBudget).toBe(8);
+    expect(keysWhenCombinedRan).toEqual(['unpriced-series:ss-parent-1', 'churned-live-work:cust-churned-1']);
     const calls = episodeHelpers.raiseAdminAlertWithReopen.mock.calls;
     expect(calls.map((c) => c[3].dedupeKey))
       .toEqual(['unpriced-series:ss-parent-1', 'churned-live-work:cust-churned-1', 'same-start-visits:cust-pair-1']);
@@ -1188,9 +1196,37 @@ describe('same-start visits (class 5)', () => {
     expect(opts).toMatchObject({
       link: '/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-cust-pair-1', detail: 'Aug 10 at 11 AM: Lawn and Pest.',
       bell: true, dedupeKey: 'same-start-visits:cust-pair-1', refreshOnDedupe: true,
-      metadata: { dedupeKey: 'same-start-visits:cust-pair-1', customer_id: 'cust-pair-1', day_keys: ['2026-08-10 11:00'] },
+      metadata: { dedupeKey: 'same-start-visits:cust-pair-1', customer_id: 'cust-pair-1', itemKeys: ['2026-08-10'] },
     });
     expect(result).toMatchObject({ sameStartVisits: 1, sameStartCheckFailed: false, alerted: 3 });
+  });
+
+  test('they ring within what the classes and the combined-booking check left of the budget; the rest wait for a later run', async () => {
+    const sameStartKeys = () => episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey).filter((k) => k.startsWith('same-start-visits:'));
+    // One class ring + nine combined-booking rings: nothing left.
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1'), pairAlert('cust-pair-2')], failed: false });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 9, problems: 9, rings: 9 });
+    makeDbMock({ coverageRows: [unpricedChild()] });
+    expect(await runInner({ now: NOW })).toMatchObject({ sameStartVisits: 2, alerted: 1 });
+    expect(sameStartKeys()).toEqual([]);
+
+    // Eight combined-booking rings: one left, so the first customer rings and the second waits.
+    jest.clearAllMocks();
+    episodeHelpers.raiseAdminAlertWithReopen.mockImplementation(delegatingRaise);
+    episodeHelpers.openAdminAlertKeys.mockImplementation(async () => []);
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1'), pairAlert('cust-pair-2')], failed: false });
+    runCombinedBookingCheck.mockResolvedValueOnce({ checked: 8, problems: 8, rings: 8 });
+    makeDbMock({ coverageRows: [unpricedChild()] });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 2 });
+    expect(sameStartKeys()).toEqual(['same-start-visits:cust-pair-1']);
+  });
+
+  test('a failed combined-booking check reports no rings: the same-start bells still ring in the budget the classes left', async () => {
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1')], failed: false });
+    runCombinedBookingCheck.mockRejectedValueOnce(new Error('boom'));
+    makeDbMock();
+    expect(await runInner({ now: NOW })).toMatchObject({ combinedBookingCheckFailed: true, alerted: 1 });
+    expect(episodeHelpers.raiseAdminAlertWithReopen.mock.calls.map((c) => c[3].dedupeKey)).toEqual(['same-start-visits:cust-pair-1']);
   });
 
   test('a customer with no same-time day left has its bell closed; a customer still listed keeps it', async () => {

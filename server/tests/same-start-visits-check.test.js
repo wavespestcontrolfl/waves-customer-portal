@@ -44,7 +44,7 @@ test('two visits at one start make one bell: who, when, the visit to move, the d
   expect(opts.detail).toBe('Dec 3 at 11 AM: Lawn Care Service and Pest Control Service.');
   expect(opts.refreshOnDedupe).toBe(true);
   expect(metadata).toEqual({
-    customer_id: 'cust-1', first_date: '2026-12-03', day_count: 1, day_keys: ['2026-12-03 11:00'], visit_ids: ['visit-a', 'visit-b'],
+    customer_id: 'cust-1', first_date: '2026-12-03', day_count: 1, itemKeys: ['2026-12-03'], visit_ids: ['visit-a', 'visit-b'],
     area: 'Schedule', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' }, doneWhen: 'visits_start_apart', who: 'person',
   });
 });
@@ -62,7 +62,8 @@ test('many days: the why counts them from the first, later-year days carry the y
   expect(opts.detail).toMatch(/ Jun 5, 2028 at 10:30 AM: Lawn Care Service and Tree & Shrub Care Service\. And 2 more days\.$/);
   expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-07&appointment=shrub-0');
   expect(metadata).toMatchObject({ first_date: '2026-12-07', day_count: 12 });
-  expect(metadata.day_keys).toHaveLength(12);
+  // Every day, the two past the ten listed too: a change to one of them still refreshes the bell.
+  expect(metadata.itemKeys).toEqual(dates);
   expect(metadata.ruleViolations).toBeUndefined();
   expect(title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
 });
@@ -111,13 +112,76 @@ test('a long name is cut to the 60-character headline; a name the rules refuse s
   expect(metadata).toMatchObject({ subject: { type: 'customer', id: 'cust-1' }, doneWhen: 'visits_start_apart', who: 'person' });
 });
 
-test('a standing bell rings again only when a day it did not list joins; a fixed day updates it quietly', async () => {
+test('a standing bell rings again only when a day it did not carry joins; a fixed day updates it quietly', async () => {
   finderReturns([visit(), visit({ id: 'visit-b' })]);
   const [[, , , , { ringOnRefresh }]] = (await sameStartVisitAlerts(TODAY)).alerts;
-  expect(ringOnRefresh({}, { day_keys: ['2026-12-03 11:00'] })).toBe(false);
-  expect(ringOnRefresh({}, { day_keys: ['2026-12-03 11:00', '2027-01-05 09:00'] })).toBe(false);
-  expect(ringOnRefresh({}, { day_keys: ['2027-01-05 09:00'] })).toBe(true);
+  expect(ringOnRefresh({}, { itemKeys: ['2026-12-03'] })).toBe(false);
+  expect(ringOnRefresh({}, { itemKeys: ['2026-12-03', '2027-01-05'] })).toBe(false);
+  expect(ringOnRefresh({}, { itemKeys: ['2027-01-05'] })).toBe(true);
   expect(ringOnRefresh({}, {})).toBe(true);
+});
+
+test('a day past the ten listed is still carried: replacing it rings, though the why, detail and link stay the same', async () => {
+  const dates = ['2026-12-07', '2027-02-08', '2027-04-05', '2027-06-07', '2027-08-02', '2027-10-04',
+    '2027-12-06', '2028-02-07', '2028-04-03', '2028-06-05', '2028-08-07', '2028-10-02'];
+  const findingFor = (list) => list.flatMap((date, i) => [
+    visit({ id: `lawn-${i}`, scheduled_date: day(date) }), visit({ id: `pest-${i}`, scheduled_date: day(date), service_type: 'Pest Control Service' }),
+  ]);
+  finderReturns(findingFor(dates));
+  const [[, , oldBody, oldMeta, oldOpts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  const moved = [...dates.slice(0, 11), '2028-12-04'];
+  finderReturns(findingFor(moved));
+  const [[, , body, metadata, opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect([body, opts.detail, opts.link]).toEqual([oldBody, oldOpts.detail, oldOpts.link]);
+  expect(metadata.itemKeys).toEqual(moved);
+  expect(opts.ringOnRefresh({}, { itemKeys: oldMeta.itemKeys })).toBe(true);
+});
+
+test('one date with two starts is one day with two groups; a later pair on a listed day never rings', async () => {
+  finderReturns([
+    visit({ id: 'v1', window_start: '09:00:00' }),
+    visit({ id: 'v2', window_start: '09:00:00', service_type: 'Pest Control Service' }),
+    visit({ id: 'v3', window_start: '11:00:00', service_type: 'Mosquito Service' }),
+    visit({ id: 'v4', window_start: '11:00:00', service_type: 'Tree & Shrub Care Service' }),
+  ]);
+  const [[, , body, metadata, opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect(body).toBe('4 visits on Dec 3 share a start time with another visit; split them so they run back to back.');
+  expect(opts.detail).toBe('Dec 3 at 9 AM: Lawn Care Service and Pest Control Service; at 11 AM: Mosquito Service and Tree & Shrub Care Service.');
+  expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-03&appointment=v2');
+  expect(metadata).toMatchObject({ day_count: 1, itemKeys: ['2026-12-03'], visit_ids: ['v1', 'v2', 'v3', 'v4'] });
+  // A standing bell that listed Dec 3 for the 9 AM pair alone: the 11 AM pair joining is a quiet update.
+  expect(opts.ringOnRefresh({}, { itemKeys: ['2026-12-03'] })).toBe(false);
+});
+
+test('two technicians at one start: each pair is its own group, and an unassigned visit joins every visit there', async () => {
+  finderReturns([
+    visit({ id: 'a1', technician_id: 'tech-a' }),
+    visit({ id: 'a2', technician_id: 'tech-a', service_type: 'Pest Control Service' }),
+    visit({ id: 'b1', technician_id: 'tech-b', service_type: 'Mosquito Service' }),
+    visit({ id: 'b2', technician_id: 'tech-b', service_type: 'Tree & Shrub Care Service' }),
+  ]);
+  const [[, , body, , opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect(body).toBe('4 visits on Dec 3 share a start time with another visit; split them so they run back to back.');
+  expect(opts.detail).toBe('Dec 3 at 11 AM: Lawn Care Service and Pest Control Service; at 11 AM, another technician: Mosquito Service and Tree & Shrub Care Service.');
+
+  finderReturns([
+    visit({ id: 'a1', technician_id: 'tech-a' }),
+    visit({ id: 'b1', technician_id: 'tech-b', service_type: 'Mosquito Service' }),
+    visit({ id: 'u1', technician_id: null, service_type: 'Pest Control Service' }),
+  ]);
+  const [[, , oneBody, , oneOpts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect(oneBody).toBe('3 visits start at 11 AM on Dec 3; split them so they run back to back, one hour each.');
+  expect(oneOpts.detail).toBe('Dec 3 at 11 AM: Lawn Care Service, Mosquito Service and Pest Control Service.');
+});
+
+test('the longest one-day why still fits the 110-character rule', async () => {
+  finderReturns(Array.from({ length: 12 }, (_, i) => visit({
+    id: `v-${String(i).padStart(2, '0')}`, scheduled_date: day('2027-09-30'), window_start: `${String(8 + Math.floor(i / 2)).padStart(2, '0')}:30:00`,
+  })));
+  const [[, , body, metadata]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect(body).toBe('12 visits on Sep 30, 2027 share a start time with another visit; split them so they run back to back.');
+  expect(body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+  expect(metadata.ruleViolations).toBeUndefined();
 });
 
 test('a failed read is reported, not swallowed into "no pairs": the watchdog then keeps the standing bells', async () => {

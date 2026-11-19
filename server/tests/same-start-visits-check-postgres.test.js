@@ -78,6 +78,9 @@ postgres('same-start visits check on Postgres', () => {
       // Three at one start: each visit is one row, not one row per partner.
       ...(await pair(live, { scheduled_date: '2040-01-23' })),
       await visit(live, { scheduled_date: '2040-01-23', service_type: 'Mosquito Service' }),
+      // Two technicians' pairs at one start: all four count, as two groups.
+      ...(await pair(live, { scheduled_date: '2040-01-24', technician_id: techA })),
+      ...(await pair(live, { scheduled_date: '2040-01-24', technician_id: techB })),
     ];
     await pair(live, { scheduled_date: '2040-01-17', technician_id: techA }, { technician_id: techB }); // two people working at once
     await pair(live, { scheduled_date: '2040-01-18' }, { status: 'cancelled' });
@@ -99,12 +102,13 @@ postgres('same-start visits check on Postgres', () => {
     const ours = alerts.filter((a) => mine.has(String(a[3].customer_id)));
     expect(ours.map((a) => a[0])).toEqual([`${SAME_START_PREFIX}${live}`]);
     expect(ours[0][3]).toMatchObject({
-      first_date: '2040-01-15', day_count: 3, day_keys: ['2040-01-15 10:00', '2040-01-16 09:00', '2040-01-23 10:00'],
+      first_date: '2040-01-15', day_count: 4, itemKeys: ['2040-01-15', '2040-01-16', '2040-01-23', '2040-01-24'],
     });
-    expect(ours[0][2]).toBe('3 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
+    expect(ours[0][2]).toBe('4 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
     expect(ours[0][4].detail).toBe('Jan 15 at 10 AM: Lawn Care Service and Pest Control Service.'
       + ' Jan 16 at 9 AM: Lawn Care Service and Pest Control Service.'
-      + ' Jan 23 at 10 AM: Lawn Care Service, Mosquito Service and Pest Control Service.');
+      + ' Jan 23 at 10 AM: Lawn Care Service, Mosquito Service and Pest Control Service.'
+      + ' Jan 24 at 10 AM: Lawn Care Service and Pest Control Service; at 10 AM, another technician: Lawn Care Service and Pest Control Service.');
   });
 
   test('one bell through the watchdog: raised, a new day rings, a fixed day is quiet, the split closes it, a comeback rings', async () => {
@@ -127,7 +131,7 @@ postgres('same-start visits check on Postgres', () => {
     expect(raised.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-15&appointment=${jan15Pest.id}`);
     expect(raised.read_at).toBeNull();
     expect(raised.metadata).toMatchObject({
-      dedupeKey: key, customer_id: customerId, day_keys: ['2040-01-15 10:00'], area: 'Schedule', severity: 'needs-you',
+      dedupeKey: key, customer_id: customerId, itemKeys: ['2040-01-15'], area: 'Schedule', severity: 'needs-you',
       subject: { type: 'customer', id: customerId }, doneWhen: 'visits_start_apart', who: 'person',
     });
 
@@ -140,7 +144,7 @@ postgres('same-start visits check on Postgres', () => {
     expect(rang.id).toBe(raised.id);
     expect(rang.read_at).toBeNull();
     expect(rang.body).toBe('2 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
-    expect(rang.metadata.day_keys).toEqual(['2040-01-15 10:00', '2040-01-22 11:00']);
+    expect(rang.metadata.itemKeys).toEqual(['2040-01-15', '2040-01-22']);
 
     // 3. One day is split: the bell updates quietly (read state and last ring kept).
     const readAt = new Date('2040-01-10T18:00:00Z');
@@ -153,7 +157,7 @@ postgres('same-start visits check on Postgres', () => {
     expect(quiet.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-22&appointment=${jan22Pest.id}`);
     expect(new Date(quiet.read_at).toISOString()).toBe(readAt.toISOString());
     expect(quiet.metadata.rungAt).toBe(rang.metadata.rungAt);
-    expect(quiet.metadata.day_keys).toEqual(['2040-01-22 11:00']);
+    expect(quiet.metadata.itemKeys).toEqual(['2040-01-22']);
     expect(quiet.done_at).toBeNull();
 
     // 4. The last day is split: the bell closes itself.
@@ -173,5 +177,44 @@ postgres('same-start visits check on Postgres', () => {
     expect(back.read_at).toBeNull();
     expect(back.done_at).toBeNull();
     expect(back.metadata).toMatchObject({ autoCleared: false, recurrenceGeneration: 1 });
+  });
+
+  test('a day past the ten listed still counts: moving it rings the bell again; a second start on a listed day is quiet', async () => {
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    const tech = await technician();
+    const customerId = await customer();
+    const key = `same-start-visits:${customerId}`;
+    const bell = async () => (await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]))[0];
+    const markRead = (at) => trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]).update({ read_at: at });
+    const dates = Array.from({ length: 11 }, (_, i) => `2040-01-${String(15 + i).padStart(2, '0')}`);
+    const pairs = [];
+    for (const date of dates) pairs.push(await pair(customerId, { scheduled_date: date, technician_id: tech }));
+
+    await runInner({ now });
+    const raised = await bell();
+    expect(raised.body).toBe('11 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
+    expect(raised.detail).toMatch(/ Jan 24 at 10 AM: Lawn Care Service and Pest Control Service\. And 1 more day\.$/);
+    expect(raised.metadata.itemKeys).toEqual(dates);
+
+    // The eleventh day (not in the detail) moves to another day: the why, detail and link read the same, the bell rings.
+    await markRead(new Date('2040-01-10T17:00:00Z'));
+    await trx('scheduled_services').whereIn('id', pairs[10].map((v) => v.id)).update({ scheduled_date: '2040-02-01' });
+    await runInner({ now });
+    const moved = await bell();
+    expect(moved.id).toBe(raised.id);
+    expect([moved.body, moved.detail, moved.link]).toEqual([raised.body, raised.detail, raised.link]);
+    expect(moved.metadata.itemKeys).toEqual([...dates.slice(0, 10), '2040-02-01']);
+    expect(moved.read_at).toBeNull();
+
+    // A second pair at another start on a day already listed: the detail grows, the bell stays read.
+    const readAt = new Date('2040-01-10T18:00:00Z');
+    await markRead(readAt);
+    await pair(customerId, { scheduled_date: '2040-01-15', window_start: '13:00', window_end: '14:00', technician_id: tech });
+    await runInner({ now });
+    const grown = await bell();
+    expect(grown.id).toBe(raised.id);
+    expect(grown.detail).toMatch(/^Jan 15 at 10 AM: Lawn Care Service and Pest Control Service; at 1 PM: Lawn Care Service and Pest Control Service\. /);
+    expect(new Date(grown.read_at).toISOString()).toBe(readAt.toISOString());
+    expect(grown.metadata.rungAt).toBe(moved.metadata.rungAt);
   });
 });

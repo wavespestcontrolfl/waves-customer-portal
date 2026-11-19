@@ -21,15 +21,22 @@
  * arrival time is the no-window notice's (auto-dispatch/audit.js), and a
  * deleted or inactive customer's work is not checked here.
  *
+ * GROUPS: the visits at one start are one group when one of them is
+ * unassigned (each conflicts through it), else one group per technician with
+ * two or more of them. A day is a calendar day: two groups on one date (two
+ * starts, or two technicians' pairs at one start) are one day with two groups.
+ *
  * ALERT: one needs-you Schedule bell per customer (docs/admin-notifications.md),
  * raised by the schedule-integrity watchdog's daily 6:40 ET run, under its gate,
- * its per-run ring cap (this class rings last) and its alert episodes. The bell
- * names the first day and the number of days, links to the first day's
- * schedule, and lists the days in its detail. A day that joins a standing bell
- * rings it again; a day that is fixed or gone updates it quietly. The bell
- * closes itself when no upcoming day of the customer has two visits at one
- * start (fixed, cancelled or past), and a pair that comes back rings again.
- * Read-only against scheduled_services: it writes nothing but the admin bell.
+ * its shared ring budget (this class rings after every other one, the
+ * combined-booking check included) and its alert episodes. The bell names the
+ * first day and the number of days, links to the first day's schedule, and
+ * lists the days and their groups in its detail. Its itemKeys are every day,
+ * listed in the detail or not, so a day that joins a standing bell rings it
+ * again; a day that is fixed or gone updates it quietly. The bell closes itself
+ * when no upcoming day of the customer has two visits at one start (fixed,
+ * cancelled or past), and a pair that comes back rings again. Read-only against
+ * scheduled_services: it writes nothing but the admin bell.
  */
 
 const db = require('../models/db');
@@ -46,7 +53,8 @@ const DETAIL_DAYS = 10;
 
 // Every live visit after `todayET` (YYYY-MM-DD, Eastern) that shares its
 // customer, day and arrival start with another live visit for the same
-// technician, or with one of the two unassigned. One row per visit.
+// technician, or with one of the two unassigned. One row per visit, with its
+// technician, so the groups keep two technicians' pairs apart.
 function findSameStartVisits(todayET) {
   return db('scheduled_services as a')
     .join('scheduled_services as b', function sameCustomerDayAndStart() {
@@ -64,14 +72,43 @@ function findSameStartVisits(todayET) {
     .where(function oneTechnician() {
       this.whereNull('a.technician_id').orWhereNull('b.technician_id').orWhereRaw('a.technician_id = b.technician_id');
     })
-    .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'c.first_name', 'c.last_name')
+    .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'a.technician_id', 'c.first_name', 'c.last_name')
     .orderBy([{ column: 'a.customer_id' }, { column: 'a.scheduled_date' }, { column: 'a.window_start' }, { column: 'a.id' }]);
 }
 
 const byText = (a, b) => (a < b ? -1 : (a > b ? 1 : 0));
+const byService = (a, b) => byText(a.serviceType, b.serviceType) || byText(a.id, b.id);
 
-// The finder's rows as one finding per customer: its days in date and start
-// order, each day's visits in service order.
+// One start's visits as groups that must be split: with an unassigned visit
+// every visit there conflicts through it (one group); otherwise one group per
+// technician with two or more visits there.
+function startGroups(slot) {
+  const byTechnician = new Map();
+  for (const visit of slot.visits) {
+    const technician = visit.technicianId || '';
+    if (!byTechnician.has(technician)) byTechnician.set(technician, []);
+    byTechnician.get(technician).push(visit);
+  }
+  const groups = byTechnician.has('') ? [slot.visits] : [...byTechnician.values()];
+  return groups.filter((visits) => visits.length > 1).map((visits) => ({ start: slot.start, visits: [...visits].sort(byService) }));
+}
+
+// One customer's slots (date + start) as calendar days in date order, each
+// day's groups in start order.
+function daysOf(slots) {
+  const days = new Map();
+  for (const slot of slots) {
+    for (const group of startGroups(slot)) {
+      if (!days.has(slot.date)) days.set(slot.date, { date: slot.date, groups: [] });
+      days.get(slot.date).groups.push(group);
+    }
+  }
+  return [...days.values()]
+    .sort((a, b) => byText(a.date, b.date))
+    .map((day) => ({ ...day, groups: day.groups.sort((a, b) => byText(a.start, b.start) || byService(a.visits[0], b.visits[0])) }));
+}
+
+// The finder's rows as one finding per customer, with its days (daysOf).
 function groupByCustomer(rows) {
   const { fullName } = require('./admin-alert-names');
   const customers = new Map();
@@ -80,19 +117,17 @@ function groupByCustomer(rows) {
     const start = String(row.window_start || '').slice(0, 5);
     if (!date || !/^\d{2}:\d{2}$/.test(start)) continue;
     const customerId = String(row.customer_id);
-    if (!customers.has(customerId)) customers.set(customerId, { customerId, name: fullName(row), days: new Map() });
-    const days = customers.get(customerId).days;
+    if (!customers.has(customerId)) customers.set(customerId, { customerId, name: fullName(row), slots: new Map() });
+    const slots = customers.get(customerId).slots;
     const key = `${date} ${start}`;
-    if (!days.has(key)) days.set(key, { key, date, start, visits: [] });
-    days.get(key).visits.push({ id: String(row.id), serviceType: String(row.service_type || 'Service') });
+    if (!slots.has(key)) slots.set(key, { date, start, visits: [] });
+    slots.get(key).visits.push({
+      id: String(row.id), serviceType: String(row.service_type || 'Service'), technicianId: row.technician_id ? String(row.technician_id) : null,
+    });
   }
-  return [...customers.values()].map((finding) => ({
-    ...finding,
-    days: [...finding.days.values()]
-      .filter((day) => day.visits.length > 1)
-      .sort((a, b) => byText(a.key, b.key))
-      .map((day) => ({ ...day, visits: day.visits.sort((a, b) => byText(a.serviceType, b.serviceType) || byText(a.id, b.id)) })),
-  })).filter((finding) => finding.days.length);
+  return [...customers.values()]
+    .map(({ slots, ...finding }) => ({ ...finding, days: daysOf([...slots.values()]) }))
+    .filter((finding) => finding.days.length);
 }
 
 // "11 AM", "10:30 AM", "12 PM" from 'HH:MM'.
@@ -110,13 +145,21 @@ function dayWords(date, todayET) {
   return date.slice(0, 4) > String(todayET).slice(0, 4) ? `${short}, ${date.slice(0, 4)}` : short;
 }
 
-// The detail: every day (up to DETAIL_DAYS) with its time and services.
-function detailText(days, todayET) {
-  const listed = days.slice(0, DETAIL_DAYS).map((day) => {
-    const services = day.visits.map((v) => v.serviceType);
-    const named = services.length > 2 ? `${services.slice(0, -1).join(', ')} and ${services[services.length - 1]}` : services.join(' and ');
-    return `${dayWords(day.date, todayET)} at ${timeWords(day.start)}: ${named}.`;
+const listWords = (names) => (names.length > 2 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names.join(' and '));
+
+// One day in the detail: each group's start and services. A start that repeats
+// on the day is a second technician's pair ("at 9 AM, another technician: ...").
+function dayDetail(day, todayET) {
+  const parts = day.groups.map((group, i) => {
+    const repeat = i > 0 && day.groups[i - 1].start === group.start;
+    return `at ${timeWords(group.start)}${repeat ? ', another technician' : ''}: ${listWords(group.visits.map((v) => v.serviceType))}`;
   });
+  return `${dayWords(day.date, todayET)} ${parts.join('; ')}.`;
+}
+
+// The detail: every day (up to DETAIL_DAYS) with its groups.
+function detailText(days, todayET) {
+  const listed = days.slice(0, DETAIL_DAYS).map((day) => dayDetail(day, todayET));
   const more = days.length - listed.length;
   return [...listed, ...(more > 0 ? [`And ${more} more ${more === 1 ? 'day' : 'days'}.`] : [])].join(' ');
 }
@@ -129,12 +172,17 @@ function sameStartCopy(finding, todayET) {
   const names = require('./admin-alert-names');
   const compose = require('./admin-alert-compose');
   const [first] = finding.days;
-  const when = `${dayWords(first.date, todayET)} at ${timeWords(first.start)}`;
-  const why = finding.days.length === 1
-    ? `${first.visits.length} visits start at ${timeWords(first.start)} on ${dayWords(first.date, todayET)}; split them so they run back to back, one hour each.`
-    : `${finding.days.length} days have visits at the same time, first ${when}; split each so they run back to back.`;
-  // The visit the office moves: the last of the first day's visits.
-  const moveId = first.visits[first.visits.length - 1].id;
+  const [firstGroup] = first.groups;
+  const day = dayWords(first.date, todayET);
+  const visitCount = first.groups.reduce((n, group) => n + group.visits.length, 0);
+  let why = `${finding.days.length} days have visits at the same time, first ${day} at ${timeWords(firstGroup.start)}; split each so they run back to back.`;
+  if (finding.days.length === 1 && first.groups.length === 1) {
+    why = `${visitCount} visits start at ${timeWords(firstGroup.start)} on ${day}; split them so they run back to back, one hour each.`;
+  } else if (finding.days.length === 1) {
+    why = `${visitCount} visits on ${day} share a start time with another visit; split them so they run back to back.`;
+  }
+  // The visit the office moves: the last of the first day's first group.
+  const moveId = firstGroup.visits[firstGroup.visits.length - 1].id;
   const link = `/admin/dispatch?tab=schedule&date=${encodeURIComponent(first.date)}&appointment=${encodeURIComponent(moveId)}`;
   const detail = detailText(finding.days, todayET);
   const spec = {
@@ -162,21 +210,23 @@ function sameStartCopy(finding, todayET) {
 }
 
 // One customer's alert in the watchdog's tuple form: [dedupeKey, title, body,
-// metadata, options]. The refresh rings only when a day the standing bell did
-// not list joins it; a fixed day updates the bell quietly.
+// metadata, options]. itemKeys are every day (YYYY-MM-DD), listed in the
+// detail or not: notifyAdmin refreshes a standing bell when they change
+// (RING_METADATA_KEYS), and the refresh rings only when a day the bell did not
+// carry joins it; a fixed day updates the bell quietly.
 function sameStartAlert(finding, todayET) {
   const copy = sameStartCopy(finding, todayET);
-  const dayKeys = finding.days.map((day) => day.key);
+  const dates = finding.days.map((day) => day.date);
   return [
     `${SAME_START_PREFIX}${finding.customerId}`,
     copy.title,
     copy.why,
     {
       customer_id: finding.customerId,
-      first_date: finding.days[0].date,
-      day_count: finding.days.length,
-      day_keys: dayKeys,
-      visit_ids: finding.days.flatMap((day) => day.visits.map((v) => v.id)),
+      first_date: dates[0],
+      day_count: dates.length,
+      itemKeys: dates,
+      visit_ids: finding.days.flatMap((day) => day.groups.flatMap((group) => group.visits.map((v) => v.id))),
       ...copy.metadata,
     },
     {
@@ -184,8 +234,8 @@ function sameStartAlert(finding, todayET) {
       detail: copy.detail,
       refreshOnDedupe: true,
       ringOnRefresh: (_existing, existingMeta) => {
-        const known = new Set(Array.isArray(existingMeta?.day_keys) ? existingMeta.day_keys : []);
-        return dayKeys.some((key) => !known.has(key));
+        const known = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : []);
+        return dates.some((date) => !known.has(date));
       },
     },
   ];
