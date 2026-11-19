@@ -62,6 +62,14 @@ describe('generateFeaturedImage: reference markers follow the hero flags', () =>
     expect(AstroPublisher._internals.parseImageDataUrl(url)).toMatchObject({ logoReference: true, vanWrapReference: true });
   });
 
+  test('identification is passed to the planner, so an identification post never gets a people-free hero', async () => {
+    mockHero({ logoReference: false, vanWrapReference: false });
+    await generateFeaturedImage({ title: 'T', slug: 's', identification: true });
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'blog-hero', index: 0, identification: true }));
+    await generateFeaturedImage({ title: 'T', slug: 's' });
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenLastCalledWith(expect.objectContaining({ identification: false }));
+  });
+
   test('neither reference attached → the plain data URL is returned untouched', async () => {
     mockHero({ logoReference: false, vanWrapReference: false });
     const url = await generateFeaturedImage({ title: 'T', slug: 's' });

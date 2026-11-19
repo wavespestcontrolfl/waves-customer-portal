@@ -8,6 +8,7 @@ const BlogAuditor = require('../services/content/blog-auditor');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { invalidSpokeSites } = require('../services/content-astro/spoke-sites');
+const { isIdentificationPost } = require('../services/content/licensed-photo-library');
 const autonomousReviewQueue = require('../services/content/autonomous-review-queue');
 const internalLinkReviewQueue = require('../services/content/internal-link-review-queue');
 const { isEnabled } = require('../config/feature-gates');
@@ -213,10 +214,12 @@ function parseBoundedInt(value, { defaultValue, min, max, name }) {
 //
 // Call sites are expected to wrap this in try/catch and store the
 // error string alongside the post for display.
-async function generateFeaturedImage({ title, topic, keyword, slug }) {
+async function generateFeaturedImage({ title, topic, keyword, slug, identification = false }) {
   const AstroPublisher = require('../services/content-astro/astro-publisher');
   try {
-    const hero = await AstroPublisher.generatePlannedImage({ title, topic, keyword, mode: 'blog-hero', slug, index: 0 });
+    // identification: an identification post never gets a people-free hero
+    // (image-generator planFor; owner 2026-11-19).
+    const hero = await AstroPublisher.generatePlannedImage({ title, topic, keyword, mode: 'blog-hero', slug, index: 0, identification });
     logger.info(`[content] Generated featured image for "${title}" via ${hero.model} (${hero.plan.style}, ${String(hero.plan.setting).split(',')[0]})`);
     if (hero.screen?.checked && !hero.screen.ok) {
       logger.warn(`[content] Featured image for "${title}" still failed the text/logo screen after a retry (${hero.screen.reasons.join('; ')}) — operator review`);
@@ -759,6 +762,7 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
       topic: post.meta_description,
       keyword: post.keyword,
       slug: blogSlug(post),
+      identification: isIdentificationPost(post),
     });
 
     // Same predicates ATOMICALLY on the write (the image call above is slow —

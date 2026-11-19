@@ -49,7 +49,7 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
-  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration'), IMAGE_CHAIN_BUDGET_MS: 360000,
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), IMAGE_CHAIN_BUDGET_MS: 360000,
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
@@ -2906,6 +2906,17 @@ describe('generateHeroBuffer (publish-time AI hero)', () => {
     );
   });
 
+  test('an identification post (post_type or page_type diagnostic) plans its hero with identification: true', async () => {
+    imageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${PNG_B64}`, model: 'test-model' });
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    screenGeneratedImage.mockResolvedValue({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    for (const [extra, expected] of [[{ post_type: 'diagnostic' }, true], [{ page_type: 'diagnostic' }, true], [{ post_type: 'seasonal' }, false], [{}, false]]) {
+      imageGenerator.planFor.mockClear();
+      await AstroPublisher._internals.generateHeroBuffer({ title: 'T', meta_description: 'm', keyword: 'k', slug: 's', ...extra });
+      expect(imageGenerator.planFor.mock.calls[0][0].identification).toBe(expected);
+    }
+  });
+
   test('throws when generation yields no usable image (so publish fails loudly, not hero-less)', async () => {
     imageGenerator.generate.mockResolvedValue({ dataUrl: 'not-a-data-url', model: 'x' });
     await expect(
@@ -4446,6 +4457,7 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
       expect(body).toContain('gpt-image-2 (cartoon, inside a residential garage, dusk)');
     }
     expect(admin).toContain('- body-1: gemini-image-pro (photo, a pool cage, noon) — screen clean');
+    expect(AstroPublisher._internals.describeImageProvenance('hero', { model: 'm', plan: { style: 'photo', cast: 'technician', setting: 'in a backyard, dew', timeOfDay: 'noon' } })).toBe('- hero: m (photo, technician, in a backyard, noon) — not screened');
     // The label is the committed file name, not the list position: a draft that already carried body-1 gets its generated asset as body-2 (Codex r13 P2 on #3964).
     const shifted = buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a b', images: { hero: null, body: [{ ...clean, src: '/images/blog/x/body-2.webp' }] } });
     expect(shifted).toContain('- body-2: gemini-image-pro');
@@ -4498,21 +4510,23 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     expect(out.screen.readableText).toEqual(['ON']);
   });
 
-  test('an infographic that rendered its caption plus one stray label beats a retry that dropped the caption — allowed text is not a defect (Codex r11 P2)', async () => {
+  test('identification rides into BOTH plans (first and screen retry); a body slot passes nothing', async () => {
     const imageGenerator = require('../services/content/image-generator');
     const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
     imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    imageGenerator.planFor.mockClear();
     screenGeneratedImage
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"'], violations: 1 })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"', 'readable text: ORKIN'], violations: 2 });
-    // Equal violations → the first candidate (stable sort), never the captionless one by string count.
-    let out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
-    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
-    // More violations on the retry → the first candidate again.
-    out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
-    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    await AstroPublisher.generatePlannedImage({ ...args, identification: true });
+    expect(imageGenerator.planFor).toHaveBeenCalledTimes(2);
+    expect(imageGenerator.planFor.mock.calls[0][0]).toMatchObject({ index: 0, identification: true });
+    expect(imageGenerator.planFor.mock.calls[1][0]).toMatchObject({ index: 1000, identification: true });
+    for (const [plan] of imageGenerator.planFor.mock.calls) expect(plan).not.toHaveProperty('captions');
+    imageGenerator.planFor.mockClear();
+    screenGeneratedImage.mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    await AstroPublisher.generatePlannedImage({ ...args, mode: 'blog-body', index: 1 });
+    expect(imageGenerator.planFor.mock.calls[0][0].identification).toBeFalsy();
   });
 
   test('a caller-supplied deadline is honoured by both generate calls (near-duplicate re-framing shares the slot budget — Codex r8 P2)', async () => {

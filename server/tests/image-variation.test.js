@@ -2,7 +2,7 @@
  * Image variation plan + text/logo screen (owner direction 2026-09-05: the
  * autopublished pictures all read as the same postcard; three images per
  * post stay, but they must vary in style and setting, carry no invented
- * labels or logos, and only an infographic may carry text — its own captions).
+ * labels or logos or text; the infographic style was removed 2026-11-19).
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
@@ -35,49 +35,44 @@ describe('planFor — deterministic variation per post and slot', () => {
     expect(styles.size).toBeGreaterThanOrEqual(2);
   });
 
-  test('infographic needs captions — without them it degrades to the post\'s unused fourth style; a forced style is honored', () => {
-    const degraded = gen.planFor({ slug: SLUG, mode: 'blog-body', index: 1, style: 'infographic' }).style;
-    expect(degraded).not.toBe('infographic');
-    expect(degraded).toBe(gen.stylePermutation(SLUG)[3]);
-    expect(gen.planFor({ slug: SLUG, mode: 'blog-body', index: 3, style: 'infographic', captions: ['1 OFF'] }).style).toBe('infographic');
-    expect(gen.planFor({ slug: SLUG, mode: 'blog-hero', index: 0, style: 'cartoon' }).style).toBe('cartoon');
+  test('there are three styles and none is an infographic (owner 2026-11-19)', () => {
+    expect(Object.keys(gen.IMAGE_STYLES)).toEqual(['photo', 'illustration', 'cartoon']);
+    expect(gen.retryStyleFor).toBeUndefined(); // three styles for three slots: no unused style to retry in
   });
 
-  test('hero, body-1 and body-2 never share a style within one post (Codex r1 P2 on #3964)', () => {
-    const slugs = Array.from({ length: 40 }, (_, i) => `post-${i}`);
+  test('hero, body-1 and body-2 never share a style within one post, and no slot is ever an infographic (Codex r1 P2 on #3964; owner 2026-11-19)', () => {
+    const slugs = Array.from({ length: 520 }, (_, i) => `section/post-${i}-${(i * 7919) % 1000}`);
     let photoHeroes = 0;
     for (const slug of slugs) {
       const styles = [
         gen.planFor({ slug, mode: 'blog-hero', index: 0 }).style,
-        gen.planFor({ slug, mode: 'blog-body', index: 1, captions: ['Step one'] }).style,
-        gen.planFor({ slug, mode: 'blog-body', index: 2, captions: ['Step two'] }).style,
+        gen.planFor({ slug, mode: 'blog-body', index: 1 }).style,
+        gen.planFor({ slug, mode: 'blog-body', index: 2 }).style,
       ];
       expect(new Set(styles).size).toBe(3);
-      // Without captions an infographic slot still lands on a style the other two slots do not use.
-      const noCaptions = [gen.planFor({ slug, mode: 'blog-hero', index: 0 }).style, gen.planFor({ slug, mode: 'blog-body', index: 1 }).style, gen.planFor({ slug, mode: 'blog-body', index: 2 }).style];
-      expect(new Set(noCaptions).size).toBe(3);
+      for (const index of [0, 1, 2, 3]) {
+        expect(gen.planFor({ slug, mode: index ? 'blog-body' : 'blog-hero', index }).style).not.toBe('infographic');
+      }
       if (styles[0] === 'photo') photoHeroes += 1;
     }
-    expect(photoHeroes).toBeGreaterThan(20); // the hero still leans photo for search thumbnails
+    expect(photoHeroes / slugs.length).toBeGreaterThan(0.6); // the hero still leans photo: two posts in three
   });
 
-  test('a screen retry lands on a style no sibling slot uses, or the slot\'s own style under a fresh seed (Codex r2 P2 on #3964)', () => {
+  test('a screen retry (index + 1000) keeps the slot\'s style and cast under a fresh scene seed (Codex r2 P2 on #3964)', () => {
+    let freshScenes = 0;
     for (let i = 0; i < 40; i += 1) {
       const slug = `post-${i}`;
-      const siblings = [0, 1, 2].map((index) => gen.planFor({ slug, mode: index ? 'blog-body' : 'blog-hero', index, captions: index ? ['Step'] : [] }).style);
       for (const index of [0, 1, 2]) {
         const mode = index ? 'blog-body' : 'blog-hero';
-        const captions = index ? ['Step'] : [];
-        const retry = gen.retryStyleFor({ slug, mode, index, captions });
-        const others = siblings.filter((_, k) => k !== index);
-        expect(others).not.toContain(retry);
-        expect(Object.keys(gen.IMAGE_STYLES)).toContain(retry);
-        // A retried slot never lands on infographic without captions.
-        if (!captions.length) expect(retry).not.toBe('infographic');
+        const first = gen.planFor({ slug, mode, index, subject: 'lawn' });
+        const retry = gen.planFor({ slug, mode, index: index + 1000, subject: 'lawn' });
+        expect(retry.style).toBe(first.style);
+        expect(retry.cast).toBe(first.cast);
+        expect(retry.van).toBe(first.van);
+        if (`${retry.setting}|${retry.timeOfDay}|${retry.vantage}` !== `${first.setting}|${first.timeOfDay}|${first.vantage}`) freshScenes += 1;
       }
     }
-    const mod = require('../services/content/image-generator');
-    expect(mod.retryStyleFor).toBe(gen.retryStyleFor);
+    expect(freshScenes).toBeGreaterThan(100); // of 120: the retry is a new scene, not the same prompt again
   });
 
   test('the setting pool follows the subject: turf posts stay outdoors, equipment posts may use the garage, indoor pests may look out from the kitchen; no setting carries a time of day', () => {
@@ -129,43 +124,10 @@ describe('buildPrompt with a plan', () => {
     expect(p).toMatch(/do not fill the frame with palms and a tile roof/);
   });
 
-  test('infographic style allows exactly the supplied captions and nothing else', () => {
-    const plan = gen.planFor({ slug: SLUG, mode: 'blog-body', index: 1, style: 'infographic', captions: ['1 OFF', '2 MANUAL'] });
-    const p = gen.buildPrompt({ title: 'T', keyword: 'Three steps', mode: 'blog-body', shot: 'action', plan, captions: ['1 OFF', '2 MANUAL'] });
-    expect(p).toMatch(/The ONLY text in the image is exactly: "1 OFF", "2 MANUAL"/);
-    expect(p).not.toMatch(/No text, words/);
-    expect(p).toMatch(/infographic/i);
-  });
-
-  test('an infographic plan is a layout on a plain background — no yard/room setting, time of day, or camera framing (Codex r10 P2 on #3964)', () => {
-    for (let i = 0; i < 20; i += 1) {
-      const plan = gen.planFor({ slug: `post-${i}`, mode: 'blog-body', index: 1, style: 'infographic', captions: ['Step one'], subject: 'Rain Bird sprinkler timer guide' });
-      expect(plan.style).toBe('infographic');
-      expect(gen.INFOGRAPHIC_LAYOUTS).toContain(plan.setting);
-      expect(Object.values(gen.SETTINGS).flat()).not.toContain(plan.setting);
-      expect(plan.timeOfDay).toBe('');
-      const p = gen.buildPrompt({ title: 'T', keyword: 'Three steps', topic: 'Turn the dial.', mode: 'blog-body', shot: 'action', avoid: 'a timer', city: 'Venice', plan, captions: ['Step one'] });
-      expect(p).toMatch(/Layout: .*on a plain light background/);
-      expect(p).not.toMatch(/Setting:|Vantage:|Framing:|Southwest Florida home/);
-      // The style and layout never ask for numbers or labels the caption rule forbids (Codex r12 P2).
-      expect(p).not.toMatch(/numbered|labeled|legible .*labels/i);
-      expect(p).not.toMatch(/\b(early morning|mid-morning|noon|late afternoon|golden hour|dusk)\b/);
-      // The alt describes the composition, not a home at a time of day.
-      const alt = gen.buildAltText({ title: 'T', keyword: 'Three steps', city: 'Venice', mode: 'blog-body', plan });
-      expect(alt).toMatch(/^Infographic illustrating Three steps: /);
-      expect(alt).not.toMatch(/Southwest Florida home/);
-    }
-    // Every other style keeps its scene plan.
-    const photo = gen.planFor({ slug: 'post-1', mode: 'blog-hero', index: 0, style: 'photo' });
-    expect(Object.values(gen.SETTINGS).flat()).toContain(photo.setting);
-    expect(photo.timeOfDay).toBeTruthy();
-  });
-
-  test('cartoon and illustration styles still forbid text; a caption on a non-infographic style is ignored', () => {
-    for (const style of ['cartoon', 'illustration']) {
-      const p = gen.buildPrompt({ title: 'T', keyword: 'K', mode: 'blog-hero', plan: { style, setting: 's', timeOfDay: 't', vantage: 'v' }, captions: ['SHOULD NOT APPEAR'] });
+  test('every style forbids text and logos', () => {
+    for (const style of ['photo', 'cartoon', 'illustration']) {
+      const p = gen.buildPrompt({ title: 'T', keyword: 'K', mode: 'blog-hero', plan: { style, setting: 's', timeOfDay: 't', vantage: 'v' } });
       expect(p).toMatch(/No text, words, letters, numbers, watermarks, or logos/);
-      expect(p).not.toMatch(/SHOULD NOT APPEAR/);
     }
   });
 
@@ -188,6 +150,167 @@ describe('buildPrompt with a plan', () => {
   });
 });
 
+// ── A cast for every planned picture (owner 2026-11-19) ──────────────
+
+const YARD_SUBJECT = 'Chinch bug damage in a St. Augustine lawn';
+const slotPlan = (slug, slot, extra = {}) => gen.planFor({ slug, mode: slot ? 'blog-body' : 'blog-hero', index: slot, subject: YARD_SUBJECT, ...extra });
+const slugsOf = (n) => Array.from({ length: n }, (_, i) => `section-${i % 7}/post-${i}-${(i * 7919) % 1000}`);
+
+describe('planFor cast', () => {
+  test('a post shows at most one technician across hero, body-1 and body-2; about one hero in four', () => {
+    const slugs = slugsOf(400);
+    let techHeroes = 0;
+    let techPictures = 0;
+    for (const slug of slugs) {
+      const casts = [0, 1, 2].map((slot) => slotPlan(slug, slot).cast);
+      expect(casts.filter((c) => c === 'technician').length).toBeLessThanOrEqual(1);
+      for (const c of casts) expect(['technician', 'homeowner', 'none']).toContain(c);
+      if (casts[0] === 'technician') techHeroes += 1;
+      techPictures += casts.filter((c) => c === 'technician').length;
+    }
+    expect(techHeroes / slugs.length).toBeGreaterThanOrEqual(0.15);
+    expect(techHeroes / slugs.length).toBeLessThanOrEqual(0.35);
+    expect(techPictures / (slugs.length * 3)).toBeLessThan(0.3); // 3 posts in 4 show one technician: a quarter of pictures
+  });
+
+  test('the van shows in at most 12% of yard pictures and never twice in one post', () => {
+    const slugs = slugsOf(400);
+    let vans = 0;
+    for (const slug of slugs) {
+      const plans = [0, 1, 2].map((slot) => slotPlan(slug, slot));
+      const n = plans.filter((p) => p.van).length;
+      expect(n).toBeLessThanOrEqual(1);
+      vans += n;
+    }
+    expect(vans / (slugs.length * 3)).toBeLessThanOrEqual(0.12);
+    expect(vans).toBeGreaterThan(0);
+    // An indoor subject never gets a van.
+    for (const slug of slugs.slice(0, 80)) {
+      expect([0, 1, 2].every((slot) => !gen.planFor({ slug, mode: slot ? 'blog-body' : 'blog-hero', index: slot, subject: 'German cockroaches in the kitchen' }).van)).toBe(true);
+    }
+  });
+
+  test('a near-duplicate retry (index + 100) and a screen retry (index + 1000) keep the slot\'s cast and style; the scene seed may change', () => {
+    for (const slug of slugsOf(120)) {
+      for (const slot of [1, 2]) {
+        const base = slotPlan(slug, slot);
+        for (const index of [slot + 100, slot + 1000, slot + 1100]) {
+          const retry = gen.planFor({ slug, mode: 'blog-body', index, subject: YARD_SUBJECT });
+          expect(retry.cast).toBe(base.cast);
+          expect(retry.style).toBe(base.style);
+          expect(retry.van).toBe(base.van);
+        }
+      }
+      const hero = slotPlan(slug, 0);
+      const heroRetry = gen.planFor({ slug, mode: 'blog-hero', index: 1000, subject: YARD_SUBJECT });
+      expect(heroRetry.cast).toBe(hero.cast);
+      expect(heroRetry.style).toBe(hero.style);
+    }
+    // A fresh scene on retry: across many slugs the setting or time changes for some.
+    const changed = slugsOf(60).filter((slug) => {
+      const a = slotPlan(slug, 1);
+      const b = gen.planFor({ slug, mode: 'blog-body', index: 101, subject: YARD_SUBJECT });
+      return a.setting !== b.setting || a.timeOfDay !== b.timeOfDay;
+    });
+    expect(changed.length).toBeGreaterThan(20);
+  });
+
+  test('an identification post never gets a people-free picture, and the plan carries the flag', () => {
+    const slugs = slugsOf(300);
+    let nonId = 0;
+    for (const slug of slugs) {
+      for (const slot of [0, 1, 2]) {
+        const plan = slotPlan(slug, slot, { identification: true });
+        expect(plan.cast).not.toBe('none');
+        expect(plan.identification).toBe(true);
+        if (slotPlan(slug, slot).cast === 'none') nonId += 1;
+      }
+    }
+    expect(nonId).toBeGreaterThan(0); // the same slots are people-free on a normal post
+    expect(slotPlan('x', 0).identification).toBe(false);
+  });
+
+  test('the cast mix on a normal post is mostly empty scenes with some homeowners', () => {
+    const tally = { technician: 0, homeowner: 0, none: 0 };
+    for (const slug of slugsOf(400)) for (const slot of [0, 1, 2]) tally[slotPlan(slug, slot).cast] += 1;
+    const total = tally.technician + tally.homeowner + tally.none;
+    expect(tally.none / total).toBeGreaterThan(0.4);
+    expect(tally.homeowner / total).toBeGreaterThan(0.15);
+  });
+});
+
+describe('buildPrompt cast', () => {
+  const PLAN = { style: 'photo', setting: 'in a backyard, dew on the grass', timeOfDay: 'noon', vantage: 'eye level', van: false };
+  const prompt = (cast, extra = {}, args = {}) => gen.buildPrompt({ title: 'Roof rats', keyword: 'Roof rats', mode: 'blog-hero', plan: { ...PLAN, cast, ...extra }, ...args });
+
+  test('cast none: no people at all and no uniform clause', () => {
+    const p = prompt('none');
+    expect(p).toContain('People: none.');
+    expect(p).toContain(gen.NO_PEOPLE_CAST_LINE);
+    expect(p).not.toContain('TECHNICIAN:');
+    expect(p).not.toContain('If a Waves technician appears');
+    expect(p).not.toContain("a technician's red shirt or red cap is part of the palette");
+    expect(p).not.toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+    // The logo reference clause set never leaks the technician in either.
+    expect(prompt('none', {}, { uniformLogo: false })).not.toMatch(/Waves logo/);
+  });
+
+  test('cast homeowner: ordinary clothes, no technician clause', () => {
+    const p = prompt('homeowner');
+    expect(p).toContain(gen.HOMEOWNER_CAST_LINE);
+    expect(p).toContain('People: one adult homeowner in ordinary casual clothes');
+    expect(p).not.toContain('TECHNICIAN:');
+    expect(p).not.toContain('If a Waves technician appears');
+  });
+
+  test('cast technician: one technician line, then the existing uniform clause as before', () => {
+    const plain = prompt('technician');
+    expect(plain).toContain(`${gen.TECHNICIAN_CAST_LINE} ${gen.WAVES_UNIFORM_LINE}`);
+    expect(plain).toContain('People: exactly one Waves technician in the scene, and no other uniformed worker.');
+    const logo = prompt('technician', {}, { uniformLogo: true });
+    expect(logo).toContain(`${gen.TECHNICIAN_CAST_LINE} ${gen.WAVES_UNIFORM_LOGO_LINE}`);
+  });
+
+  test('an identification post adds the no-pest-close-up sentence to homeowner and none pictures only', () => {
+    expect(prompt('none', { identification: true })).toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+    expect(prompt('homeowner', { identification: true })).toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+    expect(prompt('technician', { identification: true })).not.toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+  });
+
+  test('body action framing agrees with the cast', () => {
+    const framing = (cast) => gen.buildPrompt({ keyword: 'Sealing the vents', topic: 'lead', mode: 'blog-body', shot: 'action', plan: { ...PLAN, cast } });
+    expect(framing('technician')).toContain('Framing: the Waves technician actively doing what this section describes');
+    expect(framing('homeowner')).toContain('Framing: a homeowner actively doing what this section describes');
+    expect(framing('none')).toContain('Framing: the task this section describes caught mid-way — the tools and materials in place where the work happens, no person in frame.');
+    expect(framing('none')).not.toMatch(/Framing: a person/);
+    // Other shots are unchanged by the cast.
+    const close = gen.buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', plan: { ...PLAN, cast: 'none' } });
+    expect(close).toContain(gen.BODY_IMAGE_FRAMING['close-up']);
+  });
+
+  test('the no-drawn-marks sentence rides on blog-hero and blog-body, not social-square', () => {
+    for (const mode of ['blog-hero', 'blog-body']) {
+      expect(gen.buildPrompt({ title: 'T', keyword: 'K', mode, plan: { ...PLAN, cast: 'none' } })).toContain(gen.NO_DRAWN_MARKS_LINE);
+      expect(gen.buildPrompt({ title: 'T', keyword: 'K', mode })).toContain(gen.NO_DRAWN_MARKS_LINE);
+    }
+    expect(gen.NO_DRAWN_MARKS_LINE).toBe('Show one real scene with nothing drawn over it: no check marks, crosses, prohibition signs, arrows, callout bubbles, magnified insets, split panels or before-and-after comparisons — the picture states no verdict.');
+    expect(gen.buildPrompt({ title: 'T', keyword: 'K', mode: 'social-square' })).not.toContain('nothing drawn over it');
+    expect(gen.buildPrompt({ title: 'T', keyword: 'K', mode: 'social-square', plan: { ...PLAN, cast: 'none' } })).not.toContain('nothing drawn over it');
+  });
+
+  // Prompts captured from origin/main (before the cast change) for callers
+  // that pass no plan. Social tiles and the newsletter must not change; the
+  // blog modes differ only by the appended no-drawn-marks sentence.
+  const LEGACY_SOCIAL = "A high-quality, photorealistic social media tile for a Southwest Florida pest control & lawn care business named \"Waves Pest Control.\" Subject: Fire ants. Setting: a Bradenton-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun). If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering. Composition: square 1:1 aspect ratio, 1024x1024. Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, letters, numbers, watermarks, or logos anywhere in the image. Must not depict: no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line); no invented control-panel labels, dials with fake words, or gibberish lettering.";
+  const LEGACY_BODY = "A high-quality, photorealistic in-article illustration for a Southwest Florida pest control & lawn care business named \"Waves Pest Control.\" Subject: k. Context from the article: lead Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon. Framing: a person (a technician or homeowner) actively doing what this section describes — hands visible, mid-task, candid documentary feel. If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering. Composition: landscape 3:2 aspect ratio, 1536x1024. Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, letters, numbers, watermarks, or logos anywhere in the image. Must not depict: no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line); no invented control-panel labels, dials with fake words, or gibberish lettering. This image must look clearly different from the article's hero image (a wide establishing shot of: a timer) — a different scene, distance and angle, not a variation of it. Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.";
+  const LEGACY_HERO = "A high-quality, photorealistic blog hero image for a Southwest Florida pest control & lawn care business named \"Waves Pest Control.\" Subject: Post. Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon. If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering. Composition: landscape 3:2 aspect ratio, 1536x1024. Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, letters, numbers, watermarks, or logos anywhere in the image. Must not depict: no company logos, brand names, or brand marks of any kind — equipment and vehicles are generic and unbranded, and uniforms carry no logo or lettering (only the uniform COLORS follow the Waves uniform line); no invented control-panel labels, dials with fake words, or gibberish lettering. Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.";
+  test('a call with no plan builds the same prompt as before (social tiles and legacy callers)', () => {
+    expect(gen.buildPrompt({ title: 'Pest Control Bradenton', city: 'Bradenton', mode: 'social-square', keyword: 'Fire ants' })).toBe(LEGACY_SOCIAL);
+    expect(gen.buildPrompt({ title: 'Post', keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action', avoid: 'a timer' })).toBe(`${LEGACY_BODY} ${gen.NO_DRAWN_MARKS_LINE}`);
+    expect(gen.buildPrompt({ title: 'Post', mode: 'blog-hero' })).toBe(`${LEGACY_HERO} ${gen.NO_DRAWN_MARKS_LINE}`);
+  });
+});
+
 describe('screenGeneratedImage', () => {
   const buffer = Buffer.from('fake-image');
   beforeEach(() => jest.clearAllMocks());
@@ -207,32 +330,15 @@ describe('screenGeneratedImage', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('a logo fails; invented labels fail; the infographic\'s own captions are allowed', async () => {
+  test('a logo fails and every readable string fails: no caption can be allowed (the AI infographic is retired, owner 2026-11-19)', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '```json\n{"readable_text": ["ORKIN"], "logos_or_brand_marks": ["Orkin logo on truck"], "notes": ""}\n```' });
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/logo or brand mark: Orkin/), expect.stringMatching(/readable text: ORKIN/)], violations: 2 });
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["SET TIME", "ZONE 5 RUN"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: SET TIME, ZONE 5 RUN/)] });
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF", "2  MANUAL", "3", "OFF"], "logos_or_brand_marks": []}' });
-    // An allowed caption the image rendered is not a violation (Codex r11 P2 on #3964).
-    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL', '3 OFF'] })).toMatchObject({ ok: true, violations: 0 });
-    // Extra words around an allowed caption are stray text, not the caption.
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF SALE", "2 MANUAL"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: 1 OFF SALE/), expect.stringMatching(/missing caption: "1 OFF"/)]), violations: 2 });
-    // A reordered caption is stray text; a partial one is an incomplete caption (Codex r1 P2 on #3964).
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants Stop How To"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: Ants Stop How To/)]) });
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/incomplete caption: "How to Stop Ants"/)] });
-    // No caption read back at all is a missing caption (Codex r3 P2 on #3964).
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/missing caption: "How to Stop Ants"/)] });
-    // Fragments out of reading order do not reconstruct the caption (Codex r4 P2 on #3964).
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants", "How to Stop"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false });
-    // Split fragments that together cover the caption, in order, still pass.
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["How to", "Stop Ants"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: true });
-    expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).toMatch(/ALLOWED.*"1 OFF"/);
+    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: SET TIME, ZONE 5 RUN/)], violations: 2 });
+    // A caption list a caller still passes changes nothing: the string is stray text and the prompt allows none.
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["How to Stop Ants"], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: ['readable text: How to Stop Ants'], violations: 1 });
+    expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).not.toMatch(/ALLOWED|1 OFF/);
   });
 
   test('a brief exclusion the provider ignored fails the screen; only exclusions the caller named count (Codex r8 P2 on #3964)', async () => {

@@ -118,8 +118,7 @@ function loadVanWrapReferences() {
 }
 
 // Chain order (bake-off 2026-09-05, the same three prompts on every provider):
-// gpt-image-2 best on photo, cartoon and infographic (it honored an exact
-// caption list; ~75–90 s, ~$0.17); gpt-image-1.5 next (~35–40 s); gpt-image-1
+// gpt-image-2 best on photo and cartoon (~75–90 s, ~$0.17); gpt-image-1.5 next (~35–40 s); gpt-image-1
 // last. The Gemini legs that used to sit between them were removed 2026-09-24
 // (SynthID pixel watermark — see the header); OpenAI-only by design.
 // gpt-image-2.5-sunburst leads since 2026-09-25 (owner: render on Images
@@ -223,6 +222,18 @@ const BODY_IMAGE_FRAMING = {
   action: 'Framing: a person (a technician or homeowner) actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
   environment: 'Framing: a wide environmental view of where this happens around the home, with the subject clearly placed in it.',
 };
+// A planned picture's action framing agrees with the plan's cast: the generic
+// line above names "a technician or homeowner", which would put a person in a
+// picture whose cast is none (or a technician in a homeowner picture).
+const BODY_ACTION_FRAMING = {
+  technician: 'Framing: the Waves technician actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
+  homeowner: 'Framing: a homeowner actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
+  none: 'Framing: the task this section describes caught mid-way — the tools and materials in place where the work happens, no person in frame.',
+};
+function bodyFramingFor(shot, cast) {
+  if (shot === 'action' && BODY_ACTION_FRAMING[cast]) return BODY_ACTION_FRAMING[cast];
+  return BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up'];
+}
 
 // ── variation plan ───────────────────────────────────────────────────
 //
@@ -234,35 +245,26 @@ const BODY_IMAGE_FRAMING = {
 // each other AND from the last post's, and a re-run reproduces the same plan.
 //
 // Styles: photo (documentary), illustration (flat vector), cartoon (friendly,
-// character-led), infographic (the one style that may carry text — ONLY the
-// exact captions the caller supplies; every other style forbids readable text
-// and all styles forbid logos and brand marks).
+// character-led). Every style forbids readable text and logos and brand
+// marks. There is no infographic style (owner 2026-11-19): an image model
+// given a heading and no data invented check marks and crosses that
+// contradicted the post (3 of 10 compared pictures).
 const IMAGE_STYLES = Object.freeze({
   photo: {
     label: 'Photorealistic scene',
     line: 'Style: candid documentary photograph, natural color and light, real-world detail; no illustration look.',
-    allowsText: false,
   },
   illustration: {
     label: 'Flat illustration',
     line: 'Style: clean flat-vector illustration with simple shapes, limited palette (Waves blue #009CDE, gold #FFD700, warm neutrals), soft shadows, no photorealism.',
-    allowsText: false,
   },
   cartoon: {
     label: 'Cartoon illustration',
     line: 'Style: friendly cartoon illustration with bold outlines, expressive characters, bright limited palette (Waves blue #009CDE and gold #FFD700 accents), playful but clear.',
-    allowsText: false,
-  },
-  infographic: {
-    label: 'Infographic',
-    // No numbers or labels beyond the caption: the text rule allows only the
-    // caption and the screen rejects every other string (Codex r12 P2).
-    line: 'Style: clean modern infographic on a plain light background — simple flat icons, generous white space, Waves blue #009CDE and gold #FFD700 accents; no numbers, labels, or lettering other than the caption named below.',
-    allowsText: true,
   },
 });
 // One style permutation per post: the hero takes the first entry and body
-// slot k takes the k-th, so the hero and up to three body images never share
+// slot k takes the k-th, so the hero and the first two body images never share
 // a style (Codex r1 P2 on #3964). The hero still leans photo (search
 // thumbnails): two posts in three put photo first.
 const STYLE_KEYS = Object.freeze(Object.keys(IMAGE_STYLES));
@@ -332,17 +334,6 @@ function settingsFor(subject) {
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
-// An infographic is a composition, not a scene: its plan names a LAYOUT in
-// place of a yard/room setting, no time of day, and a fixed straight-on
-// vantage — a photographic setting line contradicted the style's plain
-// background and let providers draw the scene instead (Codex r10 P2 on #3964).
-const INFOGRAPHIC_LAYOUTS = [
-  'a left-to-right row of simple icons joined by arrows',
-  'a parts diagram with plain callout lines and no labels',
-  'a side-by-side comparison of two or three panels',
-  'a checklist of icons with check and cross marks',
-  'a circular process diagram of a few icon stages',
-];
 function hashString(input) {
   let h = 2166136261;
   const str = String(input || '');
@@ -352,39 +343,73 @@ function hashString(input) {
   }
   return h >>> 0;
 }
-// planFor({ slug, mode, index, captions, subject, style }) — deterministic per
+// The slot a picture fills: the hero is 0 and body slot k is k. The publisher
+// passes index = k + 1 + attempt * 100 on a near-duplicate retry and
+// index + 1000 on a screen retry, so the slot is the index modulo 100 —
+// style and cast follow the SLOT, never the raw index, or a retry would take
+// a sibling slot's style and cast. Setting, time and vantage keep the full
+// index: a retry must still get a fresh scene.
+function slotFor(mode, index) {
+  return mode === 'blog-body' ? (Number(index) || 0) % 100 : 0;
+}
+// Who is in a post's pictures (owner 2026-11-19: 52 of 53 AI heroes and 45 of
+// 49 body scenes showed a Waves technician, 27 of 102 the van). One seed per
+// post decides which single slot (hero 0, body 1, body 2) may show the
+// technician, and which slot may show the van. -1 = no slot.
+function castSeedFor(slug) {
+  return hashString(`${slug || 'post'}:cast`);
+}
+// 0 = hero, 1/2 = body slots, 3 of 4 = this post shows no technician.
+function technicianSlotFor(slug) {
+  const t = castSeedFor(slug) % 4;
+  return t < 3 ? t : -1;
+}
+// 3 of 12 posts let one slot show the van; the other 9 show none.
+function vanSlotFor(slug) {
+  const v = (castSeedFor(slug) >>> 2) % 12;
+  return v < 3 ? v : -1;
+}
+// Slot cast: the post's one technician slot, else a slot-stable pick between a
+// homeowner (one in three) and nobody. An identification post never gets an
+// empty picture — a people-free picture would make the pest the subject, and
+// AI pest close-ups on identification posts were flagged as wrong-species
+// guidance on 2026-10-22.
+function castFor({ slug, mode, slot, identification = false }) {
+  if (slot === technicianSlotFor(slug)) return 'technician';
+  if (identification) return 'homeowner';
+  const seed = hashString(`${slug || 'post'}:${mode}:${slot}`);
+  return (seed + 5 * 7919) % 3 === 0 ? 'homeowner' : 'none';
+}
+// planFor({ slug, mode, index, subject, identification }) — deterministic per
 // post + slot. index 0 is the hero; body slots are 1..n. `subject` picks the
 // setting pool and must be what the image is ABOUT — the title plus the
-// keyword or section heading, never the lead or meta copy: a coastal-lawn post
-// whose thesis mentions irrigation is not an equipment post (Codex r2 P2 on
-// #3964). A style the slot cannot support (an infographic with no captions)
-// degrades to the post's UNUSED fourth style, so it still differs from the
-// other slots.
-function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject = '', style: forced } = {}) {
+// keyword or section heading, never the lead or meta copy: a coastal-lawn
+// post whose thesis mentions irrigation is not an equipment post (Codex r2 P2
+// on #3964). A screen retry passes index + 1000: the same slot, so the same
+// style and cast, under a fresh scene seed. With three styles for three
+// slots there is no unused style to retry in (the retired fourth style was
+// the infographic).
+function planFor({ slug, mode = 'blog-hero', index = 0, subject = '', identification = false } = {}) {
   const seed = hashString(`${slug || 'post'}:${mode}:${index}`);
   const pick = (list, salt) => list[(seed + salt * 7919) % list.length];
   const perm = stylePermutation(slug);
-  const slot = mode === 'blog-body' ? index : 0;
-  let style = forced && IMAGE_STYLES[forced] ? forced : perm[slot % perm.length];
-  if (style === 'infographic' && !(Array.isArray(captions) && captions.length)) {
-    style = slot < 3 ? perm[3] : 'illustration';
-  }
-  if (style === 'infographic') {
-    return { style, setting: pick(INFOGRAPHIC_LAYOUTS, 1), timeOfDay: '', vantage: 'straight-on, centered' };
-  }
+  const slot = slotFor(mode, index);
   const category = settingCategoryFor(subject);
   return {
-    style,
+    style: perm[slot % perm.length],
+    cast: castFor({ slug, mode, slot, identification }),
+    identification: identification === true,
     setting: pick(SETTINGS[category], 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
     // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
-    // scenes. Yard settings only (a van in a kitchen is a contradiction), and
-    // about one in three so the variation directive (2026-09-05) still holds.
-    // Whether that van is UNMARKED or wears the real wrap is a
-    // GENERATION-TIME decision, not a planning one — see the van wrap
-    // reference block above and VAN_WRAP_LINE (owner ruling 2026-09-24).
-    van: category === 'yard' && (seed + 4 * 7919) % 3 === 0,
+    // scenes. Yard settings only (a van in a kitchen is a contradiction); one
+    // slot in a quarter of posts (vanSlotFor, owner 2026-11-19) so the
+    // variation directive (2026-09-05) holds. Whether that van is UNMARKED or
+    // wears the real wrap is a GENERATION-TIME decision, not a planning one —
+    // see the van wrap reference block above and VAN_WRAP_LINE (owner ruling
+    // 2026-09-24).
+    van: category === 'yard' && slot === vanSlotFor(slug),
   };
 }
 const VAN_LINE = 'In the background, a solid Waves-blue (#009CDE) Ford Transit 250 medium-roof cargo van parked at the curb or in the driveway — plain and unmarked, no lettering, no logo, not the focus of the shot.';
@@ -398,20 +423,6 @@ const VAN_WRAP_LINE = [
   'VAN: Park exactly ONE physical Waves van several metres behind the main action, at the curb or in the driveway. Show it once at a single side or slight rear-three-quarter angle, fully inside the frame, separated from the subject, and occupying approximately 20–30% of the image width; it stays clearly secondary. Include no second, partial, mirrored, or reflected van.',
   'Faithfully reproduce, in the image\'s own style, the Ford Transit 250 medium-roof body and bright-blue halftone wrap from the van photos. Keep WAVES, Lawn & Pest, Wave Goodbye to Pests!, 941-241-2459, and GoWavesFL.com as separate wrap elements. The phone number and web address must be exact; leave tiny text unresolved rather than inventing other digits or merging the web address with the slogan.',
 ].join(' ');
-// The style a slot regenerates in after a failed text/logo screen: one no
-// sibling slot of the post uses (the permutation's unused fourth style, when
-// the slot can carry it), else the slot's own style under a fresh seed — a
-// fixed swap map put a retried hero into body-1's style (Codex r2 P2 on
-// #3964).
-function retryStyleFor({ slug, mode = 'blog-hero', index = 0, captions = [] } = {}) {
-  const perm = stylePermutation(slug);
-  const taken = new Set(perm.slice(0, 3));
-  if (taken.has('infographic')) taken.add(perm[3]); // a caption-less infographic slot degrades to perm[3]
-  const own = planFor({ slug, mode, index, captions }).style;
-  const hasCaptions = Array.isArray(captions) && captions.length > 0;
-  const free = STYLE_KEYS.filter((style) => !taken.has(style) && style !== own && (style !== 'infographic' || hasCaptions));
-  return free[0] || own;
-}
 // Relevance guards every image carries, plus caller-supplied "must not
 // depict" lines (a brief's rules — e.g. no repair scenes on a post that says
 // Waves does not repair irrigation; no competitor vehicles on a comparison).
@@ -422,8 +433,7 @@ const STANDARD_GUARDS = [
 // Owner directive 2026-09-23 (Adam, after the Bradenton WDO hero showed a tech in
 // a blue long-sleeve and khakis): any Waves technician in a generated image wears
 // the REAL uniform. Every scene mode carries the line — a hero, body slot or social
-// tile can all put a person in frame. Infographics draw no people at all
-// (INFOGRAPHIC_NO_PEOPLE_LINE). Without a reference image (Gemini legs, kill
+// tile can all put a person in frame. Without a reference image (Gemini legs, kill
 // switch, missing asset) the logo stays OFF the shirt/cap: generators render
 // a prompt-only mark as gibberish and the text/logo screen would reject it.
 const WAVES_UNIFORM_LINE = 'If a Waves technician appears, they wear the real Waves uniform: a solid red long-sleeve polo (a small blank badge on the left chest is fine), a baseball cap that is either light blue or red, and plain black or dark navy work pants — never a blue shirt, never khaki or tan pants; shirt and cap carry no readable logo or lettering.';
@@ -438,11 +448,27 @@ const WAVES_UNIFORM_LOGO_LINE = [
   'Use the complete mascot-and-wording logo rather than an isolated W or mascot fragment. Place no logo on sleeves, back, pants, gloves, or equipment. If the scene has no technician, do not use the logo image at all.',
 ].join(' ');
 
-// An infographic draws no people: it can carry neither the logo reference
-// nor a judgeable uniform, and the audit would flag any logo-free technician
-// icon it produced — so the style excludes figures outright (Codex r3 P2 on
-// #4761, superseding the "infographic carries the uniform line" P2 on #4696).
-const INFOGRAPHIC_NO_PEOPLE_LINE = 'Do not draw people, technician figures, faces, hands or mascots — flat icons of tools, pests, plants, homes and yards only.';
+// Who is in a planned picture (plan.cast, owner 2026-11-19). A technician
+// picture keeps the uniform clause above and is told it is the only uniformed
+// person; a homeowner or an empty picture REPLACES the uniform clause (and the
+// logo reference is not attached, see _logoReference).
+const TECHNICIAN_CAST_LINE = 'People: exactly one Waves technician in the scene, and no other uniformed worker.';
+const HOMEOWNER_CAST_LINE = 'People: one adult homeowner in ordinary casual clothes — no uniform, no cap, no red shirt, no logo. No technician and no service worker in this picture.';
+const NO_PEOPLE_CAST_LINE = 'People: none. No person, hand, arm, silhouette or figure anywhere in the frame — no technician and no homeowner. The place, the object or the condition itself is the whole picture.';
+const IDENTIFICATION_NO_PEST_CLOSEUP_LINE = 'Do not show the pest in an identifiable close-up; it may appear small in the scene or not at all.';
+// The people clause of a prompt: the plan's cast line, or the legacy uniform
+// clause when the plan carries no cast (social tiles, newsletter, no plan).
+function peopleClauseFor(plan, uniform) {
+  const cast = plan && plan.cast;
+  if (cast === 'technician') return `${TECHNICIAN_CAST_LINE} ${uniform}`;
+  if (cast !== 'homeowner' && cast !== 'none') return uniform;
+  const line = cast === 'homeowner' ? HOMEOWNER_CAST_LINE : NO_PEOPLE_CAST_LINE;
+  return plan.identification === true ? `${line} ${IDENTIFICATION_NO_PEST_CLOSEUP_LINE}` : line;
+}
+// Blog scene pictures state no verdict: an image model given a section
+// heading drew check marks and crosses that contradicted the post (owner
+// 2026-11-19).
+const NO_DRAWN_MARKS_LINE = 'Show one real scene with nothing drawn over it: no check marks, crosses, prohibition signs, arrows, callout bubbles, magnified insets, split panels or before-and-after comparisons — the picture states no verdict.';
 
 // What each combination of attached references changes in a scene prompt,
 // keyed `${withLogo}/${withVanWrap}`: the uniform line, the van line, the
@@ -476,7 +502,7 @@ const REFERENCE_CLAUSES = {
   },
 };
 
-function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [], uniformLogo = false, vanWrap = false, referenceRoles }) {
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, avoidDepicting = [], uniformLogo = false, vanWrap = false, referenceRoles }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
   const base = style
@@ -490,16 +516,10 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
   // A planned image names ITS setting, time and vantage; the legacy line
   // (one fixed postcard) only remains for callers that pass no plan.
-  // An infographic's plan is a layout on a plain background — no scene, time
-  // of day, or camera framing, which would contradict the style line.
-  const isInfographic = Boolean(plan) && plan.style === 'infographic';
-  // An infographic never carries a reference (no scene, and its text rule
-  // is caption-only); the van wrap only where the plan places a van.
-  const hasVan = Boolean(plan && plan.van) && !isInfographic;
-  const clauses = REFERENCE_CLAUSES[`${Boolean(uniformLogo) && !isInfographic}/${Boolean(vanWrap) && hasVan}`];
-  const local = isInfographic
-    ? `Layout: ${plan.setting}, ${plan.vantage}, on a plain light background — no photographic scene, no time of day; at most one small Southwest Florida cue (a palm or wave icon).`
-    : plan
+  // The van wrap only where the plan places a van.
+  const hasVan = Boolean(plan && plan.van);
+  const clauses = REFERENCE_CLAUSES[`${Boolean(uniformLogo)}/${Boolean(vanWrap) && hasVan}`];
+  const local = plan
     ? `Setting: ${plan.setting}, ${plan.timeOfDay}, ${city ? `a ${city}-area Southwest Florida home` : 'a Southwest Florida home'}; Southwest Florida cues stay subtle (one palm or a stucco wall is plenty — do not fill the frame with palms and a tile roof). Vantage: ${plan.vantage}.`
     : (city
       ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
@@ -515,21 +535,18 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
   // The limited illustration palettes (blue / gold / neutrals) must not
   // steer a technician's shirt back to blue: uniform red is always allowed.
   const styleLine = style
-    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast; a technician's red shirt or red cap is part of the palette.`
+    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast${plan.cast === 'homeowner' || plan.cast === 'none' ? '.' : "; a technician's red shirt or red cap is part of the palette."}`
     : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
-  const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
-  const textRule = captionList.length
-    ? `The ONLY text in the image is exactly: ${captionList.map((c) => `"${c}"`).join(', ')} — spelled exactly, nothing else written anywhere.`
-    : clauses.noText;
+  const textRule = clauses.noText;
   const guards = `Must not depict: ${[clauses.guard, STANDARD_GUARDS[1], ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
-  const framing = mode === 'blog-body' && !isInfographic ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
+  const framing = mode === 'blog-body' ? bodyFramingFor(shot, plan && plan.cast) : '';
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
   const editorial = mode === 'blog-hero' || mode === 'blog-body'
-    ? 'Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose.'
+    ? `Editorial image content: depict the specific observation or step in the supplied article context. Do not invent measured results, charts, percentages, before-and-after outcomes, or diagnostic features. Source organizations mentioned in the context are attribution, not image subjects: never reproduce their logos, seals, badges, or imply endorsement. Keep anatomy and relative scale plausible; do not exaggerate pests or damage for drama. Prefer an explanatory view of the relevant condition or task over a generic technician pose. ${NO_DRAWN_MARKS_LINE}`
     : '';
-  const uniform = isInfographic ? INFOGRAPHIC_NO_PEOPLE_LINE : clauses.uniform;
+  const uniform = peopleClauseFor(plan, clauses.uniform);
   const van = hasVan ? clauses.van : '';
   return [base, focus, local, framing, referenceRoles, uniform, van, composition, styleLine, textRule, guards, distinct, editorial].filter(Boolean).join(' ');
 }
@@ -561,8 +578,6 @@ function buildAltText({ title, topic, keyword, city, mode = 'blog-hero', plan = 
   const kind = styled
     ? (mode === 'social-square' ? `${styled} social tile` : styled)
     : (mode === 'social-square' ? 'Photorealistic social tile' : 'Photorealistic scene');
-  // An infographic has a layout, not a setting (Codex r10 P2 on #3964).
-  if (plan && plan.style === 'infographic') return `${kind} illustrating ${subject}: ${plan.setting}.`;
   return `${kind} of ${setting}, illustrating ${subject}.`;
 }
 
@@ -757,15 +772,15 @@ class ImageGenerator {
   // deadlineAt — an absolute ms timestamp the whole call must respect; a
   // caller that generates more than once for one slot (screen retry) passes
   // the same deadline to both calls so the slot never gets a second budget.
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt, deadlineAt = null, uniformLogo = false, vanWrap = false } = {}) {
-    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, avoidDepicting = [], prompt: customPrompt, deadlineAt = null, uniformLogo = false, vanWrap = false } = {}) {
+    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, avoidDepicting });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
     const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
     const references = [...this._logoReference({ customPrompt, plan, uniformLogo }), ...this._vanWrapReference({ customPrompt, plan, vanWrap })];
     const attached = referenceProvenance(references);
     const referencePrompt = references.length
-      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, uniformLogo: attached.logoReference, vanWrap: attached.vanWrapReference, referenceRoles: referenceRolesFor(references) })
+      ? buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, avoidDepicting, uniformLogo: attached.logoReference, vanWrap: attached.vanWrapReference, referenceRoles: referenceRolesFor(references) })
       : null;
 
     for (const slug of this.chain) {
@@ -792,21 +807,22 @@ class ImageGenerator {
 
   // The logo reference rides only on a prompt this module built (a caller's
   // custom prompt says nothing about a reference), only when the caller opted
-  // in, and never on an infographic (which draws no people at all).
+  // in, and never on a planned picture whose cast is not the technician (the
+  // reference image itself cues a technician; owner 2026-11-19).
   // → the reference images to attach ([] for none).
   _logoReference({ customPrompt, plan, uniformLogo }) {
-    if (uniformLogo !== true || customPrompt || (plan && plan.style === 'infographic')) return [];
+    if (uniformLogo !== true || customPrompt || (plan && plan.cast && plan.cast !== 'technician')) return [];
     const logo = this._uniformLogo === undefined ? loadUniformLogo() : this._uniformLogo;
     return Buffer.isBuffer(logo) && logo.length ? [{ kind: 'logo', buffer: logo, mimeType: 'image/png', filename: 'waves-logo.png' }] : [];
   }
 
   // The van wrap references ride only on a prompt this module built, only
   // when the caller opted in, and only when the plan actually places a van
-  // in the scene (plan.van; never an infographic, which has no scene) —
+  // in the scene (plan.van) —
   // attaching a van reference to a scene with no van would have nothing to
   // anchor it to.
   _vanWrapReference({ customPrompt, plan, vanWrap }) {
-    if (vanWrap !== true || customPrompt || !(plan && plan.van) || plan.style === 'infographic') return [];
+    if (vanWrap !== true || customPrompt || !(plan && plan.van)) return [];
     const refs = this._vanWrapRefs === undefined ? loadVanWrapReferences() : this._vanWrapRefs;
     if (!(Array.isArray(refs) && refs.length === 2 && refs.every((b) => Buffer.isBuffer(b) && b.length))) return [];
     return [
@@ -911,7 +927,6 @@ module.exports.ImageGenerator = ImageGenerator;
 // Codex P1 on e8b864170 — an _internals-only export would have thrown on
 // every autonomous publish).
 module.exports.planFor = planFor;
-module.exports.retryStyleFor = retryStyleFor;
 module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports.pixelWatermarkAllowed = pixelWatermarkAllowed;
@@ -931,15 +946,22 @@ module.exports._internals = {
   VAN_WRAP_LINE,
   WAVES_UNIFORM_LINE,
   WAVES_UNIFORM_LOGO_LINE,
-  INFOGRAPHIC_NO_PEOPLE_LINE,
+  TECHNICIAN_CAST_LINE,
+  HOMEOWNER_CAST_LINE,
+  NO_PEOPLE_CAST_LINE,
+  IDENTIFICATION_NO_PEST_CLOSEUP_LINE,
+  NO_DRAWN_MARKS_LINE,
+  BODY_ACTION_FRAMING,
+  technicianSlotFor,
+  vanSlotFor,
+  castFor,
+  slotFor,
   STANDARD_GUARDS,
   REFERENCE_CLAUSES,
   referenceRolesFor,
   stylePermutation,
-  retryStyleFor,
   settingsFor,
   SETTINGS,
-  INFOGRAPHIC_LAYOUTS,
   DEFAULT_CHAIN,
   MODEL_MAP,
   MODE_SIZES,
