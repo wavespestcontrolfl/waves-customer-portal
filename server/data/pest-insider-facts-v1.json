@@ -1614,15 +1614,14 @@
     {
       "id": "D01",
       "title": "Roof rats nest in old palm fronds and can jump to a house",
-      "statement": "Roof rats, Florida's top rodent pest, nest in old palm fronds and attics, and can jump eight feet from a tree to a house.",
+      "statement": "Roof rats like to nest in attics, soffits, hollow trees and old palm fronds, and rats have been known to jump eight feet from a tree to a house.",
       "lead": [
-        "UF/IFAS says roof rats are now the number one rodent pest in Florida.",
-        "They like to nest in attics, soffits, hollow trees and the old fronds on palm trees.",
-        "Rats have been known to jump eight feet from a tree to a house."
+        "Roof rats like to nest in attics, soffits, hollow trees and the old fronds on palm trees.",
+        "Rats have been known to jump eight feet from a tree to a house.",
+        "UF/IFAS says removing old palm leaf skirts can remove hiding places for rats."
       ],
       "quotes": [
         "Did you realize that rats have been known to jump eight feet from a tree to a house?",
-        "Roof rats are now the number one rodent pest in Florida.",
         "They also prefer to keep their nests in attics, soffits, hollow trees, and the old fronds on palm trees",
         "Removal of old palm leaf skirts such as those found on Mexican fan palms (Figure 10) can remove hiding places for rats, snakes, scorpions, and other desirable or not so desirable wildlife.",
         "When they invade buildings, they chew through wires that can potentially start fires, gnaw through plastic and lead water pipes, make holes in walls and cause other structural damage."
@@ -1669,7 +1668,6 @@
       "confidence": "high",
       "notes": "high (each piece is stated directly; the jump distance comes from a county blog, not a research paper).",
       "quote_sources": [
-        0,
         0,
         0,
         1,

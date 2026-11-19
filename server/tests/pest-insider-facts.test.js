@@ -31,7 +31,7 @@ const REVIEWED_HASHES = {
   P05: 'ae20ff04ac9ead00', P06: 'ab2846db3a830bc7', M01: '098922ea0b050950', M02: 'b743a1fc12158d94',
   M03: '89a2eca65f1116b5', M04: '456066f83313a8c5', T01: '6ac42f09c95473b5', T02: '38288b7d3c330d4c',
   T03: '06f4c9f340c3978c', T04: 'fc383a094bbedd07', A01: 'ff2d76ddd5cfeb74', A02: '5f49cdcb70a09555',
-  R01: 'e4c0aabc5d07d6c2', R02: '36ad3cd51a0d9358', R03: '8659e5c2b3163792', D01: '5d5189b5d13aca40',
+  R01: 'e4c0aabc5d07d6c2', R02: '36ad3cd51a0d9358', R03: '8659e5c2b3163792', D01: '990f629a6a3df536',
   D02: '118e4a41dee14132', D03: '6481660e05756908', S01: '98799458fc47a0e0', S02: '2bab2ea15d8037f1',
   X01: 'd03e3a91e8df2df3', X02: '071b02310132d221', X03: '9977038d1658d277', X04: '6f864c0a8959d708',
   X05: 'bfa5e45c106ee7af', X06: '66472b0218a2592a', X07: '97c3009c452be7c0', X08: '38d0190c37ff3733',
@@ -162,6 +162,10 @@ describe('factsForSend', () => {
     expect(factsForSend('2027-03-31', rechecked).map((f) => f.id)).toContain('O04');
     expect(factsForSend('2027-04-01', rechecked).map((f) => f.id)).not.toContain('O04');
     expect(FACTS.find((f) => f.id === 'O04').months).not.toContain(4);
+    // November is one of O04's months, so in November 2027 only the expiry keeps it out (pre-push round 19)
+    expect(FACTS.find((f) => f.id === 'O04').months).toContain(11);
+    expect(factsForSend('2026-11-05', rechecked).map((f) => f.id)).toContain('O04');
+    expect(factsForSend('2027-11-04', rechecked).map((f) => f.id)).not.toContain('O04');
   });
 
   test('refuses a calendar day that does not exist, as a date or a timestamp', () => {
