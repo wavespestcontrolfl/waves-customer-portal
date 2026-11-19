@@ -194,7 +194,8 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
       service_type: 'Quarterly Pest Control Service',
       status: 'completed',
       is_recurring: true,
-      recurring_pattern: 'quarterly',
+      recurring_pattern: 'custom',
+      recurring_interval_days: 42,
       window_start: '09:00',
       window_end: '10:00',
     })));
@@ -205,18 +206,22 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
 
     await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
 
-    const calls = capture.mock.calls.filter(([, , opts]) => opts?.metadata?.scheduledServiceId);
+    const fixtureIds = new Set([target.id, pending.id]);
+    const fixtureCalls = () => capture.mock.calls.filter(([, , opts]) => fixtureIds.has(opts?.metadata?.scheduledServiceId));
+    const calls = fixtureCalls();
     expect(calls.map(([, , opts]) => opts.metadata.scheduledServiceId)).toEqual([target.id]);
     const [, spec, opts] = calls[0];
-    expect(opts.detail).toBe(`Series started ${started} (quarterly). The dispatch due date is missing.`);
+    expect(opts.detail).toBe(`Series started ${started} (every 42 days). The dispatch due date is missing.`);
     expect(spec.link).toBe(`/admin/dispatch?tab=schedule&date=${DAY}&appointment=${target.id}`);
 
     // The due date drives the alert words/key, while the locked appointment's
     // actual calendar date drives the management link.
     capture.mockClear();
     await mockConn('scheduled_services').where({ id: target.id }).update({ recurring_dispatch_due_date: '2097-06-08' });
-    await expect(flagUnplacedVisits({ lockWindowDays: 14 }, NOW)).resolves.toBe(1);
-    const dueCalls = capture.mock.calls.filter(([, , alertOpts]) => alertOpts?.metadata?.dueDate === '2097-06-08');
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const dueCalls = fixtureCalls();
+    expect(dueCalls.map(([, , alertOpts]) => [alertOpts.metadata.scheduledServiceId, alertOpts.metadata.dueDate]))
+      .toEqual([[target.id, '2097-06-08']]);
     expect(dueCalls).toHaveLength(1);
     expect(dueCalls[0][1].why).toContain('due Jun 8');
     expect(dueCalls[0][1].link).toBe(`/admin/dispatch?tab=schedule&date=${DAY}&appointment=${target.id}`);
@@ -227,8 +232,9 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     capture.mockClear();
     await mockConn('scheduled_services').where({ id: target.id }).update({ recurring_dispatch_due_date: null });
     await mockConn.raw('ALTER TABLE scheduled_services RENAME COLUMN recurring_pattern TO recurring_pattern_unavailable');
-    await expect(flagUnplacedVisits({ lockWindowDays: 14 }, NOW)).resolves.toBe(1);
-    const fallbackCalls = capture.mock.calls.filter(([, , alertOpts]) => alertOpts?.metadata?.scheduledServiceId === target.id);
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const fallbackCalls = fixtureCalls();
+    expect(fallbackCalls.map(([, , alertOpts]) => alertOpts.metadata.scheduledServiceId)).toEqual([target.id]);
     expect(fallbackCalls).toHaveLength(1);
     expect(fallbackCalls[0][2].detail).toBe('The dispatch due date is missing.');
   });

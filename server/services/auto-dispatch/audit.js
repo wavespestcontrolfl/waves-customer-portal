@@ -478,10 +478,13 @@ async function noWindowSeriesDetail(trx, row) {
     // lookup instead of leaving the alert transaction aborted.
     const root = await trx.transaction((savepoint) => savepoint('scheduled_services')
       .where({ id: row.recurring_parent_id, customer_id: row.customer_id })
-      .first('scheduled_date', 'recurring_pattern'));
+      .first('scheduled_date', 'recurring_pattern', 'recurring_interval_days'));
     const started = root?.scheduled_date ? toDateStr(root.scheduled_date) : null;
+    const days = Number(root?.recurring_interval_days);
+    const pattern = root?.recurring_pattern === 'custom' && Number.isInteger(days) && days > 0
+      ? `every ${days} ${days === 1 ? 'day' : 'days'}` : root?.recurring_pattern;
     const series = started
-      ? `Series started ${started}${root.recurring_pattern ? ` (${root.recurring_pattern})` : ''}.`
+      ? `Series started ${started}${pattern ? ` (${pattern})` : ''}.`
       : null;
     return [series, 'The dispatch due date is missing.'].filter(Boolean).join(' ');
   } catch (err) {
