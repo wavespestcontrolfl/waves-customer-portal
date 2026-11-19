@@ -657,6 +657,18 @@ describe('sendStageComms — a held job-offer text', () => {
   });
 });
 
+describe('the email ledger snapshot', () => {
+  test('hides a token that a line break splits from its path inside an href, since a browser drops the break and opens it', async () => {
+    const { portalUrl } = require('../utils/portal-url');
+    const token = 'e'.repeat(64);
+    const html = `<p>Read it:</p><a href="https://portal.wavespestcontrol.com/careers/offer/\n${token}">Read your offer</a>`;
+    await RecruitingComms._internals.sendRawEmail({ app: baseApp(), stage: 'offer_sent', to: 'jane@example.com', subject: 'Your job offer from Waves', html, text: 'Read it.' });
+    const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
+    expect(row.html_snapshot).toBe(`<p>Read it:</p><a href="${portalUrl('/careers/offer/[link hidden]')}">Read your offer</a>`);
+    expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
+  });
+});
+
 describe('sendStageComms — a held owner reply that pastes an offer link', () => {
   const TOKEN = 'b'.repeat(64);
   const LINK = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}`;

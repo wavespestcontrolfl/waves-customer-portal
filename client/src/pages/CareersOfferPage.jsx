@@ -210,11 +210,15 @@ function ClosedState({ data }) {
   );
 }
 
-function resultMessage(data) {
+// signedElsewhere: a 409 said the offer is signed, so the signature on record
+// is not one this page just sent. Say so, with the name on record once a read
+// brings it.
+function resultMessage(data, signedElsewhere) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
     const when = formatLongInstant(data.signedAt);
-    return `You signed this offer${when ? ` on ${when}` : ''}. Welcome to Waves. ${who} will contact you about your first day.`;
+    const lead = signedElsewhere ? `This offer was already signed${data.signedName ? ` by ${data.signedName}` : ''}` : 'You signed this offer';
+    return `${lead}${when ? ` on ${when}` : ''}. Welcome to Waves. ${who} will contact you about your first day.`;
   }
   if (data.state === 'date_requested') {
     return `Thanks. ${who} will look at your new date. If it works, he will send you an updated offer.`;
@@ -223,7 +227,7 @@ function resultMessage(data) {
 }
 
 // signed / declined / date_requested: the answer the applicant already gave.
-function ResultState({ data }) {
+function ResultState({ data, signedElsewhere }) {
   return (
     <Column>
       <div style={EYEBROW}>Waves</div>
@@ -234,7 +238,7 @@ function ResultState({ data }) {
             You asked to start on {formatLongDate(data.requestedStartDate)}.
           </p>
         )}
-        <p style={BODY_STYLE} role="status">{resultMessage(data)}</p>
+        <p style={BODY_STYLE} role="status">{resultMessage(data, signedElsewhere)}</p>
       </BrandCard>
     </Column>
   );
@@ -740,6 +744,7 @@ function OfferPage({ token }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
+  const [signedElsewhere, setSignedElsewhere] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const seq = useRef(0);
 
@@ -796,6 +801,7 @@ function OfferPage({ token }) {
       return true;
     }
     if (!ANSWERED_STATES.includes(body?.state)) return false;
+    setSignedElsewhere(body.state === 'signed');
     applied({ state: body.state });
     reload();
     return true;
@@ -807,6 +813,6 @@ function OfferPage({ token }) {
     return <Column><PublicLoadError resource="offer link" onRetry={() => setLoadAttempt((a) => a + 1)} /></Column>;
   }
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;
-  if (ANSWERED_STATES.includes(data.state)) return <ResultState data={data} />;
+  if (ANSWERED_STATES.includes(data.state)) return <ResultState data={data} signedElsewhere={signedElsewhere} />;
   return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} />;
 }

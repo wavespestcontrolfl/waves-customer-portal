@@ -19,8 +19,8 @@ const TOKEN = 'cd'.repeat(32);
 const HIDDEN_LINK = portalUrl(`/careers/offer/${OFFER_LINK_HIDDEN}`);
 
 // Spellings a browser cleans into the link (dot segments, backslashes, letter case), or a reader decodes into it
-// (percent-encoding, double encoding, HTML character references, full-width forms, an invisible character in the
-// token). Each is stored as the standard link with the token hidden, and pinned to the same token.
+// (percent-encoding, double encoding, full-width forms, an invisible character in the token). Each is stored as the
+// standard link with the token hidden, and pinned to the same token.
 const OTHER_SPELLINGS = [
   `https://portal.wavespestcontrol.com/careers/offer/./${TOKEN}`,
   `https://portal.wavespestcontrol.com/careers/x/../offer/${TOKEN}`,
@@ -31,7 +31,6 @@ const OTHER_SPELLINGS = [
   `https://portal.wavespestcontrol.com/%63areers/offer/${TOKEN}`,
   `https://portal.wavespestcontrol.com/careers/%256Fffer/${TOKEN}`,
   `https://portal.wavespestcontrol.com/careers/offer/%63${TOKEN.slice(1)}`,
-  `href="https://x.test/careers/&#111;ffer/${TOKEN}">Read</a>`,
   `https://portal.wavespestcontrol.com/\uff43\uff41\uff52\uff45\uff45\uff52\uff53/\uff4f\uff46\uff46\uff45\uff52/${TOKEN}`,
   `https://portal.wavespestcontrol.com/careers/offer/${TOKEN.slice(0, 32)}\u200b${TOKEN.slice(32)}`,
 ];
@@ -50,8 +49,26 @@ describe('redactOfferLinks', () => {
     expect(offerLinkTokens(text)).toEqual([TOKEN]);
   });
 
+  // A browser drops tabs and line breaks inside the URL an HTML attribute holds, and decodes its character references.
+  test.each([
+    ['a line break before the token', `https://portal.wavespestcontrol.com/careers/offer/\n${TOKEN}`],
+    ['a tab and a line break inside the token', `https://portal.wavespestcontrol.com/careers/offer/${TOKEN.slice(0, 20)}\t\r\n${TOKEN.slice(20)}`],
+    ['an encoded letter', `https://x.test/careers/&#111;ffer/${TOKEN}`],
+    ['an encoded line break', `https://portal.wavespestcontrol.com/careers/offer/&#10;${TOKEN}`],
+  ])('an HTML link with %s keeps its quotes, stores the standard hidden link and replays as a working link', (label, href) => {
+    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
+    for (const q of ['"', "'"]) {
+      const html = `<a href=${q}${href}${q}>Read your offer</a>`;
+      expect(redactOfferLinks(html)).toBe(`<a href=${q}${HIDDEN_LINK}${q}>Read your offer</a>`);
+      expect(offerLinkTokens(html)).toEqual([TOKEN]);
+      expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: offerLinkTokens(html) }, redactOfferLinks(html)))
+        .toBe(`<a href=${q}${portalUrl(`/careers/offer/${TOKEN}`)}${q}>Read your offer</a>`);
+    }
+  });
+
   test('keeps the host and the words around the link as it is sent; a capital token is still that token', () => {
     expect(redactOfferLinks(`x.test/careers/offer/${TOKEN}`)).toBe(`x.test/careers/offer/${OFFER_LINK_HIDDEN}`);
+    expect(redactOfferLinks(`<a href="https://x.test/careers/offer/${TOKEN}">Read</a>`)).toBe(`<a href="https://x.test/careers/offer/${OFFER_LINK_HIDDEN}">Read</a>`);
     expect(redactOfferLinks(`x.test/careers/offer/${TOKEN.toUpperCase()}.`)).toBe(`x.test/careers/offer/${OFFER_LINK_HIDDEN}.`);
     expect(offerLinkTokens(`x.test/careers/offer/${TOKEN.toUpperCase()}.`)).toEqual([TOKEN]);
   });
@@ -127,6 +144,15 @@ describe('the deferred replay body', () => {
     expect(redactOfferLinks(body)).toBe(`Old: x.test/careers/offer/${OFFER_LINK_HIDDEN} New: ${HIDDEN_LINK} Thanks.`);
     expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: offerLinkTokens(body) }, redactOfferLinks(body)))
       .toBe(`Old: x.test/careers/offer/${TOKEN} New: ${portalUrl(`/careers/offer/${other}`)} Thanks.`);
+  });
+
+  test('two links in one run keep their order when the other spelling comes first', () => {
+    const other = 'f'.repeat(64);
+    const body = `Links: x.test/careers/./offer/${other},x.test/careers/offer/${TOKEN} Thanks.`;
+    expect(offerLinkTokens(body)).toEqual([other, TOKEN]);
+    expect(redactOfferLinks(body)).toBe(`Links: ${HIDDEN_LINK} ${HIDDEN_LINK} Thanks.`);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: offerLinkTokens(body) }, redactOfferLinks(body)))
+      .toBe(`Links: ${portalUrl(`/careers/offer/${other}`)} ${portalUrl(`/careers/offer/${TOKEN}`)} Thanks.`);
   });
 
   test('a held owner reply gets each pasted link back in order; a missing or extra link refuses it', () => {
