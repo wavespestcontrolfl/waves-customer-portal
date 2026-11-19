@@ -313,7 +313,9 @@ function fitBody(text) {
 // handoff, a phone a newer sign-in took over is no longer in it. A browser's
 // web-push endpoint can stay active under two staff accounts on a shared
 // browser, and its page shows a push whoever is signed in, so it is never in
-// it; nor is a token a customer registration re-pointed.
+// it; nor is a token a customer registration re-pointed. That index compares
+// letter case, so a token another active row holds in any case is ambiguous
+// and is not in it either.
 async function namedDevices(technicianId, conn) {
   const { STAFF_APP_BUNDLE_ID } = require('./apns');
   const rows = await conn('push_subscriptions as ps')
@@ -323,6 +325,7 @@ async function namedDevices(technicianId, conn) {
     .whereNull('ps.customer_id')
     .whereRaw('ps.staff_token_version = t.auth_token_version')
     .whereRaw("ps.subscription_data::jsonb->>'topic' = ?", [STAFF_APP_BUNDLE_ID])
+    .whereRaw('NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND o.active AND lower(o.device_token) = lower(ps.device_token))')
     .select('ps.id', 'ps.device_token');
   return new Map(rows.map((row) => [String(row.id), row.device_token]));
 }
@@ -614,7 +617,10 @@ async function newerCardExists(notice, conn) {
 // same recheck verified as this tech's staff app (namedDevices). The sender
 // builds each device's payload right after that device's recheck, so
 // clearing the second line there reaches that device and every later one.
-async function pushCard(notice, { checkCurrent = null } = {}) {
+// A tech who left field work since the card hears nothing (stillAssignable).
+// `liveBody()`, when given, is the second line as the visit reads at this
+// recheck (the row checkCurrent just read), or null to keep the written one.
+async function pushCard(notice, { checkCurrent = null, liveBody = null } = {}) {
   try {
     const PushService = require('./push-notifications');
     let stale = false;
@@ -632,7 +638,12 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       try {
         if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
         else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
-        else if (push.body) verified = await namedDevices(notice.technicianId, db);
+        else if (!(await stillAssignable(notice.technicianId, db))) stale = true;
+        else if (push.body) {
+          const live = liveBody ? liveBody() : null;
+          if (live) push.body = live;
+          verified = await namedDevices(notice.technicianId, db);
+        }
       } catch (err) {
         push.body = '';
         logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending the first line only`);
@@ -672,7 +683,10 @@ async function deliver(notices) {
     try {
       const card = await writeCard(n);
       // A push that goes out now says what its card was just written with.
-      if (card) written.push({ ...n, cardId: card.id || null, pushBody: fitBody(pushDetail(partsFromCard(card.payload, n.kind))) });
+      if (card) {
+        written.push({ ...n, cardId: card.id || null, pushBody: fitBody(pushDetail(partsFromCard(card.payload, n.kind))),
+          previousWhen: card.payload.previous_when || null });
+      }
       else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
@@ -680,7 +694,14 @@ async function deliver(notices) {
   }
   for (const n of written) {
     if (n.holdForRun || n.holdForBundle) continue;
-    await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
+    // A stop still on the route reads as the visit is at each handoff (the
+    // row its recheck just read), as a bundled push does; a moved-off or
+    // cancelled stop keeps what its card was written with (#7569).
+    let row = null;
+    await pushCard(n, {
+      checkCurrent: async (conn) => { row = await standingRow(n, conn); return !!row; },
+      liveBody: () => (row && ON_ROUTE_KINDS.has(n.kind) ? fitBody(pushDetail(partsFromVisit(row, n.kind, n.previousWhen))) : null),
+    });
   }
   return { written: written.length, dropped };
 }

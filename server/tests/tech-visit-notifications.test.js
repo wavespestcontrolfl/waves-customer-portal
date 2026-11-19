@@ -1164,6 +1164,8 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
       ['whereNull', 'ps.customer_id'],
       ['whereRaw', 'ps.staff_token_version = t.auth_token_version'],
       ['whereRaw', "ps.subscription_data::jsonb->>'topic' = ?", ['com.wavespestcontrol.wavespay']],
+      // A token another active row holds, in any letter case, is ambiguous.
+      ['whereRaw', expect.stringContaining('lower(o.device_token) = lower(ps.device_token)')],
     ]));
   });
 
@@ -1199,6 +1201,38 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     } finally {
       techs['tech-1'] = was;
     }
+  });
+
+  test('an immediate push to a tech who left field work after the card is never sent (pre-push audit P1)', async () => {
+    const was = techs['tech-1'];
+    // The card is written while tech-1 does field work; the flag drops before the handoff.
+    mockBeforeLeg = async () => { techs['tech-1'] = { ...TECH, field_dispatchable: false }; };
+    try {
+      await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+      expect(cardRows).toHaveLength(1);
+      expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    } finally {
+      techs['tech-1'] = was;
+    }
+  });
+
+  test('an immediate push reads a stop still on the route as the visit is at the handoff (pre-push audit P1)', async () => {
+    mockBeforeLeg = async () => { Object.assign(visitRows['v-1'], { service_address_line1: '9 Example Ln' }); };
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(cardRows[0].payload).toMatchObject({ street: '4312 Cortez Rd W' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 9 Example Ln',
+    }));
+  });
+
+  test('an immediate moved-off push keeps the words its card was written with (#7569)', async () => {
+    visitRows['v-1'] = { ...VISIT, id: 'v-1', technician_id: 'tech-2' };
+    mockBeforeLeg = async () => { Object.assign(visitRows['v-1'], { scheduled_date: '2026-09-11', service_address_line1: '9 Example Ln' }); };
+    await notices.notifyTechVisitChange({ visitId: 'v-1', kind: 'unassigned', technicianId: 'tech-1', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'A visit was moved off your route',
+      body: 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W',
+    }));
   });
 
   test('a single unverified visit gets its own first line only', async () => {
