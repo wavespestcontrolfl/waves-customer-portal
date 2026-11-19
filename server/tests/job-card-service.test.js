@@ -2322,8 +2322,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
 
       test('an add-on whose product the host does not use is one card, still apart from any host card', async () => {
         const fireAnt = { name: 'Fire Ant Yard Treatment', category: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', areaAddOnScope: { tierSqFt: 5000 } };
-        // The pest host's perimeter product is the Talstar P hint (owner 2026-10-26: Talak, no Demand CS).
-        const { cards } = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [fireAnt] }, {}, fullProtocols, [...catalog, { id: 't', name: 'Talstar P' }]);
+        // The pest host's perimeter product is the LESCO Crosscheck Plus hint (owner 2026-11-19: Crosscheck + Taurus SC, no Demand CS).
+        const { cards } = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [fireAnt] }, {}, fullProtocols, [...catalog, { id: 't', name: 'LESCO Crosscheck Plus' }]);
         expect(cards.filter((card) => card.id === 'gov2')).toEqual([expect.objectContaining({ rowId: 'gov2::area_addon_fire_ant_yard', addOnKey: 'area_addon_fire_ant_yard' })]);
         expect(cards.find((card) => card.id === 't').rowId).toBe('t');
         expect(cards.some((card) => card.id === 'd')).toBe(false);

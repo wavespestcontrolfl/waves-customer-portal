@@ -38,9 +38,11 @@ export const PEST_DEFAULT_MIX = [
 // exclusion), the specialty pest lanes that keep their own product flows
 // (rodent, bed bug, flea/tick, bee/wasp, roach cleanouts, ant jobs), and
 // the visits the canonical alias set deliberately excludes — initial
-// visits and inspections.
+// visits and inspections, and the trap-only retainer plans (owner 2026-11-19:
+// a trap check applies no spray, so "Monthly Trap-Only Retainer Service" must
+// not pick up the monthly general-pest vocabulary below).
 const NON_MIX_SERVICE_RE =
-  /lawn|turf|grass|\bsod\b|fertil|weed|aerat|dethatch|mosquito|termite|wdo|tree|shrub|\bpalms?\b|rodent|\brats?\b|\bmice\b|\bmouse\b|\bmoles?\b|bed\s*bug|\bfleas?\b|\bticks?\b|\bbees?\b|wasp|roach|\bants?\b|cleanout|exclusion|\binitial\b|inspection/i;
+  /lawn|turf|grass|\bsod\b|fertil|weed|aerat|dethatch|mosquito|termite|wdo|tree|shrub|\bpalms?\b|rodent|\brats?\b|\bmice\b|\bmouse\b|\bmoles?\b|bed\s*bug|\bfleas?\b|\bticks?\b|\bbees?\b|wasp|roach|\bants?\b|cleanout|exclusion|\binitial\b|inspection|\btrap|retainer/i;
 
 // The recurring general-pest vocabulary mirrors the canonical alias set
 // in migration 20260514000009 (all three naming generations, the legacy

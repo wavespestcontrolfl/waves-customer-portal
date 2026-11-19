@@ -237,17 +237,37 @@ describe('waveguard-plan-engine helpers', () => {
     });
 
     test('matchCatalogProduct resolves the product from lineMeta hints despite de-branded text', () => {
-      // Owner 2026-10-26: no Demand CS on hand, the perimeter is Talak (the Talstar P hint), so a
-      // catalog that still lists Demand CS resolves the Talstar P row.
+      // Owner 2026-11-19: the regular general-pest visit is LESCO Crosscheck Plus (both perimeter lines) and
+      // Taurus SC (the non-repellent perimeter line); Demand CS and Atticus Antapex WSG are not on those lines.
       const catalog = [
         { id: '1', name: 'Demand CS', cost_per_unit: 5 },
-        { id: '2', name: 'Talstar P', cost_per_unit: 4 },
+        { id: '2', name: 'LESCO Crosscheck Plus', cost_per_unit: 4 },
+        { id: '4', name: 'Taurus SC', cost_per_unit: 6 },
+        { id: '5', name: 'Atticus Antapex WSG', cost_per_unit: 7 },
         { id: '3', name: 'Unrelated Product' },
       ];
-      const meta = protocols.pest.visits[0].lineMeta['Treated exterior perimeter band'];
-      const line = { raw: 'Treated exterior perimeter band', catalogProductHints: meta.catalogProductHints };
-      expect(matchCatalogProduct(line, catalog).name).toBe('Talstar P');
-      expect(meta).toMatchObject({ scope: 'exterior', treatmentApplied: true });
+      const lineMeta = protocols.pest.visits[0].lineMeta;
+      const resolve = (raw) => matchCatalogProduct({ raw, catalogProductHints: lineMeta[raw].catalogProductHints }, catalog);
+      expect(resolve('Treated exterior perimeter band').name).toBe('LESCO Crosscheck Plus');
+      expect(resolve('Applied repellent solution with surfactant to perimeter').name).toBe('LESCO Crosscheck Plus');
+      expect(resolve('Applied non-repellent solution to perimeter (6-ft band + crack & crevice)').name).toBe('Taurus SC');
+      // Left on Atticus Antapex WSG on purpose: roach activity on a regular visit is an open owner question.
+      expect(resolve('Treated interior cracks & crevices (activity present)').name).toBe('Atticus Antapex WSG');
+      expect(lineMeta['Treated exterior perimeter band']).toMatchObject({ scope: 'exterior', treatmentApplied: true });
+    });
+
+    test('regular pest visit 1 names the house products and no retired or roach-only product on its perimeter lines', () => {
+      const hints = (raw) => protocols.pest.visits[0].lineMeta[raw].catalogProductHints;
+      expect(hints('Treated exterior perimeter band')).toEqual(['LESCO Crosscheck Plus']);
+      expect(hints('Applied repellent solution with surfactant to perimeter')).toEqual(['LESCO Crosscheck Plus']);
+      expect(hints('Applied non-repellent solution to perimeter (6-ft band + crack & crevice)')).toEqual(['Taurus SC']);
+      expect(hints('Treated interior cracks & crevices (activity present)')).toEqual(['Atticus Antapex WSG']);
+      // Visits 2 to 6 are unchanged: still no Crosscheck or Taurus hint there that this ruling did not set.
+      for (const visit of protocols.pest.visits.slice(1)) {
+        for (const meta of Object.values(visit.lineMeta || {})) {
+          expect(meta.catalogProductHints || []).not.toContain('LESCO Crosscheck Plus');
+        }
+      }
     });
 
     test('every lineMeta key matches an actual de-branded line in its visit', () => {

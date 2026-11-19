@@ -1846,21 +1846,21 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Talstar P"
+              "LESCO Crosscheck Plus"
             ]
           },
           "Applied repellent solution with surfactant to perimeter": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Talstar P"
+              "LESCO Crosscheck Plus"
             ]
           },
           "Applied non-repellent solution to perimeter (6-ft band + crack & crevice)": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Atticus Antapex WSG"
+              "Taurus SC"
             ]
           },
           "Treated interior cracks & crevices (activity present)": {
@@ -1909,7 +1909,7 @@
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Advion Cockroach Gel Bait"
+              "Advion Evolution Cockroach Gel Bait"
             ]
           },
           "Crack-and-crevice treatment": {
@@ -2282,7 +2282,7 @@
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Advion Cockroach Gel Bait"
+              "Advion Evolution Cockroach Gel Bait"
             ],
             "completionApplicationMethod": "bait_placement"
           },
@@ -2315,7 +2315,7 @@
         "completionDefaultProducts": [
           "Atticus Antapex WSG",
           "Gentrol Complete EC3",
-          "Advion Cockroach Gel Bait"
+          "Advion Evolution Cockroach Gel Bait"
         ]
       },
       {
@@ -2328,7 +2328,7 @@
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "Talstar P",
+              "LESCO Crosscheck Plus",
               "Atticus Antapex WSG"
             ]
           },
