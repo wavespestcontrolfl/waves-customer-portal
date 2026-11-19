@@ -142,15 +142,19 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
   test('the day-stops select list carries service_type/is_recurring/is_callback so quality totals plan the same minutes as the picker', async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     let capturedSelect;
+    let capturedOccupancySql;
     dayStopsQuery.mockImplementation((_c, opts) => {
       capturedSelect = opts.select;
-      return { whereRaw: () => Promise.resolve([{
+      return { whereRaw: sql => {
+        capturedOccupancySql = sql;
+        return Promise.resolve([{
         id: 'v1', technician_id: 'tech1', route_order: 1, customer_id: 'cust', scheduled_date: DATE,
         window_start: '09:00', window_end: '10:00', time_window: null, status: 'confirmed',
         reservation_expires_at: null, created_at: '2020-01-01T00:00:00Z', visit_id: null,
         estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service', is_recurring: true,
         is_callback: false, lat: 27.4, lng: -82.4,
-      }]) };
+        }]);
+      } };
     });
     const result = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
     // The fix: without these three columns selected, workDuration's
@@ -159,6 +163,7 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(capturedSelect).toEqual(expect.arrayContaining([
       'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
     ]));
+    expect(capturedOccupancySql).toContain('scheduled_services.customer_id IS NOT NULL');
     // A recognized recurring-pest row plans at owner minutes (35, owner 2026-10-30), not the
     // legacy 60 its stored estimate/window would otherwise charge.
     expect(result.days[0].byTech[0].serviceMinutes).toBe(35);

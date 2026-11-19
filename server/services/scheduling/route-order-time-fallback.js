@@ -11,6 +11,7 @@
  * computeChronologicalRepair uses (route-reorder-window-fit.js).
  */
 const { currentOrder, effectiveWindowRange, isCoVisitPair } = require('../route-reorder-window-fit');
+const { isHoldStop } = require('./travel-gap');
 
 // A completed stop or the stop under way is behind the technician: the visit never goes ahead of one
 // (stops-ahead.js counts only the live stops numbered before a visit).
@@ -26,7 +27,7 @@ const DONE_OR_UNDER_WAY = ['completed', 'en_route', 'on_site'];
 function timeFallbackOrder(rows, target) {
   if (DONE_OR_UNDER_WAY.includes(target.status)) return null;
   const mine = (rows || []).filter(row => row.technician_id === target.technician_id
-    && row.reservation_expires_at == null && row.route_order != null && String(row.id) !== String(target.id));
+    && !isHoldStop(row) && row.route_order != null && String(row.id) !== String(target.id));
   const candidate = currentOrder(mine);
   const floor = candidate.reduce((after, stop, i) => (DONE_OR_UNDER_WAY.includes(stop.status) ? i + 1 : after), 0);
   const range = effectiveWindowRange(target);

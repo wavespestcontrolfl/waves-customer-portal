@@ -1179,6 +1179,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       try {
         committed = await slotReservation.commitReservation({
           scheduledServiceId: purchase.scheduled_service_id,
+          expectUnclaimed: true,
           customerId,
           estimatedPrice: Number(purchase.per_visit),
           estimate: { ...est, status: 'accepted' },

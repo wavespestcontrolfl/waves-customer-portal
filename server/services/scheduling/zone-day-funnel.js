@@ -46,6 +46,7 @@
  * that request (full pool offered) — a scattered offer beats no offer.
  */
 
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const logger = require('../logger');
 const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
 const { isEnabled } = require('../../config/feature-gates');
@@ -160,9 +161,7 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .andWhere(liveServiceOrHold)
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',

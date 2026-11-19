@@ -231,6 +231,48 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test.each([false, true])('a booked visit with an old hold expiry is offered once (already linked: %s)', async (linked) => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: linked ? estimateId : null,
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
+      },
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(id);
+    expect(acceptance.appointment).not.toHaveProperty('reservationExpiresAt');
+  });
+
+  test('an open picker accepts its chosen visit when staff have already booked it for the same estimate and customer', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId },
+    });
+    const response = await putAccept(token, { slotId: `${CHOSEN_DATE}_09-00_unassigned`, paymentMethodPreference: 'pay_at_visit' });
+    const body = await response.json();
+    expect({ status: response.status, error: body.error }).toEqual({ status: 200, error: undefined });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('accepted');
+    const firstVisits = await mockTransaction('scheduled_services')
+      .where({ customer_id: customerId, source_estimate_id: estimateId, scheduled_date: CHOSEN_DATE }).pluck('id');
+    expect(firstVisits).toEqual([id]);
+  });
+
+  test('an open picker cannot adopt a different hour when the submitted hold has expired', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId },
+    });
+    const response = await putAccept(token, { slotId: `${CHOSEN_DATE}_11-00_unassigned` });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('sent');
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);
@@ -321,6 +363,23 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     const EstimateConverter = () => require('../services/estimate-converter');
     const convertOpts = { skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true };
 
+    test.each(['cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit with an old hold stamp cannot become the plan start', async (status) => {
+      const { customerId, estimateId } = await fixture(mockTransaction);
+      const earlier = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: ASSESSMENT_DATE,
+        extra: { status, source_estimate_id: estimateId, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
+      });
+      const chosen = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+        extra: { source_estimate_id: estimateId, estimated_price: 55 },
+      });
+      await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+      const result = await EstimateConverter().convertEstimate(estimateId, { database: mockTransaction, ...convertOpts });
+      expect(result.firstScheduledServiceId).toBe(chosen);
+      expect(dateOnly(result.membershipEmail.effectiveDate)).toBe(CHOSEN_DATE);
+      expect(await mockTransaction('scheduled_services').where({ id: earlier }).first('status')).toEqual({ status });
+    });
+
     test('an assessment stamped to the estimate (older build) does not become the plan start', async () => {
       const { customerId, estimateId } = await fixture(mockTransaction);
       // The earlier-dated assessment carries the estimate's stamp, as the
@@ -329,7 +388,7 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       const assessmentId = await assessmentVisit(mockTransaction, customerId, { source_estimate_id: estimateId });
       const chosenId = await visit(mockTransaction, {
         customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
-        extra: { source_estimate_id: estimateId, estimated_price: 55 },
+        extra: { source_estimate_id: estimateId, estimated_price: 55, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
       });
       await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
 

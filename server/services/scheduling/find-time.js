@@ -25,6 +25,7 @@ const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, se
 const { zoneRouteDaysLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
@@ -1298,10 +1299,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .whereNotNull('scheduled_services.window_start')
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .where(liveServiceOrHold)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',

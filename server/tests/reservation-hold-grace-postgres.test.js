@@ -147,6 +147,33 @@ postgres('hold grace + extend (real Postgres)', () => {
     else process.env.RESERVATION_COMMIT_GRACE_MINUTES = originalGrace;
   });
 
+  test.each([false, true])('a hold linked after preflight must be adopted before accepting its price (stamp cleared: %s)', async (cleared) => {
+    await withHold({}, async ({ trx, holdId, customerId }) => {
+      expect((await holdRow(trx, holdId)).customer_id).toBeNull();
+      const staffBooking = { customer_id: customerId, estimated_price: '79.00', status: 'confirmed' };
+      await trx('scheduled_services').where({ id: holdId }).update({
+        ...staffBooking, ...(cleared ? { reservation_expires_at: null } : {}),
+      });
+      await expect(slotReservation.commitReservation({
+        trx, scheduledServiceId: holdId, customerId, estimatedPrice: 45, expectUnclaimed: true,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(await trx('scheduled_services').where({ id: holdId }).first('customer_id', 'status', 'estimated_price'))
+        .toEqual(staffBooking);
+    });
+  });
+
+  test('a booked visit with an old hold stamp replays for its customer and keeps its owner', async () => {
+    await withHold({ committed: true, expiresInSeconds: -3600 }, async ({ trx, holdId, customerId }) => {
+      const before = await holdRow(trx, holdId);
+      await expect(slotReservation.commitReservation({ trx, scheduledServiceId: holdId, customerId: randomUUID() }))
+        .rejects.toMatchObject({ code: 'RESERVATION_NOT_FOUND' });
+      expect(await holdRow(trx, holdId)).toEqual(before);
+      const booked = { id: holdId, customer_id: customerId, reservation_expires_at: null };
+      await expect(slotReservation.commitReservation({ trx, scheduledServiceId: holdId, customerId })).resolves.toMatchObject(booked);
+      expect(await holdRow(trx, holdId)).toEqual(booked);
+    });
+  });
+
   describe('commitGraceMinutes()', () => {
     test('defaults to 10 and clamps to [0, 30]', () => {
       delete process.env.RESERVATION_COMMIT_GRACE_MINUTES;
@@ -159,6 +186,19 @@ postgres('hold grace + extend (real Postgres)', () => {
   });
 
   describe('commitReservation grace', () => {
+    test('a second customer cannot commit over a booked visit that retained an expired hold stamp', async () => {
+      await withHold({}, async ({ trx, holdId, customerId, date }) => {
+        const other = randomUUID();
+        await trx('customers').insert({ id: other, first_name: 'Synthetic', last_name: 'Appointment', phone: '+19415550112' });
+        await trx('scheduled_services').insert({ customer_id: other, scheduled_date: date, window_start: '13:00',
+          window_end: '14:00', service_type: 'Lawn Care', status: 'confirmed', estimated_duration_minutes: 60,
+          reservation_expires_at: trx.raw("NOW() - INTERVAL '1 hour'") });
+        await expect(slotReservation.commitReservation({ scheduledServiceId: holdId, customerId, trx }))
+          .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+        expect((await holdRow(trx, holdId)).customer_id).toBeNull();
+      });
+    });
+
     test('graduates a hold that expired 30 s ago (the owner case: 34 s late)', async () => {
       process.env.RESERVATION_COMMIT_GRACE_MINUTES = '10';
       await withHold({ expiresInSeconds: -30 }, async ({ trx, holdId, customerId }) => {
