@@ -6904,7 +6904,7 @@ function initScheduledJobs() {
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };
           const smsResult = await dispatchScheduledSms(msg, claimMeta, sendReplay,
-          purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
+          purpose, SCHEDULED_SMS_MAX_ATTEMPTS, toPhone);
           if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
           const lawnPipelineRetryAt = claimMeta.entry_point === 'lawn_assessment_notification_deferred'
@@ -7161,9 +7161,10 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
-                // So does the pre-send customer-link check (scheduled-sms-delivery.js scheduledLinkRefusal): its reason is the
-                // check's own refusal code, and that function has already raised the office alert.
-                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED'].includes(smsResult.code)) {
+                // So do the pre-send customer-link check and the website-line check (scheduled-sms-delivery.js
+                // scheduledLinkRefusal, scheduledWebsiteLineRefusal): the reason is the check's own refusal code, and
+                // that function has already raised the office alert.
+                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED', 'WEBSITE_LINE_REFUSED'].includes(smsResult.code)) {
                   await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
                     metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
                   });
