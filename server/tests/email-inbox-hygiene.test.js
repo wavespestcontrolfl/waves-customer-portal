@@ -640,7 +640,7 @@ describe('draftReplyForEmail signature and grounded facts', () => {
     const call = dispatchWithFallback.mock.calls[0][1];
     expect(call.system.startsWith(SYSTEM_BASELINE + '\n')).toBe(true);
     expect(call.system).toMatch(/FACTS FROM WAVES RECORDS \(current as of [A-Z][a-z]+, [A-Z][a-z]+ \d+, \d+:\d{2} [AP]M ET\):\nVisits:\n- Quarterly Pest Control Service \| Tuesday, November 3/);
-    expect(call.system).toContain('Use the FACTS for any visit date, arrival window, status, technician name, or phone number.');
+    expect(call.system).toContain('Use the FACTS for any visit date, arrival window, status, technician name, phone number, or estimate date (valid until, accepted).');
     expect(call.system).toContain('Never promise how or when Waves will contact the customer (a call, a text, an email) unless the FACTS say so.');
     expect(call.system).toContain("Never write 'sorry we missed your call'.");
     expect(call.text).toContain('Are you still coming today?');

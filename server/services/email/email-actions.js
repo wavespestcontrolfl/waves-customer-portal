@@ -1182,7 +1182,7 @@ async function draftFactsSystemEntries(email, customer) {
   const now = new Date();
   return [
     `FACTS FROM WAVES RECORDS (current as of ${formatETDay(now)}, ${formatETDate(now)}, ${formatETTime(now)} ET):\n${facts}`,
-    'Use the FACTS for any visit date, arrival window, status, technician name, or phone number. Use service names exactly as written in the FACTS. Never leave a [BRACKETED PLACEHOLDER] for something the FACTS answer; use a placeholder only for what they do not cover. Stay consistent with the texts Waves already sent. Never promise how or when Waves will contact the customer (a call, a text, an email) unless the FACTS say so. Never write \'sorry we missed your call\'.',
+    'Use the FACTS for any visit date, arrival window, status, technician name, phone number, or estimate date (valid until, accepted). Use service names exactly as written in the FACTS. Never leave a [BRACKETED PLACEHOLDER] for something the FACTS answer; use a placeholder only for what they do not cover. Stay consistent with the texts Waves already sent. Never promise how or when Waves will contact the customer (a call, a text, an email) unless the FACTS say so. Never write \'sorry we missed your call\'.',
   ];
 }
 
