@@ -4,7 +4,12 @@
  * Date values ('YYYY-MM-DD') are formatted without a time-zone shift. Instants
  * (expiresAt, signedAt) are formatted in Eastern time.
  */
-import { etDateString, formatETDate, formatETDateOnly } from '../../lib/timezone';
+import { addETDays, etDateString, etParts, formatETDate, formatETDateOnly } from '../../lib/timezone';
+
+// Calendar dates ('YYYY-MM-DD') go through the shared Eastern helpers in
+// lib/timezone.js. A day anchored at noon UTC is the same Eastern day all year.
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const anchorOf = (value) => new Date(`${value}T12:00:00Z`);
 
 export function money(value) {
   const n = Number(value);
@@ -64,16 +69,17 @@ export function signedNameValid(name) {
   return trimmed.length >= 3 && trimmed.length <= 120 && trimmed.split(/\s+/).length >= 2;
 }
 
-// Monday=1 … Sunday=0 for a 'YYYY-MM-DD' value, without a time-zone shift.
-function weekdayOf(dateValue) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateValue || ''));
-  if (!m) return null;
-  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay();
+// 0 Sunday .. 6 Saturday for a real 'YYYY-MM-DD' calendar date (Feb 30 is not one), else null.
+function weekdayOf(value) {
+  if (typeof value !== 'string' || !DATE_RE.test(value)) return null;
+  const at = anchorOf(value);
+  if (Number.isNaN(at.getTime()) || etDateString(at) !== value) return null;
+  return etParts(at).dayOfWeek;
 }
 
-export function tomorrowET() {
-  const [y, m, d] = etDateString().split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+// Tomorrow's calendar date in Eastern, 'YYYY-MM-DD'.
+export function tomorrowET(now = new Date()) {
+  return etDateString(addETDays(now, 1));
 }
 
 // null when valid, else the message to show.

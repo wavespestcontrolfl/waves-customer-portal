@@ -45,5 +45,9 @@ describe('offerFormat', () => {
     expect(dateRequestProblem('2026-12-18')).toMatch(/Monday to Thursday/); // Fri
     expect(dateRequestProblem('2026-12-17')).toBeNull(); // Thu
     expect(dateRequestProblem('2026-12-21')).toBeNull(); // Mon
+    // Not a calendar date: Feb 30 would roll over to Mar 2 (a Tuesday) in a hand-made Date.
+    expect(dateRequestProblem('2027-02-30')).toBe('Pick a date.');
+    // 11:30 PM ET on Dec 14 is Dec 15 in UTC: tomorrow is still the Eastern Dec 15.
+    expect(tomorrowET(new Date('2026-12-15T04:30:00Z'))).toBe('2026-12-15');
   });
 });
