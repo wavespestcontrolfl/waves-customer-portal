@@ -168,9 +168,10 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     return slotId;
   }
 
-  // The whole flow a customer walks: tap a service in the My Plan list, pick
-  // a time, confirm.
-  async function buy(serviceKey) {
+  // The first two steps a customer walks: tap a service in the My Plan list
+  // and pick a time. Split from confirm so deterministic interleavings can
+  // complete or staff-claim the selected hold before the first confirm moves.
+  async function openPurchase(serviceKey) {
     const { offers } = await oneTap.listOffers({ customerId: ids.customer });
     const offer = offers.find((candidate) => candidate.serviceKey === serviceKey);
     expect(offer).toMatchObject({ serviceKey, mode: 'priced' });
@@ -181,6 +182,12 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     } });
     const slotId = await offerOpening(init.estimateId);
     await oneTap.reserve({ customerId: ids.customer, purchaseId: init.purchaseId, slotId });
+    return init;
+  }
+
+  // The whole flow a customer walks: tap, pick, confirm.
+  async function buy(serviceKey) {
+    const init = await openPurchase(serviceKey);
     const done = await oneTap.confirm({ customerId: ids.customer, purchaseId: init.purchaseId,
       termsAccepted: true, ip: '203.0.113.9', userAgent: 'fixture' });
     return { init, done };
@@ -269,4 +276,161 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     expect(init.pricing.newService.discountPct).toBeGreaterThan(0);
     expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(init.visitsPerYear);
   });
+
+  test('a staff-booked competitor surviving expired-hold cleanup preserves the purchase for office review', async () => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const competitorId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: competitorId,
+      source_estimate_id: init.estimateId,
+      customer_id: ids.customer,
+      technician_id: ids.technician,
+      service_type: 'Lawn Care',
+      scheduled_date: openDay(18),
+      window_start: '13:00',
+      window_end: '14:00',
+      status: 'confirmed',
+      is_recurring: true,
+      estimated_price: 73,
+      reservation_expires_at: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    await require('../services/slot-reservation').releaseExpiredReservations();
+    expect(await trx('scheduled_services').where({ id: competitorId }).first('reservation_expires_at'))
+      .toEqual({ reservation_expires_at: null });
+
+    await expect(oneTap.confirm({
+      customerId: ids.customer,
+      purchaseId: init.purchaseId,
+      termsAccepted: true,
+    })).rejects.toMatchObject({
+      status: 422,
+      code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED',
+      message: expect.stringMatching(/call or text the Waves office/i),
+    });
+
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
+      .toEqual({ status: 'reserved', scheduled_service_id: purchase.scheduled_service_id });
+    expect(await trx('estimates').where({ id: init.estimateId }).first('status', 'price_locked_at'))
+      .toEqual({ status: 'draft', price_locked_at: null });
+    expect(await trx('invoices').where({ customer_id: ids.customer })).toHaveLength(0);
+    expect(Number((await trx('scheduled_services').where({ id: competitorId }).first('estimated_price')).estimated_price))
+      .toBe(73);
+    expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first('customer_id'))
+      .toEqual({ customer_id: null });
+  });
+
+  test.each([
+    ['before reservation preparation', 'prepare'],
+    ['after reservation preparation, before the transaction', 'transaction'],
+  ])('two confirmations completing %s return the same durable purchase', async (_when, interleaving) => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const reservations = require('../services/slot-reservation');
+    const prepareReservationCommit = reservations.prepareReservationCommit;
+    const prepare = jest.spyOn(reservations, 'prepareReservationCommit');
+    const routeDb = require('../models/db');
+    const transaction = routeDb.transaction;
+    let transactionSpy;
+    let winner;
+    const completeWinner = async () => {
+      winner = await oneTap.confirm({
+        customerId: ids.customer,
+        purchaseId: init.purchaseId,
+        termsAccepted: true,
+        ip: '203.0.113.9',
+        userAgent: 'fixture',
+      });
+    };
+    if (interleaving === 'prepare') {
+      prepare.mockImplementationOnce(async (...args) => {
+        await completeWinner();
+        return prepareReservationCommit(...args);
+      });
+    } else {
+      transactionSpy = jest.spyOn(routeDb, 'transaction').mockImplementationOnce(async (...args) => {
+        await completeWinner();
+        return transaction(...args);
+      });
+    }
+
+    try {
+      const replay = await oneTap.confirm({
+        customerId: ids.customer,
+        purchaseId: init.purchaseId,
+        termsAccepted: true,
+        ip: '203.0.113.9',
+        userAgent: 'fixture',
+      });
+      expect(replay).toEqual(winner);
+      expect(replay).toMatchObject({ success: true, perVisit: init.perVisit });
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(prepare).toHaveBeenCalledWith(purchase.scheduled_service_id, {
+        serviceMode: 'recurring', expectedEstimateId: init.estimateId, expectedCustomerId: ids.customer,
+      });
+      expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status'))
+        .toEqual({ status: 'completed' });
+      const series = await trx('scheduled_services').where({ source_estimate_id: init.estimateId });
+      expect(series).toHaveLength(init.visitsPerYear);
+      expect(series.filter((row) => !row.recurring_parent_id)).toHaveLength(1);
+      expect(await trx('invoices').where({ customer_id: ids.customer })).toHaveLength(0);
+    } finally {
+      transactionSpy?.mockRestore();
+      prepare.mockRestore();
+    }
+  }, 180000);
+
+  test.each([
+    ['before reservation preparation after expiry cleanup', 'before'],
+    ['after reservation preparation at the authoritative writer check', 'after'],
+  ])('a staff claim %s is not mistaken for a completed purchase', async (_when, interleaving) => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const reservations = require('../services/slot-reservation');
+    const prepareReservationCommit = reservations.prepareReservationCommit;
+    let staffBooked;
+    const claimAndClean = async () => {
+      await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).update({
+        customer_id: ids.customer,
+        estimated_price: 73,
+        status: 'confirmed',
+        reservation_expires_at: trx.raw("NOW() - INTERVAL '1 hour'"),
+      });
+      await reservations.releaseExpiredReservations();
+      staffBooked = await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first();
+      expect(staffBooked.reservation_expires_at).toBeNull();
+    };
+    let prepare;
+    if (interleaving === 'before') {
+      await claimAndClean();
+    } else {
+      prepare = jest.spyOn(reservations, 'prepareReservationCommit').mockImplementationOnce(async (...args) => {
+        const prepared = await prepareReservationCommit(...args);
+        await claimAndClean();
+        return prepared;
+      });
+    }
+
+    try {
+      await expect(oneTap.confirm({
+        customerId: ids.customer,
+        purchaseId: init.purchaseId,
+        termsAccepted: true,
+      })).rejects.toMatchObject({ status: 409, code: 'SLOT_UNAVAILABLE' });
+      expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first()).toEqual(staffBooked);
+      expect(Number(staffBooked.estimated_price)).toBe(73);
+      expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
+        .toEqual({ status: 'initiated', scheduled_service_id: null });
+      expect(await trx('estimates').where({ id: init.estimateId }).first('status', 'price_locked_at'))
+        .toEqual({ status: 'draft', price_locked_at: null });
+      expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(1);
+      expect(await trx('invoices').where({ customer_id: ids.customer })).toHaveLength(0);
+    } finally {
+      prepare?.mockRestore();
+    }
+  }, 180000);
 });

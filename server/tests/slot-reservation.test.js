@@ -69,6 +69,26 @@ describe('slot reservation helpers', () => {
     ));
   });
 
+  test('explicit reservation ownership accepts only the genuine unclaimed hold', () => {
+    const { assertConvertibleReservation } = slotReservation._internals;
+    const held = {
+      id: 'scheduled-123', source_estimate_id: 'estimate-456', customer_id: null,
+      reservation_expires_at: '2027-05-20T13:15:00.000Z',
+    };
+    expect(() => assertConvertibleReservation(held, {
+      expectedEstimateId: 'estimate-456', expectedCustomerId: 'customer-1',
+    })).not.toThrow();
+    expect(() => assertConvertibleReservation({ ...held, source_estimate_id: 'estimate-other' }, {
+      expectedEstimateId: 'estimate-456', expectedCustomerId: 'customer-1',
+    })).toThrow(expect.objectContaining({ code: 'RESERVATION_NOT_FOUND' }));
+    expect(() => assertConvertibleReservation({ ...held, customer_id: 'customer-1' }, {
+      expectedEstimateId: 'estimate-456', expectedCustomerId: 'customer-1',
+    })).toThrow(expect.objectContaining({ code: 'SLOT_UNAVAILABLE', reason: 'reservation_already_booked' }));
+    expect(() => assertConvertibleReservation({ ...held, customer_id: 'customer-other' }, {
+      expectedEstimateId: 'estimate-456', expectedCustomerId: 'customer-1',
+    })).toThrow(expect.objectContaining({ code: 'RESERVATION_NOT_FOUND' }));
+  });
+
   test('an admin-renamed catalog row never changes the visit CLASSIFICATION (codex r20 P1)', () => {
     const { classifierStableServiceType } = slotReservation._internals;
     // A WDO row renamed to wording without the classifier's family tokens
@@ -577,6 +597,49 @@ describe('slot reservation helpers', () => {
     })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: '2027-05-20_09-00_tech-1' });
     // Locked on the writing trx so the offboarding cannot commit underneath.
     expect(techBuilder.forShare).toHaveBeenCalled();
+    expect(updateBuilder.update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a same-customer staff claim', { customer_id: 'customer-1', reservation_expires_at: null }, 'SLOT_UNAVAILABLE'],
+    ['a foreign customer claim', { customer_id: 'customer-other' }, 'RESERVATION_NOT_FOUND'],
+    ['a foreign estimate reassignment', { source_estimate_id: 'estimate-other' }, 'RESERVATION_NOT_FOUND'],
+  ])('explicit one-tap ownership rejects %s on the locked row without writing', async (_label, lockedOverrides, code) => {
+    const held = {
+      id: 'scheduled-123', source_estimate_id: 'estimate-456', customer_id: null,
+      scheduled_date: '2027-05-20', window_start: '09:00:00', window_end: '10:00:00',
+      technician_id: 'tech-1', reservation_expires_at: '2027-05-20T13:15:00.000Z',
+    };
+    const dateProbeBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(held),
+    };
+    const reservationBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ ...held, ...lockedOverrides }),
+    };
+    const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      if (table === 'booking_config') return db(table);
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.isTransaction = true;
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      expectedEstimateId: 'estimate-456',
+      expectedCustomerId: 'customer-1',
+      estimatedPrice: 73,
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx,
+    })).rejects.toMatchObject({ code });
+    expect(reservationBuilder.forUpdate).toHaveBeenCalled();
     expect(updateBuilder.update).not.toHaveBeenCalled();
   });
 

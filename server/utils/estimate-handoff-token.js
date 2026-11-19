@@ -69,6 +69,27 @@ function verifyEstimateHandoffToken(estimateId, token, nowSec = Math.floor(Date.
   }
 }
 
+function appointmentRefreshRequired() {
+  return Object.assign(new Error('Refresh this estimate to review your booked visit before confirming.'), {
+    status: 412, statusCode: 412, code: 'APPOINTMENT_REFRESH_REQUIRED',
+  });
+}
+
+function appointmentOfficeReviewRequired() {
+  return Object.assign(new Error(
+    'We found more than one booked visit for this service. Please call or text the Waves office so we can confirm the right appointment before completing your purchase.',
+  ), {
+    status: 422,
+    statusCode: 422,
+    code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED',
+  });
+}
+
 module.exports = {
-  mintEstimateHandoffToken, mintEstimateAcceptToken, verifyEstimateHandoffToken, TTL_SECONDS,
+  mintEstimateHandoffToken,
+  mintEstimateAcceptToken,
+  verifyEstimateHandoffToken,
+  appointmentRefreshRequired,
+  appointmentOfficeReviewRequired,
+  TTL_SECONDS,
 };

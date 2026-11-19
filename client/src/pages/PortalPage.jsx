@@ -1381,6 +1381,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   const [confirming, setConfirming] = useState(false);
   confirmingRef.current = confirming;
   const [stepError, setStepError] = useState('');
+  const [officeReviewMessage, setOfficeReviewMessage] = useState('');
   const [needsCard, setNeedsCard] = useState(false);
   const [cardSaved, setCardSaved] = useState(false);
   const [cardBusy, setCardBusy] = useState(false);
@@ -1404,6 +1405,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     setSlots(null);
     setSelectedSlot(null);
     setStepError('');
+    setOfficeReviewMessage('');
     setNeedsCard(false);
     setCardSaved(false);
     setResult(null);
@@ -1616,7 +1618,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       setResult(r);
       setStep('done');
     } catch (err) {
-      if (err?.status === 402) {
+      if (err?.status === 422 && err?.code === 'APPOINTMENT_OFFICE_REVIEW_REQUIRED') {
+        // Preserve the exact hold and frozen price on screen. This terminal
+        // state has no retry, refresh, re-reserve, release or change-time
+        // control; office review must resolve the competing booking.
+        setOfficeReviewMessage(err?.message || 'Call Waves so we can confirm the right appointment before you continue.');
+      } else if (err?.status === 402) {
         setNeedsCard(true);
         setCardSaved(false);
         setStepError('Save a payment method above to finish.');
@@ -1677,7 +1684,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   // The services the customer already has, at the price the new tier gives
   // them. Before confirm these are the frozen plan; on the done screen only
   // the ones the purchase actually repriced.
-  const existingServicesBox = (pricing, { done = false } = {}) => {
+  const existingServicesBox = (pricing, { done = false, officeReview = false } = {}) => {
     const rows = pricing?.existingServices || [];
     if (!rows.length && !(done && pricing?.existingPending)) return null;
     return (
@@ -1713,7 +1720,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
             We are moving {rows.length ? 'the rest of your' : 'your'} current services to the {tierName(pricing)} price.
           </div>
         ) : null}
-        {!done ? (
+        {!done && !officeReview ? (
           <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
             Applied automatically when you confirm. Your visit schedule does not change.
           </div>
@@ -1812,6 +1819,35 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
             </div>
           ) : !init ? (
             <div style={{ fontSize: 15, color: muted }}>Loading your offer…</div>
+          ) : officeReviewMessage ? (
+            <>
+              <div style={softBox}>
+                {summaryRow('Service', init.label)}
+                <div style={{ height: 6 }} />
+                {priceRows(init.pricing, init.perVisit)}
+                <div style={{ height: 6 }} />
+                {summaryRow('Held visit', selectedSlot
+                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
+                  : '—')}
+              </div>
+              {existingServicesBox(init.pricing, { officeReview: true })}
+              <div style={softBox}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Call Waves to review your appointment</div>
+                <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                  {officeReviewMessage}
+                </div>
+                <a
+                  data-glass-accent=""
+                  href="tel:+19412975749"
+                  style={{ ...PORTAL_SECONDARY_ACTION, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginTop: 10, textDecoration: 'none' }}
+                >
+                  Call Waves — (941) 297-5749
+                </a>
+                <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                  Nothing was purchased. Your held visit and price are unchanged on this screen.
+                </div>
+              </div>
+            </>
           ) : step === 'terms' ? (
             <>
               <div style={softBox}>

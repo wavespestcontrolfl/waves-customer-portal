@@ -37,6 +37,10 @@ const {
   isNewRecurringSignupCandidate,
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
+const {
+  appointmentRefreshRequired,
+  appointmentOfficeReviewRequired,
+} = require('../utils/estimate-handoff-token');
 const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType, GRASS_SOURCE } = require('./lawn-grass-context');
@@ -1888,6 +1892,66 @@ function linkedVisitsAfterCardError() {
   err.status = 409;
   err.statusCode = 409;
   return err;
+}
+
+// Public/authenticated customer confirmation must never infer the selected
+// appointment from every row carrying the estimate's source stamp. That
+// stamp is also used for bookkeeping, and an older staff booking can sort
+// ahead of the hold this confirmation just graduated. Customer-facing
+// callers opt into this contract by supplying reviewedBookedVisitId as an
+// OWN property; omission preserves staff/manual converter behavior.
+function selectReviewedBookedRows(rows, {
+  enforce = false,
+  reviewedBookedVisitId = null,
+  estimateId,
+  customerId,
+} = {}) {
+  const candidates = Array.isArray(rows) ? rows : [];
+  if (!enforce) return candidates;
+
+  if (reviewedBookedVisitId == null) {
+    if (candidates.length > 0) throw appointmentRefreshRequired();
+    return [];
+  }
+
+  const expectedId = String(reviewedBookedVisitId).trim();
+  if (!expectedId) throw appointmentRefreshRequired();
+  const selected = candidates.find((row) => String(row?.id) === expectedId);
+  const isExactOwnedFinalizedRow = String(selected?.id) === expectedId
+    && selected.source_estimate_id !== undefined
+    && selected.source_estimate_id !== null
+    && String(selected.source_estimate_id) === String(estimateId)
+    && selected.customer_id !== undefined
+    && selected.customer_id !== null
+    && String(selected.customer_id) === String(customerId)
+    && selected.reservation_expires_at === null;
+  if (!isExactOwnedFinalizedRow) throw appointmentRefreshRequired();
+  if (candidates.some((row) => String(row?.id) !== expectedId)) {
+    throw appointmentOfficeReviewRequired();
+  }
+  return [selected];
+}
+
+async function filterPublicBookedRows(rows, {
+  reviewedBookedVisitId = null,
+  isReviewableBookedVisit,
+} = {}) {
+  if (typeof isReviewableBookedVisit !== 'function') {
+    throw new TypeError('reviewedBookedVisitId requires isReviewableBookedVisit');
+  }
+  const selectedId = reviewedBookedVisitId == null ? null : String(reviewedBookedVisitId).trim();
+  const candidates = [];
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    // The row this request just graduated is authoritative from the caller's
+    // under-lock checks. Competing rows must independently qualify under the
+    // caller's reviewability contract.
+    if (selectedId && String(row?.id) === selectedId) {
+      candidates.push(row);
+      continue;
+    }
+    if (await isReviewableBookedVisit(row?.id)) candidates.push(row);
+  }
+  return candidates;
 }
 
 // A commercial recurring line (convertEstimate's hasCommercialRecurring).
@@ -5644,6 +5708,13 @@ const EstimateConverter = {
    *   the $99 WaveGuard setup fee is WAIVED. When 'standard', an invoice is
    *   created for the setup fee plus the accepted first application amount.
    *   Public accepts auto-send the invoice unless opts.autoSendInvoice is false.
+   * @param {string|null} [opts.reviewedBookedVisitId] — customer-confirmation
+   *   invariant. A string requires that exact booked visit to be the estimate's
+   *   only converter-eligible linked visit; explicit null requires none. Omit
+   *   for staff/manual conversions that retain legacy linked-visit discovery.
+   * @param {(id: string) => Promise<boolean>} [opts.isReviewableBookedVisit]
+   *   required with reviewedBookedVisitId; evaluates competing source-stamped
+   *   rows under the caller's reviewed-appointment contract.
    * @returns {object} Conversion result summary
    */
   async convertEstimate(estimateId, opts = {}) {
@@ -6609,6 +6680,7 @@ const EstimateConverter = {
       })
       : fn(database));
     const registerSeededRowsInline = !seedsInOwnTransaction && !deferFollowUpReminderRegistration;
+    const enforceReviewedBookedVisit = Object.prototype.hasOwnProperty.call(opts, 'reviewedBookedVisitId');
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
@@ -6630,13 +6702,32 @@ const EstimateConverter = {
     // first paid application: it is dropped here so it cannot set the series
     // start nor be priced as a plan visit, and the normal auto-schedule path
     // runs when it was the only stamped row.
-    const reservedRows = linkedVisitCount > 0
-      ? await withoutAssessmentVisits(await database('scheduled_services')
+    // Reviewed customer confirmations deliberately do NOT inherit the legacy
+    // `reservation_expires_at IS NULL` filter. A staff claim can retain a
+    // residual live/lapsed hold timestamp and is still a competing booking.
+    // Unmodified staff/manual callers retain the exact legacy query.
+    let stampedBookedRows = [];
+    if (enforceReviewedBookedVisit || linkedVisitCount > 0) {
+      const stampedBookedQuery = database('scheduled_services')
         .where({ source_estimate_id: estimateId })
-        .whereNotNull('customer_id')
-        .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc'), database)
-      : [];
+        .whereNotNull('customer_id');
+      if (!enforceReviewedBookedVisit) stampedBookedQuery.whereNull('reservation_expires_at');
+      stampedBookedRows = await withoutAssessmentVisits(
+        await stampedBookedQuery.orderBy('scheduled_date', 'asc'), database,
+      );
+    }
+    const converterEligibleReservedRows = enforceReviewedBookedVisit
+      ? await filterPublicBookedRows(stampedBookedRows, {
+        reviewedBookedVisitId: opts.reviewedBookedVisitId,
+        isReviewableBookedVisit: opts.isReviewableBookedVisit,
+      })
+      : stampedBookedRows;
+    const reservedRows = selectReviewedBookedRows(converterEligibleReservedRows, {
+      enforce: enforceReviewedBookedVisit,
+      reviewedBookedVisitId: opts.reviewedBookedVisitId,
+      estimateId,
+      customerId,
+    });
     const reservationRowsExist = reservedRows.length > 0;
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
     const combinedCapacity = capacitySnapshot && !capacitySnapshot.allocatedServiceIds ? capacitySnapshot : null;
@@ -9571,6 +9662,8 @@ module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimate
 module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.otherPlanRowsPin = otherPlanRowsPin;
+module.exports.selectReviewedBookedRows = selectReviewedBookedRows;
+module.exports.filterPublicBookedRows = filterPublicBookedRows;
 module.exports.hasCommercialRecurringLine = hasCommercialRecurringLine;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;

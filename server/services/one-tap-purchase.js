@@ -37,6 +37,9 @@ const { acquireOccupancyLock } = require('./scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { customerPreservesMonthlyMembership, parseEstimateData, roundMoney } = require('./billing-cadence');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
+const { etDateString } = require('../utils/datetime-et');
+const { appointmentOfficeReviewRequired } = require('../utils/estimate-handoff-token');
+const { withoutAssessmentVisits } = require('./assessment-booking');
 
 // Single source of the terms the customer agrees to. The exact snapshot is
 // stored on the purchase row at init and rendered verbatim by the client —
@@ -981,6 +984,76 @@ async function completedRetryResponse(customerId, completedPurchase) {
   };
 }
 
+async function recoverReservationFailure({ error, purchase, customerId }) {
+  if (error?.code === 'RESERVATION_NOT_FOUND') {
+    error = httpError(409, 'Your held time expired — pick a slot again.', { code: 'RESERVATION_EXPIRED' });
+  } else if (error?.code === 'APPOINTMENT_REFRESH_REQUIRED') {
+    error = httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE' });
+  }
+  if (!['RESERVATION_EXPIRED', 'SLOT_UNAVAILABLE'].includes(error?.code)) throw error;
+  // Hold-identity CAS: only reset the row if it still points at the hold
+  // THIS confirm ran with. A concurrent re-reserve already replaced the
+  // pointer, and a blind reset would erase the newly held slot. CAS FIRST:
+  // if a competing confirm owns the row lock, this waits for its commit and
+  // then affects zero; only then is its durable receipt visible to replay.
+  const reset = await db('one_tap_purchases')
+    .where({ id: purchase.id, status: 'reserved', scheduled_service_id: purchase.scheduled_service_id })
+    .update({ status: 'initiated', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() })
+    .catch(() => null);
+  if (!reset) {
+    const latestPurchase = await db('one_tap_purchases')
+      .where({ id: purchase.id, customer_id: customerId })
+      .first();
+    if (latestPurchase?.status === 'completed') {
+      return completedRetryResponse(customerId, latestPurchase);
+    }
+  }
+  throw error;
+}
+
+async function completedPurchaseAfterConflict(customerId, purchase) {
+  const latestPurchase = await db('one_tap_purchases')
+    .where({ id: purchase.id, customer_id: customerId })
+    .first();
+  return latestPurchase?.status === 'completed'
+    ? completedRetryResponse(customerId, latestPurchase)
+    : null;
+}
+
+async function reviewableOneTapBookedVisits(trx, { estimateId, customerId }) {
+  const rows = await trx('scheduled_services')
+    .where({ source_estimate_id: estimateId, customer_id: customerId })
+    .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+    .where('scheduled_date', '>=', etDateString())
+    .select('id', 'service_id', 'service_type', 'is_callback');
+  return (await withoutAssessmentVisits(rows, trx)).filter((row) => row.is_callback !== true);
+}
+
+async function assertNoCompetingOneTapBooking(trx, {
+  estimateId,
+  customerId,
+  selectedId,
+}) {
+  const rows = await reviewableOneTapBookedVisits(trx, { estimateId, customerId });
+  if (rows.some((row) => String(row.id) !== String(selectedId))) {
+    throw appointmentOfficeReviewRequired();
+  }
+}
+
+// Competing rows are judged independently from the selected hold. The
+// converter keeps the just-committed id without calling this predicate, then
+// calls it for every other customer-claimed source-stamped row. A residual
+// hold timestamp does not make a real staff booking disappear.
+async function isReviewableOneTapBookedVisit(trx, {
+  id,
+  estimateId,
+  customerId,
+}) {
+  if (!id) return false;
+  const rows = await reviewableOneTapBookedVisits(trx, { estimateId, customerId });
+  return rows.some((row) => String(row.id) === String(id));
+}
+
 // ── confirm ──────────────────────────────────────────────────────────────
 async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent }) {
   if (termsAccepted !== true) throw httpError(400, 'You must agree to the terms to confirm.');
@@ -1000,14 +1073,46 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   if (purchase.status !== 'reserved' || !purchase.scheduled_service_id) {
     throw httpError(409, 'Pick a time before confirming.');
   }
-  await rejectRetiredOneTapVariant(purchase);
+  try {
+    await rejectRetiredOneTapVariant(purchase);
+  } catch (err) {
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return completed;
+    throw err;
+  }
   const preEstimate = await db('estimates').where({ id: purchase.estimate_id }).first('id', 'status', 'expires_at', 'price_locked_at');
   if (!preEstimate || preEstimate.status !== 'draft' || preEstimate.price_locked_at || estimateExpired(preEstimate)) {
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return completed;
     throw httpError(409, OFFER_CHANGED);
   }
 
   const customer = await db('customers').where({ id: customerId }).first();
-  if (!customer || customer.active === false || customer.deleted_at) throw httpError(409, OFFER_CHANGED);
+  if (!customer || customer.active === false || customer.deleted_at) {
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return completed;
+    throw httpError(409, OFFER_CHANGED);
+  }
+
+  // A distinct staff booking stamped to this synthesized estimate is an
+  // appointment ambiguity, not proof that the separate target plan was
+  // purchased. Preserve the held visit and frozen offer for office review.
+  // Repeat this under the transaction lock and at converter selection to
+  // close each race window.
+  try {
+    await assertNoCompetingOneTapBooking(db, {
+      estimateId: purchase.estimate_id,
+      customerId,
+      selectedId: purchase.scheduled_service_id,
+    });
+  } catch (err) {
+    // A winner can commit after the initial purchase read and before this
+    // advisory scan. Its newly seeded follow-ups resemble competitors; the
+    // completed ledger row is authoritative and supplies the frozen receipt.
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return completed;
+    throw err;
+  }
 
   // Fast-fail ownership pre-check (fail closed → release + void). This runs
   // UNLOCKED and is advisory only — the authoritative re-check runs again
@@ -1018,6 +1123,12 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     await assertTargetStillPurchasable(db, customer, purchase.service_key);
   } catch (err) {
     await voidPurchase(purchase);
+    // The initial purchase read can lose to a confirmation that commits
+    // before this advisory ownership check. Its new series looks like
+    // OWNED_MEANWHILE; the void CAS cannot overwrite `completed`, and the
+    // loser must return that frozen receipt instead of reporting a false 409.
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return completed;
     throw err.status ? err : httpError(409, OFFER_CHANGED);
   }
 
@@ -1032,12 +1143,20 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     logger.warn(`[one-tap-purchase] card lookup failed, asking for card (code=${err?.code || 'none'})`);
     card = null;
   }
-  if (!card) throw httpError(402, 'A saved payment method is required to confirm.', { needsCard: true });
+  if (!card) {
+    const completed = await completedPurchaseAfterConflict(customerId, purchase);
+    if (completed) return completed;
+    throw httpError(402, 'A saved payment method is required to confirm.', { needsCard: true });
+  }
 
   const EstimateConverter = require('./estimate-converter');
   let txOut;
   try {
-    const preparedReservationCapacity = await slotReservation.prepareReservationCommit(purchase.scheduled_service_id, { serviceMode: 'recurring' });
+    const preparedReservationCapacity = await slotReservation.prepareReservationCommit(purchase.scheduled_service_id, {
+      serviceMode: 'recurring',
+      expectedEstimateId: purchase.estimate_id,
+      expectedCustomerId: customerId,
+    });
     txOut = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // copied from the estimate-accept txn, which documents the real
@@ -1092,6 +1211,11 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // disagreeing with the persisted billing model. The converter's own
       // later customer lock re-locks the same row on this trx (no-op).
       const freshCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+      await assertNoCompetingOneTapBooking(trx, {
+        estimateId: purchase.estimate_id,
+        customerId,
+        selectedId: purchase.scheduled_service_id,
+      });
       await assertTargetStillPurchasable(trx, freshCustomer, purchase.service_key);
 
       // Card revalidated + LOCKED inside the transaction (r10 P1): the
@@ -1186,6 +1310,8 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           preLockedDate,
           preLockedTechId,
           preparedCapacity: preparedReservationCapacity,
+          expectedEstimateId: purchase.estimate_id,
+          expectedCustomerId: customerId,
           trx,
         });
       } catch (commitErr) {
@@ -1234,6 +1360,12 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // post-commit below so a rollback can't page anyone.
       const conversion = await EstimateConverter.convertEstimate(est.id, {
         database: trx,
+        reviewedBookedVisitId: committed.id,
+        isReviewableBookedVisit: (id) => isReviewableOneTapBookedVisit(trx, {
+          id,
+          estimateId: est.id,
+          customerId,
+        }),
         billingTerm: 'standard',
         skipSetupInvoice: true,
         autoSendInvoice: false,
@@ -1264,21 +1396,12 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
     // back; void the purchase (releases the hold) so it cannot be retried.
     if (err && err.code === 'OWNED_MEANWHILE') {
       await voidPurchase(purchase);
+      const completed = await completedPurchaseAfterConflict(customerId, purchase);
+      if (completed) return completed;
       throw err;
     }
-    // Re-pick recovery: the hold died mid-confirm — everything rolled back;
-    // put the purchase back in pick-a-time state (best-effort).
-    if (err && (err.code === 'RESERVATION_EXPIRED' || err.code === 'SLOT_UNAVAILABLE')) {
-      // Hold-identity CAS: only reset the row if it still points at the hold
-      // THIS confirm ran with — a concurrent re-reserve (customer re-picked
-      // while this confirm was in flight) has already replaced the pointer,
-      // and a blind reset would erase their newly held slot.
-      await db('one_tap_purchases')
-        .where({ id: purchase.id, status: 'reserved', scheduled_service_id: purchase.scheduled_service_id })
-        .update({ status: 'initiated', scheduled_service_id: null, slot_id: null, updated_at: db.fn.now() })
-        .catch(() => {});
-    }
-    throw err;
+    // Re-pick recovery, or canonical success if another confirm completed.
+    return recoverReservationFailure({ error: err, purchase, customerId });
   }
 
   // Concurrent-confirm loser: the first confirm did all the work (and its
@@ -1549,5 +1672,14 @@ module.exports = {
   TERMS_VERSION,
   TERMS_TEXT,
   HOLD_MINUTES,
-  _private: { assertNoDrift, serializeSlot, formatVisitWhen, to12h, oneTapVariantStillOffered, rejectRetiredOneTapVariant, voidPurchase },
+  _private: {
+    assertNoDrift,
+    serializeSlot,
+    formatVisitWhen,
+    to12h,
+    oneTapVariantStillOffered,
+    rejectRetiredOneTapVariant,
+    voidPurchase,
+    isReviewableOneTapBookedVisit,
+  },
 };
