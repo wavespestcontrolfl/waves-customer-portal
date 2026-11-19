@@ -55,6 +55,8 @@ const row = (id, overrides = {}) => ({
   technicianName: 'Fixture Technician',
   customerName: `Fixture ${id}`,
   address: '100 Example Lane',
+  // The day feed always sends the key (visitPremiseFields); Dispatch's sheet rules ask for it.
+  propertyId: 'prop-fixture',
   serviceType: 'Cockroach Control',
   serviceTypeRaw: 'Cockroach Control',
   scheduledDate: '2099-01-01',
@@ -142,6 +144,9 @@ it.each([
   ['a form that does not match the profile', { findingsSchema: { ...ROACH_SCHEMA, type: 'flea' } }],
   ['no form on the row', { findingsSchema: null }],
   ['a visit closed out as a whole visit', { visitId: 'visit-fixture', visitCloseoutEnabled: true }],
+  // Admin Dispatch's own guards (shouldOpenSpecialtyFastComplete).
+  ['a companion form', { completionProfile: { category: 'pest_control', serviceKey: 'cockroach_control', findingsType: 'cockroach', companions: [{ findingsType: 'flea' }] } }],
+  ['a visit back from the payment flow while GATE_FAST_COMPLETE_INVOICED_VISITS is off', { checkoutInvoiceId: 'inv-fixture' }],
 ])('%s: the typed form, as before', async (_label, overrides) => {
   rows = [row('svc-old-path', overrides)];
   mount();
@@ -214,6 +219,32 @@ it('a station sheet\'s /complete answered by a 2xx it cannot read keeps the save
   expect(err).toBeInstanceOf(Error);
   // An open outcome, never a save: the submit hook keeps the body and its key.
   expect(completionFailureOutcome(err)).toBe('retry');
+});
+
+// The station sheet opens by admin Dispatch's own rule (shouldOpenSpecialtyFastComplete):
+// a visit back from the payment flow, or a row with no `propertyId` key, keeps
+// the typed form, as on Dispatch.
+it.each([
+  ['back from the payment flow while GATE_FAST_COMPLETE_INVOICED_VISITS is off', { checkoutInvoiceId: 'inv-fixture' }, false],
+  ['on a row with no propertyId key', {}, true],
+])('with the station map on, a bait station visit %s keeps the typed form under GATE_STATION_FAST_COMPLETE', async (_label, overrides, dropProperty) => {
+  mocks.stationMap = { enabled: true, ready: true, known: true };
+  const visit = row('svc-station', { ...STATION_VISITS[1][1], stationFastCompleteEnabled: true, ...overrides });
+  if (dropProperty) delete visit.propertyId;
+  rows = [visit];
+  mount();
+  await openFromTools();
+  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith(TYPED_FORM('svc-station')));
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('with the station map on, a bait station visit back from the payment flow opens the sheet under GATE_FAST_COMPLETE_INVOICED_VISITS', async () => {
+  mocks.stationMap = { enabled: true, ready: true, known: true };
+  rows = [row('svc-station', { ...STATION_VISITS[1][1], stationFastCompleteEnabled: true, checkoutInvoiceId: 'inv-fixture', invoicedVisitFastCompleteEnabled: true })];
+  mount();
+  await openFromTools();
+  expect(await sheetService()).toMatchObject({ id: 'svc-station', typedFlow: true, stationsFlow: true });
+  expect(assign).not.toHaveBeenCalled();
 });
 
 it('with the station map on, a trap check keeps the typed form under GATE_STATION_FAST_COMPLETE', async () => {

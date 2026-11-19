@@ -201,3 +201,22 @@ test('the lawn visit sheet holds its full-form hand-off while a saved attempt is
   await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
   expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
 });
+
+// Today's off-route saved attempt (`recoveryOnly`): the row holds only the
+// visit id and summary, so a discard leaves a notice: no fresh form, and no
+// full-form hand-off with no day or premise to open it on.
+test('the lawn visit sheet on an off-route saved attempt shows a notice after a discard, never a fresh form or the hand-off', async () => {
+  const body = { idempotencyKey: 'lawn-off-key', technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-off', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const request = vi.fn(async () => { throw Object.assign(new Error('Not this sheet'), { status: 404 }); });
+  const onFullForm = vi.fn();
+  render(<FastCompleteLawnSheet service={{ id: 'visit-off', recoveryOnly: true }} operatorId="tech-a" request={request} catalog={[]}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Discard saved retry' }));
+  expect(await screen.findByText(/No saved completion is left for this visit/)).toBeInTheDocument();
+  await waitFor(async () => expect((await getFastCompletionAttempt('visit-off', 'tech-a')).attempt).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(onFullForm).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: /Complete/ })).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
+});

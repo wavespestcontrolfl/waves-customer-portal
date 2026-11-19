@@ -313,6 +313,20 @@ describe('opening the sheet', () => {
     expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
   });
 
+  // Today's off-route saved attempt: its row holds only the visit id and the
+  // attempt's summary, so with no attempt left there is no fresh form to build.
+  test('an off-route saved attempt\'s row with no attempt left shows a notice, never the form or the hand-off', async () => {
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={{ id: 'svc-lawn', customerName: 'Saved completion', serviceType: 'Lawn visit', recoveryOnly: true }}
+      request={makeRequest()} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await screen.findByText(/No saved completion is left for this visit/);
+    // The eligible context arrives and changes nothing.
+    await waitFor(() => expect(requests.some(({ path }) => path.split('?')[0].endsWith('/lawn-fast/context'))).toBe(true));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+    expect(onFullForm).not.toHaveBeenCalled();
+  });
+
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
     const request = makeRequest({ ctx: context({ service: { ...VISIT, propertyId: 'prop-other' } }) });
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} />);

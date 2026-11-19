@@ -183,6 +183,8 @@ const PROPERTY_CHECK_MESSAGE = 'We could not check this lawn assessment against 
 const STOCK_LOCKOUT_MESSAGE = 'A product is out of stock. Update inventory, tap Check stock, then complete again.';
 const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.';
 const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
+// An off-route saved attempt's row once that attempt is gone (discarded, or finished elsewhere).
+const RECOVERY_ONLY_NOTICE = 'No saved completion is left for this visit. To complete it, close this and open the visit from its day on the schedule.';
 const REFUSAL_MESSAGES = {
   lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
   lawn_fast_not_eligible: NOT_ON_THIS_SHEET_MESSAGE,
@@ -1433,14 +1435,16 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   // The server says this visit does not use this sheet: the parent opens the
   // full form, once. (No button on the sheet leads there.) Not while a saved
   // attempt is checked for or shown: a fresh full-form completion would race it.
+  // Never for an off-route saved attempt's row (`recoveryOnly`): it holds no
+  // day or premise to open the full form on.
   const handedOff = useRef(false);
   const holdsSaved = submission.recovering || submission.restored;
   useEffect(() => {
-    if (ctx.handoff && !handedOff.current && !holdsSaved) {
+    if (ctx.handoff && !handedOff.current && !holdsSaved && !service?.recoveryOnly) {
       handedOff.current = true;
       onFullForm?.();
     }
-  }, [ctx.handoff, holdsSaved, onFullForm]);
+  }, [ctx.handoff, holdsSaved, service?.recoveryOnly, onFullForm]);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
@@ -1468,6 +1472,9 @@ function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  // An off-route saved attempt's row holds only the visit id and the attempt's
+  // summary: no customer, day, property or billing facts for a fresh completion.
+  if (service.recoveryOnly) return <ActionFeedback className="tech-visit-feedback">{RECOVERY_ONLY_NOTICE}</ActionFeedback>;
   const refusal = refusalWithoutContext(submission, ctx);
   if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;

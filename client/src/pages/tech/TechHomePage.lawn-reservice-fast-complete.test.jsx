@@ -40,6 +40,8 @@ const row = (id, overrides = {}) => ({
   technicianId: 'tech-fixture',
   customerName: `Fixture ${id}`,
   address: '100 Example Lane',
+  // The day feed always sends the key (visitPremiseFields); Dispatch's sheet rules ask for it.
+  propertyId: 'prop-fixture',
   serviceType: 'Lawn Care Re-Service',
   scheduledDate: '2099-01-01',
   status: 'confirmed',
@@ -125,6 +127,20 @@ it('does not route a pest re-service or a tree & shrub visit to the lawn sheet',
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-ts'));
+  expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();
+});
+
+// Admin Dispatch's own rule (shouldOpenLawnReserviceFastComplete): these keep
+// the deep link, where the working form takes them.
+it.each([
+  ['back from the payment flow while GATE_FAST_COMPLETE_INVOICED_VISITS is off', { checkoutInvoiceId: 'inv-fixture' }],
+  ['with a companion form the server refuses', { completionProfile: { category: 'lawn_care', serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment', companions: [{ findingsType: 'tree_shrub' }] } }],
+  ['on a grouped stop the server refuses', { visitId: 'visit-fixture' }],
+])('keeps the deep link for a lawn re-service %s, as Dispatch does', async (_label, overrides) => {
+  rows = [row('svc-lawn-guard', { lawnReserviceFastCompleteEnabled: true, ...overrides })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-lawn-guard'));
   expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();
 });
 

@@ -344,7 +344,8 @@ it('a saved lawn visit attempt reopens the lawn visit sheet here, with the produ
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
   const sheet = await screen.findByTestId('lawn-visit-sheet');
-  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn' });
+  // Off today's route: the row holds only the id and summary, so the sheet offers the attempt alone.
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn', recoveryOnly: true });
   await waitFor(() => expect(JSON.parse(screen.getByTestId('lawn-visit-sheet').getAttribute('data-catalog'))).toEqual([{ id: 'prod-fixture', name: 'Fixture granular' }]));
   expect(screen.queryByTestId('lawn-sheet')).not.toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
@@ -378,7 +379,8 @@ it('a saved lawn visit attempt on a visit that now reads completed reopens the l
   rows = [row('svc-lawn-done', { status: 'completed', serviceType: 'Lawn Care', completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_6week', projectBacked: false } })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
-  expect(JSON.parse((await screen.findByTestId('lawn-visit-sheet')).getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn-done' });
+  // On the route: the sheet has the routed row, so a discard leaves a fresh form.
+  expect(JSON.parse((await screen.findByTestId('lawn-visit-sheet')).getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn-done', recoveryOnly: false });
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 

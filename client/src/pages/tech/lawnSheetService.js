@@ -47,5 +47,9 @@ export function lawnSheetService(row) {
     routedServiceType: row.serviceTypeRaw || null,
     routedCatalogServiceId: row.catalogServiceId || null,
     completionInvoiceAlreadySent: !!row.completionInvoiceAlreadySent,
+    // Today's off-route saved attempt (useSavedFastCompletions): the row holds
+    // only the visit id and the attempt's summary, so the sheet offers that
+    // attempt and never a fresh completion.
+    recoveryOnly: row.fastCompletionRecoveryOnly === true,
   };
 }

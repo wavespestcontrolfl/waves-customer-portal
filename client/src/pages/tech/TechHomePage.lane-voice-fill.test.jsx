@@ -43,6 +43,8 @@ const row = (id, overrides = {}) => ({
   technicianName: 'Fixture Technician',
   customerName: `Fixture ${id}`,
   address: '100 Example Lane',
+  // The day feed always sends the key (visitPremiseFields); Dispatch's sheet rules ask for it.
+  propertyId: 'prop-fixture',
   serviceType: 'Fire Ant Treatment',
   serviceTypeRaw: 'Fire Ant Treatment',
   scheduledDate: '2099-01-01',
@@ -135,6 +137,8 @@ it.each([
   // The server sends no profile when its read fails.
   ['a profile that could not be read', { completionProfileLookupFailed: true, completionProfile: null }],
   ['a linked-project lookup that failed (a project may exist)', { linkedProjectLookupFailed: true }],
+  // Admin Dispatch's own guard (shouldOpenSpecialtyFastComplete).
+  ['a visit back from the payment flow while GATE_FAST_COMPLETE_INVOICED_VISITS is off', { checkoutInvoiceId: 'inv-fixture' }],
 ])('%s: the Dispatch completion form, as Dispatch opens it, never the project editor', async (_label, overrides) => {
   const assign = vi.fn();
   vi.stubGlobal('location', { ...window.location, assign });
