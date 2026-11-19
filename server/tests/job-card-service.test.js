@@ -560,13 +560,26 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
       { id: 'opt', name: 'Optional', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
       { id: 'rec', name: 'Recognition', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
       { id: 'base', name: 'Base', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+      { id: 'tet', name: 'Tetrino', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
+      { id: 'prem', name: 'Premium', rate_unit: 'fl oz', label_verified_at: '2026-08-01' },
     ];
     const mix = { amount: 1, amountUnit: 'fl oz' };
+    // The engine's own reasons: the bermuda step's second line is selected with the ticked one (selectStepAtomically).
+    const [, rec] = require('../services/lawn-bermuda-removal').selectStepAtomically([
+      { raw: 'Fus', role: 'conditional', conditional: true, bermudaStep: true, selected: true, selectionReason: 'base_or_explicit_selection', product: { id: 'fus' }, mix },
+      { raw: 'Rec', role: 'conditional', conditional: true, bermudaStep: true, selected: false, selectionReason: 'conditional_not_selected', product: { id: 'rec' }, mix },
+    ]);
+    expect(rec.selectionReason).toBe('bermuda_step_selected_together');
     const buildPlan = jest.fn().mockResolvedValue({
       propertyGate: { month: 'Sep', visit: 9, blocks: [] },
       mixCalculator: {
-        items: [{ raw: 'Base', role: 'base', selected: true, product: { id: 'base' }, mix }, { raw: 'Rec', role: 'conditional', conditional: true, bermudaStep: true, selected: true, product: { id: 'rec' }, mix }],
-        conditionalOptions: [{ raw: 'Opt', role: 'conditional', conditional: true, selected: false, product: { id: 'opt' }, mix }],
+        items: [{ raw: 'Base', role: 'base', conditional: false, selected: true, selectionReason: 'base_or_explicit_selection', product: { id: 'base' }, mix }, rec],
+        conditionalOptions: [
+          { raw: 'Opt', role: 'conditional', conditional: true, selected: false, selectionReason: 'conditional_not_selected', product: { id: 'opt' }, mix },
+          // Lines the engine holds or picks by its own rule: a tick changes nothing, so no box.
+          { raw: 'Tet', role: 'conditional', conditional: true, selected: false, selectionReason: 'tetrino_scout_evidence_required', fieldHold: 'tetrino_scout_evidence_required', product: { id: 'tet' }, mix },
+          { raw: 'Prem', role: 'conditional', conditional: true, selected: false, selectionReason: 'premium_or_drought_prep_not_selected', product: { id: 'prem' }, mix },
+        ],
       },
     });
     const out = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog: cat, dbh: () => ({}), deps: { buildPlan } });
@@ -578,6 +591,11 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     expect(byId.opt).not.toHaveProperty('bermudaStep');
     // A ticked step line is selected (no longer "if needed") and still takes a tick.
     expect(byId.rec).toMatchObject({ planOption: true, bermudaStep: true, conditional: false });
+    // A held Tetrino line and an unpicked premium line stay cards with no amount and no box.
+    for (const id of ['tet', 'prem']) {
+      expect(byId[id]).toMatchObject({ conditional: true, planned: null });
+      expect(byId[id]).not.toHaveProperty('planOption');
+    }
     // A tree and shrub add-on's "if needed" line is conditional but never a plan option.
     const pest = await jobCard.resolveVisitLines({
       facts: { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: [{ name: 'Tree & Shrub Care', category: 'tree_shrub' }] },
@@ -597,8 +615,8 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
       mixCalculator: {
         items: [],
         conditionalOptions: [
-          { raw: 'Original line', role: 'conditional', conditional: true, selected: false, product: { id: 'sub' }, mix, substitution: { originalProductId: 'orig', originalProductName: 'Original' } },
-          { raw: 'Opt line', role: 'conditional', conditional: true, selected: false, product: { id: 'opt' }, mix },
+          { raw: 'Original line', role: 'conditional', conditional: true, selected: false, selectionReason: 'conditional_not_selected', product: { id: 'sub' }, mix, substitution: { originalProductId: 'orig', originalProductName: 'Original' } },
+          { raw: 'Opt line', role: 'conditional', conditional: true, selected: false, selectionReason: 'conditional_not_selected', product: { id: 'opt' }, mix },
         ],
       },
     });

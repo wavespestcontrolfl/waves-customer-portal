@@ -7171,7 +7171,7 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
       {short && <JobCardChip tone="hold" label="Short" D={D} />}
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
-      {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the new selection…</span>}
+      {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the amounts…</span>}
     </>
   );
   return (
@@ -7534,7 +7534,7 @@ export function JobCardTab({ card, loading, error, D, lawn = null }) {
       {!lawn?.pending && <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />}
       {!lawn?.pending && <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />}
       {!lawn?.pending && <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />}
-      {card.planBlocks?.length > 0 && (
+      {!lawn?.pending && card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
           {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
@@ -7649,7 +7649,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
   const [lawnPlanQuery, setLawnPlanQuery] = useState("");
   const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
   const [lawnPlanError, setLawnPlanError] = useState("");
-  const [lawnPlanRefresh, setLawnPlanRefresh] = useState(0);
+  // The Plan tab's Refresh re-reads the plan AND the job card, so the two tabs never show two reads.
+  const [refreshKey, setRefreshKey] = useState(0);
   const jobCardShownFor = useRef(null);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -7736,7 +7737,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     return () => {
       cancelled = true;
     };
-  }, [service?.id, selectedQuery]);
+  }, [service?.id, selectedQuery, refreshKey]);
 
   useEffect(() => {
     setLawnPlan(null);
@@ -7768,7 +7769,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
     return () => {
       cancelled = true;
     };
-  }, [readPlan, service?.id, selectedQuery, lawnPlanRefresh]);
+  }, [readPlan, service?.id, selectedQuery, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -8137,7 +8138,11 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
             plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
             loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
             error={lawnPlanError}
-            onRefresh={() => setLawnPlanRefresh((k) => k + 1)}
+            onRefresh={() => {
+              // Until the card's re-read lands the Job tab is pending: no amount from the old read shows.
+              setJobCardQuery(null);
+              setRefreshKey((k) => k + 1);
+            }}
           />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
           <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />

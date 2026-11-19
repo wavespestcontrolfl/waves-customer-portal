@@ -23,6 +23,7 @@ let serverIgnores = [];
 let hold = null;
 let jobCardOff = false;
 let jobCardDown = false;
+let holdCard = null;
 const idsOf = (url) => (new URL(url, "http://x").searchParams.get("selectedConditionalProductIds") || "").split(",").filter(Boolean);
 
 // The server's resolved selection for a read: the ids asked for, less any it refuses; a bermuda step is all or none.
@@ -88,8 +89,11 @@ beforeEach(() => {
   hold = null;
   jobCardOff = false;
   jobCardDown = false;
+  holdCard = null;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
+    // A held read of the visit's job card, with or without ticks (a Refresh re-reads it with none).
+    if (holdCard && u.includes(`/protocols/job-card/${service.id}`)) return holdCard.promise.then(() => reply(fixture(u)));
     // A safety-data outage: the visit's job card read answers 503.
     if (jobCardDown && u.includes(`/protocols/job-card/${service.id}`)) return reply({ error: "Safety data unavailable" }, 503);
     // A held read of the job card or the plan with ticks: the panel waits on it, as on a slow network.
@@ -203,6 +207,37 @@ describe("Use ticks on the Job tab", () => {
     expect(screen.queryByLabelText("Use Fixture base")).toBeNull();
   });
 
+  it("while a tick is re-read the plan's block box is hidden too: its messages belong to the old selection", async () => {
+    blocked = true;
+    await mount();
+    expect(await screen.findByText("Fixture blackout.")).toBeInTheDocument();
+    hold = deferred();
+    fireEvent.click(await screen.findByLabelText("Use Fixture optional"));
+    await screen.findAllByText("Checking the amounts…");
+    expect(screen.queryByText("Fixture blackout.")).toBeNull();
+    await act(async () => { hold.release(); });
+    expect(await screen.findByText("Fixture blackout.")).toBeInTheDocument();
+  });
+
+  it("Refresh on the Plan tab re-reads the job card too; until it lands the Job tab shows no amount from the old read", async () => {
+    await mount();
+    expect(screen.getByText(/2 fl oz/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    const refresh = await screen.findByRole("button", { name: /Refresh/ });
+    const cardReads = asked(`/protocols/job-card/${service.id}`).length;
+    const planReads = asked("/treatment-plans/").length;
+    holdCard = deferred();
+    fireEvent.click(refresh);
+    await waitFor(() => expect(asked(`/protocols/job-card/${service.id}`).length).toBe(cardReads + 1));
+    expect(asked("/treatment-plans/").length).toBe(planReads + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Job" }));
+    expect((await screen.findAllByText("Checking the amounts…")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/\b2 fl oz\b/)).toBeNull();
+    await act(async () => { holdCard.release(); });
+    await waitFor(() => expect(screen.queryByText("Checking the amounts…")).toBeNull());
+    expect(screen.getByText(/2 fl oz/)).toBeInTheDocument();
+  });
+
   it("shows the mixing order from the job card", async () => {
     await mount();
     await screen.findByText("Mixing order");
@@ -216,7 +251,7 @@ describe("Use ticks on the Job tab", () => {
     expect(screen.getByText(/2 fl oz/)).toBeInTheDocument();
     hold = deferred();
     fireEvent.click(await screen.findByLabelText("Use Fixture optional"));
-    expect((await screen.findAllByText("Checking the new selection…")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Checking the amounts…")).length).toBeGreaterThan(0);
     expect(screen.queryByText(/\b2 fl oz\b/)).toBeNull();
     expect(screen.queryByText("Mixing order")).toBeNull();
     expect(screen.queryByText("Tank")).toBeNull();
@@ -225,7 +260,7 @@ describe("Use ticks on the Job tab", () => {
     expect(screen.getByLabelText("Use Fixture optional")).toBeChecked();
     expect(screen.getAllByText("Fixture base").length).toBeGreaterThan(0);
     await act(async () => { hold.release(); });
-    await waitFor(() => expect(screen.queryByText("Checking the new selection…")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Checking the amounts…")).toBeNull());
     expect(screen.getAllByText(/4 fl oz/).length).toBeGreaterThan(0);
     expect(screen.getByText("Mixing order")).toBeInTheDocument();
     expect(screen.getByLabelText("Use Fixture optional")).toBeChecked();
@@ -238,11 +273,11 @@ describe("Use ticks on the Job tab", () => {
     await waitFor(() => expect(screen.getAllByText(/4 fl oz/).length).toBeGreaterThan(0));
     hold = deferred();
     fireEvent.click(screen.getByLabelText("Use Fixture optional"));
-    await screen.findAllByText("Checking the new selection…");
+    await screen.findAllByText("Checking the amounts…");
     expect(screen.queryByText(/4 fl oz/)).toBeNull();
     expect(screen.getByLabelText("Use Fixture optional")).not.toBeChecked();
     await act(async () => { hold.release(); });
-    await waitFor(() => expect(screen.queryByText("Checking the new selection…")).toBeNull());
+    await waitFor(() => expect(screen.queryByText("Checking the amounts…")).toBeNull());
     expect(screen.queryByText(/4 fl oz/)).toBeNull();
     expect(lastCardIds()).toEqual([]);
   });
@@ -285,7 +320,7 @@ describe("Use ticks on the Job tab", () => {
     expect(screen.getByRole("button", { name: "Tap again to order" })).toBeInTheDocument();
     hold = deferred();
     fireEvent.click(screen.getByLabelText("Use Fixture optional"));
-    await screen.findAllByText("Checking the new selection…");
+    await screen.findAllByText("Checking the amounts…");
     expect(screen.queryByRole("button", { name: /Order more|Tap again to order/ })).toBeNull();
     await act(async () => { hold.release(); });
     expect(await screen.findByRole("button", { name: "Order more" })).not.toBeDisabled();

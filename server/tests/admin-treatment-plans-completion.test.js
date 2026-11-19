@@ -146,6 +146,20 @@ test.each([true, false])('every protocol line carries a description with no rate
   expect(protocol.base[0].raw).toBe(tech ? 'Stonewall 4FL 0.5 fl oz per 1,000' : raw);
 });
 
+// A threshold is not a dose: the February St. Augustine irrigation audit keeps "VWC >40% = reduce 20%", while every other
+// percentage goes (a dose share, "0.25% of the spray volume" in the v13 surfactant line). Real protocol lines.
+test.each([true, false])('a protocol line keeps its irrigation thresholds and loses its dose percentages (technician=%s)', async tech => {
+  const feb = require('../config/protocols.json').lawn.st_augustine.visits.find((v) => v.month === 'Feb').secondary.split('\n').find((l) => /IRRIGATION AUDIT/.test(l));
+  const nis = require('../config/lawn-protocol-v13.json').st_augustine.visits[0].secondary.split('\n').find((l) => /Nonionic Surfactant/.test(l));
+  expect(feb).toMatch(/VWC >40% = reduce 20%/);
+  expect(nis).toMatch(/0\.25% of the spray volume/);
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [{ raw: feb, matched: false }, { raw: nis, matched: true }] } });
+  const { protocol } = (await run({ tech })).body.plan;
+  expect(protocol.conditional[0].description).toContain('VWC >40% = reduce 20%');
+  expect(protocol.conditional[1].description).toContain('Nonionic Surfactant');
+  expect(protocol.conditional[1].description).not.toMatch(/0\.25|%/);
+});
+
 // The Plan tab's notice text: a stock block names no planned quantity and an unmatched line is described, not raw.
 // `message` stays as the engine writes it (summarizeInventoryStatus) for the completion form, which reads these lists.
 test.each([true, false])('a stock block and an unmatched line carry a description with no planned amount, rate or price (technician=%s); message stays', async tech => {

@@ -1309,12 +1309,13 @@ function productBlocksUnderPlan({ plan }, product) {
 // visit stamped elsewhere gets no plan and no amounts.
 const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
 
-// A lawn plan line the engine selects by a Use tick: every "if needed" (conditional-role) line, and a primary line written
-// "if …" (protocols.json November St. Augustine: Atrazine "IF <85°F", Three-Way "if too warm") while the tick alone decides
-// it (the engine's reasons for "not ticked" and "ticked"). A fertilizer branch line (soil P), a premium line or a held line
-// is the engine's own pick: no box.
-const TICK_SELECTION_REASONS = new Set(['conditional_not_selected', 'base_or_explicit_selection']);
-const takesUseTick = (item) => item.role === 'conditional' || (item.conditional === true && TICK_SELECTION_REASONS.has(item.selectionReason));
+// A lawn plan line the engine selects by a Use tick: an "if needed" (conditional-role) line or a primary line written "if …"
+// (protocols.json November St. Augustine: Atrazine "IF <85°F", Three-Way "if too warm"), while the tick alone decides it:
+// the engine's reasons for "not ticked" and "ticked" (a bermuda removal step's other lines are ticked with it). A line the
+// engine picks or holds by its own rule (soil-P branch, premium, Tetrino scouting, mixed turf, North Port, the rounds
+// catch-up) gets no box, since a tick there changes nothing; the Plan tab shows the engine's hold reason.
+const TICK_SELECTION_REASONS = new Set(['conditional_not_selected', 'base_or_explicit_selection', 'bermuda_step_selected_together']);
+const takesUseTick = (item) => item.conditional === true && TICK_SELECTION_REASONS.has(item.selectionReason);
 
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date(), selectedConditionalProductIds = [] }) {
   // Identity gates the primary line before any branch — a catalog
@@ -1641,12 +1642,17 @@ function linesFromProtocolText(visit, catalog) {
 // Dosing values never ride in the descriptive line text: a rate shown there
 // would survive every withhold (unverified, held, blocked). Rates come only
 // from the resolved, permitted mix (`planned`).
-const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:%|(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
+const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
+// A percentage in a product line is a dose ("TriTek spray oil: 1.0% standard", "0.25% of the spray volume") or a bag
+// analysis, so it goes, except a threshold: one after a comparison (the irrigation audit's "VWC >40%") or after "reduce"
+// ("= reduce 20%"), the forms no dose is written in.
+const PERCENT_TOKEN_RE = /(?<![<>≤≥]\s*|\breduce\s+)\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*%/gi;
 // Owner-only unit prices the protocol text carries ("($6.08)", a compound "($1.91+$21.79)", a bare "— $15") never
 // reach a technician's card either: the Protocols page's own strip (protocol-reader.js). The card route sends this
 // text as built, with no whole-payload strip after it.
 function describeLine(raw) {
   return stripPriceTokensFromText(String(raw || ''))
+    .replace(PERCENT_TOKEN_RE, ' ')
     .replace(RATE_TOKEN_RE, ' ')
     .replace(/\(\s*\)/g, ' ')
     .replace(/\s+\)/g, ')')
