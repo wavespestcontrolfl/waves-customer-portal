@@ -91,6 +91,31 @@ describe('email autoUnsubscribe — operational-sender belt', () => {
   });
 });
 
+describe('email autoUnsubscribe — the feeds the SiteOne deals digest reads (owner 2026-11-18)', () => {
+  // 2026-05-19: one newsletter verdict on SiteOne promo mail unsubscribed contact@; no promo email came for six months.
+  const unsub = (from) => autoUnsubscribe({ id: 'test', from_address: from, list_unsubscribe: '<https://example.com/unsub>' });
+
+  test.each([
+    ['SiteOne promo mail', 'marketing@grow.siteone.com'],
+    ['SiteOne order and case notices', 'SiteOne <noreply@ec.siteone.com>'],
+    ['SiteOne itself', 'srep@siteone.com'],
+    ['a maker on the digest list, subdomain', 'news@mail.basf.com'],
+  ])('refuses %s, whatever the headers say', async (_label, from) => {
+    const result = await unsub(from);
+    expect(result.method).toBe('none');
+    expect(result.note).toContain('deals digest sender');
+  });
+
+  test('a look-alike is not a digest sender: it gets the ordinary checks', async () => {
+    for (const from of ['srep@siteone.com.evil.example', 'srep@notsiteone.com']) {
+      const result = await unsub(from);
+      expect(result.method).toBe('none');
+      expect(result.note).not.toContain('deals digest sender');
+      expect(result.note).toContain('unauthenticated sender');
+    }
+  });
+});
+
 describe('email spam-blocker — isOperationalDomain export', () => {
   test('covers hub, subdomains, and spokes; not external domains', () => {
     expect(isOperationalDomain('wavespestcontrol.com')).toBe(true);
