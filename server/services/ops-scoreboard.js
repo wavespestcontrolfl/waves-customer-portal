@@ -324,7 +324,13 @@ async function computeCustomerPickerConversion({ from, to }, conn) {
     'created_at',
     from,
     to,
-  ).select('resource_id', 'metadata');
+  ).whereRaw(`NOT EXISTS (
+    SELECT 1 FROM audit_log prior
+     WHERE prior.actor_type = 'customer' AND prior.action = 'estimate_hold_started'
+       AND prior.resource_type = 'estimate' AND prior.resource_id IS NOT NULL
+       AND prior.metadata ->> 'scheduled_service_id' = audit_log.metadata ->> 'scheduled_service_id'
+       AND prior.created_at < ?::timestamp AT TIME ZONE 'America/New_York'
+  )`, [`${from}T00:00:00`]).select('resource_id', 'metadata');
 
   const selected = new Map();
   for (const event of events) {

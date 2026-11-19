@@ -60,6 +60,7 @@ const { computeCustomerPickerConversion } = require('../services/ops-scoreboard'
       event(wrongEstimate, wrong),
       event(pendingEstimate, pending),
       event(outsideEstimate, outside, { created_at: new Date('2026-11-17T04:59:59Z') }),
+      event(outsideEstimate, outside, { created_at: new Date('2026-11-17T05:00:01Z') }),
       event(randomUUID(), randomUUID(), { actor_type: 'staff' }),
     ]);
     await db('scheduled_services').insert([
@@ -70,6 +71,9 @@ const { computeCustomerPickerConversion } = require('../services/ops-scoreboard'
       { id: outside, source_estimate_id: outsideEstimate, customer_id: customerId, status: 'confirmed' },
     ]);
 
+    await expect(computeCustomerPickerConversion({ from: '2026-11-16', to: '2026-11-16' }, db)).resolves.toMatchObject({
+      selectedAppointments: 1, bookedAppointments: 1, numerator: 1, denominator: 1,
+    });
     await expect(computeCustomerPickerConversion({ from: '2026-11-17', to: '2026-11-17' }, db)).resolves.toEqual({
       numerator: 1, denominator: 3, share: 1 / 3,
       selectedAppointments: 3, bookedAppointments: 1, appointmentShare: 1 / 3,
