@@ -1320,6 +1320,25 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // The 9:00 AM ET "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1): how many viewed
+  // estimates nobody has called, and a tap opens the Estimates page on its Call today filter. services/estimate-call-today-push.js
+  // sends it pushOnly, so it writes no bell row (rule: fyi) and each admin can switch it off in Push Settings. The words
+  // are counts only, never a customer name or phone (a lock screen shows them). p = { count, day }.
+  estimate_call_today: {
+    label: 'Morning list: estimates to call today',
+    category: 'alert',
+    priority: 'normal',
+    group: 'Alerts',
+    rule: { area: 'Estimates', severity: 'fyi', who: 'person', expiryDays: 7 },
+    build: (p) => {
+      const count = Number(p.count) || 0;
+      return {
+        title: count === 1 ? 'Call today: 1 estimate' : `Call today: ${count} estimates`,
+        body: 'Opened in the last 2 days. Nobody has called yet.',
+        link: '/admin/estimates?view=call_today',
+      };
+    },
+  },
   // The owner's 7 PM open-visit nudge as a phone banner (GATE_OWNER_NUDGE_BANNER, owner 2026-11-04 "banner"): the same words
   // the text carries, a tap opens the tech close-out page. services/tech-open-visit-nudge.js sends it pushOnly to the owner's
   // own admin user, so it writes no bell row (rule: fyi) and the owner can switch it off in Push Settings. p = { headline,
@@ -1448,6 +1467,10 @@ function pushTagFor(triggerKey, payload = {}) {
   // One banner per ET day: a late or repeated send replaces the same day's banner, and tomorrow's never replaces today's.
   if (triggerKey === 'waiting_summary') {
     return `waves-waiting_summary-${payload.day || 'unknown-day'}`;
+  }
+  // One "Call today" banner per ET day, like the morning summary.
+  if (triggerKey === 'estimate_call_today') {
+    return `waves-estimate_call_today-${payload.day || 'unknown-day'}`;
   }
   // One nudge banner per technician-day claim: a repeat replaces the same day's banner, tomorrow's never replaces today's.
   if (triggerKey === 'open_visits_nudge') {

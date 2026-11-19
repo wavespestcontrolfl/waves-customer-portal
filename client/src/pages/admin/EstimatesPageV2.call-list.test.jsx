@@ -107,10 +107,10 @@ function response(body) {
 
 let patches;
 
-function renderPage(width = 1440) {
+function renderPage(width = 1440, search = "?tab=estimates") {
   window.innerWidth = width;
   return render(
-    <MemoryRouter initialEntries={["/admin/pipeline?tab=estimates"]}>
+    <MemoryRouter initialEntries={[`/admin/pipeline${search}`]}>
       <EstimatesPageV2 />
     </MemoryRouter>,
   );
@@ -156,6 +156,25 @@ it("(desktop) the Call today card counts only the 2h-48h, uncalled viewed offers
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
   // The Call action is on those rows.
   expect(screen.getAllByRole("button", { name: /^Call .* via Waves$/ })).toHaveLength(2);
+});
+
+// The 9 AM push links to /admin/estimates?view=call_today, which redirects to /admin/pipeline?tab=estimates&view=call_today.
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) ?view=call_today opens the list on the Call today filter", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+});
+
+it.each([
+  ["an unknown view", "?tab=estimates&view=nope"],
+  ["no view", "?tab=estimates"],
+])("(desktop) %s leaves the list on its default filter", async (_label, search) => {
+  const { container } = renderPage(1440, search);
+  await screen.findByText("Fresh View");
+  expect(rowIds(container)).toContain("v-1h");
+  expect(rowIds(container)).toContain("v-cold");
 });
 
 it("(desktop) Pick reason lists recently expired opened offers and saves a reason without a status", async () => {

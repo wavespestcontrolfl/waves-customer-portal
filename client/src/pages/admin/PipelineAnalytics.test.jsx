@@ -12,6 +12,7 @@ import PipelineAnalytics, {
   isPickReasonEstimate,
   withinDateRange,
 } from "./PipelineAnalytics";
+import * as sharedCallToday from "@estimate-call-today";
 
 const NOW = new Date("2026-05-15T12:00:00.000Z");
 
@@ -829,6 +830,10 @@ describe("PipelineAnalytics drafts tile", () => {
 
 
 describe("isCallTodayEstimate", () => {
+  it("is the shared rule the 9 AM push counts with, not a second copy", () => {
+    expect(isCallTodayEstimate).toBe(sharedCallToday.isCallTodayEstimate);
+  });
+
   const NOW_MS = NOW.getTime();
   const viewedOffer = (hours, extra = {}) =>
     estimate({

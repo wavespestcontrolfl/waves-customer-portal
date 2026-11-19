@@ -4482,9 +4482,10 @@ router.get('/', async (req, res, next) => {
     const soldByById = await loadSoldByForList(db, estimates);
     // Call list: the newest outbound call to each VIEWED row's phone, one batched read.
     // A failed read costs only the field (lastCalledAt stays null).
+    const { lastCalledAtByEstimateId, callTodayFields } = require('../services/estimate-call-list');
     let lastCalledById = new Map();
     try {
-      lastCalledById = await require('../services/estimate-call-list').lastCalledAtByEstimateId(db, estimates);
+      lastCalledById = await lastCalledAtByEstimateId(db, estimates);
     } catch (err) {
       // Never err.message: a Knex error carries the SQL with its bindings, i.e. every customer
       // phone in the batch's whereIn (AGENTS.md, PII in logs). The driver code is enough.
@@ -4527,9 +4528,9 @@ router.get('/', async (req, res, next) => {
           ),
         } : null;
         return {
-          id: e.id, status: e.status, customerName: e.customer_name,
+          id: e.id, customerName: e.customer_name,
           customerId: e.customer_id,
-          customerPhone: e.customer_phone, address: e.address,
+          address: e.address,
           customerEmail: e.customer_email,
           updatedAt: e.updated_at,
           monthlyTotal,
@@ -4543,17 +4544,20 @@ router.get('/', async (req, res, next) => {
           staffPreviewable: staffPreviewableIds.has(e.id),
           tier: e.waveguard_tier, createdBy: e.created_by_name,
           sentAt: e.sent_at,
-          viewedAt: hasBeenSent ? e.viewed_at : null,
           acceptedAt: e.accepted_at,
           scheduledAt: e.scheduled_at,
           expiresAt: e.expires_at,
           sendMethod: e.send_method,
           declinedAt: e.declined_at,
           viewCount: hasBeenSent ? e.view_count || 0 : 0,
-          lastViewedAt: hasBeenSent ? e.last_viewed_at : null,
           clickCount: parseInt(clickStats.get(e.id)?.click_count || 0, 10),
-          lastClickedAt: clickStats.get(e.id)?.last_clicked_at || null,
           createdAt: e.created_at,
+          // The "Call today" rule's fields (status, phone, archivedAt, views, click, follow-up, newest answered call):
+          // one mapping shared with the 9 AM push (services/estimate-call-list.js callTodayFields).
+          ...callTodayFields(e, {
+            lastClickedAt: clickStats.get(e.id)?.last_clicked_at,
+            lastCalledAt: lastCalledById.get(e.id),
+          }),
           source: e.source || 'manual',
           serviceInterest,
           serviceLines,
@@ -4563,9 +4567,6 @@ router.get('/', async (req, res, next) => {
           description: serviceInterest || e.notes,
           notes: e.notes,
           followUpCount: e.follow_up_count || 0,
-          lastFollowUpAt: e.last_follow_up_at,
-          // Call list: newest outbound call to a viewed row's phone; null otherwise.
-          lastCalledAt: lastCalledById.get(e.id) || null,
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
           dispositionSource: e.disposition_source || null,
@@ -4573,7 +4574,6 @@ router.get('/', async (req, res, next) => {
           competitorName: e.competitor_name || null,
           competitorPrice: e.competitor_price != null ? parseFloat(e.competitor_price) : null,
           token: e.token,
-          archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
           billByInvoice: e.bill_by_invoice,
           // The row offers "Send booking link" only when the route would not refuse it

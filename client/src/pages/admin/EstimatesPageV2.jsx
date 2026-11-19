@@ -281,6 +281,11 @@ const CALL_LIST_MATCHERS = {
   call_today: (e) => isCallTodayEstimate(e),
   pick_reason: (e) => isPickReasonEstimate(e),
 };
+// ?view=call_today opens the list on its "Call today" filter (the 9 AM push links here). Any other value
+// does nothing: the list opens on "all", as before.
+function filterFromView(searchParams) {
+  return searchParams.get("view") === "call_today" ? "call_today" : "all";
+}
 function withCallListChips(chips, afterKey) {
   const at = chips.findIndex((c) => c.key === afterKey);
   if (at < 0) return [...chips, ...CALL_LIST_CHIPS];
@@ -2041,12 +2046,13 @@ function EstimatePipelineViewV2({
   const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState(() => filterFromView(searchParams));
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -4116,8 +4122,10 @@ function EstimatesMobileListView({
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [searchParams] = useSearchParams();
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("all");
+  const viewFilterRef = useRef(filterFromView(searchParams));
+  const [filter, setFilter] = useState(viewFilterRef.current);
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4391,9 +4399,10 @@ function EstimatesMobileListView({
   }, [estimates, v3Flag]);
   const filterOptions = mobileFilterOptions(v3Flag, filterCounts);
 
-  // Reset filter when the v3 flag flips; keep chronological ordering stable.
+  // Reset filter when the v3 flag flips; keep chronological ordering stable. The reset goes back to the
+  // filter the URL asked for (?view=call_today), so the flag loading after mount does not undo that link.
   useEffect(() => {
-    setFilter("all");
+    setFilter(viewFilterRef.current);
   }, [v3Flag]);
 
   // Flat list across all days — mirrors CustomersPageV2 directory layout.

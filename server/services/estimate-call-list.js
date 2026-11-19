@@ -67,6 +67,28 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
 }
 
 /**
+ * The fields the "Call today" rule reads (shared/estimate-call-today.cjs), in the shape the list API sends.
+ * ONE mapping for the list route and the 9 AM push, so the page and the push judge the same row.
+ * viewedAt and lastViewedAt stay null on a row that was never sent (the list's own rule).
+ *
+ * @param {object} row  estimates row (snake_case columns)
+ * @param {{lastClickedAt?: *, lastCalledAt?: *}} [extra]  the two values read in batches (short_codes, call_log)
+ */
+function callTodayFields(row, { lastClickedAt = null, lastCalledAt = null } = {}) {
+  const hasBeenSent = !!row.sent_at;
+  return {
+    status: row.status,
+    customerPhone: row.customer_phone,
+    archivedAt: row.archived_at,
+    viewedAt: hasBeenSent ? row.viewed_at : null,
+    lastViewedAt: hasBeenSent ? row.last_viewed_at : null,
+    lastClickedAt: lastClickedAt || null,
+    lastFollowUpAt: row.last_follow_up_at,
+    lastCalledAt: lastCalledAt || null,
+  };
+}
+
+/**
  * May PATCH /api/admin/estimates/:id stamp a staff loss reason on this row WITHOUT a status change?
  * Only on a row whose status is `expired` (the request leaves the
  * status alone), and never on a never-sent internal draft that aged out (`expired_unsent`:
@@ -79,4 +101,4 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
   return (estimate.disposition || '') !== 'expired_unsent';
 }
 
-module.exports = { lastCalledAtByEstimateId, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
+module.exports = { lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
