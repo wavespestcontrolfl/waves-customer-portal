@@ -171,6 +171,7 @@ router.get('/preferences', async (req, res, next) => {
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
           irrigationSystem: true, irrigationControllerLocation: '', irrigationZones: null,
+          irrigationControllerBrand: null, irrigationControllerModel: null, irrigationControllerApp: null,
           irrigationInchesPerWeek: null, irrigationRunMinutes: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationWaterSource: null, irrigationIssues: '',

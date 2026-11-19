@@ -15,6 +15,7 @@
  */
 
 const Joi = require('joi');
+const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } = require('@waves/irrigation-runtime');
 const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('./irrigation-weekly-email');
 const { validCalendarDate } = require('../utils/datetime-et');
 const AwayWatch = require('./away-watch');
@@ -96,6 +97,12 @@ const PREFS_FIELD_SCHEMAS = {
   awayWatchUntil: awayWatchDay(),
   // 20260401000005_property_preferences.js — varchar(200).
   irrigationControllerLocation: shortTextMax(200),
+  // The sprinkler timer on file: brand, Hunter model, and whether the customer runs it from the maker's phone app.
+  // Each is a key from the shared list (@waves/irrigation-runtime); '' or null clears. Not watering inputs: they stay
+  // out of IRRIGATION_INPUT_FIELDS, the revision trigger and the confirmed-fields ledger (settleControllerTimer below).
+  irrigationControllerBrand: enumOrNull(Object.keys(CONTROLLER_BRANDS)),
+  irrigationControllerModel: enumOrNull(Object.keys(CONTROLLER_MODELS)),
+  irrigationControllerApp: enumOrNull(Object.keys(CONTROLLER_APP_ANSWERS)),
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
   // Minutes each zone runs on a watering day — the natural-unit schedule
@@ -163,6 +170,7 @@ const ALLOWED_FIELDS = [
   'blackout_start', 'blackout_end',
   'away_watch_from', 'away_watch_until',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
+  'irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app',
   'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_water_source', 'irrigation_issues',
   'mowing_days', 'mowing_time_of_day', 'mowing_notes',
@@ -277,12 +285,22 @@ async function customerQualifiesForLawnInches(customer = {}) {
   return hasIrrigationEmailOptIn(customer.id);
 }
 
+// The timer's three fields describe one box on the wall. A write that names the brand keeps the other two true to
+// it, for every writer: only a Hunter has a model on the list, and no timer on file has no phone-app answer.
+function settleControllerTimer(updates) {
+  if (!('irrigation_controller_brand' in updates)) return;
+  const brand = updates.irrigation_controller_brand;
+  if (brand !== 'hunter') updates.irrigation_controller_model = null;
+  if (brand == null) updates.irrigation_controller_app = null;
+}
+
 // Normalizes a snake_case `updates` object (already filtered to an allowed-
-// fields list) for storage: irrigation_system_type coerced to an array
+// fields list) for storage: the timer's fields kept coherent (above), irrigation_system_type coerced to an array
 // (accepts a legacy scalar), and every JSON_FIELDS value stringified
 // so knex sends JSON text rather than a bound object. Mutates and returns
 // the same object; order matters (type coercion before stringification).
 function normalizeUpdatesForStorage(updates) {
+  settleControllerTimer(updates);
   if ('irrigation_system_type' in updates) {
     const v = updates.irrigation_system_type;
     updates.irrigation_system_type = Array.isArray(v) ? v : (v ? [v] : []);

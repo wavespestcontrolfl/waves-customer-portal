@@ -160,7 +160,7 @@ import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 import { NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY } from "../../lib/pretreatWarrantyValues";
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
-import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS } from "@waves/irrigation-runtime";
+import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS, CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } from "@waves/irrigation-runtime";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -6922,6 +6922,11 @@ const ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS = [
   ["drip", "Drip"],
   ["rotor", "Rotor"],
 ];
+// The sprinkler timer on file: the same keys and labels the customer's card uses.
+const accessPrefsTimerOptions = (labels) => [["", "Not set"], ...Object.entries(labels)];
+const ACCESS_PREFS_TIMER_BRAND_OPTIONS = accessPrefsTimerOptions(CONTROLLER_BRANDS);
+const ACCESS_PREFS_TIMER_MODEL_OPTIONS = accessPrefsTimerOptions(CONTROLLER_MODELS);
+const ACCESS_PREFS_TIMER_APP_OPTIONS = accessPrefsTimerOptions(CONTROLLER_APP_ANSWERS);
 const ACCESS_PREFS_HOA_ROWS = [
   ["HOA Name", "hoa_name"],
   ["HOA Company", "hoa_company"],
@@ -6986,6 +6991,9 @@ const ACCESS_PREFS_FIELDS = {
   awayWatchFrom: "date",
   awayWatchUntil: "date",
   irrigationControllerLocation: "text",
+  irrigationControllerBrand: "optional",
+  irrigationControllerModel: "optional",
+  irrigationControllerApp: "optional",
   irrigationZones: "number",
   irrigationInchesPerWeek: "number",
   irrigationRunMinutes: "number",
@@ -7367,6 +7375,11 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo, awayWatchEnabled }) 
       <AccessPrefRow label="Run Minutes / Zone" value={p.irrigation_run_minutes} />
       <AccessPrefRow label="Watering Days" value={p.watering_days} />
       <AccessPrefRow label="Controller Location" value={p.irrigation_controller_location} />
+      <AccessPrefRow label="Timer Brand" value={CONTROLLER_BRANDS[p.irrigation_controller_brand]} />
+      {p.irrigation_controller_brand === "hunter" && (
+        <AccessPrefRow label="Timer Model" value={CONTROLLER_MODELS[p.irrigation_controller_model]} />
+      )}
+      <AccessPrefRow label="Runs From Phone App" value={CONTROLLER_APP_ANSWERS[p.irrigation_controller_app]} />
       <AccessPrefRow label="Zones" value={p.irrigation_zones} />
       <AccessPrefRow label="Rain Sensor" value={p.rain_sensor ? "Yes" : "No"} />
       <AccessPrefRow label="Irrigation Notes" value={p.irrigation_schedule_notes} />
@@ -7529,6 +7542,26 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
   );
 }
 
+// The timer on file. A new brand is a new box: its model and phone-app answer start empty. Only a Hunter has a model.
+function AccessPrefsTimer({ d, set, setDraft, fieldErrors }) {
+  const f = { d, set, fieldErrors };
+  const setBrand = () => (brand) =>
+    setDraft((prev) => (brand === prev.irrigationControllerBrand
+      ? prev
+      : { ...prev, irrigationControllerBrand: brand, irrigationControllerModel: "", irrigationControllerApp: "" }));
+  return (
+    <>
+      <AccessPrefsSelect {...f} set={setBrand} label="Timer Brand" field="irrigationControllerBrand" options={ACCESS_PREFS_TIMER_BRAND_OPTIONS} />
+      {d.irrigationControllerBrand === "hunter" && (
+        <AccessPrefsSelect {...f} label="Timer Model" field="irrigationControllerModel" options={ACCESS_PREFS_TIMER_MODEL_OPTIONS} />
+      )}
+      {d.irrigationControllerBrand && (
+        <AccessPrefsSelect {...f} label="Runs From Phone App" field="irrigationControllerApp" options={ACCESS_PREFS_TIMER_APP_OPTIONS} />
+      )}
+    </>
+  );
+}
+
 function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod, sodUnchanged, awayWatchEnabled }) {
   const f = { d, set, fieldErrors };
   // Entering sensitivity details turns the flag on — techs only see the
@@ -7591,6 +7624,7 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets,
       </div>
       <AccessPrefsPills {...f} label="Watering Days" field="wateringDays" options={DAY_KEYS} />
       <AccessPrefsTextInput {...f} label="Controller Location" field="irrigationControllerLocation" maxLength={200} />
+      <AccessPrefsTimer {...f} setDraft={setDraft} />
       <AccessPrefsTextInput {...f} label="Zones" field="irrigationZones" type="number" min="0" max="100" />
       <AccessPrefsSwitchRow label="Rain Sensor" checked={d.rainSensor} onChange={set("rainSensor")} />
       <AccessPrefsTextInput {...f} multiline label="Irrigation Notes" field="irrigationScheduleNotes" />

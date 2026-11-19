@@ -34,7 +34,8 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
-const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
+const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps, whereLiveCustomer } = require('../customer-stages');
+const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } = require('@waves/irrigation-runtime');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
@@ -360,6 +361,13 @@ property_id: a customer with more than one active property needs one — the too
     },
   },
   {
+    name: 'get_sprinkler_timer_counts',
+    description: `Counts of the sprinkler timers live customers have on file: brand, Hunter model, and whether they run it from the maker's phone app. Totals only; no customer is named.
+Use for: "how many customers have a Hunter X2?", "how many run their timer from the Hydrawise app?", "how many homes would need a Wi-Fi part?"
+The portal only records the timer and links a guide. It does not connect to, pause or start any timer, so these are planning figures: never say a timer is connected or can be.`,
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
     name: 'get_recent_completions',
     description: `The most recently completed visits, newest first — resolves "the customer we just finished" and "what did we complete today". Returns customer, service, technician, and completion time.
 Use for: "build the report for the customer we just finished", "who did we finish today?", "what was the last completed stop?"`,
@@ -458,6 +466,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'cancel_plan': return await cancelPlan(input, actionContext);
       case 'create_appointment': return await createAppointment(input, actionContext);
       case 'get_recent_completions': return await getRecentCompletions(input);
+      case 'get_sprinkler_timer_counts': return await getSprinklerTimerCounts();
       case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
       case 'cancel_appointment': return await cancelAppointment(input, actionContext);
       case 'draft_sms': return await draftSms(input);
@@ -3073,6 +3082,44 @@ const CLOSED_OUT_AT_SQL = `COALESCE(
     WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
   ss.completed_at)`;
 
+// Where a recorded timer stands for Hunter's Hydrawise app, the one maker app with a route Waves has scoped (PR #8009).
+// A Hydrawise touchscreen is on it by build. An X2 or a Pro-C is on it only when the customer says so, and needs a
+// Hunter Wi-Fi part when they say no (an older Pro-C may not take one). An X-Core and every other brand has no route.
+function sprinklerTimerStanding({ brand, model, app }) {
+  if (brand !== 'hunter' || model === 'x_core') return 'no_hydrawise_route';
+  if (model === 'hydrawise') return 'on_hydrawise';
+  if (model !== 'x2' && model !== 'pro_c') return 'not_answered';
+  return { yes: 'on_hydrawise', no: 'needs_wifi_part' }[app] || 'not_answered';
+}
+
+// rows: one per (brand, model, app) with its number of homes.
+function sprinklerTimerRollup(rows) {
+  const summary = { on_hydrawise: 0, needs_wifi_part: 0, no_hydrawise_route: 0, not_answered: 0 };
+  const byTimer = rows.map((row) => {
+    const homes = Number(row.homes) || 0;
+    const standing = sprinklerTimerStanding(row);
+    summary[standing] += homes;
+    const model = row.brand === 'hunter' ? (CONTROLLER_MODELS[row.model] || '(model not recorded)') : '';
+    return {
+      timer: `${CONTROLLER_BRANDS[row.brand] || row.brand} ${model}`.trim(),
+      runs_from_phone_app: CONTROLLER_APP_ANSWERS[row.app] || 'Not answered',
+      standing,
+      homes,
+    };
+  }).sort((a, b) => b.homes - a.homes || a.timer.localeCompare(b.timer));
+  return { homes_with_a_timer_on_file: byTimer.reduce((total, row) => total + row.homes, 0), summary, by_timer: byTimer };
+}
+
+async function getSprinklerTimerCounts() {
+  const rows = await db('property_preferences')
+    .whereNotNull('irrigation_controller_brand')
+    .whereIn('customer_id', db('customers').modify(whereLiveCustomer).select('id'))
+    .groupBy('irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app')
+    .select({ brand: 'irrigation_controller_brand', model: 'irrigation_controller_model', app: 'irrigation_controller_app' })
+    .count({ homes: '*' });
+  return sprinklerTimerRollup(rows);
+}
+
 async function getRecentCompletions(input = {}) {
   // Floor defensively even though the schema says integer — a fractional
   // limit binds into Postgres's integer LIMIT and errors, and a fractional
@@ -5575,6 +5622,8 @@ module.exports = {
   CARD_CANCEL_REFUSED_MESSAGE,
   // Test hook: the bar's one booking pricer (every create path asks it before anything is booked).
   _ibBookingPricing: ibBookingPricing,
+  // Test hook: the sprinkler timer count's rollup (get_sprinkler_timer_counts), without a database.
+  _sprinklerTimerRollup: sprinklerTimerRollup,
   // Shared with services/customer-name-search.js (picker sound-alikes): one loader and cap for the shared name index.
   nameCandidates, NAME_INDEX_BOOK_CAP,
 };

@@ -732,4 +732,41 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByText(/Rex/)).toBeInTheDocument();
     expect(screen.getByText(/Kept in the garage/)).toBeInTheDocument();
   });
+
+  it('shows the sprinkler timer on file, and a new brand saves with its old model and app answer cleared', async () => {
+    const bodies = [];
+    vi.stubGlobal('fetch', vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        bodies.push(JSON.parse(options.body));
+        return response({ success: true, saved: true, preferences: BASE_PREFS });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({ irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    const row = (label) => screen.getByText(label).parentElement;
+    expect(row('Timer Brand')).toHaveTextContent('Hunter');
+    expect(row('Timer Model')).toHaveTextContent('X2');
+    expect(row('Runs From Phone App')).toHaveTextContent('Yes');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const select = (label) => screen.getByText(label).closest('label').querySelector('select');
+    expect(select('Timer Model').value).toBe('x2');
+    fireEvent.change(select('Timer Brand'), { target: { value: 'rain_bird' } });
+    // Only a Hunter has a model on the list.
+    expect(screen.queryByText('Timer Model')).not.toBeInTheDocument();
+    expect(select('Runs From Phone App').value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toEqual({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null });
+  });
 });
