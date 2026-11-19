@@ -106,6 +106,13 @@ describe('isDealEmail', () => {
     expect(isDealEmail(email({ subject: 'Hello', body_text: 'A cash discount applies.' }))).toBe(false);
   });
 
+  test('a long run of spaces after "Case Number" is checked in linear time, and is no case ID', () => {
+    // Overlapping \s* runs made this take about 3 s at 1,200 spaces; one way to match takes under 1 ms.
+    const started = Date.now();
+    expect(isDealEmail(email({ subject: `Case Number${' '.repeat(1200)}x: 10% off` }))).toBe(true);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
   test('reads body_html when body_text is empty', () => {
     expect(isDealEmail(email({ subject: 'Hello', body_text: '', body_html: '<p>Early order <b>program</b></p><p>Rebate &amp; flyer</p>' }))).toBe(true);
   });
