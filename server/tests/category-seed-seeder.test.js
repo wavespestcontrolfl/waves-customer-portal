@@ -655,6 +655,27 @@ describe('customer-question manifest 2026-11-18', () => {
     }
   });
 
+  // Global rule 3 bans prices outright. The completion gate and the publish
+  // guardrails turn a brief's ban on only for the wording they recognize
+  // ("no ... prices"), and under a ban nothing is exempt, so a price framed
+  // around the quote CTA still fails. "never state prices" left it off
+  // (pre-push audit).
+  test('every brief turns on the all-prices ban, so a price beside the quote CTA still fails', () => {
+    const { detectHardcodedPrice } = require('../services/content/seo-completion-gate')._internals;
+    const { findHardcodedPrice } = require('../services/content/content-guardrails');
+    const { deriveSyncGuardrailOptions, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/guardrail-options');
+    const framed = 'Most homes pay about $123 for this; [request a pest control quote](/pest-control-quote/) for yours.';
+    // Control: without a ban, the quote framing exempts this price.
+    expect(findHardcodedPrice(framed, { forbidAllPrices: false })).toBeNull();
+    const failures = [];
+    for (const id of ids) {
+      const brief = composeSeedBrief(manifest, id);
+      if (deriveSyncGuardrailOptions({ bucket: OPERATOR_INTERCEPT_BUCKET, service: brief.service }, brief).forbidAllPrices !== true) failures.push(`${id} guardrails`);
+      if (detectHardcodedPrice(framed, brief) !== true) failures.push(`${id} completion gate`);
+    }
+    expect(failures).toEqual([]);
+  });
+
   // Every source URL is a required citation the writer is told to cite, and
   // a cited source is usually a link. A link the publish guardrails refuse
   // (an "&" or "%" in the address is UNSUPPORTED_BODY_SYNTAX) parks the
