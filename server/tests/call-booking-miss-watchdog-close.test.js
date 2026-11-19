@@ -78,8 +78,9 @@ const AFTER_CALL = '2026-10-20T15:00:00Z';
 const call = (over = {}) => ({
   id: CALL_ID, twilio_call_sid: 'CAsynthetic700', customer_id: 'cust-1', direction: 'outbound', created_at: CALL_AT,
   from_phone: '+19415550100', to_phone: '+19415550111',
-  // A settled call stores the call agent's decision; this one let the booking through.
-  ai_validation: { mode: 'enforce', routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } },
+  // A finished pass stores the call agent's decision; this one let the booking through.
+  processing_status: 'processed',
+  ai_validation: { mode: 'enforce', generated_at: CALL_AT, routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } },
   ai_extraction_enriched: {
     caller: { name_full: 'Sam Sample' },
     service_request: { specific_service_name: 'Waves Assessment' },
@@ -381,12 +382,12 @@ describe('close pass', () => {
   // Pre-push P1 (2026-11-18): the replacement "book it" bell of a call the call agent held
   // names why it was held, as the call's first bell does.
   test('a held call: the replacement "book it" bell says why it was held; the close pass reads ai_validation', async () => {
-    const held = { mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
-    mockState.calls = [call({ ai_validation: held, processing_status: 'processed' })];
+    const held = { mode: 'enforce', generated_at: CALL_AT, routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
+    mockState.calls = [call({ ai_validation: held })];
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     await planOpenBookingMissBells({ now: NOW });
-    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['ai_validation', 'processing_status']));
+    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['ai_validation', 'processing_status', 'processing_started_at']));
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
@@ -398,8 +399,8 @@ describe('close pass', () => {
   // Pre-push P1 (2026-11-18): a reprocessed call that no longer confirms a slot has a new
   // decision about another reading of the call; it must not explain the stamped slot.
   test('a reprocessed held call whose stamped slot stands in: the replacement bell names no hold reason', async () => {
-    const newDecision = { mode: 'enforce', routing: { allowed: false, reason: 'low_confidence', appointment_blocking_flags: [] } };
-    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, ai_validation: newDecision, processing_status: 'processed' })];
+    const newDecision = { mode: 'enforce', generated_at: CALL_AT, routing: { allowed: false, reason: 'low_confidence', appointment_blocking_flags: [] } };
+    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, ai_validation: newDecision })];
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     const result = await tick();
@@ -410,13 +411,20 @@ describe('close pass', () => {
     expect(opts.detail).not.toContain('The call agent held');
   });
 
-  // Pre-push P1 (2026-11-18): mid-(re)processing, a pass has written its new extraction but not
-  // yet its new ai_validation, so the stored decision may be the previous pass's.
-  test('a held call still in processing: the replacement bell names no hold reason, though the slot is confirmed', async () => {
-    const held = { mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
-    for (const processingStatus of ['processing', null]) {
+  // Pre-push P1s (2026-11-18): mid-(re)processing, a pass has written its new extraction but not
+  // yet its new ai_validation; an 'extraction_failed' pass can still be retried; and a reprocess
+  // keeps the previous pass's decision until it stores its own. None of them proves a hold.
+  test('a held decision from a pass that did not finish, or from an earlier pass, names no hold reason', async () => {
+    const held = { mode: 'enforce', generated_at: CALL_AT, routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
+    const cases = [
+      { processing_status: 'processing' },
+      { processing_status: null },
+      { processing_status: 'extraction_failed' },
+      { processing_started_at: AFTER_CALL },
+    ];
+    for (const over of cases) {
       NotificationService.notifyAdmin.mockClear();
-      mockState.calls = [call({ ai_validation: held, processing_status: processingStatus })];
+      mockState.calls = [call({ ai_validation: held, ...over })];
       mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
       mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
       await tick();

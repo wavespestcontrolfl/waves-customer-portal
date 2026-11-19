@@ -42,8 +42,8 @@ function extraction(over = {}) {
   };
 }
 
-// A settled call stores the call agent's decision; this one let the booking through.
-const ALLOWED = { mode: 'enforce', routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } };
+// A finished pass stores the call agent's decision; this one let the booking through.
+const ALLOWED = { mode: 'enforce', generated_at: NOW.toISOString(), routing: { allowed: true, reason: null, flags: [], appointment_blocking_flags: [] } };
 
 function call(over = {}) {
   return {
@@ -51,6 +51,7 @@ function call(over = {}) {
     direction: 'outbound', created_at: OLD_ENOUGH,
     from_phone: '+19415550100', to_phone: '+19415550111',
     ai_extraction_enriched: extraction(),
+    processing_status: 'processed',
     ai_validation: ALLOWED,
     ...over,
   };
@@ -242,7 +243,7 @@ describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
 // rings after HELD_GRACE_MINUTES and names the reason.
 describe('a visit the call agent held', () => {
   const held = (flags = ['address_unverified'], over = {}) => ({
-    mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: flags }, ...over,
+    mode: 'enforce', generated_at: NOW.toISOString(), routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: flags }, ...over,
   });
   const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
 
@@ -338,28 +339,57 @@ describe('a visit the call agent held', () => {
     expect(agentHoldReason({ mode: 'enforce', routing: { allowed: false, reason: 'do_not_contact', appointment_blocking_flags: [] } })).toBe('the caller asked not to be contacted');
   });
 
-  // Pre-push P1 (2026-11-18): the processor writes ai_validation last, and its hard-veto exit
-  // (spam, out of area, an opt-out) returns before that write.
-  test('a call with no stored decision is held: it rings after HELD_GRACE_MINUTES and names no reason', () => {
-    const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null })], [], { now: NOW });
-    expect(miss.holdReason).toBeNull();
-    const text = bookItAlert(miss, false);
-    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
-    expect(text.detail).not.toContain('The call agent held');
-    expect(computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES - 1), ai_validation: null })], [], { now: NOW })).toHaveLength(0);
+  // Pre-push P1s (2026-11-18): an 'extraction_failed' pass can still be retried and book the
+  // visit, a reprocess keeps the previous pass's decision until it stores its own, and a
+  // hard-veto exit stores none. Only a finished pass's own decision proves a hold.
+  test('a hold needs a finished pass and that pass\'s own decision; anything else waits GRACE_MINUTES and names no reason', () => {
+    const fast = (over) => computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ...over })], [], { now: NOW });
+    const slow = (over) => computeBookingMisses([call(over)], [], { now: NOW });
+    const claimedAt = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+    // This pass claimed the row 5 minutes before it stored its decision: the decision is its own.
+    expect(fast({ ai_validation: held(['address_unverified'], { generated_at: claimedAt(0) }), processing_started_at: claimedAt(5) }))
+      .toEqual([expect.objectContaining({ holdReason: 'the address is not confirmed' })]);
+    const unproven = {
+      'no stored decision': { ai_validation: null },
+      'a decision with no time': { ai_validation: held(['address_unverified'], { generated_at: undefined }) },
+      'a decision from before the last claim': { ai_validation: held(['address_unverified'], { generated_at: claimedAt(5) }), processing_started_at: claimedAt(0) },
+      'a pass that can still be retried': { ai_validation: held(), processing_status: 'extraction_failed' },
+    };
+    for (const [label, over] of Object.entries(unproven)) {
+      expect([label, fast(over)]).toEqual([label, []]);
+      expect([label, slow(over).map((m) => m.holdReason)]).toEqual([label, [null]]);
+    }
   });
 
-  test('a confirmed opt-out with no stored decision rings fast, says why, and never asks for a call', () => {
-    const optedOut = call({
-      created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null,
-      ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }),
-    });
-    const [miss] = computeBookingMisses([optedOut], [], { now: NOW });
+  test('a confirmed opt-out on a finished pass rings fast, says why, and never asks for a call', () => {
+    const optOut = extraction({ consent: { do_not_contact_request: true } });
+    const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null, ai_extraction_enriched: optOut })], [], { now: NOW });
     expect(miss.holdReason).toBe('the caller asked not to be contacted');
     const text = bookItAlert(miss, false);
     expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked not to be contacted.');
     expect(text.detail).toContain('Review it in dispatch before booking, and do not call or text the caller.');
     expect(text.detail).not.toContain('call back');
+    // A pass that can still be retried waits GRACE_MINUTES, but its bell still never asks for a call.
+    const retryable = call({ processing_status: 'extraction_failed', ai_validation: null, ai_extraction_enriched: optOut });
+    expect(computeBookingMisses([{ ...retryable, created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }], [], { now: NOW })).toHaveLength(0);
+    const [late] = computeBookingMisses([retryable], [], { now: NOW });
+    expect(late.holdReason).toBeNull();
+    expect(bookItAlert(late, false).detail).toContain('do not call or text the caller');
+  });
+
+  // Pre-push P1 (2026-11-18): a withheld caller ID is not a number to call back, and a caller
+  // with no line on the row may still have given a callback number (the router's own rule).
+  test('the number shown and the callback step follow the router\'s reach rule', () => {
+    const detailOf = (over) => bookItAlert(computeBookingMisses([call(over)], [], { now: NOW })[0], false).detail;
+    const withheld = detailOf({ to_phone: 'anonymous' });
+    expect(withheld).toMatch(/^Pat Sample \(no number\) confirmed /);
+    expect(withheld).toContain('Book it in dispatch; the call left no number to call back.');
+    const spoken = detailOf({ to_phone: null, ai_extraction_enriched: extraction({ caller: { name_full: 'Pat Sample', phone_e164: '+19415550123' } }) });
+    expect(spoken).toMatch(/^Pat Sample \(\+19415550123\) confirmed /);
+    expect(spoken).toContain('Book it in dispatch or call back to reset expectations.');
+    // The call's own line wins when it is dialable.
+    expect(detailOf({ ai_extraction_enriched: extraction({ caller: { name_full: 'Pat Sample', phone_e164: '+19415550123' } }) }))
+      .toMatch(/^Pat Sample \(\+19415550111\) confirmed /);
   });
 
   // Pre-push P1 (2026-11-18): the date check follows the same contact rule as "book it".
@@ -373,6 +403,7 @@ describe('a visit the call agent held', () => {
     expect(optedOut).not.toContain('confirm the new day with the customer');
     expect(check(call(), 'the caller asked not to be contacted')).toContain('do not call or text the caller');
     expect(check(call({ to_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
+    expect(check(call({ to_phone: 'anonymous' }))).toMatch(/the call left no number to confirm a new day\.$/);
     expect(check(call(), 'the call has no callback number')).toMatch(/the call left no number to confirm a new day\.$/);
   });
 
