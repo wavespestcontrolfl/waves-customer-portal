@@ -3,6 +3,7 @@ const MODELS = require('../config/models');
 const logger = require('./logger');
 const { savepointRead } = require('../utils/savepoint-read');
 const { dispatchWithFallback } = require('./llm/call');
+const { activeIngredientsMentioned } = require('./service-report/report-writer-rules');
 
 // Outcomes that always skip the AI path. These are customer-sensitive
 // situations where generated wording could go off-tone or contradict the
@@ -386,7 +387,7 @@ const ORDINARY_NAME_WORDS = new Set([
 ]);
 
 // Report vocabulary inside catalog names, for the mention check only
-// (catalogScreensForPrompt, admin-schedule.js): a plain word in a note never
+// (catalogScreensForPrompt below): a plain word in a note never
 // marks a catalog product named. Audit 2026-10-03 (prod, read-only): over the
 // 274 most recent pest AI reports, a note that read like its report marked a
 // catalog product "mentioned" by one of these words, and that product's full
@@ -724,6 +725,41 @@ async function readCatalogScreenRows(db) {
 // The catalog's non-product rows (yard signs, stakes, stickers).
 const isSupplyCategory = (category) => String(category || '').trim().toLowerCase() === 'supplies';
 
+// The catalog products, and their actives, a report prompt names: under the
+// writer rules each joins the trade-name and active screens, so a draft never
+// names a product a note mentioned. Supplies (yard signs, stakes, stickers)
+// are no products a report could name: their ordinary words ("yard sign",
+// "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
+// visit whose notes said "yard" (prod 2026-10-02).
+const MENTION_GENERIC_TOKENS = new Set([...REPORT_GENERIC_PRODUCT_TOKENS, ...REPORT_VOCABULARY_NAME_WORDS]);
+function catalogScreensForPrompt(catalogRows, promptText) {
+  const names = [];
+  const actives = [];
+  const promptWritesAlias = promptAliasTest(promptText);
+  for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !isSupplyCategory(r?.category))) {
+    // By its name or its short display name. A registered alias the prompt
+    // writes out is screened in the shared builder (mentionedText): aliases
+    // are staff shorthand, matched whole.
+    // Neither the report screen's own generic words (the pests, "station",
+    // "trap", "yard", "care") nor the plain report words inside catalog names
+    // ("high", "contact", "monitoring") mark a product named: a note that says
+    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
+    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
+    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
+      .filter((label) => containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
+    // Its alias written out counts as naming it for its actives.
+    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
+    names.push(...mentioned);
+    // Its actives too: a draft must not swap the named product for its
+    // active ingredient; and an active the prompt names on its own
+    // ("azoxystrobin" in a note) is screened even with no product name.
+    if (row?.active_ingredient && (named || activeIngredientsMentioned(promptText, row.active_ingredient))) {
+      actives.push(row.active_ingredient);
+    }
+  }
+  return { names, actives };
+}
+
 // wholeCatalog adds the catalog-wide brand screen above; catalogRows lets a
 // caller that already read the catalog pass it in (withCatalogAliases rows);
 // mentionedText is the prompt the copy was written from, so an alias the
@@ -804,6 +840,8 @@ async function buildVisitTradeNameScreen({ products = [], extraNames = [], db = 
 module.exports = {
   buildPrompt,
   buildReportTradeNameScreen,
+  catalogScreensForPrompt,
+  readCatalogScreenRows,
   containsProductName,
   REPORT_GENERIC_PRODUCT_TOKENS,
   REPORT_VOCABULARY_NAME_WORDS,

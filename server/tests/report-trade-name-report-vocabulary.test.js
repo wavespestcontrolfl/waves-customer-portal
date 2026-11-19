@@ -8,7 +8,8 @@
  * does name, keep their full screen (#5729).
  */
 const CompletionRecap = require('../services/completion-recap');
-const { catalogScreensForPrompt } = require('../routes/admin-schedule')._test;
+
+const { catalogScreensForPrompt } = CompletionRecap;
 
 const CATALOG = [
   { name: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer', category: 'fertilizer' },

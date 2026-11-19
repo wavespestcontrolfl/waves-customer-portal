@@ -8,7 +8,8 @@
  * unavailable".
  */
 const CompletionRecap = require('../services/completion-recap');
-const { catalogScreensForPrompt } = require('../routes/admin-schedule')._test;
+
+const { catalogScreensForPrompt } = CompletionRecap;
 
 const CATALOG = [
   { name: 'Pesticide application sign 4x5 (yard sign card)', category: 'supplies', active_ingredient: null },
