@@ -7161,6 +7161,20 @@ function JobCardMixingOrder({ title, steps, D }) {
   );
 }
 
+// A mix's required conditions (the plan's own warnings for its planned products: water setback, storm hold, the Bermuda
+// spot's growth, morning and test-patch rules), open under that mix's order, each once with the products it names.
+function JobCardRequired({ title, notes, D }) {
+  if (!notes?.length) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, padding: "10px 14px", marginBottom: 8, fontSize: 14, color: D.text, display: "grid", gap: 4 }}>
+      <div style={{ fontWeight: 500 }}>{title}</div>
+      {notes.map((note) => (
+        <div key={note.text}>{note.products?.length ? `${note.products.join(", ")}: ` : ""}{note.text}</div>
+      ))}
+    </div>
+  );
+}
+
 // `pending`: a "Use" tick is being read again; the amounts on this card belong to the old selection, so none shows.
 function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
   const amount = pending ? null : fmtAmount(p.planned?.amount, p.planned?.unit);
@@ -7533,9 +7547,15 @@ export function JobCardTab({ card, loading, error, D, lawn = null }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
-      {!lawn?.pending && <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />}
-      {!lawn?.pending && <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />}
-      {!lawn?.pending && <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />}
+      {!lawn?.pending && (
+        <>
+          <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />
+          <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />
+          <JobCardRequired title="Required for the mix" notes={card.mixRequired} D={D} />
+          <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />
+          <JobCardRequired title="Required for the Bermuda backpack mix" notes={card.bermudaRequired} D={D} />
+        </>
+      )}
       {!lawn?.pending && card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>

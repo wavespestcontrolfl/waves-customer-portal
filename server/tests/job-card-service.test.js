@@ -626,7 +626,7 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     expect(cards.find((c) => c.id === 'opt')).toMatchObject({ planOption: true, selectionId: 'opt' });
   });
 
-  test('a primary "if" line (November St. Augustine) takes a Use tick on the Job tab; a soil-P branch line does not, picked or not', async () => {
+  test('a primary "if" line (November St. Augustine) takes a Use tick on the Job tab; a soil-P branch line does not, picked or not, and an id naming a branch bag is dropped', async () => {
     const engine = require('../services/waveguard-plan-engine');
     const nov = require('../config/protocols.json').lawn.st_augustine.visits.find((v) => v.month === 'Nov').primary;
     const cat = ['atz:Atrazine 4L', 'twy:Three-Way', 'l242:LESCO 24-2-11', 'l240:LESCO 24-0-11']
@@ -662,6 +662,16 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
       l240: { box: false, checked: true, amount: true },
       twy: { box: true, checked: false, amount: false },
     });
+    // An id naming a branch bag (24-2-11, not the soil test's pick) is no box: the plan is read again without it, so the
+    // soil test's bag stays and the Atrazine tick still counts. A plain tick reads the plan once.
+    const buildPlan = jest.fn(async (id, opts) => planFor(opts.selectedConditionalProductIds || []));
+    const read = (ids) => jobCard.resolveVisitLines({ facts, protocols: {}, catalog: cat, dbh: () => ({}), deps: { buildPlan }, selectedConditionalProductIds: ids });
+    const crafted = await read(['l242', 'atz']);
+    expect(buildPlan.mock.calls.map(([, opts]) => opts.selectedConditionalProductIds)).toEqual([['l242', 'atz'], ['atz']]);
+    expect(crafted.lines.filter((l) => l.selected).map((l) => l.product.id).sort()).toEqual(['atz', 'l240']);
+    buildPlan.mockClear();
+    await read(['atz']);
+    expect(buildPlan).toHaveBeenCalledTimes(1);
   });
 
   test('a plan failure yields no lines instead of a crash', async () => {
@@ -1406,6 +1416,29 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(out.bermudaMixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, null], [2, 'a'], [3, 'b']]);
     });
 
+    test('each mix carries its planned products\' required conditions once: the same notes the plan warns about', async () => {
+      const engine = require('../services/waveguard-plan-engine');
+      const bermudaRemoval = require('../services/lawn-bermuda-removal');
+      const named = (id, gates, extra = {}) => item(id, { product: { id, name: rows.find((r) => r.id === id).name }, gateNotes: engine.v13GateNotes(gates), ...extra });
+      const step = { activelyGrowingOnly: true, morningUnderF: 85, noMowDaysBeforeAfter: 3 };
+      const items = [
+        named('a', { minDistanceFromWaterFt: 25, noWaterIn: true }),
+        ...bermudaRemoval.addTestPatchNote([named('b', step, { bermudaStep: true }), named('u', step, { bermudaStep: true })]),
+      ];
+      const { out } = await card(planWith({ mixCalculator: { carrierGalPer1000: 2, items, conditionalOptions: [] } }));
+      expect(out.mixRequired).toEqual([{ text: 'Keep 25 ft from ponds, lakes and canals; skip that strip.', products: ['Alpha'] }]);
+      // An unverified label withholds its amount, not its conditions.
+      const both = ['Bravo', 'Unverified'];
+      expect(out.bermudaRequired).toEqual([
+        { text: 'Spray only when the bermuda is actively growing.', products: both },
+        { text: 'Spray in the morning, with the temperature under 85°F.', products: both },
+        { text: bermudaRemoval.TEST_PATCH_NOTE, products: both },
+      ]);
+      // One line per product is the plan's own warning list; a plain note (watering in, mowing) is not on it.
+      const shown = [...out.mixRequired, ...out.bermudaRequired].flatMap((n) => n.products.map((name) => `${name}: ${n.text}`));
+      expect(shown.sort()).toEqual(engine.v13SelectedGateWarnings(items).map((w) => w.message).sort());
+    });
+
     test('no step instruction carries a price or a rate, for a technician card or an owner card', async () => {
       const raw = 'Stonewall 4FL 0.5 fl oz per 1,000 ($3.51)';
       // The August bermuda protocol's compound price tag: an instruction falls back to this raw line.
@@ -1433,9 +1466,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const base = factsDb({ 'scheduled_services as ss': lawn, products_catalog: rows, property_preferences: prefs });
       const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
       const down = await jobCard.buildJobCard('svc1', { dbh, deps: { buildPlan: jest.fn().mockRejectedValue(new Error('down')), getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } }, now: new Date('2026-09-04T12:00:00Z') });
-      expect([down.mixingOrder, down.bermudaMixingOrder]).toEqual([[], []]);
+      expect([down.mixingOrder, down.bermudaMixingOrder, down.mixRequired, down.bermudaRequired]).toEqual([[], [], [], []]);
       const away = await card(planWith(), { ...lawn, address_diverges: true });
-      expect([away.out.mixingOrder, away.out.bermudaMixingOrder]).toEqual([[], []]);
+      expect([away.out.mixingOrder, away.out.bermudaMixingOrder, away.out.mixRequired, away.out.bermudaRequired]).toEqual([[], [], [], []]);
       expect(away.buildPlan).not.toHaveBeenCalled();
     });
 

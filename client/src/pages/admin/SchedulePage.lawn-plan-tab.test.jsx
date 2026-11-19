@@ -56,6 +56,8 @@ const cardFor = (url) => {
     sprayCheck: { window: "not_today" }, tank: { calibrated: true, rigs: [] },
     mixingOrder: [{ step: 1, productId: "base", productName: "Fixture potassium", instruction: "Add the potassium first." }],
     bermudaMixingOrder: [{ step: 1, productId: null, productName: "Water", instruction: "Half fill the backpack." }, { step: 2, productId: "rec", productName: "Fixture rec", instruction: "Add rec." }],
+    mixRequired: [{ text: "Keep 25 ft from ponds, lakes and canals; skip that strip.", products: ["Fixture potassium"] }],
+    bermudaRequired: [{ text: "Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.", products: ["Fixture rec", "Fixture fus"] }],
     products: [
       optionCard("opt", "Fixture optional", { order: { quantity: 2, unit: "gal", packSize: "1 gal" } }),
       // An approved substitution: the engine matches the tick by the original product id.
@@ -299,12 +301,16 @@ describe("Use ticks on the Job tab", () => {
     expect(await screen.findByText("Rate: 0.5 oz per 1,000 sq ft")).toBeInTheDocument();
   });
 
-  it("shows the mixing order from the job card", async () => {
+  it("shows the mixing order from the job card, and each mix's required notes open under it", async () => {
     await mount();
     await screen.findByText("Mixing order");
     expect(screen.getByText("Bermuda backpack mix")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Mixing order"));
     expect(screen.getByText("Add the potassium first.")).toBeInTheDocument();
+    expect(screen.getByText("Required for the mix")).toBeInTheDocument();
+    expect(screen.getByText("Fixture potassium: Keep 25 ft from ponds, lakes and canals; skip that strip.")).toBeInTheDocument();
+    expect(screen.getByText("Required for the Bermuda backpack mix")).toBeInTheDocument();
+    expect(screen.getByText("Fixture rec, Fixture fus: Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.")).toBeInTheDocument();
   });
 
   it("a tick re-reads the card; until the answer lands no amount, mixing order or Tank shows and the boxes are off, then the new amounts show", async () => {
@@ -315,6 +321,7 @@ describe("Use ticks on the Job tab", () => {
     expect((await screen.findAllByText("Checking the amounts…")).length).toBeGreaterThan(0);
     expect(screen.queryByText(/\b2 fl oz\b/)).toBeNull();
     expect(screen.queryByText("Mixing order")).toBeNull();
+    expect(screen.queryByText("Required for the Bermuda backpack mix")).toBeNull();
     expect(screen.queryByText("Tank")).toBeNull();
     expect(screen.getByLabelText("Use Fixture optional")).toBeDisabled();
     // The local tick shows while the read is out; the rest of the card stays.

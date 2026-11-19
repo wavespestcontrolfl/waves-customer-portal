@@ -1265,18 +1265,49 @@ function precautionText(product) {
 const PLAN_UNAVAILABLE = { code: 'plan_unavailable', message: 'Lawn plan unavailable right now.' };
 const APPROVALS_UNAVAILABLE = { code: 'approvals_unavailable', message: 'Approval checks unavailable right now.' };
 
+// A Use tick only adds an "if needed" line. An id that picks a May fertilizer branch bag instead (the engine's
+// explicit_branch_selection: possibly the bag the soil test did not choose) is no box the Job tab offers, so the plan is
+// read again without the branch bags' ids and the soil test picks the bag. Null when no id overrode the branch.
+const BRANCH_REASONS = new Set(['explicit_branch_selection', 'mutually_exclusive_branch_not_selected']);
+function branchOverrideIds(plan) {
+  const items = [...(plan?.protocol?.base || []), ...(plan?.protocol?.conditional || [])];
+  if (!items.some((item) => item.selectionReason === 'explicit_branch_selection')) return null;
+  return new Set(items.filter((item) => BRANCH_REASONS.has(item.selectionReason))
+    .flatMap((item) => [item.product?.id, item.substitution?.originalProductId]).filter(Boolean).map(String));
+}
+
 /** { plan } or { plan: null, error } — a failed build is its own block. */
 async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date(), selectedConditionalProductIds = [] } = {}) {
+  // strict: the plan engine's own catalog read throws instead of reading
+  // as an empty catalog, so an outage is a visible plan block, never
+  // "no products matched". The "Use" ticks on "if needed" lines ride in as
+  // selectedConditionalProductIds, as on the plan route; none = the base plan.
+  const build = (ids) => (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now, strict: true, ...(ids.length ? { selectedConditionalProductIds: ids } : {}) });
   try {
-    // strict: the plan engine's own catalog read throws instead of reading
-    // as an empty catalog, so an outage is a visible plan block, never
-    // "no products matched". The "Use" ticks on "if needed" lines ride in as
-    // selectedConditionalProductIds, as on the plan route; none = the base plan.
-    return { plan: await (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now, strict: true, ...(selectedConditionalProductIds.length ? { selectedConditionalProductIds } : {}) }) };
+    const plan = await build(selectedConditionalProductIds);
+    const branchIds = selectedConditionalProductIds.length ? branchOverrideIds(plan) : null;
+    return { plan: branchIds ? await build(selectedConditionalProductIds.filter((id) => !branchIds.has(String(id)))) : plan };
   } catch (err) {
     logger.warn(`[job-card] plan unavailable for ${serviceId}: ${err.message}`);
     return { plan: null, error: err };
   }
+}
+
+// A planned product's required conditions: the gate notes the plan also lists as warnings (water setback, storm hold,
+// the Bermuda spot's growth, morning and test-patch rules). The old Plan panel showed them beside its mixing order; the
+// Job tab shows each once, with the products it names, under the order of its own mix.
+function requiredNotes(items) {
+  const byText = new Map();
+  for (const item of items) {
+    const name = item.product?.name;
+    for (const note of name ? item.gateNotes || [] : []) {
+      if (note?.severity !== 'required' || typeof note.text !== 'string') continue;
+      if (!byText.has(note.text)) byText.set(note.text, { text: note.text, products: [] });
+      const { products } = byText.get(note.text);
+      if (!products.includes(name)) products.push(name);
+    }
+  }
+  return [...byText.values()];
 }
 
 function planBlocksOf({ plan, blocks }) {
@@ -1330,8 +1361,9 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now, selectedConditionalProductIds });
     const plan = loaded.plan;
     if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
+    const planned = plan.mixCalculator?.items || [];
     const items = [
-      ...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || []),
+      ...planned, ...(plan.mixCalculator?.conditionalOptions || []),
       // Unticked, a primary "if" line sits in protocol.base only: the engine lists conditional-role lines alone as options.
       ...(plan.protocol?.base || []).filter((item) => item.selected === false && takesUseTick(item)),
     ];
@@ -1373,6 +1405,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure,
       carrierGalPer1000: plan.mixCalculator?.carrierGalPer1000 ?? null,
       mixingOrder: plan.mixingOrder || [], bermudaMixingOrder: plan.bermudaMixingOrder || [],
+      mixRequired: requiredNotes(planned.filter((item) => !item.bermudaStep)),
+      bermudaRequired: requiredNotes(planned.filter((item) => item.bermudaStep)),
     };
   }
   return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
@@ -1507,7 +1541,8 @@ async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {
   }
   // The add-on that IS the visit has no product to select: say so plainly in place of the generic "no protocol products".
   const ownNote = noProductNote(ownKey, primary.lines);
-  return { ...primary, lines, addons, ...(ownNote ? { note: ownNote } : {}) };
+  // No lawn plan read (another program, an outage, a non-primary address): no required notes.
+  return { mixRequired: [], bermudaRequired: [], ...primary, lines, addons, ...(ownNote ? { note: ownNote } : {}) };
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1987,7 +2022,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     loadRigSystems(dbh),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
-  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
+  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000, mixingOrder, bermudaMixingOrder, mixRequired, bermudaRequired } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now, selectedConditionalProductIds });
   const tank = tankFromCalibrations(rigRows(calibrations, facts.rig), carrierGalPer1000);
   // One entry per catalog product: a host's line and an add-on's line of the same product are two cards, one spray check.
   const products = [...new Map(lines.map((l) => [l.product.id, l.product])).values()];
@@ -2070,6 +2105,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     products: cards,
     mixingOrder: mixingOrderForCards(mixingOrder, cards),
     bermudaMixingOrder: bermudaMixOrderForCards(bermudaMixingOrder, cards, blocks),
+    mixRequired,
+    bermudaRequired,
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
     lineNote: note || null,
