@@ -5,7 +5,7 @@
  * The letter preview is the server's text for the SAVED draft, so Send stays
  * off until the form matches what was saved and the owner can read it.
  */
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActionFeedback,
   Badge,
@@ -29,6 +29,7 @@ import {
   maskPhone,
   offerErrorMessage,
   sendChannels,
+  sendHeadline,
   stepDateFor,
 } from "./offerLogic";
 
@@ -205,7 +206,7 @@ function formView({ edits, reviewed, data, contact, busy, locked }) {
   };
 }
 
-function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged, onSent }) {
+function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged, onSent, onBusyChange }) {
   const [edits, setEdits] = useState({});
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
   const [needRead, setNeedRead] = useState(false);
@@ -213,6 +214,11 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState(null);
+  // The dialog's own close handler (Escape, backdrop) honors the same busy state.
+  useEffect(() => {
+    onBusyChange(busy);
+    return () => onBusyChange(false);
+  }, [busy, onBusyChange]);
   const reviewed = reviewedDraft(data, draftId);
   // Read-only until a read has succeeded and holds the draft this form is about.
   const locked = isLocked(needRead, draftId, reviewed);
@@ -245,13 +251,31 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     return next;
   };
 
-  const save = () =>
-    run(async () => {
-      const { offer } = await saveOfferDraft(applicationId, toPayload(fields));
+  // Another admin changed this draft since the read this form shows: say so,
+  // then re-read and show their version before anything else is saved or sent.
+  const draftChanged = async (id) => {
+    setConfirming(false);
+    setNeedRead(true);
+    await refresh(id);
+  };
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // An existing draft is named by id and hash, so a stale save is refused.
+      const guard = reviewed ? { draftId: reviewed.id, draftHash: reviewed.draftHash } : {};
+      const { offer } = await saveOfferDraft(applicationId, { ...toPayload(fields), ...guard });
       setDraftId(offer.id);
       setNeedRead(true);
       await refresh(offer.id);
-    });
+    } catch (err) {
+      setError(offerErrorMessage(err));
+      if (reviewed && err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed.id);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const retryRead = () => run(() => refresh(draftId));
 
@@ -265,11 +289,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       setConfirming(false);
     } catch (err) {
       setError(offerErrorMessage(err));
-      if (err?.body?.code === "DRAFT_CHANGED") {
-        setConfirming(false);
-        setNeedRead(true);
-        await refresh(reviewed.id);
-      }
+      if (err?.body?.code === "DRAFT_CHANGED") await draftChanged(reviewed.id);
     } finally {
       setBusy(false);
     }
@@ -279,7 +299,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     return (
       <>
         <DialogBody>
-          <p className="text-14 text-zinc-800 mb-1">Offer sent to {firstName}.</p>
+          <p className="text-14 text-zinc-800 mb-1">{sendHeadline(result, firstName)}</p>
           <p className="text-14 text-zinc-600">{commsSummary(result)}</p>
         </DialogBody>
         <DialogFooter>
@@ -347,10 +367,11 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
 }
 
 export default function OfferDialog({ open, applicationId, contact, data, draft, onClose, onChanged, onSent }) {
+  const [busy, setBusy] = useState(false);
   const name = String(contact?.name || "Applicant");
   const status = (draft || data?.current)?.status;
   return (
-    <Dialog open={open} onClose={onClose} layer={130} size="lg">
+    <Dialog open={open} onClose={busy ? undefined : onClose} layer={130} size="lg">
       <DialogHeader>
         <DialogTitle>
           Offer: {name} {status === "draft" || !status ? <Badge>Draft</Badge> : null}
@@ -366,6 +387,7 @@ export default function OfferDialog({ open, applicationId, contact, data, draft,
           onClose={onClose}
           onChanged={onChanged}
           onSent={onSent}
+          onBusyChange={setBusy}
         />
       )}
     </Dialog>

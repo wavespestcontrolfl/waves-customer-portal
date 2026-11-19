@@ -130,6 +130,22 @@ const OUTCOME_TEXT = {
   uncertain: "uncertain, may have been delivered",
 };
 
+const WENT_OUT = ["sent", "deferred", "uncertain"];
+
+// The headline after a send that answered 200. The offer is open either way;
+// the words say which channels went out (sent, held for the send window, or
+// possibly delivered) and never claim "sent" when neither did.
+export function sendHeadline(comms, firstName) {
+  if (!comms?.sms && !comms?.email) return `Offer sent to ${firstName}.`;
+  const text = WENT_OUT.includes(comms.sms?.outcome);
+  const email = WENT_OUT.includes(comms.email?.outcome);
+  if (text && email) return `Offer sent to ${firstName}.`;
+  if (!text && !email) {
+    return "The offer is open, but the text and the email did not go out. Check his phone and email, then use Revise to send a new link.";
+  }
+  return `The offer is open. The ${text ? "text" : "email"} went out, but the ${text ? "email" : "text"} did not.`;
+}
+
 // comms = { sms: {outcome, code}, email: {outcome, code} } -> "Text sent. Email sent."
 export function commsSummary(comms) {
   const part = (label, c) => {

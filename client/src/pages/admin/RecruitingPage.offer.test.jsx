@@ -655,3 +655,75 @@ describe('RecruitingPage offer flow: one source of truth', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 });
+
+describe('RecruitingPage offer flow: guarded save, busy close and send outcome', () => {
+  async function openDraftForm(routes = {}, offer) {
+    setupFetch(routes, { offer: offer || (() => res(200, offerPayload({ current: offerRecord() }))) });
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    const offerButton = screen.getByRole('button', { name: 'Offer' });
+    await waitFor(() => expect(offerButton).not.toBeDisabled());
+    fireEvent.click(offerButton);
+    await screen.findByLabelText('Hourly rate ($)');
+  }
+
+  it('saving an existing draft names it by id and hash', async () => {
+    const calls = [];
+    const saved = offerRecord({ startDate: '2027-01-11', draftHash: 'hash-2' });
+    const fetchBase = vi.fn();
+    setupFetch({ 'POST /admin/careers/app-1/offer': () => res(200, { offer: saved }) }, { offer: () => res(200, offerPayload({ current: offerRecord() })) });
+    fetchBase.mockImplementation(globalThis.fetch);
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => { calls.push({ method: options.method || 'GET', url: String(url), body: options.body && JSON.parse(options.body) }); return fetchBase(url, options); }));
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    await screen.findByRole('heading', { name: /Jordan Rivera — / });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Offer' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Offer' }));
+    fireEvent.change(await screen.findByLabelText('Start date'), { target: { value: '2027-01-11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/admin/careers/app-1/offer'))).toBe(true));
+    const post = calls.find((c) => c.method === 'POST' && c.url.endsWith('/admin/careers/app-1/offer'));
+    expect(post.body).toMatchObject({ startDate: '2027-01-11', draftId: 'offer-1', draftHash: 'hash-1' });
+  });
+
+  it('DRAFT_CHANGED on save shows the message and the other admin version', async () => {
+    let current = offerRecord({ draftHash: 'old' });
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer': () => { current = offerRecord({ draftHash: 'new', hourlyRate: 24 }); return res(409, { error: 'x', code: 'DRAFT_CHANGED' }); } },
+      () => res(200, offerPayload({ current })),
+    );
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
+    expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
+  });
+
+  it('Escape does not close the dialog while a save runs', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    await openDraftForm({ 'POST /admin/careers/app-1/offer': () => gate.then(() => res(200, { offer: offerRecord() })) });
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(screen.getByLabelText('Hours')).toBeDisabled());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.keyDown(screen.getByLabelText('Hours'), { key: 'Escape' });
+    expect(screen.getByLabelText('Hours')).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Hours')).not.toBeDisabled());
+  });
+
+  it.each([
+    [{ sms: { outcome: 'failed' }, email: { outcome: 'blocked' } }, 'The offer is open, but the text and the email did not go out. Check his phone and email, then use Revise to send a new link.'],
+    [{ sms: { outcome: 'sent' }, email: { outcome: 'failed' } }, 'The offer is open. The text went out, but the email did not.'],
+    [{ sms: { outcome: 'blocked' }, email: { outcome: 'sent' } }, 'The offer is open. The email went out, but the text did not.'],
+    [{ sms: { outcome: 'sent' }, email: { outcome: 'sent' } }, 'Offer sent to Jordan.'],
+  ])('the send result tells which channels went out (%#)', async (comms, headline) => {
+    await openDraftForm({ 'POST /admin/careers/app-1/offer/offer-1/send': () => res(200, { offer: offerRecord({ status: 'sent' }), comms }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText(headline)).toBeInTheDocument();
+  });
+});
