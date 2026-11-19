@@ -46,11 +46,14 @@ class FakeResponse {
     this.headers = new Headers(init.headers);
     this.body = body;
     this.bodyUsed = false;
+    // A fetched response keeps its URL, through clone() and Cache Storage; one
+    // the worker builds has none. Only a test passes `url`, for the first kind.
+    this.url = init.url || '';
   }
   clone() {
     // The real Response throws once its body is locked by a consumer.
     if (this.bodyUsed) throw new TypeError('Response body is already used');
-    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate });
+    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate, url: this.url });
   }
   async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
   async json() { return JSON.parse(await this.text()); }
@@ -420,8 +423,60 @@ describe('service-worker private link pages', () => {
     for (const key of [...offerPaths, '/manifest.json', '/assets/index-AAA.js', '/careers/offers']) await cache.put(key, asset);
     const worker = loadWorker(cache);
     await worker.dispatchActivate();
-    expect([...cache.store.keys()].map(url => url.replace('https://portal.test', '')).sort()).toEqual(['/assets/index-AAA.js', '/careers/offers', '/manifest.json']);
     expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
+    await tick(); // the purge runs beside activation, not in it
+    expect([...cache.store.keys()].map(url => url.replace('https://portal.test', '')).sort())
+      .toEqual(['/__waves/install-commit', '/assets/index-AAA.js', '/careers/offers', '/manifest.json']);
+  });
+
+  // The older worker stores every page it opens as the shell, and the stored
+  // response keeps that page's URL. One it opens while this worker installs
+  // began after the install mark, so that mark does not stop it.
+  it("stores the shell again without its URL when an older worker stored a job-offer page as the shell, and that worker's later refreshes cannot store it again", async () => {
+    const cache = fakeCache();
+    const locks = fakeLocks();
+    let clock = 1000;
+    const assets = ['/assets/index-BBB.js'];
+    const serve = serveBuild(assets);
+    const offerUrl = `https://portal.test/careers/offer/${token}`;
+    const offerPage = () => new FakeResponse(shellHtml(assets), { url: offerUrl });
+    const older = loadWorker(cache, { locks, now: () => clock });
+    const next = loadWorker(cache, { locks, now: () => clock });
+    for (const worker of [older, next]) worker.setFetch(async request => (request.url === '/' ? fakeResponse(shellHtml(assets)) : serve(request)));
+    await next.dispatchInstall(); // install mark: 1000
+    clock = 2000;
+    await older.cacheCompleteShellResponse(offerPage(), undefined, { startedAt: 2000 });
+    expect((await cache.match('/')).url).toBe(offerUrl); // the case to clean up
+    clock = 3000;
+    await next.dispatchActivate();
+    expect(next.workerClients.claim).toHaveBeenCalledTimes(1);
+    await tick();
+    const shell = await cache.match('/');
+    expect(shell.url).toBe('');
+    expect(await shell.text()).toBe(shellHtml(assets));
+    // An offer page the older worker opened before this worker took over, whose refresh lands only now.
+    await expect(older.cacheCompleteShellResponse(offerPage(), undefined, { startedAt: 2500 })).rejects.toThrow(/superseded/);
+    expect((await cache.match('/')).url).toBe('');
+    expect([...cache.store.values()].some(response => /careers/i.test(response.url))).toBe(false);
+    // The takeover mark never holds back this worker's own refreshes.
+    clock = 4000;
+    next.setFetch(serveBuild(['/assets/index-CCC.js']));
+    await next.dispatchFetch('/dashboard', { mode: 'navigate' });
+    expect(await (await cache.match('/')).text()).toContain('index-CCC');
+  });
+
+  it("moves the install mark up to the takeover, never back over a newer install's mark", async () => {
+    const markOf = async (cache) => (await cache.match('/__waves/install-commit')).headers.get('x-waves-install-started');
+    const cache = fakeCache();
+    const worker = loadWorker(cache, { now: () => 5000 });
+    await worker.dispatchActivate();
+    await tick();
+    expect(await markOf(cache)).toBe('5000');
+    const newer = fakeCache();
+    await newer.put('/__waves/install-commit', new FakeResponse('', { headers: { 'x-waves-install-started': '9000' } }));
+    await loadWorker(newer, { now: () => 5000 }).dispatchActivate();
+    await tick();
+    expect(await markOf(newer)).toBe('9000');
   });
 
   it('tries the purge again on the next page load when it fails at activate, without holding up the claim', async () => {
@@ -437,6 +492,7 @@ describe('service-worker private link pages', () => {
     worker.setFetch(serveBuild(['/assets/index-AAA.js']));
     await worker.dispatchActivate();
     expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
+    await tick();
     expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(true);
     // The applicant may visit only the offer: that visit retries it too, and is still left to the browser.
     const { response } = await worker.dispatchFetch(offerPaths[1], { mode: 'navigate' });

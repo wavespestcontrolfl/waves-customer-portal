@@ -75,6 +75,20 @@ describe('redactOfferLinks', () => {
     expect(offerLinkTokens(`x.test/careers/offer/${TOKEN.toUpperCase()}.`)).toEqual([TOKEN]);
   });
 
+  // A browser resolves dot segments in the path only, so one in a query or fragment never removes the token.
+  test.each([
+    ['a query', `https://portal.wavespestcontrol.com/Careers/Offer/${TOKEN}?a=/..`],
+    ['a fragment', `https://portal.wavespestcontrol.com/Careers/Offer/${TOKEN}#/../..`],
+    ['a query after a dot segment in the path', `https://x.test/careers/x/../OFFER/${TOKEN}?next=/../../`],
+  ])('a dot segment in %s cannot hide the token on the path: stored as the standard hidden link, pinned, replayed', (label, link) => {
+    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
+    const text = `Here it is: ${link} thanks`;
+    expect(redactOfferLinks(text)).toBe(`Here it is: ${HIDDEN_LINK} thanks`);
+    expect(offerLinkTokens(text)).toEqual([TOKEN]);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: offerLinkTokens(text) }, redactOfferLinks(text)))
+      .toBe(`Here it is: ${portalUrl(`/careers/offer/${TOKEN}`)} thanks`);
+  });
+
   test('pins only the token on the offer path: a 64-hex query value beside it stays and is not pinned', () => {
     const ref = 'f'.repeat(64);
     const sent = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}?ref=${ref}`;

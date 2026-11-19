@@ -310,8 +310,13 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused, onInvalid, locked }) {
+function TextConsent({ token, initial, version, onPending, onStale, onSnapshot, onRefused, onInvalid, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
+  // The offer's version the choice is made on: the page's copy, which each
+  // read and each save brings up to date. The server refuses a change made
+  // from an older version, so a save that lands late (Try again sent the
+  // choice again meanwhile) cannot undo a later choice.
+  const versionRef = useRef(version);
   const [saving, setSaving] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [error, setError] = useState('');
@@ -326,8 +331,10 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
   // re-read the offer) carries the stored choice. Show it, unless a choice
   // made here is still waiting for its answer.
   useEffect(() => {
-    if (wanted.current === null) setChecked(Boolean(initial));
-  }, [initial]);
+    if (wanted.current !== null) return;
+    setChecked(Boolean(initial));
+    versionRef.current = version;
+  }, [initial, version]);
 
   // After a write whose reply was lost, ask the server what it stored. Signing
   // stays locked until the stored choice is the one the applicant made. The read
@@ -368,7 +375,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
     setError('');
     let res;
     try {
-      res = await postJson(token, '/text-consent', { consent: next });
+      res = await postJson(token, '/text-consent', { consent: next, version: versionRef.current });
     } catch {
       lostSave.current = true;
       await confirm();
@@ -393,7 +400,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
     if (res.ok) {
       const stored = Boolean(res.body.textConsent);
       setChecked(stored);
-      onSnapshot({ textConsent: stored }); // the page's copy follows, so a later read can correct the box
+      onSnapshot({ textConsent: stored, version: res.body.version }); // the page's copy follows, so a later read can correct the box
     } else setChecked(!next);
     if (res.status === 404) onInvalid();
     else if (res.status === 409) {
@@ -637,7 +644,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onS
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} locked={blocked} />
+        <TextConsent token={token} initial={data.textConsent} version={data.version} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} locked={blocked} />
         <SignBlock
           name={name}
           onName={setName}
@@ -712,8 +719,11 @@ const CLOSED_STATES = ['expired', 'withdrawn', 'superseded'];
 // with the closed page itself: { state, message, contactPhone }. On an answered
 // offer (signed, declined, date asked) it names only the state: { state }.
 const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.state) && typeof body.message === 'string';
-// One person's signature in any letter case, as the server compares a resend (job-offers.js sameName).
-const sameName = (a, b) => Boolean(a) && String(a).trim().toLowerCase() === String(b || '').trim().toLowerCase();
+// One person's signature as the server stores and compares it (job-offers.js cleanText and sameName): control
+// characters dropped, each run of spaces one space, trimmed, in any letter case.
+const NAME_CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+const signatureKey = (value) => String(value || '').replace(NAME_CONTROL_CHARS, '').replace(/\s+/g, ' ').trim().toLowerCase();
+const sameName = (a, b) => Boolean(a) && signatureKey(a) === signatureKey(b);
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
 async function readOffer(token) {

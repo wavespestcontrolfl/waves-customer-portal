@@ -65,7 +65,7 @@ router.get('/:token', offerLimiter, handle('view', async (req) => {
   return body ? { body } : { notFound: true };
 }));
 
-router.post('/:token/text-consent', offerLimiter, handle('text consent', (req) => JobOffers.setTextConsent(req.params.token, req.body && req.body.consent)));
+router.post('/:token/text-consent', offerLimiter, handle('text consent', (req) => JobOffers.setTextConsent(req.params.token, req.body && req.body.consent, req.body && req.body.version)));
 
 router.post('/:token/accept', offerLimiter, handle('accept', (req) => JobOffers.acceptOffer(req.params.token, {
   signedName: req.body && req.body.signedName,

@@ -58,7 +58,9 @@ const BUILD_HEADER = 'x-waves-build';
 // An installing worker and the active one share the cache but not their
 // navigation order (module state is per instance). The installer records
 // when its precache began; an active navigation that began earlier must
-// not commit its (older) shell over the installer's.
+// not commit its (older) shell over the installer's. The private-link purge
+// moves the mark up to the moment this worker took over, so no older
+// worker's navigation can commit after that either (see takeoverAt).
 const INSTALL_MARK_URL = '/__waves/install-commit';
 const INSTALL_STARTED_HEADER = 'x-waves-install-started';
 // Equality counts as superseding. Date.now() has coarse resolution (and
@@ -597,22 +599,46 @@ self.addEventListener('install', event => {
   event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()));
 });
 
-// An older worker stored any same-origin GET in its catch-all branch, so it
-// could hold a job-offer URL as a request key. Drop those when this worker
-// takes over. The shell needs nothing: install just stored a fresh one from '/'.
-// Until one purge has finished, each navigation tries again, so a Cache
-// Storage error at activate cannot leave them behind (a restarted worker
-// checks once more; the list is cheap).
+// When this worker took over, in the lifetime that ran activate. Every page
+// an older worker opened began before it, and every page this worker opens
+// begins after it, so an install mark set to it supersedes the older
+// worker's refreshes still in flight, never this worker's own.
+let takeoverAt = null;
+
+// An older worker stored any same-origin GET in its catch-all branch, and
+// the response of each page it opened as the shell, so a request key or the
+// shell's response URL can hold a job-offer link. Under the shell-refresh
+// lock, so no refresh is part-way through its commit: move the install mark
+// up to takeoverAt (never back: a newer install's mark stays), so no older
+// worker's refresh can store the shell again; then store the shell again
+// without its URL when that URL is a job-offer link, and drop job-offer
+// request keys. Not part of activation: the lock can wait on an older
+// worker's refresh, and page requests wait for activation. Until one purge
+// has finished, each navigation tries again, so a Cache Storage error cannot
+// leave them behind (a restarted worker checks once more; the list is cheap).
 let privateLinksPurged = false;
 async function purgePrivateLinkEntries() {
-  const cache = await caches.open(CACHE_NAME);
-  const requests = await cache.keys();
-  await Promise.all(requests.filter(request => isPrivateLinkPage(new URL(request.url).pathname)).map(request => cache.delete(request)));
+  await withShellRefresh(async () => {
+    const cache = await caches.open(CACHE_NAME);
+    if (takeoverAt !== null && !(await installCommittedAfter(cache, takeoverAt))) {
+      await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(takeoverAt) } }));
+    }
+    const shell = await cache.match(OFFLINE_URL);
+    if (shell && shell.url && isPrivateLinkPage(new URL(shell.url).pathname)) {
+      const html = await shell.text();
+      const assets = shellAssetUrls(html);
+      await putShell(cache, new Response(html, { status: shell.status, statusText: shell.statusText, headers: shell.headers }), assets.length ? buildIdOf(assets) : null);
+    }
+    const requests = await cache.keys();
+    await Promise.all(requests.filter(request => isPrivateLinkPage(new URL(request.url).pathname)).map(request => cache.delete(request)));
+  });
   privateLinksPurged = true;
 }
 
 self.addEventListener('activate', event => {
-  event.waitUntil(sweepStaleCaches().then(() => purgePrivateLinkEntries().catch(() => {})).then(() => self.clients.claim()));
+  takeoverAt = Date.now();
+  event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
+  purgePrivateLinkEntries().catch(() => {});
 });
 
 // A job-offer link page: its URL is the applicant's private signing link.

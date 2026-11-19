@@ -8622,19 +8622,24 @@ attribute value or an unbroken run of text. The link as sent keeps its host with
 path, read as a browser or a reader would (HTML character references including named ones, dot segments, repeated
 slashes, backslashes, tabs and line breaks inside an attribute, letter case, percent-encoding, full-width forms,
 invisible characters), holds `/careers/offer/<64-hex token>` is stored as the standard link with the token hidden, once
-per such token in source order. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
+per such token in source order; dot segments are resolved in each part before a `?` or `#` on its own, as a browser
+resolves only the path. The same scan pins only those tokens (a 64-hex query value beside them is not pinned),
 so a held text replays each one as the standard link. The service worker never handles an offer URL, in any
 request mode (`client/public/sw.js` `isPrivateLinkPage`): it stores nothing, because a stored response or request
-keeps its URL, it drops any offer URL an older worker stored when it activates, and it never serves its offline
-shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+keeps its URL; after it takes over, it drops any offer URL an older worker stored, as a request key or as the
+shell's response URL (the purge first moves the install mark up to the takeover time, so that worker's refreshes
+still in flight cannot store it again), and it never serves its offline shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
-textConsent, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
+textConsent, version, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
 snapshot frozen at Send (`job_offers.snapshot`), never from live records, so the Terms the applicant reads are the
 issued version the owner sent; for `superseded`, `withdrawn` and `expired` it returns only `{state, message,
 contactPhone}` (no terms). A sent offer past `expires_at` reads `expired` before any sweep, and an offer whose
 application the owner moved to hired/rejected/withdrawn reads `withdrawn` (that stage change also marks the offer row withdrawn in the same transaction, so reopening the application cannot revive the link). The first GET stamps `opened_at`, every
-GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean}` -> `{textConsent}`; `accept {signedName}` (trimmed,
+GET `last_viewed_at`. POST bodies: `text-consent {consent: boolean, version}` -> `{textConsent, version}`, where
+`version` is the offer row's `updated_at` from the read the choice was made on: a choice already stored answers 200 with
+no write, and a change made from any other version answers 409 `{state:'open'}`, so a save that lands late (its reply
+was lost and the page saved the same choice again) cannot undo a later choice; `accept {signedName}` (trimmed,
 3 to 120 characters, at least two words) -> `{state:'signed', signedAt}`; `date-request {requestedStartDate:
 'YYYY-MM-DD' (future Monday to Thursday), note? (<= 500)}` -> `{state:'date_requested'}`; `decline {reason? (<= 500)}` ->
 `{state:'declined'}`. Each acts only from state `open`; any other state answers 409 with the current state body (an

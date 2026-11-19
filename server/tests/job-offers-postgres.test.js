@@ -300,12 +300,25 @@ jest.setTimeout(120000);
         expect((await JobOffers.publicView(token)).terms.markdown).toContain('## Duties');
       });
 
-      test('text consent records and clears the stamp, and refuses a non-boolean', async () => {
-        expect(await JobOffers.setTextConsent(token, true)).toEqual({ body: { textConsent: true } });
-        expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeTruthy();
-        expect(await JobOffers.setTextConsent(token, false)).toEqual({ body: { textConsent: false } });
-        expect((await root('job_offers').where({ id: offer.id }).first()).text_consent_at).toBeNull();
-        expect(await JobOffers.setTextConsent(token, 'yes')).toMatchObject({ invalid: expect.any(String) });
+      test('text consent records and clears the stamp from the current version; a late save from an older read cannot undo a later choice', async () => {
+        const stamp = async () => (await root('job_offers').where({ id: offer.id }).first()).text_consent_at;
+        const first = (await JobOffers.publicView(token)).version;
+        const on = await JobOffers.setTextConsent(token, true, first);
+        expect(on).toEqual({ body: { textConsent: true, version: expect.any(String) } });
+        expect(on.body.version).not.toBe(first);
+        expect(await stamp()).toBeTruthy();
+        // The same choice again (Try again after a lost reply) writes nothing and answers the stored choice.
+        expect(await JobOffers.setTextConsent(token, true, first)).toEqual({ body: { textConsent: true, version: on.body.version } });
+        const off = await JobOffers.setTextConsent(token, false, on.body.version);
+        expect(off).toEqual({ body: { textConsent: false, version: expect.any(String) } });
+        expect(off.body.version).not.toBe(on.body.version);
+        expect(await stamp()).toBeNull();
+        // The first save of "on" lands only now: refused, and "off" stays.
+        expect(await JobOffers.setTextConsent(token, true, first)).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await JobOffers.setTextConsent(token, true, undefined)).toEqual({ refused: true, body: { state: 'open' } });
+        expect(await stamp()).toBeNull();
+        expect((await JobOffers.publicView(token)).version).toBe(off.body.version);
+        expect(await JobOffers.setTextConsent(token, 'yes', off.body.version)).toMatchObject({ invalid: expect.any(String) });
       });
 
       test('signing records the signature, hires the applicant, raises one bell, and a replay never signs twice', async () => {

@@ -200,6 +200,7 @@ const OFFER_PAYLOAD = {
   owner: { name: 'Sam Carter', title: 'owner', sentOn: OFFER_SENT },
   expiresAt: OFFER_EXPIRES,
   textConsent: false,
+  version: '2026-12-11T15:20:00.000Z',
   signedName: null,
   signedAt: null,
   terms: {

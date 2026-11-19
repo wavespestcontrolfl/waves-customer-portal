@@ -16,7 +16,9 @@
  *   reader can also undo percent-encoding, letter case, repeated slashes, full-width forms and invisible characters.
  *   A unit whose path, read that way, holds /careers/offer/<64-hex token> is replaced as a whole by the standard link
  *   with the token hidden, once for each such token in the order they appear, so the replay can rebuild each one as
- *   the link the page opens. Only tokens on that path are pinned: another 64-hex value (a query value) is not a link.
+ *   the link the page opens. Dot segments are resolved in each part before a "?" or "#" on its own, as a browser
+ *   resolves only the path, so a query cannot remove a token from the path. Only tokens on that path are pinned:
+ *   another 64-hex value (a query value) is not a link.
  * An /careers/interview/ link is not on that path and is left alone. Out of reach of any pattern: a token a person has to
  * put back together from pieces (split by spaces, or by a line break in plain text); no browser opens that as a link.
  */
@@ -26,7 +28,9 @@ const { portalUrl } = require('./portal-url');
 
 const HIDDEN = '[link hidden]';
 const SENT_LINK_RE = /(\/careers\/offer\/)([0-9a-fA-F]{64})/g;
-const OFFER_PATH_TOKEN_RE = /\/careers\/offer\/([0-9a-f]{64})(?![0-9a-f])/g;
+const TOKEN_SEGMENT_RE = /^([0-9a-f]{64})(?![0-9a-f])/;
+// The route word, also after punctuation that opens the unit ("(careers", url=careers); a host such as x.careers is not.
+const CAREERS_SEGMENT_RE = /(?:^|[^a-z0-9.-])careers$/;
 const UNIT_RE = /=\s*(?:"[^"]*"|'[^']*')|(?:(?!=\s*["'])\S)+/g;
 
 function percentDecode(seq) {
@@ -48,14 +52,23 @@ function readable(unit) {
   return out.normalize('NFKC').replace(/[\t\n\r]|\p{Cf}/gu, '').replace(/\\/g, '/').toLowerCase();
 }
 
-// The offer tokens on a read unit's path, with its dot segments removed and repeated slashes read as one.
+// The offer tokens in a read unit, in order. Each part before a "?" or "#" is walked segment by segment, as a browser
+// resolves a path: "." and empty segments (repeated slashes) are skipped and ".." drops the segment before it. A segment
+// that opens with a 64-hex token right after "careers" and "offer" holds a token.
 function offerTokensIn(seen) {
-  let path = seen.replace(/\/{2,}/g, '/');
-  for (let before = ''; before !== path;) {
-    before = path;
-    path = path.replace(/\/\.(?=\/|$)/g, '').replace(/\/(?!\.\.(?:\/|$))[^/]+\/\.\.(?=\/|$)/g, '');
+  const tokens = [];
+  for (const part of seen.split(/[?#]/)) {
+    const path = [];
+    for (const segment of part.split('/')) {
+      if (segment === '..') path.pop();
+      else if (segment && segment !== '.') {
+        const token = path.at(-1) === 'offer' && CAREERS_SEGMENT_RE.test(path.at(-2) || '') && TOKEN_SEGMENT_RE.exec(segment);
+        if (token) tokens.push(token[1]);
+        path.push(segment);
+      }
+    }
   }
-  return Array.from(path.matchAll(OFFER_PATH_TOKEN_RE), (m) => m[1]);
+  return tokens;
 }
 
 // One pass, unit by unit, so each hidden link and its token keep the same order for redaction and for pinning.

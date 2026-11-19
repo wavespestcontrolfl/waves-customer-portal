@@ -102,8 +102,8 @@ describe('the actions', () => {
     expect(mockService.requestDate).toHaveBeenCalledWith(TOKEN, { requestedStartDate: '2027-01-11', note: 'Notice runs out' });
     await call(`/${TOKEN}/decline`, 'POST', { reason: 'Took another job' });
     expect(mockService.declineOffer).toHaveBeenCalledWith(TOKEN, { reason: 'Took another job' });
-    await call(`/${TOKEN}/text-consent`, 'POST', { consent: true });
-    expect(mockService.setTextConsent).toHaveBeenCalledWith(TOKEN, true);
+    await call(`/${TOKEN}/text-consent`, 'POST', { consent: true, version: '2026-12-01T14:00:00.000Z' });
+    expect(mockService.setTextConsent).toHaveBeenCalledWith(TOKEN, true, '2026-12-01T14:00:00.000Z');
   });
 
   test('a missing body reaches the service as nothing, never a crash', async () => {

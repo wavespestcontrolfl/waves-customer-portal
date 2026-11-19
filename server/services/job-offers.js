@@ -914,6 +914,7 @@ function openPayload(offer, state) {
     owner: snapshot.owner,
     expiresAt: snapshot.expiresAt,
     textConsent: Boolean(offer.text_consent_at),
+    version: iso(offer.updated_at),
     signedName: offer.signed_name || null,
     signedAt: iso(offer.signed_at),
     requestedStartDate: offer.requested_start_date ? ymdOf(offer.requested_start_date) : null,
@@ -964,16 +965,24 @@ const refusal = (state, offer) => ({
     : { state },
 });
 
-/** POST /:token/text-consent */
-async function setTextConsent(token, consent) {
+/**
+ * POST /:token/text-consent. `version` is the offer's version from the read the choice was made on. A save can land
+ * late (its reply was lost and the page saved the same choice again), so a change made from an older version is
+ * refused: it cannot undo a later choice. A choice that is already stored writes nothing.
+ */
+async function setTextConsent(token, consent, version) {
   return db.transaction(async (trx) => {
     const found = await lockByToken(trx, token);
     if (!found) return { notFound: true };
     if (found.state !== 'open') return refusal(found.state, found.offer);
     if (typeof consent !== 'boolean') return { invalid: 'Choose yes or no.' };
-    const stamp = consent ? (found.offer.text_consent_at || found.now) : null;
-    await trx('job_offers').where({ id: found.offer.id }).update({ text_consent_at: stamp, updated_at: new Date() });
-    return { body: { textConsent: Boolean(consent) } };
+    const current = iso(found.offer.updated_at);
+    if (Boolean(found.offer.text_consent_at) === consent) return { body: { textConsent: consent, version: current } };
+    if (version !== current) return { refused: true, body: { state: 'open' } };
+    // Strictly later than the version it replaces, so two changes in one millisecond still get two versions.
+    const updatedAt = new Date(Math.max(Date.now(), new Date(found.offer.updated_at).getTime() + 1));
+    await trx('job_offers').where({ id: found.offer.id }).update({ text_consent_at: consent ? found.now : null, updated_at: updatedAt });
+    return { body: { textConsent: consent, version: iso(updatedAt) } };
   });
 }
 

@@ -18,6 +18,8 @@ const TERMS = {
   markdown: '## Hours\nFour 10-hour days.\n\n## Pay\nPaid every Friday.\n\n<script>alert(1)</script>',
 };
 
+const VERSION = '2026-12-11T15:20:00.000Z'; // the offer's version as the first read shows it
+
 function openPayload(overrides = {}) {
   return {
     state: 'open',
@@ -33,6 +35,7 @@ function openPayload(overrides = {}) {
     owner: { name: 'Sam Carter', title: 'owner', sentOn: '2026-12-11' },
     expiresAt: '2026-12-18T15:20:00.000Z',
     textConsent: false,
+    version: VERSION,
     signedName: null,
     signedAt: null,
     terms: TERMS,
@@ -130,7 +133,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(box);
     await waitFor(() => expect(box).toBeChecked());
     expect(fetchMock.mock.calls[1][0]).toMatch(/\/text-consent$/);
-    expect(bodyOf(fetchMock, 1)).toEqual({ consent: true });
+    expect(bodyOf(fetchMock, 1)).toEqual({ consent: true, version: VERSION });
     fireEvent.click(box);
     expect(await screen.findByText('Try later')).toBeInTheDocument();
     expect(box).toBeChecked();
@@ -210,7 +213,7 @@ describe('CareersOfferPage — open state', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
     expect(fetchMock.mock.calls[3][0]).toMatch(/\/text-consent$/);
-    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true });
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: VERSION });
   });
 
   it('keeps the choice and the lock when the read after a lost reply still holds the old value, until the choice is sent again', async () => {
@@ -233,7 +236,46 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
     expect(screen.queryByText(/We could not confirm that choice/)).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(bodyOf(fetchMock, 3)).toEqual({ consent: false });
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: false, version: VERSION });
+  });
+
+  // The server refuses a change made from an older version, so a save that
+  // lands late cannot undo a later choice. The page sends the version of the
+  // read or save the choice was made on.
+  it('sends each text choice with the version it was made on: the read first, then the version the last save returned', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:21:00.000Z' }))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: false, version: '2026-12-11T15:22:00.000Z' }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const box = await screen.findByLabelText('Text me about this offer');
+    fireEvent.click(box);
+    await waitFor(() => expect(box).toBeChecked());
+    await waitFor(() => expect(box).toBeEnabled());
+    fireEvent.click(box);
+    await waitFor(() => expect(box).not.toBeChecked());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(bodyOf(fetchMock, 1)).toEqual({ consent: true, version: VERSION });
+    expect(bodyOf(fetchMock, 2)).toEqual({ consent: false, version: '2026-12-11T15:21:00.000Z' });
+  });
+
+  it('shows the stored choice when a change made from an older version is refused, and the next change sends the new version', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ state: 'open' }, 409)) // another tab changed the choice since this read
+      .mockResolvedValueOnce(jsonResponse(openPayload({ version: '2026-12-11T15:30:00.000Z' })))
+      .mockResolvedValueOnce(jsonResponse({ textConsent: true, version: '2026-12-11T15:31:00.000Z' }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const box = await screen.findByLabelText('Text me about this offer');
+    fireEvent.click(box);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(box).toBeEnabled());
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    await waitFor(() => expect(box).toBeChecked());
+    expect(bodyOf(fetchMock, 3)).toEqual({ consent: true, version: '2026-12-11T15:30:00.000Z' });
   });
 
   // The 409 says where the offer stands. A closed offer comes back whole, with
@@ -488,7 +530,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
-    expect(bodyOf(fetchMock, 4)).toEqual({ consent: true });
+    expect(bodyOf(fetchMock, 4)).toEqual({ consent: true, version: VERSION });
   });
 
   it('locks the other panel while the accept request is pending', async () => {
@@ -528,14 +570,15 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\./)).toBeInTheDocument();
   });
 
-  it('re-reads the offer when signing answers 502; the name on record in any letter case is this signature', async () => {
+  it('re-reads the offer when signing answers 502; the name on record is this signature in any letter case and spacing', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({}, 502))
       .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'JORDAN RIVERA', signedAt: '2026-12-12T13:15:00.000Z' })));
     globalThis.fetch = fetchMock;
     renderPage();
-    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    // The server stores "Jordan Rivera": each run of spaces collapsed, as job-offers.js cleanText does.
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: '  Jordan   Rivera ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
   });
