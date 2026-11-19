@@ -43,7 +43,7 @@ function chain(table) {
   const q = { calls: [], filter: null };
   const rec = (name) => (...args) => { q.calls.push([name, ...args]); return q; };
   Object.assign(q, {
-    join: rec('join'), leftJoin: rec('leftJoin'), whereNull: rec('whereNull'), whereNotIn: rec('whereNotIn'),
+    join: rec('join'), joinRaw: rec('joinRaw'), leftJoin: rec('leftJoin'), whereNull: rec('whereNull'), whereNotIn: rec('whereNotIn'),
     where: (...args) => { q.calls.push(['where', ...args]); if (args[0] && typeof args[0] === 'object') q.filter = args[0]; return q; },
     select: async (...cols) => { sqlCalls.push({ table, calls: q.calls, cols }); return candidates; },
     first: async () => {
@@ -74,6 +74,7 @@ beforeEach(() => {
   alertEpisodesLive.mockReturnValue(true);
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockResolvedValue(1);
+  episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'bell-1', deduped: false, rang: true });
 });
 
 describe('what the query asks for', () => {
@@ -81,7 +82,9 @@ describe('what the query asks for', () => {
     await run();
     const { calls } = sqlCalls[0];
     expect(calls).toEqual(expect.arrayContaining([
-      ['join', 'scheduled_services as s', 's.id', 'i.scheduled_service_id'],
+      // The visit, directly or through the invoice's service record (a post-completion invoice carries only that link).
+      ['leftJoin', 'service_records as sr', 'sr.id', 'i.service_record_id'],
+      ['joinRaw', 'JOIN scheduled_services AS s ON s.id = COALESCE(i.scheduled_service_id, sr.scheduled_service_id)'],
       ['where', 'i.status', 'paid'],
       ['whereNull', 'i.receipt_sent_at'], ['whereNull', 'i.archived_at'],
       ['where', 'i.total', '>', 0],
@@ -98,7 +101,8 @@ describe('raising', () => {
     const [bell] = raised();
     expect(bell.category).toBe('billing');
     expect(bell.headline).toBe("Billing — send Pat Tester's receipt");
-    expect(bell.why).toBe('Paid $125.00 by check at the Nov 18 visit; no receipt has gone out.');
+    // The figure is the invoice's total, not the tender (a last check can settle a part-paid invoice).
+    expect(bell.why).toBe('The $125.00 invoice was paid by check at the Nov 18 visit; no receipt has gone out.');
     expect(bell.opts).toMatchObject({
       dedupeKey: keyOf(A), bell: true, link: `/admin/invoices?invoice=${A}`,
       metadata: expect.objectContaining({ invoiceId: A, customerId: 'cust-1', severity: 'needs-you', subject: { type: 'invoice', id: A }, who: 'person', doneWhen: 'receipt_sent' }),
@@ -161,7 +165,7 @@ describe('raising', () => {
     candidates = [row(A, { first_name: null, last_name: null, payment_method: null })];
     await run();
     expect(raised()[0].headline).toBe("Billing — send a customer's receipt");
-    expect(raised()[0].why).toBe('Paid $125.00 at the Nov 18 visit; no receipt has gone out.');
+    expect(raised()[0].why).toBe('The $125.00 invoice was paid at the Nov 18 visit; no receipt has gone out.');
   });
 
   test('a name that breaks the alert rules becomes "a customer"', async () => {
@@ -171,8 +175,24 @@ describe('raising', () => {
   });
 
   test('a suppressed write (test customer) is not counted as raised', async () => {
-    episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: null, suppressed: true });
+    episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: null, suppressed: true, rang: false });
     expect(await run()).toMatchObject({ raised: 0, failed: 0 });
+  });
+
+  test('a standing bell\'s silent dedupe on the next pass is not counted as raised', async () => {
+    episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'bell-1', deduped: true, rang: false });
+    expect(await run()).toMatchObject({ candidates: 1, raised: 0, failed: 0 });
+    expect(raised()).toHaveLength(1);
+  });
+
+  test('a job that delivered a leg rings nothing, even with no receipt stamp', async () => {
+    candidates = [row(A), row(B)];
+    jobs = {
+      [A]: { status: 'completed', sms_result: { sent: false, reason: 'no-phone' }, email_result: { ok: true } },
+      [B]: { status: 'failed', sms_result: { sent: true }, email_result: JSON.stringify({ ok: false, error: 'bounced' }) },
+    };
+    await run();
+    expect(raised()).toEqual([]);
   });
 
   test('stands down while alert episodes are off', async () => {
@@ -187,16 +207,29 @@ describe('closing', () => {
   const open = (...ids) => episodes.openAdminAlertKeys.mockResolvedValue(ids.map(keyOf));
 
   test.each([
-    ['receipt sent', { receipt_sent_at: new Date('2026-11-18T18:00:00Z') }, 'Receipt sent'],
-    ['invoice void', { status: 'void' }, 'Invoice void'],
-    ['invoice archived', { archived_at: new Date('2026-11-18T18:00:00Z') }, 'Invoice archived'],
-  ])('%s closes the bell with a one-line resolution', async (why, change, resolution) => {
+    ['receipt sent', { receipt_sent_at: new Date('2026-11-18T18:00:00Z') }, 'Receipt sent', null],
+    ['invoice void', { status: 'void' }, 'Invoice void', null],
+    ['invoice archived', { archived_at: new Date('2026-11-18T18:00:00Z') }, 'Invoice archived', null],
+    ['receipts turned off', {}, 'Receipts turned off', () => { prefs = { 'cust-1': { payment_receipt: false } }; }],
+    ['receipt delivered', {}, 'Receipt delivered', () => { jobs = { [A]: { status: 'completed', email_result: { ok: true } } }; }],
+    ['receipt carried by the visit text', {}, 'Receipt carried by the visit text', () => { jobs = { [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } } }; }],
+  ])('%s closes the bell with a one-line resolution', async (why, change, resolution, arrange) => {
     candidates = [];
-    invoices = [{ id: A, status: 'paid', receipt_sent_at: null, archived_at: null, ...change }];
+    invoices = [{ id: A, customer_id: 'cust-1', status: 'paid', receipt_sent_at: null, archived_at: null, ...change }];
+    if (arrange) arrange();
     open(A);
     const out = await run();
     expect(closed()).toEqual([{ keys: [keyOf(A)], reason: why, resolution }]);
     expect(out.closed).toBe(1);
+  });
+
+  test('a receipt job still in flight keeps the bell open (it may still fail)', async () => {
+    candidates = [];
+    invoices = [{ id: A, customer_id: 'cust-1', status: 'paid', receipt_sent_at: null, archived_at: null }];
+    jobs = { [A]: { status: 'queued' } };
+    open(A);
+    expect(await run()).toMatchObject({ closed: 0 });
+    expect(closed()).toEqual([]);
   });
 
   test('a gone invoice or a key with no invoice id closes; a still-unreceipted paid invoice stands', async () => {
