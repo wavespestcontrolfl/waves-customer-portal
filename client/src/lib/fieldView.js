@@ -1,4 +1,5 @@
 import { getAdminAuthToken, loadStaffOfflinePass } from './adminAuth';
+import { preloadInBackground } from './staleChunkReload';
 
 // Field view (owner 2026-11-19): an admin login can make the phone open on
 // Today. The switch is saved on that phone, for that login only, with the
@@ -33,6 +34,18 @@ export function fieldViewLanding(pathname) {
     if (profile?.role !== 'admin') return null;
     return readFieldViewPreference(profile.id) ? '/admin/today' : null;
   } catch { return null; }
+}
+
+// Today's code loads on first use, and the service worker keeps a page's
+// code only after the app asked for it once. So turning Field view on loads
+// Today's code at once: the next open can then show Today with no signal.
+// Resolves false when the code could not load (no signal, or a newer build).
+export function preloadFieldViewLanding() {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return Promise.resolve(false);
+  return preloadInBackground([
+    () => import('../pages/admin/TodayShell'),
+    () => import('../pages/tech/TechHomePage'),
+  ]);
 }
 
 // Router state on the Today address a Field view landing opened.

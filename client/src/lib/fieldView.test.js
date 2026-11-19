@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  adminNavigationPreferenceKey, FIELD_VIEW_LANDING_STATE, fieldViewLanding, readFieldViewPreference, signInReturnLocation,
+  adminNavigationPreferenceKey, FIELD_VIEW_LANDING_STATE, fieldViewLanding, preloadFieldViewLanding, readFieldViewPreference, signInReturnLocation,
 } from './fieldView';
+
+// The two modules an open of Today needs, recorded when the preload loads them.
+const loaded = vi.hoisted(() => []);
+vi.mock('../pages/admin/TodayShell', () => { loaded.push('TodayShell'); return { default: () => null }; });
+vi.mock('../pages/tech/TechHomePage', () => { loaded.push('TechHomePage'); return { default: () => null }; });
 import { saveStaffOfflinePass } from './adminAuth';
 
 const storageOf = (entries) => ({ getItem: (key) => (key in entries ? entries[key] : null) });
@@ -93,6 +98,20 @@ describe('signInReturnLocation', () => {
     expect(signInReturnLocation(byHand)).toBe(byHand);
     const other = { pathname: '/admin/customers', search: '', hash: '', state: { from: 'x' } };
     expect(signInReturnLocation(other)).toBe(other);
+  });
+});
+
+// Pre-push P1 (round 5): turning Field view on readies Today for a later
+// open with no signal.
+describe('preloadFieldViewLanding', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  it("loads Today's shell and page", async () => {
+    await expect(preloadFieldViewLanding()).resolves.toBe(true);
+    expect([...loaded].sort()).toEqual(['TechHomePage', 'TodayShell']);
+  });
+  it('reports false at once with no signal', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    await expect(preloadFieldViewLanding()).resolves.toBe(false);
   });
 });
 

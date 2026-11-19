@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { clearStaffDeviceData } from "../../lib/adminAuth";
+import { preloadFieldViewLanding } from "../../lib/fieldView";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
@@ -36,6 +37,43 @@ const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
   (sec) => !NAV_PATHS.has(sec.to.split("?")[0]) || sec.to.includes("?tab="),
 );
 
+// The Field view switch (owner 2026-11-19), for an admin login. It moves
+// only when this phone saved it (setFieldView returns false when it could
+// not). Turning it on also loads Today's code for a later open with no
+// signal. The row says when either failed; only the newest tap's load
+// answer counts.
+function FieldViewRow({ navigation }) {
+  const fieldView = navigation.fieldView === true;
+  const [notSaved, setNotSaved] = useState(false);
+  const [todayNotReady, setTodayNotReady] = useState(false);
+  const lastTap = useRef(0);
+  const change = (on) => {
+    const saved = navigation.setFieldView(on);
+    const tap = ++lastTap.current;
+    setNotSaved(saved === false);
+    setTodayNotReady(false);
+    if (saved !== true || !on) return;
+    void preloadFieldViewLanding().then((ready) => {
+      if (tap === lastTap.current) setTodayNotReady(!ready);
+    });
+  };
+  return (
+    <section className="mt-2">
+      <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+        <li className="flex items-center gap-3 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div id="field-view-label" className="text-14 text-zinc-900">Field view</div>
+            <div id="field-view-hint" className="text-14 text-zinc-500">Opens on Today. Today takes the Dashboard tab.</div>
+            {notSaved && <div role="alert" className="text-14 text-alert-fg">Not saved on this phone: its storage is full or blocked. Field view stays {fieldView ? "on" : "off"}.</div>}
+            {todayNotReady && <div role="status" className="text-14 text-zinc-700">Today is not ready for no signal yet. Open Today once with signal.</div>}
+          </div>
+          <Switch checked={fieldView} onChange={change} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
+        </li>
+      </ul>
+    </section>
+  );
+}
+
 export default function MorePage() {
   const navigate = useNavigate();
   // The "More" menu is a mobile-only nav surface (its root is `md:hidden`, so
@@ -48,9 +86,6 @@ export default function MorePage() {
   const outletContext = useOutletContext();
   const currentRole = outletContext?.user?.role || null;
   const navigation = useAdminNavigation();
-  // The switch moves only when this phone saved it (setFieldView returns
-  // false when it could not), so the row says why it did not move.
-  const [fieldViewNotSaved, setFieldViewNotSaved] = useState(false);
 
   if (!isMobile) return <Navigate to="/admin" replace />;
 
@@ -100,20 +135,7 @@ export default function MorePage() {
           </WorkspaceLink>;
         }) : <WorkspaceGroup key={group.id} group={group} source="more" />))}
       </UiSurface>}
-      {navigation && currentRole === "admin" && (
-        <section className="mt-2">
-          <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
-            <li className="flex items-center gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <div id="field-view-label" className="text-14 text-zinc-900">Field view</div>
-                <div id="field-view-hint" className="text-14 text-zinc-500">Opens on Today. Today takes the Dashboard tab.</div>
-                {fieldViewNotSaved && <div role="alert" className="text-14 text-alert-fg">Not saved on this phone: its storage is full or blocked. Field view stays {fieldView ? "on" : "off"}.</div>}
-              </div>
-              <Switch checked={fieldView} onChange={(on) => setFieldViewNotSaved(navigation.setFieldView(on) === false)} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
-            </li>
-          </ul>
-        </section>
-      )}
+      {navigation && currentRole === "admin" && <FieldViewRow navigation={navigation} />}
       {visibleSettingsLeaves.length > 0 && (
         <section className="mt-2">
           {" "}

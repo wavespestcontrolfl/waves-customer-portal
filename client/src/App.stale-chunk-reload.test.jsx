@@ -17,6 +17,7 @@ import {
   handleVitePreloadError,
   isStaleChunkReloadPending,
   markPageNavigating,
+  preloadInBackground,
   resetStaleChunkReloadForTests,
 } from './lib/staleChunkReload';
 
@@ -153,4 +154,38 @@ test('with no reload pending, a lazy page that loads normally clears the one-sho
   renderInBoundary(Page);
   expect(await screen.findByText('Loaded page')).toBeInTheDocument();
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+});
+
+// Field view (pre-push P1, round 5): turning the switch on loads Today's code
+// in the background. With no signal that load fails; the failure is not a
+// stale page, so it must not reload over the Settings page.
+test('a failed background preload never reloads, also for a loader that fails late', async () => {
+  const reload = vi.fn();
+  const fail = [];
+  const preload = preloadInBackground([0, 1].map(() => () => new Promise((_, reject) => { fail.push(reject); })));
+  const early = preloadErrorEvent();
+  handleVitePreloadError(early, reload);
+  fail[0](new TypeError('Failed to fetch dynamically imported module: /assets/TodayShell-new.js'));
+  await Promise.resolve();
+  const late = preloadErrorEvent();
+  handleVitePreloadError(late, reload);
+  fail[1](new TypeError('Failed to fetch dynamically imported module: /assets/TechHomePage-new.js'));
+  await expect(preload).resolves.toBe(false);
+  expect([early.defaultPrevented, late.defaultPrevented]).toEqual([false, false]);
+  expect(reload).not.toHaveBeenCalled();
+  expect(isStaleChunkReloadPending()).toBe(false);
+  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
+  // Once every loader settled, a failed chunk is a stale page again.
+  const stale = preloadErrorEvent();
+  handleVitePreloadError(stale, reload);
+  expect(stale.defaultPrevented).toBe(true);
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+test('a background preload is ready only when every loader returned a module', async () => {
+  const page = async () => ({ default: () => null });
+  await expect(preloadInBackground([page, page])).resolves.toBe(true);
+  // A chunk a navigation window held resolves undefined: nothing loaded.
+  await expect(preloadInBackground([page, swallowedImport])).resolves.toBe(false);
+  await expect(preloadInBackground([page, () => { throw new Error('sync failure'); }])).resolves.toBe(false);
 });

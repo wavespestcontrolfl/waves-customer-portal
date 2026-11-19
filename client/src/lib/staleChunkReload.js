@@ -30,6 +30,7 @@ const NAVIGATION_WINDOW_MS = 30000;
 let reloadPending = false;
 let navigatingUntil = 0;
 let chunkHeld = false;
+let backgroundPreloads = 0;
 
 function pageNavigating() {
   return Date.now() < navigatingUntil;
@@ -71,6 +72,25 @@ export function markPageNavigating(reload = () => window.location.reload()) {
   };
 }
 
+// A background preload readies a page's code before anyone opens the page
+// (Field view loads Today's code when its switch turns on, for a later open
+// with no signal). With no signal it fails, and that failure is not a stale
+// page: while one runs, the handler leaves each failure to the import that
+// made it. The preload then resolves false. A page opened in that moment
+// still reloads once through lazyWithRetry's own guard; only its CSS-only
+// failure shows the error screen instead. The window stays open until every
+// loader settles, so a late failure cannot reload the page either. Resolves
+// true when every loader returned a module (a held chunk returns none).
+export async function preloadInBackground(loaders) {
+  backgroundPreloads += 1;
+  try {
+    const results = await Promise.allSettled(loaders.map(async (load) => load()));
+    return results.every((result) => result.status === 'fulfilled' && Boolean(result.value));
+  } finally {
+    backgroundPreloads -= 1;
+  }
+}
+
 // One-shot guard (App.jsx clears the flag on a successful lazy load) so a
 // genuine outage still surfaces instead of reload-looping.
 export function handleVitePreloadError(event, reload = () => window.location.reload()) {
@@ -79,6 +99,7 @@ export function handleVitePreloadError(event, reload = () => window.location.rel
     event.preventDefault();
     return;
   }
+  if (backgroundPreloads > 0) return;
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
@@ -95,4 +116,5 @@ export function resetStaleChunkReloadForTests() {
   reloadPending = false;
   navigatingUntil = 0;
   chunkHeld = false;
+  backgroundPreloads = 0;
 }
