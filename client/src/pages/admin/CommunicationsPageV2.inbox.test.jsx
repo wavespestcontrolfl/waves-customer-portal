@@ -1461,3 +1461,26 @@ it("a row read with one failed batch waits for every batch, then says the rest f
   expect(screen.getByText("The texts were not marked read. Try again.")).toBeInTheDocument();
   expect(logCallsAfterReads()).toBeGreaterThan(0);
 });
+
+it("opening a row inside its Undo window sends the waiting read and ends Undo", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  fireEvent.click(screen.getByText("Please check the gate"));
+  await tick(0);
+  // Opening read the text, so Undo could no longer bring it back: it is gone, and the waiting read went out.
+  expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+});
+
+it("opening another row leaves the first row's Undo in place", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }, { ...inbound("b", "Second sender question", "+19415550111"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  fireEvent.click(screen.getByText("Second sender question"));
+  await tick(0);
+  expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+});

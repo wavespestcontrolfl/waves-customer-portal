@@ -3388,6 +3388,8 @@ export function SmsTab({
     setActiveThread(openedThread);
     setSmsView("conversation");
     selectSmsRecipient(match.contactPhone, match.ourNumber, match.customerId);
+    // Opening reads the thread now, so a waiting list read of it can no longer be undone: send it.
+    if (openedThread.messages.some((m) => pendingReadCovers(pendingReadRef.current, m))) void commitPendingReadRef.current();
     markMessagesRead(openedThread);
   }, [deepLinkThreadKey, threads, markMessagesRead]);
   useEffect(() => {
@@ -4424,6 +4426,8 @@ export function SmsTab({
                       setActiveThread(openedThread);
                       setSmsView("conversation");
                       selectSmsRecipient(t.contactPhone, t.ourNumber, t.customerId);
+                      // Opening reads the thread now, so a waiting list read of it can no longer be undone: send it.
+                      if (openedThread.messages.some((m) => pendingReadCovers(pendingReadRef.current, m))) void commitPendingReadRef.current();
                       markMessagesRead(openedThread);
                     }}
                     className={cn(
