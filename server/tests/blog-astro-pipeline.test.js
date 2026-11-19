@@ -6364,16 +6364,24 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     }
   });
 
-  test('resolveBodyImages: a new picture plans under its NAME number, so it never shares a slot with a kept picture', async () => {
+  test('bodySlotOfName: odd names plan as slot 1 and even names as slot 2', () => {
+    const { bodySlotOfName } = AstroPublisher._internals;
+    expect([1, 2, 3, 4, 49, 50, '7'].map(bodySlotOfName)).toEqual([1, 2, 1, 2, 1, 2, 1]);
+  });
+
+  test('resolveBodyImages: a new picture takes the body slot the kept picture does not hold, never the hero slot', async () => {
     const { resolveBodyImages, compressToWebp } = AstroPublisher._internals;
     const imageGenerator = require('../services/content/image-generator');
     const w1 = (await compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
-    // The post keeps one managed picture (body-<kept>) in its Alpha section; Beta has none yet.
-    const plannedFor = async (kept) => {
-      const keptSrc = `/images/blog/pest-control/my-post/body-${kept}.webp`;
-      const liveBody = `## Alpha\n\nAlpha lead prose.\n\n![Kept alt](${keptSrc})\n\n## Beta\n\nBeta prose.\n`;
-      gh.getFile.mockImplementation(async (path) => (path === `public${keptSrc}` ? { content: '', sha: 'kept', raw: { content: w1 } } : null));
-      gh.listDir.mockResolvedValue([{ type: 'file', name: `body-${kept}.webp`, path: `public${keptSrc}`, sha: 'kept' }]);
+    const w2 = (await compressToWebp(Buffer.from(PATTERNS[2].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const src = (n) => `/images/blog/pest-control/my-post/body-${n}.webp`;
+    // The post keeps one managed picture (body-<kept>) in its Alpha section; Beta has none.
+    // `orphans` are managed files still on main that the draft no longer shows.
+    const plannedFor = async (kept, orphans = []) => {
+      const liveBody = `## Alpha\n\nAlpha lead prose.\n\n![Kept alt](${src(kept)})\n\n## Beta\n\nBeta prose.\n`;
+      const onMain = new Map([[`public${src(kept)}`, w1], ...orphans.map((n) => [`public${src(n)}`, w2])]);
+      gh.getFile.mockImplementation(async (path) => (onMain.has(path) ? { content: '', sha: `sha-${path}`, raw: { content: onMain.get(path) } } : null));
+      gh.listDir.mockResolvedValue([...onMain.keys()].map((path) => ({ type: 'file', name: path.split('/').pop(), path, sha: `sha-${path}` })));
       imageGenerator.planFor.mockClear();
       const res = await resolveBodyImages({
         frontmatter: { title: 'My Post' },
@@ -6381,15 +6389,25 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
         body: liveBody,
         existingFile: { path: 'src/content/blog/pest-control/my-post.mdx', file: { content: `---\ntitle: My Post\n---\n${liveBody}` } },
       });
-      expect(res.body).toContain(keptSrc);
+      expect(res.body).toContain(src(kept));
       const slots = imageGenerator.planFor.mock.calls.map(([plan]) => plan).filter((plan) => plan.mode === 'blog-body').map((plan) => plan.index % 100);
       expect(slots.length).toBeGreaterThan(0);
-      return { files: res.files.map((f) => f.path), slots: [...new Set(slots)] };
+      return { files: res.files.map((f) => f.path), slots: [...new Set(slots)], deletes: res.deletes };
     };
-    // Kept body-1: the new picture is body-2 and plans as slot 2 (the loop position alone would say slot 1 again).
-    expect(await plannedFor(1)).toEqual({ files: ['public/images/blog/pest-control/my-post/body-2.webp'], slots: [2] });
-    // Kept body-3 (an earlier refresh named it): body-1 is free again, and its slot 1 is not the kept picture's slot 3.
-    expect(await plannedFor(3)).toEqual({ files: ['public/images/blog/pest-control/my-post/body-1.webp'], slots: [1] });
+    // Kept body-1 (slot 1): the new picture is body-2, slot 2. The loop position alone said slot 1 again.
+    expect(await plannedFor(1)).toEqual({ files: [`public${src(2)}`], slots: [2], deletes: [] });
+    // Kept body-1, and an old body-2 the draft dropped: body-2 is deleted, body-3 is passed over
+    // (slot 1 is held), and body-4 plans as slot 2 — not slot 3, which is the hero's style.
+    const superseded = await plannedFor(1, [2]);
+    expect(superseded).toEqual({ files: [`public${src(4)}`], slots: [2], deletes: [`public${src(2)}`] });
+    // With the real planner that picture's style is neither the hero's nor the kept body-1's.
+    const real = jest.requireActual('../services/content/image-generator');
+    const styleOf = (mode, index) => real.planFor({ slug: 'pest-control/my-post', mode, index }).style;
+    expect(new Set([styleOf('blog-hero', 0), styleOf('blog-body', 1), styleOf('blog-body', superseded.slots[0])]).size).toBe(3);
+    // Kept body-3 (slot 1, named by an earlier refresh): free body-1 is passed over, body-2 plans as slot 2.
+    expect(await plannedFor(3)).toEqual({ files: [`public${src(2)}`], slots: [2], deletes: [] });
+    // Kept body-2 (slot 2): body-1 plans as slot 1.
+    expect(await plannedFor(2)).toEqual({ files: [`public${src(1)}`], slots: [1], deletes: [] });
   });
 
   test('bodyImageRefs: a query or fragment on a local destination is resolved to its pathname — the committed file, not the suffixed URL, is what validates (GH r27)', () => {

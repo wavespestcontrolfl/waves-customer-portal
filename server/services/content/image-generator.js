@@ -349,10 +349,11 @@ function hashString(input) {
   }
   return h >>> 0;
 }
-// The slot a picture fills: the hero is 0 and the picture named body-N is N
-// (a post's names are unique, so its slots are too). The publisher passes
-// index = N + attempt * 100 on a near-duplicate retry and index + 1000 on a
-// screen retry, so the slot is the index modulo 100 —
+// The slot a picture fills: the hero is 0 and a body picture is 1 or 2 (the
+// publisher reads it from the file name, bodySlotOfName: odd names 1, even
+// names 2). The publisher passes index = slot + attempt * 100 on a
+// near-duplicate retry and index + 1000 on a screen retry, so the slot is the
+// index modulo 100 —
 // style and cast follow the SLOT, never the raw index, or a retry would take
 // a sibling slot's style and cast. Setting, time and vantage keep the full
 // index: a retry must still get a fresh scene.
@@ -388,11 +389,11 @@ function castFor({ slug, mode, slot, identification = false }) {
   return (seed + 5 * 7919) % 3 === 0 ? 'homeowner' : 'none';
 }
 // planFor({ slug, mode, index, subject, identification }) — deterministic per
-// post + slot. index 0 is the hero; body slots are 1..n. `subject` picks the
-// setting pool and must be what the image is ABOUT — the title plus the
-// keyword or section heading, never the lead or meta copy: a coastal-lawn
-// post whose thesis mentions irrigation is not an equipment post (Codex r2 P2
-// on #3964). A screen retry passes index + 1000: the same slot, so the same
+// post + slot. index 0 is the hero; a body picture's slot is 1 or 2 (see
+// slotFor). `subject` picks the setting pool and must be what the image is
+// ABOUT — the title plus the keyword or section heading, never the lead or
+// meta copy: a coastal-lawn post whose thesis mentions irrigation is not an
+// equipment post (Codex r2 P2 on #3964). A screen retry passes index + 1000: the same slot, so the same
 // style and cast, under a fresh scene seed. With three styles for three
 // slots there is no unused style to retry in (the retired fourth style was
 // the infographic).

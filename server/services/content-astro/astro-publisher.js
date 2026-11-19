@@ -2954,6 +2954,29 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
   return out;
 }
 
+// A managed body picture plans under one of two logical slots (the slot picks
+// the style and the cast, see image-generator slotFor), and the slot is read
+// from the file NAME: odd names are slot 1, even names slot 2. A kept
+// picture's slot is then known on every later refresh with no stored record.
+// A new picture takes a free name whose slot no kept or new picture of the
+// post holds, so two body pictures never share a style or a cast and neither
+// takes the hero's style (three styles: hero 0, body 1 and 2). Counting the
+// loop position instead planned a picture added beside a kept body-1 as slot
+// 1 again; planning by the raw name number gave body-3 the hero's style.
+function bodySlotOfName(n) {
+  const k = Math.max(1, Math.trunc(Number(n)) || 1); // names start at body-1
+  return ((k - 1) % 2) + 1;
+}
+// The body slots held by the given picture paths (managed names only).
+function heldBodySlots(managedPrefix, srcs) {
+  const held = new Set();
+  for (const src of srcs) {
+    const name = String(src).startsWith(managedPrefix) ? String(src).slice(managedPrefix.length).match(/^(\d+)\.webp$/) : null;
+    if (name) held.add(bodySlotOfName(name[1]));
+  }
+  return held;
+}
+
 // `siblings` = already-resolved images with bytes (the freshly generated
 // hero) that every body image must differ from.
 // `mdx`: the TARGET file's flavour (false for the scheduler's flat `.md`
@@ -3149,6 +3172,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // the name cap parks the post).
   let n = 0;
   const superseded = [];
+  const heldSlots = heldBodySlots(managedPrefix, [...draftSrcs, ...taken]);
   for (let k = 0; k < slots.length; k++) {
     const slot = slots[k];
     const reuse = reusedBySlot.get(k) || null;
@@ -3171,9 +3195,12 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
       repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
       if (draftSrcs.has(src) || taken.has(src)) continue;
       const onMain = await gh.getFile(repoPath);
-      if (!onMain) break; // free name → generate here
-      superseded.push({ repoPath, sha: onMain.sha || null });
+      if (onMain) { superseded.push({ repoPath, sha: onMain.sha || null }); continue; }
+      // A free name — passed over while its slot is held and the other one is open.
+      if (heldSlots.size < 2 && heldSlots.has(bodySlotOfName(n))) continue;
+      break; // generate here
     }
+    heldSlots.add(bodySlotOfName(n));
 
     let gen;
     let buffer;
@@ -3195,13 +3222,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           shot,
           avoid: heroSubject,
           slug,
-          // The planner slot is the NAME number (body-N plans as slot N), not
-          // the loop position. A name is never reused while its picture
-          // lives, so no two pictures of a post share a slot: a refresh that
-          // keeps body-1 and adds one picture plans it as body-2's or body-3's
-          // slot, never slot 1 again (which would repeat the kept picture's
-          // style and could put a second technician in the post).
-          index: n + attempt * 100,
+          index: bodySlotOfName(n) + attempt * 100,
           avoidDepicting: imageExclusionsFor(brief),
           deadlineAt: slotDeadline,
         });
@@ -5571,6 +5592,7 @@ module.exports = {
     committedImageBuffer,
     assertDistinctPictures,
     BODY_IMAGE_SHOTS,
+    bodySlotOfName,
     NEAR_DUPLICATE_MAX_DISTANCE,
     reusableLiveBodyImage,
     BODY_IMAGE_MIN,
