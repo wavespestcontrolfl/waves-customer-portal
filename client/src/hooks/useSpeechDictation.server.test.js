@@ -339,6 +339,29 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
+  it("a page hidden when the send fails is asked only once it is visible again, so the recording is not lost", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    let visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    try {
+      failFirstPost(fetchMock, () => { visibility = "hidden"; throw new TypeError("Load failed"); });
+      await recordAndStop(onTranscript);
+      await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(confirm).not.toHaveBeenCalled();
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(postsTo(fetchMock)).toHaveLength(2);
+    } finally {
+      delete document.visibilityState;
+    }
+  });
+
   it("a refusal (the server answered) is shown and never offers a resend", async () => {
     const confirm = vi.fn(() => true);
     vi.stubGlobal("confirm", confirm);

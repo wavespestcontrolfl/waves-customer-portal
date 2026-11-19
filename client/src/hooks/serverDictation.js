@@ -131,18 +131,34 @@ export function transcribeClip(blob, durationSeconds, clip, token) {
 
 export const RESEND_QUESTION = `${UNSENT_MESSAGE} Send it again?`;
 
+// A hidden page (the app went to the background as the recording stopped) may not show a
+// question at all, and a suppressed confirm() reads as "no": ask only once the page is back.
+function pageVisible() {
+  if (document.visibilityState !== "hidden") return Promise.resolve();
+  return new Promise((resolve) => {
+    const onChange = () => {
+      if (document.visibilityState === "hidden") return;
+      document.removeEventListener("visibilitychange", onChange);
+      resolve();
+    };
+    document.addEventListener("visibilitychange", onChange);
+  });
+}
+
 /**
  * transcribeClip, and when a send got no answer while `stillWanted()` holds (the field is still
- * there and still this recording's), asks to send the SAME recording again. Never automatic:
- * when only the answer was lost, the server already paid for those words. Resolves null when the
- * person says no; throws the unsent error when the field moved on.
+ * there and still this recording's), asks to send the SAME recording again, once the page is
+ * visible. Never automatic: when only the answer was lost, the server already paid for those
+ * words. Resolves null when the person says no; throws the unsent error when the field moved on.
  */
 export async function transcribeClipWithResend(blob, durationSeconds, clip, token, stillWanted) {
   for (;;) {
     try {
       return await transcribeClip(blob, durationSeconds, clip, token);
     } catch (e) {
-      if (!e?.unsent || !stillWanted()) throw e;
+      if (!e?.unsent) throw e;
+      await pageVisible();
+      if (!stillWanted()) throw e;
       if (!window.confirm(RESEND_QUESTION)) return null;
     }
   }
