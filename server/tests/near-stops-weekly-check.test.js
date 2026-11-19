@@ -73,12 +73,14 @@ const TECH = { id: 'tech-1', name: 'Tech One' };
 // ------------------------------------------------------------------ part 1
 
 let seq = 0;
-function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending', property = null, street = null }) {
+function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ranch', at, date, start = '09:00', plan = false, status = 'pending', property = null, street = null, unit = null }) {
   seq += 1;
   return {
     id: `svc-${seq}`,
     customer_id: customer,
     property_id: property,
+    visit_id: null,
+    time_window: null,
     status,
     scheduled_date: date,
     window_start: start ? `${start}:00` : null,
@@ -88,6 +90,7 @@ function stop({ customer, first = 'Avery', last = 'Sample', city = 'Lakewood Ran
     lat: at.lat,
     lng: at.lng,
     service_address_line1: street,
+    service_address_line2: unit,
     service_address_zip: null,
     service_address_city: city,
     first_name: first,
@@ -411,6 +414,42 @@ describe('part 1: next-door stops booked apart', () => {
     const pairs = findApartPairs(rows);
     // One split, the two properties; the unlinked visit cannot be placed, so it pairs with neither.
     expect(pairs.map((p) => [p.first.id, p.second.id])).toEqual([[rows[1].id, rows[2].id]]);
+  });
+
+  test('a first visit with only a map pin never merges two known homes at that pin', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-08', street: '100 Sample Way', unit: 'Unit 1', plan: true }),
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-15', street: '100 Sample Way', unit: 'Unit 2', plan: true }),
+    ];
+    // The two units are two homes; the pin-only visit fits both, so it pairs with neither.
+    expect(findApartPairs(rows).map((p) => [p.first.id, p.second.id])).toEqual([[rows[1].id, rows[2].id]]);
+  });
+
+  test("an unassigned service goes beside its own home's sibling on a numbered route", () => {
+    const route = (row, order) => ({ ...row, route_order: order });
+    const homeA = (extra = {}) => ({ ...stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '10:00', street: '100 Sample Way' }), ...extra });
+    const rows = [
+      route(homeA(), 1),
+      route(stop({ customer: 'c-y', at: north(22), date: '2027-03-01', start: '10:00' }), 2),
+      route(stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '10:00' }), 3),
+      homeA({ technician_id: null }),
+    ];
+    // The time fallback puts the unassigned service right after its sibling, so the
+    // stop at the far home is still between the neighbors.
+    expect(findApartPairs(rows)).toEqual([expect.objectContaining({ between: 1 })]);
+  });
+
+  test("a legacy visit with only a time_window is judged on the route at that window's start", () => {
+    const legacy = (customer, at, window, order) => ({ ...stop({ customer, at, date: '2027-03-01', start: null }), time_window: window, route_order: order });
+    const rows = [
+      legacy('c-a', HOME_A, 'morning', 1),
+      { ...stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }), route_order: 2 },
+      legacy('c-b', NEXT_DOOR, 'afternoon', 3),
+    ];
+    const pairs = findApartPairs(rows);
+    expect(pairs).toEqual([expect.objectContaining({ between: 1 })]);
+    expect([pairs[0].first.windowStart, pairs[0].second.windowStart]).toEqual(['08:00', '12:00']);
   });
 
   test('a visit with no time yet on the same day is not judged', () => {

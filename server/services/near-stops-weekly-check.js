@@ -43,7 +43,7 @@ const { alertEpisodesLive } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { haversine, resolveGeo, milesToDriveMinutes } = require('./auto-dispatch/geo');
 const { samePlace } = require('./auto-dispatch/current-conflict');
-const { effectivePremise, currentOrder } = require('./route-reorder-window-fit');
+const { effectivePremise, currentOrder, effectiveWindowRange } = require('./route-reorder-window-fit');
 const { timeFallbackOrder } = require('./scheduling/route-order-time-fallback');
 const { daysBetween } = require('./auto-dispatch/route-tiers');
 const { FLEX_TIER_RADIUS_DAYS } = require('./auto-dispatch/flex-tier');
@@ -144,6 +144,18 @@ function hhmm(value) {
   return match ? `${match[1].padStart(2, '0')}:${match[2]}` : null;
 }
 
+// A visit's time: its window start, or for a legacy row the start of its time_window
+// as the app reads it (route-reorder-window-fit.js effectiveWindowRange: 'morning'
+// starts 8:00 AM, '2:00 PM' is 14:00).
+function windowStartOf(row) {
+  const own = hhmm(row.window_start);
+  if (own) return own;
+  const range = effectiveWindowRange(row);
+  if (!range) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(Math.floor(range.startMin / 60))}:${pad(range.startMin % 60)}`;
+}
+
 function dayLabel(dateStr) {
   return formatETDayDate(parseETDateTime(`${dateStr}T12:00`));
 }
@@ -176,7 +188,7 @@ function toVisit(row) {
     id: String(row.id),
     customerId: String(row.customer_id),
     date: dateOnlyString(row.scheduled_date),
-    windowStart: hhmm(row.window_start),
+    windowStart: windowStartOf(row),
     tech: row.technician_id ? String(row.technician_id) : null,
     done: row.status === SERVED_STATUS, // served: a pairing partner, never a split to report
     nightKind: nightKindOf(row),
@@ -192,39 +204,51 @@ function toVisit(row) {
 // address the app's same-place rule compares.
 const addressKnown = (row) => !!effectivePremise(row).service_address_line1;
 
-// One customer's two rows are one home under the app's own same-place rule
-// (auto-dispatch/current-conflict.js samePlace: one linked property, else one
-// service address, unit included). Two linked properties, or two known addresses,
-// that differ are two homes even at one map pin (two units of one building). Only
-// when an address is unknown do the map pins decide.
-function sameHome(home, row, geo) {
-  if (samePlace(home.row, row)) return true;
-  if ((home.row.property_id && row.property_id) || (addressKnown(home.row) && addressKnown(row))) return false;
+// How surely a row names its home: 0 a linked property, 1 a known address, 2 only a map pin.
+function homeTier(row) {
+  if (row.property_id) return 0;
+  return addressKnown(row) ? 1 : 2;
+}
+
+// Whether `row` belongs to `home` under the app's own same-place rule
+// (auto-dispatch/current-conflict.js samePlace). A linked row belongs only to its
+// own property's home. A row with a known address belongs to a home that holds that
+// address (unit included) on any of its rows; two known addresses that differ are
+// two homes even at one map pin (two units of one building). Only a row with no
+// known address is placed by its map pin.
+function belongsTo(home, row, geo) {
+  const tier = homeTier(row);
+  if (tier === 0) return home.propertyIds.has(String(row.property_id));
+  if (tier === 1) return home.rows.some((r) => addressKnown(r) && samePlace(r, row));
   return !!(home.geo && geo) && haversine(home.geo.lat, home.geo.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES;
 }
 
-// Every row's home, pinned or not. Rows linked to a property go first, one home
-// per property. Each unlinked row then joins the one home it matches; a row that
-// matches none starts its own, and one that matches more than one (one address
-// for two linked homes) cannot be placed: it stays a stop on its route but is
-// never paired. Only a placed home with a pin can be paired.
+// Every row's home, pinned or not. Linked rows go first (one home per property),
+// then rows with a known address, then rows with only a map pin, so a weaker row
+// never decides how stronger ones group. Each row joins the one home it belongs
+// to; a row that belongs to none starts its own, and one that belongs to more than
+// one (one address or one pin for two homes) cannot be placed: it stays a stop on
+// its route but is never paired. Only a placed home with a pin can be paired.
 function buildPlaces(rows) {
   const places = [];
   const byCustomer = new Map();
-  const linkedFirst = [...rows.filter((r) => r.property_id), ...rows.filter((r) => !r.property_id)];
-  for (const row of linkedFirst) {
-    const geo = resolveGeo(row);
+  const tiered = rows.map((row) => ({ row, tier: homeTier(row) })).sort((x, y) => x.tier - y.tier); // stable
+  for (const { row: raw } of tiered) {
+    const geo = resolveGeo(raw);
+    // The app's guarded pin (scheduling/day-stops.js guardedCoordSelects), as the route helpers read it.
+    const row = { ...raw, lat: geo ? geo.lat : null, lng: geo ? geo.lng : null };
     const customerId = String(row.customer_id);
     if (!byCustomer.has(customerId)) byCustomer.set(customerId, []);
     const own = byCustomer.get(customerId);
-    const matches = own.filter((home) => sameHome(home, row, geo));
+    const matches = own.filter((home) => belongsTo(home, row, geo));
     let place = matches.length === 1 ? matches[0] : null;
     if (!place) {
       place = {
         key: `home-${places.length + 1}`,
         customerId,
-        row,
         geo,
+        rows: [],
+        propertyIds: new Set(),
         unplaced: matches.length > 1,
         name: shortName(row),
         city: row.service_address_city || row.customer_city || null,
@@ -233,6 +257,8 @@ function buildPlaces(rows) {
       places.push(place);
       own.push(place);
     }
+    place.rows.push(row);
+    if (row.property_id) place.propertyIds.add(String(row.property_id));
     if (!place.geo && geo) place.geo = geo;
     place.visits.push({ ...toVisit(row), home: place.key, placeName: place.name, city: place.city });
   }
@@ -621,7 +647,7 @@ async function loadStops(fromDate, untilDate, conn = db) {
     .orderBy([{ column: 's.scheduled_date' }, { column: 's.window_start' }, { column: 's.id' }])
     .select(
       's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id', 's.status',
-      's.route_order', 's.created_at',
+      's.route_order', 's.created_at', 's.visit_id', 's.time_window',
       's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng', 's.property_id',
       's.service_address_line1', 's.service_address_line2', 's.service_address_zip', 's.service_address_city',
       'c.first_name', 'c.last_name', 'c.address_line1 as customer_address_line1',
