@@ -690,10 +690,15 @@ function stripFixedReentryTiming(value, replacement = '') {
 
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
+// The phone numbers a post may carry: the shared lines only (the main line
+// and the office lines). A website-only line proves a website visit
+// (config/shared-phone-lines), so a post never shows one.
 const KNOWN_PHONES = new Set();
 try {
   const twilioNumbers = require('../config/twilio-numbers');
+  const shared = new Set(require('../config/shared-phone-lines').sharedLineNumbers(twilioNumbers));
   const addPhone = (n) => {
+    if (!shared.has(n.number)) return;
     if (n.number) KNOWN_PHONES.add(n.number.replace(/\D/g, ''));
     if (n.formatted) KNOWN_PHONES.add(n.formatted.replace(/\D/g, ''));
   };

@@ -47,6 +47,8 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true),
 }));
+// The website-only line check (website-line-contact.js) has its own suites; here it answers per test.
+jest.mock('../services/website-line-contact', () => ({ websiteLineRefusal: jest.fn(async () => null) }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -349,6 +351,43 @@ describe('PUT /admin/drafts/:id/approve', () => {
     });
   });
 
+});
+
+describe('a website-only line the recipient never called or texted (website-line-contact.js)', () => {
+  const { websiteLineRefusal } = require('../services/website-line-contact');
+  const pending = () => updates.find((u) => u.table === 'message_drafts' && u.payload.status === 'pending');
+  const put = (route, body) => withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/admin/drafts/draft-1/${route}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  });
+  beforeEach(() => {
+    enqueue('message_drafts', { returning: [draftRow()] });
+    enqueue('customers', { first: { id: 'cust-1', phone: '+19415550101' } });
+  });
+
+  test('approve is refused with its code, nothing is sent, and the draft goes back to pending', async () => {
+    websiteLineRefusal.mockResolvedValueOnce('WEBSITE_LINE_REFUSAL');
+    expect(await put('approve', { fromNumber: '+19412542617' }))
+      .toEqual({ status: 400, body: { error: 'WEBSITE_LINE_REFUSAL', code: 'WEBSITE_LINE_FIRST_CONTACT' } });
+    expect(websiteLineRefusal).toHaveBeenCalledWith('+19412542617', '+19415550101');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+  });
+
+  test('revise is refused the same way and clears the edited response', async () => {
+    websiteLineRefusal.mockResolvedValueOnce('WEBSITE_LINE_REFUSAL');
+    expect(await put('revise', { revisedResponse: 'Edited copy.', fromNumber: '+19412542617' }))
+      .toEqual({ status: 400, body: { error: 'WEBSITE_LINE_REFUSAL', code: 'WEBSITE_LINE_FIRST_CONTACT' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(pending().payload).toMatchObject({ revised_response: null, final_response: null });
+  });
+
+  test('a failed read answers an error, sends nothing and still releases the claim', async () => {
+    websiteLineRefusal.mockRejectedValueOnce(new Error('read failed'));
+    expect(await put('approve', { fromNumber: '+19412542617' })).toEqual({ status: 500, body: { error: 'read failed' } });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+  });
 });
 
 describe('PUT /admin/drafts/:id/revise', () => {

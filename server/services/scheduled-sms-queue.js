@@ -21,7 +21,8 @@
  *   9. immediate-only links (Auto Pay setup, contract signing, card request, statement pay, prep pages, review asks,
  *      branded short links that point at a review) are refused (400; 503 when a short link cannot be read);
  *  10. the time must parse and be in the future (400);
- *  11. the from number must be a Waves Twilio number (400);
+ *  11. the from number must be a Waves Twilio number (400), and a website-only
+ *      line only toward someone who already called or texted it (400);
  *  12. an Agent Review draft must still own a pending decision (409), then the decision is parked in the transaction.
  *
  * Effects, one transaction under the suggest-thread lock: verify the bearer links in the text belong to the recipient (the
@@ -43,6 +44,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteLineRefusal, WEBSITE_LINE_REFUSAL } = require('./website-line-contact');
 const { normalizePhone } = require('../utils/phone');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { isRecruitingPhone } = require('../utils/recruiting-thread-scope');
@@ -188,6 +190,8 @@ const SCHEDULE_GUARDS = [
     status: 400,
     error: 'fromNumber must be a Waves Twilio number',
   },
+  // A website-only line texts only someone who already called or texted it (website-line-contact.js).
+  { check: async (c) => Boolean(await websiteLineRefusal(c.chosenFrom, c.to)), status: 400, error: WEBSITE_LINE_REFUSAL, extra: { code: 'WEBSITE_LINE_FIRST_CONTACT' } },
   // An Agent Review draft can be scheduled instead of sent now. Carry the verified decision id on the scheduled row
   // so the 5-min dispatch cron resolves it when the send fires. A stale card (most often another operator just
   // handled the same suggestion) must not queue a duplicate reply with no decision linkage.

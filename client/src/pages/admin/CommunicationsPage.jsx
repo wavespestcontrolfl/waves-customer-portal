@@ -5,6 +5,7 @@
 // retained only for named exports consumed by CommunicationsPageV2 and
 // CallLogTabV2:
 //   - ALL_NUMBERS               (the four Twilio business numbers)
+//   - REPLY_LINE_NUMBERS        (Waves lines no sender picker offers)
 //   - NUMBER_LABEL_MAP          (number → "Bradenton" / "Sarasota" etc)
 //   - call disposition constants (legacy named exports, kept for any
 //                                  future consumer)
@@ -289,13 +290,24 @@ const ALL_NUMBERS = [
   },
 ];
 
+// Waves lines no sender picker offers: the main site's web-only line
+// (server/config/twilio-numbers.js). It answers only a person who reached
+// Waves on it (server/services/website-line-contact.js), so it is never a
+// choice in a "From" list. It is still ours: labels, the Calls callback
+// target and the callback line count it.
+const REPLY_LINE_NUMBERS = [
+  {
+    number: "+19412542617",
+    formatted: "(941) 254-2617",
+    label: "Main site web-only line",
+  },
+];
+
 // Flat lookup: number ->label
 const NUMBER_LABEL_MAP = {};
-ALL_NUMBERS.forEach((g) =>
-  g.numbers.forEach((n) => {
-    NUMBER_LABEL_MAP[n.number] = n.label;
-  }),
-);
+[...ALL_NUMBERS.flatMap((g) => g.numbers), ...REPLY_LINE_NUMBERS].forEach((n) => {
+  NUMBER_LABEL_MAP[n.number] = n.label;
+});
 
 
 const CALL_DISPOSITIONS = [
@@ -316,6 +328,7 @@ const CALL_DISPOSITIONS = [
 // Named exports for V2 reuse
 export {
   ALL_NUMBERS,
+  REPLY_LINE_NUMBERS,
   TEMPLATES,
   CALL_DISPOSITIONS,
   NUMBER_LABEL_MAP,

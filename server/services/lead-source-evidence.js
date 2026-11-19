@@ -438,9 +438,15 @@ function sourceEvidenceLabelSql(db) {
     WHEN LENGTH(${dialedDigitsSql}) = 11 AND LEFT(${dialedDigitsSql}, 1) = '1' THEN RIGHT(${dialedDigitsSql}, 10) END)`;
   const websiteOnlyNumbers = websiteOnlyNationalNumbers();
   const websiteOnlyCallSql = `COALESCE(${dialedNationalSql} IN (${websiteOnlyNumbers.map(() => '?').join(', ')}), FALSE)`;
-  const websiteSourceSql = "(lead_sources.source_type IN ('main_site', 'spoke_site') OR lead_sources.channel = 'website_organic')";
+  // SQL twin of normalized(): trimmed, lowercased, each run of whitespace or
+  // hyphens turned into '_', so an office-typed 'Main Site' matches as in JS.
+  const normalizedSql = (column) => `regexp_replace(LOWER(regexp_replace(COALESCE(${column}, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')), '[[:space:]-]+', '_', 'g')`;
+  const sourceTypeSql = normalizedSql('lead_sources.source_type');
+  const sourceChannelSql = normalizedSql('lead_sources.channel');
+  const contactChannelSql = normalizedSql('leads.first_contact_channel');
+  const websiteSourceSql = `(${sourceTypeSql} IN ('main_site', 'spoke_site') OR ${sourceChannelSql} = 'website_organic')`;
   // No joined row, or one with neither a source type nor a channel.
-  const noRecordedSourceSql = "(COALESCE(BTRIM(lead_sources.source_type), '') = '' AND COALESCE(BTRIM(lead_sources.channel), '') = '')";
+  const noRecordedSourceSql = `(${sourceTypeSql} = '' AND ${sourceChannelSql} = '')`;
   return db.raw(`LOWER(CASE
     WHEN (leads.extracted_data->'source_evidence'->>'kind') IN (${[...EVIDENCE_KINDS].map(() => '?').join(', ')})
       AND NULLIF(BTRIM(leads.extracted_data->'source_evidence'->>'label'), '') IS NOT NULL
@@ -450,22 +456,22 @@ function sourceEvidenceLabelSql(db) {
       AND COALESCE(NULLIF(BTRIM(leads.gclid), ''), NULLIF(BTRIM(leads.wbraid), ''), NULLIF(BTRIM(leads.gbraid), '')) IS NOT NULL THEN 'Google Ads'
     WHEN NOT ${callOriginSql}
       AND COALESCE(NULLIF(BTRIM(leads.fbclid), ''), NULLIF(BTRIM(leads.fbc), '')) IS NOT NULL THEN 'Meta Ads'
-    WHEN lead_sources.source_type = 'google_ads' THEN 'Google Ads'
-    WHEN lead_sources.source_type = 'gbp'
-      OR (lead_sources.source_type = 'website_organic' AND lead_sources.name ILIKE '%Google Business%') THEN 'Google Business Profile'
+    WHEN ${sourceTypeSql} = 'google_ads' THEN 'Google Ads'
+    WHEN ${sourceTypeSql} = 'gbp'
+      OR (${sourceTypeSql} = 'website_organic' AND lead_sources.name ILIKE '%Google Business%') THEN 'Google Business Profile'
     WHEN ${callOriginSql} AND ${websiteOnlyCallSql}
       AND (${websiteSourceSql} OR ${noRecordedSourceSql}) THEN 'Website'
     WHEN ${websiteSourceSql} AND ${callOriginSql} THEN 'Source unknown'
     WHEN ${websiteSourceSql} THEN 'Website'
-    WHEN lead_sources.source_type = 'referral' THEN 'Referral'
-    WHEN lead_sources.source_type = 'email' THEN 'Email inquiry'
-    WHEN lead_sources.source_type IN ('vehicle', 'walk_in') OR lead_sources.channel = 'offline' THEN COALESCE(NULLIF(lead_sources.name, ''), 'Offline')
-    WHEN lead_sources.source_type = 'ai_assistant' THEN 'AI assistant referral'
+    WHEN ${sourceTypeSql} = 'referral' THEN 'Referral'
+    WHEN ${sourceTypeSql} = 'email' THEN 'Email inquiry'
+    WHEN ${sourceTypeSql} IN ('vehicle', 'walk_in') OR ${sourceChannelSql} = 'offline' THEN COALESCE(NULLIF(BTRIM(lead_sources.name), ''), 'Offline')
+    WHEN ${sourceTypeSql} = 'ai_assistant' THEN 'AI assistant referral'
     WHEN ${metaCallPlacementSql} THEN 'Meta Ads'
-    WHEN lead_sources.source_type = 'facebook' THEN 'Source unknown'
-    WHEN leads.first_contact_channel IN ('form', 'website_quote') THEN 'Website'
-    WHEN leads.first_contact_channel = 'email' THEN 'Email inquiry'
-    WHEN leads.first_contact_channel IN ('manual', 'phone', 'call', 'inbound_call') THEN 'Source unknown'
+    WHEN ${sourceTypeSql} = 'facebook' THEN 'Source unknown'
+    WHEN ${contactChannelSql} IN ('form', 'website_quote') THEN 'Website'
+    WHEN ${contactChannelSql} = 'email' THEN 'Email inquiry'
+    WHEN ${contactChannelSql} IN ('manual', 'phone', 'call', 'inbound_call') THEN 'Source unknown'
     ELSE 'Source unknown'
   END)`, [...EVIDENCE_KINDS, ...websiteOnlyNumbers]);
 }

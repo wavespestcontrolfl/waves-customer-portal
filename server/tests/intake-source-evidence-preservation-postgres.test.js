@@ -254,6 +254,23 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
       lead_type: 'inbound_call', first_contact_channel: 'call',
       source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '555',
     }],
+    ['call to the web-only line on an office-typed source type', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'Main Site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+19412542617',
+    }],
+    ['web form on an office-typed source with spaces and a hyphen', {
+      lead_type: 'quote_wizard', first_contact_channel: 'form',
+      source_type: ' Spoke-Site ', source_channel: 'organic', source_name: 'Spoke',
+    }],
+    ['web form on an office-typed Google Ads source', {
+      lead_type: 'quote_wizard', first_contact_channel: 'form', source_type: 'Google Ads', source_name: 'Ads',
+    }],
+    ['offline source whose name has surrounding spaces', {
+      lead_type: 'manual', first_contact_channel: 'manual', source_type: 'Walk In', source_name: '  Truck wrap  ',
+    }],
+    ['contact channel typed with a hyphen and no source row', {
+      lead_type: 'quote_wizard', first_contact_channel: 'website-quote',
+    }],
     ['web form on a website source with the main line number', {
       lead_type: 'quote_wizard', first_contact_channel: 'form',
       source_type: 'main_site', source_channel: 'organic', source_name: 'Main Site', call_dialed_phone: '+19412975749',
