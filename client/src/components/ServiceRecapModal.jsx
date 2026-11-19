@@ -74,6 +74,31 @@ function fmtTime(ts) {
   } catch { return ''; }
 }
 
+// The ledger's rows on a recorded product (the recap's own rows keep no amounts), as the Taurus yearly-limit
+// warning reads a row: quantity with its unit, dilution, application date. A recorded mL rate is never shown, and a
+// save with no rate row restores the product's recorded rate onto its ledger rows, so each row reads that rate.
+function recordedLedgerRows(rp) {
+  const rows = (Array.isArray(rp.ledger_rows) ? rp.ledger_rows : []).map((row) => ({
+    ...(Number(row?.quantity) > 0 && row.quantity_unit ? { totalAmount: Number(row.quantity), amountUnit: row.quantity_unit } : {}),
+    ...(row?.dilution_rate ? { dilution: row.dilution_rate } : {}),
+    ...(row?.application_date ? { applicationDate: row.application_date } : {}),
+  }));
+  if (!(Number(rp.application_rate) > 0 && isMlUnit(rp.rate_unit))) return rows;
+  const hidden = { storedRate: Number(rp.application_rate), storedRateUnit: rp.rate_unit };
+  return rows.length ? rows.map((row) => ({ ...row, ...hidden })) : [hidden];
+}
+
+// The rows the Taurus warning reads for one selected product: on a reopened recap one per ledger row, so any 0.06%
+// row warns (the yearly count reads a record at its strongest); else the product at its rate. With no rate row (a
+// recorded mL rate is never shown) the row reads the recorded rate the save restores.
+function taurusWarningRows(product, rateRow, ledgerRows) {
+  const rated = { ...product, rate: rateRow?.rate, rateUnit: rateRow?.unit };
+  if (!ledgerRows?.length) return [rated];
+  return ledgerRows.map(({ storedRate, storedRateUnit, ...facts }) => ({
+    ...rated, ...facts, ...(rateRow ? {} : { rate: storedRate, rateUnit: storedRateUnit }),
+  }));
+}
+
 export default function ServiceRecapModal({
   service,
   request,
@@ -101,9 +126,9 @@ export default function ServiceRecapModal({
   const [selected, setSelected] = useState(() => new Set());
   // The house mix was pre-selected on open (so a Taurus left off it for the label limit is worth saying).
   const [houseMixSeeded, setHouseMixSeeded] = useState(false);
-  // Amounts recorded on a reopened recap, by catalog id: this lane edits no amounts, but the Taurus
-  // yearly-limit warning reads them as the ledger count does.
-  const [recordedAmounts, setRecordedAmounts] = useState(() => ({}));
+  // The ledger's rows on a reopened recap, by catalog id (amount, dilution, application date of each): this lane
+  // edits none of them, but the Taurus yearly-limit warning reads them as the ledger count does.
+  const [recordedLedger, setRecordedLedger] = useState(() => ({}));
   // productId -> { rate: string, unit: string }. Seeded from the rate
   // already recorded on the visit (reopen) or the catalog prefill
   // (fresh selection); the tech edits it before submit.
@@ -166,7 +191,7 @@ export default function ServiceRecapModal({
           );
           const preselect = new Set();
           const seededRates = {};
-          const seededAmounts = {};
+          const seededLedger = {};
           recorded.forEach((rp) => {
             const cat = (rp.product_id != null ? byId.get(String(rp.product_id)) : null)
               || byName.get(String(rp.product_name || '').trim().toLowerCase());
@@ -178,10 +203,8 @@ export default function ServiceRecapModal({
               return;
             }
             preselect.add(cat.id);
-            // The ledger's quantity (the recap's own rows keep no amounts), with its unit: the yearly count reads it.
-            if (Number(rp.ledger_quantity) > 0 && rp.ledger_quantity_unit) {
-              seededAmounts[cat.id] = { totalAmount: Number(rp.ledger_quantity), amountUnit: rp.ledger_quantity_unit };
-            }
+            const ledgerRows = recordedLedgerRows(rp);
+            if (ledgerRows.length) seededLedger[cat.id] = [...(seededLedger[cat.id] || []), ...ledgerRows];
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
@@ -213,7 +236,7 @@ export default function ServiceRecapModal({
           if (preselect.size) {
             setSelected(preselect);
             setRates(seededRates);
-            setRecordedAmounts(seededAmounts);
+            setRecordedLedger(seededLedger);
           }
         }
         // Default pest tank mix (shared with CompletionPanel via
@@ -281,7 +304,7 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), ...recordedAmounts[id], rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].flatMap((id) => taurusWarningRows(productById.get(id), rates[id], recordedLedger[id])), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({
