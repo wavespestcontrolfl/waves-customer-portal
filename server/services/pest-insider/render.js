@@ -9,12 +9,14 @@
  * The body is one email for every subscriber, and the public archive serves
  * it as stored. So it holds only reviewed copy (the fact's lead and title,
  * the species entry) and links the renderer builds itself from a species
- * slug. It takes no caller text and no caller link: every round of the
- * pre-push audit (5 to 10) found another way such input could carry a code,
- * a name, an email or a merge tag into a shared email. The optional blocks
- * come back in later PRs as structured data: the blog link (PR 2), "Active
- * near you" from area counts (PR 2), "A tool we'd use" from a reviewed
- * product list (PR 3), and "Your home", rendered per recipient (PR 4).
+ * slug, or takes from the reviewed post list (posts.js: the lead's "Read the
+ * full story on our blog" link must be one of POST_URLS). It takes no other
+ * caller text and no other caller link: every round of the pre-push audit
+ * (5 to 10) found another way such input could carry a code, a name, an
+ * email or a merge tag into a shared email. The other blocks come back in
+ * later PRs as structured data: "Active near you" from area counts and
+ * "Your home", rendered per recipient (PR 4), and "A tool we'd use" from a
+ * reviewed product list (PR 3).
  *
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
@@ -26,9 +28,10 @@
 'use strict';
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
+const { SITE, POST_URLS } = require('./posts');
 
-const SITE = 'https://www.wavespestcontrol.com';
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
+const POST_LINK_TEXT = 'Read the full story on our blog';
 
 const escapeHtml = (text) => String(text ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -48,13 +51,16 @@ const box = (inner) => `<div class="dm-box" style="margin:0 0 14px 0;padding:14p
 const small = (html) => `<p class="dm-muted" style="margin:0 0 14px 0;font-size:14px;line-height:1.5;color:${newsletterPalette().muted};">${html}</p>`;
 
 function leadBlock({ lead }) {
+  // Every issue links the lead fact's post, and only a reviewed post URL.
+  if (!POST_URLS.includes(lead.postUrl)) throw new Error('pest-insider render: the lead link must be a reviewed post URL (posts.js)');
   const body = lead.sentences.map((s) => s.text).join(' ');
   const html = [
     headingHtml(0, 'Today I learned'),
     `<h3 class="dm-ink" style="margin:0 0 8px 0;font-size:17px;line-height:1.4;">${escapeHtml(lead.headline)}</h3>`,
     paragraph(escapeHtml(body)),
+    paragraph(link(lead.postUrl, POST_LINK_TEXT)),
   ].join('\n');
-  const text = ['TODAY I LEARNED', lead.headline, '', body].join('\n');
+  const text = ['TODAY I LEARNED', lead.headline, '', body, '', `${POST_LINK_TEXT}: ${lead.postUrl}`].join('\n');
   return { html, text };
 }
 
@@ -74,9 +80,11 @@ function identifierBlock({ idItem }) {
 }
 
 /**
- * @param {{ subject: string, preview: string, lead: { headline: string, sentences: {text:string}[] },
+ * @param {{ subject: string, preview: string,
+ *   lead: { headline: string, sentences: {text:string}[], postUrl: string },
  *   idItem: { text: string, species: { slug: string, name: string } } }} issue
- *   Any other field is ignored: the shared body takes no caller text.
+ *   lead.postUrl must be one of the reviewed POST_URLS. Any other field is
+ *   ignored: the shared body takes no caller text.
  */
 function renderIssue(issue) {
   const blocks = [leadBlock(issue), identifierBlock(issue)];
@@ -101,4 +109,4 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, escapeHtml, IDENTIFIER_URL };
+module.exports = { renderIssue, wrapIssueHtml, escapeHtml, IDENTIFIER_URL, POST_LINK_TEXT };

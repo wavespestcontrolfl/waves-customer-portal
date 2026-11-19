@@ -84,24 +84,31 @@ const tier = (f) => [f.kind === 'pest' ? 0 : 1, f.months.length <= SEASONAL_MAX_
 const sameTier = (a, b) => a.every((v, i) => v === b[i]);
 const tierBefore = (a, b) => { const i = a.findIndex((v, k) => v !== b[k]); return i >= 0 && a[i] < b[i]; };
 
-// Lead fact: the previous issue's service is skipped when another fits, then
-// the best tier (pest kind, seasonal, high confidence) wins, and the send
-// date picks inside that tier, so equal facts rotate instead of the same id
-// always winning.
-function pickLeadFact(dateET, recentFactIds, recheckedFactIds) {
-  const candidates = factsForSend(dateET, { excludeIds: recentFactIds, recheckedIds: recheckedFactIds });
-  if (!candidates.length) return null;
+// Lead fact: only a fact whose blog post is live this send can lead (the
+// issue links it). Then the previous issue's service is skipped when another
+// fits, the best tier (pest kind, seasonal, high confidence) wins, and the
+// send date picks inside that tier, so equal facts rotate instead of the same
+// id always winning. A fact whose post is down drops out, and the next fact
+// leads in its place.
+function pickLeadFact(dateET, recentFactIds, recheckedFactIds, livePostFactIds) {
+  const fitting = factsForSend(dateET, { excludeIds: recentFactIds, recheckedIds: recheckedFactIds });
+  const candidates = fitting.filter((f) => livePostFactIds.includes(f.id));
+  if (!candidates.length) return { fact: null, reason: fitting.length ? 'no_live_post_for_month' : 'no_fact_for_month' };
   const previous = recentFactIds.length ? factById(recentFactIds[recentFactIds.length - 1]) : null;
   const fresh = previous ? candidates.filter((f) => f.service !== previous.service) : candidates;
   const pool = fresh.length ? fresh : candidates;
   let best = tier(pool[0]);
   for (const f of pool) if (tierBefore(tier(f), best)) best = tier(f);
   const top = pool.filter((f) => sameTier(tier(f), best));
-  return top[pickIndex(`${dateET}:lead`, top.length)];
+  return { fact: top[pickIndex(`${dateET}:lead`, top.length)], reason: null };
 }
 
 /**
- * @param {{ sendDate: string|Date, recentFactIds?: string[], recentSpeciesSlugs?: string[], recheckedFactIds?: string[] }} input
+ * @param {{ sendDate: string|Date, livePostFactIds: string[], recentFactIds?: string[],
+ *   recentSpeciesSlugs?: string[], recheckedFactIds?: string[] }} input
+ *   livePostFactIds names the facts whose blog post answered as live for
+ *   this send (posts.checkLivePosts); no other fact can lead. It is
+ *   required: a plan with no post check would lead with an unlinked fact.
  *   recent* lists hold the last six issues' picks (RECENT_WINDOW), oldest
  *   first; every id in them is excluded, so a fact or species used there
  *   never repeats, and the last fact id names the previous issue's service.
@@ -109,10 +116,11 @@ function pickLeadFact(dateET, recentFactIds, recheckedFactIds) {
  *   for this send; any other flagged fact is never picked.
  * @returns {{ leadFact: object|null, idItem: object|null, reason?: string }}
  */
-function planIssue({ sendDate, recentFactIds = [], recentSpeciesSlugs = [], recheckedFactIds = [] }) {
+function planIssue({ sendDate, livePostFactIds, recentFactIds = [], recentSpeciesSlugs = [], recheckedFactIds = [] }) {
+  if (!Array.isArray(livePostFactIds)) throw new Error('pest-insider plan: livePostFactIds must list the facts whose post is live');
   const dateET = sendDateET(sendDate);
-  const leadFact = pickLeadFact(dateET, recentFactIds, recheckedFactIds);
-  if (!leadFact) return { leadFact: null, idItem: null, reason: 'no_fact_for_month' };
+  const { fact: leadFact, reason } = pickLeadFact(dateET, recentFactIds, recheckedFactIds, livePostFactIds);
+  if (!leadFact) return { leadFact: null, idItem: null, reason };
   const idItem = pickSpecies({ dateET, fact: leadFact, recentSpeciesSlugs });
   if (!idItem) return { leadFact, idItem: null, reason: 'no_species' };
   return { leadFact, idItem };
