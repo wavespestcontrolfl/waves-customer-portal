@@ -58,6 +58,7 @@ jest.mock('../services/estimate-accepted-email', () => ({
 }));
 jest.mock('../services/appointment-tagger', () => ({
   onServiceScheduled: jest.fn(async () => ({})),
+  classifyAppointmentType: jest.fn(() => ({ tag: 'lawn', label: 'Lawn Care' })),
 }));
 jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
@@ -76,6 +77,7 @@ const express = require('express');
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 
 const dateOnly = (value) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10));
 
@@ -231,6 +233,295 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test.each([false, true])('a booked visit with an old hold expiry is offered once (already linked: %s)', async (linked) => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: linked ? estimateId : null,
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
+      },
+    });
+    const acceptance = await getAcceptance(token);
+    expect(acceptance.mode).toBe('existing_appointment');
+    expect(acceptance.appointment.id).toBe(id);
+    expect(acceptance.appointment).not.toHaveProperty('reservationExpiresAt');
+  });
+
+  test('an open picker and its retry reuse the exact visit staff already booked', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    // A separate legacy hold can still coexist briefly when staff created a
+    // booking instead of linking the hold. The booked row wins; the hold can
+    // never become a second first visit.
+    await visit(mockTransaction, {
+      customerId: null, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: estimateId,
+        status: 'pending',
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+      },
+    });
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: {
+        source_estimate_id: estimateId,
+        reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'"),
+      },
+    });
+    const reloaded = await getAcceptance(token);
+    expect(reloaded.appointment.id).toBe(id);
+    expect(reloaded.appointment).not.toHaveProperty('reservationExpiresAt');
+    const body = { slotId: `${CHOSEN_DATE}_09-00_unassigned`, paymentMethodPreference: 'pay_at_visit' };
+    const response = await putAccept(token, body);
+    expect({ status: response.status, error: (await response.json()).error }).toEqual({ status: 200, error: undefined });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('accepted');
+    const firstVisits = await mockTransaction('scheduled_services')
+      .where({ customer_id: customerId, source_estimate_id: estimateId, scheduled_date: CHOSEN_DATE }).pluck('id');
+    expect(firstVisits).toEqual([id]);
+
+    const beforeRetry = await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId }).pluck('id');
+    const retry = await putAccept(token, body);
+    expect(retry.status).toBe(200);
+    expect(await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId }).pluck('id'))
+      .toEqual(beforeRetry);
+  });
+
+  test('cancelled history at the submitted coordinates does not hide the estimate\'s new live hold', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    let bookingDate = CHOSEN_DATE;
+    for (let i = 0; i < 30 && await require('../services/scheduling/blackout-dates').isBlackoutDate(bookingDate, mockTransaction); i += 1) {
+      bookingDate = etDateString(addETDays(new Date(`${bookingDate}T12:00:00Z`), 1));
+    }
+    expect(await require('../services/scheduling/blackout-dates').isBlackoutDate(bookingDate, mockTransaction)).toBe(false);
+    const cancelledId = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: bookingDate,
+      extra: { source_estimate_id: estimateId, status: 'cancelled' },
+    });
+    const holdId = await visit(mockTransaction, {
+      customerId: null, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: bookingDate,
+      extra: {
+        source_estimate_id: estimateId,
+        status: 'pending',
+        reservation_expires_at: mockTransaction.raw("NOW() + INTERVAL '10 minutes'"),
+      },
+    });
+    expect(await mockTransaction('scheduled_services')
+      .where({ source_estimate_id: estimateId, scheduled_date: bookingDate, window_start: '09:00', technician_id: null })
+      .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+      .whereNotNull('customer_id'))
+      .toHaveLength(0);
+    expect(await mockTransaction('scheduled_services').where({ id: holdId }).first('reservation_expires_at'))
+      .toEqual(expect.objectContaining({ reservation_expires_at: expect.any(Date) }));
+
+    const response = await putAccept(token, {
+      slotId: `${bookingDate}_09-00_unassigned`,
+      paymentMethodPreference: 'pay_at_visit',
+    });
+
+    const payload = await response.json();
+    expect({ status: response.status, payload }).toEqual({
+      status: 200,
+      payload: expect.objectContaining({ success: true }),
+    });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('accepted');
+    expect(await mockTransaction('scheduled_services').where({ id: cancelledId }).first('status', 'customer_id'))
+      .toMatchObject({ status: 'cancelled', customer_id: customerId });
+    expect(await mockTransaction('scheduled_services').where({ id: holdId }).first('status', 'customer_id', 'reservation_expires_at'))
+      .toMatchObject({ status: 'pending', customer_id: customerId, reservation_expires_at: null });
+  });
+
+  test('a second eligible booking committed while acceptance waits for the date lock makes recovery fail closed', async () => {
+    // This case needs two independently committed transactions. Replace the
+    // per-test rollback fixture with committed synthetic rows, then clean them
+    // explicitly after the request's own outer transaction is rolled back.
+    await mockTransaction.rollback();
+    mockTransaction = null;
+    let seeded;
+    let firstId;
+    let secondId;
+    await db.transaction(async (seedTrx) => {
+      seeded = await fixture(seedTrx);
+      firstId = await visit(seedTrx, {
+        customerId: seeded.customerId,
+        key: 'lawn_care_monthly',
+        type: 'Monthly Lawn Care Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId },
+      });
+    });
+    mockTransaction = await db.transaction();
+    const blocker = await db.transaction();
+    const observer = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    let blockerOpen = true;
+    let request;
+    try {
+      await acquireOccupancyLock(blocker, CHOSEN_DATE);
+      request = putAccept(seeded.token, {
+        slotId: `${CHOSEN_DATE}_09-00_unassigned`,
+        paymentMethodPreference: 'pay_at_visit',
+      });
+
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const rows = await observer('pg_stat_activity')
+          .whereRaw('datname = current_database()')
+          .where({ wait_event_type: 'Lock' })
+          .where('query', 'like', '%pg_advisory_xact_lock%')
+          .select('pid');
+        waiting = rows.length > 0;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+
+      secondId = await visit(blocker, {
+        customerId: seeded.customerId,
+        key: 'lawn_care_monthly',
+        type: 'Monthly Lawn Care Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId },
+      });
+      await blocker.commit();
+      blockerOpen = false;
+
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+      expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
+      const owners = await mockTransaction('scheduled_services').whereIn('id', [firstId, secondId]).pluck('customer_id');
+      expect(owners).toHaveLength(2);
+      expect(new Set(owners)).toEqual(new Set([seeded.customerId]));
+    } finally {
+      if (blockerOpen) await blocker.rollback().catch(() => {});
+      if (request) await request.catch(() => {});
+      await observer.destroy();
+      await mockTransaction?.rollback().catch(() => {});
+      mockTransaction = null;
+      if (seeded) {
+        await db('scheduled_services').where({ source_estimate_id: seeded.estimateId }).del();
+        await db('estimates').where({ id: seeded.estimateId }).del();
+        await db('customers').where({ id: seeded.customerId }).del();
+      }
+    }
+  });
+
+  test('an open picker cannot adopt a moved hour or assigned technician', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, window_start: '11:00', window_end: '13:00' },
+    });
+    const movedHour = await putAccept(token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` });
+    expect(movedHour.status).toBe(409);
+    expect(await movedHour.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+
+    const technicianId = randomUUID();
+    await mockTransaction('technicians').insert({
+      id: technicianId, name: 'Assigned fixture', role: 'technician', active: true,
+      employment_status: 'active', field_dispatchable: true,
+    });
+    await mockTransaction('scheduled_services').where({ source_estimate_id: estimateId })
+      .update({ window_start: '09:00', window_end: '11:00', technician_id: technicianId });
+    const movedTech = await putAccept(token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` });
+    expect(movedTech.status).toBe(409);
+    expect(await movedTech.json()).toMatchObject({ code: 'RESERVATION_EXPIRED' });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).toBe('sent');
+  });
+
+  test('an open picker refuses an ambiguous duplicate or a free assessment at the submitted coordinates', async () => {
+    const ambiguous = await fixture(mockTransaction);
+    for (let i = 0; i < 2; i += 1) {
+      await visit(mockTransaction, {
+        customerId: ambiguous.customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+        extra: { source_estimate_id: ambiguous.estimateId },
+      });
+    }
+    expect((await putAccept(ambiguous.token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` })).status).toBe(409);
+    expect((await mockTransaction('estimates').where({ id: ambiguous.estimateId }).first()).status).toBe('sent');
+
+    const free = await fixture(mockTransaction);
+    await assessmentVisit(mockTransaction, free.customerId, {
+      source_estimate_id: free.estimateId, scheduled_date: CHOSEN_DATE,
+    });
+    expect((await putAccept(free.token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` })).status).toBe(409);
+    expect((await mockTransaction('estimates').where({ id: free.estimateId }).first()).status).toBe('sent');
+  });
+
+  test('an open picker never adopts another customer\'s visit even when the estimate and hour stamps match', async () => {
+    const owner = await fixture(mockTransaction);
+    const other = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId: other.customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: owner.estimateId },
+    });
+    expect((await putAccept(owner.token, { slotId: `${CHOSEN_DATE}_09-00_unassigned` })).status).toBe(409);
+    expect((await mockTransaction('estimates').where({ id: owner.estimateId }).first()).status).toBe('sent');
+    expect((await mockTransaction('scheduled_services').where({ id }).first()).customer_id).toBe(other.customerId);
+  });
+
+  test('locked recovery refuses a booking whose customer owner is cleared before its row lock', async () => {
+    await mockTransaction.rollback();
+    mockTransaction = null;
+    let seeded;
+    let bookedId;
+    await db.transaction(async (seedTrx) => {
+      seeded = await fixture(seedTrx);
+      bookedId = await visit(seedTrx, {
+        customerId: seeded.customerId,
+        key: 'lawn_care_monthly',
+        type: 'Monthly Lawn Care Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId },
+      });
+    });
+    mockTransaction = await db.transaction();
+    const ownerChange = await db.transaction();
+    const observer = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    let ownerChangeOpen = true;
+    let request;
+    try {
+      const { rows: [{ pid }] } = await ownerChange.raw('SELECT pg_backend_pid()::int AS pid');
+      await ownerChange('scheduled_services').where({ id: bookedId }).forUpdate().first();
+      await ownerChange('scheduled_services').where({ id: bookedId }).update({ customer_id: null });
+
+      // Both unlocked probes still see the committed owner. The request then
+      // waits at its final FOR UPDATE, where the expected customer must be
+      // part of the predicate rather than restored from the stale preflight.
+      request = putAccept(seeded.token, {
+        slotId: `${CHOSEN_DATE}_09-00_unassigned`,
+        paymentMethodPreference: 'pay_at_visit',
+      });
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const result = await observer.raw(`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND ?::int = ANY(pg_blocking_pids(pid))
+        ) AS waiting`, [pid]);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      await ownerChange.commit();
+      ownerChangeOpen = false;
+
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: expect.stringContaining('no longer available') });
+      expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
+      expect((await mockTransaction('scheduled_services').where({ id: bookedId }).first()).customer_id).toBeNull();
+    } finally {
+      if (ownerChangeOpen) await ownerChange.rollback().catch(() => {});
+      if (request) await request.catch(() => {});
+      await observer.destroy();
+      await mockTransaction?.rollback().catch(() => {});
+      mockTransaction = null;
+      if (seeded) {
+        await db('scheduled_services').where({ source_estimate_id: seeded.estimateId }).del();
+        await db('estimates').where({ id: seeded.estimateId }).del();
+        await db('customers').where({ id: seeded.customerId }).del();
+      }
+    }
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);
@@ -291,6 +582,134 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId, { source_estimate_id: estimateId });
     expect((await getAcceptance(token)).mode).not.toBe('existing_appointment');
+  });
+
+  test('a legacy unflagged re-service is neither offered nor adopted and repriced', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction, {
+      data: PEST_DATA, monthly: 15, annual: 180,
+    });
+    const callbackId = await visit(mockTransaction, {
+      customerId,
+      key: 'pest_re_service',
+      type: 'Quarterly Pest Control Service',
+      date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, is_callback: false, estimated_price: 0 },
+    });
+
+    expect((await getAcceptance(token)).mode).not.toBe('existing_appointment');
+    const response = await putAccept(token, { existingAppointmentId: callbackId });
+
+    expect(response.status).toBe(409);
+    expect(await mockTransaction('scheduled_services').where({ id: callbackId }).first())
+      .toMatchObject({ customer_id: customerId, source_estimate_id: estimateId, estimated_price: '0.00' });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).not.toBe('accepted');
+  });
+
+  test.each([
+    ['legacy re-service', 'pest_re_service'],
+    ['free assessment', 'lawn_inspection'],
+  ])('locked adoption uses the refreshed catalog to refuse a visit relabelled as a %s after preflight', async (_label, replacementKey) => {
+    await mockTransaction.rollback();
+    mockTransaction = null;
+    let seeded;
+    let bookedId;
+    await db.transaction(async (seedTrx) => {
+      seeded = await fixture(seedTrx, { data: PEST_DATA, monthly: 15, annual: 180 });
+      bookedId = await visit(seedTrx, {
+        customerId: seeded.customerId,
+        key: 'pest_general_quarterly',
+        type: 'Quarterly Pest Control Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId, estimated_price: 0 },
+      });
+    });
+    mockTransaction = await db.transaction();
+    const relabel = await db.transaction();
+    const observer = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    let relabelOpen = true;
+    let request;
+    try {
+      const { rows: [{ pid }] } = await relabel.raw('SELECT pg_backend_pid()::int AS pid');
+      const replacementServiceId = await serviceId(relabel, replacementKey);
+      await relabel('scheduled_services').where({ id: bookedId }).forUpdate().first();
+      await relabel('scheduled_services').where({ id: bookedId }).update({
+        service_id: replacementServiceId,
+        is_callback: false,
+      });
+
+      request = putAccept(seeded.token, {
+        existingAppointmentId: bookedId,
+        paymentMethodPreference: 'pay_at_visit',
+      });
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const result = await observer.raw(`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND ?::int = ANY(pg_blocking_pids(pid))
+        ) AS waiting`, [pid]);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      await relabel.commit();
+      relabelOpen = false;
+
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
+      expect(await mockTransaction('scheduled_services').where({ id: bookedId }).first())
+        .toMatchObject({ customer_id: seeded.customerId, service_id: replacementServiceId, estimated_price: '0.00' });
+    } finally {
+      if (relabelOpen) await relabel.rollback().catch(() => {});
+      if (request) await request.catch(() => {});
+      await observer.destroy();
+      await mockTransaction?.rollback().catch(() => {});
+      mockTransaction = null;
+      if (seeded) {
+        await db('scheduled_services').where({ source_estimate_id: seeded.estimateId }).del();
+        await db('estimates').where({ id: seeded.estimateId }).del();
+        await db('customers').where({ id: seeded.customerId }).del();
+      }
+    }
+  });
+
+  test('an accepted one-time retry still offers booking when its only stamped row is a legacy re-service', async () => {
+    const oneTimeData = {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [{ name: 'German Roach Cleanout', price: 250 }], membershipFee: 0 },
+      },
+    };
+    const { customerId, estimateId, token } = await fixture(mockTransaction, {
+      data: oneTimeData, monthly: 0, annual: 0,
+    });
+    await mockTransaction('estimates').where({ id: estimateId }).update({
+      status: 'accepted',
+      accepted_at: new Date(),
+      accepted_service_mode: 'one_time',
+      price_locked_at: new Date(),
+      onetime_total: 250,
+    });
+    const callbackId = await visit(mockTransaction, {
+      customerId,
+      key: 'pest_re_service',
+      type: 'Pest Control Re-Service',
+      date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, is_callback: false, estimated_price: 0 },
+    });
+
+    const response = await putAccept(token);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      alreadyAccepted: true,
+      nextStep: 'book_one_time',
+      reservationCommitted: false,
+      bookingUrl: expect.stringContaining(`estimate_id=${estimateId}`),
+    });
+    expect(await mockTransaction('scheduled_services').where({ id: callbackId }).first())
+      .toMatchObject({ customer_id: customerId, estimated_price: '0.00' });
   });
 
   test('accept: a stale page posting the assessment id is refused and the assessment is not restamped', async () => {

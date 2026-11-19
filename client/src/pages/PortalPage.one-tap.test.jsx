@@ -179,6 +179,69 @@ describe('one-tap purchase CTA gating', () => {
     expect(screen.getByText(/confirmation email and an app notification/)).toBeInTheDocument();
   });
 
+  it('a staff-claimed appointment stays selected and shows office resolution instead of re-picking', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      purchaseId: 'p-1', estimateId: 'est-1', serviceKey: 'lawn_care', label: 'Lawn Care',
+      perVisit: 84, cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+      terms: { version: 'v1', text: 'Server terms text.' }, hasCardOnFile: true, holdMinutes: 15,
+      slots: {
+        primary: [{ slotId: 'slot-1', date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', techFirstName: 'Adam' }],
+        expander: [], nearby: false,
+      },
+    });
+    api.oneTapReserve.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15 });
+    api.oneTapConfirm.mockRejectedValue(Object.assign(new Error('office review needed'), {
+      status: 409, code: 'RESERVATION_CLAIMED', officeResolution: true,
+    }));
+
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+    fireEvent.click(await screen.findByText('Agree and choose a time'));
+    fireEvent.click(await screen.findByText(/Arrival 8:00 AM–10:00 AM/));
+    await screen.findByText(/held for 15 minutes/);
+    fireEvent.click(screen.getByText('Confirm'));
+
+    expect(await screen.findByText(/office has already booked this appointment/i)).toBeInTheDocument();
+    expect(screen.getByText(/call \(941\) 297-5749/i)).toBeInTheDocument();
+    expect(screen.queryByText('Change time')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Call office' })).toHaveAttribute('href', 'tel:+19412975749');
+    expect(screen.getByText(/Thursday, Aug 20, 8:00 AM–10:00 AM/)).toBeInTheDocument();
+    expect(api.oneTapSlots).not.toHaveBeenCalled();
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
+    expect(screen.queryByText('This offer changed')).not.toBeInTheDocument();
+
+    // Closing to call the office is allowed, but the committed appointment
+    // and purchase pointer are not an abandoned hold and must not be released.
+    fireEvent.click(screen.getByLabelText('Close purchase'));
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: /Add Lawn Care/ })).not.toBeInTheDocument());
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
+  });
+
+  it('a card-return resume restores the claimed appointment directly in office resolution', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_claim&redirect_status=succeeded&one_tap_resume=p-claim');
+    try {
+      api.getPropertyRecommendations.mockResolvedValue(recommendations({ cards: [] }));
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue({
+        purchaseId: 'p-claim', estimateId: 'est-1', status: 'reserved', open: true,
+        serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 84,
+        cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+        terms: { version: 'v1', text: 'Server terms text.' },
+        hasCardOnFile: true, holdLive: true, officeResolution: true, holdMinutes: 15,
+        slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', holdExpiresAt: null },
+      });
+
+      renderDashboard();
+      expect(await screen.findByText(/office has already booked this appointment/i)).toBeInTheDocument();
+      expect(screen.getByText(/Thursday, Aug 20, 8:00 AM–10:00 AM/)).toBeInTheDocument();
+      expect(screen.queryByText('Change time')).not.toBeInTheDocument();
+      expect(api.oneTapSlots).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
   // Owner 2026-11-11: the purchase screens show the discount on the service
   // being added and the new price of the services the customer already has.
   it('shows the WaveGuard discount on the new service and the new price of current services, then what the purchase applied', async () => {

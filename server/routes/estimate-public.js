@@ -23,7 +23,8 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, paidEstimateVisitsQuery } = require('../services/assessment-booking');
+const { isReService, excludeReServices } = require('../services/re-service');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -90,6 +91,8 @@ const {
   lineFlagsBlockPercentDiscount,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
+const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
+const { UPCOMING_SERVICE_STATUSES } = require('../services/visit-context/statuses');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1809,6 +1812,25 @@ function adoptableAppointmentStatuses() {
     : ['pending', 'confirmed'];
 }
 
+async function bookedAtSubmittedSlot(database, estimate, data, coordinates, adoptableStatuses) {
+  const claims = await database('scheduled_services')
+    .where(coordinates)
+    .whereIn('scheduled_services.status', UPCOMING_SERVICE_STATUSES)
+    .whereNotNull('scheduled_services.customer_id')
+    .select('scheduled_services.customer_id');
+  if (!claims.length) return { claimed: false, appointment: null };
+  if (!estimate.customer_id || claims.some(row => String(row.customer_id) !== String(estimate.customer_id))) {
+    return { claimed: true, appointment: null };
+  }
+  const appointment = await findLinkedUpcomingAppointment(estimate, data, {
+    database,
+    bookedSlotMatch: { ...coordinates, 'scheduled_services.customer_id': estimate.customer_id },
+    serviceModes: adoptionServiceModesForContract(estimate, data),
+    adoptableStatuses,
+  });
+  return { claimed: true, appointment };
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -1846,8 +1868,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      liveServiceOrHold(builder);
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -1867,6 +1888,9 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     })
     .orderBy('scheduled_services.scheduled_date', 'asc')
     .orderBy('scheduled_services.window_start', 'asc')
+    // At the same hour PostgreSQL sorts a linked customer's booking ahead of
+    // a customerless hold. Reloading the picker retains the real appointment.
+    .orderBy('scheduled_services.customer_id', 'asc')
     // Unique final key: scheduled_date + window_start is not a total order
     // (bundled/multi-property visits tie), and the fallback below paginates —
     // without a stable tiebreaker LIMIT/OFFSET pages can repeat or skip tied
@@ -1889,11 +1913,35 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     });
 
   if (requestedId) q.where('scheduled_services.id', requestedId);
+  if (opts.bookedSlotMatch) q.where(opts.bookedSlotMatch);
+  const anyModeFamilyKeys = new Set([
+    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'recurring' }),
+    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'one_time' }),
+  ]);
+  const familyKeys = estimateFamilyKeysForAdoption(estimate, data, {
+    serviceMode: opts.serviceMode,
+    serviceModes: opts.serviceModes,
+  });
   // Assessment visits never compete for the estimate-linked slot: filtered in
   // the query so an earlier linked assessment cannot hide a later linked paid
   // visit behind .first() (the customer-wide fallback only sees unclaimed
   // rows, so it could never recover that one).
-  let row = await excludeAssessmentBookings(q).first();
+  let row;
+  if (opts.bookedSlotMatch) {
+    // A recovered slot is an identity proof, not a best-effort search. Apply
+    // the same paid-family filter as normal adoption and require exactly one
+    // result; duplicate staff bookings at the signed coordinates are
+    // ambiguous and must send the customer back to the picker.
+    const matches = await excludeReServices(excludeAssessmentBookings(q));
+    const eligible = (Array.isArray(matches) ? matches : []).filter((candidate) => (
+      !isAssessmentVisit(candidate)
+      && (anyModeFamilyKeys.size === 0 || appointmentMatchesEstimateFamily(candidate, familyKeys))
+    ));
+    if (eligible.length !== 1) return null;
+    [row] = eligible;
+  } else {
+    row = await excludeReServices(excludeAssessmentBookings(q)).first();
+  }
 
   // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
   // r8 P1): a mixed estimate whose linked row is a recurring-family visit
@@ -1904,14 +1952,6 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // exemption: when the estimate has NO derivable service families under ANY
   // mode (guarantee-only / invoice-only shapes with no service lists), the
   // explicit link keeps its historical precedence.
-  const anyModeFamilyKeys = new Set([
-    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'recurring' }),
-    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'one_time' }),
-  ]);
-  const familyKeys = estimateFamilyKeysForAdoption(estimate, data, {
-    serviceMode: opts.serviceMode,
-    serviceModes: opts.serviceModes,
-  });
   if (row && anyModeFamilyKeys.size > 0 && !appointmentMatchesEstimateFamily(row, familyKeys)) {
     row = null;
   }
@@ -1919,6 +1959,8 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // no-derivable-family exemption above (the query already filters them;
   // this guards any caller connection that does not).
   if (row && isAssessmentVisit(row)) row = null;
+
+  if (!row && opts.bookedSlotMatch) return null;
 
   // Customer-wide fallback (gated): a customer who already has an upcoming
   // appointment for the SAME service family shouldn't be pushed through the
@@ -1963,7 +2005,6 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         const cw = baseQuery()
           .where('customer_id', estimate.customer_id)
           .whereNull('source_estimate_id')
-          .whereNull('reservation_expires_at')
           // Candidate rows carry their catalog identity so classification
           // survives stale service_type labels (codex #3228 r5).
           .leftJoin('services', 'services.id', 'scheduled_services.service_id')
@@ -1973,7 +2014,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
             'services.name as catalog_service_name',
           );
         if (requestedId) cw.where('scheduled_services.id', requestedId);
-        const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
+        const candidates = await excludeReServices(cw).limit(CANDIDATE_PAGE_SIZE).offset(offset);
         if (!Array.isArray(candidates) || candidates.length === 0) break;
         row = null;
         for (const cand of candidates) {
@@ -10688,8 +10729,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
 
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
-    const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
-    const existingAppointmentId = req.body && typeof req.body.existingAppointmentId === 'string' ? req.body.existingAppointmentId.trim() : '';
+    let slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
+    let existingAppointmentId = req.body && typeof req.body.existingAppointmentId === 'string' ? req.body.existingAppointmentId.trim() : '';
     if (slotId && existingAppointmentId) {
       return res.status(400).json({ error: 'Choose either a new slot or the existing appointment, not both' });
     }
@@ -10763,54 +10804,67 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       code: 'RESERVATION_EXPIRED',
     };
 
+    // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
+    const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
+    // ONE snapshot of the adoptable status set for this request (preflight
+    // + under-lock UPDATE) — see adoptableAppointmentStatuses.
+    const acceptAdoptableStatuses = adoptableAppointmentStatuses();
+    let bookedSlotMatch = null;
+    let bookedSlotCoordinates = null;
+    let recoveredAppointment = null;
     let reservationRow = null;
     if (slotId) {
       const parsed = slotReservation._internals.parseSlotId(slotId);
       if (!parsed) return res.status(400).json({ error: 'invalid slotId format' });
 
-      // Find the reservation row for THIS estimate matching the requested
-      // slot. Prevents a malicious client from passing a slotId reserved
-      // for someone else's estimate.
-      reservationRow = await db('scheduled_services')
-        .where({
-          source_estimate_id: estimate.id,
-          scheduled_date: parsed.date,
-          window_start: parsed.windowStart,
-        })
-        .modify((q) => { if (parsed.techId) q.where('technician_id', parsed.techId); })
-        .whereNotNull('reservation_expires_at')
-        // Grace measured by POSTGRES, not this process's clock (pre-push
-        // audit P1): commitReservation's authoritative check compares against
-        // NOW(), so a JS-side Date.now() comparison here could refuse — under
-        // app/DB clock skew — a hold the commit would have graduated. That is
-        // this very bug in miniature.
-        .select('*', db.raw('(reservation_expires_at < NOW() - make_interval(mins => ?)) AS _beyond_grace', [holdGraceMinutes]))
-        // NEWEST hold for the slot, explicitly (codex r3 P1). A customer
-        // whose hold lapsed can reserve the same slot again before the
-        // grace-delayed sweep removes the old row — reserveSlot ignores the
-        // expired one and mints a fresh live row, so two rows match here.
-        // Unordered, `.first()` could hand back the stale one: the grace
-        // would admit it, and commitReservation would then see the
-        // customer's OWN new live hold as a rival and refuse a perfectly
-        // good signup with SLOT_UNAVAILABLE (or a beyond-grace old row would
-        // 409 the preflight before the live row was ever considered).
-        .orderBy('reservation_expires_at', 'desc')
-        .first();
+      const bookedCoordinates = {
+        'scheduled_services.source_estimate_id': estimate.id,
+        'scheduled_services.scheduled_date': parsed.date,
+        'scheduled_services.window_start': parsed.windowStart,
+        'scheduled_services.technician_id': parsed.techId || null,
+      };
+      const checkBooking = () => bookedAtSubmittedSlot(db, estimate, estData, bookedCoordinates, acceptAdoptableStatuses);
+      const claim = await checkBooking();
+      if (claim.claimed) {
+        if (!claim.appointment) return res.status(409).json(HOLD_EXPIRED_409);
+        bookedSlotCoordinates = bookedCoordinates;
+        bookedSlotMatch = { ...bookedCoordinates, 'scheduled_services.customer_id': estimate.customer_id };
+        recoveredAppointment = claim.appointment;
+        existingAppointmentId = recoveredAppointment.id;
+        slotId = '';
+        reservationRow = null;
+      } else {
+        // Find the unclaimed reservation row for THIS estimate and submitted
+        // coordinates. The estimate's own recently lapsed hold retains its
+        // database-clock grace; another estimate's hold never does.
+        reservationRow = await db('scheduled_services')
+          .where({
+            source_estimate_id: estimate.id,
+            scheduled_date: parsed.date,
+            window_start: parsed.windowStart,
+            technician_id: parsed.techId || null,
+          })
+          .whereNull('customer_id')
+          .whereNotNull('reservation_expires_at')
+          .select('*', db.raw('(reservation_expires_at < NOW() - make_interval(mins => ?)) AS _beyond_grace', [holdGraceMinutes]))
+          .orderBy('reservation_expires_at', 'desc')
+          .first();
 
-      // Row gone = swept past the grace (or never reserved): same recovery
-      // either way, the customer re-picks. Both 409s carry the code the
-      // client keys its "hold expired" banner on.
-      if (!reservationRow) {
-        return res.status(409).json(HOLD_EXPIRED_409);
-      }
-      if (reservationRow._beyond_grace) {
-        return res.status(409).json(HOLD_EXPIRED_409);
+        if (!reservationRow || reservationRow._beyond_grace) {
+          // Re-read through the strict booked identity in case staff claimed
+          // the row between the linked-row probe and this hold query.
+          recoveredAppointment = (await checkBooking()).appointment;
+          if (!recoveredAppointment) return res.status(409).json(HOLD_EXPIRED_409);
+          bookedSlotCoordinates = bookedCoordinates;
+          bookedSlotMatch = { ...bookedCoordinates, 'scheduled_services.customer_id': estimate.customer_id };
+          existingAppointmentId = recoveredAppointment.id;
+          slotId = '';
+          reservationRow = null;
+        }
       }
     }
 
-    // Parse estimate data + detect one-time-only vs recurring (read-only — safe outside txn)
-    const rawEstData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
-    const estData = withSupplementedRecurringServices(rawEstData) || rawEstData || {};
     // A guarantee-only renewal has NO visit: its invoice-mode accept never
     // books, and /reserve rejects it — so a slotId here can only come from a
     // crafted/stale client holding a pre-gate reservation. Reject rather than
@@ -10876,11 +10930,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // row stays adoptable under ANY of them; cross-family protection (codex
     // #3228 r4/r8) is preserved because the intersection is a subset of each
     // single mode's family set.
-    // ONE snapshot of the adoptable status set for this request (preflight
-    // + under-lock UPDATE) — see adoptableAppointmentStatuses.
-    const acceptAdoptableStatuses = adoptableAppointmentStatuses();
     const existingAppointmentRow = existingAppointmentId
-      ? await findLinkedUpcomingAppointment(estimate, estData, {
+      ? recoveredAppointment || await findLinkedUpcomingAppointment(estimate, estData, {
         appointmentId: existingAppointmentId,
         serviceModes: adoptionServiceModesForContract(estimate, estData),
         adoptableStatuses: acceptAdoptableStatuses,
@@ -12196,6 +12247,20 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
       let acceptPreLockedTechId = null;
+      if (bookedSlotMatch) {
+        // Public reserve and staff schedule writers take the same day lock.
+        // Prove uniqueness again before the transaction takes any row locks.
+        await acquireOccupancyLock(trx, bookedSlotMatch['scheduled_services.scheduled_date']);
+        // Probe the raw signed coordinates again so a foreign claim or an
+        // ambiguous second booking cannot hide behind the expected-owner
+        // match used by the final locked read below.
+        const { appointment } = await bookedAtSubmittedSlot(
+          trx, estimate, estData, bookedSlotCoordinates, acceptAdoptableStatuses,
+        );
+        if (!appointment || String(appointment.id) !== String(existingAppointmentRow?.id)) {
+          throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
+        }
+      }
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -13211,6 +13276,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         try {
           const committedAppointment = await slotReservation.commitReservation({
             scheduledServiceId: reservationRow.id,
+            expectUnclaimed: true,
+            expectedSourceEstimateId: estimate.id,
             customerId,
             paymentMethodPreference,
             estimatedPrice: visitEstimatedPrice,
@@ -13261,7 +13328,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             err.code = 'RESERVATION_EXPIRED';
             throw err;
           }
-          if (commitErr.code === 'SLOT_UNAVAILABLE') {
+          if (commitErr.code === 'SLOT_UNAVAILABLE' || commitErr.code === 'RESERVATION_CLAIMED') {
             const err = new Error('slot no longer available — re-pick a slot');
             err.status = 409;
             err.code = 'SLOT_UNAVAILABLE';
@@ -13283,6 +13350,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           try {
             const committedAppointment = await slotReservation.commitReservation({
               scheduledServiceId: existingAppointmentRow.id,
+              expectUnclaimed: true,
+              expectedSourceEstimateId: estimate.id,
               customerId,
               paymentMethodPreference,
               estimatedPrice: visitEstimatedPrice,
@@ -13332,7 +13401,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               err.code = 'RESERVATION_EXPIRED';
               throw err;
             }
-            if (commitErr.code === 'SLOT_UNAVAILABLE') {
+            if (commitErr.code === 'SLOT_UNAVAILABLE' || commitErr.code === 'RESERVATION_CLAIMED') {
               const err = new Error('slot no longer available — re-pick a slot');
               err.status = 409;
               err.code = 'SLOT_UNAVAILABLE';
@@ -13364,17 +13433,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // one that targets this very visit. A lock_timeout maps to the same
           // recoverable catalog_unavailable the resolver raises.
           {
-            // Whole row: naming reservation_policy_version breaks the
-            // golden-master schemas that predate the capacity columns.
-            const adoptPolicy = await trx('scheduled_services')
-              .where({ id: existingAppointmentRow.id })
-              .first();
-            if (require('../services/scheduling/policy').capacityEnabled() || adoptPolicy?.reservation_policy_version === 2) {
-              try {
-                await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);
-              } catch (lockErr) {
-                throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause: lockErr });
-              }
+            // Every adopted row now needs catalog identity for the free
+            // re-service guard, not only capacity rows. Take the catalog
+            // table lock before the appointment row so a concurrent catalog
+            // write cannot create an ABBA wait with this locked recheck.
+            try {
+              await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);
+            } catch (lockErr) {
+              throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause: lockErr });
             }
           }
           {
@@ -13389,8 +13455,27 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               'services.name as catalog_service_name',
             )
             .where('scheduled_services.id', existingAppointmentRow.id)
+            .where(bookedSlotMatch || {})
             .forUpdate('scheduled_services')
             .first();
+          // EvalPlanQual can return the freshly updated scheduled_services
+          // row after waiting on FOR UPDATE while retaining the join values
+          // from the statement's older snapshot. Resolve the now-locked
+          // row's current service_id again under the catalog table lock.
+          const lockedCatalog = lockedAdoptRow?.service_id
+            ? await trx('services').where({ id: lockedAdoptRow.service_id }).first('service_key', 'name')
+            : null;
+          // Every identity predicate below must judge the same CURRENT
+          // catalog row. A FOR UPDATE wait may return fresh scheduled_service
+          // columns with the outer join's older service values, so using the
+          // joined aliases for assessment/family while only re-service used
+          // lockedCatalog could reprice a visit dispatch just moved to a free
+          // assessment or another family.
+          const lockedIdentityRow = lockedAdoptRow && {
+            ...lockedAdoptRow,
+            catalog_service_key: lockedAdoptRow.service_id ? lockedCatalog?.service_key : null,
+            catalog_service_name: lockedAdoptRow.service_id ? lockedCatalog?.name : null,
+          };
           const lockedAnyModeKeys = new Set([
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),
@@ -13402,9 +13487,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, {
             serviceModes: adoptionServiceModesForContract(estimate, estData),
           });
-          const lockedFamilyOk = !isAssessmentVisit(lockedAdoptRow)
+          const lockedFamilyOk = !isAssessmentVisit(lockedIdentityRow)
+            && !isReService({
+              serviceKey: lockedIdentityRow?.catalog_service_key,
+              serviceName: lockedIdentityRow?.catalog_service_name,
+              serviceType: lockedIdentityRow?.service_type,
+            })
             && (lockedAnyModeKeys.size === 0
-              || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys));
+              || appointmentMatchesEstimateFamily(lockedIdentityRow || {}, lockedFamilyKeys));
           // Property scope under lock, mirroring the preflight's coverage
           // exactly (owner ruling 2026-08-15: the under-lock recheck must
           // never reject a row the preflight admitted). The preflight
@@ -13726,34 +13816,35 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // where createTermForAnnualPrepay defaults the start). Guarding with
         // bare "today" 409'd a legitimate next-term renewal whose current
         // term ends before the booked first visit.
-        const reservedStartRow = await trx('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
-          .orderBy('scheduled_date', 'asc')
-          .first('scheduled_date');
+        const reservedStartRow = await paidEstimateVisitsQuery(trx, {
+          estimateId: estimate.id,
+          customerId,
+        }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        try {
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            customerId,
-            overlapTermStart,
-            false,
-            'Customer already has an annual prepay term through',
-            estimate.id,
-          );
-        } catch (overlapErr) {
-          if (overlapErr && overlapErr.annualPrepayOverlap) {
-            const conflict = estimateAcceptError(
-              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-              409,
+        const assertAnnualPrepayStart = async (termStart) => {
+          try {
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              customerId,
+              termStart,
+              false,
+              'Customer already has an annual prepay term through',
+              estimate.id,
             );
-            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-            throw conflict;
+          } catch (overlapErr) {
+            if (overlapErr && overlapErr.annualPrepayOverlap) {
+              const conflict = estimateAcceptError(
+                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+                409,
+              );
+              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+              throw conflict;
+            }
+            throw overlapErr;
           }
-          throw overlapErr;
-        }
+        };
+        await assertAnnualPrepayStart(overlapTermStart);
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13829,6 +13920,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
+          // Re-check the exact normalized start the term writer is about to
+          // persist. Dispatch can cancel or move the booked anchor after the
+          // preflight above while this transaction retains the customer lock.
+          verifyAnnualPrepayTermStart: async (normalizedStart) => {
+            const finalStart = dateOnly(normalizedStart) || etDateString();
+            if (finalStart === overlapTermStart) return;
+            await assertAnnualPrepayStart(finalStart);
+          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation
@@ -22398,7 +22497,7 @@ function validateRecurringSlotPaymentPreference({
 }
 
 function isReservationHeldAppointment(row = {}) {
-  return !!row?.reservation_expires_at;
+  return row?.customer_id == null && !!row?.reservation_expires_at;
 }
 
 function assertExistingAppointmentUpdateApplied(updatedCount) {
@@ -22832,12 +22931,10 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // A booking bound to this estimate (committed reservation, linked existing
   // appointment, or the converter's auto-scheduled first visit) — enough to
   // know the customer does NOT need the one-time booking link again.
-  const committedAppointment = await db('scheduled_services')
-    .where({ source_estimate_id: estimate.id })
-    .whereNotNull('customer_id')
-    .whereNull('reservation_expires_at')
-    .orderBy('scheduled_date', 'asc')
-    .first('id');
+  const committedAppointment = estimate.customer_id && await paidEstimateVisitsQuery(db, {
+    estimateId: estimate.id,
+    customerId: estimate.customer_id,
+  }).first('scheduled_services.id');
   const reservationCommitted = !!committedAppointment;
 
   // One-time accepts that never booked get the self-serve booking link again.

@@ -75,6 +75,34 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
   });
   afterEach(async () => { await mockConn.rollback(); });
 
+  test('staff route checks retain a booked visit after its old hold stamp expires', async () => {
+    await mockConn('scheduled_services').insert({
+      id: BLOCKER,
+      customer_id: CUSTOMER,
+      technician_id: TECH,
+      status: 'confirmed',
+      estimated_duration_minutes: 480,
+      scheduled_date: DAY,
+      window_start: '09:00',
+      window_end: '17:00',
+      lat: 27.52,
+      lng: -82.4,
+      created_at: '2020-01-03T12:00:00Z',
+      reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 day'"),
+    });
+
+    const result = await checkArrivalPlacement({
+      conn: mockConn,
+      serviceId: TARGET,
+      date: DAY,
+      technicianId: TECH,
+      windowStart: '09:00',
+      windowEnd: '10:00',
+      roads: 'cache',
+    });
+    expect(result).toMatchObject({ feasible: false });
+  });
+
   test('capacity finder reads live blocks, eligibility and whole-hour arrivals from PostgreSQL', async () => {
     const gate = process.env.GATE_SCHEDULING_CAPACITY;
     let trafficSpy;

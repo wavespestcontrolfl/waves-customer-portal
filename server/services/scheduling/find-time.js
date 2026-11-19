@@ -32,6 +32,7 @@ const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
 const { customerWindowAdmits } = require('./customer-windows');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
 // day-end admission rule for customer-facing callers — the
@@ -231,6 +232,9 @@ async function findArrivalWindowSlots(opts) {
           unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         }),
         date, technicianId: tech.id, excludeServiceIds: opts.excludeServiceIds, now,
+        // Staff and customer reads share the same occupancy truth: a booked
+        // visit remains on the route even when its old hold stamp expires.
+        includeClaimedBookings: true,
         // Staff callers only (GATE_TECH_START_POINTS; tech-start-point.js).
         startPoints: opts.techStartPoints === true,
         // The route check: today's route under way continues from
@@ -249,7 +253,11 @@ async function findArrivalWindowSlots(opts) {
   }
   // The road days' routes are driven on Google, only each route's hours near
   // its best (the road band).
-  const onRoads = routes.filter((route) => roadCheck && roads.onRoads(route.date, today, windows));
+  // A newly restored booking changes the route that would be preloaded.
+  // Judge it on cached/conservative travel; never turn occupancy correctness
+  // into incremental provider spend. Unaffected routes keep their road pass.
+  const onRoads = routes.filter((route) => roadCheck && !route.context.restoredBooking
+    && roads.onRoads(route.date, today, windows));
   onRoads.forEach((route) => { route.context.travel = roadTravel; });
   if (onRoads.length) await preloadBandLegs(roadTravel, onRoads);
   for (const route of routes) {
@@ -320,6 +328,11 @@ async function findCapacitySlots(opts) {
       if (absentDays.has(`${tech.id}:${date}`)) continue;
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
+        // Capacity offers and their reserve/commit writers must see the same
+        // claimed bookings, including rows that retain an expired hold stamp.
+        // arrival-route keeps any newly exposed route on cached/conservative
+        // travel, so this consistency check never buys incremental road legs.
+        includeClaimedBookings: true,
         // The requesting estimate's OWN uncommitted hold must not occupy the
         // route it is asking about (codex r16 P1) — the legacy/SSR page no
         // longer adopts that hold, so a tight route could otherwise omit the
@@ -395,8 +408,12 @@ async function findCapacitySlots(opts) {
   // one bounded, request-local budget across the complete calendar horizon.
   for (let pass = 0; pass < 3; pass++) {
     const legs = [];
-    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
-    await travel.preload(legs);
+    for (const candidate of candidates) {
+      if (!candidate.context.restoredBooking) {
+        evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
+      }
+    }
+    if (legs.length) await travel.preload(legs);
   }
   const slots = [];
   // Why each refused candidate was refused (arrival_window, day_overcommitted,
@@ -1298,10 +1315,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .whereNotNull('scheduled_services.window_start')
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .where(liveServiceOrHold)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',

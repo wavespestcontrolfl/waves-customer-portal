@@ -43,6 +43,7 @@ const { violatesSelfServeNotice, visitInsideNoticeWindow } = require('./scheduli
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
+const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const { acquireOccupancyLock, findConflictingVisits, findInterviewConflicts, techScopedConfirmActive, applyTechScope } = require('./scheduling/occupancy');
 const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 
@@ -1773,10 +1774,7 @@ async function reserveSlot({
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-        .andWhere((q) => {
-          q.whereNull('reservation_expires_at')
-            .orWhereRaw('reservation_expires_at > NOW()');
-        })
+        .andWhere(liveServiceOrHold)
         .modify((q) => { if (makeRoom) q.whereNotIn('id', makeRoom.moveIds); })
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
@@ -1800,10 +1798,7 @@ async function reserveSlot({
           .where('scheduled_services.scheduled_date', date)
           .whereNull('scheduled_services.technician_id')
           .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-          .where((q) => {
-            q.whereNull('scheduled_services.reservation_expires_at')
-              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-          })
+          .where(liveServiceOrHold)
           .modify((q) => { if (makeRoom) q.whereNotIn('scheduled_services.id', makeRoom.moveIds); })
           .where((q) => {
             if (zoneSlug) q.orWhere('scheduled_services.zone', zoneSlug);
@@ -1990,7 +1985,7 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, expectedSourceEstimateId?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -2006,6 +2001,13 @@ async function commitReservation({
   preLockedDate = null,
   preLockedTechId = null,
   preparedCapacity = null,
+  // The estimate accept priced an unclaimed hold. If staff linked it after
+  // preflight, acceptance must restart through the booked-appointment
+  // adoption path instead of overwriting that booking's identity or price.
+  expectUnclaimed = false,
+  // Self-serve callers bind the pointer to the estimate that minted the
+  // hold. Checked on the locked row before idempotent replay or any update.
+  expectedSourceEstimateId = null,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2158,6 +2160,17 @@ async function commitReservation({
       || (preparedCapacity && (row.technician_id || null) !== (preRow.technician_id || null))) {
       const err = new Error('reservation moved to another date');
       err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
+    if (expectedSourceEstimateId != null
+      && String(row.source_estimate_id || '') !== String(expectedSourceEstimateId)) {
+      const err = new Error('reservation belongs to another estimate');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
+    if (expectUnclaimed && row.customer_id != null) {
+      const err = new Error('the held appointment was booked before confirmation');
+      err.code = 'RESERVATION_CLAIMED';
       throw err;
     }
     if (!row.reservation_expires_at) {
@@ -2340,10 +2353,7 @@ async function commitReservation({
         .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
         .whereNot('id', scheduledServiceId)
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-        .andWhere((q) => {
-          q.whereNull('reservation_expires_at')
-            .orWhereRaw('reservation_expires_at > NOW()');
-        })
+        .andWhere(liveServiceOrHold)
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
         .first('id');
 

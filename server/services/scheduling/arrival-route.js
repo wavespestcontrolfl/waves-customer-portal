@@ -12,6 +12,7 @@ const { gateEnvValue, multiTechConfirmLive } = require('../../config/feature-gat
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
@@ -199,7 +200,7 @@ async function loadArrivalRouteContext({
   // A caller outside any transaction that must not geocode (a staff save's
   // road purchase, buySaveRoads): read the geocoder's cache only, as the
   // save's own locked read does.
-  cacheLocation = false,
+  cacheLocation = false, includeClaimedBookings = false,
 }) {
   const stored = prospective ? { id: '__candidate__', route_order: null, created_at: now.toISOString(), ...prospective }
     : await conn('scheduled_services')
@@ -244,11 +245,12 @@ async function loadArrivalRouteContext({
     dateStr: date,
     excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
     select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
+      ...(includeClaimedBookings ? [conn.raw('scheduled_services.reservation_expires_at <= NOW() AS hold_lapsed')] : []),
       // An unstamped row inherits the customer's premise, and the co-visit
       // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
       ...CUSTOMER_PREMISE_ALIASES],
-  }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
-      .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
+  }).where(includeClaimedBookings ? liveServiceOrHold : q => q.whereNull('scheduled_services.reservation_expires_at')
+    .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
     .where({ date }).whereNot('block_type', 'available')
     .where(query => query.where('technician_id', techId).orWhereNull('technician_id'))
@@ -278,7 +280,14 @@ async function loadArrivalRouteContext({
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
-    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes);
+    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId
+      && (!includeClaimedBookings || row.customer_id == null) && row.reservation_expires_at)), planningMinutes);
+  // A previously invisible booking changes the route whose travel we would
+  // buy. Certify the changed route with existing answers or the conservative
+  // local model. Ordinary days retain their existing road checks.
+  const restoredBooking = includeClaimedBookings && dayRows.some(row => row.customer_id != null
+    && row.reservation_expires_at != null && (row.technician_id == null || row.technician_id === techId)
+    && (row.hold_lapsed || (excludeEstimateId && row.source_estimate_id === excludeEstimateId)));
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
@@ -288,7 +297,7 @@ async function loadArrivalRouteContext({
   placedAt: prospective ? null : { date: dateOnly(stored.scheduled_date),
     technicianId: stored.technician_id || null, windowStart: String(stored.window_start || '').slice(0, 5) },
   routeOrderPinned,
-  travel, preserveCapacity, blocks,
+  travel, preserveCapacity, blocks, restoredBooking,
   planningMinutes,
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
@@ -1144,6 +1153,7 @@ async function certifyArrivalPlacement(context, options) {
   if (!context) return unverified(null, 'this date');
   if (!capacityEnabled() && !context.preserveCapacity) return evaluateArrivalPlacement(context, options);
   context.travel ||= RouteOptimizer.createSchedulingTravel();
+  if (context.restoredBooking) return evaluateArrivalPlacement(context, options);
   // Recompute departure times after road estimates change a leg. A final
   // uncovered leg retains the conservative model and is labelled accordingly.
   for (let pass = 0; pass < 3; pass++) {
@@ -1163,10 +1173,11 @@ function capacityError(reason = 'route_changed') {
 
 async function prepareArrivalCapacity(options) {
   if (!capacityEnabled() && !options.preserveCapacity) return null;
-  const context = await loadArrivalRouteContext(options);
+  const bookingOptions = { ...options, includeClaimedBookings: true };
+  const context = await loadArrivalRouteContext(bookingOptions);
   if (!context) throw capacityError('route_unverified');
   await certifyArrivalPlacement(context, options);
-  return { options, fingerprint: routeFingerprint(context), travel: context.travel };
+  return { options: bookingOptions, fingerprint: routeFingerprint(context), travel: context.travel };
 }
 
 // Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
@@ -1323,7 +1334,10 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
   // From the office, like every commit-time check (tech-start-point.js):
   // the save probe certified this day from there, so the same order wins.
-  const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
+  const context = await loadArrivalRouteContext({
+    conn: sp, serviceId, date, technicianId: row.technician_id,
+    includeClaimedBookings: true,
+  });
   if (!context) return refuse('no_context');
   if (context.grouped) return refuse('grouped');
   if (staffSave === true) context.travel = staffSaveTravel(date);
@@ -1455,13 +1469,18 @@ async function buySaveRoads({
   const [start, end] = [windowStart, windowEnd].map((value) => String(value ?? '').slice(0, 5) || undefined);
   const work = async () => {
     const load = (extra) => loadArrivalRouteContext({
-      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true, ...extra,
+      conn, serviceId, prospective, date: day, technicianId, changes, cacheLocation: true,
+      includeClaimedBookings: true, ...extra,
     });
     const checkContext = await load({ fromActiveStop: pickerRoadCheckLive(), excludeServiceIds });
     // The route number is read from a context with no exclusions and no active
     // stop (placeMovedVisit); reuse the check's when it is the same one.
     const placeContext = !capacityEnabled()
       && (excludeServiceIds.length || checkContext?.activeStop ? await load({}) : checkContext);
+    // A booked row newly visible through liveServiceOrHold changes the route
+    // whose roads would be purchased. Keep the actual staff check correct,
+    // but leave this preload provider-free for that route.
+    if (checkContext?.restoredBooking || placeContext?.restoredBooking) return;
     const travel = roadTimes.createPickerTravel({ spender, budget });
     // `check: false` = a move that numbers the day but runs no advisory check (Quick Move).
     const reads = [[check && checkContext, { allowInsertion: false }], [placeContext, { place: true }]]
@@ -1492,14 +1511,19 @@ async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, lateDays = false, ...options
 }) {
   const live = pickerRoadCheckLive();
-  const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
+  const context = await loadArrivalRouteContext({
+    fromActiveStop: live,
+    ...options,
+    includeClaimedBookings: true,
+  });
   // `lateDays`: only the staff picked-hour verdict asks for it, so an hour the
   // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}) };
   const roadTimes = require('./hint-road-times');
   // A staff save reads the road times its picker bought; it never buys.
   if (context && roads === 'cache') context.travel = staffSaveTravel(options.date);
-  if (context && live && roads === true && roadTimes.onRoads(options.date, etDateString(new Date()))) {
+  if (context && !context.restoredBooking && live && roads === true
+    && roadTimes.onRoads(options.date, etDateString(new Date()))) {
     context.travel = roadTimes.createPickerTravel({ spender: roadSpender, ...(pickerBudget ? { budget: pickerBudget } : {}) });
     // Three passes, as certifyArrivalPlacement: a re-timed leg is asked again.
     for (let pass = 0; pass < 3; pass++) {

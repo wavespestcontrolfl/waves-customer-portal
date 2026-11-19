@@ -65,6 +65,7 @@ beforeEach(() => {
 afterAll(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
 test('the pre-capacity arrival finder keeps its enumerator\'s refusal counts, per date', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
   enumerateArrivalPlacements.mockImplementation((context) => {
     if (context.date === OPEN_DAY) {
       return { placements: [{ windowStart: '09:00', windowEnd: '10:00', fit }], evaluated: 10, rejections: { arrival_window: 9 } };
@@ -79,6 +80,7 @@ test('the pre-capacity arrival finder keeps its enumerator\'s refusal counts, pe
     [UNVERIFIED_DAY]: { route_unverified: 10 },
     [FULL_DAY]: { arrival_window: 7, return_time: 3 },
   });
+  expect(loadArrivalRouteContext.mock.calls.every(([opts]) => opts.includeClaimedBookings === true)).toBe(true);
 });
 
 test('a new stop (New Appointment) runs the same finder on a prospective context', async () => {
@@ -177,6 +179,39 @@ test('the picker road check: Google on the road days, later days the model', asy
     expect(evaluateArrivalPlacement).not.toHaveBeenCalled();
     // Three passes over the road days' routes, nothing more.
     expect(roadTravel.preload).toHaveBeenCalledTimes(3);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('a newly restored staff booking participates in the route without incremental road preload', async () => {
+  const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+  const roads = require('../services/scheduling/hint-road-times');
+  const roadTravel = { preload: jest.fn(async () => {}), lookup: jest.fn() };
+  const spy = jest.spyOn(roads, 'createPickerTravel').mockReturnValue(roadTravel);
+  loadArrivalRouteContext.mockImplementation(async ({ date }) => ({
+    date,
+    restoredBooking: true,
+    target: { id: 'candidate', service_type: 'pest_control' },
+    rows: [{ id: 'booked-old-stamp', customer_id: 'cust-1' }],
+  }));
+  enumerateArrivalPlacements.mockReturnValue({
+    placements: [{ windowStart: '09:00', windowEnd: '10:00', fit }],
+    evaluated: 1,
+    rejections: {},
+  });
+  try {
+    const result = await findAvailableSlots({
+      ...BASE,
+      dateFrom: ymd(1),
+      dateTo: ymd(1),
+      pickerRoadCheck: true,
+      roadSpender: 'staff-1',
+    });
+    expect(result.slots).toHaveLength(1);
+    expect(loadArrivalRouteContext.mock.calls[0][0].includeClaimedBookings).toBe(true);
+    expect(roadTravel.preload).not.toHaveBeenCalled();
+    expect(enumerateArrivalPlacements.mock.calls.every(([context]) => context.travel === undefined)).toBe(true);
   } finally {
     spy.mockRestore();
   }

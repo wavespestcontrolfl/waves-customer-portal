@@ -71,6 +71,78 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     }
   });
 
+  test('capacity offers and reserve both count a claimed visit with an expired hold stamp', async () => {
+    await f.db('scheduled_services').insert(f.baseStop({
+      source_estimate_id: f.ids.estimates[0],
+      reservation_expires_at: f.db.raw("NOW() - INTERVAL '1 hour'"),
+      window_start: '08:00',
+      window_end: '18:00',
+      estimated_duration_minutes: 600,
+      route_order: 1,
+    }));
+
+    const offers = await findAvailableSlots({ ...f.PIN, dateFrom: f.date, dateTo: f.date,
+      technicianId: f.ids.technician, serviceType: 'pest_control', durationMinutes: 30,
+      includeWeekends: true, topN: 99 });
+
+    expect(offers.slots.some(slot => slot.start_time === '10:00')).toBe(false);
+    await expect(reserveSlot({
+      estimateId: f.ids.estimates[0],
+      slotId: f.signedSlot(f.ids.estimates[0]),
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+  });
+
+  test('capacity offer generation buys no road legs for a restored same-estimate unassigned booking', async () => {
+    const optimizer = require('../services/route-optimizer');
+    const localTravel = optimizer.createSchedulingTravel({ maxRequests: 0 });
+    localTravel.preload = jest.fn(async () => {});
+    const createTravel = jest.spyOn(optimizer, 'createSchedulingTravel').mockReturnValue(localTravel);
+    const find = () => findAvailableSlots({ ...f.PIN, dateFrom: f.date, dateTo: f.date,
+      technicianId: f.ids.technician, serviceType: 'pest_control', durationMinutes: 30,
+      excludeEstimateId: f.ids.estimates[0], includeWeekends: true, topN: 99 });
+    try {
+      await find();
+      expect(localTravel.preload).toHaveBeenCalled();
+      localTravel.preload.mockClear();
+      await f.db('scheduled_services').insert(f.baseStop({
+        technician_id: null,
+        source_estimate_id: f.ids.estimates[0],
+        reservation_expires_at: f.db.raw("NOW() + INTERVAL '1 hour'"),
+      }));
+
+      await find();
+
+      expect(localTravel.preload).not.toHaveBeenCalled();
+    } finally {
+      createTravel.mockRestore();
+    }
+  });
+
+  test('legacy offers and reserve both count a claimed visit with an expired hold stamp', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      await f.db('scheduled_services').insert(f.baseStop({
+        source_estimate_id: f.ids.estimates[1],
+        reservation_expires_at: f.db.raw("NOW() - INTERVAL '1 hour'"),
+        window_start: '08:00',
+        window_end: '18:00',
+        estimated_duration_minutes: 600,
+        route_order: 1,
+      }));
+
+      const offers = await findAvailableSlots({ ...f.PIN, dateFrom: f.date, dateTo: f.date,
+        technicianId: f.ids.technician, serviceType: 'pest_control', durationMinutes: 30,
+        includeWeekends: true, topN: 99 });
+      expect(offers.slots.some(slot => slot.start_time === '10:00')).toBe(false);
+      await expect(reserveSlot({
+        estimateId: f.ids.estimates[0],
+        slotId: f.signedSlot(f.ids.estimates[0]),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+    } finally {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    }
+  });
+
   // The placed visit plans the owner table now (owner 2026-10-30: this fixture's uncadenced
   // 'pest_control' reads one-time pest, 45), so the last gap is the 60 minutes before the block;
   // the row it holds is still its 30-minute allowance.

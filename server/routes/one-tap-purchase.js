@@ -79,6 +79,7 @@ function sendServiceError(res, err) {
   const body = { error: err.message };
   if (err.needsCard) body.needsCard = true;
   if (err.code) body.code = err.code;
+  if (err.officeResolution) body.officeResolution = true;
   res.status(err.status).json(body);
   return true;
 }

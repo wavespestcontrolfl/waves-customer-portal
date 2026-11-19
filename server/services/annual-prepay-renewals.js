@@ -8110,6 +8110,10 @@ async function createTermForAnnualPrepay({
   // `termCreated` is set on it only when this call inserted the term, and the
   // caller records the baseline itself then. A reused term is never recorded.
   deferVisitPriceRecord = null,
+  // Public estimate accepts validate the booked start before conversion.
+  // Let them re-assert the final normalized date immediately before any
+  // annual term lookup or write if that booking changed meanwhile.
+  verifyNormalizedStart = null,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -8120,6 +8124,7 @@ async function createTermForAnnualPrepay({
   const normalizedStart = dateOnly(termStart) || etDateString();
   const normalizedEnd = dateOnly(termEnd) || addMonthsSameDay(normalizedStart, 12);
   if (!normalizedEnd) throw new Error('Could not determine annual prepay term end');
+  if (typeof verifyNormalizedStart === 'function') await verifyNormalizedStart(normalizedStart);
   const nextStatus = await statusForPrepayInvoice(prepayInvoiceId, conn);
   const termCols = await annualPrepayColumns(conn);
   const normalizedCoverageServiceType = coverageServiceType === undefined

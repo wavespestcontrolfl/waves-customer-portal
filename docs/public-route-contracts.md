@@ -46,6 +46,30 @@ and ineligible rows are indistinguishable (no existence oracle); "privacy
 headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 `Referrer-Policy: no-referrer`.
 
+## Authenticated one-tap confirmation
+
+`POST /api/one-tap/:purchaseId/confirm` requires the customer's authentication
+and a UUID purchase ID that belongs to that customer. The route uses
+`GATE_ONE_TAP_PURCHASE` and a limit of ten confirmation attempts per hour.
+The client sends `{ termsAccepted: true }`. The server reads the customer
+identity, IP address and user agent from the authenticated request.
+
+If staff claim the selected appointment before confirmation, the route returns
+`409 { error, code: "RESERVATION_CLAIMED", officeResolution: true }`. The
+appointment keeps its booked customer and price. The portal keeps the current
+purchase and selected appointment on the confirmation screen and shows the
+office number, (941) 297-5749. In that office-resolution state confirm and
+change-time are disabled; closing the overlay does not release or void the
+purchase. Reserve, slot-refresh and release also return the same claim-specific
+409 instead of replacing or abandoning the pointer. A later init or card-return
+resume reopens the exact selected appointment with `officeResolution: true`.
+The existing expired and unavailable responses let the customer choose another
+time.
+
+Confirmation checks the locked appointment's `source_estimate_id` against
+the purchase's synthesized estimate. A mismatch returns `RESERVATION_EXPIRED`.
+The resume response omits appointment details for mismatched estimates.
+
 ## Routes
 
 Customer page-view log (no payload, gate, or header change): the data GET of
@@ -1342,6 +1366,14 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end rules above, which apply in both modes.
+Booking and estimate availability treat a customer-linked appointment as
+booked even when an older staff path left its reservation expiry stamp behind.
+Estimate acceptance may recover that appointment only when exactly one paid,
+adoptable visit still matches the submitted estimate, customer, date, start,
+and technician; those coordinates and its service family are checked again
+under the row lock. An expired unclaimed hold remains available only to its
+own estimate's commit-grace path.
+
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
 commit — `/api/booking/confirm` here and the re-service commit below — prepares

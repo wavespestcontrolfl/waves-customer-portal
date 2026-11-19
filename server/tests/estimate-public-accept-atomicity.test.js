@@ -65,21 +65,25 @@ jest.mock('../models/db', () => {
   // issue order) so tests can assert cross-statement ORDER — e.g. the accept
   // txn's rung-1 occupancy lock landing before its estimates UPDATE.
   const state = { tables: {}, ops: [], tryDepositLedgerBusy: false };
+  const valueAt = (row, col) => {
+    if (Object.hasOwn(row, col)) return row[col];
+    return row[String(col).split('.').pop()];
+  };
 
   const rowMatches = (row, ctx) => {
     for (const eq of ctx.eqFilters) {
       for (const [col, val] of Object.entries(eq)) {
-        if (String(row[col]) !== String(val)) return false;
+        if (String(valueAt(row, col)) !== String(val)) return false;
       }
     }
-    for (const col of ctx.nullCols) if (row[col] != null) return false;
-    for (const col of ctx.notNullCols) if (row[col] == null) return false;
-    for (const [col, arr] of ctx.notIn) if (arr.includes(row[col])) return false;
-    for (const [col, val] of ctx.notEq) if (row[col] === val) return false;
+    for (const col of ctx.nullCols) if (valueAt(row, col) != null) return false;
+    for (const col of ctx.notNullCols) if (valueAt(row, col) == null) return false;
+    for (const [col, arr] of ctx.notIn) if (arr.includes(valueAt(row, col))) return false;
+    for (const [col, val] of ctx.notEq) if (valueAt(row, col) === val) return false;
     for (const [col, op, pattern] of ctx.likes) {
       if (String(op).toLowerCase() !== 'like') return false;
       const prefix = String(pattern).endsWith('%') ? String(pattern).slice(0, -1) : String(pattern);
-      if (!String(row[col] || '').startsWith(prefix)) return false;
+      if (!String(valueAt(row, col) || '').startsWith(prefix)) return false;
     }
     return true;
   };
@@ -542,6 +546,10 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(response.data.invoiceAmount).toBe(448);
     expect(response.data.prepayInvoiceAmount).toBe(448);
     expect(response.data.invoicePayUrl == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).toHaveBeenCalledWith(
+      'est-atomic-1',
+      expect.objectContaining({ verifyAnnualPrepayTermStart: expect.any(Function) }),
+    );
     const NotificationService = require('../services/notification-service');
     const estimateNotice = NotificationService.notifyAdmin.mock.calls.find((call) => call[0] === 'estimate');
     // The full admin text (the bell's detail since the who-and-what copy, #5576)
@@ -834,6 +842,41 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
     expect(res.data.bookingUrl).toContain('estimate_id=est-already-2');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
+  test('another customer\'s stamped visit does not suppress the rightful customer\'s one-time booking retry', async () => {
+    const accepted = recurringPestEstimate({
+      id: 'est-already-foreign',
+      token: 'tok-already-foreign-x0123456789',
+      status: 'accepted',
+      customer_id: 'cust-rightful',
+      accepted_service_mode: 'one_time',
+      price_locked_at: new Date(),
+      onetime_total: 250,
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { services: [] },
+          oneTime: { items: [{ name: 'German Roach Cleanout', price: 250 }], membershipFee: 0 },
+        },
+      }),
+    });
+    resetStore(accepted);
+    db.__state.tables.scheduled_services = [{
+      id: 'ss-foreign',
+      source_estimate_id: accepted.id,
+      customer_id: 'cust-foreign',
+      reservation_expires_at: new Date(Date.now() - 60_000),
+      status: 'confirmed',
+      scheduled_date: '2027-07-20',
+    }];
+
+    const res = await putAccept(accepted.token);
+
+    expect(res.status).toBe(200);
+    expect(res.data.alreadyAccepted).toBe(true);
+    expect(res.data.nextStep).toBe('book_one_time');
+    expect(res.data.reservationCommitted).toBe(false);
+    expect(res.data.bookingUrl).toContain(`estimate_id=${accepted.id}`);
   });
 });
 
@@ -1519,6 +1562,7 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     // statements, so rung 1 precedes the estimates UPDATE here.
     resetStore(recurringPestEstimate({ id: 'est-lock-1', token: 'tok-lock-1-x0123456789' }));
     db.__state.tables.scheduled_services = [holdFixture()];
+    const commitSpy = jest.spyOn(require('../services/slot-reservation'), 'commitReservation');
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       tier: 'Bronze',
@@ -1537,6 +1581,12 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(res.data.reservationCommitted).toBe(true);
+    expect(commitSpy).toHaveBeenCalledWith(expect.objectContaining({
+      scheduledServiceId: 'ss-hold-1',
+      expectedSourceEstimateId: 'est-lock-1',
+      expectUnclaimed: true,
+    }));
+    commitSpy.mockRestore();
 
     // The hold graduated inside the accept: customer bound, expiry cleared,
     // still on the pre-locked date.

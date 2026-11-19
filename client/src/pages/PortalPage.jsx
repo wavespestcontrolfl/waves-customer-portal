@@ -1354,6 +1354,8 @@ function oneTapDayLabel(date) {
   return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
+const ONE_TAP_OFFICE_RESOLUTION = `Our office has already booked this appointment. Call ${WAVES_SUPPORT_PHONE_DISPLAY} before continuing checkout.`;
+
 function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   useLockBodyScroll(open);
   // Close is LOCKED while a confirmation is in flight (same guard as
@@ -1381,6 +1383,10 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   const [confirming, setConfirming] = useState(false);
   confirmingRef.current = confirming;
   const [stepError, setStepError] = useState('');
+  // A staff claim is not an ordinary validation error: the selected visit is
+  // now a real booking. Keep this as explicit flow state so close, change-time
+  // and retry cannot release it or silently start another selection.
+  const [officeResolution, setOfficeResolution] = useState(false);
   const [needsCard, setNeedsCard] = useState(false);
   const [cardSaved, setCardSaved] = useState(false);
   const [cardBusy, setCardBusy] = useState(false);
@@ -1393,7 +1399,11 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   const cardMountRef = useRef(null);
   // Snapshot for the unmount-time hold release (best-effort).
   const releaseRef = useRef({});
-  releaseRef.current = { purchaseId: init?.purchaseId || null, done: step === 'done' };
+  releaseRef.current = {
+    purchaseId: init?.purchaseId || null,
+    done: step === 'done',
+    officeResolution,
+  };
 
   useEffect(() => {
     if (!open || (!card && !resume)) return undefined;
@@ -1404,6 +1414,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     setSlots(null);
     setSelectedSlot(null);
     setStepError('');
+    setOfficeResolution(false);
     setNeedsCard(false);
     setCardSaved(false);
     setResult(null);
@@ -1425,7 +1436,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         holdMinutes: resume.holdMinutes,
       });
       setCardSaved(!!resume.cardJustSaved);
-      if (resume.holdLive && resume.slot) {
+      if (resume.officeResolution && resume.slot) {
+        setSelectedSlot({ slotId: null, ...resume.slot });
+        setOfficeResolution(true);
+        setStepError(ONE_TAP_OFFICE_RESOLUTION);
+        setStep('confirm');
+      } else if (resume.holdLive && resume.slot) {
         setSelectedSlot({ slotId: null, ...resume.slot });
         setStep('confirm');
       } else {
@@ -1450,6 +1466,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       }
       setInit(d);
       setSlots(d.slots || null);
+      if (d.officeResolution && d.slot) {
+        setSelectedSlot({ slotId: null, ...d.slot });
+        setOfficeResolution(true);
+        setStepError(ONE_TAP_OFFICE_RESOLUTION);
+        setStep('confirm');
+      }
     }).catch((err) => {
       if (stale) return;
       setInitError(err?.status === 409 ? 'stale' : (err?.message || 'Something went wrong — please try again.'));
@@ -1478,13 +1500,30 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     closedRef.current = false;
     return () => {
       closedRef.current = true;
-      const { purchaseId, done } = releaseRef.current;
-      if (purchaseId && !done) api.oneTapRelease(purchaseId).catch(() => {});
+      const { purchaseId, done, officeResolution: bookedByOffice } = releaseRef.current;
+      if (purchaseId && !done && !bookedByOffice) api.oneTapRelease(purchaseId).catch(() => {});
       paymentElementRef.current = null;
       elementsRef.current = null;
       stripeRef.current = null;
     };
   }, [open]);
+
+  const restoreOfficeResolution = async (purchaseId) => {
+    const id = purchaseId || init?.purchaseId;
+    if (!id) return false;
+    try {
+      const state = await api.oneTapGet(id);
+      if (!state.officeResolution || !state.slot) return false;
+      setInit((current) => ({ ...current, ...state }));
+      setSelectedSlot({ slotId: null, ...state.slot });
+      setOfficeResolution(true);
+      setStepError(ONE_TAP_OFFICE_RESOLUTION);
+      setStep('confirm');
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   const refreshSlots = async (purchaseId) => {
     const id = purchaseId || init?.purchaseId;
@@ -1493,14 +1532,16 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     try {
       setSlots(await api.oneTapSlots(id));
     } catch (err) {
-      if (err?.status === 409) setInitError('stale');
+      if (err?.code === 'RESERVATION_CLAIMED') {
+        if (!await restoreOfficeResolution(id)) setInitError('stale');
+      } else if (err?.status === 409) setInitError('stale');
     } finally {
       setSlotsBusy(false);
     }
   };
 
   const pickSlot = async (slot) => {
-    if (!init || reserving) return;
+    if (!init || reserving || officeResolution) return;
     setReserving(true);
     setStepError('');
     try {
@@ -1516,7 +1557,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       setSelectedSlot(slot);
       setStep('confirm');
     } catch (err) {
-      if (err?.code === 'SLOT_UNAVAILABLE') {
+      if (err?.code === 'RESERVATION_CLAIMED') {
+        if (!await restoreOfficeResolution(init.purchaseId)) setInitError('stale');
+      } else if (err?.code === 'SLOT_UNAVAILABLE') {
         setStepError('That time was just taken — pick another slot.');
         refreshSlots();
       } else if (err?.status === 409) {
@@ -1532,7 +1575,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   // Inline card capture on CONFIRM when no consented card is on file —
   // the EXISTING portal save-card sequence (SetupIntent → Payment Element →
   // save), with the same locked consent copy. Save only; no charge.
-  const mustCollectCard = !!init && (!init.hasCardOnFile || needsCard) && !cardSaved;
+  const mustCollectCard = !!init && !officeResolution && (!init.hasCardOnFile || needsCard) && !cardSaved;
   useEffect(() => {
     if (!open || step !== 'confirm' || !mustCollectCard || elementsRef.current) return undefined;
     let stale = false;
@@ -1608,7 +1651,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   };
 
   const handleConfirm = async () => {
-    if (!init || confirming) return;
+    if (!init || confirming || officeResolution) return;
     setConfirming(true);
     setStepError('');
     try {
@@ -1620,6 +1663,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         setNeedsCard(true);
         setCardSaved(false);
         setStepError('Save a payment method above to finish.');
+      } else if (err?.code === 'RESERVATION_CLAIMED') {
+        // Staff already turned this hold into a real appointment. Keep the
+        // selected time and purchase pointer visible; automatically re-picking
+        // would conceal that booking and could create a duplicate.
+        setOfficeResolution(true);
+        setStepError(ONE_TAP_OFFICE_RESOLUTION);
       } else if (err?.code === 'RESERVATION_EXPIRED' || err?.code === 'SLOT_UNAVAILABLE') {
         setSelectedSlot(null);
         setStep('time');
@@ -1901,19 +1950,21 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   : '—')}
               </div>
               {existingServicesBox(init.pricing)}
-              <div style={{ fontSize: 14, color: muted }}>
-                Your time is held for {init.holdMinutes || 15} minutes.{' '}
-                {/* Locked while confirming: reserving a replacement slot
-                    mid-confirm races the in-flight confirmation's hold. */}
-                <button
-                  type="button"
-                  disabled={confirming}
-                  onClick={() => { if (confirming) return; setStep('time'); setStepError(''); }}
-                  style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 700, fontSize: 14, cursor: confirming ? 'default' : 'pointer', textDecoration: 'underline', opacity: confirming ? 0.55 : 1 }}
-                >
-                  Change time
-                </button>
-              </div>
+              {!officeResolution && (
+                <div style={{ fontSize: 14, color: muted }}>
+                  Your time is held for {init.holdMinutes || 15} minutes.{' '}
+                  {/* Locked while confirming: reserving a replacement slot
+                      mid-confirm races the in-flight confirmation's hold. */}
+                  <button
+                    type="button"
+                    disabled={confirming}
+                    onClick={() => { if (confirming) return; setStep('time'); setStepError(''); }}
+                    style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 700, fontSize: 14, cursor: confirming ? 'default' : 'pointer', textDecoration: 'underline', opacity: confirming ? 0.55 : 1 }}
+                  >
+                    Change time
+                  </button>
+                </div>
+              )}
               {mustCollectCard && (
                 <div style={softBox}>
                   <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
@@ -1936,16 +1987,27 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                 </div>
               )}
               {stepError && <div style={{ fontSize: 14, color: '#9A3412' }}>{stepError}</div>}
-              <button
-                type="button"
-                data-glass-accent=""
-                data-glass-size="primary"
-                style={{ ...PORTAL_PRIMARY_ACTION, opacity: mustCollectCard || confirming ? 0.55 : 1 }}
-                disabled={mustCollectCard || confirming}
-                onClick={handleConfirm}
-              >
-                {confirming ? 'Confirming…' : 'Confirm'}
-              </button>
+              {officeResolution ? (
+                <a
+                  href={WAVES_SUPPORT_PHONE_TEL}
+                  data-glass-accent=""
+                  data-glass-size="primary"
+                  style={{ ...PORTAL_PRIMARY_ACTION, display: 'flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none' }}
+                >
+                  Call office
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  data-glass-accent=""
+                  data-glass-size="primary"
+                  style={{ ...PORTAL_PRIMARY_ACTION, opacity: mustCollectCard || confirming ? 0.55 : 1 }}
+                  disabled={mustCollectCard || confirming}
+                  onClick={handleConfirm}
+                >
+                  {confirming ? 'Confirming…' : 'Confirm'}
+                </button>
+              )}
             </>
           ) : (
             <>
