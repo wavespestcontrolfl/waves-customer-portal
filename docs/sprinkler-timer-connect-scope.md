@@ -99,7 +99,8 @@ the client dev server and open
 | `running` | A run in progress, with Stop |
 | `paused` | Turf zones paused after a treatment |
 | `offline` | Timer unreachable |
-| `rainbird`, `xcore` | Timers that cannot connect: guide only |
+| `rainbird`, `xcore` | Timers that cannot connect: guide only. Rain Bird also asks whether the customer uses Rain Bird's app. |
+| `proc` | Hunter Pro-C: some can go on Hydrawise; guide, and the app question |
 | `autosetup` | Step 4: the sheet that turns on automatic runs (day and start time) |
 | `auto` | Step 4: automatic runs on, with the next run |
 | `rainskip` | Step 4: a run skipped for rain |
@@ -225,18 +226,27 @@ Other routes checked and ruled out:
 
 Ships live, no vendor, no gate. About 1.5 days. All estimates here are rough.
 
-- Two columns on `property_preferences`, beside
+- Three columns on `property_preferences`, beside
   `irrigation_controller_location`: `irrigation_controller_brand` and
-  `irrigation_controller_model`, each a key from one fixed list. Validated
-  in `property-preferences-schema.js`, so the portal route and the staff
+  `irrigation_controller_model`, each a key from one fixed list, and
+  `irrigation_controller_app` (`yes`, `no` or `unknown`): whether the
+  customer runs the timer from its maker's phone app. Validated in
+  `property-preferences-schema.js`, so the portal route and the staff
   route accept them with no second validator.
+- The third column is what makes the count useful. An X2 on the dial and
+  an X2 already on Hydrawise are the same model, and only the second is
+  ready to connect. The card asks "Do you run it from Hunter's Hydrawise
+  phone app?" with Yes, No and Not sure. Rain Bird owners get the same
+  question about Rain Bird's app.
 - They are not watering inputs. They stay out of the irrigation revision
   trigger and out of the confirmed-fields ledger, so recording a timer
   never invalidates a week's plan.
 - Customer side: the card's picker (`timer=pick`), then the guide-only
-  states. Staff side: two inputs in the Customer 360 irrigation block, so
-  the model can be set from the truck.
-- A read-only count by model for the owner.
+  states. Staff side: three inputs in the Customer 360 irrigation block,
+  so the tech can set them from the truck.
+- A read-only count for the owner, by model and by app answer. It shows
+  how many homes are ready to connect, how many need a Wi-Fi part, and how
+  many have not answered.
 - Why no gate: it cannot text, charge, delete, spend, or add a public page
   (`waves-ship` §6).
 

@@ -51,11 +51,17 @@ const BRANDS = [
   { value: 'other', label: 'Another brand' },
 ];
 const HUNTER_MODELS = [
-  { value: 'x2', name: 'X2', hint: 'Gray box with a dial. X2 is printed in the top corner.', next: 'x2' },
-  { value: 'x_core', name: 'X-Core', hint: 'Looks like the X2. X-Core is printed on the front.', next: 'xcore' },
-  { value: 'pro_c', name: 'Pro-C', hint: 'Wider box with a dial and room for extra zones.', next: 'xcore' },
-  { value: 'hydrawise', name: 'Hydrawise touchscreen', hint: 'No dial. You run it from a screen or the Hydrawise app.', next: 'ready' },
+  { value: 'x2', name: 'X2', label: 'Hunter X2', hint: 'Gray box with a dial. X2 is printed in the top corner.', next: 'x2' },
+  { value: 'x_core', name: 'X-Core', label: 'Hunter X-Core', hint: 'Looks like the X2. X-Core is printed on the front.', next: 'xcore' },
+  { value: 'pro_c', name: 'Pro-C', label: 'Hunter Pro-C', hint: 'Wider box with a dial and room for extra zones.', next: 'proc' },
+  { value: 'hydrawise', name: 'Hydrawise touchscreen', label: 'Hunter Hydrawise timer', hint: 'No dial. You run it from a screen or the Hydrawise app.', next: 'ready' },
 ];
+const DEFAULT_MODEL = 'Hunter X2';
+// "Hunter X2 on Hydrawise"; a Hydrawise touchscreen already says so.
+const onHydrawise = (model) => (model.includes('Hydrawise') ? model : `${model} on Hydrawise`);
+const DAY_NAMES = { Sun: 'Sunday', Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+const clock = (time) => time.replace(' ', ':00 ');
+const zoneCount = (count, kind = '') => `${count} ${kind}${count === 1 ? 'zone' : 'zones'}`;
 const ZONES = [
   { id: 1, name: 'Front lawn', turf: true },
   { id: 2, name: 'Side lawn', turf: true },
@@ -243,7 +249,7 @@ function ManageRow({ onZones, onDisconnect }) {
 
 // ── one component per screen; `go` moves between them ──────────────────────
 
-function PickView({ go }) {
+function PickView({ go, pickModel }) {
   const [brand, setBrand] = useState('hunter');
   return (
     <>
@@ -256,7 +262,7 @@ function PickView({ go }) {
       {brand === 'hunter' && (
         <div style={{ display: 'grid', gap: 10, marginBottom: 16 }}>
           {HUNTER_MODELS.map((model) => (
-            <button key={model.value} type="button" data-glass="chip" onClick={() => go(model.next)} style={{
+            <button key={model.value} type="button" data-glass="chip" onClick={() => pickModel(model)} style={{
               ...buttonBase, minHeight: 64, padding: '12px 14px', borderRadius: 10, border: '1px solid #D8D0C0', background: '#fff',
               color: B.glassNavy, textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
             }}>
@@ -278,41 +284,67 @@ function PickView({ go }) {
   );
 }
 
-function X2View({ go }) {
+// Step 1 records this answer, so the count can tell a dial-only timer from one already on its maker's app.
+const APP_ANSWERS = ['Yes', 'No', 'Not sure'];
+const HYDRAWISE_QUESTION = 'Do you run it from Hunter\'s Hydrawise phone app?';
+
+function AppQuestion({ question, onYes }) {
+  const [answer, setAnswer] = useState(null);
+  const choose = (option) => { setAnswer(option); if (option === 'Yes' && onYes) onYes(); };
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>{question}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {APP_ANSWERS.map((option) => (
+          <ChoiceChip key={option} active={answer === option} onClick={() => choose(option)}>{option}</ChoiceChip>
+        ))}
+      </div>
+      {answer && <div style={{ ...meta, marginTop: 8 }}>Thanks. We saved your answer.</div>}
+    </div>
+  );
+}
+
+function X2View({ go, model }) {
   return (
     <>
-      <StatusLine label="Hunter X2" detail="Runs from the dial" />
+      <StatusLine label={model} detail="Runs from the dial" />
       <p style={prose}>Your X2 can connect to the Waves app once it's on Hunter's Hydrawise app. That takes Hunter's WAND Wi-Fi module, which is sold separately.</p>
+      <AppQuestion question={HYDRAWISE_QUESTION} onYes={() => go('ready')} />
       <Callout>
         <div style={{ fontWeight: 700, marginBottom: 4 }}>Good to know before you add one</div>
         <div style={{ color: BODY }}>After the module goes in, the dial stops working and your schedule lives in the Hydrawise app.</div>
       </Callout>
       <div style={{ display: 'grid', gap: 12 }}>
-        <ChipButton onClick={() => go('ready')} icon="check">My X2 is on Hydrawise now</ChipButton>
         <p style={{ ...meta, margin: 0 }}><LinkOut href={GUIDE.hunter}>How to run this week's plan from the dial</LinkOut></p>
+        <TextButton onClick={() => go('pick')}>Change my timer</TextButton>
       </div>
     </>
   );
 }
 
-// Timers with no way onto the Waves app: the guide is the whole card.
+// Timers that stay on the guide. A Pro-C may already be on Hydrawise, and a
+// Rain Bird owner is asked whether they use Rain Bird's app.
 const GUIDE_ONLY = {
   rainbird: {
-    name: 'Rain Bird', guide: GUIDE.rainBird, cta: 'How to run it on a Rain Bird',
+    name: 'Rain Bird', guide: GUIDE.rainBird, cta: 'How to run it on a Rain Bird', appQuestion: 'Do you run it from the Rain Bird phone app?',
     line: 'Rain Bird timers can\'t connect to the Waves app yet. You can still follow this week\'s plan by hand in about a minute.',
   },
   xcore: {
     name: 'Hunter X-Core', guide: GUIDE.hunter, cta: 'How to run it on a Hunter',
     line: 'This timer can\'t connect to the Waves app. You can still follow this week\'s plan by hand in about a minute.',
   },
+  proc: {
+    name: 'Hunter Pro-C', guide: GUIDE.hunter, cta: 'How to run it on a Hunter', appQuestion: HYDRAWISE_QUESTION, yesGoes: 'ready',
+    line: 'Some Pro-C timers can go on Hunter\'s Hydrawise app with a Hunter Wi-Fi part, and some can\'t. It depends on the year it was made. You can follow this week\'s plan by hand in about a minute.',
+  },
 };
-
 function GuideOnlyView({ view, go }) {
   const timer = GUIDE_ONLY[view];
   return (
     <>
       <StatusLine label={timer.name} detail="Runs from the dial" />
       <p style={prose}>{timer.line}</p>
+      {timer.appQuestion && <AppQuestion question={timer.appQuestion} onYes={timer.yesGoes ? () => go(timer.yesGoes) : undefined} />}
       <div style={{ display: 'grid', gap: 12 }}>
         <a href={timer.guide} target="_blank" rel="noopener noreferrer" data-glass-accent="" data-glass-size="primary" style={{
           ...buttonBase, minHeight: 48, padding: '12px 16px', borderRadius: 10, border: `1px solid ${B.yellow}`, background: B.yellow,
@@ -324,10 +356,10 @@ function GuideOnlyView({ view, go }) {
   );
 }
 
-function ReadyView({ go, openSheet }) {
+function ReadyView({ go, openSheet, model }) {
   return (
     <>
-      <StatusLine label="Hunter X2 on Hydrawise" detail="Not connected" />
+      <StatusLine label={onHydrawise(model)} detail="Not connected" />
       <p style={prose}>Connect your timer and we'll pause your turf watering after treatments that call for it. You can also start this week's plan from here.</p>
       <PrimaryButton onClick={() => openSheet('consent')}>Connect my timer</PrimaryButton>
       <div style={{ marginTop: 4 }}><TextButton onClick={() => go('pick')}>Change my timer</TextButton></div>
@@ -336,10 +368,10 @@ function ReadyView({ go, openSheet }) {
 }
 
 // Connect by request: Waves asks through Hydrawise, the customer approves the email.
-function ApproveView({ go }) {
+function ApproveView({ go, model }) {
   return (
     <>
-      <StatusLine label="Hunter X2 on Hydrawise" detail="Waiting for your approval" />
+      <StatusLine label={onHydrawise(model)} detail="Waiting for your approval" />
       <p style={prose}>We sent a request through Hydrawise. Open the email from Hydrawise and approve Waves. This page updates once you do.</p>
       <ChipButton onClick={() => go('zones')} icon="check">I approved it</ChipButton>
       <div style={{ marginTop: 4 }}><TextButton onClick={() => go('ready')}>Cancel the request</TextButton></div>
@@ -347,11 +379,11 @@ function ApproveView({ go }) {
   );
 }
 
-function ZonesView({ go, zones, setZones, turfCount }) {
+function ZonesView({ saveZones, zones, setZones, turfCount, model }) {
   const flip = (id) => setZones((list) => list.map((item) => (item.id === id ? { ...item, turf: !item.turf } : item)));
   return (
     <>
-      <StatusLine tone="ok" label="Connected" detail="Hunter X2" />
+      <StatusLine tone="ok" label="Connected" detail={model} />
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Which zones water your grass?</div>
       <p style={prose}>We only pause or run the zones you mark as turf. Beds, drip and everything else stay exactly as they are.</p>
       <div style={{ marginBottom: 16 }}>
@@ -364,12 +396,12 @@ function ZonesView({ go, zones, setZones, turfCount }) {
           </div>
         ))}
       </div>
-      <PrimaryButton onClick={() => go('connected')} disabled={turfCount === 0}>Save {turfCount} turf {turfCount === 1 ? 'zone' : 'zones'}</PrimaryButton>
+      <PrimaryButton onClick={saveZones} disabled={turfCount === 0}>Save {zoneCount(turfCount, 'turf ')}</PrimaryButton>
     </>
   );
 }
 
-function OfflineView({ go }) {
+function OfflineView({ go, editZones }) {
   return (
     <>
       <StatusLine tone="warn" label="We can't reach your timer" detail={`Last seen ${weekday(-1)} at 6:40 PM`} />
@@ -377,7 +409,7 @@ function OfflineView({ go }) {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <ChipButton onClick={() => go('connected')} icon="refresh">Try again</ChipButton>
       </div>
-      <ManageRow onZones={() => go('zones')} onDisconnect={() => go('ready')} />
+      <ManageRow onZones={editZones} onDisconnect={() => go('ready')} />
     </>
   );
 }
@@ -386,7 +418,7 @@ function RunCallout({ openSheet, turfCount, totalMinutes }) {
   return (
     <Callout>
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>This week: about 30 minutes per turf zone</div>
-      <div style={{ color: BODY, marginBottom: 14 }}>{turfCount} zones, one after another. About {duration(totalMinutes)} in all.</div>
+      <div style={{ color: BODY, marginBottom: 14 }}>{zoneCount(turfCount)}{turfCount === 1 ? '.' : ', one after another.'} About {duration(totalMinutes)} in all.</div>
       <PrimaryButton onClick={() => openSheet('run')}>Run this week's plan</PrimaryButton>
       <div style={{ ...meta, marginTop: 10 }}>Only on your permitted watering day, during your area's allowed hours.</div>
     </Callout>
@@ -406,13 +438,15 @@ function PausedCallout({ go }) {
   );
 }
 
-// A fixed moment: 35 minutes into the run.
-function RunningCallout({ go, turfCount, totalMinutes }) {
-  const progress = totalMinutes ? Math.min(100, Math.round((35 / totalMinutes) * 100)) : 0;
+// A fixed moment: 35 minutes into the run, or 10 minutes from the end of a short one.
+function RunningCallout({ go, turfZones, totalMinutes }) {
+  const elapsed = Math.min(35, Math.max(0, totalMinutes - 10));
+  const index = Math.min(turfZones.length - 1, Math.floor(elapsed / 30));
+  const progress = totalMinutes ? Math.round((elapsed / totalMinutes) * 100) : 0;
   return (
     <Callout>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Watering now: zone 2 of {turfCount}</div>
-      <div style={{ color: BODY, marginBottom: 12 }}>Side lawn, 30 minutes. About {duration(Math.max(0, totalMinutes - 35))} left in this run.</div>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Watering now: zone {index + 1} of {turfZones.length}</div>
+      <div style={{ color: BODY, marginBottom: 12 }}>{turfZones[index]?.name}, 30 minutes. About {duration(totalMinutes - elapsed)} left in this run.</div>
       <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Run progress" style={{ height: 8, borderRadius: 999, background: 'rgba(4,57,94,0.12)', overflow: 'hidden', marginBottom: 14 }}>
         <div style={{ width: `${progress}%`, height: '100%', background: B.glassNavy, borderRadius: 999 }} />
       </div>
@@ -422,11 +456,11 @@ function RunningCallout({ go, turfCount, totalMinutes }) {
 }
 
 // Step 4: the timer follows the weekly plan at the day and time the customer set.
-function AutoCallout({ openSheet, turfCount, totalMinutes }) {
+function AutoCallout({ openSheet, turfCount, totalMinutes, schedule }) {
   return (
     <Callout>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Next run: {weekday(2)} at 5:00 AM</div>
-      <div style={{ color: BODY }}>About 30 minutes per turf zone, from this week's plan. {turfCount} zones, about {duration(totalMinutes)} in all.</div>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Next run: {DAY_NAMES[schedule.day]} at {clock(schedule.time)}</div>
+      <div style={{ color: BODY }}>About 30 minutes per turf zone, from this week's plan. {zoneCount(turfCount)}, about {duration(totalMinutes)} in all.</div>
       <div style={{ marginTop: 4 }}><TextButton onClick={() => openSheet('auto')}>Change day or time</TextButton></div>
     </Callout>
   );
@@ -444,11 +478,11 @@ function RainSkipCallout() {
   );
 }
 
-function MissedCallout({ openSheet }) {
+function MissedCallout({ openSheet, schedule }) {
   return (
     <Callout>
       <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>{weekday(-1)}'s run did not start</div>
-      <div style={{ color: BODY, marginBottom: 14 }}>We couldn't reach your timer at 5:00 AM, so your lawn was not watered. Check that your home Wi-Fi reaches the timer.</div>
+      <div style={{ color: BODY, marginBottom: 14 }}>We couldn't reach your timer at {clock(schedule.time)}, so your lawn was not watered. Check that your home Wi-Fi reaches the timer.</div>
       <PrimaryButton onClick={() => openSheet('run')}>Run this week's plan</PrimaryButton>
       <div style={{ ...meta, marginTop: 10 }}>Only on your permitted watering day, during your area's allowed hours.</div>
     </Callout>
@@ -471,29 +505,29 @@ const ACTIVITY = {
     { when: shortDay(-14), what: 'Paused your turf zones after weed control.' },
   ],
   auto: () => [
-    { when: shortDay(-5), what: 'Ran the weekly plan at 5:00 AM: 4 zones, 30 minutes each.' },
+    { when: shortDay(-5), what: 'Ran the weekly plan for you: 4 zones, 30 minutes each.' },
     { when: shortDay(-12), what: 'No run. The weekly plan said skip.' },
     { when: shortDay(-14), what: 'Paused your turf zones after weed control.' },
   ],
   rainskip: () => [
-    { when: shortDay(-1), what: 'Skipped the 5:00 AM run. About 0.8 inches of rain since your last watering day.' },
-    { when: shortDay(-8), what: 'Ran the weekly plan at 5:00 AM: 4 zones, 30 minutes each.' },
+    { when: shortDay(-1), what: 'Skipped the run. About 0.8 inches of rain since your last watering day.' },
+    { when: shortDay(-8), what: 'Ran the weekly plan for you: 4 zones, 30 minutes each.' },
   ],
   missed: () => [
-    { when: shortDay(-1), what: 'The 5:00 AM run did not start. We could not reach your timer.' },
-    { when: shortDay(-8), what: 'Ran the weekly plan at 5:00 AM: 4 zones, 30 minutes each.' },
+    { when: shortDay(-1), what: 'The run did not start. We could not reach your timer.' },
+    { when: shortDay(-8), what: 'Ran the weekly plan for you: 4 zones, 30 minutes each.' },
   ],
 };
 
 // connected | paused | running | auto | rainskip | missed
-function LiveView({ view, go, openSheet, turfCount, totalMinutes }) {
+function LiveView({ view, go, openSheet, editZones, turfZones, turfCount, totalMinutes, model, schedule }) {
   const [autoPause, setAutoPause] = useState(true);
   const autoRun = AUTO_RUN_VIEWS.includes(view);
   const LiveCallout = LIVE_CALLOUT[view];
   return (
     <>
-      <StatusLine tone="ok" label="Connected" detail={`Hunter X2 · ${turfCount} turf zones`} />
-      <LiveCallout go={go} openSheet={openSheet} turfCount={turfCount} totalMinutes={totalMinutes} />
+      <StatusLine tone="ok" label="Connected" detail={`${model} · ${zoneCount(turfCount, 'turf ')}`} />
+      <LiveCallout go={go} openSheet={openSheet} turfZones={turfZones} turfCount={turfCount} totalMinutes={totalMinutes} schedule={schedule} />
       <div style={{ display: 'grid', gap: 10 }}>
         <SettingRow label="Pause the lawn after treatments" checked={autoPause} onChange={() => setAutoPause((on) => !on)}
           detail="When your service report says to skip turf watering after a treatment, we pause your turf zones until that time." />
@@ -501,7 +535,7 @@ function LiveView({ view, go, openSheet, turfCount, totalMinutes }) {
           detail="Each week we start your turf zones for that week's minutes, on the day and time you pick." />
       </div>
       <ActivityList rows={(ACTIVITY[view] || ACTIVITY.usual)()} />
-      <ManageRow onZones={() => go('zones')} onDisconnect={() => go('ready')} />
+      <ManageRow onZones={editZones} onDisconnect={() => go('ready')} />
     </>
   );
 }
@@ -533,9 +567,9 @@ function ConnectSheet({ byRequest, onClose, onContinue }) {
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const START_TIMES = ['4 AM', '5 AM', '6 AM', '8 PM'];
 
-function AutoRunSheet({ onClose, onSave }) {
-  const [day, setDay] = useState(weekdayShort(2));
-  const [time, setTime] = useState('5 AM');
+function AutoRunSheet({ schedule, onClose, onSave }) {
+  const [day, setDay] = useState(schedule.day);
+  const [time, setTime] = useState(schedule.time);
   return (
     <Sheet label="Run the weekly plan for me" onClose={onClose}>
       <p style={{ margin: '0 0 16px', color: BODY }}>Each week we start your turf zones for that week's minutes, on the day and time you pick. No run in a week the plan says skip.</p>
@@ -546,13 +580,13 @@ function AutoRunSheet({ onClose, onSave }) {
         'We skip a run after half an inch or more of rain.',
         'If we can\'t reach your timer, the run does not happen. You can start it from this page.',
       ]} />
-      <SheetActions primary="Turn on automatic runs" onPrimary={onSave} secondary="Not now" onSecondary={onClose} />
+      <SheetActions primary="Turn on automatic runs" onPrimary={() => onSave({ day, time })} secondary="Not now" onSecondary={onClose} />
     </Sheet>
   );
 }
 
 const VIEWS = {
-  pick: PickView, x2: X2View, xcore: GuideOnlyView, rainbird: GuideOnlyView, ready: ReadyView, approve: ApproveView,
+  pick: PickView, x2: X2View, xcore: GuideOnlyView, proc: GuideOnlyView, rainbird: GuideOnlyView, ready: ReadyView, approve: ApproveView,
   zones: ZonesView, offline: OfflineView, connected: LiveView, paused: LiveView, running: LiveView,
   auto: LiveView, rainskip: LiveView, missed: LiveView,
 };
@@ -566,16 +600,25 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
   const [view, setView] = useState(start);
   const [sheet, setSheet] = useState(startSheet);
   const [zones, setZones] = useState(ZONES);
-  const turfCount = zones.filter((zone) => zone.turf).length;
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [schedule, setSchedule] = useState({ day: weekdayShort(2), time: '5 AM' });
+  // Editing turf zones returns to the screen it was opened from, so a pause or an offline warning is not lost.
+  const [zonesReturn, setZonesReturn] = useState('connected');
+  const turfZones = zones.filter((zone) => zone.turf);
+  const turfCount = turfZones.length;
   const totalMinutes = turfCount * 30;
   const View = VIEWS[view];
   const closeSheet = () => setSheet(null);
+  const pickModel = (picked) => { setModel(picked.label); setView(picked.next); };
+  const editZones = () => { setZonesReturn(view); setView('zones'); };
+  const saveZones = () => { setView(zonesReturn); setZonesReturn('connected'); };
 
   return (
     <>
       <section data-glass="card" data-prototype="sprinkler-timer" style={cardStyle} aria-label="Your sprinkler timer">
         <h2 style={title}>Your sprinkler timer</h2>
-        <View view={view} go={setView} openSheet={setSheet} zones={zones} setZones={setZones} turfCount={turfCount} totalMinutes={totalMinutes} />
+        <View view={view} go={setView} openSheet={setSheet} zones={zones} setZones={setZones} turfZones={turfZones} turfCount={turfCount}
+          totalMinutes={totalMinutes} model={model} schedule={schedule} pickModel={pickModel} editZones={editZones} saveZones={saveZones} />
       </section>
 
       {(sheet === 'consent' || sheet === 'request') && (
@@ -583,11 +626,13 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
           onContinue={() => { closeSheet(); setView(sheet === 'request' ? 'approve' : 'zones'); }} />
       )}
 
-      {sheet === 'auto' && <AutoRunSheet onClose={closeSheet} onSave={() => { closeSheet(); setView('auto'); }} />}
+      {sheet === 'auto' && (
+        <AutoRunSheet schedule={schedule} onClose={closeSheet} onSave={(next) => { setSchedule(next); closeSheet(); setView('auto'); }} />
+      )}
 
       {sheet === 'run' && (
         <Sheet label="Run this week's plan?" onClose={closeSheet}>
-          <p style={{ margin: '0 0 12px', color: BODY }}>{turfCount} turf zones, about 30 minutes each. About {duration(totalMinutes)} in all.</p>
+          <p style={{ margin: '0 0 12px', color: BODY }}>{zoneCount(turfCount, 'turf ')}, about 30 minutes each. About {duration(totalMinutes)} in all.</p>
           <PointList icon="alert" tone={AMBER} heading="Before you start" points={[
             'Only run on your permitted watering day, during your area\'s allowed hours.',
             'If half an inch or more of rain has fallen since your last watering day, skip this run.',

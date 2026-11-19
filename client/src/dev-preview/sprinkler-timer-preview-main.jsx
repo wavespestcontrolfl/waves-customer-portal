@@ -21,6 +21,7 @@
  *   offline    timer unreachable
  *   rainbird   Rain Bird (cannot connect yet): guide only
  *   xcore      Hunter X-Core (cannot connect): guide only
+ *   proc       Hunter Pro-C (some can go on Hydrawise): guide, and the app question
  *   autosetup  connected, with the automatic-runs sheet open (step 4)
  *   auto       automatic runs on, showing the next run (step 4)
  *   rainskip   an automatic run skipped for rain (step 4)
