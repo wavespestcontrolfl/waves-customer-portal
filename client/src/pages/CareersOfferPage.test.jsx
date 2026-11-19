@@ -71,7 +71,7 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     expect(await screen.findByRole('heading', { name: 'Your job offer' })).toBeInTheDocument();
     expect(globalThis.fetch.mock.calls[0][0]).toMatch(/\/public\/careers\/offer\/tok-123$/);
-    expect(screen.getByText(/Signed by Sam Carter, owner · Dec 11, 2026/)).toBeInTheDocument();
+    expect(screen.getByText((_, el) => el.tagName === 'P' && el.textContent === 'Signed by Sam Carter, owner · Dec 11, 2026')).toBeInTheDocument();
     expect(screen.getByText('Pest Control Technician')).toBeInTheDocument();
     expect(screen.getByText('Mon, Jan 4, 2027')).toBeInTheDocument();
     expect(screen.getByText('$23.00 an hour, $25.00 from Apr 5')).toBeInTheDocument();
