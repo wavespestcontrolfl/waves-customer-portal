@@ -1,3 +1,5 @@
+const { validate: isUuid } = require('uuid');
+
 // An off-session authentication decline closes the local claim, but its
 // PaymentIntent can still settle. Both checkout and Billing use this predicate.
 function whereAwaitingAuthentication(query, table) {
@@ -11,20 +13,20 @@ function whereAwaitingAuthentication(query, table) {
   });
 }
 
-// Called only with a verified payment_intent.canceled webhook. The same
-// cancellation may arrive before the saved-card worker records the decline.
-// Store its identity on the attempt without changing the claim's lifecycle.
-async function recordAuthenticationCancellation(intent, database) {
+// Both the signed webhook and the operator's server-side Stripe retrieval
+// must identify the same saved-card attempt, invoice, owner and tender.
+function matchingCancellation(intent, database, lockInvoice = false) {
   const meta = intent.metadata || {};
   if (intent.status !== 'canceled' || !intent.id || meta.source !== 'admin_card_on_file') return;
-  const uuid = require('uuid').validate;
-  if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(uuid)) return;
+  if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(isUuid)) return;
   const methodId = (typeof intent.payment_method === 'string' ? intent.payment_method : intent.payment_method?.id)
     || intent.last_payment_error?.payment_method?.id || null;
+  const invoice = database('invoices').select('id')
+    .where({ id: meta.waves_invoice_id, customer_id: meta.waves_customer_id });
+  if (lockInvoice) invoice.forShare();
   const query = database('stripe_invoice_charge_attempts')
     .where({ id: meta.saved_card_attempt_id, invoice_id: meta.waves_invoice_id })
-    .whereIn('invoice_id', database('invoices').select('id')
-      .where({ id: meta.waves_invoice_id, customer_id: meta.waves_customer_id }))
+    .whereIn('invoice_id', invoice)
     .where(function relevantAttempt() {
       this.whereIn('status', ['claimed', 'ambiguous']).orWhere({ status: 'failed', decline_code: 'authentication_required' });
     })
@@ -32,12 +34,43 @@ async function recordAuthenticationCancellation(intent, database) {
       this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', intent.id);
     });
   if (methodId) query.where({ stripe_payment_method_id: methodId });
-  // With no method on the event, retain its PI id as a candidate. It clears
-  // the hold only once the saved-card worker independently names that PI.
-  await query.update({
+  const evidence = {
     authentication_canceled_intent_id: intent.id,
     ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),
-  });
+  };
+  return { query, evidence };
 }
 
-module.exports = { whereAwaitingAuthentication, recordAuthenticationCancellation };
+// A webhook can arrive before the worker records the decline. Without a
+// method, its candidate clears the hold only if the worker binds the same PI.
+async function recordAuthenticationCancellation(intent, database) {
+  const match = matchingCancellation(intent, database);
+  if (match) await match.query.update(match.evidence);
+}
+
+async function verifySavedCardCancellation({ attemptId, intentId, stripe, database, execute = false }) {
+  if (!isUuid(attemptId) || !/^pi_[A-Za-z0-9]+$/.test(intentId || '')) {
+    throw new Error('Supply a saved-card attempt UUID and a Stripe PaymentIntent ID.');
+  }
+  const intent = await stripe.paymentIntents.retrieve(intentId);
+  if (intent?.id !== intentId || intent.metadata?.saved_card_attempt_id !== attemptId.toLowerCase()) {
+    throw new Error('Stripe did not return the requested PaymentIntent for this saved-card attempt.');
+  }
+  const match = matchingCancellation(intent, database, execute);
+  if (!match) throw new Error('Stripe did not verify a canceled saved-card payment for this invoice.');
+
+  // Historical recovery is for a finished authentication decline only. The
+  // UPDATE repeats every identity check, including any intervening binding.
+  const { query, evidence } = match;
+  query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
+    .where(function compatibleEvidence() {
+      this.whereNull('authentication_canceled_intent_id').orWhere('authentication_canceled_intent_id', intentId);
+    });
+  if (!evidence.stripe_payment_intent_id) query.where({ stripe_payment_intent_id: intentId });
+
+  const verified = execute ? await query.update(evidence) : await query.first('id');
+  if (!verified) throw new Error('The local authentication decline or its payment identity does not match the Stripe cancellation.');
+  return { attemptId, intentId, result: execute ? 'cancellation_recorded' : 'cancellation_verified' };
+}
+
+module.exports = { whereAwaitingAuthentication, recordAuthenticationCancellation, verifySavedCardCancellation };

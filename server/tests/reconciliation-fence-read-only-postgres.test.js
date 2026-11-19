@@ -9,7 +9,7 @@
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261119081500_saved_card_authentication_cancellation');
-const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
+const { recordAuthenticationCancellation, verifySavedCardCancellation } = require('../services/invoice-payment-authentication');
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 jest.mock('../services/completion-balance-sweep', () => ({ dunningStoppedInvoiceIds: jest.fn(async () => new Set()) }));
 jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
@@ -112,7 +112,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     const invoiceId = randomUUID();
     const attemptId = randomUUID();
     const intent = {
-      id: `pi_${attemptId}`, status: 'canceled', payment_method: 'pm_synthetic',
+      id: `pi_${attemptId.replaceAll('-', '')}`, status: 'canceled', payment_method: 'pm_synthetic',
       metadata: { source: 'admin_card_on_file', saved_card_attempt_id: attemptId, waves_invoice_id: invoiceId, waves_customer_id: customerId },
     };
     await conn('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'sent', invoice_number: invoiceId, total: 25 });
@@ -203,6 +203,87 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       expect(await verdict(blocked.invoiceId, trx, { checkout: true })).toMatchObject({ chargeAttemptId: blocked.attemptId });
     });
   });
+
+  test('an operator can preview and record one old cancellation without a retained webhook or a stored PI', async () => {
+    const { invoiceId, attemptId, intent } = await authenticationFixture(app);
+    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
+    const options = { stripe, attemptId, intentId: intent.id };
+    const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId }).first();
+    const before = await attempt();
+    expect(await inReadOnly((database) => verifySavedCardCancellation({ ...options, database })))
+      .toMatchObject({ result: 'cancellation_verified' });
+    expect(await attempt()).toEqual(before);
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+
+    const record = () => verifySavedCardCancellation({ ...options, database: app, execute: true });
+    await record();
+    await record();
+    expect(stripe.paymentIntents.retrieve.mock.calls).toEqual([[intent.id], [intent.id], [intent.id]]);
+    expect(await attempt()).toEqual({ ...before, authentication_canceled_intent_id: intent.id, stripe_payment_intent_id: intent.id });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+    const nextId = randomUUID();
+    await app('stripe_invoice_charge_attempts').insert({
+      id: nextId, invoice_id: invoiceId, status: 'failed', decline_code: 'authentication_required', resolved_at: new Date(),
+    });
+    await record();
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: nextId });
+  });
+
+  test('a failed Stripe lookup, a live intent or mismatched evidence keeps the original hold', async () => {
+    const { invoiceId, attemptId, intent } = await authenticationFixture(app);
+    const retrieve = jest.fn();
+    const verify = () => verifySavedCardCancellation({
+      database: app, stripe: { paymentIntents: { retrieve } }, attemptId, intentId: intent.id, execute: true,
+    });
+    retrieve.mockRejectedValueOnce(new Error('unavailable'));
+    await expect(verify()).rejects.toThrow('unavailable');
+    const mismatches = [
+      { id: 'pi_different' }, { status: 'requires_action' }, { status: 'succeeded' },
+      { payment_method: null }, { payment_method: 'pm_other' },
+      ...Object.keys(intent.metadata).map((key) => ({ metadata: { ...intent.metadata, [key]: randomUUID() } })),
+    ];
+    for (const mismatch of mismatches) {
+      retrieve.mockResolvedValueOnce({ ...intent, ...mismatch });
+      await expect(verify()).rejects.toThrow();
+    }
+    const attempt = () => app('stripe_invoice_charge_attempts').where({ id: attemptId });
+    expect(await attempt().first()).toMatchObject({ stripe_payment_intent_id: null, authentication_canceled_intent_id: null });
+    await attempt().update({ authentication_canceled_intent_id: 'pi_previousCandidate' });
+    retrieve.mockResolvedValueOnce(intent);
+    await expect(verify()).rejects.toThrow();
+    expect(await attempt().first()).toMatchObject({ stripe_payment_intent_id: null, authentication_canceled_intent_id: 'pi_previousCandidate' });
+    await attempt().update({ authentication_canceled_intent_id: null });
+
+    // The local binding changes while Stripe is answering. Execute must
+    // check that binding again even after an earlier successful preview.
+    retrieve.mockResolvedValueOnce(intent).mockImplementationOnce(async () => {
+      await attempt().update({ stripe_payment_intent_id: 'pi_other' });
+      return intent;
+    });
+    await verifySavedCardCancellation({ database: app, stripe: { paymentIntents: { retrieve } }, attemptId, intentId: intent.id });
+    await expect(verify()).rejects.toThrow();
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    await attempt().update({ stripe_payment_intent_id: intent.id });
+    retrieve.mockResolvedValueOnce({ ...intent, payment_method: null });
+    await verify();
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+  });
+
+  test('an operator recording a cancellation waits for a concurrent invoice owner change and refuses the old owner', async () => {
+    const { invoiceId, attemptId, intent } = await authenticationFixture(app);
+    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
+    const change = await app.transaction();
+    try {
+      await change('invoices').where({ id: invoiceId }).update({ customer_id: randomUUID() });
+      const refusal = await commitWithWaitingCheckout(change, (database) => verifySavedCardCancellation({
+        database, stripe, attemptId, intentId: intent.id, execute: true,
+      }));
+      expect(refusal?.message).toMatch(/does not match/);
+    } finally {
+      if (!change.isCompleted()) await change.rollback();
+    }
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+  }, 15000);
 
   test('combined checkout waiting for a sibling lock sees the new authentication decline before collection', async () => {
     const { verifyAllocationLocked } = require('../services/pay-combined');

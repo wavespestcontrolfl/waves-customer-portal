@@ -70,7 +70,7 @@ describe('StripeService.charge settlement moment', () => {
 // The saved-card invoice charge takes no PaymentIntent advisory lock, so the
 // succeeded webhook can race it past the row it records (Codex #4996 r14).
 describe('StripeService.chargeInvoiceWithSavedCard settlement moment', () => {
-  function load({ methodType = 'card', intent }) {
+  function load({ methodType = 'card', intent, autoCredit = 0, creditError = null }) {
     jest.resetModules();
     const state = { inserted: null, attempt: null };
     const invoice = { id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'sent', subtotal: '100.00', total: '100.00',
@@ -80,7 +80,7 @@ describe('StripeService.chargeInvoiceWithSavedCard settlement moment', () => {
     // Permissive: every read the charge path makes resolves, and the rows it writes are captured.
     const db = jest.fn((table) => {
       const chain = {};
-      for (const name of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate',
+      for (const name of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate',
         'orderBy', 'orderByRaw', 'select', 'andWhere', 'whereExists', 'leftJoin', 'join', 'limit', 'modify', 'skipLocked']) {
         chain[name] = jest.fn((arg) => { if (['where', 'orWhere'].includes(name) && typeof arg === 'function') arg.call(chain, chain); return chain; });
       }
@@ -101,13 +101,23 @@ describe('StripeService.chargeInvoiceWithSavedCard settlement moment', () => {
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     db.schema = { hasTable: jest.fn(async () => false), hasColumn: jest.fn(async () => false) };
     jest.doMock('../models/db', () => db);
-    jest.doMock('stripe', () => jest.fn(() => ({ paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn(async () => intent) },
-      paymentMethods: { retrieve: jest.fn() }, charges: { retrieve: jest.fn() } })));
+    const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn(async () => intent) },
+      paymentMethods: { retrieve: jest.fn() }, charges: { retrieve: jest.fn() } };
+    const applyAccountCreditToInvoice = jest.fn(async (options) => {
+      if (creditError) throw creditError;
+      invoice.credit_applied = String(autoCredit);
+      return { applied: autoCredit, fullyCovered: false, options };
+    });
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
     jest.doMock('../config', () => ({}));
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
-    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: autoCredit > 0 } }));
+    jest.doMock('../services/customer-credit', () => ({
+      customerAutoApplyEnabled: jest.fn(async () => autoCredit > 0),
+      applyAccountCreditToInvoice,
+    }));
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-    return { StripeService: require('../services/stripe'), state };
+    return { StripeService: require('../services/stripe'), state, stripeClient, applyAccountCreditToInvoice };
   }
   const succeededAt = 1789900000;
 
@@ -126,5 +136,40 @@ describe('StripeService.chargeInvoiceWithSavedCard settlement moment', () => {
 
     expect(state.inserted).toMatchObject({ status: 'processing' });
     expect(JSON.parse(state.inserted.metadata)).not.toHaveProperty('settled_event_at');
+  });
+
+  test('the saved-card charge excludes only its own claim and still applies ordinary account credit', async () => {
+    const { StripeService, stripeClient, applyAccountCreditToInvoice } = load({
+      autoCredit: 25,
+      intent: { id: 'pi_saved_credit', status: 'succeeded', created: succeededAt, latest_charge: 'ch_saved_credit' },
+    });
+
+    await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1');
+
+    expect(applyAccountCreditToInvoice).toHaveBeenCalledWith({
+      invoiceId: 'inv-1',
+      currentChargeAttemptId: 'att-1',
+    }, expect.any(Function));
+    expect(stripeClient.paymentIntents.create).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 7500 }),
+      expect.any(Object),
+    );
+  });
+
+  test('a competing potentially settling payment aborts the claimed charge before Stripe', async () => {
+    const conflict = Object.assign(new Error('older card payment can still settle'), {
+      code: 'STRIPE_CHARGE_IN_PROGRESS',
+      statusCode: 409,
+      savedCardPending: true,
+    });
+    const { StripeService, stripeClient } = load({
+      autoCredit: 25,
+      creditError: conflict,
+      intent: { id: 'pi_must_not_run', status: 'succeeded', created: succeededAt, latest_charge: 'ch_must_not_run' },
+    });
+
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1'))
+      .rejects.toMatchObject({ code: 'STRIPE_CHARGE_IN_PROGRESS' });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 });

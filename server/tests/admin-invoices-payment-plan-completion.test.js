@@ -77,8 +77,11 @@ const INVOICE = {
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => {
-    qb[m] = jest.fn(() => qb);
+  ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'andWhere', 'whereExists', 'orderBy', 'orderByRaw', 'limit', 'forUpdate', 'noWait'].forEach((m) => {
+    qb[m] = jest.fn((arg) => {
+      if (['where', 'orWhere'].includes(m) && typeof arg === 'function') arg.call(qb, qb);
+      return qb;
+    });
   });
   qb.first = jest.fn(async () => null);
   qb.insert = jest.fn(() => Promise.resolve(1));
@@ -106,7 +109,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
   let trx;
   let trxInvoices;
   let trxPayments;
-  let trxPlans, trxCustomers;
+  let trxPlans, trxCustomers, trxChargeAttempts;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -122,6 +125,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     trxPayments = makeRecorder({ insert: jest.fn(() => Object.assign(Promise.resolve(1), { returning: jest.fn(async () => [{ id: 'pay-1' }]) })) });
     trxPlans = makeRecorder();
     trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
+    trxChargeAttempts = makeRecorder();
     trx = jest.fn((table) => {
       if (table === 'invoices') return trxInvoices;
       if (table === 'payments') return trxPayments;
@@ -134,7 +138,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       // The saved-card claim fence (assertNoInvoiceChargeReconciliationPending)
       // reads these two tables under the same lock as the paid/prepaid flip —
       // no claim/orphan fixtures here, so an empty first() clears the fence.
-      if (table === 'stripe_invoice_charge_attempts') return makeRecorder();
+      if (table === 'stripe_invoice_charge_attempts') return trxChargeAttempts;
       if (table === 'stripe_orphan_charges') return makeRecorder();
       throw new Error(`unexpected trx table ${table}`);
     });
@@ -201,6 +205,35 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       const body = await res.json();
       expect(body.error).toMatch(/visit is cancelled/);
       expect(trxVisits.forUpdate).toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+      expect(trx).not.toHaveBeenCalledWith('payment_plans');
+    });
+  });
+
+  test('apply-credit returns 409 when a potentially settling card payment is found under the invoice lock', async () => {
+    trxChargeAttempts.first.mockResolvedValueOnce({
+      id: 'attempt-auth-1',
+      status: 'failed',
+      decline_code: 'authentication_required',
+      resolved_at: new Date(),
+      stripe_payment_intent_id: 'pi_auth_1',
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(409);
+      await expect(res.json()).resolves.toEqual({
+        error: 'An earlier card payment is awaiting verification. Please contact us before trying again. — resolve it before applying credit',
+      });
+      expect(trxChargeAttempts.where).toHaveBeenCalledWith({
+        'stripe_invoice_charge_attempts.status': 'failed',
+        'stripe_invoice_charge_attempts.decline_code': 'authentication_required',
+      });
+      expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
       expect(trxInvoices.update).not.toHaveBeenCalled();
       expect(trx).not.toHaveBeenCalledWith('payment_plans');
     });

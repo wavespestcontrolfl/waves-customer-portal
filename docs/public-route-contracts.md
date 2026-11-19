@@ -801,9 +801,13 @@ Combined checkout omits a held sibling. If the hold appears after selection,
 checkout returns HTTP 409 with `staleBalance` so the page can reload the
 amount. Setup, tender changes, and finalization check the affected invoices
 under lock. Staff and automated saved-card retries also check the hold under
-the invoice lock before recording a new charge attempt.
-A verified cancellation for the same attempt and PaymentIntent
-clears the authentication hold. The `/confirm` endpoint can still record money
+the invoice lock before recording a new charge attempt. On a held invoice,
+staff credit application returns HTTP 409 and automatic credit application
+leaves the balance available.
+A verified cancellation for the same attempt and PaymentIntent clears that
+attempt's authentication hold. After webhook history expires, an operator can
+verify the PaymentIntent directly using the saved-card cancellation command
+in `ops/agents/README.md`. The `/confirm` endpoint can still record money
 the processor has already accepted.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner

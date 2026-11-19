@@ -189,8 +189,20 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
 // lease that proves a bound PI is a dead session rather than a live page.
 const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 
-function blockingInvoiceChargeAttempt(invoiceId, database, checkout) {
+function blockingInvoiceChargeAttempt(invoiceId, database, checkout, excludeChargeAttemptId) {
   const attempts = database('stripe_invoice_charge_attempts').where({ invoice_id: invoiceId });
+  if (excludeChargeAttemptId) {
+    // The saved-card charge may apply credit after it has durably claimed this
+    // invoice but before submitting to Stripe. Exclude only that exact, still
+    // pre-submit claim. If its state has advanced to submitted, ambiguous or an
+    // authentication decline, it is real competing-payment evidence again.
+    attempts.whereNot(function currentPreSubmitClaim() {
+      this.where({ id: excludeChargeAttemptId, status: 'claimed' })
+        .whereNull('submitted_at')
+        .whereNull('stripe_payment_intent_id')
+        .whereNull('resolved_at');
+    });
+  }
   const activeClaim = (q) => q.whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at');
   if (checkout) {
     // One snapshot includes both sides of the claimed -> authentication decline
@@ -213,8 +225,8 @@ function invoiceChargeConflict(err, checkout) {
 // readOnly leaves every unresolved claim in place. checkout also covers a
 // resolved authentication decline when authorizing a new collection. Recording
 // money already received keeps the original reconciliation rules.
-async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false, checkout = false } = {}) {
-  let chargeAttempt = await blockingInvoiceChargeAttempt(invoiceId, database, checkout);
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false, checkout = false, excludeChargeAttemptId = null } = {}) {
+  let chargeAttempt = await blockingInvoiceChargeAttempt(invoiceId, database, checkout, excludeChargeAttemptId);
   if (checkout && chargeAttempt?.status === 'failed') {
     throw Object.assign(new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'), {
       code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: chargeAttempt.id, statusCode: 409, savedCardPending: true,
@@ -2817,8 +2829,16 @@ const StripeService = {
           // apply (a throw rolls this transaction back, nothing applied).
           if (typeof assertBeforeMoneyMoves === 'function') assertBeforeMoneyMoves();
           const { applyAccountCreditToInvoice } = require('./customer-credit');
-          await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
-            logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          try {
+            await applyAccountCreditToInvoice({ invoiceId, currentChargeAttemptId: chargeAttempt.id }, trx);
+          } catch (creditErr) {
+            // The owned-attempt exception is intentionally narrow. A different
+            // pending/ambiguous/authenticating payment must abort this charge;
+            // ordinary credit-service hiccups retain the historical best-effort
+            // behavior and leave the card charge itself available.
+            if (savedCardChargeSuppressesAlternateCollection(creditErr)) throw creditErr;
+            logger.warn(`[stripe] charge-time account-credit apply skipped for invoice ${invoiceId}: ${creditErr.message}`);
+          }
           const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
           if (recredited) Object.assign(lockedInvoice, recredited);
           chargeCreditAppliedTotal = Number(lockedInvoice.credit_applied) || 0;

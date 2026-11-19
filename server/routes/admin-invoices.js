@@ -3225,7 +3225,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // transaction COMMITS — the promotion sticks — and map it to 409
         // outside, after commit.
         try {
-          await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, trx);
+          await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, trx, { checkout: true });
         } catch (fenceErr) {
           if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
             return { chargeReconciliationPending: `${fenceErr.message} — resolve it before applying credit` };

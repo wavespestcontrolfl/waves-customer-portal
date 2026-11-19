@@ -23,12 +23,22 @@ function makeFakeDb(tables, { failTable = null } = {}) {
     const q = {};
     const rows = () => (tables[name] || []).filter((r) => filters.every((f) => f(r)));
     q.where = (a, b) => {
-      if (a && typeof a === 'object') Object.entries(a).forEach(([k, v]) => filters.push((r) => String(r[k]) === String(v)));
+      if (typeof a === 'function') a.call(q, q);
+      else if (a && typeof a === 'object') Object.entries(a).forEach(([k, v]) => filters.push((r) => String(r[k]) === String(v)));
       else filters.push((r) => String(r[a]) === String(b));
+      return q;
+    };
+    q.whereNot = (a) => {
+      if (a && typeof a === 'object') Object.entries(a).forEach(([k, v]) => filters.push((r) => String(r[k]) !== String(v)));
       return q;
     };
     q.whereIn = (col, vals) => { filters.push((r) => vals.map(String).includes(String(r[col]))); return q; };
     q.whereNull = (col) => { filters.push((r) => r[col] == null); return q; };
+    q.whereNotNull = (col) => { filters.push((r) => r[col] != null); return q; };
+    q.orWhere = (a) => { if (typeof a === 'function') a.call(q, q); return q; };
+    q.orWhereNull = () => q;
+    q.orWhereColumn = () => q;
+    q.orderByRaw = () => q;
     q.whereRaw = (sql, bindings = []) => {
       if (/reason ILIKE \?/i.test(sql)) {
         const prefix = String(bindings[0]).replace(/%$/, '').toLowerCase();

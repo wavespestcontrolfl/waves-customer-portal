@@ -253,7 +253,7 @@ async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } =
   return row?.auto_apply_account_credit === true;
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, currentChargeAttemptId = null }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -417,6 +417,19 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // completion invoice has no PI; the admin apply-credit route, by contrast,
     // explicitly triages/cancels the PI — auto-apply simply declines.)
     if (invoice.stripe_payment_intent_id) return { applied: 0, skipped: 'has_payment_intent' };
+    // An unstamped card payment can still settle. Check under the invoice
+    // lock, leaving any existing claims in place for their reconciliation.
+    try {
+      await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, t, {
+        readOnly: true,
+        checkout: true,
+        excludeChargeAttemptId: currentChargeAttemptId,
+      });
+    } catch (paymentErr) {
+      // A charge pricing its own credit must stop before it calls Stripe.
+      if (currentChargeAttemptId || paymentErr.savedCardPending !== true) throw paymentErr;
+      return { applied: 0, skipped: 'card_payment_may_settle' };
+    }
     // An active payment plan snapshots total_balance at creation; auto-applying
     // credit now would reduce amount due while the plan keeps collecting the
     // original balance (over-collection + consumed credit). Skip — the operator

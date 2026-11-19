@@ -27,6 +27,7 @@ invoked by a human or an agent session, on purpose, from the repo root.
 
 | Script | Mode | What it does |
 |---|---|---|
+| `verify-saved-card-cancellation.js` | MUTATES with `--execute` | Verifies one historical saved-card authentication decline against its canceled Stripe PaymentIntent. The default previews the evidence. |
 | `replay-no-show-detector.js` | READ-ONLY | Replays operator-supplied timestamped visit and communication evidence at every five-minute decision point; writes local JSON/Markdown reports comparing 45- and 60-minute warnings. No DB or provider access. |
 | `pull-page-tokens.js` | READ-ONLY | Pulls one recent live token per customer-facing token-gated page type (estimate, pay, receipt, report, track, …) so those pages can be opened for visual review. |
 | `affiliate-baseline.js` | READ-ONLY | Captures the **search/traffic half** of the affiliate pilot's pre-activation baseline (`docs/affiliate-links-pilot.md`), per candidate URL: GSC clicks/impressions/CTR/position, the top queries each page ranks for, GA4 sessions/users, session-weighted bounce rate, pageviews, and GA4 key events (session duration is omitted — it cannot be weighted correctly at the available grain). Window defaults to 90 days; `--end` defaults to a 3-day GSC lag. Filtered to the blog lane and flagged against the pilot's excluded topic classes. Queries `searchanalytics` directly rather than the service's `syncPages()`, so it never writes `gsc_pages`. GA4 rows are summed per path (`getTopPages` splits one path across title changes). Warns on row-cap truncation, `--url` values that matched nothing, and pages missing GA4 sessions. **PARTIAL — not sufficient to activate links:** estimate starts, calls, CTA clicks and geography are not captured (GA4 key events are a leading indicator, not portal-side conversions), so the documented stop rule cannot be evaluated from this alone. `--json` stores a reproducible snapshot; re-running the same `--end` reproduces it. |
@@ -116,6 +117,16 @@ grant nothing by themselves. Keep every prod-touching script scoped to exactly
 what was asked; never dump full tables or the variable store.
 
 ## Usage
+
+### Verify a historical saved-card cancellation
+
+Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. Use its `stripe_payment_intent_id` if present. For an older row without that ID, find the PaymentIntent in the same Stripe account by its `saved_card_attempt_id` metadata. Supply a reachable `DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. Apply the cancellation-evidence migration first.
+
+```sh
+node ops/agents/verify-saved-card-cancellation.js --attempt <attempt-uuid> --intent <pi_id>
+```
+
+A preview returning `cancellation_verified` leaves the hold in place. After approval, repeat with `--execute` to retrieve the payment again and record the evidence on that attempt. The command requires a canceled PaymentIntent with the matching source, attempt, invoice, customer and payment method. When Stripe omits the method, the attempt must already name that PaymentIntent. Missing or conflicting proof leaves the hold in place. Other attempts on the invoice are checked independently. [Stripe webhook resend windows](https://docs.stripe.com/webhooks#manual-retries)
 
 ### Build and alert evidence
 
