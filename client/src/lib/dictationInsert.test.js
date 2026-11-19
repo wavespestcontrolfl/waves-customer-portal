@@ -132,6 +132,15 @@ describe("insertDictatedText", () => {
     expect(dictationRefusal(spaced, { start: 6, end: 6 })).toBe(null);
   });
 
+  it("a box in a disabled fieldset is locked: no mic, no words", () => {
+    const el = box("<fieldset disabled><textarea>Hello</textarea></fieldset>");
+    expect(el.disabled).toBe(false);
+    expect(isEligibleBox(el)).toBe(false);
+    expect(dictationRefusal(el, { start: 5, end: 5 })).toBe("locked");
+    expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: false, reason: "locked" });
+    expect(el.value).toBe("Hello");
+  });
+
   it("drops the words when the box left the page or is locked now", () => {
     const el = box("<textarea>Hello</textarea>");
     el.disabled = true;

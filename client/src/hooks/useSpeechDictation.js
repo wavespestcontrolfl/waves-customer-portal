@@ -199,7 +199,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
 
   // `clip` is the recording's target; the session shows words only while the field still belongs to it.
   const beginLive = useCallback((stream, clip) => {
-    const token = readToken();
+    // The preview streams under the login of the tap (`clip.token`), like the clip itself.
+    const { token } = clip;
     if (!token) return;
     liveRef.current?.abort();
     const session = startLiveWords({
@@ -332,9 +333,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       alert(`Microphone unavailable: ${e?.message || e}`);
       return;
     }
-    if (!mountedRef.current || slot.cancelled()) {
-      // Unmounted, cancelled (`cancel()`), or another mic took the microphone
-      // while the permission prompt was open — release the mic.
+    if (!mountedRef.current || slot.cancelled() || readToken() !== clip.token) {
+      // Unmounted, cancelled (`cancel()`), another mic took the microphone, or
+      // another tab switched the login while the permission prompt was open —
+      // release the mic: nothing records or streams under another login.
       stream.getTracks().forEach((t) => t.stop());
       release();
       doneStarting();

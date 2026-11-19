@@ -11,9 +11,14 @@ export const MIN_BOX_HEIGHT = 52;
  * (`data-own-mic`) or opts out (`data-no-dictation`). Single-line inputs never
  * qualify. Size is checked where the mic is placed (`boxFits`).
  */
+// Takes no typing now: disabled (its own attribute, or a disabled fieldset around it) or read-only.
+function locked(el) {
+  return el.disabled || el.readOnly || (typeof el.matches === "function" && el.matches(":disabled"));
+}
+
 export function isEligibleBox(el) {
   if (!el || el.tagName !== "TEXTAREA") return false;
-  if (el.disabled || el.readOnly) return false;
+  if (locked(el)) return false;
   if (el.closest("[data-own-mic], [data-no-dictation]")) return false;
   const style = typeof getComputedStyle === "function" ? getComputedStyle(el) : null;
   return !style || (style.display !== "none" && style.visibility !== "hidden");
@@ -86,7 +91,7 @@ function placement(el, selection) {
  */
 export function dictationRefusal(el, selection) {
   if (!el || !el.isConnected) return "gone";
-  if (el.disabled || el.readOnly) return "locked";
+  if (locked(el)) return "locked";
   const { lead, room } = placement(el, selection);
   return room <= lead.length ? "full" : null;
 }

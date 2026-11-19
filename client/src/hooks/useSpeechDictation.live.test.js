@@ -91,6 +91,22 @@ describe("useSpeechDictation live words", () => {
     expect(sessions[0].abort).toHaveBeenCalled();
   });
 
+  it("the login changed while the mic permission was open: no session, no recording, the mic is let go", async () => {
+    stubServer();
+    const stop = vi.fn();
+    navigator.mediaDevices.getUserMedia.mockImplementationOnce(async () => {
+      localStorage.setItem("waves_admin_token", "other-staff-jwt");
+      return { getTracks: () => [{ stop }] };
+    });
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), {}));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.starting).toBe(false));
+    expect(result.current.listening).toBe(false);
+    expect(sessions).toHaveLength(0);
+    expect(stop).toHaveBeenCalled();
+  });
+
   it("opens no session when the server did not offer live words", async () => {
     stubServer({ liveWords: false });
     const { result } = await recording({});
