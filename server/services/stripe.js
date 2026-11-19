@@ -677,7 +677,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'status', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
+      .first('id', 'status', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'credit_applied_delta', 'credit_applied_total');
     if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
     if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
     const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
@@ -686,7 +686,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       // Even the invoice's pointer may have been written by a processing
       // webhook. A timed-out worker cannot supply further proof. Acknowledge
       // that observation while retaining the ambiguous claim and its credit.
-      if (attempt.status === 'ambiguous') return false;
+      if (attempt.worker_create_timed_out_at) return false;
       // Stripe can deliver failure before the original create returns. Retry
       // the signed event after the worker has bound its exact response. No
       // invoice, reserved credit or attempt state has changed in this path.
@@ -3196,6 +3196,7 @@ const StripeService = {
           if (creditReservationReady) {
             await markInvoiceSavedCardChargeAttempt(chargeAttempt.id, {
               status: 'ambiguous',
+              worker_create_timed_out_at: new Date(),
               error_message: String(err.message).slice(0, 1000),
               resolved_at: null,
             }).catch((attemptErr) => {

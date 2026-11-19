@@ -53,9 +53,8 @@ function savedCardAttemptMatchesPaymentIntent({
 }) {
   if (!attempt || !invoice || !paymentIntent) return false;
   const metadata = paymentIntent.metadata || {};
-  const paymentMethodId = typeof paymentIntent.payment_method === 'string'
-    ? paymentIntent.payment_method
-    : paymentIntent.payment_method?.id;
+  const method = paymentIntent.payment_method || paymentIntent.last_payment_error?.payment_method;
+  const paymentMethodId = typeof method === 'string' ? method : method?.id;
   const metadataAttemptId = metadata.saved_card_attempt_id
     ? String(metadata.saved_card_attempt_id)
     : '';

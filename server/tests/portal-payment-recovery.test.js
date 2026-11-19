@@ -74,7 +74,7 @@ function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptE
   return jest.fn((table) => {
     const query = {};
     for (const method of [
-      'join', 'where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereIn', 'orWhereColumn', 'orWhereNull',
+      'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orWhere', 'orWhereIn', 'orWhereColumn', 'orWhereNull',
     ]) {
       query[method] = (...args) => {
         if (typeof args[0] === 'function') args[0].call(query, query);
@@ -214,6 +214,13 @@ test('a saved-card authentication_required row with no PI id cannot open a secon
 });
 
 test.each([
+  {
+    label: 'webhook declined a different intent from the worker',
+    invoiceRow: invoice(),
+    attemptRows: [{ invoice_id: INV_A, status: 'failed', decline_code: 'card_declined', resolved_at: new Date(),
+      worker_payment_intent_id: 'pi_worker', stripe_payment_intent_id: 'pi_webhook' }],
+    expectedState: 'authentication_unknown',
+  },
   {
     label: 'known authentication_required',
     invoiceRow: invoice(),

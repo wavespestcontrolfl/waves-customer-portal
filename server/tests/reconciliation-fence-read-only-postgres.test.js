@@ -90,6 +90,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await migration.up(app);
     await provenanceMigration.up(app);
     await workerIdentityMigration.up(app);
+    await require('../models/migrations/20261119190100_saved_card_worker_timeout').up(app);
     StripeService = require('../services/stripe');
   });
 

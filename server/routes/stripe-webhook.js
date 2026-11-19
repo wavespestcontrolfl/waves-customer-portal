@@ -7125,9 +7125,12 @@ async function handlePaymentIntentCanceled(paymentIntent) {
       });
       if (attemptResolved) {
         logger.info(`[stripe-webhook] Released saved-card attempt ${canceledSavedCardAttempt.id} for canceled PI ${piId}`);
-        continue;
       }
+      // Only the attempt resolver can reopen a recognized saved-card payment.
+      // A false verdict preserves the invoice and reserved credit.
+      continue;
     }
+    if (paymentIntent.metadata?.source === 'admin_card_on_file' && paymentIntent.metadata?.saved_card_attempt_id) continue;
     // PI ownership in the predicate: a replacement PI rebinding this invoice
     // between the read and this write must not have its binding cleared.
     await db('invoices')

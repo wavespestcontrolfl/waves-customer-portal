@@ -596,6 +596,7 @@ describe('saved-card failed-webhook attempt repair', () => {
   test('withholds invoice and credit writes until the original worker binds a webhook-first failure', async () => {
     const { database, state } = failedAttemptDb();
     state.attempt.worker_payment_intent_id = null;
+    state.attempt.status = 'ambiguous'; // a concurrent checkout promoted the claim while the worker is still waiting
     await expect(resolveFailedInvoiceSavedCardChargeAttempt({
       attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
     })).rejects.toMatchObject({ code: 'SAVED_CARD_WORKER_INTENT_PENDING' });
@@ -605,7 +606,7 @@ describe('saved-card failed-webhook attempt repair', () => {
 
   test('a completed create timeout stays held without independent request proof, even if processing stamped the invoice', async () => {
     const { database, state } = failedAttemptDb();
-    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, submitted_at: new Date(), idempotency_key: 'original-create' });
+    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, worker_create_timed_out_at: new Date(), submitted_at: new Date(), idempotency_key: 'original-create' });
     state.invoice.stripe_payment_intent_id = 'pi-failed';
     const failure = { attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database };
     await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'other-create' })).resolves.toBe(false);
