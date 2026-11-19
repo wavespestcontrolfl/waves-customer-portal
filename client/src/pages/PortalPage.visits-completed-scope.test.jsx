@@ -156,7 +156,7 @@ describe('Completed visits by property', () => {
     expect(api.getServices).toHaveBeenCalledTimes(2);
   });
 
-  it('evicts cached history when a pagination 403 arrives after Completed unmounts', async () => {
+  it.each([false, true])('evicts denied pagination history when already remounted offline is %s', async (remountBeforeDenial) => {
     let rejectPagination;
     api.getServices
       .mockResolvedValueOnce({
@@ -170,13 +170,19 @@ describe('Completed visits by property', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load More Visits' }));
     await waitFor(() => expect(rejectPagination).toEqual(expect.any(Function)));
     fireEvent.click(screen.getByRole('button', { name: 'Close completed visits' }));
+    const reopenOffline = () => {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+      fireEvent(window, new Event('offline'));
+      fireEvent.click(screen.getByRole('button', { name: 'Reopen completed visits' }));
+    };
+    if (remountBeforeDenial) {
+      reopenOffline();
+      expect(await screen.findByText('Cached authorized house')).toBeInTheDocument();
+    }
     await act(async () => {
       rejectPagination(Object.assign(new Error('Authorization denied'), { status: 403 }));
     });
-
-    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
-    fireEvent(window, new Event('offline'));
-    fireEvent.click(screen.getByRole('button', { name: 'Reopen completed visits' }));
+    if (!remountBeforeDenial) reopenOffline();
 
     expect(screen.queryByText('Cached authorized house')).not.toBeInTheDocument();
     expect(api.getServices).toHaveBeenCalledTimes(2);

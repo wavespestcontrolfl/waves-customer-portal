@@ -3780,7 +3780,6 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const reportPanelIdPrefix = useId();
-  const [services, setServices] = useState([]);
   const historyScopeKey = `${customerId || 'customer'}:${historyProperty || 'profile'}`;
   const mountedRef = useRef(false);
   const activeHistoryScopeRef = useRef(historyScopeKey);
@@ -3833,8 +3832,8 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
       // Pagination bypasses usePortalRead.refresh. A denial that arrives after
       // Completed unmounts must still evict the provider cache, or an offline
       // remount can resurrect the previously authorized rows and actions.
-      if (authorizationDenied) evictOriginalCache({ clearAll: true });
       const current = requestIsCurrent();
+      if (authorizationDenied) evictOriginalCache({ clearAll: true });
       // A scope conflict invalidates the cache entry this request started
       // from even after unmount. Preserve a replacement written by a newer
       // verified request for the same key.
@@ -3868,10 +3867,11 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
-  const [totalServices, setTotalServices] = useState(null);
+  const services = historyRead.data?.services || [];
+  const totalServices = Number.isFinite(historyRead.data?.total) ? historyRead.data.total : null;
   // Raw pagination cursor — counts rows RECEIVED, not rows kept after the
   // boundary-row dedupe, so the next page never re-requests a seen row.
-  const [servicesOffset, setServicesOffset] = useState(0);
+  const servicesOffset = historyRead.data?.nextOffset ?? services.length;
   const [loadingMore, setLoadingMore] = useState(false);
   const moreSequence = useRef(0);
   const [lightbox, setLightbox] = useState(null);
@@ -3889,7 +3889,6 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return;
     moreSequence.current += 1;
     setLoadingMore(false);
-    setServices([]);
     setExpanded(null);
     setLightbox(null);
     closePreview();
@@ -3906,15 +3905,15 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
 
   const SERVICES_PAGE_SIZE = 100;
   useEffect(() => {
-    if (!historyRead.data) return;
-    const d = historyRead.data;
     moreSequence.current += 1;
     setLoadingMore(false);
-    setServices(d.services || []);
-    setServicesOffset(d.nextOffset ?? (d.services || []).length);
-    setTotalServices(Number.isFinite(d.total) ? d.total : null);
+    if (!historyRead.data) {
+      setExpanded(null);
+      setLightbox(null);
+      closePreview();
+    }
     return () => { moreSequence.current += 1; };
-  }, [historyRead.data, historyRead.pending]);
+  }, [historyRead.data, historyRead.pending, closePreview]);
 
   // The server caps each page at 100 rows — older visits stay reachable
   // through an explicit Load More instead of silently vanishing from history.
@@ -3974,7 +3973,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const sectionTitle = CUSTOMER_SECTION_LABEL;
 
   // The stable key keeps an open iframe alive when the list enters saved mode.
-  const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
+  const previewOverlay = historyRead.data && preview && <DocumentPreviewOverlay key="report-preview"
     preview={preview} onClose={closePreview}
     onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />;
 
@@ -13530,14 +13529,15 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const profileFactsApply = !(selectedProperty || savedScope) || entryConfirmedPrimary;
   const profileFactsRef = useRef(profileFactsApply);
   profileFactsRef.current = profileFactsApply;
-  const adoptTracker = useCallback((d) => {
+  const adoptTracker = useCallback((d, expectedStopId = null) => {
     const { entry, saved, named, refresh } = scopeRef.current;
     if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
       setTracker(null);
       if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
       return;
     }
-    setTracker(d.tracker);
+    if (expectedStopId != null && String(d?.tracker?.id) !== String(expectedStopId)) return;
+    setTracker(d?.tracker ?? null);
   }, []);
 
   const fetchTracker = useCallback(() => {
@@ -13617,40 +13617,23 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     return Promise.race([
       api.getTodayTracker(),
       new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          const timeout = new Error('Report refresh timed out');
-          timeout.code = 'REPORT_REVALIDATION_TIMEOUT';
-          reject(timeout);
-        }, READ_TIMEOUT_MS);
+        timer = setTimeout(() => reject(new Error('Report refresh timed out')), READ_TIMEOUT_MS);
       }),
     ])
       .then(d => {
         if (seq !== trackerSeqRef.current) return;
-        const { entry, saved, named, refresh } = scopeRef.current;
-        if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
-          setTracker(null);
-          if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
-          return;
-        }
-        if (!d?.tracker || String(d.tracker.id) !== String(displayedTrackerId)) {
-          if (!preserveOnMissing) withdrawCompletionReport(displayedTrackerId);
-          return;
-        }
-        setTracker(d.tracker);
+        adoptTracker(d, preserveOnMissing ? displayedTrackerId : null);
       })
       .catch(error => {
         if (seq !== trackerSeqRef.current) return;
         const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
-        const timedOut = error?.code === 'REPORT_REVALIDATION_TIMEOUT';
-        // A ready report cannot remain trusted after revalidation times out.
-        // Withdraw it immediately; the late request may no longer restore it.
-        if (denied || (timedOut && reportWasVisible)) withdrawCompletionReport(displayedTrackerId);
+        if (denied || reportWasVisible) withdrawCompletionReport(displayedTrackerId);
       })
       .finally(() => {
         clearTimeout(timer);
         if (showBusy && busyAttempt === reportRefreshAttemptRef.current) setReportRefreshing(false);
       });
-  }, [withdrawCompletionReport]);
+  }, [adoptTracker, withdrawCompletionReport]);
 
   // Terminal trackers stop the 15-second poll, but report permission can
   // still change while Home remains mounted. Join the portal refresh cycle so

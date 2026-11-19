@@ -120,7 +120,20 @@ describe('completed visit report handoff on Home', () => {
     expect(screen.queryByRole('button', { name: "View today's report" })).not.toBeInTheDocument();
   });
 
-  it.each([401, 403])('withdraws the completed tracker report when portal revalidation is denied (%s)', async status => {
+  it('adopts a replacement visit and clears a missing visit on portal refresh', async () => {
+    todayTracker = completeTracker({ customerSummary: 'First visit.', reportUrl: '/report/first' });
+    render(<PortalReadProvider enabled><ServiceTracker /></PortalReadProvider>);
+    expect(await screen.findByText('First visit.')).toBeInTheDocument();
+    todayTracker = { ...completeTracker({ customerSummary: 'Second visit.', reportUrl: '/report/second' }), id: 'visit-2' };
+    fireEvent(window, new Event('online'));
+    expect(await screen.findByText('Second visit.')).toBeInTheDocument();
+    expect(screen.queryByText('First visit.')).not.toBeInTheDocument();
+    todayTracker = null;
+    fireEvent(window, new Event('online'));
+    await waitFor(() => expect(screen.queryByText('Service complete')).not.toBeInTheDocument());
+  });
+
+  it.each([401, 403, 500])('withdraws the completed tracker report when portal revalidation fails (%s)', async status => {
     todayTracker = completeTracker({
       customerSummary: 'Contact-visible closeout.',
       reportUrl: '/report/contact-report', reportPdfUrl: null, reportPending: false,

@@ -39,12 +39,27 @@ function SilentRead({ load }) {
   usePortalRead('documents', load);
   return null;
 }
+function KeyedRead({ cacheKey, label, load, readRef }) {
+  const read = usePortalRead(cacheKey, load);
+  if (readRef) readRef.current = read;
+  return <>
+    <div data-testid={`${label}-data`}>{read.data?.title || 'No saved information'}</div>
+    <div data-testid={`${label}-state`}>{read.saved ? 'saved' : read.error ? 'error' : read.loading ? 'loading' : 'ready'}</div>
+    <button onClick={read.refresh}>{label} retry</button>
+  </>;
+}
 function App({ load, extraLoad, account = 'a', show = true, enabled = true }) {
   return <PortalReadProvider key={account} enabled={enabled}><PortalRefreshArea>
     <RefreshFixture /><div data-testid="pull-target">Visits</div>
     {show && <Read load={load} />}
     {extraLoad && <SilentRead load={extraLoad} />}
   </PortalRefreshArea></PortalReadProvider>;
+}
+function InvalidationApp({ visitsLoad, documentsLoad, visitsRef, showVisits = true }) {
+  return <PortalReadProvider enabled>
+    {showVisits && <KeyedRead cacheKey="visits" label="visits" load={visitsLoad} readRef={visitsRef} />}
+    <KeyedRead cacheKey="documents" label="documents" load={documentsLoad} />
+  </PortalReadProvider>;
 }
 
 beforeEach(() => {
@@ -266,6 +281,122 @@ describe('customer portal reads', () => {
 
     expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
     expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears a remounted offline reader when an older reader later loses authorization', async () => {
+    const denied = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(denied.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    rerender(<App load={load} show={false} />);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    rerender(<App load={load} />);
+    expect(screen.getByText('Saved visit')).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('saved');
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status: 403 })));
+
+    expect(screen.queryByText('Saved visit')).not.toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('error');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('blocks a newer mounted reader completion after an older reader loses authorization', async () => {
+    const denied = deferred();
+    const newer = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(denied.promise)
+      .mockReturnValueOnce(newer.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    rerender(<App load={load} show={false} />);
+    rerender(<App load={load} />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    expect(screen.getByText('Saved visit')).toBeInTheDocument();
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status: 403 })));
+    expect(screen.queryByText('Saved visit')).not.toBeInTheDocument();
+    await act(async () => newer.resolve({ title: 'Revoked stale visit' }));
+    expect(screen.queryByText('Revoked stale visit')).not.toBeInTheDocument();
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    rerender(<App load={load} show={false} />);
+    rerender(<App load={load} />);
+    expect(screen.getByTestId('data')).toHaveTextContent('No saved information');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('propagates authorization eviction across every mounted cache key', async () => {
+    const denied = deferred();
+    const visitsLoad = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(denied.promise);
+    const documentsLoad = vi.fn().mockResolvedValue({ title: 'Saved document' });
+    render(<InvalidationApp visitsLoad={visitsLoad} documentsLoad={documentsLoad} />);
+    expect(await screen.findByTestId('visits-data')).toHaveTextContent('Saved visit');
+    expect(await screen.findByTestId('documents-data')).toHaveTextContent('Saved document');
+    fireEvent.click(screen.getByRole('button', { name: 'visits retry' }));
+
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status: 401 })));
+
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('No saved information');
+    expect(screen.getByTestId('documents-data')).toHaveTextContent('No saved information');
+    expect(screen.getByTestId('visits-state')).toHaveTextContent('error');
+    expect(screen.getByTestId('documents-state')).toHaveTextContent('error');
+  });
+
+  it('propagates a captured keyed eviction without clearing other keys or accepting a stale completion', async () => {
+    const older = deferred();
+    const newer = deferred();
+    const visitsRef = { current: null };
+    const visitsLoad = vi.fn()
+      .mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+    const documentsLoad = vi.fn().mockResolvedValue({ title: 'Saved document' });
+    const { rerender } = render(<InvalidationApp
+      visitsLoad={visitsLoad}
+      documentsLoad={documentsLoad}
+      visitsRef={visitsRef}
+    />);
+    expect(await screen.findByTestId('visits-data')).toHaveTextContent('Saved visit');
+    expect(await screen.findByTestId('documents-data')).toHaveTextContent('Saved document');
+    fireEvent.click(screen.getByRole('button', { name: 'visits retry' }));
+    await waitFor(() => expect(visitsLoad).toHaveBeenCalledTimes(2));
+    const evictOriginalKey = visitsRef.current.evict;
+
+    rerender(<InvalidationApp
+      visitsLoad={visitsLoad}
+      documentsLoad={documentsLoad}
+      visitsRef={visitsRef}
+      showVisits={false}
+    />);
+    rerender(<InvalidationApp
+      visitsLoad={visitsLoad}
+      documentsLoad={documentsLoad}
+      visitsRef={visitsRef}
+    />);
+    await waitFor(() => expect(visitsLoad).toHaveBeenCalledTimes(3));
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('Saved visit');
+
+    act(() => evictOriginalKey());
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('No saved information');
+    expect(screen.getByTestId('documents-data')).toHaveTextContent('Saved document');
+    await act(async () => newer.resolve({ title: 'Stale visit' }));
+    expect(screen.getByTestId('visits-data')).toHaveTextContent('No saved information');
+    await act(async () => older.resolve({ title: 'Older stale visit' }));
+    expect(screen.queryByText('Older stale visit')).not.toBeInTheDocument();
   });
 
   it.each([401, 403])('evicts a saved result when access denial arrives after the read timeout (%s)', async status => {
