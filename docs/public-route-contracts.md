@@ -8616,10 +8616,12 @@ router matches: each segment percent-decoded, any case, extra trailing slashes i
 the not-valid page). A last segment that looks like a file name (`bad.pdf`) gets the plain missing-file 404, as on
 every SPA path, and never the page; no offer token has a dot. The page itself opens only the link as sent: a token of
 64 lowercase hex and no percent-encoding in the path (any letter case of `/careers/offer/` is fine). Any other spelling
-shows the not-valid state with no API read: stored messages hide the link in every spelling a browser cleans into it
-(`utils/offer-link-redaction.js`: any letter case, and every 64-hex token in an unbroken run of text that names both
-`careers` and `offer`, which covers dot segments and backslashes), and a percent-encoded path stays encoded in the
-browser, so no other spelling may work as a credential. The service worker never handles an offer URL, in any
+shows the not-valid state with no API read. Stored messages hide the token in every spelling of the link
+(`utils/offer-link-redaction.js`): the link as sent keeps its host with the token hidden; any other unbroken run of text
+that names both `careers` and `offer` and holds a 64-hex token once read as a browser or a reader would (dot segments,
+backslashes, letter case, percent-encoding, HTML character references, full-width forms, invisible characters) is
+stored as the standard link with the token hidden, once per token, and pinned to the same tokens, so a held text
+replays as the standard link. The service worker never handles an offer URL, in any
 request mode (`client/public/sw.js` `isPrivateLinkPage`): it stores nothing, because a stored response or request
 keeps its URL, it drops any offer URL an older worker stored when it activates, and it never serves its offline
 shell in the page's place, so the browser always fetches the page with these headers. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits

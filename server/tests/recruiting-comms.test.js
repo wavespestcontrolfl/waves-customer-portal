@@ -664,13 +664,13 @@ describe('sendStageComms — a held owner reply that pastes an offer link', () =
   const HOLD = { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' };
   const sha256 = (text) => require('crypto').createHash('sha256').update(text).digest('hex');
 
-  function holdReply(offers) {
+  function holdReply(offers, smsBody = `Here is your offer again: ${LINK}`) {
     mockSendCustomerMessage.mockResolvedValue(HOLD);
     const app = baseApp();
     mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
     mockDb.__tables.sms_log = [];
     mockDb.__tables.job_offers = offers;
-    return RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'staff-1', smsBody: `Here is your offer again: ${LINK}` });
+    return RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'staff-1', smsBody });
   }
 
   test('is queued with the link hidden and pins it to its offer, so the replay can put the real link back', async () => {
@@ -680,6 +680,19 @@ describe('sendStageComms — a held owner reply that pastes an offer link', () =
     expect(queued.message_body).toBe('Here is your offer again: https://portal.wavespestcontrol.com/careers/offer/[link hidden]');
     expect(JSON.stringify(queued)).not.toContain(TOKEN.slice(0, 40)); // no token anywhere on the row, metadata included
     expect(JSON.parse(queued.metadata).offer_links).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
+  });
+
+  test('a pasted link in another spelling is queued as the standard hidden link and pinned, so the replay sends a working link', async () => {
+    const { portalUrl } = require('../utils/portal-url');
+    const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
+    const result = await holdReply([{ id: 'offer-7', token: TOKEN }], `Here is your offer again: https://portal.wavespestcontrol.com/careers/%6Fffer/./${TOKEN}`);
+    expect(result.sms).toBe('deferred');
+    const queued = mockDb.__tables.sms_log.find((r) => r.status === 'scheduled');
+    expect(queued.message_body).toBe(`Here is your offer again: ${portalUrl('/careers/offer/[link hidden]')}`);
+    expect(JSON.stringify(queued)).not.toContain(TOKEN.slice(0, 40));
+    expect(JSON.parse(queued.metadata).offer_links).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
+    expect(replayBodyFor('recruiting_comms_deferred', { eligible: true, offerTokens: [TOKEN] }, queued.message_body))
+      .toBe(`Here is your offer again: ${portalUrl(`/careers/offer/${TOKEN}`)}`);
   });
 
   test('a pasted link that matches no offer is not queued, so it never waits with a link it cannot send', async () => {

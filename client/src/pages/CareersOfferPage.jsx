@@ -720,10 +720,10 @@ async function readOffer(token) {
 
 // Keyed by token so a pending write for one link can never land on another.
 // Only the link as it was sent opens the offer: 64 lowercase hex and no
-// percent-encoding in the path. The router would decode an encoded spelling,
-// which the browser leaves encoded, and a stored message hides the link only in
-// the spellings a browser cleans into it (server/utils/offer-link-redaction.js:
-// any letter case, dot segments, backslashes). No other spelling may work.
+// percent-encoding in the path (the browser leaves an encoded spelling encoded,
+// and the router would decode it). Stored messages hide the token in every
+// spelling of the link (server/utils/offer-link-redaction.js), and this page
+// opens only the one spelling the server sends.
 const SENT_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 export default function CareersOfferPage() {
