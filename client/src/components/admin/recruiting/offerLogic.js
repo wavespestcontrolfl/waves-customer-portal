@@ -113,6 +113,20 @@ export function isStaleWrite(err) {
   return STALE_CODES.includes(err?.body?.code);
 }
 
+// A write whose answer was lost: no reply, a 5xx, or a reply that could not be
+// read. The server may have done it, so the form re-reads before it offers the
+// write again. A 4xx answer is a refusal: nothing was written.
+export function isLostAnswer(err) {
+  const status = Number(err?.status);
+  return !(status >= 400 && status < 500);
+}
+
+// After a lost answer, the re-read showed the draft as it was: nothing was written.
+export const LOST_ANSWER_TEXT = {
+  save: "The save got no answer, and the draft did not change, so nothing was saved. Try again.",
+  send: "The send got no answer, and the offer is still a draft, so it did not go out. Try again.",
+};
+
 export function money(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "";

@@ -24,8 +24,10 @@ import {
   describeSend,
   expiryLabel,
   formatIssued,
+  isLostAnswer,
   isStartWeekday,
   isStaleWrite,
+  LOST_ANSWER_TEXT,
   isValidDay,
   maskEmail,
   maskPhone,
@@ -279,6 +281,8 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   // Set when the server refused a write as stale. The form stays read-only, with the owner's
   // edits on screen, until they load the new version or close the form.
   const [conflict, setConflict] = useState(false);
+  // "save" or "send" while the form re-reads after a write whose answer was lost.
+  const [lost, setLost] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
@@ -330,8 +334,11 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   // that draft is gone (another admin sent or discarded it), the form closes and the card
   // shows the offer's state. After a refused write it only re-reads: the owner still picks.
   const reread = async () => {
-    if (conflict) {
-      if (await onChanged()) setNeedRead(false);
+    if (conflict || lost) {
+      const next = await onChanged();
+      if (!next) return;
+      setNeedRead(false);
+      if (lost) settleLost(next, lost);
       return;
     }
     const expected = pinned?.id || draftId;
@@ -347,6 +354,41 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     setConflict(true);
     setNeedRead(true);
     if (await onChanged()) setNeedRead(false);
+  };
+
+  // A read after a lost answer decides what happened. The draft as it was: nothing
+  // was written, so the form stays as it is, edits included. Anything else (the
+  // offer went out, or the draft changed): read-only, as after a refused write.
+  const settleLost = (next, kind) => {
+    const still = pinned ? reviewedDraft(next, pinned.id) : openDraft(next);
+    const unchanged = pinned ? still?.draftHash === pinned.draftHash : !still;
+    setLost(null);
+    if (unchanged) {
+      setError(LOST_ANSWER_TEXT[kind]);
+    } else {
+      setConflict(true);
+      setError(null);
+    }
+  };
+
+  // The answer to a save or send was lost: re-read before the form offers the write
+  // again. If the read fails, Try again only re-reads.
+  const lostWrite = async (kind) => {
+    setConfirming(false);
+    setError(null);
+    setLost(kind);
+    setNeedRead(true);
+    const next = await onChanged();
+    if (!next) return;
+    setNeedRead(false);
+    settleLost(next, kind);
+  };
+
+  // A failed write: a lost answer re-reads; a refusal shows the server's sentence.
+  const writeFailed = async (err, kind) => {
+    if (isLostAnswer(err)) return lostWrite(kind);
+    setError(offerErrorMessage(err));
+    if (isStaleWrite(err)) await staleWrite();
   };
 
   const adoptLatest = () => {
@@ -369,8 +411,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       setNeedRead(true);
       await refresh(offer.id);
     } catch (err) {
-      setError(offerErrorMessage(err));
-      if (isStaleWrite(err)) await staleWrite();
+      await writeFailed(err, "save");
     } finally {
       setBusy(false);
     }
@@ -386,8 +427,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       await onSent();
       setConfirming(false);
     } catch (err) {
-      setError(offerErrorMessage(err));
-      if (isStaleWrite(err)) await staleWrite();
+      await writeFailed(err, "send");
     } finally {
       setBusy(false);
     }

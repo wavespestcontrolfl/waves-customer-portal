@@ -11,7 +11,7 @@ import { offerErrorMessage, shownOffer } from "./offerLogic";
 // Statuses that leave something to act on: a draft to finish, or an offer that is out.
 const LIVE_STATES = ["draft", "sent", "date_requested"];
 
-export default function OfferSection({ detail, offerFlow, onChanged }) {
+export default function OfferSection({ detail, offerFlow, onChanged, detailStale = false }) {
   const { enabled, data, openForm, error: readError, refreshError, ownerActions, retry } = offerFlow;
   const [signed, setSigned] = useState(null);
   const [error, setError] = useState(null);
@@ -31,7 +31,8 @@ export default function OfferSection({ detail, offerFlow, onChanged }) {
   // declined, or signed before the application was moved back to Offer.
   const current = shownOffer(data.current);
   const stillInOffer = detail.status === "offer";
-  const canMakeOffer = stillInOffer && !refreshError && !data.draft && !(current && LIVE_STATES.includes(current.status));
+  // detailStale: the application could not be re-read, so its stage may be out of date.
+  const canMakeOffer = stillInOffer && !refreshError && !detailStale && !data.draft && !(current && LIVE_STATES.includes(current.status));
   const stale = refreshError ? (
     <ActionFeedback error className="mb-3" onRetry={retry}>
       {refreshError}

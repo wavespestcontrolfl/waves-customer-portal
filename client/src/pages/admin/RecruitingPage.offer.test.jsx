@@ -711,13 +711,45 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     await new Promise((r) => setTimeout(r, 50));
     expect(within(detailDialog).getByText(notice)).toBeInTheDocument();
     expect(within(detailDialog).getByRole('button', { name: 'Hired' })).toBeDisabled();
+    // A new offer depends on the stage too: it waits for the re-read.
+    expect(within(screen.getByTestId('offer-card')).queryByRole('button', { name: 'Make an offer' })).toBeNull();
     failDetail = false;
-    detail.status = 'interview';
     fireEvent.click(within(detailDialog).getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(within(detailDialog).queryByText(notice)).toBeNull());
     expect(within(detailDialog).getByRole('button', { name: 'Hired' })).not.toBeDisabled();
-    // The re-read applied: the application is in Interview now, so Interview is no longer a move.
-    expect(within(detailDialog).queryByRole('button', { name: 'Interview' })).toBeNull();
+    expect(within(screen.getByTestId('offer-card')).getByRole('button', { name: 'Make an offer' })).toBeInTheDocument();
+  });
+
+  it('after a send from Interview whose application re-read fails, the interview link button waits for the re-read too', async () => {
+    let failDetail = false;
+    let current = offerRecord();
+    const detail = detailFixture({ status: 'interview', interview_url: 'https://portal.example.test/careers/interview/link' });
+    setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-1/send': () => {
+          // The send moves the application to Offer on the server; the re-read of it fails.
+          current = offerRecord({ status: 'sent', timeline: [] });
+          failDetail = true;
+          return res(200, { offer: current, comms: { sms: { outcome: 'sent' }, email: { outcome: 'sent' } } });
+        },
+        'GET /admin/careers/app-1': () => (failDetail ? res(500, { error: 'Server error' }) : res(200, { application: detail })),
+      },
+      { offer: () => res(200, offerPayload({ current })), detail },
+    );
+    await openDetail();
+    const offerButton = screen.getByRole('button', { name: 'Offer' });
+    await waitFor(() => expect(offerButton).not.toBeDisabled());
+    fireEvent.click(offerButton);
+    await screen.findByLabelText('Hourly rate ($)');
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    const sentView = (await screen.findByText('Offer sent to Jordan.')).closest('[role="dialog"]');
+    fireEvent.click(within(sentView).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByText('Offer sent to Jordan.')).toBeNull());
+    const detailDialog = screen.getByRole('heading', { name: /Jordan Rivera — / }).closest('[role="dialog"]');
+    expect(await within(detailDialog).findByText(/could not be reloaded after the offer change/)).toBeInTheDocument();
+    expect(within(detailDialog).getByRole('button', { name: 'Resend link' })).toBeDisabled();
   });
 });
 
@@ -1072,6 +1104,69 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     const after = await screen.findByTestId('offer-card');
     expect(within(after).getByText('Closed unsigned')).toBeInTheDocument();
     expect(within(after).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+  });
+
+  it('a send whose answer is lost re-reads: an offer that went out leaves the form read-only with no second Send', async () => {
+    let current = offerRecord();
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer/offer-1/send': () => { current = offerRecord({ status: 'sent', timeline: [] }); return res(502, { error: 'Bad gateway' }); } },
+      () => res(200, offerPayload({ current })),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('This draft is no longer open. Close this form to see the offer.')).toBeInTheDocument();
+    expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    expect(screen.queryByText('Bad gateway')).toBeNull();
+  });
+
+  it('a send with no answer whose offer is still the same draft says nothing went out and offers Send again', async () => {
+    await openDraftForm({ 'POST /admin/careers/app-1/offer/offer-1/send': () => Promise.reject(new TypeError('Failed to fetch')) });
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('The send got no answer, and the offer is still a draft, so it did not go out. Try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
+    expect(screen.getByLabelText('Hourly rate ($)')).not.toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText(/Send this offer to Jordan/)).toBeInTheDocument();
+  });
+
+  it('a save whose answer is lost and whose re-read fails stays read-only; Try again only re-reads and keeps the typed edits', async () => {
+    let failRead = false;
+    const saves = [];
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer': () => { saves.push(1); failRead = true; return res(503, { error: 'Unavailable' }); } },
+      () => (failRead ? res(500, { error: 'Server error' }) : res(200, offerPayload({ current: offerRecord() }))),
+    );
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    const form = screen.getByLabelText('Hours').closest('[role="dialog"]');
+    await waitFor(() => expect(within(form).getByRole('button', { name: 'Try again' })).not.toBeDisabled());
+    expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
+    expect(screen.getByLabelText('Hours')).toBeDisabled();
+    failRead = false;
+    fireEvent.click(within(form).getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('The save got no answer, and the draft did not change, so nothing was saved. Try again.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
+    expect(screen.getByLabelText('Hours')).not.toBeDisabled();
+    expect(saves).toHaveLength(1);
+  });
+
+  it('a re-read that finds the gate off closes the form and brings back the status-only Offer move', async () => {
+    let off = false;
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer': () => { off = true; return res(200, { offer: offerRecord({ draftHash: 'hash-2' }) }); } },
+      () => (off ? res(404, { enabled: false }) : res(200, offerPayload({ current: offerRecord() }))),
+    );
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(screen.queryByLabelText('Hours')).toBeNull());
+    const offerButton = screen.getByRole('button', { name: 'Offer' });
+    await waitFor(() => expect(offerButton).not.toBeDisabled());
+    fireEvent.click(offerButton);
+    expect(await screen.findByRole('heading', { name: 'Move to Offer' })).toBeInTheDocument();
   });
 
   it('a send answer whose offer was withdrawn during delivery says it is no longer open, with no Revise advice', async () => {

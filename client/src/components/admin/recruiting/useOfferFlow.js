@@ -28,7 +28,10 @@ export default function useOfferFlow(applicationId, applicationStatus) {
     try {
       const data = await fetchOffer(id);
       if (mine === seq.current) {
-        setState({ id, status: data.enabled === true ? "ready" : "off", data, error: null });
+        const on = data.enabled === true;
+        setState({ id, status: on ? "ready" : "off", data, error: null });
+        // The gate went off: close the form, so the application is back on the status-only Offer move.
+        if (!on) setForm(null);
       }
       return data;
     } catch (err) {

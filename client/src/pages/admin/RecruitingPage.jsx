@@ -719,7 +719,8 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated) {
 // with a resend option, or no link yet with a send/resend CTA. A distinct
 // component because this sub-tree carries most of the dialog's own
 // branching (the booked/unbooked split, the link-status copy).
-function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
+// disabled: the application could not be re-read, so its stage may be out of date.
+function InterviewSchedulingBlock({ detail, onOpenStageDialog, disabled }) {
   const relevant = ["offer", "hired"].includes(detail.status)
     ? Boolean(detail.interview_booked_at || detail.interview_url)
     : detail.status === "interview";
@@ -741,6 +742,7 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
               size="sm"
               variant="ghost"
               onClick={() => onOpenStageDialog("interview", { resend: true })}
+              disabled={disabled}
             >
               Resend link
             </Button>
@@ -764,6 +766,7 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog }) {
               size="sm"
               variant="secondary"
               onClick={() => onOpenStageDialog("interview", { resend: true })}
+              disabled={disabled}
             >
               {detail.interview_url ? "Resend link" : "Send link"}
             </Button>
@@ -925,9 +928,9 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
             ))}
         </div>
 
-        <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} />
+        <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} disabled={Boolean(refreshError)} />
 
-        <OfferSection detail={detail} offerFlow={offerFlow} onChanged={onOfferChanged} />
+        <OfferSection detail={detail} offerFlow={offerFlow} onChanged={onOfferChanged} detailStale={Boolean(refreshError)} />
 
         <StatusHistoryList history={detail.status_history} />
 
