@@ -665,7 +665,11 @@ export default function ServiceReportDocument({ data, token }) {
   // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
   // replace legacy summary copy that contradicts the watch items — without it
   // the PDF can claim nothing notable was found directly above those findings.
-  const reconciledResult = typeof data.reportV2?.todaysResult === 'string'
+  // The technician's report (summarySource 'technician_report') is not legacy
+  // copy: it is the tech-reviewed account the live page prints whole in its
+  // Visit Summary, and todaysResult is only its first sentence. The PDF prints
+  // the whole report below, in the same order as a pest report.
+  const reconciledResult = typeof data.reportV2?.todaysResult === 'string' && data.summarySource !== 'technician_report'
     ? data.reportV2.todaysResult.trim() : '';
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary

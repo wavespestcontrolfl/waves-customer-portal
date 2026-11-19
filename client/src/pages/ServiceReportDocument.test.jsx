@@ -1176,6 +1176,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(other.container.textContent).not.toContain('In the photos we noticed some weed pressure');
   });
 
+  it("prints the whole technician's report, not the reconciled first sentence", () => {
+    // The lawn reconciliation's result is the report's first sentence; the
+    // live page prints the whole report in its Visit Summary, so the PDF does.
+    const report = 'I treated the front beds for fire ants and spot-treated the weeds along the driveway. The turf by the side gate is thin from shade, so I will check it again next visit. — Dana';
+    const data = {
+      ...BASE_DATA,
+      typedReport: null,
+      summary: `Thanks for having us out today. ${report}`,
+      summarySource: 'technician_report',
+      reportV2: { todaysResult: 'I treated the front beds for fire ants and spot-treated the weeds along the driveway.', insights: [{ headline: 'Thin turf', whatWeSaw: 'Shade thinning.' }] },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain(report);
+    // Cleaned the way the live page cleans it.
+    expect(container.textContent).not.toContain('Thanks for having us out today.');
+  });
+
   it('keeps a promised follow-up and the next-service arrival window', () => {
     const data = {
       ...BASE_DATA,
