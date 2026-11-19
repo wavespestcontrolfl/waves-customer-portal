@@ -47,8 +47,8 @@ function stubFetch() {
           serviceId: 'pest-visit-1', programKey: 'pest',
           matchedVisit: { visit: 1, reason: 'pest_general', matched: true },
           source: 'none', products: [], unresolved: [],
-          // Under the 4-a-year Taurus label limit, so the house mix keeps Taurus.
-          taurusYearly: { count: 0, limit: 4, year: 2026 },
+          // Room under the yearly Taurus label limit, so the house mix keeps Taurus.
+          taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 },
         }),
       };
     }

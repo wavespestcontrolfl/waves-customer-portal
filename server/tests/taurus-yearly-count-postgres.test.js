@@ -1,9 +1,9 @@
 /**
- * Real PostgreSQL: the Taurus SC yearly count (services/taurus-yearly-count.js)
- * against a scratch schema. Home resolution (property, then customer), the ET
- * year window, distinct service dates, leaving out the visit being completed,
- * and both product matches (catalog product_id, older product_name rows) are
- * the database's own answers.
+ * Real PostgreSQL: the Taurus SC yearly count (services/taurus-yearly-count.js) against a scratch
+ * schema. The compliance ledger is the source: retracted rows are left out, the home is the property
+ * frozen on the ledger (else the visit's), the year is the ET year of today, the visit being completed
+ * is left out, one service record is one application, and the product is found by the close-out
+ * picker's name rule. The SQL's own answers, through the real driver.
  *
  * Self-skips without DATABASE_URL (CI runs it in the server-db job), e.g.:
  *   DATABASE_URL=postgresql://localhost:5432/waves_test \
@@ -18,33 +18,36 @@ const { taurusYearlyCount } = require('../services/taurus-yearly-count');
 
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
-const NOW = new Date('2026-11-19T15:00:00Z');
+const NOW = new Date('2026-12-10T15:00:00Z');
+const OLD = '2026-05-01'; // before the 0.03% ruling: counts as 0.06%
+const NEW = '2026-12-01';
 
 describeOrSkip('taurus yearly count on PostgreSQL', () => {
   let db;
   let schema;
   let taurusId;
+  let retiredTaurusId;
   let otherId;
-  const customer = randomUUID();
   const propA = randomUUID();
   const propB = randomUUID();
 
-  async function visit({ property = null, cust = customer, date = '2026-03-10', taurus = 'id', status = 'completed', record = true, ledgerProperty = null } = {}) {
+  // One completed visit with one ledger row (more rows on the same record through `extra`).
+  async function application({
+    cust, property = null, date = NEW, product = taurusId, ledgerProperty = null, rate = null, unit = null, dilution = null,
+    retracted = false, withVisit = true,
+  }) {
     const ssId = randomUUID();
-    await db('scheduled_services').insert({ id: ssId, customer_id: cust, property_id: property });
-    if (!record) return { ssId };
     const srId = randomUUID();
-    await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: ssId, service_date: date, status });
-    const product = { id: randomUUID(), service_record_id: srId };
-    if (taurus === 'id') await db('service_products').insert({ ...product, product_name: 'Taurus SC (renamed)', product_id: taurusId });
-    if (taurus === 'name') await db('service_products').insert({ ...product, product_name: 'Taurus SC', product_id: null });
-    if (taurus === 'upper') await db('service_products').insert({ ...product, product_name: '  TAURUS SC  ', product_id: null });
-    if (taurus === 'suffixed') await db('service_products').insert({ ...product, product_name: 'Taurus SC 9.7%', product_id: null });
-    if (taurus === 'lookalike') await db('service_products').insert({ ...product, product_name: 'Taurus SCX', product_id: null });
-    if (taurus === 'none') await db('service_products').insert({ ...product, product_name: 'LESCO Crosscheck Plus', product_id: otherId });
-    if (ledgerProperty) await db('property_application_history').insert({ service_product_id: product.id, property_id: ledgerProperty });
+    if (withVisit) await db('scheduled_services').insert({ id: ssId, customer_id: cust, property_id: property });
+    await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: withVisit ? ssId : null, service_date: date });
+    await ledgerRow({ cust, srId, date, product, ledgerProperty, rate, unit, dilution, retracted });
     return { ssId, srId };
   }
+  const ledgerRow = ({ cust, srId, date = NEW, product = taurusId, ledgerProperty = null, rate = null, unit = null, dilution = null, retracted = false }) => db('property_application_history').insert({
+    customer_id: cust, service_record_id: srId, product_id: product, application_date: date, property_id: ledgerProperty,
+    application_rate: rate, rate_unit: unit, dilution_rate: dilution, retracted_at: retracted ? new Date() : null,
+  });
+  const count = (cust, property, visitId = randomUUID(), now = NOW) => taurusYearlyCount({ id: visitId, customer_id: cust, property_id: property }, { knex: db, now });
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -56,11 +59,16 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await db.raw('CREATE SCHEMA ??', [schema]);
     await db.raw('CREATE TABLE products_catalog (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text, active boolean DEFAULT true)');
     await db.raw('CREATE TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid, property_id uuid)');
-    await db.raw('CREATE TABLE service_records (id uuid PRIMARY KEY, customer_id uuid, scheduled_service_id uuid, service_date date NOT NULL, status text)');
-    await db.raw('CREATE TABLE service_products (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), service_record_id uuid, product_name text, product_id uuid)');
-    await db.raw('CREATE TABLE property_application_history (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), service_product_id uuid, property_id uuid)');
+    await db.raw('CREATE TABLE service_records (id uuid PRIMARY KEY, customer_id uuid, scheduled_service_id uuid, service_date date NOT NULL)');
+    await db.raw(`CREATE TABLE property_application_history (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL, service_record_id uuid, product_id uuid,
+      application_date date NOT NULL, application_rate numeric(8,4), rate_unit varchar(30), dilution_rate varchar(100),
+      property_id uuid, retracted_at timestamptz
+    )`);
     [taurusId] = (await db('products_catalog').insert({ name: 'Taurus SC' }).returning('id')).map((r) => r.id);
-    [otherId] = (await db('products_catalog').insert({ name: 'LESCO Crosscheck Plus' }).returning('id')).map((r) => r.id);
+    [retiredTaurusId] = (await db('products_catalog').insert({ name: '  TAURUS SC 9.7%  ', active: false }).returning('id')).map((r) => r.id);
+    [otherId] = (await db('products_catalog').insert([{ name: 'LESCO Crosscheck Plus' }]).returning('id')).map((r) => r.id);
+    await db('products_catalog').insert({ name: 'Taurus SCX' });
   });
 
   afterAll(async () => {
@@ -69,84 +77,100 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await db.destroy();
   });
 
-  it('counts distinct service dates of Taurus records at the home this ET year', async () => {
-    await visit({ property: propA, date: '2026-02-01' });
-    await visit({ property: propA, date: '2026-05-01', taurus: 'name' }); // older row, by name
-    await visit({ property: propA, date: '2026-06-01', taurus: 'upper' }); // legacy casing and spacing
-    await visit({ property: propA, date: '2026-06-15', taurus: 'suffixed' });
-    await visit({ property: propA, date: '2026-06-20', taurus: 'lookalike' }); // another product
-    await visit({ property: propA, date: '2026-08-01', taurus: 'none' }); // no Taurus
-    await visit({ property: propA, date: '2026-09-01', status: 'cancelled' });
-    await visit({ property: propB, date: '2026-06-01' }); // another home
-    await visit({ property: propA, date: '2025-12-31' }); // last ET year
-    await visit({ property: propA, date: '2027-01-01' }); // next year
-    const current = await visit({ property: propA, date: '2026-11-19' });
-    const out = await taurusYearlyCount({ id: current.ssId, customer_id: customer, property_id: propA }, { knex: db, now: NOW });
-    // 02-01, 05-01 (by name), 06-01 (upper case) and 06-15 (suffixed); the lookalike product and the current visit are left out.
-    expect(out).toEqual({ count: 4, limit: 4, year: 2026 });
+  it('counts the home\'s non-retracted Taurus ledger rows this ET year, by concentration', async () => {
+    const cust = randomUUID();
+    await application({ cust, property: propA, date: OLD }); // 0.06%
+    await application({ cust, property: propA, date: NEW }); // 0.03%
+    await application({ cust, property: propA, date: NEW, product: otherId }); // not Taurus
+    await application({ cust, property: propA, date: NEW, retracted: true }); // retracted
+    await application({ cust, property: propB, date: NEW }); // another home
+    await application({ cust, property: propA, date: '2025-12-31' }); // last year
+    await application({ cust, property: propA, date: '2027-01-01' }); // next year
+    expect(await count(cust, propA)).toEqual({ high: 1, low: 1, count: 2, eligible: true, year: 2026 });
   });
 
-  it('counts two visits on the same day as two applications, and two records of one visit as one', async () => {
+  it('leaves out only the rows of the visit being completed', async () => {
     const cust = randomUUID();
-    await visit({ cust, property: propA, date: '2026-05-01' });
-    await visit({ cust, property: propA, date: '2026-05-01' });
-    const twice = await visit({ cust, property: propA, date: '2026-06-01' });
-    // A second record (a re-save) of the same scheduled visit, also with Taurus.
-    const srId = randomUUID();
-    await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: twice.ssId, service_date: '2026-06-01', status: 'completed' });
-    await db('service_products').insert({ service_record_id: srId, product_name: 'Taurus SC' });
-    const probe = { id: randomUUID(), customer_id: cust, property_id: propA };
-    expect((await taurusYearlyCount(probe, { knex: db, now: NOW })).count).toBe(3);
+    const first = await application({ cust, property: propA, date: NEW });
+    await application({ cust, property: propA, date: OLD });
+    expect((await count(cust, propA, first.ssId)).count).toBe(1);
+    expect((await count(cust, propA)).count).toBe(2);
+  });
+
+  it('counts two visits on one day as two applications, and two rows of one record as one', async () => {
+    const cust = randomUUID();
+    await application({ cust, property: propA });
+    await application({ cust, property: propA });
+    const twoRows = await application({ cust, property: propA });
+    await ledgerRow({ cust, srId: twoRows.srId });
+    expect(await count(cust, propA)).toMatchObject({ high: 0, low: 3, count: 3 });
+  });
+
+  it('applies the label scenarios: 4 at 0.03%, 1 at 0.06% + 2 at 0.03%, 2 at 0.06%', async () => {
+    const four = randomUUID();
+    for (let i = 0; i < 4; i += 1) await application({ cust: four, property: propA });
+    expect(await count(four, propA)).toMatchObject({ high: 0, low: 4, eligible: false });
+
+    const three = randomUUID();
+    for (let i = 0; i < 3; i += 1) await application({ cust: three, property: propA });
+    expect(await count(three, propA)).toMatchObject({ high: 0, low: 3, eligible: true });
+
+    const oneHigh = randomUUID();
+    await application({ cust: oneHigh, property: propA, date: OLD });
+    await application({ cust: oneHigh, property: propA });
+    expect(await count(oneHigh, propA)).toMatchObject({ high: 1, low: 1, eligible: true });
+    await application({ cust: oneHigh, property: propA });
+    expect(await count(oneHigh, propA)).toMatchObject({ high: 1, low: 2, eligible: false });
+
+    const twoHigh = randomUUID();
+    await application({ cust: twoHigh, property: propA, date: OLD });
+    await application({ cust: twoHigh, property: propA, date: '2026-09-09' });
+    expect(await count(twoHigh, propA)).toMatchObject({ high: 2, low: 0, eligible: false });
+  });
+
+  it('reads a later 0.06% row from its rate or dilution', async () => {
+    const cust = randomUUID();
+    await application({ cust, property: propA, rate: 0.8, unit: 'fl_oz/gal' });
+    await application({ cust, property: propA, dilution: '0.06%' });
+    await application({ cust, property: propA, rate: 4, unit: 'oz' });
+    expect(await count(cust, propA)).toMatchObject({ high: 2, low: 1, eligible: false });
   });
 
   it('places an application at the property frozen on the ledger, not at the visit as corrected later', async () => {
     const cust = randomUUID();
-    // The visit now says propB (an address correction), the ledger froze propA at completion.
-    await visit({ cust, property: propB, ledgerProperty: propA, date: '2026-02-02' });
-    await visit({ cust, property: propA, ledgerProperty: propB, date: '2026-03-03' });
-    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: propA }, { knex: db, now: NOW })).count).toBe(1);
-    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: propB }, { knex: db, now: NOW })).count).toBe(1);
+    await application({ cust, property: propB, ledgerProperty: propA });
+    await application({ cust, property: propA, ledgerProperty: propB });
+    expect((await count(cust, propA)).count).toBe(1);
+    expect((await count(cust, propB)).count).toBe(1);
   });
 
-  it('leaves out only the record of the visit being completed', async () => {
+  it('falls back to the visit\'s property for a legacy row, and counts a row with no property anywhere', async () => {
     const cust = randomUUID();
-    const first = await visit({ cust, property: propA, date: '2026-01-10' });
-    const second = await visit({ cust, property: propA, date: '2026-04-10' });
-    expect((await taurusYearlyCount({ id: first.ssId, customer_id: cust, property_id: propA }, { knex: db, now: NOW })).count).toBe(1);
-    expect((await taurusYearlyCount({ id: second.ssId, customer_id: cust, property_id: propA }, { knex: db, now: NOW })).count).toBe(1);
-    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: propA }, { knex: db, now: NOW })).count).toBe(2);
-  });
-
-  it('falls back to the whole customer when the visit has no property_id', async () => {
-    const cust = randomUUID();
-    await visit({ cust, property: propA, date: '2026-01-10' });
-    await visit({ cust, property: propB, date: '2026-02-10' });
-    await visit({ cust, property: null, date: '2026-03-10' });
-    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: null }, { knex: db, now: NOW })).count).toBe(3);
-    // A property visit counts its own home and the unattributed (null-property) records, not the other home.
-    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: propA }, { knex: db, now: NOW })).count).toBe(2);
+    await application({ cust, property: propA }); // ledger property_id null, visit propA
+    await application({ cust, property: propB }); // ledger null, visit propB: another home
+    await application({ cust, property: null }); // no property anywhere: counts at every home
+    await application({ cust, withVisit: false }); // a record with no visit: unplaced
+    expect((await count(cust, propA)).count).toBe(3);
+    // A visit with no property counts the whole customer.
+    expect((await count(cust, null)).count).toBe(4);
   });
 
   it('draws the year at ET midnight, not UTC', async () => {
     const cust = randomUUID();
-    await visit({ cust, date: '2026-12-31' });
-    await visit({ cust, date: '2027-01-01' });
-    const probe = { id: randomUUID(), customer_id: cust, property_id: null };
+    await application({ cust, property: null, date: '2026-12-31' });
+    await application({ cust, property: null, date: '2027-01-01' });
     // 9 PM ET Dec 31 2026 = 02:00Z Jan 1 2027: still the 2026 year.
-    expect((await taurusYearlyCount(probe, { knex: db, now: new Date('2027-01-01T02:00:00Z') })).count).toBe(1);
+    expect((await count(cust, null, undefined, new Date('2027-01-01T02:00:00Z'))).count).toBe(1);
     // 1 AM ET Jan 1 2027: the 2027 year.
-    expect((await taurusYearlyCount(probe, { knex: db, now: new Date('2027-01-01T06:00:00Z') })).count).toBe(1);
-    expect((await taurusYearlyCount(probe, { knex: db, now: new Date('2027-06-01T12:00:00Z') })).year).toBe(2027);
-    // A December visit closed out in January counts toward December's year.
-    const december = { ...probe, scheduled_date: '2026-12-30' };
-    expect(await taurusYearlyCount(december, { knex: db, now: new Date('2027-01-03T15:00:00Z') })).toMatchObject({ count: 1, year: 2026 });
+    expect(await count(cust, null, undefined, new Date('2027-01-01T06:00:00Z'))).toMatchObject({ count: 1, year: 2027 });
   });
 
-  it('records with no scheduled visit still count for the customer', async () => {
+  it('finds the product by the picker\'s name rule, a retired catalog row included, and not a lookalike', async () => {
     const cust = randomUUID();
-    const srId = randomUUID();
-    await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: null, service_date: '2026-03-03', status: 'completed' });
-    await db('service_products').insert({ service_record_id: srId, product_name: 'Taurus SC' });
-    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: null }, { knex: db, now: NOW })).count).toBe(1);
+    await application({ cust, property: propA, product: retiredTaurusId });
+    await application({ cust, property: propA });
+    const [{ id: lookalike }] = await db('products_catalog').where({ name: 'Taurus SCX' }).select('id');
+    await application({ cust, property: propA, product: lookalike });
+    expect((await count(cust, propA)).count).toBe(2);
   });
 });

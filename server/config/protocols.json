@@ -1858,10 +1858,7 @@
           },
           "Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice": {
             "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Taurus SC"
-            ]
+            "treatmentApplied": true
           },
           "Treated interior cracks & crevices (activity present)": {
             "scope": "interior",

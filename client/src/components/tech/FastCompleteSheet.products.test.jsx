@@ -75,8 +75,8 @@ const COMMON = [
   { productId: 'retired', visits: 3, usualUnit: 'g', usualAmount: 1 },
 ];
 
-// This home's Taurus count so far this year (under the 4-a-year label limit, so the house mix keeps Taurus).
-const HOUSE_COUNT = { count: 0, limit: 4, year: 2026 };
+// This home's Taurus count so far this year (room under the yearly label limit, so the house mix keeps Taurus).
+const HOUSE_COUNT = { count: 0, high: 0, low: 0, eligible: true, year: 2026 };
 const CONTEXT_SERVICE = {
   id: 'svc-1', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1',
   serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },

@@ -58,8 +58,8 @@ function makeRequest({ existingProducts = [], products = CATALOG, catalogLoadFai
         service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false },
         timeline: [],
         products,
-        // Under the 4-a-year Taurus label limit, so the house mix keeps Taurus.
-        taurusYearly: { count: 0, limit: 4, year: 2026 },
+        // Room under the yearly Taurus label limit, so the house mix keeps Taurus.
+        taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 },
         catalogLoadFailed,
         existingRecord: existingProducts.length
           ? { id: 'rec-1', technician_notes: 'prior note', status: 'completed', products: existingProducts }

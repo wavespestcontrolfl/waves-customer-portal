@@ -94,7 +94,7 @@ beforeEach(() => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
   vi.stubGlobal('scrollTo', vi.fn());
   vi.stubGlobal('alert', vi.fn());
-  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ customer: {}, actions: [], available: false, taurusYearly: { count: 0, limit: 4, year: 2026 } }) })));
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ customer: {}, actions: [], available: false, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }) })));
 });
 
 afterEach(() => {

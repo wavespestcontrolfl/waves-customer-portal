@@ -70,7 +70,7 @@ function makeRequest({
   const completes = [...complete];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, reportFlow: true, service, products: typeof products === 'function' ? products() : products, ...context };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, reportFlow: true, service, products: typeof products === 'function' ? products() : products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/tech-tips')) return tips;
     if (path.split('?')[0].endsWith('/promises')) return typeof promises === 'function' ? promises(path) : promises;
@@ -442,7 +442,7 @@ describe('generate and read', () => {
     request.mockImplementation(async (path, options) => {
       request.calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
       if (path.endsWith('/voice-facts')) throw Object.assign(new Error('down'), { status: 503 });
-      if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, reportFlow: true, service: REGULAR, products: CATALOG };
+      if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, reportFlow: true, service: REGULAR, products: CATALOG };
       if (path.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
       if (path === '/admin/schedule/generate-report') return { report: REPORT };
       if (path.endsWith('/treatment-zone')) return { enabled: true, treatmentZone: null };

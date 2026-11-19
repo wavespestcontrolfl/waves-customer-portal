@@ -1,15 +1,64 @@
 /**
- * taurus-yearly-count: the argument contract of the one read-only query, the
- * ET year window, and the fail-soft answers. The SQL itself is exercised on a
- * real PostgreSQL in taurus-yearly-count-postgres.test.js.
+ * taurus-yearly-count: the label-scenario rule, the concentration of a ledger row, the one query's
+ * arguments, the ET year, and the fail-soft answers. The SQL itself runs on a real PostgreSQL in
+ * taurus-yearly-count-postgres.test.js.
  */
 jest.mock('../models/db', () => ({ raw: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { taurusYearlyCount, etYearBounds, TAURUS_YEARLY_LIMIT, TAURUS_NAME_PATTERN } = require('../services/taurus-yearly-count');
+const {
+  taurusYearlyCount, taurusEligible, applicationConcentration, etYearBounds,
+  TAURUS_LOW_RATE_SINCE, TAURUS_NAME_PATTERN,
+} = require('../services/taurus-yearly-count');
 
-const fakeKnex = (rows) => ({ raw: jest.fn().mockResolvedValue({ rows }) });
 const VISIT = { id: 'visit-1', customer_id: 'cust-1', property_id: 'prop-1' };
+const ledger = (rows) => ({ raw: jest.fn().mockResolvedValue({ rows }) });
+const OLD = '2026-05-01';
+const NEW = '2026-12-01';
+let n = 0;
+const row = (over = {}) => {
+  n += 1;
+  return { id: `row-${n}`, service_record_id: `rec-${n}`, application_date: NEW, application_rate: null, rate_unit: null, dilution_rate: null, ...over };
+};
+
+describe('taurusEligible (label scenarios for another 0.03% application)', () => {
+  it.each([
+    [{ high: 0, low: 0 }, true],
+    [{ high: 0, low: 3 }, true],
+    [{ high: 0, low: 4 }, false],
+    [{ high: 0, low: 7 }, false],
+    [{ high: 1, low: 0 }, true],
+    [{ high: 1, low: 1 }, true],
+    [{ high: 1, low: 2 }, false],
+    [{ high: 2, low: 0 }, false],
+    [{ high: 3, low: 0 }, false],
+  ])('%j -> %s', (counts, expected) => {
+    expect(taurusEligible(counts)).toBe(expected);
+  });
+});
+
+describe('applicationConcentration', () => {
+  it('counts every row before the 0.03% ruling as 0.06%, whatever the row says', () => {
+    expect(TAURUS_LOW_RATE_SINCE).toBe('2026-11-20');
+    expect(applicationConcentration(row({ application_date: '2026-11-19', rate_unit: 'oz', application_rate: '4' }))).toBe('high');
+    expect(applicationConcentration(row({ application_date: '2026-04-08' }))).toBe('high');
+  });
+
+  it('counts a row from the ruling date on as 0.03% unless it says otherwise', () => {
+    expect(applicationConcentration(row({ application_date: '2026-11-20' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '4', rate_unit: 'oz' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '0.4', rate_unit: 'fl_oz/gal' }))).toBe('low');
+  });
+
+  it('reads a later 0.06% row from its fl oz per gallon rate or its dilution', () => {
+    expect(applicationConcentration(row({ application_rate: '0.8', rate_unit: 'fl_oz/gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: 0.8, rate_unit: 'FL OZ/GAL' }))).toBe('high');
+    expect(applicationConcentration(row({ dilution_rate: '0.06%' }))).toBe('high');
+    expect(applicationConcentration(row({ dilution_rate: '0.1' }))).toBe('high');
+    expect(applicationConcentration(row({ dilution_rate: '0.03%' }))).toBe('low');
+    expect(applicationConcentration(row({ dilution_rate: 'unknown' }))).toBe('low');
+  });
+});
 
 describe('etYearBounds', () => {
   it('uses the ET calendar year, not the UTC one, at the year boundary', () => {
@@ -20,54 +69,63 @@ describe('etYearBounds', () => {
     // 7 PM ET Dec 31 2026 (00:00Z Jan 1) is still 2026.
     expect(etYearBounds(new Date('2027-01-01T00:00:00Z')).year).toBe(2026);
   });
-
-  it("uses the visit's own scheduled date when it has one (a December visit closed out in January)", () => {
-    const jan2 = new Date('2027-01-02T15:00:00Z');
-    expect(etYearBounds(jan2, '2026-12-30')).toEqual({ year: 2026, yearStart: '2026-01-01', nextYearStart: '2027-01-01' });
-    // node-pg hands a DATE back as a Date at local midnight; the calendar day is what counts.
-    expect(etYearBounds(jan2, new Date('2026-12-30T05:00:00Z')).year).toBe(2026);
-    expect(etYearBounds(jan2, null).year).toBe(2027);
-    expect(etYearBounds(jan2, 'not a date').year).toBe(2027);
-  });
 });
 
 describe('taurusYearlyCount', () => {
-  it('passes the home, the visit to leave out, the ET year window and the product name; one query', async () => {
-    const knex = fakeKnex([{ count: 3 }]);
+  it('passes the home, the visit to leave out, the ET year window and the name rule; one read-only query', async () => {
+    const knex = ledger([]);
     const out = await taurusYearlyCount(VISIT, { knex, now: new Date('2027-01-01T04:00:00Z') });
-    expect(out).toEqual({ count: 3, limit: TAURUS_YEARLY_LIMIT, year: 2026 });
+    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, year: 2026 });
     expect(knex.raw).toHaveBeenCalledTimes(1);
     const [sql, bindings] = knex.raw.mock.calls[0];
     expect(bindings).toEqual({
       customerId: 'cust-1', propertyId: 'prop-1', visitId: 'visit-1',
       yearStart: '2026-01-01', nextYearStart: '2027-01-01', namePattern: TAURUS_NAME_PATTERN,
     });
-    // Read only: no row lock, no write.
+    // The ledger, not retracted rows, no row lock, no write.
+    expect(sql).toMatch(/FROM property_application_history/);
+    expect(sql).toMatch(/retracted_at IS NULL/);
     expect(sql).not.toMatch(/FOR\s+(UPDATE|SHARE)|INSERT|UPDATE\s|DELETE/i);
   });
 
-  it('falls back to the customer when the visit has no property_id', async () => {
-    const knex = fakeKnex([{ count: 2 }]);
-    await taurusYearlyCount({ id: 'visit-1', customer_id: 'cust-1', property_id: null }, { knex });
-    expect(knex.raw.mock.calls[0][1]).toMatchObject({ customerId: 'cust-1', propertyId: null });
+  it('falls back to the customer when the visit has no property, and leaves out no visit without an id', async () => {
+    const knex = ledger([]);
+    await taurusYearlyCount({ customer_id: 'cust-1' }, { knex });
+    expect(knex.raw.mock.calls[0][1]).toMatchObject({ customerId: 'cust-1', propertyId: null, visitId: null });
   });
 
-  it('leaves no visit out when the call has no visit id', async () => {
-    const knex = fakeKnex([{ count: 1 }]);
-    await taurusYearlyCount({ customer_id: 'cust-1' }, { knex });
-    expect(knex.raw.mock.calls[0][1].visitId).toBeNull();
+  it('counts one application per service record, at its highest concentration', async () => {
+    const knex = ledger([
+      row({ service_record_id: 'rec-a', application_date: OLD }),
+      row({ service_record_id: 'rec-a', application_date: OLD }),
+      row({ service_record_id: 'rec-b', application_date: NEW }),
+      row({ service_record_id: 'rec-b', application_date: NEW, application_rate: '0.8', rate_unit: 'fl_oz/gal' }),
+      row({ service_record_id: null, application_date: NEW }),
+    ]);
+    // rec-a: one 0.06%; rec-b: two rows, one 0.06% -> one 0.06%; the record-less row is its own 0.03% application.
+    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, year: 2026 });
+  });
+
+  it.each([
+    ['four at 0.03% use the year up', [NEW, NEW, NEW, NEW].map((d) => row({ application_date: d })), { high: 0, low: 4, eligible: false }],
+    ['three at 0.03% leave one', [NEW, NEW, NEW].map((d) => row({ application_date: d })), { high: 0, low: 3, eligible: true }],
+    ['one 0.06% and one 0.03% leave room', [row({ application_date: OLD }), row()], { high: 1, low: 1, eligible: true }],
+    ['one 0.06% and two 0.03% use the year up', [row({ application_date: OLD }), row(), row()], { high: 1, low: 2, eligible: false }],
+    ['two 0.06% use the year up', [row({ application_date: OLD }), row({ application_date: OLD })], { high: 2, low: 0, eligible: false }],
+  ])('%s', async (_name, rows, expected) => {
+    expect(await taurusYearlyCount(VISIT, { knex: ledger(rows) })).toMatchObject(expected);
   });
 
   it('answers unknown (null) with no customer, without a query', async () => {
-    const knex = fakeKnex([{ count: 1 }]);
+    const knex = ledger([]);
     expect(await taurusYearlyCount({ id: 'visit-1' }, { knex })).toBeNull();
     expect(await taurusYearlyCount(null, { knex })).toBeNull();
     expect(knex.raw).not.toHaveBeenCalled();
   });
 
-  it('answers unknown (null) when the read fails or returns nothing usable', async () => {
+  it('answers unknown (null) when the read fails or returns no rows array', async () => {
     const failing = { raw: jest.fn().mockRejectedValue(Object.assign(new Error('boom: SELECT ...'), { code: '57014' })) };
     expect(await taurusYearlyCount(VISIT, { knex: failing })).toBeNull();
-    expect(await taurusYearlyCount(VISIT, { knex: fakeKnex([]) })).toBeNull();
+    expect(await taurusYearlyCount(VISIT, { knex: { raw: jest.fn().mockResolvedValue({}) } })).toBeNull();
   });
 });

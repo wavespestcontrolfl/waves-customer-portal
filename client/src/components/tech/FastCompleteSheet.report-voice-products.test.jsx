@@ -54,7 +54,7 @@ function makeRequest({ fill = read([TAURUS_SIX]) } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: typeof options?.body === 'string' ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, reportFlow: true, service: REGULAR, products: CATALOG };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, reportFlow: true, service: REGULAR, products: CATALOG };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return { available: false, promises: [] };

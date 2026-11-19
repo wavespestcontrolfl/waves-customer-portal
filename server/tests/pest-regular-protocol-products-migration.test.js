@@ -516,10 +516,12 @@ describe('pest regular protocol products migration: down', () => {
 describe('pest regular protocol products: the protocol hints', () => {
   const hints = (raw) => protocols.pest.visits[0].lineMeta[raw].catalogProductHints;
 
-  test('visit 1 perimeter lines name Crosscheck (both repellent lines) and Taurus SC (non-repellent line)', () => {
+  test('visit 1 perimeter lines name Crosscheck (both repellent lines); the non-repellent line names no product (only the count-aware close-out mix adds Taurus SC)', () => {
     expect(hints('Treated exterior perimeter band')).toEqual(['LESCO Crosscheck Plus']);
     expect(hints('Applied repellent solution with surfactant to perimeter')).toEqual(['LESCO Crosscheck Plus']);
-    expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice')).toEqual(['Taurus SC']);
+    // No Taurus hint: a hint would select Taurus on the pre-visit Job Card with the catalog dilution and no yearly
+    // limit. The close-out house mix, which reads the home's yearly count, is the only thing that adds it.
+    expect(hints('Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice')).toBeUndefined();
   });
 
   test('the Taurus SC line says what its label allows (1 ft up + 1 ft out; 18-in band at openings), in the checklist and the lineMeta key alike', () => {

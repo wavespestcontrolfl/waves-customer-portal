@@ -66,7 +66,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url) => ({
     ok: true,
     json: async () => (String(url).includes('/default-products')
-      ? { source: 'none', products: [], unresolved: [], taurusYearly: { count: 0, limit: 4, year: 2026 } }
+      ? { source: 'none', products: [], unresolved: [], taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }
       : { customer: {}, actions: [], available: false }),
   })));
 });

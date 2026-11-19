@@ -21,7 +21,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { isMlUnit } from '../lib/measure-units';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
-import { applyTaurusYearlyLimit, taurusYearlyCountOf, taurusYearlyNote } from '../lib/taurus-yearly-limit';
+import { applyTaurusYearlyLimit, taurusYearlyNote, taurusYearlyOf } from '../lib/taurus-yearly-limit';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
 import { UiSurface, Button, Field, Input, Textarea, Checkbox, ActionFeedback, cn } from './ui';
@@ -241,8 +241,8 @@ export default function ServiceRecapModal({
         ) {
           const mixSelect = new Set();
           const mixRates = {};
-          // Taurus SC's label limit (4 a year per home): the server's count leaves it off once a home is at the limit.
-          applyTaurusYearlyLimit(pestDefaultMixSelections(data.products), taurusYearlyCountOf(data.taurusYearly)).forEach(({ product }) => {
+          // Taurus SC's yearly label limit at this home: the server's answer leaves it off when no application fits.
+          applyTaurusYearlyLimit(pestDefaultMixSelections(data.products), taurusYearlyOf(data.taurusYearly)).forEach(({ product }) => {
             mixSelect.add(product.id);
             const prefill = catalogRatePrefill(product, data?.service?.serviceType);
             if (prefill) mixRates[product.id] = prefill;
@@ -272,8 +272,7 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusCount = taurusYearlyCountOf(ctx?.taurusYearly);
-  const taurusNote = taurusYearlyNote(taurusCount, [...selected].map((id) => productById.get(id)), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => productById.get(id)), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

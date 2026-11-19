@@ -71,7 +71,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
-import { applyTaurusYearlyLimit, taurusYearlyCountOf, taurusYearlyNote } from '../../lib/taurus-yearly-limit';
+import { applyTaurusYearlyLimit, taurusYearlyNote, taurusYearlyOf } from '../../lib/taurus-yearly-limit';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
@@ -477,7 +477,7 @@ function useFastCompleteContext({
   typedType = null,
 }) {
   const [ctx, setCtx] = useState({
-    loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null, oneTap: false, taurusYearlyCount: null,
+    loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null, oneTap: false, taurusYearly: null,
     rating: { allowed: false, scaleLabels: null },
   });
   useEffect(() => {
@@ -504,8 +504,8 @@ function useFastCompleteContext({
         // 1 to 5 rating on a typed form), so it asks for none.
         const rates = ratingContract?.allowed === true && !typedType;
         const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType });
-        // Taurus SC's label limit (4 a year per home), counted by the server with this context; null (unknown) keeps it on the mix.
-        const taurusYearlyCount = taurusYearlyCountOf(data?.taurusYearly);
+        // Taurus SC's yearly label limit at this home, read by the server with this context; null (unknown) leaves it off the mix.
+        const taurusYearly = taurusYearlyOf(data?.taurusYearly);
         setCtx({
           loading: false,
           loadError: '',
@@ -521,9 +521,9 @@ function useFastCompleteContext({
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
           rows: houseMix
-            ? applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearlyCount).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
+            ? applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearly).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
             : [],
-          taurusYearlyCount,
+          taurusYearly,
           // A visit on the house mix is a regular pest visit or a pest
           // re-service, never a lane or typed one: the visits the full form
           // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
@@ -1489,11 +1489,10 @@ function writerSources({ productCount, photoCount, marked, rated }) {
   ];
 }
 
-// Taurus SC's label limit (4 a year per home): the line saying it was left off the house mix, or the warning when it
+// Taurus SC's yearly label limit at this home: the line saying it was left off the house mix, or the warning when it
 // is on the sheet over the limit. Warns only; null when the count is under the limit.
 function taurusNoteFor(ctx, active) {
-  const count = ctx?.taurusYearlyCount;
-  return taurusYearlyNote(count, active, { mixVisit: ctx?.houseMix === true });
+  return taurusYearlyNote(ctx?.taurusYearly, active, { mixVisit: ctx?.houseMix === true });
 }
 
 // The products as one line ("Taurus SC 4 fl oz · …"), opened to the full

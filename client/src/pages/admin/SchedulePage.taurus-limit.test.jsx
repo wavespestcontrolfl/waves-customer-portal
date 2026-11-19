@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 //
-// CompletionPanel-level coverage for Taurus SC's label limit (4 a year per
-// home, owner 2026-11-19): /default-products carries the server's count; at 4
-// the pest house mix seeds without Taurus, a manual Taurus warns (never
+// CompletionPanel-level coverage for Taurus SC's yearly label limit (owner
+// 2026-11-19): /default-products carries the server's answer (whether another
+// 0.03% application fits); when none fits the pest house mix seeds without Taurus, a manual Taurus warns (never
 // blocks), and an unknown count (failed request, or no key) leaves Taurus out too and says so.
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CompletionPanel } from './SchedulePage';
 
+const FULL = { high: 0, low: 4, count: 4, eligible: false, year: 2026 };
+const ROOM = { high: 0, low: 3, count: 3, eligible: true, year: 2026 };
 const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
 
 const pestCatalog = [
@@ -64,19 +66,19 @@ afterEach(() => {
   localStorage.clear();
 });
 
-it('4 of 4: seeds the mix without Taurus, keeps Crosscheck and the surfactant, and says why', async () => {
-  await openPanel({ taurusYearly: { count: 4, limit: 4, year: 2026 } });
+it('no application fits: seeds the mix without Taurus, keeps Crosscheck and the surfactant, and says why', async () => {
+  await openPanel({ taurusYearly: FULL });
   await screen.findByText('LESCO Crosscheck Plus');
   expect(screen.getByText('LESCO 90/10 Nonionic Surfactant')).toBeTruthy();
   expect(screen.queryByText('Taurus SC')).toBeNull();
-  expect(screen.getByText('Taurus left out: 4 of 4 this year at this home (label limit).')).toBeTruthy();
+  expect(screen.getByText("Taurus left out: this home reached the label's yearly limit (4 this year).")).toBeTruthy();
 });
 
-it('3 of 4: seeds the whole mix and says nothing', async () => {
-  await openPanel({ taurusYearly: { count: 3, limit: 4, year: 2026 } });
+it('room under the label: seeds the whole mix and says nothing', async () => {
+  await openPanel({ taurusYearly: ROOM });
   await screen.findByText('Taurus SC');
   expect(screen.getByText('LESCO Crosscheck Plus')).toBeTruthy();
-  expect(screen.queryByText(/label limit|over the label/)).toBeNull();
+  expect(screen.queryByText(/yearly (Taurus )?limit/)).toBeNull();
 });
 
 it('unknown count (no key, null, or a failed request): seeds the mix without Taurus and says the count is unavailable', async () => {
@@ -90,11 +92,11 @@ it('unknown count (no key, null, or a failed request): seeds the mix without Tau
   }
 });
 
-it('adding Taurus back by hand at 4 warns (the left-out line gives way to the warning)', async () => {
-  await openPanel({ taurusYearly: { count: 4, limit: 4, year: 2026 } });
+it('adding Taurus back by hand when none fits warns (the left-out line gives way to the warning)', async () => {
+  await openPanel({ taurusYearly: FULL });
   await screen.findByText('LESCO Crosscheck Plus');
   fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Taurus' } });
   fireEvent.click(await screen.findByText('Taurus SC'));
-  await waitFor(() => expect(screen.getByText("5th Taurus this year at this home: over the label's 4.")).toBeTruthy());
+  await waitFor(() => expect(screen.getByText("Over the label's yearly Taurus limit at this home.")).toBeTruthy());
   expect(screen.queryByText(/Taurus left out/)).toBeNull();
 });

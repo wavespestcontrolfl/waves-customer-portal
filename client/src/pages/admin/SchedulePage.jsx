@@ -139,8 +139,8 @@ import {
 } from "../../lib/protocol-completion-defaults";
 import {
   applyTaurusYearlyLimit,
-  taurusYearlyCountOf,
   taurusYearlyNote,
+  taurusYearlyOf,
 } from "../../lib/taurus-yearly-limit";
 import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
@@ -14018,12 +14018,12 @@ export function CompletionPanel({
   // outcome goes declined → completed).
   const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
   // The server's protocol/default-products answer, read once per visit. It also
-  // carries Taurus SC's yearly count (label limit 4 a year per home): the pest
+  // carries Taurus SC's yearly label answer for this home: the pest
   // mix seed waits for the answer to settle (a failure settles it too, with the
   // count unknown, so Taurus stays off the mix; nothing blocks the close-out).
   const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
   const [protocolCompletionDefaultsSettled, setProtocolCompletionDefaultsSettled] = useState(false);
-  const taurusYearlyCount = taurusYearlyCountOf(protocolCompletionDefaults?.taurusYearly);
+  const taurusYearly = taurusYearlyOf(protocolCompletionDefaults?.taurusYearly);
   const pestDefaultMixSeededRef = useRef(false);
   const pestDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
@@ -14037,7 +14037,7 @@ export function CompletionPanel({
       return;
     }
     pestDefaultMixSeededRef.current = true;
-    const rows = applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearlyCount)
+    const rows = applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearly)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
       // A regular pest visit's seeded rows start on their area (owner
@@ -14057,7 +14057,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearlyCount]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -23708,8 +23708,8 @@ export function CompletionPanel({
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {(() => {
-            // Taurus SC's label limit: 4 a year per home. Warns only, never blocks the save.
-            const note = taurusYearlyNote(taurusYearlyCount, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
+            // Taurus SC's yearly label limit at this home. Warns only, never blocks the save.
+            const note = taurusYearlyNote(taurusYearly, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
             return note ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{note}</p> : null;
           })()}
           {quickComplete ? (
