@@ -994,12 +994,12 @@ function leadFiltersFromParams(params) {
       params.get("builder_warranty") === "expiring" ? "expiring" : "",
   };
 }
-// Footnote for the "Reached in 15 min" card. A lead whose estimate the app sent and then sent again is
-// left out of the counts, since nothing records who sent it the second time.
+// Footnote for the "Reached in 15 min" card. A lead is left out of the counts when the record cannot
+// say who reached it or when (a call with no answer time, an estimate sent again after the app sent it).
 function reachedSub(reach) {
   const base = "First contact by a person: call, text, email or estimate";
   return reach.notJudged > 0
-    ? `${base}. ${reach.notJudged} left out: an app-sent estimate was sent again, who sent it is not recorded`
+    ? `${base}. ${reach.notJudged} left out: who reached them, or when, is not recorded`
     : base;
 }
 
@@ -3955,7 +3955,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 : undefined
             }
           />{" "}
-          {ov.leadReach?.cohort > 0 && (
+          {(ov.leadReach?.cohort > 0 || ov.leadReach?.notJudged > 0) && (
             <>
               <MetricCard
                 label="Reached in 15 min"

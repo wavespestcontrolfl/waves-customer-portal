@@ -17,10 +17,11 @@
  *     or an inbound call a person answered (answered_by = 'human'). The call that
  *     created the lead counts when a person answered it (matched by twilio_call_sid),
  *     because that is the lead's first contact; any other call must come after
- *     first_contact_at. A call with no trustworthy end (callEndedAtSql) counts for nothing. An
- *     outbound staff-bridge call is reached when the customer's leg connected (customer_leg ended_at
- *     minus duration_seconds); with no customer leg its start is not that time, so one that started
- *     inside the 15 minutes and ended after them leaves the lead NOT JUDGED (see callTiming);
+ *     first_contact_at. A call with no trustworthy end (callEndedAtSql) counts for nothing. The
+ *     time a call reached a person is when the staff phone accepted an inbound call
+ *     (forward_acceptance.accepted_at) or the customer's leg connected on an outbound bridge call
+ *     (customer_leg ended_at minus duration_seconds); with neither it is somewhere between the
+ *     call's start and its end (callTiming);
  *   - an email a person sent (a Gmail SENT row, personSentFilter) to the lead's address, leaving out
  *     the SEO link outreach job's sends (its stored Gmail thread ref, seo_link_prospects);
  *   - an estimate a person sent: the lead's estimate (leads.estimate_id, or the public-quote mirror
@@ -31,9 +32,13 @@
  *     record (deliveryState keeps timestamps only, manualSendAttempts exists only when the client
  *     sent a key), so provenance is per estimate: one the app's automation delivered first
  *     (automation.autoSend or .moveAutoSend result 'sent') is not a person and does not count. If
- *     it was then delivered again, that delivery may have been staff, so a lead no one else reached
- *     within the window is NOT JUDGED (left out of every count), not "never reached". The lead's
- *     'estimate_sent' activity row is not used: it is written even when every channel was suppressed.
+ *     it was then delivered again beyond the deliveries the automation records prove, that delivery
+ *     may have been a person's. The lead's 'estimate_sent' activity row is not used: it is written even
+ *     when every channel was suppressed.
+ * Uncertainty is judged in one place, bucketReach: a lead is NOT JUDGED (left out of every count)
+ * only when an uncertain item (a call with no known answer time, a possible person's resend) could
+ * move it to a different bucket. One that cannot (all after the window, or after a proven contact
+ * inside it) leaves the lead judged.
  * The call agent's own verdict (lead-contact-sync's third call clause) is NOT a person
  * and does not count here.
  *
@@ -49,14 +54,13 @@
  */
 
 const db = require('../models/db');
-const { phoneIdentityKey } = require('../utils/phone');
 const { phoneIdentitySql } = require('./sms-response-policy');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { callEndedAtSql, callStartedAtSql } = require('./sms-pending-conversations');
-const { personSentFilter, extractEmailAddresses } = require('./email/email-customer-link');
-const { openLeadIdentities, contactSkipReason } = require('./lead-contact-sync');
+const { personSentFilter, capturedRecipients } = require('./email/email-customer-link');
+const { openLeadIdentities, contactSkipReason, usablePhoneKey, leadEmail } = require('./lead-contact-sync');
 const { leadMatchesEstimateContact } = require('./lead-estimate-link');
 const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 
@@ -72,20 +76,6 @@ const asMs = (value) => {
 };
 const uniq = (list) => [...new Set(list.filter(Boolean))];
 const idOrNull = (id) => (id == null ? null : String(id));
-
-// A phone key only when it names one line: 10 NANP digits, or a +-prefixed international
-// number (the same bar as lead-contact-sync.js). A fragment names nobody.
-function usablePhoneKey(raw) {
-  const key = phoneIdentityKey(raw);
-  if (!key) return null;
-  if (/^\d{10}$/.test(key)) return key;
-  return /^\+[1-9]\d{7,14}$/.test(key) ? key : null;
-}
-
-function leadEmail(raw) {
-  const [first] = extractEmailAddresses(raw);
-  return first || null;
-}
 
 // The leads this figure counts: engaged prospects with a first-contact time.
 function reachCohort(leads) {
@@ -140,6 +130,8 @@ async function personCalls(conn, peers, sids, leadIds, since) {
     .select('cl.twilio_call_sid as sid', 'cl.customer_id', conn.raw(`${started} as at`), conn.raw(`${peerSql} as peer`),
       conn.raw("cl.metadata->>'lead_id' as stamp_lead_id"), conn.raw(`${SETTLED_CALL_SQL} as settled`),
       'cl.direction', conn.raw(`${callEndedAtSql('cl')} as ended_at`),
+      conn.raw("cl.metadata->'forward_acceptance'->>'accepted' as accepted"),
+      conn.raw("cl.metadata->'forward_acceptance'->>'accepted_at' as accepted_at"),
       conn.raw("cl.metadata->'customer_leg'->>'ended_at' as leg_ended_at"),
       conn.raw("cl.metadata->'customer_leg'->>'duration_seconds' as leg_seconds"));
   return rows.map((row) => ({
@@ -149,16 +141,32 @@ async function personCalls(conn, peers, sids, leadIds, since) {
   }));
 }
 
-// When a call reached the customer: { at, spanEnd }. An inbound call a person answered is reached at its
-// start (spanEnd null). An outbound bridge call with a customer leg is reached when that leg connected.
-// One without a customer leg is reached somewhere between its start and its end (spanEnd).
+// When a call reached a person: { at, spanEnd }. `at` is the earliest the contact could have happened;
+// `spanEnd` is the latest (the call's own end), or null when `at` is exact.
+//  - Outbound bridge call with a customer leg: exact, when that leg connected.
+//  - Inbound call with forward_acceptance: exact, when the staff phone accepted it
+//    (metadata.forward_acceptance.accepted_at, written by /inbound-forward-accept).
+//  - Anything else: somewhere between the call's start and its end.
 function callTiming(row) {
   const start = asMs(row.at);
-  if (row.direction !== 'outbound') return { at: start, spanEnd: null };
-  const legEnd = row.leg_ended_at ? Date.parse(row.leg_ended_at) : NaN;
-  const legSeconds = row.leg_seconds == null || row.leg_seconds === '' ? NaN : Number(row.leg_seconds);
-  if (Number.isFinite(legEnd) && Number.isFinite(legSeconds) && legSeconds >= 0) return { at: legEnd - legSeconds * 1000, spanEnd: null };
-  return { at: start, spanEnd: asMs(row.ended_at) };
+  const end = asMs(row.ended_at);
+  const span = { at: start, spanEnd: end != null && end > start ? end : null };
+  if (row.direction === 'outbound') {
+    const legEnd = row.leg_ended_at ? Date.parse(row.leg_ended_at) : NaN;
+    const legSeconds = row.leg_seconds == null || row.leg_seconds === '' ? NaN : Number(row.leg_seconds);
+    return Number.isFinite(legEnd) && Number.isFinite(legSeconds) && legSeconds >= 0 ? { at: legEnd - legSeconds * 1000, spanEnd: null } : span;
+  }
+  const acceptedAt = row.accepted === 'true' || row.accepted === true ? asMs(row.accepted_at) : null;
+  return acceptedAt != null ? { at: acceptedAt, spanEnd: null } : span;
+}
+
+// The lead each call sid originated, from ALL leads, not just the cohort: an older lead's phone must
+// not take a call that a lead outside the date range originated from it.
+async function sidOwnersOf(conn, calls) {
+  const sids = uniq(calls.map((w) => w.sid));
+  if (!sids.length) return new Map();
+  const rows = await conn('leads').whereIn('twilio_call_sid', sids).select('id', 'twilio_call_sid');
+  return new Map(rows.filter((r) => r.twilio_call_sid).map((r) => [String(r.twilio_call_sid), String(r.id)]));
 }
 
 // Who a batch of Gmail SENT rows belongs to, Map(row id -> customer id, AMBIGUOUS, or null). Email
@@ -169,10 +177,9 @@ function callTiming(row) {
 // resolver's linkage without its thread-reach refinement (threadSendReachesCustomer), so it can only
 // skip more sends than the resolver would, never credit one the resolver would refuse.
 const AMBIGUOUS_CUSTOMER = 'ambiguous-customer';
-const recipientsOf = (row) => extractEmailAddresses([row.to_address, row.cc_address, row.bcc_address].filter(Boolean).join(','));
 async function emailOwners(conn, rows) {
   const threads = uniq(rows.map((row) => row.gmail_thread_id));
-  const recipients = uniq(rows.flatMap(recipientsOf));
+  const recipients = uniq(rows.flatMap((row) => capturedRecipients(row) || []));
   const [threadRows, customerRows] = await Promise.all([
     threads.length
       ? conn('emails').whereIn('gmail_thread_id', threads).whereNotNull('customer_id').select('id', 'gmail_thread_id', 'customer_id')
@@ -189,7 +196,7 @@ async function emailOwners(conn, rows) {
     for (const t of threadRows) {
       if (row.gmail_thread_id && String(t.gmail_thread_id) === String(row.gmail_thread_id) && String(t.id) !== String(row.id)) found.add(String(t.customer_id));
     }
-    const mine = new Set(recipientsOf(row));
+    const mine = new Set(capturedRecipients(row) || []);
     for (const c of customerRows) if (mine.has(c.address)) found.add(String(c.id));
     owners.set(String(row.id), found.size > 1 ? AMBIGUOUS_CUSTOMER : ([...found][0] ?? null));
   }
@@ -211,9 +218,12 @@ async function personEmails(conn, addresses, since) {
     .whereRaw(`EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(${recipientText}, a.addr) > 0)`, [addresses])
     .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.customer_id', 'er.received_at as at');
   if (!rows.length) return [];
-  const owners = await emailOwners(conn, rows);
+  // A row whose recipients are not all known (Cc/Bcc never captured) names no one: another customer may
+  // have been copied, so it is no evidence (the resolver's own guard, capturedRecipients).
+  const known = rows.filter((row) => capturedRecipients(row));
+  const owners = await emailOwners(conn, known);
   const wanted = new Set(addresses);
-  return rows.flatMap((row) => recipientsOf(row)
+  return known.flatMap((row) => capturedRecipients(row)
     .filter((addr) => wanted.has(addr))
     .map((addr) => ({ key: `email:${addr}`, scope: 'email', customerId: owners.get(String(row.id)), at: asMs(row.at) })));
 }
@@ -247,6 +257,7 @@ async function estimateSends(conn, cohort) {
       .orWhereRaw("e.estimate_data->>'lead_id' = ANY(?)", [leadIds]))
     .select('e.id', 'e.customer_id', 'e.customer_phone', 'e.customer_email', 'l.id as linked_lead_id',
       conn.raw("e.estimate_data->>'lead_id' as data_lead_id"), conn.raw(`${FIRST_DELIVERED_SQL} as at`),
+      conn.raw("e.estimate_data #> '{deliveryState,deliveredAt}' as delivered_at"),
       conn.raw(`${AUTOMATED_SQL} as automated`), conn.raw(`${AUTO_DELIVERIES_SQL} as auto_deliveries`), conn.raw(`${DELIVERIES_SQL} as deliveries`));
   return rows.flatMap((row) => {
     let leadId = null;
@@ -257,8 +268,11 @@ async function estimateSends(conn, cohort) {
       if (named && !named.estimate_id && leadMatchesEstimateContact(named, row)) leadId = String(named.id);
     }
     if (!leadId || !byId.has(leadId)) return [];
+    // The second real delivery in time: with the first automated, it is the earliest a person could have sent one.
+    const times = (Array.isArray(row.delivered_at) ? row.delivered_at : []).map(asMs).filter((t) => t != null).sort((a, b) => a - b);
     return [{
       leadId, at: asMs(row.at), automated: !!row.automated, deliveries: Number(row.deliveries) || 0, autoDeliveries: Number(row.auto_deliveries) || 0,
+      resendAt: times[1] ?? null,
     }];
   });
 }
@@ -280,17 +294,16 @@ async function identityOwners(conn, cohort, peers, addresses) {
 const NOT_JUDGED = 'not_judged';
 
 // Witnesses indexed once for the whole cohort. Each call is owned once, in this priority: the
-// processor's settled stamp (metadata.lead_id), then a cohort lead's own originating sid, then (left
-// unowned) the phone it was on. An owned call credits that lead alone, whatever its phone says; an
-// unowned witness is matched by identity key. A stamp naming a lead outside the cohort owns the call
-// too, so no cohort lead takes it by phone.
-function indexEvidence(cohort, evidence) {
-  const sidLead = new Map(cohort.filter((l) => l.twilio_call_sid).map((l) => [String(l.twilio_call_sid), String(l.id)]));
+// processor's settled stamp (metadata.lead_id), then the lead that originated its sid (read from ALL
+// leads, `sidOwners`), then (left unowned) the phone it was on. An owned call credits that lead alone,
+// whatever its phone says, and no cohort lead takes it when its owner is outside the cohort; an unowned
+// witness is matched by identity key.
+function indexEvidence(evidence, sidOwners) {
   const index = { byKey: new Map(), owned: new Map(), estimates: new Map() };
   const push = (map, key, value) => map.set(key, [...(map.get(key) || []), value]);
   for (const w of [...evidence.texts, ...evidence.calls, ...evidence.emails]) {
     if (w.at == null) continue;
-    const ownerId = w.stampedTo || (w.sid && sidLead.get(w.sid)) || null;
+    const ownerId = w.stampedTo || (w.sid && sidOwners.get(w.sid)) || null;
     if (ownerId) push(index.owned, ownerId, w);
     else push(index.byKey, w.key, w);
   }
@@ -298,16 +311,32 @@ function indexEvidence(cohort, evidence) {
   return index;
 }
 
-// A staff-bridge call with no customer leg started inside the window and ended after it: the customer
-// may have connected on either side of the line.
-const crossesWindow = (w, firstAt) => w.spanEnd != null
-  && w.at <= firstAt + REACH_WITHIN_MINUTES * MINUTE_MS && w.spanEnd > firstAt + REACH_WITHIN_MINUTES * MINUTE_MS;
+// ---- The bucket of one lead (the only place uncertainty is judged) --------------------------------
 
-// The times a person reached one lead: [times, uncertain]. `uncertain` when the lead's reach inside the
-// window cannot be told: a call whose customer connection time is unknown crosses the window edge, or
-// the lead's estimate was delivered first by the app's automation and then delivered again beyond the
-// deliveries the automation's records prove (nothing records who made those).
-function reachTimes(lead, index, owners) {
+/**
+ * Items are possible person contacts: { earliest, latest }. `latest` is when the contact had certainly
+ * happened by (null when it may never have happened at all); `earliest` is the soonest it could have.
+ * A text has earliest = latest; a call whose answer time is unknown spans its start to its end; an
+ * estimate resent after an automated delivery may or may not have been a person's, so latest is null.
+ * Returns minutes to the first certain contact (0 when it came first), null when there is none, or
+ * NOT_JUDGED when an uncertain item could move the lead to a different bucket (within / later /
+ * never): it could land inside the window while the certain contact is outside it, or, with no certain
+ * contact, it could turn never into reached at all. An uncertain item that cannot change the bucket
+ * (every one of them is after the window, or after a proven contact inside it) leaves the lead judged.
+ */
+function bucketReach(items, firstAt) {
+  const cutoff = firstAt + REACH_WITHIN_MINUTES * MINUTE_MS;
+  const certain = items.filter((i) => i.latest != null).map((i) => i.latest);
+  const best = certain.length ? Math.min(...certain) : null;
+  const minutes = best == null ? null : Math.max(0, (best - firstAt) / MINUTE_MS);
+  if (best != null && best <= cutoff) return minutes;
+  const uncertain = items.filter((i) => i.latest == null || i.earliest < i.latest);
+  const couldChange = best == null ? uncertain.length > 0 : uncertain.some((i) => i.earliest <= cutoff);
+  return couldChange ? NOT_JUDGED : minutes;
+}
+
+// Every possible person contact of one lead, as bucketReach items.
+function reachItems(lead, index, owners) {
   const id = String(lead.id);
   const firstAt = asMs(lead.first_contact_at);
   const sid = lead.twilio_call_sid ? String(lead.twilio_call_sid) : null;
@@ -320,34 +349,28 @@ function reachTimes(lead, index, owners) {
   // A call owned by this lead counts after first contact; the originating call is its first contact
   // even though it came before first_contact_at.
   const owned = (index.owned.get(id) || []).filter((w) => w.at > firstAt || (sid && w.sid === sid));
-  const witnesses = [...byIdentity, ...owned];
-  const times = witnesses.filter((w) => !crossesWindow(w, firstAt)).map((w) => w.at);
-  const deliveries = index.estimates.get(id) || [];
-  times.push(...deliveries.filter((e) => !e.automated && e.at != null && e.at >= firstAt).map((e) => e.at));
-  const resent = deliveries.some((e) => e.automated && e.deliveries > (e.autoDeliveries || 0));
-  return [times, resent || witnesses.some((w) => crossesWindow(w, firstAt))];
+  const items = [...byIdentity, ...owned].map((w) => ({ earliest: w.at, latest: w.spanEnd ?? w.at }));
+  for (const e of index.estimates.get(id) || []) {
+    // A first delivery nothing automated is a person's. After an automated first delivery, deliveries
+    // beyond the ones the automation's records prove may be a person's; the earliest such one is the
+    // second delivery in time.
+    if (!e.automated && e.at != null && e.at >= firstAt) items.push({ earliest: e.at, latest: e.at });
+    if (e.automated && e.deliveries > (e.autoDeliveries || 0)) items.push({ earliest: Math.max(firstAt, e.resendAt ?? e.at ?? firstAt), latest: null });
+  }
+  return items;
 }
 
 /**
  * @param {Array} cohort leads from reachCohort
  * @param {{texts, calls, emails, estimates, owners}} evidence witness rows from the loaders above;
  *   owners is Map(identity key -> Set(lead ids sharing it)), empty when nothing is shared.
- * @returns {Map<string, number|null|string>} lead id -> minutes from first_contact_at to the earliest
- *   person contact (0 when it came first), null when no person ever reached the lead, or NOT_JUDGED
- *   when nothing else reached the lead inside the window and reachTimes found it uncertain.
+ * @param {Map<string, string>} sidOwners call sid -> id of the lead that originated it (all leads)
+ * @returns {Map<string, number|null|string>} lead id -> bucketReach result
  */
-function judgeReach(cohort, evidence) {
+function judgeReach(cohort, evidence, sidOwners = new Map(cohort.filter((l) => l.twilio_call_sid).map((l) => [String(l.twilio_call_sid), String(l.id)]))) {
   const owners = evidence.owners || new Map();
-  const index = indexEvidence(cohort, evidence);
-  const result = new Map();
-  for (const lead of cohort) {
-    const firstAt = asMs(lead.first_contact_at);
-    const [times, uncertain] = reachTimes(lead, index, owners);
-    const minutes = times.length ? Math.max(0, (Math.min(...times) - firstAt) / MINUTE_MS) : null;
-    const settled = minutes != null && minutes <= REACH_WITHIN_MINUTES;
-    result.set(String(lead.id), uncertain && !settled ? NOT_JUDGED : minutes);
-  }
-  return result;
+  const index = indexEvidence(evidence, sidOwners);
+  return new Map(cohort.map((lead) => [String(lead.id), bucketReach(reachItems(lead, index, owners), asMs(lead.first_contact_at))]));
 }
 
 /**
@@ -373,7 +396,8 @@ async function loadLeadReachStats(leads, { conn = db } = {}) {
     identityOwners(conn, cohort, peers, addresses),
   ]);
 
-  for (const minutes of judgeReach(cohort, { texts, calls, emails, estimates, owners }).values()) {
+  const sidOwners = await sidOwnersOf(conn, calls);
+  for (const minutes of judgeReach(cohort, { texts, calls, emails, estimates, owners }, sidOwners).values()) {
     if (minutes === NOT_JUDGED) { stats.notJudged += 1; stats.cohort -= 1; }
     else if (minutes == null) stats.neverReached += 1;
     else if (minutes <= REACH_WITHIN_MINUTES) stats.reachedWithin += 1;
@@ -382,4 +406,4 @@ async function loadLeadReachStats(leads, { conn = db } = {}) {
   return stats;
 }
 
-module.exports = { loadLeadReachStats, judgeReach, reachCohort, REACH_WITHIN_MINUTES, NOT_JUDGED, _test: { usablePhoneKey, leadEmail } };
+module.exports = { loadLeadReachStats, judgeReach, reachCohort, REACH_WITHIN_MINUTES, NOT_JUDGED, _test: { usablePhoneKey, leadEmail, bucketReach } };

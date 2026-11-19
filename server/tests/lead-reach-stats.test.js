@@ -195,8 +195,8 @@ describe('judgeReach', () => {
     });
     expect(result.get('1')).toBe(16);
     expect(result.get('2')).toBe(NOT_JUDGED);
-    expect(result.get('3')).toBe(3);
-    expect(result.get('4')).toBe(20);
+    expect(result.get('3')).toBe(9); // reached by the call's end at the latest
+    expect(result.get('4')).toBe(30); // started after the window: later whatever the answer time
   });
 
   // Round 3, finding 3: one call, one owner: settled stamp, then the originating sid, then the phone.
@@ -216,6 +216,51 @@ describe('judgeReach', () => {
     });
     expect(stamped.get('1')).toBe(604);
     expect(stamped.get('2')).toBeNull();
+  });
+
+  // Round 4, finding 1: the sid's owner is read from all leads, so the answer does not move with the date range.
+  test('a call whose sid belongs to a lead outside the cohort credits no cohort lead by phone', () => {
+    const older = lead(1, { phone: '+19415550500' });
+    const calls = [{ key: phoneKey(older), scope: 'phone', customerId: null, sid: 'CA-outside', stampedTo: null, at: at(5) }];
+    const outside = new Map([['CA-outside', 'lead-outside-range']]);
+    expect(judgeReach([older], { ...none, calls }, outside).get('1')).toBeNull();
+    // With no known owner the phone still counts.
+    expect(judgeReach([older], { ...none, calls }, new Map()).get('1')).toBe(5);
+  });
+
+  // Round 4, finding 2: an inbound call counts from when the staff phone accepted it.
+  test('an inbound call that starts inside the window but is accepted after it is later; unknown answer time across the edge is not judged', () => {
+    const a = lead(1);
+    const b = lead(2);
+    const c = lead(3);
+    const call = (l, fields) => ({ key: phoneKey(l), scope: 'phone', customerId: null, sid: null, stampedTo: null, spanEnd: null, ...fields });
+    const result = judgeReach([a, b, c], {
+      ...none,
+      calls: [
+        call(a, { at: at(16) }), // callTiming already moved this call's time to forward_acceptance.accepted_at (minute 16)
+        call(b, { at: at(14), spanEnd: at(30) }), // no acceptance stamp: answered somewhere in 14..30
+        call(c, { at: at(20), spanEnd: at(40) }), // starts after the window: later whatever the answer time
+      ],
+    });
+    expect(result.get('1')).toBe(16);
+    expect(result.get('2')).toBe(NOT_JUDGED);
+    expect(result.get('3')).toBe(40);
+  });
+
+  // Round 4, finding 3: uncertainty only matters when it could change the bucket.
+  test('a resend after a proven late contact leaves the lead judged; one that could be inside the window does not', () => {
+    const a = lead(1);
+    const b = lead(2);
+    const c = lead(3);
+    const resend = (leadId, resendAt) => ({ leadId, at: at(30), automated: true, deliveries: 3, autoDeliveries: 1, resendAt });
+    const result = judgeReach([a, b, c], {
+      ...none,
+      texts: [20, 20, 20].map((m, i) => ({ key: phoneKey([a, b, c][i]), scope: 'phone', customerId: null, at: at(m) })),
+      estimates: [resend('1', at(60 * 24)), resend('2', at(10)), { ...resend('3', at(10)), autoDeliveries: 3 }],
+    });
+    expect(result.get('1')).toBe(20); // staff text at 20, every possible resend is later: later
+    expect(result.get('2')).toBe(NOT_JUDGED); // a resend at minute 10 could have been the person's
+    expect(result.get('3')).toBe(20); // all three deliveries are proven automated
   });
 });
 
@@ -260,8 +305,9 @@ describe('loadLeadReachStats', () => {
     });
     const stats = await loadLeadReachStats(leads, { conn });
     expect(stats).toEqual({ cohort: 4, reachedWithin: 2, reachedLater: 1, neverReached: 1, notJudged: 0, withinMinutes: 15 });
-    // Batched: one query per kind for the whole cohort (the leads have no email, so none for email).
-    expect(conn.calls.sort()).toEqual(['call_log', 'estimates', 'leads', 'sms_log']);
+    // Batched: one query per kind for the whole cohort (the leads have no email, so none for email). The two leads
+    // reads are the identity owners and the leads that originated the calls' sids (from all leads, not the cohort).
+    expect(conn.calls.sort()).toEqual(['call_log', 'estimates', 'leads', 'leads', 'sms_log']);
   });
 
   // Finding 1: the estimate witness is the first REAL delivery. A suppressed send, a website
@@ -360,6 +406,36 @@ describe('loadLeadReachStats', () => {
     const sql = conn.raws.emails.join(' | ');
     expect(sql).toContain('seo_link_prospects');
     expect(sql).toContain('outreach_thread_ref IN (er.gmail_thread_id, er.gmail_id)');
+  });
+
+  test('a call whose sid another lead originated, read from all leads, credits no one by phone', async () => {
+    const older = lead(1);
+    const conn = fakeConn({
+      call_log: [{ peer: older.phone.replace('+1', ''), sid: 'CA-theirs', at: new Date(at(5)), direction: 'inbound', settled: true }],
+      // 1st read: shared identity; 2nd read: the sid's owner, a lead outside the cohort.
+      leads: { queue: [[], [{ id: 'outside', twilio_call_sid: 'CA-theirs' }]] },
+    });
+    expect(await loadLeadReachStats([older], { conn })).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+  });
+
+  test('an inbound call is timed from the staff acceptance; with none and an answer window across the edge it is left out', async () => {
+    const accepted = new Date(at(16)).toISOString();
+    const run = (row) => loadLeadReachStats([lead(1)], { conn: fakeConn({ call_log: [{ peer: lead(1).phone.replace('+1', ''), direction: 'inbound', at: new Date(at(14)), ...row }] }) });
+    expect(await run({ ended_at: new Date(at(30)), accepted: 'true', accepted_at: accepted })).toMatchObject({ reachedLater: 1, notJudged: 0 });
+    expect(await run({ ended_at: new Date(at(30)) })).toMatchObject({ cohort: 0, notJudged: 1 });
+    expect(await run({ ended_at: new Date(at(20)) })).toMatchObject({ reachedWithin: 0, notJudged: 1 });
+    expect(await run({ ended_at: new Date(at(14.5)) })).toMatchObject({ reachedWithin: 1 });
+  });
+
+  // Round 4, finding 4: resolveEmailCustomerLink's own guard, shared.
+  test('a sent email whose Cc/Bcc were never captured is no evidence', async () => {
+    const addr = 'pat.fixture@example.invalid';
+    const mine = lead(1, { email: addr, phone: '+19415550301' });
+    const sent = (extra) => ({ id: 'm1', gmail_thread_id: 't1', to_address: addr, cc_address: '', bcc_address: '', customer_id: null, at: new Date(at(5)), ...extra });
+    const run = (row) => loadLeadReachStats([mine], { conn: fakeConn({ emails: { queue: [[row], []] } }) });
+    expect(await run(sent())).toMatchObject({ reachedWithin: 1 });
+    expect(await run(sent({ cc_address: null }))).toMatchObject({ reachedWithin: 0, neverReached: 1 });
+    expect(await run(sent({ bcc_address: null }))).toMatchObject({ reachedWithin: 0, neverReached: 1 });
   });
 
   test('an empty cohort runs no query', async () => {

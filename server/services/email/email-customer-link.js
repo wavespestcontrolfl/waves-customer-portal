@@ -92,13 +92,21 @@ async function threadSendReachesCustomer(conn, row, customerId, asOf) {
   return !others;
 }
 
-async function resolveEmailCustomerLink(conn, row, { asOf } = {}) {
+// The recipients of a send, only when they are all known: null for a row with nothing to link on, or
+// with Cc/Bcc never captured. Shared by resolveEmailCustomerLink and every batched reader of the same
+// rule, so the guard has one definition.
+function capturedRecipients(row) {
   // A send may name its customer only in Cc or Bcc (an empty To).
   if (!row?.gmail_thread_id && !row?.to_address && !row?.cc_address && !row?.bcc_address) return null;
   // Cc/Bcc never captured (a row synced before capture existed, or a caller
   // that did not select them): who else the send reached is unknown, so it
   // never links to a customer. A captured "no Cc/Bcc" is '', not NULL.
   if (row.cc_address == null || row.bcc_address == null) return null;
+  return recipientAddresses(row);
+}
+
+async function resolveEmailCustomerLink(conn, row, { asOf } = {}) {
+  if (!capturedRecipients(row)) return null;
   if (row.gmail_thread_id) {
     const threadCustomers = await conn('emails')
       .where({ gmail_thread_id: row.gmail_thread_id })
@@ -122,4 +130,4 @@ async function resolveEmailCustomerLink(conn, row, { asOf } = {}) {
   return distinct.length === 1 ? distinct[0] : null;
 }
 
-module.exports = { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses };
+module.exports = { personSentFilter, resolveEmailCustomerLink, extractEmailAddresses, capturedRecipients };

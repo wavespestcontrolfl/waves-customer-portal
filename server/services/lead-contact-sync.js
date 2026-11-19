@@ -389,6 +389,8 @@ module.exports = {
   candidateLeadsQuery,
   openLeadIdentities,
   contactSkipReason,
+  usablePhoneKey,
+  leadEmail,
   PERFORMED_BY,
   LOOKBACK_DAYS,
   _test: { usablePhoneKey, leadEmail, resumeAfter: () => resumeAfter, resetResume: () => { resumeAfter = null; } },
