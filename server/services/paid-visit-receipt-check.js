@@ -19,10 +19,12 @@
 //   - the customer is not an internal test customer and has not turned payment receipts off
 //     (notification_prefs.payment_receipt = false);
 //   - no receipt email for it was accepted (email_messages with trigger_event_id `invoice_receipt:<id>`, which every
-//     templated receipt send stamps: the queue, a manual send, the inspection-credit resend), by status (a spam report
+//     templated receipt send stamps: the queue, a manual send, the inspection-credit resend; or `invoice:<id>:receipt`, the
+//     routed billing Email leg's key, billing-channel-email.js), by status (a spam report
 //     or an unsubscribe can only follow a delivered email) or by a delivered_at / opened_at / clicked_at stamp;
-//   - no receipt text for it was accepted (sms_log outbound, notificationEventKey `invoice:<id>:receipt`, status sent or
-//     delivered: the key visit-completion-summary.js reads; an SMS-only send whose stamp write failed leaves only this);
+//   - no receipt text for it was accepted (findAcceptedBillingTextLeg, messaging/billing-text-leg-dedupe.js, on the receipt
+//     text's notificationEventKey `invoice:<id>:receipt`: provider-accepted rows only, send reservations excluded; an
+//     SMS-only send whose stamp write failed leaves only this);
 //   - no third-party payer owns it RIGHT NOW (invoicePayerOwnership: a payer assigned through the visit or the customer
 //     default after the invoice was minted leaves payer_id NULL); an ownership that cannot be verified fails closed;
 //   - its receipt_delivery_jobs row (one per invoice) did not deliver a leg (email_result.ok or sms_result.sent: a
@@ -56,6 +58,7 @@ const { fitAction, realName, shortDateET } = require('./admin-alert-names');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { TEXT_CARRIED_BY_SUMMARY, CARRIED_RECEIPT_ALERT_PREFIX } = require('./receipt-delivery-queue');
 const { invoicePayerOwnership } = require('./invoice-payer-ownership');
+const { findAcceptedBillingTextLeg } = require('./messaging/billing-text-leg-dedupe');
 const episodes = require('./admin-alert-episodes');
 
 const KEY_PREFIX = 'paid-visit-no-receipt:';
@@ -67,8 +70,6 @@ const DONE_JOB_STATUSES = ['completed', 'failed'];
 // email_messages statuses that mean the provider took the receipt email. A spam report or an unsubscribe can only follow
 // a delivered email, and the webhook writes them over 'delivered'.
 const EMAILED_STATUSES = ['sent', 'delivered', 'opened', 'clicked', 'spam_report', 'unsubscribed'];
-// sms_log statuses that mean the carrier took the receipt text (queued and failed attempts do not count).
-const TEXTED_STATUSES = ['sent', 'delivered'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const idOf = (key) => String(key).slice(KEY_PREFIX.length);
 // Tender words for the why; any other method reads without one.
@@ -128,15 +129,11 @@ function legOf(value) {
 // deliver); the others are final, and the close pass closes an open bell on them, so they are read first. Throws on a
 // failed read; the caller fails the row closed.
 async function receiptNotOwed(conn, row) {
-  const emailed = await conn('email_messages').where({ trigger_event_id: `invoice_receipt:${row.id}` })
+  const emailed = await conn('email_messages').whereIn('trigger_event_id', [`invoice_receipt:${row.id}`, `invoice:${row.id}:receipt`])
     .where((q) => q.whereIn('status', EMAILED_STATUSES).orWhereNotNull('delivered_at').orWhereNotNull('opened_at').orWhereNotNull('clicked_at'))
     .first('id');
   if (emailed) return 'receipt emailed';
-  const texted = row.customer_id ? await conn('sms_log').where({ customer_id: row.customer_id, direction: 'outbound' })
-    .whereRaw("metadata->>'notificationEventKey' = ?", [`invoice:${row.id}:receipt`])
-    .whereIn('status', TEXTED_STATUSES)
-    .first('id') : null;
-  if (texted) return 'receipt texted';
+  if (row.customer_id && await findAcceptedBillingTextLeg(conn, row.customer_id, `invoice:${row.id}:receipt`)) return 'receipt texted';
   // One job row per invoice (receipt_delivery_jobs.invoice_id is the enqueue's conflict key).
   const job = await conn('receipt_delivery_jobs').where({ invoice_id: row.id }).first('status', 'sms_result', 'email_result');
   const sms = legOf(job?.sms_result);

@@ -12,6 +12,8 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../services/invoice-payer-ownership', () => ({ invoicePayerOwnership: jest.fn(async () => null) }));
 jest.mock('../services/closeout-alerts', () => ({ moneyCommsAlertsEnabled: jest.fn(() => true) }));
+// The shared accepted-text reader (provider-accepted rows only, send reservations excluded): keyed by notificationEventKey here.
+jest.mock('../services/messaging/billing-text-leg-dedupe', () => ({ findAcceptedBillingTextLeg: jest.fn(async () => null) }));
 jest.mock('../services/admin-alert-episodes', () => ({
   raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'bell-1', deduped: false })),
   openAdminAlertKeys: jest.fn(async () => []),
@@ -23,6 +25,7 @@ const { alertEpisodesLive } = require('../config/feature-gates');
 const episodes = require('../services/admin-alert-episodes');
 const { invoicePayerOwnership } = require('../services/invoice-payer-ownership');
 const { moneyCommsAlertsEnabled } = require('../services/closeout-alerts');
+const { findAcceptedBillingTextLeg } = require('../services/messaging/billing-text-leg-dedupe');
 const check = require('../services/paid-visit-receipt-check');
 
 // 2026-11-18 14:50 ET; the window is paid_at between Nov 11 19:50 UTC and Nov 18 17:50 UTC.
@@ -67,15 +70,11 @@ function chain(table) {
       const id = q.filter?.id ?? q.filter?.invoice_id;
       // The pre-raise re-read finds the candidate itself unless a test gives the invoice a newer state.
       if (table === 'invoices') return invoices.find((r) => r.id === id) ?? candidates.find((r) => r.id === id);
-      if (table === 'sms_log') {
-        const [, , [eventKey]] = q.calls.find(([name]) => name === 'whereRaw');
-        const [, , statuses] = q.calls.find(([name]) => name === 'whereIn');
-        const msg = texts[eventKey];
-        return msg && q.filter.direction === 'outbound' && statuses.includes(msg.status) ? msg : undefined;
-      }
       if (table === 'email_messages') {
         const [, group] = q.calls.find(([name]) => name === 'whereGroup');
-        const msg = emails[q.filter.trigger_event_id];
+        const [, , keys] = q.calls.find(([name, col]) => name === 'whereIn' && col === 'trigger_event_id');
+        const msg = keys.map((k) => emails[k]).find(Boolean);
+        if (!msg) return undefined;
         const hit = (cond) => (cond[0] === 'whereIn' ? cond[2].includes(msg.status) : msg[cond[1]] != null);
         return msg && group.some(hit) ? msg : undefined;
       }
@@ -108,6 +107,7 @@ beforeEach(() => {
   episodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'bell-1', deduped: false, rang: true });
   invoicePayerOwnership.mockResolvedValue(null);
   moneyCommsAlertsEnabled.mockReturnValue(true);
+  findAcceptedBillingTextLeg.mockImplementation(async (_conn, _customerId, eventKey) => texts[eventKey] || null);
 });
 
 describe('what the query asks for', () => {
@@ -212,23 +212,26 @@ describe('raising', () => {
 
   test('an accepted receipt email (any sender, keyed invoice_receipt:<id>) rings nothing; a failed one does not count', async () => {
     const C = '33333333-3333-4333-8333-333333333333';
-    candidates = [row(A), row(B), row(C)];
+    const D = '44444444-4444-4444-8444-444444444444';
+    candidates = [row(A), row(B), row(C), row(D)];
     emails = {
       [`invoice_receipt:${A}`]: { id: 'm-1', status: 'delivered' },
       [`invoice_receipt:${B}`]: { id: 'm-2', status: 'failed' },
       // Delivered, then a spam report wrote over the status before any delivery webhook: still delivered.
       [`invoice_receipt:${C}`]: { id: 'm-3', status: 'spam_report', delivered_at: null },
+      // The routed billing Email leg (billing-channel-email.js) keys its send by the notice key.
+      [`invoice:${D}:receipt`]: { id: 'm-4', status: 'sent' },
     };
     await run();
     expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
   });
 
-  test('an accepted receipt text (invoice:<id>:receipt) rings nothing; a queued or failed attempt does not count', async () => {
-    const C = '33333333-3333-4333-8333-333333333333';
-    candidates = [row(A), row(B), row(C)];
-    texts = { [`invoice:${A}:receipt`]: { id: 's-1', status: 'delivered' }, [`invoice:${B}:receipt`]: { id: 's-2', status: 'queued' }, [`invoice:${C}:receipt`]: { id: 's-3', status: 'failed' } };
+  test('an accepted receipt text (the shared reader, key invoice:<id>:receipt) rings nothing; none found rings', async () => {
+    candidates = [row(A), row(B)];
+    texts = { [`invoice:${A}:receipt`]: { twilio_sid: 'SM1' } };
     await run();
-    expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B), keyOf(C)]);
+    expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
+    expect(findAcceptedBillingTextLeg).toHaveBeenCalledWith(expect.any(Function), 'cust-1', `invoice:${A}:receipt`);
   });
 
   test('a completed visit scheduled today is left to today\'s closeout item while its money alerts are on; from the next day this bell rings', async () => {
@@ -313,7 +316,7 @@ describe('closing', () => {
     ['receipts turned off', {}, 'Receipts turned off', () => { prefs = { 'cust-1': { payment_receipt: false } }; }],
     ['receipt delivered', {}, 'Receipt delivered', () => { jobs = { [A]: { status: 'completed', email_result: { ok: true } } }; }],
     ['receipt emailed', {}, 'Receipt emailed', () => { emails = { [`invoice_receipt:${A}`]: { id: 'm-1', status: 'sent' } }; }],
-    ['receipt texted', {}, 'Receipt texted', () => { texts = { [`invoice:${A}:receipt`]: { id: 's-1', status: 'sent' } }; }],
+    ['receipt texted', {}, 'Receipt texted', () => { texts = { [`invoice:${A}:receipt`]: { twilio_sid: 'SM1' } }; }],
     ['billed to a payer', {}, 'Billed to a payer', () => { invoicePayerOwnership.mockResolvedValue('payer_owned'); }],
     ['the visit text alert covers it', {}, 'The visit text alert covers it', () => { jobs = { [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } } }; }],
   ])('%s closes the bell with a one-line resolution', async (why, change, resolution, arrange) => {

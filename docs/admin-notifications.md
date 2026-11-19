@@ -668,11 +668,12 @@ the visit or the customer default after the invoice was minted; an owner that ca
 between 7 days and 2 hours ago, is not owned by today's closeout item (with `GATE_CLOSEOUT_MONEY_COMMS_ALERTS` on, a completed visit
 scheduled today already shows its `paid_receipt_not_sent` gap in `closeout_gaps_today`; that item covers today only, so this bell
 takes over the next day), and whose customer is not an internal test customer and has not turned `payment_receipt` off in
-`notification_prefs`. An accepted receipt email (`email_messages` with `trigger_event_id` `invoice_receipt:<id>` and
+`notification_prefs`. An accepted receipt email (`email_messages` with `trigger_event_id` `invoice_receipt:<id>`, or
+`invoice:<id>:receipt` from the routed billing Email leg in `billing-channel-email.js`, and
 status sent, delivered, opened, clicked, spam_report or unsubscribed (the last two only follow a delivered email), or a
 `delivered_at` / `opened_at` / `clicked_at` stamp; every templated receipt send stamps it, the inspection-credit resend included), an
-accepted receipt text (`sms_log` outbound with `notificationEventKey` `invoice:<id>:receipt`, status sent or delivered, the key
-`visit-completion-summary.js` reads), or a job
+accepted receipt text (`findAcceptedBillingTextLeg` on the key `invoice:<id>:receipt`: provider-accepted rows only, send reservations
+excluded), or a job
 that delivered a leg (`email_result.ok`, `sms_result.sent`, read even on a job still running) is skipped: the customer has the
 receipt. A `receipt_delivery_jobs` row still in flight (any status but `completed` or `failed`) holds it back; a failed job that
 delivered nothing is a hit. A Text leg the visit summary carried (`carried_by_visit_summary`) but never got accepted is skipped only while the
