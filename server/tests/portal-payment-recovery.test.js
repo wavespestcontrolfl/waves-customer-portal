@@ -176,6 +176,49 @@ test('a resolved saved-bank failure verifies the invoice after its PaymentIntent
   expect(recovery.get('pay-bank')?.payUrl).toBe('/pay/tok-a');
 });
 
+test('a saved-card authentication_required row with no PI id cannot open a second checkout', async () => {
+  const payment = {
+    id: 'pay-sca',
+    status: 'failed',
+    stripe_payment_intent_id: null,
+    metadata: {
+      invoice_id: INV_A,
+      source: 'card_on_file_failed_attempt',
+      ambiguous_outcome: false,
+    },
+  };
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [payment], reader([invoice()], [{
+    invoice_id: INV_A,
+    stripe_payment_intent_id: null,
+    status: 'failed',
+    decline_code: 'authentication_required',
+    resolved_at: new Date(),
+  }]));
+
+  expect(recovery.has('pay-sca')).toBe(false);
+  expect(memberCollectionPending).not.toHaveBeenCalled();
+});
+
+test('a terminal saved-card decline still offers its verified invoice checkout', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-declined',
+    status: 'failed',
+    metadata: {
+      invoice_id: INV_A,
+      source: 'card_on_file_failed_attempt',
+      ambiguous_outcome: false,
+    },
+  }], reader([invoice()], [{
+    invoice_id: INV_A,
+    stripe_payment_intent_id: null,
+    status: 'failed',
+    decline_code: 'insufficient_funds',
+    resolved_at: new Date(),
+  }]));
+
+  expect(recovery.get('pay-declined')?.payUrl).toBe('/pay/tok-a');
+});
+
 test('a legacy intent-only row sees both a live binding and a cleared resolved-attempt binding', async () => {
   const recovery = await recoveryInvoiceIndexFor('cust-1', [{
     id: 'pay-bank', status: 'failed', metadata: null, stripe_payment_intent_id: 'pi-reused',
@@ -194,6 +237,20 @@ test('a failed resolved-attempt lookup withholds intent-based recovery', async (
   }], reader([invoice()], [], undefined, { attemptError: new Error('attempt lookup failed') }));
 
   expect(recovery.has('pay-bank')).toBe(false);
+});
+
+test('a failed attempt lookup withholds an invoice-only saved-card recovery link', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-card',
+    status: 'failed',
+    metadata: {
+      invoice_id: INV_A,
+      source: 'card_on_file_failed_attempt',
+      ambiguous_outcome: false,
+    },
+  }], reader([invoice()], [], undefined, { attemptError: new Error('attempt lookup failed') }));
+
+  expect(recovery.has('pay-card')).toBe(false);
 });
 
 test('conflicting non-explicit identifiers fail closed instead of choosing an invoice', async () => {

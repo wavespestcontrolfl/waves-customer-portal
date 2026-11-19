@@ -191,22 +191,50 @@ async function loadRecoveryInvoiceRows(customerId, keys, database) {
 // Saved-bank failures clear the invoice's live PI binding after resolution.
 // Retain the terminal attempt as a second, verified PI→invoice edge and load
 // any invoice reachable only through that evidence before identity matching.
-async function loadResolvedAttemptEvidence(customerId, intentIds, initialRows, database) {
-  if (!intentIds.length) {
-    return { rows: initialRows, resolvedFailedAttempts: [], resolvedAttemptLookupFailed: false };
+async function loadResolvedAttemptEvidence(customerId, keys, initialRows, database) {
+  if (!keys.intentIds.length && !keys.invoiceIds.length) {
+    return {
+      rows: initialRows,
+      resolvedFailedAttempts: [],
+      authPendingInvoiceIds: new Set(),
+      attemptLookupFailed: false,
+    };
   }
   try {
     const resolvedFailedAttempts = await database('stripe_invoice_charge_attempts as attempt')
       .join('invoices as attempt_invoice', 'attempt_invoice.id', 'attempt.invoice_id')
       .where({ 'attempt_invoice.customer_id': customerId, 'attempt.status': 'failed' })
-      .whereIn('attempt.stripe_payment_intent_id', intentIds)
+      .where(function failedAttemptLink() {
+        if (keys.intentIds.length) this.whereIn('attempt.stripe_payment_intent_id', keys.intentIds);
+        if (keys.invoiceIds.length) {
+          const join = keys.intentIds.length ? 'orWhere' : 'where';
+          this[join](function authenticationRequiredInvoice() {
+            this.whereIn('attempt.invoice_id', keys.invoiceIds)
+              .where('attempt.decline_code', 'authentication_required');
+          });
+        }
+      })
       .whereNotNull('attempt.resolved_at')
-      .select('attempt.invoice_id', 'attempt.stripe_payment_intent_id');
+      .select('attempt.invoice_id', 'attempt.stripe_payment_intent_id', 'attempt.decline_code');
+    // authentication_required is not a terminal processor decline: the
+    // off-session PI can remain in requires_action and succeed later. The
+    // failed payment row intentionally carries no PI id, so this durable
+    // attempt is the only evidence that a second checkout must stay hidden.
+    // A missing PI identity is unverifiable, not terminal; keep withholding
+    // until reconciliation changes the durable attempt state.
+    const authPendingInvoiceIds = new Set(resolvedFailedAttempts
+      .filter((attempt) => attempt.decline_code === 'authentication_required')
+      .map((attempt) => String(attempt.invoice_id)));
     const loadedIds = new Set(initialRows.map((row) => String(row.id)));
     const missingIds = [...new Set(resolvedFailedAttempts.map((attempt) => String(attempt.invoice_id)))]
       .filter((id) => !loadedIds.has(id));
     if (!missingIds.length) {
-      return { rows: initialRows, resolvedFailedAttempts, resolvedAttemptLookupFailed: false };
+      return {
+        rows: initialRows,
+        resolvedFailedAttempts,
+        authPendingInvoiceIds,
+        attemptLookupFailed: false,
+      };
     }
     const supplementalRows = await database('invoices')
       .where({ customer_id: customerId })
@@ -215,11 +243,17 @@ async function loadResolvedAttemptEvidence(customerId, intentIds, initialRows, d
     return {
       rows: [...initialRows, ...supplementalRows],
       resolvedFailedAttempts,
-      resolvedAttemptLookupFailed: false,
+      authPendingInvoiceIds,
+      attemptLookupFailed: false,
     };
   } catch (err) {
     logger.warn(`[billing] failed-payment charge-attempt lookup failed for customer ${customerId}: ${err.message}`);
-    return { rows: initialRows, resolvedFailedAttempts: [], resolvedAttemptLookupFailed: true };
+    return {
+      rows: initialRows,
+      resolvedFailedAttempts: [],
+      authPendingInvoiceIds: new Set(),
+      attemptLookupFailed: true,
+    };
   }
 }
 
@@ -290,10 +324,7 @@ function paymentMayPublishInvoice(payment, invoice) {
   return String(invoiceIdOf(payment) || '').toLowerCase() === String(invoice?.id || '').toLowerCase();
 }
 
-function recoveryInvoiceForPayment(payment, indexes, resolvedAttemptLookupFailed) {
-  // A failed evidence lookup means a historic binding could conflict with
-  // the current PI stamp. Keep the history row, but withhold its bearer link.
-  if (payment.stripe_payment_intent_id && resolvedAttemptLookupFailed) return null;
+function recoveryInvoiceForPayment(payment, indexes) {
   const explicitGroups = paymentInvoiceIds(payment).map((id) => indexes.byId.get(id) || []);
   const invoiceNumber = invoiceNumberOf(payment);
   const strictGroups = invoiceNumber
@@ -309,11 +340,17 @@ function recoveryInvoiceForPayment(payment, indexes, resolvedAttemptLookupFailed
   return paymentMayPublishInvoice(payment, candidate) ? candidate : null;
 }
 
-function identifyRecoveryInvoices(payments, indexes, resolvedAttemptLookupFailed) {
+function identifyRecoveryInvoices(payments, indexes, { authPendingInvoiceIds, attemptLookupFailed }) {
   const invoiceByPaymentId = new Map();
+  // A failed evidence lookup means a historic binding or live SCA intent
+  // could conflict with the current invoice stamp. Keep the history rows,
+  // but withhold every bearer recovery link from this bounded batch.
+  if (attemptLookupFailed) return invoiceByPaymentId;
   for (const payment of payments) {
-    const invoice = recoveryInvoiceForPayment(payment, indexes, resolvedAttemptLookupFailed);
-    if (invoice) invoiceByPaymentId.set(String(payment.id), invoice);
+    const invoice = recoveryInvoiceForPayment(payment, indexes);
+    if (invoice && !authPendingInvoiceIds.has(String(invoice.id))) {
+      invoiceByPaymentId.set(String(payment.id), invoice);
+    }
   }
   return invoiceByPaymentId;
 }
@@ -348,8 +385,10 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   // matching. Resolve by PI across every invoice owned by this customer before
   // narrowing candidates; otherwise a different invoice's live PI stamp can
   // hide the cleared invoice named by the resolved attempt.
-  const { rows, resolvedFailedAttempts, resolvedAttemptLookupFailed } = await loadResolvedAttemptEvidence(
-    customerId, keys.intentIds, initialRows, database,
+  const {
+    rows, resolvedFailedAttempts, authPendingInvoiceIds, attemptLookupFailed,
+  } = await loadResolvedAttemptEvidence(
+    customerId, keys, initialRows, database,
   );
 
   // Establish identity against every matching invoice before deciding whether
@@ -358,9 +397,10 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   // could win. All identifiers on an ordinary attempt must resolve uniquely
   // to one invoice; marked combined shares are handled explicitly below.
   const indexes = recoveryIdentityIndexes(rows, resolvedFailedAttempts);
-  const invoiceByPaymentId = identifyRecoveryInvoices(
-    failedPayments, indexes, resolvedAttemptLookupFailed,
-  );
+  const invoiceByPaymentId = identifyRecoveryInvoices(failedPayments, indexes, {
+    authPendingInvoiceIds,
+    attemptLookupFailed,
+  });
 
   const identifiedInvoices = [...new Map([...invoiceByPaymentId.values()]
     .map((row) => [String(row.id), row])).values()];
