@@ -2,7 +2,8 @@
  * Text-quote bells dedupe on the phone's thread key for 7 days, three ways
  * (notifyBell in services/estimator-engine/index.js):
  *  - A NEW ASK (the placeholder startSmsThreadDraft raises for a fresh quote
- *    text, `newAsk: true`) matches OPEN bells only.
+ *    text, `newAsk: true`) matches OPEN bells only. A merge into one stamps
+ *    metadata.observedAt, so the 72-hour quiet fall-off counts from the ask.
  *    Before, a done bell inside the window still matched: a new ask with no
  *    draft "stood" on it, so the ask raised nothing. In production 3 asks
  *    between 11-10 and 11-18 got no bell this way, each behind a bell the
@@ -58,24 +59,34 @@ jest.mock('../models/db', () => {
       return row ? { ...row, metadata: JSON.stringify(row.metadata) } : undefined;
     };
     b.update = async (patch) => {
+      if (mockBeforeUpdate) mockBeforeUpdate();
       const hit = matches();
       mockUpdates.push({ ids: hit.map((row) => row.id), patch, on: name });
       // Applied, so a later lookup in the same test sees the upgrade.
-      for (const row of hit) Object.assign(row, { ...patch, metadata: JSON.parse(patch.metadata) });
+      for (const row of hit) {
+        const metadata = patch.metadata && patch.metadata.mockMerge
+          ? { ...row.metadata, ...patch.metadata.mockMerge }
+          : JSON.parse(patch.metadata);
+        Object.assign(row, { ...patch, metadata });
+      }
       return hit.length;
     };
     return b;
   };
   const db = handle('db');
   const trx = handle('trx');
-  trx.raw = async (sql, args) => {
-    if (mockLockError) throw mockLockError;
+  trx.raw = (sql, args) => {
+    // `metadata || ?::jsonb`: the patch value the fake update merges.
+    if (!/pg_advisory_xact_lock/.test(sql)) return { mockMerge: JSON.parse(args[0]) };
+    if (mockLockError) return Promise.reject(mockLockError);
     mockLog.push(`lock:${args[0]}`);
+    return Promise.resolve();
   };
   db.transaction = async (work) => work(trx);
   return db;
 });
 let mockLockError = null;
+let mockBeforeUpdate = null;
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
@@ -131,6 +142,7 @@ beforeEach(() => {
   mockLog.length = 0;
   mockInserted = 0;
   mockLockError = null;
+  mockBeforeUpdate = null;
 });
 
 describe('a new ask matches the number\'s OPEN bell only', () => {
@@ -163,13 +175,33 @@ describe('a new ask matches the number\'s OPEN bell only', () => {
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  test('while the bell is still open, a new ask stands on it: no second ring, no rewrite', async () => {
-    mockRows.push(bell('bell-open', { minutesAgo: 20 * 60 }));
+  test('a new ask merges into the open bell: no second ring, no rewrite, and the 72-hour quiet clock restarts', async () => {
+    // 68 hours old: the quiet fall-off would close it within 4 hours.
+    mockRows.push(bell('bell-open', { minutesAgo: 68 * 60 }));
 
     await expect(askPlaceholder()).resolves.toEqual({ ok: true, bellId: 'bell-open' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
-    expect(mockUpdates).toHaveLength(0);
+    expect(mockUpdates).toHaveLength(1);
+    expect(mockUpdates[0].on).toBe('trx');
+    // Only metadata changes: no new title or body, no read or done reset.
+    expect(Object.keys(mockUpdates[0].patch)).toEqual(['metadata']);
+    const row = mockRows.find((r) => r.id === 'bell-open');
+    expect(Date.now() - Date.parse(row.metadata.observedAt)).toBeLessThan(5000);
+    expect(row.metadata.lane).toBe('red');
+    expect(row.done_at).toBeNull();
+  });
+
+  test('a close that wins between the lookup and the stamp: the new ask raises its own bell', async () => {
+    const open = bell('bell-open', { minutesAgo: 72 * 60 - 1 });
+    mockRows.push(open);
+    // The quiet fall-off closes the row after the lookup read it open.
+    mockBeforeUpdate = () => { open.done_at = new Date(); };
+
+    await expect(askPlaceholder()).resolves.toEqual({ ok: true, bellId: 'bell-new-1' });
+
+    expect(mockUpdates[0].ids).toEqual([]);
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('a bell older than the 7-day window is not matched, open or not', async () => {
@@ -267,7 +299,9 @@ describe('a run\'s outcome updates the row its own ask landed on, open or done',
     await outcome(ask.bellId, { estimateId: 'est-9', lane: 'yellow' });
 
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
-    expect(mockUpdates.map((u) => u.ids)).toEqual([['bell-reopened']]);
+    // The ask's observedAt stamp, then the draft.
+    expect(mockUpdates.map((u) => u.ids)).toEqual([['bell-reopened'], ['bell-reopened']]);
+    expect(mockRows.find((row) => row.id === 'bell-reopened').metadata.estimateId).toBe('est-9');
   });
 });
 

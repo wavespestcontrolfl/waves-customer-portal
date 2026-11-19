@@ -759,7 +759,24 @@ async function notifyBell({ call, context, title, body, lane, estimateId = null,
               // bell instead of overwriting it.
               const sameDraft = !!estimateId && existingMeta.estimateId === estimateId;
               const bothOpen = !estimateId && !existingMeta.estimateId;
-              if (sameDraft || bothOpen) return landed(existing.id);
+              if (bothOpen && dedupe.openOnly) {
+                // A new ask merged into the number's open bell: no ring and no
+                // rewrite (the bell already tells it), but observedAt restarts
+                // the quiet fall-off's 72 hours (ACTIVITY_STAMP_KEYS in
+                // admin-alert-retention.js), so a bell near that limit cannot
+                // close minutes after the ask. The merge also changes the row
+                // version the fall-off's close is fenced on. A close that won
+                // since the lookup leaves no open row to stamp: the ask then
+                // raises its own bell.
+                const stamped = await conn('notifications')
+                  .where({ id: existing.id })
+                  .whereNull('done_at')
+                  .update({ metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ observedAt: new Date().toISOString() })]) });
+                if (stamped) return landed(existing.id);
+                insertFresh = true;
+              } else if (sameDraft || bothOpen) {
+                return landed(existing.id);
+              }
               if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
             }
           }
