@@ -331,6 +331,8 @@ async function loadGroupContext(db, service) {
         .whereIn('id', siblingIds)
         .select(
           'id', 'scheduled_date', 'technician_id', 'window_start', 'window_end', 'route_order', 'created_at',
+          // The far-south rule judges each member on its own zone (south-day-kept.js ruleFor).
+          'zone', 'service_address_city',
           'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback', 'reservation_policy_version',
         ),
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
@@ -1238,15 +1240,11 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // or null — gate off, nothing is read.
   const mowing = await unitMowingRule(service, prefs, ctx);
   // Far-south days stay far-south: null (rule off, a far-south visit, zone unresolved) = no filter.
-  let south = await southDayKept.ruleFor(service, ctx);
-  // Per truck, a grouped visit moves as a unit: each member's date commits on its current technician, and the unit
-  // mover re-points it after (visit-groups alignMember). The apply guard checks those technicians too (apply.js
-  // makeMoveGuard), so their far-south days hold the date here as well. Else the guard refuses a ranked move (not
-  // SLOT_TAKEN), and the run skips this visit's lower-ranked dates.
-  if (south?.techDays && service.visit_id) {
-    const { siblings } = await groupContextFor(service, ctx);
-    if (siblings.length) south = { ...south, alsoTechIds: [service, ...siblings].map((row) => row.technician_id ?? null) };
-  }
+  // Per truck, a grouped visit is judged member by member, as apply time judges it (south-day-kept.js ruleFor): else
+  // the guard refuses a ranked move (not SLOT_TAKEN) and the run skips this visit's lower-ranked dates. The group is
+  // read only then.
+  const perTruck = !!service.visit_id && require('../scheduling/zone-day-funnel').perTruckLive();
+  const south = await southDayKept.ruleFor(service, ctx, perTruck ? (await groupContextFor(service, ctx)).siblings : []);
 
   const { dateFrom, dateTo } = searchWindow(service, ctx);
   if (dateFrom > dateTo) {

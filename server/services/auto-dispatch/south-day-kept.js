@@ -15,9 +15,9 @@
  *
  * Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): a far-south stop holds its date only for
  * its own technician, and an unassigned far-south stop holds it for every technician. At candidate time the
- * slot's technician decides, and for a grouped visit each member's current technician too (the unit move commits
- * there first); at apply time, the receiving technician and the one the move transaction writes. Off, the date is
- * the fleet's (one truck).
+ * slot's technician decides, and a grouped visit is judged member by member: each member outside the far-south
+ * zones, with its current technician too (the unit move commits there first). At apply time, the receiving
+ * technician and the one the move transaction writes. Off, the date is the fleet's (one truck).
  * The per-truck view comes from the same funnel read (getZoneFunnelDays techDays, zone-day-funnel.js onZoneDay).
  *
  * Two places enforce it, so a date move of any kind is covered:
@@ -84,25 +84,34 @@ class SouthDays {
   }
 }
 
-// This visit's rule for the evaluation, or null (rule off, visit far-south, or zone unresolved: no filter).
-// `dates` = far-south stop dates, `techDays` = their per-truck view (null = the fleet's); `ownDate` = the visit's
-// current date (a same-day re-time is never dropped).
-async function ruleFor(service, ctx) {
+// This visit's rule for the evaluation, or null (rule off, or no member outside the far-south zones: no filter; a
+// member whose zone is unresolved is skipped, failing open). `dates` = far-south stop dates, `techDays` = their
+// per-truck view (null = the fleet's); `members` = each member outside the far-south zones, with its current date
+// (`ownDate`: a same-day re-time is never dropped) and the technicians besides the slot's that hold it (`techIds`).
+// `siblings` (a grouped visit's other members, with their zone fields) count per truck only, as apply time counts
+// them (apply.js makeMemberGuard, makeMoveGuard): each member is judged on its own zone, and its date commits on its
+// current technician first (the unit mover re-points it after). The fleet view keeps the visit's own rule.
+async function ruleFor(service, ctx, siblings = []) {
   const state = await (ctx.southDays || new SouthDays()).read(ctx.db, ctx);
   if (!state || !state.zones.length) return null;
-  const south = funnel().rowInFunnelZones(zoneFields(service), state.zones);
-  if (south === null) {
-    logger.info(`[auto-dispatch] south-day rule skipped for visit ${service.id}: no zone stamp and no city (failing open)`);
-    return null;
+  const grouped = !!state.techDays && siblings.length > 0;
+  const members = [];
+  for (const row of grouped ? [service, ...siblings] : [service]) {
+    const south = funnel().rowInFunnelZones(zoneFields(row, service), state.zones);
+    if (south === null) {
+      logger.info(`[auto-dispatch] south-day rule skipped for visit ${row.id}: no zone stamp and no city (failing open)`);
+    } else if (!south) {
+      members.push({ ownDate: toDateStr(row.scheduled_date), techIds: grouped ? [row.technician_id ?? null] : [] });
+    }
   }
-  return south ? null : { dates: state.dates, techDays: state.techDays, ownDate: toDateStr(service.scheduled_date) };
+  return members.length ? { dates: state.dates, techDays: state.techDays, members } : null;
 }
 
-// HARD filter test: the candidate date is another day that holds a far-south stop for the slot's technician
-// (`techId`; per truck only with GATE_MULTI_TECH_CONFIRM on, else any far-south stop holds the date), or for one of
-// the rule's `alsoTechIds` (a grouped visit's members' current technicians, set in candidate-slots.js).
-const blocks = (dateStr, rule, techId = null) => !!rule && dateStr !== rule.ownDate
-  && [techId, ...(rule.alsoTechIds || [])].some((id) => funnel().onZoneDay(dateStr, id, rule.dates, rule.techDays));
+// HARD filter test: for one of the rule's members, the candidate date is another day that holds a far-south stop of
+// the slot's technician (`techId`) or of the member's own `techIds`. Per truck only with GATE_MULTI_TECH_CONFIRM on;
+// else any far-south stop holds the date.
+const blocks = (dateStr, rule, techId = null) => !!rule && rule.members.some((member) => dateStr !== member.ownDate
+  && [techId, ...member.techIds].some((id) => funnel().onZoneDay(dateStr, id, rule.dates, rule.techDays)));
 
 // Apply time, inside the move transaction: the destination date's far-south stops as stored now, for each technician
 // the visit can sit with on that date (`techIds`; null = unassigned, which any far-south stop holds). Same fail-open

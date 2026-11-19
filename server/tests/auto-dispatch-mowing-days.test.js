@@ -593,11 +593,12 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     test('on: a grouped visit is also held by each member\'s current technician, where the unit move commits first', async () => {
       techScopedConfirmActive.mockReturnValue(true);
       findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '10:00', 't2')] });
-      const offered = async (stops, primaryTech, siblingTech) => {
+      const offered = async (stops, primaryTech, siblingTech, { primary = NORTH, sibling = {} } = {}) => {
         const grouped = siblingTech !== undefined;
-        const out = await findValidCandidateSlots({ ...NORTH, visit_id: grouped ? 'v1' : null, technician_id: primaryTech }, plain(), ctx({
+        const siblings = [{ id: 's2', scheduled_date: TUE, technician_id: siblingTech, ...sibling }];
+        const out = await findValidCandidateSlots({ ...primary, visit_id: grouped ? 'v1' : null, technician_id: primaryTech }, plain(), ctx({
           db: southDb({ stops }),
-          ...(grouped ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2', technician_id: siblingTech }], visitWindowStart: null } } : {}),
+          ...(grouped ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings, visitWindowStart: null } } : {}),
         }));
         return out.candidates.map((c) => `${c.date} ${c.technician_id}`);
       };
@@ -612,6 +613,14 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       expect(await offered(stopOf('t3'), null, null)).toEqual([]);
       // A stop of no member's technician leaves the date open.
       expect(await offered(stopOf('t3'), 't1', 't1')).toEqual([`${WED} t2`]);
+      // Each member on its own zone, as apply time: a north sibling of a far-south visit holds the unit (its own
+      // technician's day, or the slot's) ...
+      const northSibling = { sibling: { zone: 'parrish', customer_city: 'Parrish' }, primary: SOUTH };
+      expect(await offered(stopOf('t3'), 't1', 't3', northSibling)).toEqual([]);
+      expect(await offered(stopOf('t2'), 't1', 't3', northSibling)).toEqual([]);
+      expect(await offered(stopOf('t1'), 't1', 't3', northSibling)).toEqual([`${WED} t2`]);
+      // ... and a far-south sibling's technician holds nothing.
+      expect(await offered(stopOf('t3'), 't1', 't3', { sibling: { zone: 'venice', customer_city: 'Venice' } })).toEqual([`${WED} t2`]);
     });
 
     test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
