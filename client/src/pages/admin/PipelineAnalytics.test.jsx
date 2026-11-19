@@ -876,6 +876,20 @@ describe("isCallTodayEstimate", () => {
     expect(isCallTodayEstimate(estimate({ status: "viewed", customerPhone: "+19415550101" }), NOW_MS)).toBe(false);
   });
 
+  it("lists no self-serve quote nobody delivered, in any follow-up bucket (zero-follow-up contract, codex pre-push P1)", () => {
+    // One offer per bucket; each lands there until the server flags it an undelivered self-serve quote.
+    const cases = [
+      [isCallTodayEstimate, viewedOffer(10)],
+      [isGoingColdEstimate, viewedOffer(72)],
+      [isFollowUpOverdueEstimate, viewedOffer(8 * 24)],
+      [isFollowUpOverdueEstimate, estimate({ status: "sent", sentAt: hoursAgo(80) })],
+    ];
+    for (const [bucket, offer] of cases) {
+      expect(bucket(offer, NOW_MS)).toBe(true);
+      expect(bucket({ ...offer, undeliveredSelfServe: true }, NOW_MS)).toBe(false);
+    }
+  });
+
   it("never shares an offer with Going cold or Follow-up overdue", () => {
     for (let minutes = 0; minutes <= 9 * 24 * 60; minutes += 37) {
       const offer = viewedOffer(0, { viewedAt: minutesAgo(minutes), lastViewedAt: minutesAgo(minutes) });

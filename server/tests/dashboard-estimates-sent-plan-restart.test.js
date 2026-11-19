@@ -14,14 +14,16 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const recorded = [];
+let chainSeq = 0;
 function makeChain(table) {
   const chain = {
     table,
-    log(method, args) { recorded.push({ table: this.table, method, args }); return this; },
+    id: ++chainSeq,
+    log(method, args) { recorded.push({ table: this.table, chain: this.id, method, args }); return this; },
   };
   const methods = ['leftJoin', 'where', 'andWhere', 'orWhere', 'whereNot', 'orWhereNot', 'whereRaw', 'orWhereRaw',
     'whereIn', 'orWhereIn', 'whereNotIn', 'orWhereNotIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull',
-    'whereBetween', 'select', 'groupBy', 'orderBy', 'limit', 'sum', 'count', 'modify'];
+    'whereBetween', 'select', 'groupBy', 'orderBy', 'orderByRaw', 'limit', 'sum', 'count', 'modify'];
   for (const m of methods) {
     chain[m] = (...args) => {
       chain.log(m, args);
@@ -54,4 +56,25 @@ test('estimates_sent keeps source-NULL rows and DELIVERED self-serve quotes; dro
   expect(nullArms.length).toBe(2);
   expect(notRestartArms.length).toBe(2);
   expect(deliveredArms.length).toBe(2);
+});
+
+test('every get_estimate_funnel query leaves out undelivered self-serve quotes, so the rates share one cohort (codex pre-push P1)', async () => {
+  recorded.length = 0;
+  const out = await executeDashboardTool('get_estimate_funnel', { date_from: '2026-11-01', date_to: '2026-11-19' });
+  expect(out.error).toBeUndefined();
+  const chains = new Map();
+  for (const r of recorded) {
+    if (!String(r.table).includes('estimates')) continue;
+    if (!chains.has(r.chain)) chains.set(r.chain, []);
+    chains.get(r.chain).push(r);
+  }
+  // Four stages, response time, accepted value, the sent cohort by service, open follow-ups.
+  expect(chains.size).toBe(8);
+  for (const calls of chains.values()) {
+    expect(calls.some((c) => c.method === 'whereNull' && c.args[0] === 'e.source')).toBe(true);
+    expect(calls.some((c) => c.method === 'orWhereNotIn' && c.args[0] === 'e.source'
+      && JSON.stringify(c.args[1]) === JSON.stringify(['plan_restart', 'plan_start']))).toBe(true);
+    expect(calls.some((c) => c.method === 'orWhereRaw'
+      && String(c.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(c.args[0]).includes('IS NOT NULL'))).toBe(true);
+  }
 });

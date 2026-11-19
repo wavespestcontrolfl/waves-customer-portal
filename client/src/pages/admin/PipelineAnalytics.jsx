@@ -131,7 +131,11 @@ export function resolutionDate(estimate) {
 // viewed offer gone quiet past the going-cold window (7d+). Kept DISJOINT from
 // isGoingColdEstimate so the two "Needs attention" cards never double-count the
 // same offer — every open offer lands in at most one bucket.
+// None of the three follow-up buckets lists a self-serve quote nobody delivered
+// (undeliveredSelfServe, from the server: plan restart, plan start): the
+// customer opened it from the portal, and it carries a zero-follow-up contract.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
+  if (estimate?.undeliveredSelfServe) return false;
   if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
@@ -148,7 +152,7 @@ export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
 // offer crosses into follow-up-overdue too — so this is the complement slice,
 // disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed") return false;
+  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe) return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
   const age = nowMs - last;
@@ -160,7 +164,7 @@ export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
 // The upper edge is inclusive and isGoingColdEstimate starts strictly past 48h, so the two never
 // share an offer (and the 7d+ overdue bucket sits further out still). Needs a phone to call.
 export function isCallTodayEstimate(estimate, nowMs = Date.now()) {
-  if (estimate?.status !== "viewed" || estimate.archivedAt) return false;
+  if (estimate?.status !== "viewed" || estimate.archivedAt || estimate.undeliveredSelfServe) return false;
   if (!String(estimate.customerPhone || "").trim()) return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;

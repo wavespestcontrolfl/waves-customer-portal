@@ -388,6 +388,32 @@ describe('GET /admin/estimates list shape', () => {
     expect(queries.filter((q) => q.table === 'call_log' && q.m === 'whereIn')).toHaveLength(1);
   });
 
+  test('undeliveredSelfServe marks a portal quote nobody delivered, so no follow-up bucket lists it (codex pre-push P1)', async () => {
+    const delivered = { deliveryState: { firstDeliveredAt: '2026-10-02T15:00:00Z' } };
+    tableDb({
+      estimates: [
+        base('e-start', { source: 'plan_start', status: 'viewed' }),
+        base('e-restart', { source: 'plan_restart', status: 'viewed' }),
+        base('e-start-sent', { source: 'plan_start', status: 'viewed', estimate_data: delivered }),
+        base('e-staff', { source: 'manual', status: 'viewed' }),
+        base('e-legacy', { source: null, status: 'viewed' }),
+        base('e-garbled', { source: 'plan_start', status: 'viewed', estimate_data: '{not json' }),
+      ],
+    });
+    await withServer(async (baseUrl) => {
+      const { estimates } = await (await fetch(`${baseUrl}/estimates?limit=all`)).json();
+      expect(Object.fromEntries(estimates.map((e) => [e.id, e.undeliveredSelfServe]))).toEqual({
+        'e-start': true,
+        'e-restart': true,
+        'e-start-sent': false,
+        'e-staff': false,
+        'e-legacy': false,
+        // Unreadable data carries no delivery proof.
+        'e-garbled': true,
+      });
+    });
+  });
+
   test('bookingLinkEligible mirrors the send-booking-link route\'s row refusals', async () => {
     const lists = require('../routes/estimate-public').acceptanceServiceLists;
     const approval = require('../services/estimate-delivery-options').estimateDataHasUnresolvedManagerApproval;

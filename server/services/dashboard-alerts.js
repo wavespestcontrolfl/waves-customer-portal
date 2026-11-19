@@ -655,10 +655,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       // forbids. Excluded unless an operator really delivered it
       // (deliveryState.firstDeliveredAt, the admin send path's witness);
       // NULL-aware so legacy source-NULL rows stay in.
-      .where(function notUndeliveredSelfServeMint() {
-        this.whereNull('e.source').orWhereNotIn('e.source', ['plan_restart', 'plan_start'])
-          .orWhereRaw("(e.estimate_data #>> '{deliveryState,firstDeliveredAt}') IS NOT NULL");
-      });
+      .where(require('./self-serve-estimates').whereNotUndeliveredSelfServe('e'));
     if (INTERNAL_TEST_CUSTOMERS.length) {
       expiringQuery
         .whereNotIn(db.raw("LOWER(COALESCE(e.customer_name, ''))"), INTERNAL_TEST_CUSTOMERS)

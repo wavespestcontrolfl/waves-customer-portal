@@ -4566,6 +4566,10 @@ router.get('/', async (req, res, next) => {
           lastFollowUpAt: e.last_follow_up_at,
           // Call list: newest outbound call to a viewed row's phone; null otherwise.
           lastCalledAt: lastCalledById.get(e.id) || null,
+          // A self-serve quote nobody delivered (plan restart, plan start): no staff
+          // follow-up bucket (Call today, Going cold, Follow-up overdue) lists it,
+          // the zero-follow-up contract (codex pre-push P1).
+          undeliveredSelfServe: require('../services/self-serve-estimates').isUndeliveredSelfServe(e.source, estData),
           declineReason: e.decline_reason,
           disposition: e.disposition || null,
           dispositionSource: e.disposition_source || null,

@@ -694,8 +694,12 @@ function disclosedSetupFeeQuote(estimateData) {
 //   matchesLive       (liveEstimateData) => the entry's own scope/identity
 //                     test for reusing a live quote (the core adds the
 //                     cent-exact totals + full-offer fingerprint checks)
-//   strictPremises    optional; true fails the single-premises proof on an
-//                     unresolvable visit link (plan start, singlePremisesStreet)
+//   strictEvidence    optional (plan start): evidence the price depends on must
+//                     be readable, else pricing_unavailable: the single-premises
+//                     proof fails on an unresolvable visit link
+//                     (singlePremisesStreet strict) and an unreadable estimate
+//                     seed refuses. Plan restart keeps main's lenient proof and
+//                     best-effort seed.
 //   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal,
 //                     rawEngineResult }) => throws when the server's price is
 //                     not the offer the entry expects
@@ -710,7 +714,7 @@ function disclosedSetupFeeQuote(estimateData) {
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate({
-  trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive, strictPremises,
+  trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive, strictEvidence,
   assertOffer = null, snapshotSells = null, note, logTag, logDetail = '', handMessage,
   assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
 }) {
@@ -734,7 +738,7 @@ async function mintPricedEstimate({
   const linkage = require('../estimate-property-linkage');
   let primaryStreet = null;
   try {
-    primaryStreet = await singlePremisesStreet(trx, fresh, { proof: deps.customerHasOnlyPrimaryPremises, strict: strictPremises });
+    primaryStreet = await singlePremisesStreet(trx, fresh, { proof: deps.customerHasOnlyPrimaryPremises, strict: strictEvidence });
   } catch (err) {
     logger.warn(`[${logTag}] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
   }
@@ -767,6 +771,14 @@ async function mintPricedEstimate({
     // continues on profile/cache evidence as intended.
     propertySeed = await trx.transaction((sp) => crossSell.loadEstimateSeed(sp, fresh.id, primaryStreet));
   } catch (err) {
+    // Plan start fails closed (codex pre-push P0): without the seed the
+    // field-verification and tree-count guards below cannot run, and cached
+    // facts alone could still reproduce the card's price. A read that finds
+    // no seed is not a failure.
+    if (strictEvidence) {
+      logger.warn(`[${logTag}] estimate property seed unreadable for ${fresh.id} — refusing: ${err.message}`);
+      throw new RestartUnavailableError('pricing_unavailable', handMessage);
+    }
     logger.warn(`[${logTag}] estimate property seed skipped for ${fresh.id}: ${err.message}`);
   }
   // Savepoint-isolated like the seed and prepay lookups (codex GH r23
@@ -1270,7 +1282,7 @@ async function mintPlanStartEstimate({
       logTag,
       logDetail: `option ${option.id}`,
       handMessage: HAND_PRICED_PLAN_START,
-      strictPremises: true,
+      strictEvidence: true,
       assertNotCommercial,
       nowDate,
       now,

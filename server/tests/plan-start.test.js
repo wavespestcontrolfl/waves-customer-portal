@@ -571,6 +571,10 @@ describe('mintPlanStartEstimate', () => {
       await refused('pricing_unavailable', {}, { customerHasOnlyPrimaryPremises: async () => { throw new Error('boom'); } });
     });
 
+    test('an unreadable estimate seed is priced by hand: its review guards could not run (codex pre-push P0)', async () => {
+      await refused('pricing_unavailable', {}, { crossSell: { loadEstimateSeed: async () => { throw new Error('pg down'); } } });
+    });
+
     test('the mint runs the strict premises proof: a visit whose property link cannot be resolved is priced by hand (codex pre-push P1)', async () => {
       // An account the lenient proof passes and the strict one fails: an unresolvable link.
       const proof = jest.fn(async (_db, _id, _customer, _street, options) => options?.unresolvedFails !== true);
@@ -949,6 +953,8 @@ describe('assertPlanStartAcceptEligible', () => {
 describe('readers that skip undelivered self-serve mints include plan_start', () => {
   test('the pipeline derives no "Follow up" from a plan_start mint (the plan_restart contract)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-pipeline.js'), 'utf8');
-    expect(src).toContain(".orWhereNotIn('estimates.source', ['plan_restart', 'plan_start'])");
+    // Pipeline reads the shared self-serve source list (self-serve-estimates.js), which holds both sources.
+    expect(src).toContain(".orWhereNotIn('estimates.source', require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES)");
+    expect(require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES).toEqual(['plan_restart', 'plan_start']);
   });
 });

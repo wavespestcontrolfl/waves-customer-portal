@@ -1154,7 +1154,7 @@ async function fetchEstimates({ search, source, ownerId }) {
     // NULL-aware (codex GH r20 P2): legacy/imported rows carry source NULL,
     // which a bare NOT IN would drop.
     .where(function notSelfServeMint() {
-      this.whereNull('estimates.source').orWhereNotIn('estimates.source', ['plan_restart', 'plan_start']);
+      this.whereNull('estimates.source').orWhereNotIn('estimates.source', require('../services/self-serve-estimates').SELF_SERVE_ESTIMATE_SOURCES);
     })
     .orderBy('estimates.created_at', 'desc')
     .limit(MAX_CANDIDATES + 1);

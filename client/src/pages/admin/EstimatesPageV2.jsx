@@ -358,6 +358,9 @@ function v3ChipMatches(e, chip) {
   if (chip === "closed")
     return e.status === "accepted" || e.status === "declined";
   if (chip === "action") {
+    // Never a self-serve quote nobody delivered (undeliveredSelfServe): the
+    // zero-follow-up contract.
+    if (e.undeliveredSelfServe) return false;
     if (e.status === "expired") return true;
     if (e.status === "viewed" && e.viewedAt) {
       const hrs = (Date.now() - new Date(e.viewedAt).getTime()) / 3.6e6;

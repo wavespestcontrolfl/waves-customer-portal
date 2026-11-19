@@ -499,6 +499,13 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
+  test('a restart keeps main\'s best-effort seed: an unreadable seed still prices (plan start alone refuses)', async () => {
+    const d = deps({ crossSell: { loadEstimateSeed: async () => { throw new Error('pg down'); } } });
+    const minted = await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: d, randomBytes: () => Buffer.from('abcdef0123456789') });
+    expect(minted.url).toEqual(expect.any(String));
+    expect(tables.estimates).toHaveLength(1);
+  });
+
   test.each([
     ['a $79 fee', 79],
     ['a $0 fee', 0],
