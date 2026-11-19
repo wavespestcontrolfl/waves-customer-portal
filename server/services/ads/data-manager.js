@@ -503,11 +503,13 @@ function estimateLeadId(estimateData) {
 
 // Test records never go out. Lead status is NOT checked for a completed job: a
 // paid job is real revenue even if its lead was later merged as a duplicate.
+// The lead joins by estimate, so it can belong to another customer: its own
+// customer id counts too.
 function jobIsInternalTest(row) {
   return isInternalTestContact({
     customerId: row.customer_id, firstName: row.customer_first_name, lastName: row.customer_last_name, email: row.customer_email, phone: row.customer_phone,
   }) || isInternalTestContact({
-    firstName: row.lead_first_name, lastName: row.lead_last_name, email: row.lead_email, phone: row.lead_phone,
+    customerId: row.lead_customer_id, firstName: row.lead_first_name, lastName: row.lead_last_name, email: row.lead_email, phone: row.lead_phone,
   });
 }
 
@@ -740,10 +742,12 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
   // passes sendableTransactionIds (what its destination would send now: no skip
   // reason, not on its history) and pages on until `cap` customers are
   // sendable or the window ends, so no customer ages out behind ones already
-  // sent or unsendable. Those before the cap-th sendable one come back too
-  // (reported as skipped); nothing after it does.
+  // sent or unsendable. It returns those, plus at most `cap` unsendable ones
+  // from before the cap-th sendable one (reported as skipped), so the
+  // uploader's own history read stays bounded however much was sent before.
   const out = [];
   let room = cap;
+  let skipRoom = cap;
   for (let offset = 0; ; offset += pageSize) {
     const rows = await page(offset);
     const linked = await linkedLeadContacts(rows.map((r) => r.customer_id));
@@ -762,8 +766,10 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     const sendable = await sendableTransactionIds(candidates);
     for (const c of candidates) {
       if (room === 0) break;
-      out.push(c);
       if (sendable.has(c.transactionId)) room -= 1;
+      else if (skipRoom > 0) skipRoom -= 1;
+      else continue;
+      out.push(c);
     }
     if (room === 0 || rows.length < pageSize) return out;
   }
@@ -817,6 +823,7 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'ea.updated_at',
       'e.estimate_data',
       'l.id as lead_id',
+      'l.customer_id as lead_customer_id',
       'l.email as lead_email',
       'l.phone as lead_phone',
       'l.first_name as lead_first_name',
@@ -911,9 +918,11 @@ async function applyMarketingConsent(conversionType, candidates) {
       }
       // The phone changed, so the name/address must be re-picked for the
       // contact actually uploaded (a promoted account-holder phone must not
-      // ride with a different caller's name).
+      // ride with a different caller's name). A wrong number never shows that
+      // two sources are one person, so it is blanked in the sources too.
+      const usable = (src) => (sup.invalidPhones.has(consentNormPhone(src.phone)) ? { ...src, phone: null } : src);
       const reIdentity = Array.isArray(candidate.identitySources)
-        ? matchFields.identityForContact({ email: candidate.email, phone: promoted }, ...candidate.identitySources)
+        ? matchFields.identityForContact({ email: candidate.email, phone: promoted }, ...candidate.identitySources.map(usable))
         : {};
       return { ...candidate, phone: promoted, ...reIdentity };
     }
@@ -1005,19 +1014,40 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
   return { counts, rows };
 }
 
-async function existingUploads(conversionType, transactionIds) {
-  if (!transactionIds.length) return new Map();
+// The history row that decides each candidate, keyed by its transaction id.
+// new_customer is one per customer, ever, and a customer merge repoints every
+// customer_id column (these rows too) to the surviving customer, whose own
+// transaction id is new: a row under the same customer that skips the upload
+// stands for it, so a merge never sends the acquisition again.
+async function existingUploads(conversionType, candidates) {
+  if (!candidates.length) return new Map();
+  const customerIds = conversionType === 'new_customer'
+    ? [...new Set(candidates.map((c) => c.customerId).filter(Boolean).map(String))]
+    : [];
   const rows = await db('google_ads_conversion_uploads')
     .where({ conversion_type: conversionType })
-    .whereIn('transaction_id', transactionIds)
-    .select('transaction_id', 'status', 'request_id', 'updated_at');
-  return new Map(rows.map((row) => [row.transaction_id, row]));
+    .where((q) => {
+      q.whereIn('transaction_id', candidates.map((c) => c.transactionId));
+      if (customerIds.length) q.orWhereIn('customer_id', customerIds);
+    })
+    .select('transaction_id', 'customer_id', 'status', 'request_id', 'updated_at');
+  const byTransaction = new Map(rows.map((row) => [row.transaction_id, row]));
+  const skipByCustomer = new Map(rows
+    .filter((row) => customerIds.length && row.customer_id && priorUploadSkipReason(row))
+    .map((row) => [String(row.customer_id), row]));
+  const history = new Map();
+  for (const c of candidates) {
+    const own = byTransaction.get(c.transactionId);
+    const row = priorUploadSkipReason(own) ? own : (skipByCustomer.get(String(c.customerId)) || own);
+    if (row) history.set(c.transactionId, row);
+  }
+  return history;
 }
 
 // The candidates an upload run would send: no skip reason and, unless forced,
 // nothing on the history that skips it (sent, pending, partial success).
 async function uploadableTransactionIds(conversionType, candidates, force) {
-  const prior = force ? new Map() : await existingUploads(conversionType, candidates.map((c) => c.transactionId));
+  const prior = force ? new Map() : await existingUploads(conversionType, candidates);
   return new Set(candidates
     .filter((c) => !skipReason(c) && !priorUploadSkipReason(prior.get(c.transactionId)))
     .map((c) => c.transactionId));
@@ -1032,7 +1062,7 @@ async function buildReadiness({ periodDays = 30, limit = MAX_LIMIT } = {}) {
     const config = configurationFor(conversionType);
     try {
       const candidates = await collectCandidates(conversionType, { ...range, limit });
-      const existing = await existingUploads(conversionType, candidates.map((c) => c.transactionId));
+      const existing = await existingUploads(conversionType, candidates);
       const summary = summarizeCandidates(candidates, existing);
       conversions[conversionType] = {
         ...config,
@@ -1175,7 +1205,7 @@ async function uploadConversionsLocked({
       sendableTransactionIds: (batch) => uploadableTransactionIds(conversionType, batch, force),
     })
   );
-  const existing = await existingUploads(conversionType, candidates.map((c) => c.transactionId));
+  const existing = await existingUploads(conversionType, candidates);
   const skipped = [];
   const uploadable = [];
 
@@ -1393,6 +1423,8 @@ module.exports = {
     dedupeCandidatesByTransaction,
     destinationFor,
     exclusionReason,
+    existingUploads,
+    uploadableTransactionIds,
     conversionValueForNewCustomer,
     mapNewCustomerCandidate,
     JUNK_LEAD_STATUSES,

@@ -34,7 +34,8 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('new_customer conversion collector on PostgreSQL', () => {
   let database;
   const schema = `new_customer_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['leads', 'customers', 'service_records', 'scheduled_services', 'services', 'lead_sources'];
+  const tables = ['leads', 'customers', 'service_records', 'scheduled_services', 'services', 'lead_sources',
+    'google_ads_conversion_uploads', 'meta_conversion_uploads'];
 
   const savedOwnerPhone = process.env.ADAM_PHONE;
   beforeAll(async () => {
@@ -220,7 +221,7 @@ jest.setTimeout(30000);
     expect(out.map((x) => x.eventTimestamp)).toEqual(['2026-11-22T15:00:00.000Z']);
   });
 
-  test('an upload run pages until it holds `limit` sendable customers', async () => {
+  test('an upload run pages until it holds `limit` sendable customers, listing at most `limit` skipped ones', async () => {
     const ids = [];
     for (const day of ['20', '18', '16']) {
       const c = await customer({ member_since: null });
@@ -232,10 +233,13 @@ jest.setTimeout(30000);
     const tx = (out) => out.map((x) => x.transactionId);
     // Readiness (no sendable check) reads one page.
     expect(tx(await collect({ limit: 1 }))).toEqual([ids[0]]);
-    // An upload run returns the unsendable ones too, and at most `limit` sendable ones.
+    // An upload run returns at most `limit` sendable ones, plus at most `limit`
+    // unsendable ones before them (reported as skipped), so the uploader's own
+    // history read stays bounded however much was sent before.
     expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0]]) }))).toEqual([ids[0], ids[1]]);
-    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0], ids[1]]) }))).toEqual(ids);
-    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent(ids) }))).toEqual(ids);
+    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0], ids[1]]) }))).toEqual([ids[0], ids[2]]);
+    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent(ids) }))).toEqual([ids[0]]);
+    expect(tx(await collect({ limit: 2, sendableTransactionIds: notSent(ids) }))).toEqual([ids[0], ids[1]]);
     // The database page is a full page whatever the limit: one read, not one per customer.
     const pages = [];
     const all = async (batch) => { pages.push(batch.length); return new Set(batch.map((x) => x.transactionId)); };
@@ -254,6 +258,57 @@ jest.setTimeout(30000);
       [`waves_new_customer:${test.id}`, 'internal_test'],
       [`waves_new_customer:${real.id}`, null],
     ]);
+  });
+
+  test('a merge never sends the acquisition again: a sent row under the surviving customer counts, on both platforms', async () => {
+    const { existingSent } = require('../services/ads/meta-data-manager')._private;
+    const retired = await customer({ member_since: null });
+    const kept = await customer({ member_since: null, email: 'pat.two@example.com' });
+    const won = await lead(retired);
+    const sentAs = `waves_new_customer:${retired.id}`;
+    const keptId = `waves_new_customer:${kept.id}`;
+    await database('google_ads_conversion_uploads').insert({
+      conversion_type: 'new_customer', transaction_id: sentAs, event_name: 'New customer', event_timestamp: won.converted_at,
+      status: 'sent', validate_only: false, customer_id: retired.id, lead_id: won.id,
+    });
+    await database('meta_conversion_uploads').insert({
+      conversion_type: 'new_customer', event_id: sentAs, event_name: 'Purchase', status: 'sent', customer_id: retired.id, lead_id: won.id,
+    });
+    // A merge repoints every customer_id column, then retires the losing row.
+    for (const table of ['leads', 'google_ads_conversion_uploads', 'meta_conversion_uploads']) {
+      await database(table).where({ customer_id: retired.id }).update({ customer_id: kept.id });
+    }
+    await database('customers').where({ id: retired.id }).update({ deleted_at: new Date() });
+
+    const candidates = await collect();
+    expect(candidates.map((x) => x.transactionId)).toEqual([keptId]);
+    expect((await _private.existingUploads('new_customer', candidates)).get(keptId)).toMatchObject({ transaction_id: sentAs, status: 'sent' });
+    expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([]);
+    expect([...await existingSent('new_customer', candidates)]).toEqual([keptId]);
+    // The surviving customer's own failed attempt does not lift the block.
+    await database('google_ads_conversion_uploads').insert({
+      conversion_type: 'new_customer', transaction_id: keptId, event_name: 'New customer', event_timestamp: won.converted_at,
+      status: 'failed', validate_only: false, customer_id: kept.id, lead_id: won.id,
+    });
+    expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([]);
+
+    // Only a row that skips the upload counts: after a failed send it goes again.
+    await database('google_ads_conversion_uploads').update({ status: 'failed' });
+    await database('meta_conversion_uploads').update({ status: 'failed' });
+    expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([keptId]);
+    expect([...await existingSent('new_customer', candidates)]).toEqual([]);
+
+    // Other conversions are one per event, not per customer: a customer's sent
+    // job never blocks the next one.
+    await database('google_ads_conversion_uploads').insert({
+      conversion_type: 'completed_job_revenue', transaction_id: 'waves_completed_job:first', event_name: 'Job', event_timestamp: new Date(), status: 'sent', customer_id: kept.id,
+    });
+    await database('meta_conversion_uploads').insert({
+      conversion_type: 'completed_job_revenue', event_id: 'waves_completed_job:first', event_name: 'Purchase', status: 'sent', customer_id: kept.id,
+    });
+    const nextJob = { conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:next', customerId: kept.id };
+    expect((await _private.existingUploads('completed_job_revenue', [nextJob])).size).toBe(0);
+    expect((await existingSent('completed_job_revenue', [nextJob])).size).toBe(0);
   });
 
   test('a completed booking before the lead is an existing customer; a free assessment is not', async () => {

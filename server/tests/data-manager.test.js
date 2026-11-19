@@ -712,6 +712,18 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     expect(cleaned).toMatchObject({ phone: '9415550199', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
     expect(cleaned).not.toHaveProperty('identitySources');
   });
+  test("consent: a wrong number shared by the lead and its customer never lends the customer's name and ZIP", async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(['9415550101']), isSuppressed: () => false });
+    const lead = mapLeadCandidate({
+      id: 'lead-4', created_at: '2026-07-01T00:00:00Z', email: 'new@example.com', phone: '9415550101',
+      customer_id: 'cust-2', customer_email: 'old@example.com', customer_phone: '(941) 555-0101',
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+    });
+    // Before consent, the shared number joins the two records.
+    expect(lead).toMatchObject({ firstName: 'Sam', zip: '34211' });
+    const [cleaned] = await applyMarketingConsent('qualified_lead', [lead]);
+    expect(cleaned).toMatchObject({ email: 'new@example.com', phone: null, firstName: null, lastName: null, zip: null });
+  });
   test('a clean contact keeps its extras through consent cleaning', async () => {
     mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
     const [c] = await applyMarketingConsent('qualified_lead', [{ transactionId: 't-1', email: 'a@x.com', firstName: 'Jo', zip: '34221', externalId: 'cust-1' }]);
@@ -775,6 +787,31 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
     const job = { id: 'ea1', service_date: '2026-11-17', invoice_total: 100, lead_email: 'pat@example.com', lead_phone: '9415550100' };
     expect(skipReason(mapCompletedJobCandidate({ ...job, customer_phone: '(941) 555-0177' }))).toBe('internal_test');
     expect(skipReason(mapCompletedJobCandidate(job))).toBeNull();
+    // The lead joins by estimate and can belong to another customer: a listed
+    // test customer's lead makes the job a test record; any other one does not.
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_id: 'c1', lead_customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }))).toBe('internal_test');
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_id: 'c1', lead_customer_id: 'c2' }))).toBeNull();
+  });
+
+  test("the completed-job query selects the joined lead's own customer id, which the test-record check reads", async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
+    const selected = [];
+    const chain = new Proxy({}, {
+      get: (_t, prop) => {
+        if (prop === 'then') return (resolve) => resolve([]);
+        if (prop === 'select') return (...cols) => { selected.push(...cols); return chain; };
+        return () => chain;
+      },
+    });
+    dbMock.mockImplementation(() => chain);
+    dbMock.raw = (sql) => sql;
+    try {
+      await collectCandidates('completed_job_revenue', { since: '2026-11-01', endDate: '2026-11-18' });
+    } finally {
+      delete dbMock.raw;
+    }
+    expect(selected).toContain('l.customer_id as lead_customer_id');
   });
 
   test('summarizeCandidates counts internal_test and skips it', () => {

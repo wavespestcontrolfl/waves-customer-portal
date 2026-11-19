@@ -190,17 +190,31 @@ async function sendEvents(events, { testCode, fetchImpl = global.fetch } = {}) {
 
 // The candidates this run would send: no skip reason and, unless forced, not sent before.
 async function sendableEventIds(conversionType, candidates, force) {
-  const sent = force ? new Set() : await existingSent(conversionType, candidates.map((c) => c.transactionId));
+  const sent = force ? new Set() : await existingSent(conversionType, candidates);
   return new Set(candidates.filter((c) => !skipReason(c) && !sent.has(c.transactionId)).map((c) => c.transactionId));
 }
 
-async function existingSent(conversionType, eventIds) {
-  if (!eventIds.length) return new Set();
+// The candidates' event ids already sent. new_customer is one per customer,
+// ever, and a customer merge repoints every customer_id column (these rows
+// too) to the surviving customer, whose own event id is new: a sent row under
+// the same customer counts, so a merge never sends the acquisition again.
+async function existingSent(conversionType, candidates) {
+  if (!candidates.length) return new Set();
+  const customerIds = conversionType === 'new_customer'
+    ? [...new Set(candidates.map((c) => c.customerId).filter(Boolean).map(String))]
+    : [];
   const rows = await db('meta_conversion_uploads')
     .where({ conversion_type: conversionType, status: SENT })
-    .whereIn('event_id', eventIds)
-    .select('event_id');
-  return new Set(rows.map((r) => r.event_id));
+    .where((q) => {
+      q.whereIn('event_id', candidates.map((c) => c.transactionId));
+      if (customerIds.length) q.orWhereIn('customer_id', customerIds);
+    })
+    .select('event_id', 'customer_id');
+  const sentEvents = new Set(rows.map((r) => r.event_id));
+  const sentCustomers = new Set(customerIds.length ? rows.filter((r) => r.customer_id).map((r) => String(r.customer_id)) : []);
+  return new Set(candidates
+    .filter((c) => sentEvents.has(c.transactionId) || (c.customerId && sentCustomers.has(String(c.customerId))))
+    .map((c) => c.transactionId));
 }
 
 async function logUpload(candidate, { status, testMode, eventsReceived = null, errorMessage = null }) {
@@ -268,7 +282,7 @@ async function uploadConversions({ conversionType = 'completed_job_revenue', per
       // The new-customer collector pages until it holds `limit` of these.
       sendableTransactionIds: (batch) => sendableEventIds(conversionType, batch, force),
     });
-    const alreadySent = force ? new Set() : await existingSent(conversionType, candidates.map((c) => c.transactionId));
+    const alreadySent = force ? new Set() : await existingSent(conversionType, candidates);
 
     const sendable = [];
     const skipped = [];
@@ -348,5 +362,6 @@ module.exports = {
   buildReadiness,
   _private: {
     apiVersion, pixelId, buildUserData, buildEvent, skipReason, matchKeySummary, resolveMode, toUnixSeconds, EVENT_NAMES, conversionTypeEnabled,
+    existingSent,
   },
 };
