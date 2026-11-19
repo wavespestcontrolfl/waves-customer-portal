@@ -1700,7 +1700,7 @@ function detachVoiceRouteCheck(plan, candidates) {
 // that already has a technician keeps that technician.
 // `zoneFunnelAddress`: opt-in address text. With GATE_SOUTH_ZONE_DAY_FUNNEL live and an address in a
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, paidLookups }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1750,8 +1750,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // just before the return. Bounded + cached + fail-open in the service (null
   // → nothing stamped, payload keeps today's exact shape); the extra .catch is
   // belt-and-braces — weather decoration must never break or delay availability.
+  // `paidLookups: false` (availabilityForPin's read-only caller) reads no
+  // forecast at all: the service's backup is the paid Open-Meteo key.
   const { isEnabled } = require('../config/feature-gates');
-  const rainOutlookPromise = isEnabled('bookingRainChips')
+  const rainOutlookPromise = paidLookups !== false && isEnabled('bookingRainChips')
     ? require('../services/weather-forecast')
       .getDailyRainOutlookBounded(RAIN_OFFICE_POINT.lat, RAIN_OFFICE_POINT.lng)
       .catch(() => null)
@@ -1760,10 +1762,11 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // Rain ranking (GATE_CUSTOMER_RAIN_RANK, dark): a tier per candidate just
   // before the sort. The booking's rain fit and the forecast are read only
   // once a candidate inside the next 3 dates exists. Today's order with the
-  // gate off, under the re-service profile, or on any failure.
+  // gate off, under the re-service profile, with `paidLookups: false` (no
+  // forecast, as for the rain chips above), or on any failure.
   const serviceLabels = normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
   const rainRank = startCustomerRainRank({
-    serviceIdentity, serviceLabels, lat, lng, today, skip: reserviceRankIsActive(rankProfile), db,
+    serviceIdentity, serviceLabels, lat, lng, today, skip: paidLookups === false || reserviceRankIsActive(rankProfile), db,
   });
 
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
@@ -1844,6 +1847,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // One technician's days only (reschedule-public.js keeps the visit's technician);
     // unset for every other caller = every assignable technician, as before.
     technicianId,
+    // Road lookups (find-time travelAllowance): `paidLookups: false` buys none. Only
+    // availabilityForPin's read-only caller passes it (the hourly route check's slot-rule
+    // decision); unset for every other caller = the shared allowance, as before.
+    providerTravel: paidLookups,
   });
 
   // Slot rules come from the shared bookingSlotWindow derivation so the
@@ -2286,7 +2293,12 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
 // (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
 // so a text-offered time and the website's come from one finder. Null when
 // /book is off, the service is no funnel service or the pin is missing.
-async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
+// `paidLookups: false` buys nothing: no road lookup (find-time travelAllowance)
+// and no forecast (the rain chips and the rain rank; both only stamp or order
+// the offers, never add or drop one). The hourly route check's slot-rule
+// decision (day-replan/route-check.js) passes it: it only reads the offer.
+// Unset = today's lookups, as before.
+async function availabilityForPin({ lat, lng, serviceKey, internal = false, paidLookups }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
   const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
@@ -2310,6 +2322,7 @@ async function availabilityForPin({ lat, lng, serviceKey, internal = false }) {
     // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
     // exactly what /book would show this customer, graced slots included.
     bookArrivalGrace: true,
+    paidLookups,
   });
 }
 

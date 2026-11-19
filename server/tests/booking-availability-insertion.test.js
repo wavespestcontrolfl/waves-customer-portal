@@ -20,6 +20,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
 jest.mock('../services/scheduling/occupancy', () => ({ listOccupiedWindows: jest.fn() }));
+// The real rain rank, watched: which builds skip it (the paidLookups test below).
+jest.mock('../services/scheduling/customer-rain-rank', () => {
+  const actual = jest.requireActual('../services/scheduling/customer-rain-rank');
+  return { ...actual, startCustomerRainRank: jest.fn(actual.startCustomerRainRank) };
+});
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -88,6 +93,44 @@ describe('buildBookingAvailability — capacityPlacement pass-through', () => {
     await build('', { capacityPlacement: false });
     const opts = findAvailableSlots.mock.calls[0][0];
     expect(opts.capacityPlacement).toBe(false);
+  });
+});
+
+// The hourly route check's slot-rule decision (day-replan/route-check.js) reads /book's offer at a
+// zone center through availabilityForPin with paidLookups: false, so it buys nothing: no road
+// lookup (find-time travelAllowance) and no forecast (whose backup is the paid Open-Meteo key).
+// Every other caller sends none: today's lookups, as before.
+describe('availabilityForPin — paidLookups: false buys nothing', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    wireDayCapCounts([]).first = jest.fn(async () => CONFIG); // loadBookingConfig's row
+    listOccupiedWindows.mockResolvedValue([]);
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+  });
+
+  test('no road lookup and no forecast read; an omitted value keeps both', async () => {
+    const { availabilityForPin } = require('../routes/booking')._internals;
+    const { startCustomerRainRank } = require('../services/scheduling/customer-rain-rank');
+    const gates = require('../config/feature-gates');
+    const realIsEnabled = gates.isEnabled;
+    const chips = jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'bookingRainChips' || realIsEnabled(gate));
+    const outlook = jest.spyOn(require('../services/weather-forecast'), 'getDailyRainOutlookBounded').mockResolvedValue(null);
+    try {
+      const pin = { lat: 27.4, lng: -82.4, serviceKey: 'pest_control' };
+      await expect(availabilityForPin({ ...pin, paidLookups: false })).resolves.toMatchObject({ days: [] });
+      expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+      expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ providerTravel: false, customerFacing: true });
+      expect(outlook).not.toHaveBeenCalled();
+      expect(startCustomerRainRank.mock.calls[0][0].skip).toBe(true);
+      jest.clearAllMocks();
+      await availabilityForPin(pin);
+      expect(findAvailableSlots.mock.calls[0][0].providerTravel).toBeUndefined();
+      expect(outlook).toHaveBeenCalledTimes(1);
+      expect(startCustomerRainRank.mock.calls[0][0].skip).toBe(false);
+    } finally {
+      chips.mockRestore();
+      outlook.mockRestore();
+    }
   });
 });
 

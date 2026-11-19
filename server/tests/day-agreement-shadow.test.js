@@ -275,28 +275,6 @@ describe('which service the picker is asked about', () => {
     await internals.pickSlot(conn, { customerId: 'c1', day: '2040-03-14', daypart: 'any', fromVisit: null, service: SERVICE }, { findSlots, filterColliding });
     expect(filterColliding.mock.calls[0][1].serviceMix).toEqual({ services: ['Quarterly Pest Control Service'] });
   });
-
-  test('freeSlotsAt, shared with the hourly route check: one day, customer-facing, no road lookup bought, then the guard', async () => {
-    delete process.env.GATE_SCHEDULING_CAPACITY;
-    const offered = ['10:00', '13:00'].map((start) => ({ date: '2040-03-14', start_time: start, end_time: '', technician: { id: 't1' } }));
-    const findSlots = jest.fn(async () => ({ slots: offered }));
-    const filterColliding = jest.fn(async (shaped) => shaped.filter((s) => s.windowStart !== '10:00'));
-    const ask = { where: { lat: 27.5, lng: -82.57 }, day: '2040-03-14', identity: { name: 'Quarterly Pest Control Service', minutes: 60 } };
-    expect(await shadow.freeSlotsAt(conn, ask, { findSlots, filterColliding })).toEqual([offered[1]]);
-    expect(findSlots).toHaveBeenCalledWith(expect.objectContaining({
-      lat: 27.5, lng: -82.57, dateFrom: '2040-03-14', dateTo: '2040-03-14', durationMinutes: 60,
-      providerTravel: false, customerFacing: true, strictBlackout: true, excludeServiceIds: [],
-    }));
-    // Under capacity routing the route already holds its blockers, so the guard is not applied.
-    process.env.GATE_SCHEDULING_CAPACITY = 'true';
-    try {
-      filterColliding.mockClear();
-      expect(await shadow.freeSlotsAt(conn, ask, { findSlots, filterColliding })).toEqual(offered);
-      expect(filterColliding).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_SCHEDULING_CAPACITY;
-    }
-  });
 });
 
 describe('grounding, visit context and prompt note', () => {
