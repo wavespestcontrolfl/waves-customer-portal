@@ -919,7 +919,10 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
  */
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
-  const options = {};
+  // Group members currently commit in separate rebooker transactions. A
+  // cross-day automatic move must therefore fail closed under the locked unit
+  // plan; staff surfaces keep their explicit partial-move repair contract.
+  const options = { requireAtomicUnit: true };
   // Remaining per-run change budget (orchestrator): a grouped visit whose
   // LOCKED member count exceeds it is refused inside the unit move before
   // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.

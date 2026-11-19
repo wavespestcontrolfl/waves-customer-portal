@@ -140,4 +140,30 @@ postgres('auto-dispatch grouped move preflight', () => {
     expect(rows.map((row) => String(row.technician_id))).toEqual([f.techId, f.techId]);
     expect(rows.map((row) => String(row.window_start).slice(0, 5))).toEqual(['09:00', '10:00']);
   });
+
+  test('automatic cross-day fallback refuses under the locked unit plan while leaving the real group untouched', async () => {
+    const f = await buildGroup({ allocation: false });
+    const rebooker = { reschedule: jest.fn() };
+
+    await expect(moveVisitAsUnit({
+      rebooker,
+      serviceId: f.serviceIds[0],
+      service: { id: f.serviceIds[0], visit_id: f.visitId },
+      newDate: '2098-11-19',
+      newWindow: '13:00-14:00',
+      initiatedBy: 'auto_dispatch',
+      reason: 'auto_dispatch',
+      options: { seriesPolicy: 'single', keepStatus: true, requireAtomicUnit: true },
+    })).rejects.toMatchObject({
+      statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: f.serviceIds[0],
+    });
+
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const rows = await db('scheduled_services').whereIn('id', f.serviceIds).orderBy('window_start');
+    expect(rows.map((row) => String(row.visit_id))).toEqual([f.visitId, f.visitId]);
+    expect(rows.map((row) => String(row.technician_id))).toEqual([f.techId, f.techId]);
+    expect(rows.map((row) => String(row.window_start).slice(0, 5))).toEqual(['09:00', '10:00']);
+    const visit = await db('service_visits').where({ id: f.visitId }).first();
+    expect(visit.stop_base_key).toBe(stopBaseKey({ customerId: f.customerId, scheduledDate: f.date }));
+  });
 });

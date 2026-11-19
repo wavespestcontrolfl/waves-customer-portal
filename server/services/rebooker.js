@@ -1,5 +1,6 @@
 const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
+const { isDeepStrictEqual } = require('node:util');
 const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
@@ -2257,7 +2258,7 @@ class SmartRebooker {
         // deadlock between their primary transactions (codex r6).
         const ids = [...new Set([String(serviceId), ...options.excludeExpect.map((x) => String(x.id))])].sort();
         const rows = await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate()
-          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'reservation_service_mix');
         // A durable completion claim on ANY member (local codex audit P0):
         // the legacy /complete handler claims service_completion_attempts
         // under the row's stop lock and then completes the row where it
@@ -2288,7 +2289,10 @@ class SmartRebooker {
             // An absent end in the contract = "derived by the rebooker" (a
             // start-only landing); it is not compared (codex #3609 r11).
             && (exp.window_end === undefined || norm(cur.window_end) === norm(exp.window_end))
-            && extras.every((k) => (cur[k] === null || cur[k] === undefined ? null : cur[k]) === (exp[k] === undefined ? null : exp[k]));
+            && extras.every((k) => isDeepStrictEqual(
+              cur[k] === null || cur[k] === undefined ? null : cur[k],
+              exp[k] === undefined ? null : exp[k],
+            ));
           if (!same) {
             throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), {
               statusCode: 409, isOperational: true, code: 'VISIT_PLAN_STALE', memberId: exp.id,

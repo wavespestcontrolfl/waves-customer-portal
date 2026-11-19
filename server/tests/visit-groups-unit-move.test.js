@@ -447,7 +447,7 @@ describe('moveVisitAsUnit', () => {
     // status rides in the contract too (local audit): a sibling gone en_route/terminal after the plan aborts the primary's move
     expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', reservation_service_mix: null }]);
     // the sibling's own move verifies the PRIMARY at its landed target (codex r6)
-    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', reservation_service_mix: null }]);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
     // a stale snapshot is the rebooker's 409 (VISIT_PLAN_STALE) — the primary never commits, nothing moved
     db.__script = script({ members: [member('a'), member('b')] });
@@ -508,6 +508,70 @@ describe('moveVisitAsUnit', () => {
     expect(db.__calls.some((call) => call.op === 'update')).toBe(false);
   });
 
+  test('null-end preflight honors the writer rollback switch and clearWindowEnd reaches the primary write', async () => {
+    process.env.REBOOKER_NULL_END_OCCUPANCY = 'off';
+    try {
+      db.__script = script({ members: [
+        member('a', { window_end: '10:00' }),
+        member('b', { window_start: null, window_end: null }),
+      ] });
+      findConflictingVisits.mockResolvedValue([{ id: 'outside-job' }]);
+      const rebooker = fakeRebooker();
+
+      await moveVisitAsUnit({
+        rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+        newWindow: { start: '13:00', end: null }, initiatedBy: 'admin',
+        options: { clearWindowEnd: true },
+      });
+
+      expect(findConflictingVisits).not.toHaveBeenCalled();
+      expect(rebooker.reschedule.mock.calls[0].slice(0, 3)).toEqual(['a', '2026-09-02', { start: '13:00', end: null }]);
+    } finally {
+      delete process.env.REBOOKER_NULL_END_OCCUPANCY;
+    }
+  });
+
+  test('advisory preflight carries the arrival-routing warning instead of a self-overlap message', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    findConflictingVisits
+      .mockResolvedValueOnce([{ id: 'a', warning: 'The promised arrival window cannot be reached in route order.' }])
+      .mockResolvedValue([]);
+
+    const out = await moveVisitAsUnit({
+      rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'admin', options: { overlapAdvisory: true, adminWindowRules: true },
+    });
+
+    expect(out.warnings).toContain('The promised arrival window cannot be reached in route order.');
+    expect(out.warnings).not.toContain(expect.stringContaining('overlaps another job at its destination (a)'));
+  });
+
+  test('auto-dispatch cross-day groups fail closed when atomic unit commit is required; same-day and manual moves remain', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    const automatic = fakeRebooker();
+    await expect(moveVisitAsUnit({
+      rebooker: automatic, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'auto_dispatch', options: { requireAtomicUnit: true },
+    })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 'a' });
+    expect(automatic.reschedule).not.toHaveBeenCalled();
+
+    db.__script = script({ members: [member('a'), member('b')] });
+    const sameDay = fakeRebooker();
+    await moveVisitAsUnit({
+      rebooker: sameDay, serviceId: 'a', service: SERVICE, newDate: '2026-08-30',
+      newWindow: '13:00-14:00', initiatedBy: 'auto_dispatch', options: { requireAtomicUnit: true },
+    });
+    expect(sameDay.reschedule).toHaveBeenCalledTimes(2);
+
+    db.__script = script({ members: [member('a'), member('b')] });
+    const manual = fakeRebooker();
+    await moveVisitAsUnit({
+      rebooker: manual, serviceId: 'a', service: SERVICE, newDate: '2026-09-02',
+      initiatedBy: 'admin', options: { requireAtomicUnit: true },
+    });
+    expect(manual.reschedule).toHaveBeenCalledTimes(2);
+  });
+
   test('a row that joined the visit after the plan snapshot is detached at retarget, with a warning — by the full target stop, not the date alone', async () => {
     db.__script = script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' },
@@ -554,7 +618,7 @@ describe('moveVisitAsUnit', () => {
     expect(out.visitMove.failed.map((f) => f.id)).toEqual(['b']);
     const cOpts = rebooker.reschedule.mock.calls[2][5];
     expect(cOpts.excludeServiceIds).toEqual(['a']);
-    expect(cOpts.excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
+    expect(cOpts.excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', reservation_service_mix: null }]);
   });
 
   test('auto-dispatch: the opt-out flags ride in every exclusion contract and in each sibling CAS; previousStatus follows the status the rebooker actually matched', async () => {
@@ -688,12 +752,12 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' }]);
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', reservation_service_mix: null }]);
     // start-only landing: the end is the rebooker's derivation — left out of the contract, not asserted null
     db.__script = script({ members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rb2 = fakeRebooker();
     await moveVisitAsUnit({ rebooker: rb2, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: { start: '13:00', end: null } });
-    expect(rb2.reschedule.mock.calls[1][5].excludeExpect[0]).toEqual({ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00' });
+    expect(rb2.reschedule.mock.calls[1][5].excludeExpect[0]).toEqual({ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', reservation_service_mix: null });
   });
 
   test('date-only move: a sibling whose own window breaks the admin rules cannot ride it onto the new date', async () => {
@@ -939,6 +1003,12 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(expectMatchesRow(row, { technician_id: 't1' })).toBe(false);
     expect(expectMatchesRow(row, { auto_dispatch_locked: true })).toBe(false);
     expect(expectMatchesRow(row, { estimated_duration_minutes: 60 })).toBe(false);
+    expect(expectMatchesRow({ ...row, reservation_service_mix: { version: 1, services: ['pest', 'lawn'] } }, {
+      reservation_service_mix: { services: ['pest', 'lawn'], version: 1 },
+    })).toBe(true);
+    expect(expectMatchesRow({ ...row, reservation_service_mix: { version: 2 } }, {
+      reservation_service_mix: { version: 1 },
+    })).toBe(false);
     expect(expectMatchesRow(null, {})).toBe(false);
     expect(expectMatchesRow(row, {})).toBe(true);
   });

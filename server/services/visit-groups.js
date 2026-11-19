@@ -23,6 +23,7 @@
  */
 
 const db = require('../models/db');
+const { isDeepStrictEqual } = require('node:util');
 const { assertAssignableTechnician } = require('./technician-eligibility');
 
 // Row-status vocabularies live in the canonical visit-context module.
@@ -1681,12 +1682,14 @@ function shiftWindowBound(bound, delta) {
 // (bound -> shifted bound; moveVisitAsUnit's throws on a midnight crossing);
 // a windowless sibling, or a date-only move, keeps its own window
 // (`shifted: false`).
-function memberTargetBounds(m, isPrimary, win, shift) {
+function memberTargetBounds(m, isPrimary, win, shift, clearPrimaryEnd = false) {
   if (!(win.start && (m.window_start || isPrimary))) {
     return { start: m.window_start || null, end: m.window_end || null, shifted: false };
   }
   const start = isPrimary ? win.start : shift(m.window_start);
-  const end = isPrimary ? (win.end || (m.window_end ? shift(m.window_end) : null)) : shift(m.window_end);
+  const end = isPrimary
+    ? (win.end || (clearPrimaryEnd ? null : (m.window_end ? shift(m.window_end) : null)))
+    : shift(m.window_end);
   return { start, end, shifted: true };
 }
 
@@ -1706,7 +1709,7 @@ function memberTargetBounds(m, isPrimary, win, shift) {
  *     legacy :30 sibling must not ride its offset onto a new slot).
  * Returns `{ id, isPrimary, start, end, shifted }` per member, in order.
  */
-function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr }) {
+function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr, clearPrimaryEnd = false }) {
   const anchorStart = primary.window_start || visitWindowStart || null;
   if (win.start && !anchorStart && members.some((m) => m.id !== primary.id && m.window_start)) {
     throw Object.assign(new Error('Cannot move this stop to a new time from a service without a time window — move it from a grouped service that has one, or set this service\'s window first'), { statusCode: 409, code: 'VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED', isOperational: true });
@@ -1730,7 +1733,7 @@ function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr
     const isPrimary = m.id === primary.id;
     // The tapped row takes the requested slot even when it was windowless
     // (codex r3); a windowless sibling stays windowless.
-    const bounds = memberTargetBounds(m, isPrimary, win, (bound) => shiftInDay(m, bound));
+    const bounds = memberTargetBounds(m, isPrimary, win, (bound) => shiftInDay(m, bound), clearPrimaryEnd);
     if (bounds.shifted) {
       if (!isPrimary) validateSibling(m, bounds.start, bounds.end);
     } else if (!isPrimary && m.window_start && dateOnly(m.scheduled_date) !== newDateStr) {
@@ -1862,7 +1865,10 @@ function expectMatchesRow(row, expect) {
     if (key === 'scheduled_date') { if (dateOnly(have) !== dateOnly(want)) return false; continue; }
     if (key === 'window_start' || key === 'window_end') { if (norm(have) !== norm(want)) return false; continue; }
     if ((have == null) !== (want == null)) return false;
-    if (have != null && String(have) !== String(want)) return false;
+    if (have != null) {
+      const structured = typeof have === 'object' || typeof want === 'object';
+      if (structured ? !isDeepStrictEqual(have, want) : String(have) !== String(want)) return false;
+    }
   }
   return true;
 }
@@ -1896,7 +1902,11 @@ async function preflightMemberConflicts(t, { members, targets, newDateStr, optio
   const memberIds = members.map((m) => String(m.id));
   for (const target of targets.filter((x) => !x.alreadyAtTarget && x.startHHMM)) {
     const member = members.find((x) => String(x.id) === String(target.id));
-    const probeEnd = target.endHHMM || occupancyProbeEnd(target.startHHMM, null, member.estimated_duration_minutes);
+    const probeEnd = target.endHHMM || (process.env.REBOOKER_NULL_END_OCCUPANCY === 'off'
+      ? null : occupancyProbeEnd(target.startHHMM, null, member.estimated_duration_minutes));
+    // The writer's rollback switch skips occupancy for a persisted null end.
+    // Preflight must never reject a move the writer itself would admit.
+    if (!probeEnd) continue;
     const { rows: clashes } = await probeMoveConflicts({
       conn: t,
       target: {
@@ -1916,7 +1926,7 @@ async function preflightMemberConflicts(t, { members, targets, newDateStr, optio
         statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: target.id, conflictId: clashes[0].id,
       });
     }
-    warnings.push(`service ${target.id} overlaps another job at its destination (${clashes[0].id})`);
+    warnings.push(clashes[0].warning || `service ${target.id} overlaps another job at its destination (${clashes[0].id})`);
   }
   return warnings;
 }
@@ -2002,6 +2012,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // One live member is not a grouped stop: the rebooker's ordinary
         // single-row path moves it (its seam detaches an unfrozen visit).
         if (members.length < 2) return null;
+        // Auto-dispatch is silent and has no operator to repair a partial
+        // cross-day stop. Members still commit in separate rebooker
+        // transactions, so a sibling can become unwritable after the primary
+        // commits despite complete preflight. Fail closed before the first
+        // write. Manual unit moves retain their established partial-result
+        // contract, and same-day automatic conflict repair remains available.
+        if (String(initiatedBy) === 'auto_dispatch' && options.requireAtomicUnit === true
+          && members.some((m) => dateOnly(m.scheduled_date) !== newDateStr)) {
+          throw Object.assign(new Error('Cannot auto-move this grouped stop to another day until it can be committed atomically'), {
+            statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: primary.id, isOperational: true,
+          });
+        }
         // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
         // moved as a unit by STAFF, on the direct (non-series) path only —
         // the surfaces whose callers handle partial results. A customer
@@ -2059,7 +2081,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // Every member's target window, validated exactly as before the
         // first write (planMemberTargets — shared with auto-dispatch's
         // read-only prediction, so its pre-filter runs this same code).
-        const planned = planMemberTargets({ members, primary, visitWindowStart: visit.window_start, win, newDateStr });
+        const planned = planMemberTargets({
+          members, primary, visitWindowStart: visit.window_start, win, newDateStr,
+          clearPrimaryEnd: options.clearWindowEnd === true,
+        });
         const targets = members.map((m, index) => {
           const { isPrimary, start: targetStart, end: targetEnd, shifted } = planned[index];
           const window = shifted ? (targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null }) : null;
@@ -2073,7 +2098,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           return {
             id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
             startHHMM: norm(targetStart) || norm(m.window_start) || null,
-            endHHMM: norm(targetEnd) || norm(m.window_end) || null,
+            endHHMM: shifted ? (norm(targetEnd) || null) : (norm(m.window_end) || null),
             // Original bounds kept SEPARATELY (local audit): a null end must
             // roll back as { start, end: null }, never as a zero-length
             // "09:00-09:00" window.
@@ -2433,16 +2458,25 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};
+  const landedContract = {};
   // Landed tuple = what the rebooker actually writes (codex r11): a
-  // date-only move keeps BOTH bounds; a start-only window leaves the end
-  // to the rebooker's derivation, so window_end is left OUT of the contract
-  // (an undefined key is not compared) rather than asserted null.
+  // date-only move keeps BOTH bounds; a start-only window normally leaves the
+  // end out of the public landed tuple. The stricter sibling-write contract
+  // below adds deterministic clearWindowEnd and the allocation stamp.
   const targetTuple = (t) => {
     if (!t.window) return { scheduled_date: newDateStr, window_start: t.expect.window_start || null, window_end: t.expect.window_end || null };
     if (typeof t.window === 'string') { const [ts, te] = t.window.split('-'); return { scheduled_date: newDateStr, window_start: ts, window_end: te }; }
     return { scheduled_date: newDateStr, window_start: t.window.start || null };
   };
-  for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) landedState[t.id] = targetTuple(t);
+  const contractTuple = (t) => ({
+    ...targetTuple(t),
+    ...(t.window && typeof t.window !== 'string' && options.clearWindowEnd === true ? { window_end: null } : {}),
+    reservation_service_mix: t.expect.reservation_service_mix ?? null,
+  });
+  for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) {
+    landedState[t.id] = targetTuple(t);
+    landedContract[t.id] = contractTuple(t);
+  }
   // Did this member's row land at its planned target (same visit, target
   // date, planned window bounds where the plan asserts them, planned tech)?
   // Read fresh from the root connection; a read failure reports NOT landed
@@ -2502,7 +2536,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const autoDispatch = String(initiatedBy) === 'auto_dispatch';
     const optOutFence = autoDispatch ? { auto_dispatch_locked: false, auto_dispatch_excluded: false } : {};
     const participating = plan.targets.filter((x) => x.id !== target.id && !failed.some((f) => f.id === x.id));
-    const excludeExpect = participating.map((x) => ({ id: x.id, visit_id: plan.visitId, ...(landedState[x.id] || x.expect), ...optOutFence }));
+    const excludeExpect = participating.map((x) => ({ id: x.id, visit_id: plan.visitId, ...(landedContract[x.id] || x.expect), ...optOutFence }));
     const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...participating.map((x) => x.id)].map(String))];
     // The primary's CAS always carries the unit fence (locked membership +
     // planned technician); a caller's own expect fields are MERGED on top,
@@ -2719,6 +2753,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
       landedState[target.id] = targetTuple(target);
+      landedContract[target.id] = contractTuple(target);
       // The status the rebooker's CAS actually matched outranks the plan
       // snapshot (codex r6): an operator confirm between plan and move must
       // not be rewound by a caller restoring 'pending'.
@@ -2766,6 +2801,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (landedVerdict) {
         moved.push(target.id);
         landedState[target.id] = targetTuple(target);
+        landedContract[target.id] = contractTuple(target);
         warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
         logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} landed but the rebooker rejected post-commit: ${err.message}`);
         if (target.isPrimary) primaryResult = { success: true, newDate };

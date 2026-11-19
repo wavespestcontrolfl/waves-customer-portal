@@ -73,6 +73,7 @@ test('applies the move and atomically increments the change count', async () => 
 
   const callArgs = SmartRebooker.reschedule.mock.calls[0];
   expect(callArgs.slice(0, 5)).toEqual(['s1', '2026-08-11', { start: '08:00', end: '10:00' }, 'auto_dispatch', 'auto_dispatch']);
+  expect(callArgs[5].requireAtomicUnit).toBe(true);
   // atomic expect predicate (full original placement + status) carried into the rebooker's move transaction
   expect(callArgs[5].expect).toMatchObject({
     auto_dispatch_locked: false, auto_dispatch_excluded: false, status: 'confirmed', scheduled_date: '2026-08-04',

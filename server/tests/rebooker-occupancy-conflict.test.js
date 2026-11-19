@@ -89,6 +89,7 @@ function chain(overrides = {}) {
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     orderByRaw: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
   });
   return Object.assign(builder, overrides);
 }
@@ -118,9 +119,12 @@ function service(overrides = {}) {
   };
 }
 
-function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = null } = {}) {
+function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = null, excludeRows = null } = {}) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(svc) });
-  const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+  const trxScheduled = chain({
+    ...(excludeRows ? { select: jest.fn().mockResolvedValue(excludeRows) } : {}),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
+  });
   const historyInsert = chain();
   const logInsert = chain();
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
@@ -131,6 +135,7 @@ function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = nu
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
     if (table === 'series_moves') return chain();
+    if (table === 'service_completion_attempts') return chain({ first: jest.fn().mockResolvedValue(null) });
     // tech-out P1: the save-time eligibility re-check now also runs on a
     // retained-tech DATE move, not only an explicit tech change — a plain
     // active, non-absent default so a test with an assigned `svc.technician_id`
@@ -164,6 +169,52 @@ describe('reschedule — shared occupancy conflict gate', () => {
     jest.clearAllMocks();
     db.raw = rawFactory('db.raw');
     findConflictingVisits.mockReset().mockResolvedValue([]);
+  });
+
+  test('excludeExpect compares an unchanged allocation stamp by JSON value under the writer row locks', async () => {
+    const mix = { version: 1, services: ['pest_control', 'lawn_care'], durationMinutes: 120 };
+    const sibling = {
+      id: 'sib-1', visit_id: 'visit-1', scheduled_date: BASE,
+      window_start: '10:00', window_end: '11:00', status: 'confirmed', technician_id: null,
+      auto_dispatch_locked: false, auto_dispatch_excluded: false,
+      reservation_service_mix: { durationMinutes: 120, services: ['pest_control', 'lawn_care'], version: 1 },
+    };
+    const { trxScheduled } = wireRescheduleMocks(service(), { excludeRows: [sibling] });
+
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, '13:00-14:00', 'admin', 'admin', {
+      skipVisitSeam: true,
+      excludeServiceIds: ['sib-1'],
+      excludeExpect: [{
+        id: 'sib-1', visit_id: 'visit-1', scheduled_date: BASE,
+        window_start: '10:00', window_end: '11:00', status: 'confirmed', technician_id: null,
+        auto_dispatch_locked: false, auto_dispatch_excluded: false, reservation_service_mix: mix,
+      }],
+    })).resolves.toMatchObject({ success: true });
+
+    expect(trxScheduled.select.mock.calls[0]).toContain('reservation_service_mix');
+    expect(trxScheduled.update).toHaveBeenCalled();
+  });
+
+  test('excludeExpect rejects a sibling that gains a v2 allocation stamp before the primary write', async () => {
+    const sibling = {
+      id: 'sib-1', visit_id: 'visit-1', scheduled_date: BASE,
+      window_start: '10:00', window_end: '11:00', status: 'confirmed', technician_id: null,
+      auto_dispatch_locked: false, auto_dispatch_excluded: false,
+      reservation_service_mix: { version: 2, allocatedServiceIds: ['sib-1', 'other'] },
+    };
+    const { trxScheduled } = wireRescheduleMocks(service(), { excludeRows: [sibling] });
+
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, '13:00-14:00', 'admin', 'admin', {
+      skipVisitSeam: true,
+      excludeServiceIds: ['sib-1'],
+      excludeExpect: [{
+        id: 'sib-1', visit_id: 'visit-1', scheduled_date: BASE,
+        window_start: '10:00', window_end: '11:00', status: 'confirmed', technician_id: null,
+        auto_dispatch_locked: false, auto_dispatch_excluded: false, reservation_service_mix: null,
+      }],
+    })).rejects.toMatchObject({ code: 'VISIT_PLAN_STALE', memberId: 'sib-1' });
+
+    expect(trxScheduled.update).not.toHaveBeenCalled();
   });
 
   test.each([null, { start: '09:00', end: '11:00' }])('single move keeps its dispatch obligation until timed: %j', async (window) => {
