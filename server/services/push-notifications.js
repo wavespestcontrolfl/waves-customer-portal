@@ -222,7 +222,7 @@ class PushNotificationService {
   // GATE_APP_FIRST_STALE_TEXT is on (appFirstStaleFloor), so every reader follows it.
   async customerStatus(customerId, database = db, { contactKey = null, withReachable = false } = {}) {
     const context = await customerPushContext(customerId, database);
-    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false } : {}) };
+    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false, appStale: false } : {}) };
     const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
@@ -230,14 +230,17 @@ class PushNotificationService {
     const cutoff = Date.now() - PUSH_HEARTBEAT_HOURS * 3600000;
     const providers = { ios: apns.status().configured, android: fcm.status().configured };
     const reachableSince = withReachable ? appFirstStaleFloor() : null;
+    const deliverable = rows.filter((row) => providers[row.platform]);
+    const reachable = deliverable.some((row) => !reachableSince || new Date(row.updated_at).getTime() >= reachableSince.getTime());
     return {
       enabled: context.enabled,
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
       // Any active holder device whose provider is configured, however long
       // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
-      ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]
-        && (!reachableSince || new Date(row.updated_at).getTime() >= reachableSince.getTime())) } : {}),
+      // appStale: the 30-day floor alone kept a holder phone app from counting (routing then
+      // sends the text AND the app alert, GATE_APP_FIRST_STALE_TEXT).
+      ...(withReachable ? { reachable, appStale: Boolean(reachableSince) && !reachable && deliverable.length > 0 } : {}),
     };
   }
 

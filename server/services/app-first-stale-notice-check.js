@@ -7,8 +7,8 @@
  * opened. One customer whose app had last been opened on Oct 10 got the 72 hour
  * reminder, the reminder, on-the-way and arrived notices for their Nov 18 visit
  * as push only (the provider accepted them) and saw none. GATE_APP_FIRST_STALE_TEXT
- * (push-channel-routing.js, staleTextFloor) now sends the text when the app was
- * not opened in 30 days. This check finds the same gap in live data, so the
+ * (push-channel-routing.js, staleTextFloor) now sends the text too when the app was
+ * not opened in 30 days, and the app alert still goes. This check finds the same gap in live data, so the
  * owner never has to catch it again; with that gate on it should normally find 0.
  *
  * What it reads: routing records the evidence at send time. Every any-device push

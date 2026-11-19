@@ -24,6 +24,9 @@ function subscriptionQuery() {
       const row = mockDevices.find((device) => filters.every((f) => f(device)));
       return row ? { id: row.id } : undefined;
     },
+    async select() {
+      return mockDevices.filter((device) => filters.every((f) => f(device)));
+    },
   };
   return q;
 }
@@ -191,15 +194,90 @@ describe('reachability with GATE_CUSTOMER_APP_NOTIFICATIONS (account device stat
   });
 });
 
-describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text (owner 2026-11-18)', () => {
+describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text too, and the app alert still goes (owner 2026-11-18)', () => {
   const DAY_MS = 24 * 3600000;
   beforeEach(() => { process.env.GATE_APP_FIRST_ANY_DEVICE = 'true'; });
 
-  it('both gates on: a device last seen 40 days ago is not reachable, no push, so the text goes', async () => {
+  it('both gates on: a device last seen 40 days ago is not reachable: stale_app_text, no push before the text (twilio.js sends the text, then the alert)', async () => {
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
-    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(await send()).toMatchObject({ delivered: false, deliveryOutcome: 'not_sent', reason: 'stale_app_text', staleAppCompanion: true });
     expect(mockSendToCustomer).not.toHaveBeenCalled();
+    expect(mockProofRows).toHaveLength(0);
+  });
+
+  it('both gates on: a holder with no phone app at all is no_fresh_device with no flag, as today', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(await send()).not.toHaveProperty('staleAppCompanion');
+  });
+
+  it('a browser-only holder (no phone app) is neither fresh nor stale with the floor on', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    mockDevices.push(device({ platform: 'web', updated_at: hoursAgo(2) }));
+    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
+    expect(await send()).not.toHaveProperty('staleAppCompanion');
+  });
+
+  it('app notifications gate on: ONE status read decides the text and the alert (customerStatus.appStale)', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: true });
+    expect(await send()).toMatchObject({ reason: 'stale_app_text', staleAppCompanion: true });
+    expect(mockCustomerStatus).toHaveBeenCalledTimes(1);
+    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: false, appStale: false });
+    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
+    expect(await send()).not.toHaveProperty('staleAppCompanion');
+    mockCustomerStatus.mockResolvedValue({ enabled: false, reachable: false, appStale: true });
+    expect(await send()).not.toHaveProperty('staleAppCompanion');
+  });
+
+  it('no stale-app flag with the new gate off, or with the any-device gate off', async () => {
+    mockDevices.push(device({ updated_at: hoursAgo(40 * 24) }));
+    expect(await send()).not.toHaveProperty('staleAppCompanion');
+    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    expect(await send()).toMatchObject({ reason: 'no_fresh_device' });
+    expect(await send()).not.toHaveProperty('staleAppCompanion');
+  });
+
+  it('sendCompanionPush staleApp: no 72 hour gate, the any-device presentation (link-free, phone apps only), no floors, a bell when the holder accepted', async () => {
+    process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
+    const text = 'Reminder: your visit is tomorrow.\n\nManage it: https://example.invalid/r/abc';
+    // Reference: what an any-device push for a fresh holder sends.
+    mockDevices.push(device({ updated_at: hoursAgo(2) }));
+    await send({ body: text });
+    const reference = mockSendToCustomer.mock.calls[0][1];
+    mockSendToCustomer.mockClear();
+    mockNotifyCustomer.mockClear();
+    mockProofRows.length = 0;
+    mockDevices.length = 0; // the holder phone is stale: a 72 hour check would refuse it
+    mockCustomerStatus.mockClear();
+    mockSendToCustomer.mockResolvedValue({ sent: 1 });
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: text, messageType: 'appointment_reminder', appointmentId: 'visit-1', staleApp: true });
+    expect(mockSendToCustomer).toHaveBeenCalledTimes(1);
+    const [, notification, opts] = mockSendToCustomer.mock.calls[0];
+    expect(notification).toMatchObject({ title: reference.title, body: reference.body, url: reference.url, category: reference.category, tag: reference.tag });
+    expect(notification.body).not.toContain('example.invalid');
+    expect(opts.nativeOnly).toBe(true);
+    expect(opts.minUpdatedAt).toBeUndefined();
+    expect(opts.holderMinUpdatedAt).toBeUndefined();
+    expect(mockCustomerStatus).not.toHaveBeenCalled();
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(1);
+    expect(mockProofRows).toHaveLength(0); // the text's sms_log row is the record; no push proof row
+    mockNotifyCustomer.mockClear();
+    mockSendToCustomer.mockResolvedValue({ sent: 0 });
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: text, messageType: 'appointment_reminder', staleApp: true });
+    expect(mockNotifyCustomer).not.toHaveBeenCalled();
+  });
+
+  it('sendCompanionPush without staleApp: unchanged (the holder freshness gate and the heartbeat floor apply)', async () => {
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Reminder.', messageType: 'appointment_reminder' });
+    expect(mockSendToCustomer).not.toHaveBeenCalled();
+    mockDevices.push(device({ updated_at: hoursAgo(2) }));
+    await PushRouting.sendCompanionPush({ customerId: 'c-1', to: '9415550123', body: 'Reminder.', messageType: 'appointment_reminder' });
+    expect(mockSendToCustomer.mock.calls[0][2].minUpdatedAt).toBeInstanceOf(Date);
+    expect(mockSendToCustomer.mock.calls[0][2].nativeOnly).toBeUndefined();
   });
 
   it('both gates on: a device last seen 10 days ago still takes the push, with a 30-day floor and phone apps only', async () => {
@@ -224,7 +302,7 @@ describe('GATE_APP_FIRST_STALE_TEXT: an app not opened in 30 days gets the text 
     process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
     mockDevices.push(device({ id: 'd-app', updated_at: hoursAgo(40 * 24) }));
     mockDevices.push(device({ id: 'd-web', platform: 'web', updated_at: hoursAgo(1) }));
-    expect(await send()).toMatchObject({ delivered: false, reason: 'no_fresh_device' });
+    expect(await send()).toMatchObject({ delivered: false, reason: 'stale_app_text', staleAppCompanion: true });
     expect(mockSendToCustomer).not.toHaveBeenCalled();
   });
 
