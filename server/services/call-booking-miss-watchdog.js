@@ -138,11 +138,13 @@ const LAST_STEP = {
     no_number: 'Book it in dispatch; the call left no number to call back.',
   },
   // A held visit may not be one to book as agreed (a cancel request, a visit already on
-  // file, a quote first): staff check the call before they book it.
+  // file, a quote first): staff check the call before they book it. Dismiss on its Dispatch
+  // held row (dismissHeldVisit) records that no visit is needed and closes the call's bells;
+  // Done on the bell alone leaves the row.
   held: {
-    none: 'Check the call in dispatch before booking it; tap Done if no visit is needed.',
-    opted_out: 'Check the call in dispatch before booking it, and do not call or text the caller.',
-    no_number: 'Check the call in dispatch before booking it; the call left no number to call back.',
+    none: 'Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there.',
+    opted_out: 'Check the call in dispatch before booking it, and do not call or text the caller. If no visit is needed, dismiss its held row there.',
+    no_number: 'Check the call in dispatch before booking it; the call left no number to call back. If no visit is needed, dismiss its held row there.',
   },
   check: {
     none: 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
@@ -271,24 +273,28 @@ function readJson(raw) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-// The call agent's own record of its decision on the call's last pass: the newest
-// route_decisions row in enforce mode (the mode that decides bookings) for the call's
-// recording, or null unless that pass wrote it (created_at, refreshed each pass, at or after
-// processing_started_at, the last claim). The processor writes it before it books, and before
-// its hard-veto exit (spam, out of area, an opt-out). call_log.ai_validation is not read: it
-// is an audit rebuild that can differ from the live decision (an address recovery routes on
-// the recovered address, the rebuild on the original).
-function liveDecision(call, decisionRows) {
-  const recording = call.recording_sid || '';
-  let newest = null;
-  for (const row of decisionRows || []) {
-    if (row.call_log_id !== call.id || row.mode !== 'enforce' || (row.recording_sid || '') !== recording) continue;
-    const at = new Date(row.created_at).getTime();
-    if (!Number.isNaN(at) && (!newest || at > newest.at)) newest = { row, at };
-  }
-  if (!newest) return null;
+// The call agent's own record of its decision: the newest route_decisions row in enforce mode
+// (the mode that decides bookings) for the call's recording. The processor writes it on each
+// pass (created_at refreshed), before it books and before its hard-veto exit (spam, out of
+// area, an opt-out). call_log.ai_validation is not read: it is an audit rebuild that can differ
+// from the live decision (an address recovery routes on the recovered address, the rebuild on
+// the original). Both call_log reads select it with the call row, in one statement, so the
+// two come from one snapshot: two queries could pair the call's slot with a reprocess's new
+// decision.
+const LIVE_DECISION_SELECT = `(SELECT row_to_json(d) FROM (
+    SELECT rd.final_action_taken, rd.blocked_reasons, rd.created_at FROM route_decisions rd
+    WHERE rd.call_log_id = call_log.id AND rd.mode = 'enforce' AND rd.recording_sid = COALESCE(call_log.recording_sid, '')
+    ORDER BY rd.created_at DESC LIMIT 1
+  ) d) AS live_decision`;
+
+// The call's live decision (LIVE_DECISION_SELECT), or null unless the call's last pass wrote
+// it: created at or after processing_started_at, the last claim.
+function liveDecision(call) {
+  const decision = readJson(call.live_decision);
+  const at = decision ? new Date(decision.created_at).getTime() : NaN;
+  if (Number.isNaN(at)) return null;
   const startedAt = call.processing_started_at ? new Date(call.processing_started_at).getTime() : NaN;
-  return Number.isNaN(startedAt) || newest.at >= startedAt ? newest.row : null;
+  return Number.isNaN(startedAt) || at >= startedAt ? decision : null;
 }
 
 // Why the live decision held the visit (a HOLD_REASONS phrase), or null when it did not hold
@@ -337,21 +343,9 @@ function heldWaitStart(call, createdAt) {
 // still be retried and book the visit, and a 'spam' row keeps the plain wait), and its live
 // decision (liveDecision) held the booking. Every other call keeps GRACE_MINUTES and the plain
 // text.
-function callHoldReason(call, decision) {
+function callHoldReason(call) {
   if (call.processing_status !== 'processed') return null;
-  return decisionHoldReason(decision);
-}
-
-// The live decision of each call that confirmed a slot (liveDecision), by call id, read in one
-// query. Only those calls can ring.
-async function loadLiveDecisions(calls) {
-  const ids = calls.filter((c) => extractConfirmedSlot(c.ai_extraction_enriched)).map((c) => c.id);
-  if (!ids.length) return new Map();
-  const rows = await db('route_decisions')
-    .whereIn('call_log_id', ids)
-    .where({ mode: 'enforce' })
-    .select('call_log_id', 'mode', 'recording_sid', 'final_action_taken', 'blocked_reasons', 'created_at');
-  return new Map(calls.map((c) => [c.id, liveDecision(c, rows)]).filter(([, row]) => row));
+  return decisionHoldReason(liveDecision(call));
 }
 
 // What the call lets staff do next (LAST_STEP): 'opted_out' (a stored opt-out signal, or the
@@ -450,10 +444,9 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
-// ai_extraction_enriched, ai_extraction, recording_sid,
+// ai_extraction_enriched, ai_extraction, live_decision (LIVE_DECISION_SELECT),
 // processing_status, processing_started_at, metadata, duration_seconds,
-// recording_duration_seconds, bridged_at }); `decisions` maps a call id to its
-// live decision (loadLiveDecisions). A call the call agent held (callHoldReason)
+// recording_duration_seconds, bridged_at }); a call the call agent held (callHoldReason)
 // waits HELD_GRACE_MINUTES from the call's end (heldWaitStart) instead of
 // GRACE_MINUTES from created_at, and its miss carries that `holdReason` (else
 // null). `bookedRows` are scheduled_services rows
@@ -465,14 +458,14 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // `namesakes` maps a call id to the ids of the other live accounts that carry
 // the same first and last name (see loadNamesakeAccounts); their rows clear
 // only through namesakeRowClearsSlot.
-function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes = new Map(), decisions = new Map() } = {}) {
+function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes = new Map() } = {}) {
   const cutoff = (minutes) => new Date(now.getTime() - minutes * 60 * 1000);
   const graceCutoff = cutoff(GRACE_MINUTES);
   const heldGraceCutoff = cutoff(HELD_GRACE_MINUTES);
   const misses = [];
   for (const call of calls) {
     const createdAt = call.created_at ? new Date(call.created_at) : null;
-    const holdReason = callHoldReason(call, decisions.get(call.id));
+    const holdReason = callHoldReason(call);
     // A held call's wait starts when the call ends (heldWaitStart), so the office gets its 10
     // minutes after hanging up: a row inserted at pickup holds the call's start in created_at.
     const clock = holdReason ? heldWaitStart(call, createdAt) : createdAt;
@@ -856,10 +849,9 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
-      // callHoldReason's and liveDecision's inputs, and callerOptedOut's V1 signal.
-      'processing_status', 'processing_started_at', 'recording_sid', 'ai_extraction',
+      // callHoldReason's inputs, and callerOptedOut's V1 signal.
+      'processing_status', 'processing_started_at', 'ai_extraction', db.raw(LIVE_DECISION_SELECT),
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
-  const decisions = await loadLiveDecisions(calls);
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
   // and the service it stamps (confirmed_service survives a date check's title;
@@ -879,7 +871,7 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
     // a stamped slot stands in for a reprocessed call whose new decision is about another
     // reading of the call, so it carries none. callHoldReason itself needs a finished pass
     // ('processed'), so a call still in processing carries none either.
-    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? callHoldReason(call, decisions.get(call.id)) : null });
+    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? callHoldReason(call) : null });
   }
   if (!entries.length) return [];
 
@@ -996,24 +988,23 @@ async function runInner({ now }) {
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
-      // callHoldReason's and liveDecision's inputs, then heldWaitStart's (a held call's wait),
-      // then callerOptedOut's V1 signal.
-      'processing_status', 'processing_started_at', 'recording_sid', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at',
-      'ai_extraction',
+      // callHoldReason's inputs, then heldWaitStart's (a held call's wait), then callerOptedOut's
+      // V1 signal.
+      'processing_status', 'processing_started_at', db.raw(LIVE_DECISION_SELECT),
+      'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'ai_extraction',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
     && (new Date(c.created_at) >= windowStart || slotInRepeatRange(extractConfirmedSlot(c.ai_extraction_enriched), now)));
 
   // One pass to find the confirmed slots, then one bulk booking lookup.
-  const decisions = await loadLiveDecisions(calls);
-  const provisional = computeBookingMisses(calls, [], { now, decisions });
+  const provisional = computeBookingMisses(calls, [], { now });
   if (!provisional.length) {
     return { skipped: false, scanned: calls.length, misses: 0, alerted: 0, closed, raised };
   }
   const { namesakes, accounts } = await loadNamesakeAccounts(provisional);
   const bookedRows = await loadBookingRows(provisional, namesakes);
-  const missed = computeBookingMisses(calls, bookedRows, { now, namesakes, decisions });
+  const missed = computeBookingMisses(calls, bookedRows, { now, namesakes });
   nameLikelyAccounts(missed, namesakes, accounts);
   // A later visit changes what the bell says. Done on another day: the call
   // was handled, so it never rings. On the calendar on another day: it rings

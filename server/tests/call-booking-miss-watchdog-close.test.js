@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], customers: [], decisions: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };
+const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -18,7 +18,6 @@ jest.mock('../models/db', () => {
       if (table === 'scheduled_services') return mockState.booked;
       if (table === 'customers') return mockState.customers;
       if (table === 'notifications') return ctx.probe ? mockState.open : [];
-      if (table === 'route_decisions') return mockState.decisions;
       return [];
     };
     const b = {
@@ -89,7 +88,7 @@ const call = (over = {}) => ({
 });
 const SLOT = { dateET: '2026-11-04', minutes: 16 * 60, name: 'Sam Sample', service: 'Waves Assessment' };
 // The call agent's live decision on the call's last pass: routing held it on the address.
-const HELD_DECISION = { call_log_id: CALL_ID, mode: 'enforce', recording_sid: '', final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: CALL_AT };
+const HELD_DECISION = { final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: CALL_AT };
 const visit = (over = {}) => ({
   id: 'visit-1', customer_id: 'cust-1', status: 'confirmed', service_type: 'Waves Assessment', sched_date: '2026-11-04', window_start: '16:00:00',
   created_at: AFTER_CALL, source_call_log_id: null, notes: null, internal_notes: null, ...over,
@@ -279,7 +278,6 @@ describe('close pass', () => {
     mockState.inserts = [];
     mockState.failClose = false;
     mockState.callLogSelects = [];
-    mockState.decisions = [];
     NotificationService.notifyAdmin.mockReset();
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-date', deduped: false });
     logger.warn.mockClear();
@@ -384,12 +382,13 @@ describe('close pass', () => {
   // Pre-push P1 (2026-11-18): the replacement "book it" bell of a call the call agent held
   // names why it was held, as the call's first bell does.
   test('a held call: the replacement bell says why it was held; the close pass reads the live decision', async () => {
-    mockState.calls = [call()];
-    mockState.decisions = [HELD_DECISION];
+    mockState.calls = [call({ live_decision: HELD_DECISION })];
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     await planOpenBookingMissBells({ now: NOW });
-    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['processing_status', 'processing_started_at', 'recording_sid', 'ai_extraction']));
+    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining([
+      'processing_status', 'processing_started_at', 'ai_extraction', expect.objectContaining({ raw: expect.stringContaining('AS live_decision') }),
+    ]));
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
@@ -401,8 +400,7 @@ describe('close pass', () => {
   // Pre-push P1 (2026-11-18): a reprocessed call that no longer confirms a slot has a new
   // decision about another reading of the call; it must not explain the stamped slot.
   test('a reprocessed held call whose stamped slot stands in: the replacement bell names no hold reason', async () => {
-    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } } })];
-    mockState.decisions = [{ ...HELD_DECISION, blocked_reasons: ['low_confidence'] }];
+    mockState.calls = [call({ ai_extraction_enriched: { caller: { name_full: 'Sam Sample' }, scheduling: { status: 'none' } }, live_decision: { ...HELD_DECISION, blocked_reasons: ['low_confidence'] } })];
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     const result = await tick();
@@ -417,7 +415,6 @@ describe('close pass', () => {
   // yet its new decision; an 'extraction_failed' pass can still be retried; and a reprocess
   // keeps the previous pass's decision until it stores its own. None of them proves a hold.
   test('a held decision from a pass that did not finish, or from an earlier pass, names no hold reason', async () => {
-    mockState.decisions = [HELD_DECISION];
     const cases = [
       { processing_status: 'processing' },
       { processing_status: null },
@@ -427,7 +424,7 @@ describe('close pass', () => {
     ];
     for (const over of cases) {
       NotificationService.notifyAdmin.mockClear();
-      mockState.calls = [call(over)];
+      mockState.calls = [call({ live_decision: HELD_DECISION, ...over })];
       mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
       mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
       await tick();

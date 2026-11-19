@@ -240,40 +240,38 @@ describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
 // itself held waited 90 minutes for its first bell, and the bell never said why. It now
 // rings after HELD_GRACE_MINUTES and names the reason.
 describe('a visit the call agent held', () => {
-  // The call agent's live decision on a call's last pass (route_decisions, mode enforce).
-  const decision = (over = {}) => ({
-    call_log_id: 'call-1', mode: 'enforce', recording_sid: '', final_action_taken: 'triage_review',
-    blocked_reasons: ['address_unverified'], created_at: NOW.toISOString(), ...over,
-  });
+  // The call agent's live decision on a call's last pass, as the scan reads it with the call
+  // row (LIVE_DECISION_SELECT: the newest route_decisions row in enforce mode for its recording).
+  const decision = (over = {}) => ({ final_action_taken: 'triage_review', blocked_reasons: ['address_unverified'], created_at: NOW.toISOString(), ...over });
   const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
-  // computeBookingMisses with each listed call's live decision (the run loads them by call id).
-  const missesOf = (calls, decided = {}, booked = []) => computeBookingMisses(calls, booked, { now: NOW, decisions: new Map(Object.entries(decided)) });
-  const heldMiss = (over = {}, held = decision()) => missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ...over })], { 'call-1': held })[0];
+  const missesOf = (calls, booked = []) => computeBookingMisses(calls, booked, { now: NOW });
+  const heldMiss = (over = {}, held = decision()) => missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: held, ...over })])[0];
 
   test('rings after HELD_GRACE_MINUTES with its reason; an unheld call of the same age still waits GRACE_MINUTES', () => {
     const misses = missesOf([
-      call({ id: 'held', created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }),
-      call({ id: 'booked-by-agent', created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }),
+      call({ id: 'held', created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: decision() }),
+      call({ id: 'booked-by-agent', created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: decision({ final_action_taken: 'auto_route', blocked_reasons: [] }) }),
       call({ id: 'no-decision', created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }),
-      call({ id: 'held-too-recent', created_at: minutesAgo(HELD_GRACE_MINUTES - 1) }),
-    ], { held: decision(), 'booked-by-agent': decision({ final_action_taken: 'auto_route', blocked_reasons: [] }), 'held-too-recent': decision() });
+      call({ id: 'held-too-recent', created_at: minutesAgo(HELD_GRACE_MINUTES - 1), live_decision: decision() }),
+    ]);
     expect(misses.map((m) => [m.call.id, m.holdReason])).toEqual([['held', 'the address is not confirmed']]);
     // A booking still clears a held call.
-    expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1) })], { 'call-1': decision() }, [bookedRow({ source_call_log_id: 'call-1' })])).toHaveLength(0);
+    expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: decision() })], [bookedRow({ source_call_log_id: 'call-1' })])).toHaveLength(0);
   });
 
-  // Pre-push P1 (2026-11-18): ai_validation is an audit rebuild that can differ from the live
-  // decision (an address recovery routes on the recovered address, the rebuild on the original).
-  test('the live decision is the newest enforce row for the call\'s recording, written by its last pass', () => {
-    const row = (over) => ({ call_log_id: 'call-1', mode: 'enforce', recording_sid: 'RE1', final_action_taken: 'triage_review', created_at: minutesAgo(30), ...over });
-    const c = call({ recording_sid: 'RE1', processing_started_at: minutesAgo(40) });
-    const newest = row({ created_at: minutesAgo(20), final_action_taken: 'auto_route' });
-    expect(liveDecision(c, [row(), newest, row({ mode: 'shadow', created_at: minutesAgo(10) }), row({ recording_sid: 'RE0', created_at: minutesAgo(5) }), row({ call_log_id: 'call-2', created_at: minutesAgo(1) })])).toBe(newest);
+  // Pre-push P1s (2026-11-18): ai_validation is an audit rebuild that can differ from the live
+  // decision (an address recovery routes on the recovered address, the rebuild on the original),
+  // and a reprocess keeps the previous pass's decision until it writes its own.
+  test('the live decision counts only when the call\'s last pass wrote it', () => {
+    const claimed = call({ processing_started_at: minutesAgo(40) });
+    const current = decision({ created_at: minutesAgo(20) });
+    expect(liveDecision({ ...claimed, live_decision: current })).toEqual(current);
+    // node-pg returns row_to_json as an object; JSON text reads the same.
+    expect(liveDecision({ ...claimed, live_decision: JSON.stringify(current) })).toEqual(current);
     // A decision from before the last claim belongs to an earlier pass: a reprocess has not decided yet.
-    expect(liveDecision({ ...c, processing_started_at: minutesAgo(15) }, [row(), newest])).toBeNull();
-    expect(liveDecision(c, [])).toBeNull();
-    // A call with no recording matches the blank recording key the processor writes.
-    expect(liveDecision(call(), [row({ recording_sid: '' })])).toEqual(expect.objectContaining({ recording_sid: '' }));
+    expect(liveDecision({ ...claimed, processing_started_at: minutesAgo(15), live_decision: current })).toBeNull();
+    expect(liveDecision({ ...claimed, live_decision: null })).toBeNull();
+    expect(liveDecision({ ...claimed, live_decision: decision({ created_at: 'not a time' }) })).toBeNull();
   });
 
   test('a decision holds when routing blocked it or a later check skipped it; a booked one does not', () => {
@@ -308,14 +306,14 @@ describe('a visit the call agent held', () => {
     expect(optOut.detail).toContain('Check the call in dispatch before booking it, and do not call or text the caller.');
     expect(optOut.detail).not.toContain('call back');
     // A 'spam' row keeps the plain wait.
-    expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: 'spam' })], { 'call-1': decision({ blocked_reasons: ['spam_or_wrong_number'] }) })).toHaveLength(0);
+    expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: 'spam', live_decision: decision({ blocked_reasons: ['spam_or_wrong_number'] }) })])).toHaveLength(0);
   });
 
   // Pre-push P1s (2026-11-18): an 'extraction_failed' pass can still be retried and book the visit.
   test('a hold needs a finished pass; a pass that can still be retried waits GRACE_MINUTES and names no reason', () => {
     for (const status of ['extraction_failed', 'voicemail']) {
-      expect([status, missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: status })], { 'call-1': decision() })]).toEqual([status, []]);
-      expect([status, missesOf([call({ processing_status: status })], { 'call-1': decision() }).map((m) => m.holdReason)]).toEqual([status, [null]]);
+      expect([status, missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: status, live_decision: decision() })])]).toEqual([status, []]);
+      expect([status, missesOf([call({ processing_status: status, live_decision: decision() })]).map((m) => m.holdReason)]).toEqual([status, [null]]);
     }
   });
 
@@ -341,24 +339,25 @@ describe('a visit the call agent held', () => {
       call({ id: 'bridged', created_at: minutesAgo(30), bridged_at: minutesAgo(14), duration_seconds: 5 * 60 }),
       call({ id: 'bridged-done', created_at: minutesAgo(30), bridged_at: minutesAgo(16), duration_seconds: 5 * 60 }),
     ];
-    const misses = missesOf(calls, Object.fromEntries(calls.map((c) => [c.id, decision({ call_log_id: c.id })])));
+    const misses = missesOf(calls.map((c) => ({ ...c, live_decision: decision() })));
     expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done', 'bridged-done']);
     // An unheld call keeps its wait from created_at.
     expect(missesOf([call({ duration_seconds: 120 * 60 })])).toHaveLength(1);
   });
 
-  // Pre-push P1 (2026-11-18): a held visit may not be one to book as agreed (a cancel request, a
-  // visit already on file), so its bell says review and asks staff to check the call first.
+  // Pre-push P1s (2026-11-18): a held visit may not be one to book as agreed (a cancel request, a
+  // visit already on file), so its bell says review and asks staff to check the call first; and
+  // Done on the bell alone leaves the held row on Dispatch, so the step names its Dismiss.
   test('a held bell says review and why, and asks to check the call; an unheld miss keeps "book" and "nothing is on the calendar"', () => {
     const text = bookItAlert(heldMiss(), false);
     expect(text.action).toBe("review Pat Sample's Waves Assessment");
     expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the address is not confirmed.');
     expect(text.detail).toContain('The call agent held this visit and did not book it, because the address is not confirmed.');
-    expect(text.detail).toContain('Check the call in dispatch before booking it; tap Done if no visit is needed.');
+    expect(text.detail).toContain('Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there.');
     expect(text.detail).not.toContain('Book it in dispatch');
     const cancel = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['cancellation_request'] })), false);
     expect(cancel.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked to cancel.');
-    expect(cancel.detail).toContain('tap Done if no visit is needed');
+    expect(cancel.detail).toContain('If no visit is needed, dismiss its held row there.');
     const [plain] = missesOf([call()]);
     expect(bookItAlert(plain, false).action).toBe("book Pat Sample's Waves Assessment");
     expect(bookItAlert(plain, false).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
