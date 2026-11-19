@@ -1369,6 +1369,9 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
       // then. A post made an identification post since must not ship a hero
       // planned without that type's picture limits (no people-free hero, no
       // pest close-up): the run parks, and the editor regenerates the hero.
+      // Only a row whose column can hold a multi-MB data URL reaches this,
+      // and there the editor's regenerate save works too. (In production
+      // featured_image_url is varchar(255), so no row holds one: 11-19.)
       const stored = parseImageDataUrl(post.featured_image_url);
       if (stored && isIdentificationPost(post) && !stored.identificationPlan) {
         const e = new Error('featured image was generated before this post became an identification post: regenerate it in the editor, then publish again');
