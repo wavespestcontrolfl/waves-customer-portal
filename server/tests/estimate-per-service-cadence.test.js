@@ -1243,13 +1243,24 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   // A priced one-time pest choice makes a recurring choice keep only the pest rows (withPestOnlyRecurringChoice). With
   // lawn as the only recurring row, accept then persists no recurring unit: zero units is no plan to prepay.
   const PEST_ONE_TIME = { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }], membershipFee: 99 };
+  // The page's handler always passes the bundle's priced tiers; accept filters to the pest rows only when a tier resolves.
+  const LAWN_TIER = { key: 'lawn_9', label: '9 visits', serviceCategory: 'lawn', monthly: 69.75, annual: 837, visitsPerYear: 9, billingFrequencyKey: 'monthly', annualPrepayEligible: true };
   test('the server-rendered page: a one-time pest choice beside lawn-only recurring rows offers no prepay', () => {
     const lawnOnly = { result: { ...data([LAWN]).result, oneTime: PEST_ONE_TIME } };
+    const priced = { ...lead(), pricingFrequencies: [LAWN_TIER] };
     // Control: without the one-time choice, accept keeps the lawn row (one unit) and the page offers prepay.
-    expect(renderPage('prepay-ssr-zero', lead(), lawnOnly, null)).toContain('data-payment-setup="prepay_annual"');
-    const html = renderPage('prepay-ssr-zero', { ...lead(), showOneTimeOption: true }, lawnOnly, null);
+    expect(renderPage('prepay-ssr-zero', priced, lawnOnly, null)).toContain('data-payment-setup="prepay_annual"');
+    const html = renderPage('prepay-ssr-zero', { ...priced, showOneTimeOption: true }, lawnOnly, null);
     expect(html).not.toContain('data-payment-setup="prepay_annual"');
     expect(html).not.toContain('data-pay-pref="prepay_annual"');
+  });
+
+  // With no priced tier, accept persists the rows unfiltered (its pest-only step runs only for a selected tier), so the
+  // lawn row stays: one unit, and the page keeps the offer.
+  test('the server-rendered page with no priced tier counts the rows unfiltered, as accept persists them', () => {
+    const lawnOnly = { result: { ...data([LAWN]).result, oneTime: PEST_ONE_TIME } };
+    expect(renderPage('prepay-ssr-zero-tierless', { ...lead(), showOneTimeOption: true }, lawnOnly, null))
+      .toContain('data-payment-setup="prepay_annual"');
   });
 
   // A legacy estimate keeps its mosquito ladder in result.recurring and a second service in the root recurring
@@ -1425,6 +1436,21 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
     });
 
+    // The same rule on /data: a bundle with no priced tier gives accept no selected tier, so its rows count unfiltered.
+    test('a one-time pest choice beside pest and lawn: kept with a priced tier, closed with none', () => {
+      const both = {
+        result: {
+          recurring: { services: [pestRow, lawnRow] },
+          oneTime: { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
+        },
+      };
+      const choice = { show_one_time_option: true };
+      const priced = bundle();
+      expect(withMultiServicePrepayClosed(priced, both, choice)).toBe(priced);
+      const out = withMultiServicePrepayClosed({ annualPrepayEligible: true, frequencies: [] }, both, choice);
+      expect(out.annualPrepayEligible).toBe(false);
+    });
+
     test('a split plan showing a setup fee: prepay closes everywhere, the fee row stays, its waiver line goes', () => {
       const shown = bundle({
         firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
@@ -1462,6 +1488,19 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
     test('no priced frequency: two ordinary services are refused, one is not', () => {
       expect(check([pestRow], { result: { recurring: { services: [pestRow] } } })).toBe(true);
       expect(check([lawnRow, pestRow], { result: { recurring: { services: [lawnRow, pestRow] } } })).toBe(false);
+    });
+
+    // Accept persists the pest-only rows only inside its selected-tier step: with no priced tier, conversion receives every
+    // recurring row, so pest plus lawn is two units even beside a one-time pest choice.
+    test('a one-time pest choice: with a tier, pest plus lawn counts the pest row; with none, both rows', () => {
+      const pestOneTime = { total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] };
+      const both = { result: { recurring: { services: [pestRow, lawnRow] }, oneTime: pestOneTime } };
+      const choice = { show_one_time_option: true };
+      const run = (selectedFrequency) => acceptPrepayAvailable({
+        selectedFrequency, recurringSvcList: [pestRow], oneTimeList: [], estData: both, estimate: choice,
+      });
+      expect(run({ key: 'quarterly', annualPrepayEligible: true })).toBe(true);
+      expect(run(null)).toBe(false);
     });
 
     test('a tier flag still decides for one unit, and never re-opens two', () => {

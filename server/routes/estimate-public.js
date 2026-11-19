@@ -6432,7 +6432,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Only a plan with exactly one recurring unit can prepay: accept and the
   // converter refuse any other count (prepayUnitCountClosed, the same count the /data bundle uses).
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && !prepayUnitCountClosed(estData, estimate)
+    && !prepayUnitCountClosed(estData, estimate, { frequencyResolves: pricingFrequenciesForView.length > 0 })
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -28363,10 +28363,12 @@ function withPestOnlyRecurringChoice(estData) {
 }
 
 // The plan's data as accept persists it for a recurring choice: the supplemented rows, and on an estimate with a
-// one-time pest choice only the pest rows (withPestOnlyRecurringChoice).
-function recurringDataAsAccepted(estData, estimate) {
+// one-time pest choice only the pest rows (withPestOnlyRecurringChoice). Accept applies that filter only when a priced
+// frequency resolves (it persists the filtered rows inside its `if (selectedFrequency)` step), so `frequencyResolves:
+// false` counts the rows unfiltered, as conversion will receive them.
+function recurringDataAsAccepted(estData, estimate, { frequencyResolves = true } = {}) {
   const supplemented = withSupplementedRecurringServices(estData || {}) || estData || {};
-  return shouldPersistPestOnlyRecurringChoice(estimate || {}, supplemented)
+  return frequencyResolves && shouldPersistPestOnlyRecurringChoice(estimate || {}, supplemented)
     ? withPestOnlyRecurringChoice(supplemented)
     : supplemented;
 }
@@ -28380,10 +28382,10 @@ function recurringDataAsAccepted(estData, estimate) {
 // only the pest rows (withPestOnlyRecurringChoice), so lawn-only rows leave nothing to prepay. A count that fails is
 // unknown, not one unit, so prepay closes too: the page never offers a prepay, or its setup-fee waiver, that accept
 // may refuse.
-function prepayUnitCountClosed(estData, estimate) {
+function prepayUnitCountClosed(estData, estimate, { frequencyResolves = true } = {}) {
   try {
     return require('../services/estimate-converter')
-      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate)) !== 1;
+      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate, { frequencyResolves })) !== 1;
   } catch (err) {
     logger.warn(`[estimate-public] prepay unit count failed (${err?.name || 'Error'}); prepay closed`);
     return true;
@@ -28394,7 +28396,7 @@ function prepayUnitCountClosed(estData, estimate) {
 // on every path the unit count (prepayUnitCountClosed). The flags finalizePricingBundle stamps already carry the count,
 // but a bundle with no priced frequency (an engine replay that failed) has no flag to read, and the mix alone admits a
 // multi-service plan the converter refuses: a termite annual plan bundled with pest would park for a signature its
-// activation refuses.
+// activation refuses. With no priced frequency, accept persists the rows unfiltered, so they are counted unfiltered.
 function acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeList, estData, estimate }) {
   const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
     ? selectedFrequency.annualPrepayEligible
@@ -28402,7 +28404,7 @@ function acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeLis
   const prepayMixEligible = tierPrepayFlag != null
     ? tierPrepayFlag
     : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
-  return prepayMixEligible && !prepayUnitCountClosed(estData, estimate);
+  return prepayMixEligible && !prepayUnitCountClosed(estData, estimate, { frequencyResolves: Boolean(selectedFrequency) });
 }
 
 // Prepay only. The fee lines are left as each builder made them: on a legacy plan split across the two recurring
@@ -28411,7 +28413,9 @@ function acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeLis
 // just no longer says it is waived when you pay the year.
 function withMultiServicePrepayClosed(payload, estData, estimate) {
   const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
-  const multi = prepayUnitCountClosed(estData, estimate);
+  // A bundle with no priced frequency gives accept no selected tier, so accept counts its rows unfiltered too.
+  const frequencyResolves = [payload.frequencies, payload.hiddenLawnFrequencies].some((list) => Array.isArray(list) && list.length > 0);
+  const multi = prepayUnitCountClosed(estData, estimate, { frequencyResolves });
   if (!combos.length && !multi) return payload;
   const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
   // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
