@@ -29,6 +29,7 @@ const { FACTS, factById, factsForSend } = require('../services/pest-insider/fact
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
 const { POST_LINK_TEXT } = require('../services/pest-insider/render');
+const { TOOLS, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 
 // Every main fact's post answers as live, unless a case says otherwise.
 const LIVE = FACTS.filter((f) => !f.reserve).map((f) => f.id);
@@ -38,7 +39,8 @@ const A01 = factById('A01');
 const WFA = SPECIES.find((s) => s.slug === 'white-footed-ant');
 // A fixed plan: fact A01 (white-footed ants) and the White-footed Ant species,
 // so these cases test check -> render -> validate, not the planner's rotation.
-const usePlan = (leadFact, idItem = WFA) => planIssue.mockImplementation(() => ({ leadFact, idItem }));
+const usePlan = (leadFact, idItem = WFA, tool = null) => planIssue.mockImplementation(() => ({ leadFact, idItem, tool }));
+const ALL_TOOLS = TOOLS.map((t) => t.productId);
 
 afterEach(() => {
   planIssue.mockReset();
@@ -50,7 +52,9 @@ describe('buildIssue', () => {
     usePlan(A01);
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
     expect(r.ok).toBe(true);
-    expect(planIssue).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE });
+    expect(planIssue).toHaveBeenCalledWith({
+      sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE, liveToolIds: [], recentToolIds: [],
+    });
     expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
     expect(r.issue.preview).toBe("What's this? White-footed Ant");
     for (const line of A01.lead) {
@@ -61,7 +65,32 @@ describe('buildIssue', () => {
     // the lead links A01's own reviewed post
     expect(r.issue.html_body).toContain(`href="${postUrl('A01')}"`);
     expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
-    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', problems: [] });
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
+    // no live tool named: no tool item, and no Amazon link anywhere
+    for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test('a live tool renders "A tool we\'d use" with its link and Amazon\'s sentence, and the send validator accepts it', () => {
+    const mesh = toolById('stuff-it-copper-mesh');
+    usePlan(A01, WFA, mesh);
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: [mesh.productId] });
+    expect(r).toMatchObject({ ok: true, reason: null });
+    expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
+    expect(r.issue.html_body).toContain(`href="${mesh.url}"`);
+    expect(r.issue.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
+    expect(r.issue.text_body).toContain(`${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
+    expect(r.issue.text_body).toContain(mesh.lines.join(' '));
+  });
+
+  test('the builder refuses a tool the planner returns without a live check', () => {
+    usePlan(A01, WFA, toolById('stuff-it-copper-mesh'));
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: ['acurite-glass-rain-gauge'] }))
+      .toMatchObject({ ok: false, issue: null, reason: 'no_live_tool: stuff-it-copper-mesh' });
+  });
+
+  test('the live tools and the recent tools are passed to the plan', () => {
+    buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: ALL_TOOLS, recent: { toolIds: ['stuff-it-copper-mesh'] } });
+    expect(planIssue).toHaveBeenCalledWith(expect.objectContaining({ liveToolIds: ALL_TOOLS, recentToolIds: ['stuff-it-copper-mesh'] }));
   });
 
   test('with no live-post list, no issue builds: every issue links its lead fact\'s post', () => {

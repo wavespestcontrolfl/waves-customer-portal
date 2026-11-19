@@ -1,6 +1,7 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
 const { renderIssue, wrapIssueHtml, POST_LINK_TEXT } = require('../services/pest-insider/render');
 const { POST_URLS } = require('../services/pest-insider/posts');
+const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { bodyIsDarkAware } = require('../services/email-template');
 
 // A reviewed post URL (posts.js): the only kind of blog link the body carries.
@@ -43,6 +44,32 @@ describe('renderIssue', () => {
       undefined,
     ]) {
       expect(() => renderIssue({ ...BASE, lead: { ...BASE.lead, postUrl } })).toThrow(/reviewed post URL/);
+    }
+  });
+
+  test('"A tool we\'d use" renders the reviewed tool by its id, with Amazon\'s sentence right after the link', () => {
+    const gauge = toolById('acurite-glass-rain-gauge');
+    const r = renderIssue({ ...BASE, toolId: gauge.productId });
+    const html = r.html_body;
+    expect(html).toContain('A tool we&#39;d use');
+    expect(html).toContain(`href="${gauge.url}"`);
+    const linkAt = html.indexOf(`>${toolLinkText(gauge)}</a>`);
+    const sentenceAt = html.indexOf(AMAZON_DISCLOSURE);
+    expect(linkAt).toBeGreaterThan(html.indexOf(gauge.lines[1]));
+    expect(sentenceAt).toBeGreaterThan(linkAt);
+    // in normal body text, not the muted small print
+    expect(html.slice(html.lastIndexOf('<p', sentenceAt), sentenceAt)).not.toMatch(/dm-muted/);
+    expect(r.text_body).toContain(`A TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}`);
+    // the tool item comes after "What's this?"
+    expect(html.indexOf('A tool we&#39;d use')).toBeGreaterThan(html.indexOf('/pest-identifier/aedes-mosquito/'));
+    // no tool id: no tool item and no Amazon link
+    for (const part of [renderIssue(BASE).html_body, renderIssue(BASE).text_body]) expect(part).not.toMatch(/amazon/i);
+    expect(renderIssue({ ...BASE, toolId: null }).html_body).toBe(renderIssue(BASE).html_body);
+  });
+
+  test('a tool id that is not a reviewed tool is refused', () => {
+    for (const toolId of ['ks-adjustable-door-sweep', 'no-such-tool', '', 7]) {
+      expect(() => renderIssue({ ...BASE, toolId })).toThrow(/must be a reviewed tool/);
     }
   });
 

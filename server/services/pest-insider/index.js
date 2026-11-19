@@ -14,7 +14,9 @@
  * Every issue links the lead fact's reviewed blog post (posts.js), so a fact
  * leads only when the caller names it in `livePostFactIds`: the facts whose
  * post answered as live for this send (posts.checkLivePosts). With no list,
- * no issue builds.
+ * no issue builds. "A tool we'd use" is a reviewed tool (tools.js) whose
+ * product page passed this send's live check: the caller names those tools
+ * in `liveToolIds`. With none, the issue has no tool item.
  * Returns { ok, reason, issue, diagnostics } where `issue` is
  * { subject, preview, html_body, text_body } when ok.
  */
@@ -48,23 +50,27 @@ function sendGateErrors(issue) {
 }
 
 /**
- * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
- *   recheckedFactIds?: string[], livePostFactIds?: string[] }} input   The issue is one
- *   email for every subscriber and takes no caller text (render.js says why).
+ * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[], toolIds?: string[] },
+ *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolIds?: string[] }} input
+ *   The issue is one email for every subscriber and takes no caller text (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [] }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolIds = [] }) {
   const dateET = sendDateET(sendDate);
-  const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [] };
+  const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, toolId: null, problems: [] };
 
-  const { leadFact, idItem, reason } = planIssue({
+  const { leadFact, idItem, tool, reason } = planIssue({
     sendDate: dateET,
     recentFactIds: recent.factIds || [],
     recentSpeciesSlugs: recent.speciesSlugs || [],
     recheckedFactIds,
     livePostFactIds,
+    liveToolIds,
+    recentToolIds: recent.toolIds || [],
   });
+  const toolId = tool ? tool.productId : null;
   diagnostics.factId = leadFact ? leadFact.id : null;
   diagnostics.speciesSlug = idItem ? idItem.slug : null;
+  diagnostics.toolId = toolId;
   if (!leadFact || !idItem) return { ok: false, reason, issue: null, diagnostics };
   if (leadFact.recheck_before_send && !recheckedFactIds.includes(leadFact.id)) {
     return { ok: false, reason: `recheck_needed: ${leadFact.id}`, issue: null, diagnostics };
@@ -74,6 +80,10 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
   const post = postUrl(leadFact.id);
   if (!post || !livePostFactIds.includes(leadFact.id)) {
     return { ok: false, reason: `no_live_post: ${leadFact.id}`, issue: null, diagnostics };
+  }
+  // The same for the tool: the planner picks only a live tool.
+  if (toolId && !liveToolIds.includes(toolId)) {
+    return { ok: false, reason: `no_live_tool: ${toolId}`, issue: null, diagnostics };
   }
 
   const copy = checkIssueCopy({ leadFact, species: idItem });
@@ -85,6 +95,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     preview: copy.preview,
     lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post },
     idItem: { text: copy.idText, species: idItem },
+    toolId,
   });
 
   const errors = sendGateErrors(issue);

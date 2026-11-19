@@ -437,6 +437,23 @@ function titleProblem(title, subject, fact, source) {
   return subjectFormatProblem(subject) || sentenceProblem(title, { ...source, units: null }) || openerProblem(title, source) || creditProblem(title, fact);
 }
 
+// "A tool we'd use" lines (tools.js) have no source but the tool's own
+// generic name (letters only, reviewed), so they carry no number, month,
+// season, time word or name, and a unit word only when the name has it
+// ("Soil moisture meter"). The only capitalized words are a plain opener or
+// a word of the name; Amazon's name is only in the renderer's fixed link
+// text and sentence (BRAND_RE bans it here). Owner 2026-11-19, on Amazon
+// links in this email: never "buy to support us". So a line says what the
+// tool shows or does, and has no sales word.
+const SALES_RE = /\b(?:buy|buying|bought|purchas\w*|orders?|ordering|support\w*|commissions?|earn\w*|affiliates?|deals?|discount\w*|coupons?|sale|sales|bargains?)\b|\bhelps? us\b/i;
+function toolLineProblem(text, tool) {
+  if (!text) return 'empty sentence';
+  const name = String(tool.name || '');
+  const source = { units: null, labels: [], facts: name, names: name };
+  return sentenceProblem(text, source) || openerProblem(text, source)
+    || (SALES_RE.test(text) ? 'a sales word (a tool line never asks the reader to buy)' : null);
+}
+
 // "What's this?" is the species entry's own fact, checked a sentence at a time.
 function idItemProblems(idText, species) {
   const source = speciesSource(species);
@@ -482,5 +499,5 @@ function checkIssueCopy({ leadFact, species }) {
 
 module.exports = {
   checkIssueCopy, sentenceProblem, creditProblem, quantityPairs, copyProblem, canonical, subjectFormatProblem, bannedReason, factSource, speciesSource,
-  SERVICE_EMOJI, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
+  toolLineProblem, SERVICE_EMOJI, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
 };

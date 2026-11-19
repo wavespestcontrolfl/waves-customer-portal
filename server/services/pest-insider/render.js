@@ -8,15 +8,16 @@
  *
  * The body is one email for every subscriber, and the public archive serves
  * it as stored. So it holds only reviewed copy (the fact's lead and title,
- * the species entry) and links the renderer builds itself from a species
- * slug, or takes from the reviewed post list (posts.js: the lead's "Read the
- * full story on our blog" link must be one of POST_URLS). It takes no other
- * caller text and no other caller link: every round of the pre-push audit
- * (5 to 10) found another way such input could carry a code, a name, an
- * email or a merge tag into a shared email. The other blocks come back in
- * later PRs as structured data: "Active near you" from area counts and
- * "Your home", rendered per recipient (PR 4), and "A tool we'd use" from a
- * reviewed product list (PR 3).
+ * the species entry, the tool item) and links the renderer builds itself
+ * from a species slug, or takes from a reviewed list: the lead's "Read the
+ * full story on our blog" link must be one of POST_URLS (posts.js), and "A
+ * tool we'd use" is looked up by its product id in the reviewed tool list
+ * (tools.js), with Amazon's exact sentence right after its link. It takes
+ * no other caller text and no other caller link: every round of the
+ * pre-push audit (5 to 10) found another way such input could carry a code,
+ * a name, an email or a merge tag into a shared email. The other blocks
+ * come back in PR 4 as structured data, rendered per recipient: "Active
+ * near you" from area counts, and "Your home".
  *
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
@@ -29,6 +30,7 @@
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
 const { SITE, POST_URLS } = require('./posts');
+const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on our blog';
@@ -79,15 +81,34 @@ function identifierBlock({ idItem }) {
   return { html, text };
 }
 
+// "A tool we'd use": the reviewed tool's lines and link, and Amazon's exact
+// sentence right after the link, in both parts. Every word comes from the
+// tool list; the caller passes only the product id.
+function toolBlock(toolId) {
+  const tool = toolById(toolId);
+  if (!tool) throw new Error('pest-insider render: the tool must be a reviewed tool (tools.js)');
+  const about = tool.lines.join(' ');
+  const html = [
+    headingHtml(2, "A tool we'd use"),
+    paragraph(escapeHtml(about)),
+    paragraph(link(tool.url, toolLinkText(tool))),
+    paragraph(escapeHtml(AMAZON_DISCLOSURE)),
+  ].join('\n');
+  const text = ["A TOOL WE'D USE", about, '', `${toolLinkText(tool)}: ${tool.url}`, AMAZON_DISCLOSURE].join('\n');
+  return { html, text };
+}
+
 /**
  * @param {{ subject: string, preview: string,
  *   lead: { headline: string, sentences: {text:string}[], postUrl: string },
- *   idItem: { text: string, species: { slug: string, name: string } } }} issue
- *   lead.postUrl must be one of the reviewed POST_URLS. Any other field is
- *   ignored: the shared body takes no caller text.
+ *   idItem: { text: string, species: { slug: string, name: string } }, toolId?: string|null }} issue
+ *   lead.postUrl must be one of the reviewed POST_URLS; toolId, when set, a
+ *   reviewed tool's product id. Any other field is ignored: the shared body
+ *   takes no caller text.
  */
 function renderIssue(issue) {
   const blocks = [leadBlock(issue), identifierBlock(issue)];
+  if (issue.toolId !== undefined && issue.toolId !== null) blocks.push(toolBlock(issue.toolId));
   const html = blocks.map((b) => `<div class="dm-text">\n${b.html}\n</div>`).join('\n');
   const text = blocks.map((b) => b.text).join('\n\n');
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: `${text}\n` };

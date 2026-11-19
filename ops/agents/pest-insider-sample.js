@@ -11,12 +11,16 @@
  *
  *     <outDir>        where the files go (created if missing)
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
- *     --assume-live   count every reviewed blog post as live (no web request)
+ *     --assume-live   count every reviewed blog post and tool as live (no web request)
  *
  * Each issue links its lead fact's blog post, so a fact leads only when its
  * post is live. The script first asks the website for every reviewed post
  * (read-only GET requests, posts.checkLivePosts), as a send does;
  * --assume-live skips those requests, for a run with no network.
+ *
+ * "A tool we'd use" shows only a tool whose Amazon page passed a live check.
+ * Amazon refuses plain page requests, so this script checks no tool page:
+ * without --assume-live the samples have no tool item.
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
  * next one, the way the real schedule will. So each date must be a real
@@ -77,6 +81,7 @@ const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
+const { TOOLS } = require('../../server/services/pest-insider/tools');
 
 // An impossible day (2027-02-30) is refused here too, before any file is written.
 for (const d of dates) {
@@ -97,22 +102,26 @@ async function main() {
   const livePosts = new Set(livePostFactIds.map(postUrl)).size;
   console.log(`blog posts: ${livePosts} of ${POST_URLS.length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}; ${livePostFactIds.length} of ${Object.keys(POSTS).length} linked facts can lead`);
   fs.mkdirSync(outDir, { recursive: true });
-  const recent = { factIds: [], speciesSlugs: [] };
+  const liveToolIds = assumeLive ? TOOLS.map((t) => t.productId) : [];
+  console.log(`tools: ${liveToolIds.length} of ${TOOLS.length} reviewed tools ${assumeLive ? 'counted as live (--assume-live)' : 'live (this script checks no Amazon page)'}`);
+  const recent = { factIds: [], speciesSlugs: [], toolIds: [] };
   let failed = 0;
   for (const sendDate of dates) {
     const result = buildIssue({
       sendDate,
       livePostFactIds,
-      recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) },
+      liveToolIds,
+      recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW), toolIds: recent.toolIds.slice(-RECENT_WINDOW) },
     });
     const d = result.diagnostics;
-    console.log(`\n== ${sendDate}  fact ${d.factId}  species ${d.speciesSlug}`);
+    console.log(`\n== ${sendDate}  fact ${d.factId}  species ${d.speciesSlug}  tool ${d.toolId || 'none'}`);
     if (result.ok) {
       console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
       console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
       // Only a built issue counts toward the rotation, like a sent one will.
       recent.factIds.push(d.factId);
       recent.speciesSlugs.push(d.speciesSlug);
+      if (d.toolId) recent.toolIds.push(d.toolId);
     } else {
       failed += 1;
       console.log(`   NOT BUILT: ${result.reason}`);

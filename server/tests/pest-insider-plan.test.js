@@ -1,6 +1,7 @@
 // Pest Insider plan: which fact leads and which species fills "What's this?".
-const { planIssue, SPECIES, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS } = require('../services/pest-insider/plan');
+const { planIssue, SPECIES, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS, TOOL_RECENT_WINDOW } = require('../services/pest-insider/plan');
 const { factsForSend, factById, FACTS } = require('../services/pest-insider/facts');
+const { TOOLS } = require('../services/pest-insider/tools');
 
 // Every fact counts as having a live post here, so these cases test the
 // rotation; the live-post rule has its own cases below.
@@ -106,5 +107,66 @@ describe('planIssue', () => {
     const fallback = plan({ sendDate: '2026-12-03', recentSpeciesSlugs: otherCorner });
     expect(otherCorner).not.toContain(fallback.idItem.slug);
     expect(plan({ sendDate: '2026-12-03', recentSpeciesSlugs: SPECIES.map((s) => s.slug) })).toMatchObject({ idItem: null, reason: 'no_species' });
+  });
+});
+
+describe('planIssue: "A tool we\'d use"', () => {
+  const ALL_TOOLS = TOOLS.map((t) => t.productId);
+  const ids = (list) => list.map((t) => t.productId);
+  // With no recent issues, Dec 3 leads with a termite fact (T03), Feb 4 with a
+  // pest fact (R02) and May 6 with a mosquito fact (M04; no tool lists mosquito).
+  const DEC = '2026-12-03';
+  const FEB = '2027-02-04';
+  const MAY = '2027-05-06';
+
+  test('no live tool: no tool item, and the issue still plans', () => {
+    const r = plan({ sendDate: DEC });
+    expect(r.tool).toBeNull();
+    expect(r.leadFact).not.toBeNull();
+    expect(r.idItem).not.toBeNull();
+  });
+
+  test("a tool for the lead fact's service comes first, and only a live tool is picked", () => {
+    for (const sendDate of [DEC, FEB]) {
+      const { leadFact, tool } = plan({ sendDate, liveToolIds: ALL_TOOLS });
+      expect(tool.services).toContain(leadFact.service);
+      const others = ALL_TOOLS.filter((id) => id !== tool.productId);
+      const next = plan({ sendDate, liveToolIds: others }).tool;
+      expect(others).toContain(next.productId);
+    }
+    expect([plan({ sendDate: DEC }).leadFact.service, plan({ sendDate: FEB }).leadFact.service]).toEqual(['termite', 'pest']);
+  });
+
+  test("with no live tool for the lead's service, any live tool fills the item", () => {
+    const { leadFact } = plan({ sendDate: DEC });
+    const otherService = ids(TOOLS.filter((t) => !t.services.includes(leadFact.service)));
+    expect(otherService.length).toBeGreaterThan(0);
+    expect(otherService).toContain(plan({ sendDate: DEC, liveToolIds: otherService }).tool.productId);
+    // no tool lists mosquito: a mosquito lead still gets a live tool
+    const may = plan({ sendDate: MAY, liveToolIds: ALL_TOOLS });
+    expect(may.leadFact.service).toBe('mosquito');
+    expect(TOOLS.some((t) => t.services.includes('mosquito'))).toBe(false);
+    expect(ALL_TOOLS).toContain(may.tool.productId);
+  });
+
+  test('the last two issues\' tools are skipped; an older one may come back', () => {
+    expect(TOOL_RECENT_WINDOW).toBe(2);
+    const first = plan({ sendDate: DEC, liveToolIds: ALL_TOOLS }).tool.productId;
+    const again = plan({ sendDate: DEC, liveToolIds: ALL_TOOLS, recentToolIds: [first] }).tool.productId;
+    expect(again).not.toBe(first);
+    const recentTwo = plan({ sendDate: DEC, liveToolIds: ALL_TOOLS, recentToolIds: [again, first] }).tool.productId;
+    expect([first, again]).not.toContain(recentTwo);
+    // three issues ago is outside the window: the first pick comes back
+    const older = ALL_TOOLS.filter((id) => id !== first).slice(0, 2);
+    expect(plan({ sendDate: DEC, liveToolIds: ALL_TOOLS, recentToolIds: [first, ...older] }).tool.productId).toBe(first);
+    // every live tool used in the last two issues: no tool item
+    expect(plan({ sendDate: DEC, liveToolIds: [first, again], recentToolIds: [first, again] }).tool).toBeNull();
+  });
+
+  test('is deterministic, ignores an unknown tool id, and refuses a tool list that is not a list', () => {
+    expect(plan({ sendDate: DEC, liveToolIds: ALL_TOOLS })).toEqual(plan({ sendDate: DEC, liveToolIds: ALL_TOOLS }));
+    expect(plan({ sendDate: DEC, liveToolIds: ['ks-adjustable-door-sweep'] }).tool).toBeNull();
+    expect(() => plan({ sendDate: DEC, liveToolIds: 'stuff-it-copper-mesh' })).toThrow(/must be lists/);
+    expect(() => plan({ sendDate: DEC, recentToolIds: null })).toThrow(/must be lists/);
   });
 });

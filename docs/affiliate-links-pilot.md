@@ -83,6 +83,11 @@ shapes) is blocked outside the rendered blog page, gate on or off:
 
 - Newsletter: `newsletter-validator.js` hard-blocks the send
   (`AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL`), every type incl. manual.
+  One exception (owner 2026-11-19): the Pest Insider email
+  (`pest-insider-monthly`) may carry its reviewed Amazon tool links
+  (`server/services/pest-insider/tools.js`, approved registry rows only),
+  each followed by Amazon's exact sentence, in the body only. Any other
+  affiliate material in that email still blocks.
 - Social: `social-media.js publishToAll` — the convergence point for the
   RSS cron, the poller post-merge share, the studio, and manual shares —
   refuses affiliate links and strips affiliate copy field-by-field.
