@@ -177,7 +177,7 @@ describe('the report flow', () => {
   const FLAGGED = { ...REPORT_SERVICE, reserviceAsksEnabled: true };
   async function openReport(request, service = FLAGGED) {
     render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
   }
   async function generate() {
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Ghost ants on the counter, light. Baited the counter edge.' } });

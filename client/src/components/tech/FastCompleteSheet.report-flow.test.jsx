@@ -102,7 +102,7 @@ const SERVICE = {
 
 async function openSheet(request, service = SERVICE) {
   render(<FastCompleteSheet service={service} request={request} onClose={() => {}} onCompleted={() => {}} />);
-  await screen.findByText(/Taurus SC 4 fl oz/);
+  await screen.findByText(/Taurus SC 1.6 fl oz/);
 }
 
 // The schedule row a phone cached can predate GATE_FAST_COMPLETE_REPORT going
@@ -193,18 +193,18 @@ describe('the visit step', () => {
     expect(within(tracker).getAllByRole('button').map((button) => button.textContent)).toEqual(['1', '2', '3', '4', '5']);
     expect(screen.getByText('1 = very low · 2 = low · 3 = moderate · 4 = elevated · 5 = high')).toBeTruthy();
     // The products as one line, opened on Edit.
-    expect(screen.getByText(/Taurus SC 4 fl oz · LESCO Crosscheck Plus 4 fl oz/)).toBeTruthy();
+    expect(screen.getByText(/Taurus SC 1.6 fl oz · LESCO Crosscheck Plus 4 fl oz/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    expect(screen.getByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
-    expect(screen.queryByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeNull();
   });
 
   test('a visit the house mix is not for (an initial cleanout) starts with nothing picked', async () => {
     const request = makeRequest({ service: { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' } });
     render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
     await screen.findByRole('button', { name: 'Generate AI report' });
-    expect(screen.queryByText(/Taurus SC 4 fl oz/)).toBeNull();
+    expect(screen.queryByText(/Taurus SC 1.6 fl oz/)).toBeNull();
     expect(screen.queryByText(/LESCO Crosscheck/)).toBeNull();
   });
 
@@ -374,7 +374,7 @@ describe('generate and read', () => {
   test('a report the writer could not write offers the Full form, so an outage leaves a way to complete', async () => {
     const onFullForm = vi.fn();
     render(<FastCompleteSheet service={SERVICE} request={makeRequest({ report: Object.assign(new Error('Writer is busy.'), { status: 503 }) })} onClose={() => {}} onCompleted={() => {}} onFullForm={onFullForm} />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
     expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
     fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
@@ -1189,7 +1189,7 @@ describe('complete and send', () => {
     test('a Go back that cannot discard the saved attempt says so on the heads-up (pre-push P1 on 5f95bc558d)', async () => {
       const request = makeRequest({ complete: [conflict('report_rules_review', 'Refused words: "safe"'), { success: true }] });
       render(<FastCompleteSheet service={SERVICE} operatorId="tech-a" request={request} onClose={() => {}} onCompleted={() => {}} />);
-      await screen.findByText(/Taurus SC 4 fl oz/);
+      await screen.findByText(/Taurus SC 1.6 fl oz/);
       await generate();
       fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
       const back = await screen.findByRole('button', { name: 'Go back' });
@@ -1512,7 +1512,7 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
   test('the product picker waits while a description is open, and a plain visit shows no Full form (codex local r3 on #5624)', async () => {
     const staged = stagedPhotos();
     render(<FastCompleteSheet service={NOTE_BOX} request={makeRequest({ photos: staged.photos, photoChange: staged.photoChange })} onClose={() => {}} onCompleted={() => {}} onFullForm={() => {}} />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
     await screen.findByText('Counter edge');
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     const otherProduct = () => screen.getByRole('button', { name: '+ Other product' });
@@ -1583,7 +1583,7 @@ describe('a visit already invoiced from the payment flow', () => {
     const onCompleted = vi.fn();
     const request = makeRequest({ complete: [response] });
     render(<FastCompleteSheet service={{ ...SERVICE, checkoutInvoiceId: 'inv-fixture' }} request={request} onClose={() => {}} onCompleted={onCompleted} />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');

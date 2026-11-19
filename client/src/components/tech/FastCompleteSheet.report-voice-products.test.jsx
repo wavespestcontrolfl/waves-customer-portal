@@ -84,7 +84,7 @@ const SERVICE = {
 
 async function openSheet(request, props = { voiceFillEnabled: true }) {
   render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} {...props} />);
-  await screen.findByText(/Taurus SC 4 fl oz/);
+  await screen.findByText(/Taurus SC 1.6 fl oz/);
 }
 async function generate(label = 'Generate AI report') {
   if (label === 'Generate AI report') {
@@ -244,7 +244,7 @@ describe('report flow, voice fill on: products from the note', () => {
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(completeButton());
     await screen.findByTestId('fast-complete-sent');
-    expect(sent(request).products.find((p) => p.productId === 'taurus')).toMatchObject({ totalAmount: 4 });
+    expect(sent(request).products.find((p) => p.productId === 'taurus')).toMatchObject({ totalAmount: 1.6 });
   });
 
   test('the gate going off since the sheet opened (404) stops the read, and the report is still written', async () => {

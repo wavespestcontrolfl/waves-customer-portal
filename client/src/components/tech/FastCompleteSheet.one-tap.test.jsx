@@ -77,7 +77,7 @@ const SERVICE = {
 
 async function openSheet(request, props = {}) {
   render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled {...props} />);
-  await screen.findByText(/Taurus SC 4 fl oz/);
+  await screen.findByText(/Taurus SC 1.6 fl oz/);
 }
 const writeNote = () => fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
 const tapRating = () => fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
@@ -196,7 +196,7 @@ describe('one-tap: the photo and trace reads hold nothing', () => {
   const openWithFullForm = async (request) => {
     const onFullForm = vi.fn();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} onFullForm={onFullForm} voiceFillEnabled />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
     return onFullForm;
   };
   const sentBody = async (request) => {
@@ -379,7 +379,7 @@ describe('one-tap: the trace is optional', () => {
   test('a visit that cannot be traced still takes typed feet, with no Full form hold and no hold at all', async () => {
     const request = makeRequest({ facts: PERIMETER });
     render(<FastCompleteSheet service={{ ...SERVICE, traceEligible: false }} request={request} onClose={() => {}} onCompleted={() => {}} voiceFillEnabled />);
-    await screen.findByText(/Taurus SC 4 fl oz/);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
     writeNote();
     tapRating();
     await openReport();

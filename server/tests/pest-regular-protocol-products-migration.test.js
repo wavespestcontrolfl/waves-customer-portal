@@ -319,6 +319,17 @@ describe('pest regular protocol products migration: up', () => {
     }
   });
 
+  test('two old gel rows on one service type are both left alone (the live product would record two tubes)', async () => {
+    const tables = baseTables();
+    tables.service_product_usage.push(usage('r8', 'German Roach Cleanout', 'oldGel', 1, 'tube', true));
+    knex = makeKnex(tables);
+    await migration.up(knex);
+    expect(rowOf(knex, 'r1').product_id).toBe(ID.oldGel);
+    expect(rowOf(knex, 'r8').product_id).toBe(ID.oldGel);
+    expect(rowOf(knex, 'c2').product_id).toBe(ID.liveGel);
+    expect(logged(logSpy)).toMatch(/has 2 old gel rows/);
+  });
+
   test('a service type that already maps the live gel keeps its old gel row (the cost would count twice)', async () => {
     const tables = baseTables();
     tables.service_product_usage.push(usage('r9', 'German Roach Cleanout', 'liveGel', 1, 'tube', true));
@@ -436,6 +447,17 @@ describe('pest regular protocol products migration: down', () => {
     knex.tables.products_catalog.push({ id: ID.demand, name: 'Demand CS' });
     await migration.down(knex);
     expect(usageOf(knex, 'General Pest Perimeter').map((row) => row.id)).toEqual(['g1']);
+  });
+
+  test('a row the office added since (Demand CS again, under a fresh id) keeps that service type whole: the old row does not come back beside it', async () => {
+    await migration.up(knex);
+    knex.tables.service_product_usage.push(usage('fresh-demand', 'General Pest Perimeter', 'demand', 1.6, 'oz', true, null, 0.4));
+    const generalBefore = byId(usageOf(knex, 'General Pest Perimeter'));
+    await migration.down(knex);
+    expect(byId(usageOf(knex, 'General Pest Perimeter'))).toEqual(generalBefore);
+    expect(usageOf(knex, 'General Pest Perimeter').map((row) => row.id)).not.toContain('g1');
+    expect(logged(logSpy)).toMatch(/was added since up\(\)/);
+    expect(usageOf(knex, 'Bi-Monthly Pest Control').map((row) => row.id).sort()).toEqual(['b1', 'b2']);
   });
 
   test('an old row whose id was taken keeps that service type whole', async () => {

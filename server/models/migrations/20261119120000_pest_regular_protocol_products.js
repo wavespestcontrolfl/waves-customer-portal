@@ -257,11 +257,16 @@ async function restoreUsage(knex) {
     byType.get(serviceType)[kind].push({ event, row });
   }
   for (const [serviceType, { inserted, removed }] of byType) {
-    // Locked until the migration commits, so an edit cannot land between the check and the delete.
-    const current = inserted.length
-      ? await knex('service_product_usage').whereIn('id', inserted.map((item) => item.event.resource_id)).select('*').forUpdate()
-      : [];
+    // Every row of the service type, locked until the migration commits, so an edit cannot land between the check and the delete.
+    const current = await knex('service_product_usage').where({ service_type: serviceType }).select('*').forUpdate();
     const byId = new Map(current.map((row) => [String(row.id), row]));
+    const writtenIds = new Set(inserted.map((item) => String(item.event.resource_id)));
+    // A row the office added since (under a fresh id) is not in what up() wrote: putting the old rows back beside it would count twice.
+    const extra = current.filter((row) => !writtenIds.has(String(row.id)));
+    if (extra.length) {
+      console.log(`${LOG} "${serviceType}" usage: row ${extra[0].id} was added since up(): the service type is kept as it is`);
+      continue;
+    }
     const editedOrGone = inserted.filter((item) => !holdsWritten(byId.get(String(item.event.resource_id)), item.row));
     if (editedOrGone.length) {
       console.log(`${LOG} "${serviceType}" usage: row ${editedOrGone[0].event.resource_id} changed or gone since up() wrote it: the service type is kept as it is`);
@@ -357,10 +362,14 @@ async function repointRoachUsage(knex) {
   for (const serviceType of ROACH_USAGE_TYPES) {
     const rows = await knex('service_product_usage').where({ service_type: serviceType }).select('*').forUpdate();
     const alreadyLive = rows.some((row) => String(row.product_id) === String(live.id));
+    // The values read from production on 2026-11-19: 1 tube, no per-area rate, primary.
+    const isOldGelRow = (row) => oldIds.has(String(row.product_id)) && sameNumber(row.usage_amount, 1) && row.usage_unit === 'tube'
+      && row.usage_per_1000sf == null && row.is_primary === true;
+    // Exactly one source row: two would both move and record two tubes under the live product.
+    const oldGelCount = rows.filter(isOldGelRow).length;
+    if (oldGelCount > 1) console.log(`${LOG} "${serviceType}" has ${oldGelCount} old gel rows: none is re-pointed`);
     for (const row of rows) {
-      // The values read from production on 2026-11-19: 1 tube, no per-area rate, primary.
-      const isOldGel = oldIds.has(String(row.product_id)) && sameNumber(row.usage_amount, 1) && row.usage_unit === 'tube'
-        && row.usage_per_1000sf == null && row.is_primary === true;
+      const isOldGel = oldGelCount === 1 && isOldGelRow(row);
       if (isOldGel && alreadyLive) { console.log(`${LOG} "${serviceType}" already maps the live gel: the old gel row ${row.id} is kept`); continue; }
       if (isOldGel) {
         const changed = await knex('service_product_usage').where({ id: row.id, product_id: row.product_id }).update({ product_id: live.id });

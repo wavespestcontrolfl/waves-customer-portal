@@ -215,7 +215,7 @@ describe('FastCompleteSheet voice fill, gate on', () => {
     say('Taurus six grams');
     const check = await screen.findByRole('region', { name: 'Check' });
     expect(within(check).getByText('Heard “Taurus six grams” — enter the amount for Taurus SC.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeTruthy();
     expect(completeButton().disabled).toBe(true);
   });
 
