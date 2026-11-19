@@ -506,6 +506,20 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z' });
   });
 
+  test('a pick hand-off (withdrawn) speaks for its own service only: a sibling joined later keeps its time', () => {
+    const now = new Date('2026-09-10T12:00:00Z');
+    const handOff = { visit_id: 'aaa', start_at: null, withdrawn: true, communicated_at: '2026-09-09T12:00:00Z', source: 'message' };
+    const siblingTime = { visit_id: 'bbb', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' };
+    const promises = new Map([['aaa', [handOff]], ['bbb', [siblingTime]]]);
+    expect(stopPromise([a, b], promises, now)).toBe(siblingTime);
+    // Control: a plain unknown-window move notice still wins for the whole stop (the legacy move-notice rule).
+    const { withdrawn, ...unknown } = handOff;
+    expect(withdrawn).toBe(true);
+    expect(stopPromise([a, b], new Map([['aaa', [unknown]], ['bbb', [siblingTime]]]), now)).toBe(unknown);
+    // When no member holds anything else, the withdrawal stands for the stop.
+    expect(stopPromise([a, b], new Map([['aaa', [handOff]]]), now)).toBe(handOff);
+  });
+
   test('a member confirmation older than the newest grouped send is gone', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     // The grouped send quoted one window for every member, so aaa's older

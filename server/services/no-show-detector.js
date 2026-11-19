@@ -1127,8 +1127,13 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   // that copy spoke for the whole stop.
   const awaited = members.filter((member) => LIVE_STATUSES.includes(member.status)
     || ATTENDED_STATUSES.includes(member.status));
-  const held = awaited.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
+  const latestHeld = awaited.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
     .filter(Boolean);
+  // A withdrawn promise (the pick hand-off text, `withdrawn: true`) speaks for the one service it named: a service
+  // that joins a stop after its hand-off never takes back a sibling's time. It stands for the stop only when no
+  // member holds anything else (still an unknown window there: no card, and the levels reader fails closed).
+  const unwithdrawn = latestHeld.filter((promise) => promise.withdrawn !== true);
+  const held = unwithdrawn.length ? unwithdrawn : latestHeld;
   // Anything communicated BEFORE the newest grouped send is gone: that send
   // quoted one window for every member, so a member's older per-service
   // confirmation no longer stands even if another member's confirmation came
