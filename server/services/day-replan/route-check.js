@@ -147,8 +147,9 @@ function hourSlots(o) {
  *   - each stop's planned minutes (planning-minutes.js plannedWorkMinutes): every row carries preserveCapacity, as
  *     dispatch stamps it (pre-push audit round 30), and the stops read selects every input the table reads;
  *   - its order rule (its sequencers): the stored order; when that is stale (storedOrderStale), promised-window order
- *     too. Between orders that both run, dispatch's own choice (selectWinningOrder): the least drive, then the least
- *     waiting; the stored order on a tie (pre-push audit round 31);
+ *     too. Dispatch keeps only an order that keeps every promise, so one that does wins over a late one (round 32);
+ *     between those, dispatch's own choice (selectWinningOrder): the least drive, then the least waiting, the stored
+ *     order on a tie (round 31). A day where every order misses a promise is still measured, in its least-drive order;
  *   - its row mapping (a grouped stop's raw estimate is its summed work; an ordinary row keeps its raw estimate and
  *     is charged its work minutes);
  *   - its day end: the van home by DISPATCH_DAY_END, the drive home included (round 30);
@@ -179,7 +180,8 @@ function simulateBookedDay(rows, { origin, departureMin, blocks, date }) {
     });
   const sims = orders.map(run).filter(Boolean);
   if (!sims.length) return { skip: 'NO_SIMULATION' };
-  const sim = sims.reduce((best, s) => (s.travelMin < best.travelMin
+  const onTime = sims.filter((s) => s.arrivals.every((a) => !(a.lateMinutes > 0)));
+  const sim = (onTime.length ? onTime : sims).reduce((best, s) => (s.travelMin < best.travelMin
     || (s.travelMin === best.travelMin && s.waitingMin < best.waitingMin) ? s : best));
   return { sim };
 }

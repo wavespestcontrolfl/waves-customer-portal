@@ -138,6 +138,19 @@ describe('one tech-day', () => {
     expect(ids(day)).toEqual(['far', 'near']);
   });
 
+  test("between two orders, one that keeps every promise wins over a late one, whatever its drive (round 32)", () => {
+    const { storedOrderStale } = require('../services/scheduling/arrival-route')._internals;
+    const at = (id, start, end, order, lat) => stop(id, start, end, { route_order: order, customer_id: `cust-${id}`, lat, lng: -82.45 });
+    // The stored p1, p2, p3 drives least (86 minutes) but reaches p2 43 minutes after its arrival promise (8:00 plus
+    // 2 hours), behind p1's 2-hour job; promised-window order p2, p1, p3 drives 102 and keeps every promise.
+    const day = [{ ...at('p1', '08:30:00', null, 1, 27.45), estimated_duration_minutes: 120 },
+      at('p2', '08:00:00', '09:00:00', 2, 27.5), at('p3', '10:30:00', null, 4, 27.6)];
+    expect(storedOrderStale(day)).toBe(true);
+    const { sim } = rc.simulateBookedDay(day, { origin: HQ, departureMin: 480, blocks: [], date: MONDAY });
+    expect(sim.arrivals.map((x) => x.id)).toEqual(['p2', 'p1', 'p3']);
+    expect(sim.arrivals.every((x) => !(x.lateMinutes > 0))).toBe(true);
+  });
+
   test("a version-2 allocation's services are one stop, also with no street address (round 31)", () => {
     const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
     const member = (id) => stop(id, '09:00:00', null, {
