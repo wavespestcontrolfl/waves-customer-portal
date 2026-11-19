@@ -40,7 +40,7 @@ const { ensureCatalogLoaded, expectedServiceMinutes, stopExpectedMinutesSync, ex
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY, MAKE_ROOM_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
-const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
+const { getZoneFunnelDays, applyZoneDayFunnel, onZoneDay, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRouteDaysPolicyKey } = require('./scheduling/zone-route-days');
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid,
@@ -2198,20 +2198,21 @@ function makeRoomModeFor(userOpts) {
   }
 }
 
-// The zone-day funnel as the page resolved it (applyZoneDayFunnel): its cluster days, plus the one seed day when it
-// seeded one. funnelDays null = no funnel.
-function funnelAllows(funnelDays, funnel, date) {
-  return !funnelDays || funnelDays.has(date) || (funnel?.mode === 'seeded' && funnel.seedDate === date);
+// The zone-day funnel as the page resolved it (applyZoneDayFunnel): its cluster days (for the slot's own technician
+// when funnelTechDays is given: onZoneDay), plus the one seed day when it seeded one. funnelDays null = no funnel.
+function funnelAllows(funnelDays, funnel, slot, funnelTechDays) {
+  return !funnelDays || onZoneDay(slot.date, slot.techId, funnelDays, funnelTechDays)
+    || (funnel?.mode === 'seeded' && funnel.seedDate === slot.date);
 }
 
 // This page's own offer rules for one window the make-room check tries: the request's dates and weekends, the
 // customer grid and close, the zone days, the time of day, the notice and the season.
-function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel = null }) {
+function makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnelTechDays = null, funnel = null }) {
   return (slot) => {
     if (!slot?.date || slot.date < dateFrom || slot.date > dateTo) return false;
     if (!enumerateETDateStrings(slot.date, slot.date, { includeWeekends: opts.includeWeekends }).length) return false;
     if (!slotWindowFitsDay(slot.windowStart, slot.windowEnd)) return false;
-    if (!funnelAllows(funnelDays, funnel, slot.date)) return false;
+    if (!funnelAllows(funnelDays, funnel, slot, funnelTechDays)) return false;
     const kept = filterPastSlotsForToday(filterTimeOfDay([slot], opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes });
     return filterSeasonalSlots(kept, serviceProfile).length === 1;
   };
@@ -2552,7 +2553,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // — evaluated over THIS request's window, so a pinned single-date request
   // seeds that day instead of returning nothing. days null = funnel
   // inactive; the helper fails open on its own.
-  const { days: funnelDays, failed: funnelLookupFailed } = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
+  // funnelTechDays: the same days per truck (GATE_MULTI_TECH_CONFIRM), null = the fleet's.
+  const { days: funnelDays, techDays: funnelTechDays, failed: funnelLookupFailed } = await getZoneFunnelDays(db, { estimateZone, dateFrom, dateTo });
   // Fail-open must stay REQUEST-scoped: when the gate is on and either the
   // zone resolution or the zone-stop lookup failed, this request may be
   // serving an unfunneled pool to a funnel-zone estimate — caching that
@@ -2594,7 +2596,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     ]);
     const asapRaw = applyLineOfferRule(asapLists.flat().filter((s) => !dateHasStop(stopDates, s)), lineRanking);
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
-    const filtered = applyOnePerHour(applyLineOfferRule(dedupeSlots(asap), lineRanking, { sameStart: true })).sort(compareCustomerFacingSlots);
+    // Per truck (funnelTechDays, GATE_MULTI_TECH_CONFIRM): the one-per-start choice waits for the day funnel, as on
+    // the coords path below, so the truck whose zone day it is keeps its start. Else today's order (choice first).
+    const sameStart = (slots) => applyOnePerHour(applyLineOfferRule(slots, lineRanking, { sameStart: true }));
+    const afterFunnel = (slots) => (funnelTechDays ? sameStart(slots).sort(compareCustomerFacingSlots) : slots);
+    const filtered = (funnelTechDays ? dedupeSlots(asap) : sameStart(dedupeSlots(asap))).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
       serviceProfile,
@@ -2605,9 +2611,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // qualifies) and BEFORE firstDayAvailability, so the scarcity badge
     // counts only days the customer can see. No route data on this path, so
     // a seed falls back to the soonest day.
-    const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
-      filterTimeOfDay(bookable, opts.timeOfDay), funnelDays,
+    const { slots: funneledPool, funnel } = applyZoneDayFunnel(
+      filterTimeOfDay(bookable, opts.timeOfDay), funnelDays, { techDays: funnelTechDays },
     );
+    const funneledBookable = afterFunnel(funneledPool);
     const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
@@ -2624,7 +2631,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         // Admin diagnostics use getSlotDebug, which carries coords itself.
         // Funnel active → count the (time-filtered) days the customer can
         // see; inactive → the full bookable pool, exactly as before.
-        firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : bookable),
+        firstDayAvailability: firstDayAvailability(funnel ? funneledBookable : afterFunnel(bookable)),
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
         includeWeekends: opts.includeWeekends,
@@ -2724,11 +2731,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
   // LIVE line map: with a ranked list, the home-first choice at one start and the
   // one-per-hour collapse wait for the customer route check below, so a home slot that
-  // check rejects leaves the gap technician's slot at that start. No ranking: today's
-  // order (collapse first; applyLineOfferRule with no ranking returns its input).
+  // check rejects leaves the gap technician's slot at that start. Per truck (funnelTechDays,
+  // GATE_MULTI_TECH_CONFIRM) they wait too: the day funnel first keeps each technician's own
+  // zone days, so the truck whose zone day it is keeps its start. Else today's order
+  // (collapse first; applyLineOfferRule with no ranking returns its input).
   const collapseStarts = (slots) => applyOnePerHour(applyLineOfferRule(slots, lineRanking, { sameStart: true }));
+  const collapseLate = !!lineRanking || !!funnelTechDays;
   const mergedPool = dedupeSlots([...asap, ...classified]);
-  const sortedPool = (lineRanking ? mergedPool : collapseStarts(mergedPool)).sort(compareCustomerFacingSlots);
+  const sortedPool = (collapseLate ? mergedPool : collapseStarts(mergedPool)).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
     filterPastSlotsForToday(sortedPool, { minimumLeadMinutes: opts.minimumLeadMinutes }),
@@ -2766,7 +2776,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
-  const { slots: funneledEligible, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
+  const { slots: funneledEligible, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates, techDays: funnelTechDays });
   // GATE_CUSTOMER_ROUTE_CHECK: drop only a start that would make another customer late,
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
@@ -2780,7 +2790,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     capabilityRows: serviceProfile.reservationServiceMix ? capabilityRowsFor(serviceProfile.reservationServiceMix) : null,
     // The zone the page passes find-time, for the self-serve drive cap's route-day lift.
     zoneSlug: routeDaySlug,
-    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnel }),
+    admit: makeRoomAdmit({ opts, serviceProfile, dateFrom, dateTo, funnelDays, funnelTechDays, funnel }),
     placement: makeRoomPlacement({ estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, estimateId, lineRanking }),
   };
   // Mode on: the earliest passing make-room hour joins the list below (the free list when none does). Shadow, and
@@ -2795,10 +2805,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const removed = new Set(funneledEligible.filter((slot) => !kept.has(slot)));
     countedBookable = bookable.filter((slot) => !removed.has(slot));
   }
-  // LIVE line map, ranked lists only: now the home-first choice at one start and the
-  // one-per-hour collapse (deferred above), on the list and on the count alike.
-  const funneledBookable = lineRanking ? collapseStarts(routeChecked) : routeChecked;
-  if (lineRanking) countedBookable = collapseStarts(countedBookable);
+  // Ranked lists and the per-truck funnel only: now the home-first choice at one start and
+  // the one-per-hour collapse (deferred above), on the list and on the count alike.
+  const funneledBookable = collapseLate ? collapseStarts(routeChecked) : routeChecked;
+  if (collapseLate) countedBookable = collapseStarts(countedBookable);
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with

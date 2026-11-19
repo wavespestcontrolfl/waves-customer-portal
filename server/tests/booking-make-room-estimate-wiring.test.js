@@ -411,6 +411,7 @@ describe('makeRoomAdmit — the page\'s own offer rules for a tried hour', () =>
     dateFrom: '2027-05-14',
     dateTo: '2027-05-28',
     funnelDays: overrides.funnelDays || null,
+    funnelTechDays: overrides.funnelTechDays || null,
     funnel: overrides.funnel || null,
   });
   const slot = (date, start, end) => ({ date, windowStart: start, windowEnd: end, durationMinutes: 60, techId: 'tech-1' });
@@ -432,6 +433,14 @@ describe('makeRoomAdmit — the page\'s own offer rules for a tried hour', () =>
     expect(admit({ opts: { timeOfDay: 'morning' } })(slot('2027-05-20', '14:00', '15:00'))).toBe(false);
     expect(admit({ funnelDays: new Set(['2027-05-21']) })(slot('2027-05-20', '09:00', '10:00'))).toBe(false);
     expect(admit({ funnelDays: new Set(['2027-05-20']) })(slot('2027-05-20', '09:00', '10:00'))).toBe(true);
+  });
+
+  test('per truck (GATE_MULTI_TECH_CONFIRM): a zone day counts only for its own technician or an unassigned stop', () => {
+    const funnelDays = new Set(['2027-05-20']);
+    const hour = slot('2027-05-20', '09:00', '10:00'); // tech-1's hour
+    expect(admit({ funnelDays, funnelTechDays: new Map([['2027-05-20', new Set(['tech-2'])]]) })(hour)).toBe(false);
+    expect(admit({ funnelDays, funnelTechDays: new Map([['2027-05-20', new Set(['tech-1'])]]) })(hour)).toBe(true);
+    expect(admit({ funnelDays, funnelTechDays: new Map([['2027-05-20', new Set([null])]]) })(hour)).toBe(true);
   });
 
   test('a zone the funnel seeded (no cluster day left): the seed day counts, other days do not', () => {

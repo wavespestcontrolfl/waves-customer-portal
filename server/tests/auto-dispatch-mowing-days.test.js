@@ -559,6 +559,42 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     }
   });
 
+  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): a far-south stop holds its date only for its
+  // own technician's slots; an unassigned far-south stop (STOP_WED carries no technician) holds it for every one.
+  describe('per truck (GATE_MULTI_TECH_CONFIRM)', () => {
+    const SAVED_MULTI = process.env.GATE_MULTI_TECH_CONFIRM;
+    afterEach(() => restore('GATE_MULTI_TECH_CONFIRM', SAVED_MULTI));
+    const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+    const runWith = (stops, service = NORTH) => findValidCandidateSlots(service, plain(), ctx({ db: southDb({ stops }) }));
+
+    test('on: another technician\'s far-south stop leaves the date open; the same technician\'s or an unassigned one holds it', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      const other = await runWith(stopOf('t2'));
+      expect(other.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+      expect(other.drops.south_day_kept).toBe(0);
+      for (const stops of [stopOf('t1'), STOP_WED]) {
+        const held = await runWith(stops);
+        expect(held.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+        expect(held.drops.south_day_kept).toBe(1);
+      }
+    });
+
+    test('on: the slot\'s technician decides, so an unassigned visit keeps only the other truck\'s slot that day', async () => {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '08:00', 't1'), slot(WED, '10:00', 't2')] });
+      const out = await runWith(stopOf('t1'), { ...NORTH, technician_id: null });
+      expect(out.candidates.map((c) => `${c.date} ${c.technician_id}`)).toEqual([`${WED} t2`]);
+      expect(out.drops.south_day_kept).toBe(1);
+    });
+
+    test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
+      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      const out = await runWith(stopOf('t2'));
+      expect(out.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+      expect(out.drops.south_day_kept).toBe(1);
+    });
+  });
+
   describe('the decision (index.js evaluatePlacement)', () => {
     const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 6 };
     const mowingCtx = (stops) => ctx({ conflictMoves: true, db: southDb({ stops, prefs: { preferred_day: null, mowing_days: ['Mon'] } }) });
@@ -624,6 +660,27 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       await expect(check({ ...NORTH, zone: null, customer_city: null }, WED, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED, zonesFail: true }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
+    });
+
+    test('per truck (GATE_MULTI_TECH_CONFIRM on): the receiving technician decides, and the move guard passes it', async () => {
+      const { assertDestinationClear } = require('../services/auto-dispatch/south-day-kept');
+      const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
+      const t2Stop = [{ ...STOP_WED[0], technician_id: 't2' }];
+      const check = (stops, techId) => assertDestinationClear(southDb({ stops }), NORTH, NORTH, WED, refuse, techId);
+      const saved = process.env.GATE_MULTI_TECH_CONFIRM;
+      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      try {
+        await expect(check(t2Stop, 't1')).resolves.toBeUndefined();
+        await expect(check(t2Stop, 't2')).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(STOP_WED, 't1')).rejects.toMatchObject({ code: 'REFUSED' });
+        // apply.js hands the guard's receiving technician (best.technician_id) to the check: t1 is not held by t2's day.
+        const err = await guardFor(NORTH)({ trx: southDb({ stops: t2Stop }), technicianId: 't1' }).then(() => null, (e) => e);
+        expect(String(err?.message || '')).not.toContain('far-south stop');
+      } finally {
+        restore('GATE_MULTI_TECH_CONFIRM', saved);
+      }
+      // Off: t2's far-south stop holds the date for t1 as well.
+      await expect(check(t2Stop, 't1')).rejects.toMatchObject({ code: 'REFUSED' });
     });
   });
 });

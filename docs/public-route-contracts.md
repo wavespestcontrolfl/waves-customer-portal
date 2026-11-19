@@ -1393,6 +1393,11 @@ above. The estimate surface follows the same rule in hour mode: the offer filter
 (`filterCollidingSlots`), the ASAP packing dates and the hold/commit probes in
 `slot-reservation.js` count only the slot technician's rows plus unassigned ones
 while the gate is on, so an offered estimate hour reserves and commits.
+The south-zone day funnel follows it too (owner 2026-11-19): on the estimate
+picker and the lead assessment link's offered lists, a far-south slot is on a
+cluster day only when its own technician has a zone stop that day or the day
+has an unassigned zone stop (`zone-day-funnel.js` `onZoneDay`); a slot with no
+technician counts any zone stop. Off, every zone day is the fleet's, byte for byte.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
