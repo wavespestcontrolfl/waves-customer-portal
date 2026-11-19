@@ -31,7 +31,7 @@ const {
   runNearStopsWeeklyCheck,
   weekIsMissing,
   _private: {
-    findApartPairs, holdFor, stateAt, groupBookings, replayBooking, replayAll, shortDriveSummary, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
+    findApartPairs, holdFor, stateAt, groupBookings, replayBooking, replayAll, seriesSiblingMoves, shortDriveSummary, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
   },
 } = require('../services/near-stops-weekly-check');
 
@@ -125,6 +125,16 @@ describe('part 1: next-door stops booked apart', () => {
       stop({ customer: 'c-a', at: north(0.3, HOME_A), date: '2027-03-01', start: '11:00' }),
     ];
     expect(findApartPairs(rows)).toEqual([expect.objectContaining({ sameCustomer: true, between: 1 })]);
+  });
+
+  test('a combined visit between two homes is one stop, not two', () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
+      stop({ customer: 'c-x', at: north(8), date: '2027-03-01', start: '10:00' }),
+      stop({ customer: 'c-x', at: north(8), date: '2027-03-01', start: '10:00' }),
+      stop({ customer: 'c-a', at: north(0.3, HOME_A), date: '2027-03-01', start: '11:00' }),
+    ];
+    expect(findApartPairs(rows)).toEqual([expect.objectContaining({ between: 1 })]);
   });
 
   test("a third home of the same customer between the two near homes splits them", () => {
@@ -251,11 +261,11 @@ const bookingRow = (extra = {}) => svc({
   id: 'b-1', customer: 'c-new', start: '15:00', end: '16:00', at: X, createdAt: BOOKED_AT, extra,
 });
 
-function replay({ rows, moves = [], created = [bookingRow()], closed = new Set(), absent = new Set() }) {
+function replay({ rows, moves = [], created = [bookingRow()], closed = new Set(), absent = new Set(), absences = [] }) {
   const movesById = new Map();
   for (const m of moves) movesById.set(m.scheduled_service_id, [...(movesById.get(m.scheduled_service_id) || []), m]);
   const [booking] = groupBookings(created, movesById);
-  const ctx = { rows: [...rows, ...created], movesById, tech: TECH, closed, absent, techStartPoints: false };
+  const ctx = { rows: [...rows, ...created], movesById, tech: TECH, closed, offDays: absent, absences, techStartPoints: false };
   return replayBooking(booking, ctx);
 }
 
@@ -329,12 +339,33 @@ describe('part 2: the booking replay', () => {
     const rows = [besideStop(), acrossStop()];
     const link = bookingRow({ id: 'b-link', customer_id: 'c-link', source: 'inspection_link', scheduled_date: '2027-03-10' });
     const created = [bookingRow(), link];
-    const ctx = { rows: [...rows, ...created], movesById: new Map(), tech: TECH, closed: new Set(), absent: new Set(), techStartPoints: false };
+    const ctx = { rows: [...rows, ...created], movesById: new Map(), tech: TECH, closed: new Set(), offDays: new Set(), absences: [], techStartPoints: false };
     const out = replayAll(groupBookings(created, new Map()), ctx);
-    expect(out).toMatchObject({ replayed: 1, linkBookings: 1 });
+    expect(out).toMatchObject({ replayed: 1, customerPicked: 1 });
     expect(out.costly.map((r) => r.saving)).toEqual([56]);
     const { detail } = composeWeeklyCheck({ ...out, weekStart: '2027-03-01' });
-    expect(detail).toContain('Office and phone bookings last week that took a costlier hour: 1 of 1 replayed (1 link booking not replayed: a link has its own offer rules)');
+    expect(detail).toContain('Office and phone bookings last week that took a costlier hour: 1 of 1 replayed (1 customer-picked booking not replayed: links and self-booking have their own offer rules)');
+  });
+
+  test('a self-booking is customer-picked even when its source reads admin', () => {
+    const [booking] = groupBookings([bookingRow({ self_booking_id: 'sb-1' })], new Map());
+    expect(booking.staffPicked).toBe(false);
+    expect(groupBookings([bookingRow()], new Map())[0].staffPicked).toBe(true);
+  });
+
+  test("a sibling moved by a series move held its old hour at booking (series_moves.rows)", () => {
+    const moved = { ...besideStop(), scheduled_date: '2027-03-24' };
+    const series = [{ created_at: after(60), rows: [{ id: 's-beside', before: { scheduled_date: DAY, window_start: '09:00:00', window_end: '10:00:00' }, after: { scheduled_date: '2027-03-24' } }] }];
+    const moves = seriesSiblingMoves(series);
+    expect(moves).toEqual([{ scheduled_service_id: 's-beside', original_date: DAY, original_window: '09:00:00-10:00:00', created_at: after(60) }]);
+    expect(replay({ rows: [moved, acrossStop()], moves }).saving).toBe(56);
+  });
+
+  test('an absence counts as it stood at booking: one entered later does not close the day', () => {
+    const later = [{ absence_date: DAY, created_at: after(60), cleared_at: null }];
+    expect(replay({ rows: [besideStop(), acrossStop()], absences: later }).saving).toBe(56);
+    const thenCleared = [{ absence_date: DAY, created_at: before(60), cleared_at: after(60) }];
+    expect(replay({ rows: [besideStop(), acrossStop()], absences: thenCleared }).saving).toBe(0);
   });
 
   test('a booking cancelled after it was made still counts: it took the hour when booked', () => {
