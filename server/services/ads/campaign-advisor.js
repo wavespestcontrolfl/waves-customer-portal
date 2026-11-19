@@ -777,6 +777,9 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
         text: `Daily Ads Report — Grade: ${advice.grade || '?'}\n${advice.overall_assessment || ''}\n\n${actionsBlock}\n\nFull report: ${publicPortalUrl()}/admin/ads`,
         link: '/admin/ads',
         dedupeKey: `owner-alert:ads-daily-report:${advice.date || etDateString()}`,
+        // Today's report closes the open rows earlier days wrote: one open report, not one per morning
+        // (owner 2026-11-19, admin notification faults check, fault 5).
+        supersedePrior: true,
       });
     } catch (err) {
       logger.error(`Advisor owner alert failed: ${err.message}`);
