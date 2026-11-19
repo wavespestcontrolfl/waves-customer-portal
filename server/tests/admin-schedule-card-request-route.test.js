@@ -44,12 +44,6 @@ jest.mock('../services/appointment-card-request', () => ({
   isSecureCardLaneReady: (...args) => mockLaneReady(...args),
   visitCardLinkClosedReason: (...args) => mockClosedReason(...args),
 }));
-const mockSetupLinkIneligibility = jest.fn(async () => ({ reason: null }));
-const mockDeliveryPreflight = jest.fn(async () => ({ ok: true }));
-jest.mock('../services/autopay-setup-link', () => ({
-  setupLinkIneligibility: (...args) => mockSetupLinkIneligibility(...args),
-  autopayDeliveryPreflight: (...args) => mockDeliveryPreflight(...args),
-}));
 const mockMarkTerms = jest.fn(async () => ({ marked: false }));
 jest.mock('../services/in-person-handoff', () => ({ markTermsRequired: (...args) => mockMarkTerms(...args) }));
 const mockOnAutopay = jest.fn(async () => false);
@@ -104,8 +98,6 @@ describe('GET /admin/schedule/:id/card-request', () => {
     mockLaneReady.mockResolvedValue(true);
     mockOnAutopay.mockResolvedValue(false);
     mockClosedReason.mockReturnValue(null);
-    mockSetupLinkIneligibility.mockResolvedValue({ reason: null });
-    mockDeliveryPreflight.mockResolvedValue({ ok: true });
   });
 
   test('returns the rollup: request row + one-text stamp + live Auto Pay state', async () => {
@@ -124,7 +116,6 @@ describe('GET /admin/schedule/:id/card-request', () => {
         autopayActive: true,
         cardLinkSentAt: '2026-07-20T10:00:00Z',
         closedReason: null,
-        customerLinkAvailable: false,
         request: {
           status: 'completed',
           sentAt: '2026-07-20T10:00:05Z',
@@ -154,7 +145,6 @@ describe('GET /admin/schedule/:id/card-request', () => {
         autopayActive: false,
         cardLinkSentAt: null,
         closedReason: null,
-        customerLinkAvailable: false,
         request: null,
       });
     });
@@ -176,58 +166,6 @@ describe('GET /admin/schedule/:id/card-request', () => {
     expect(mockClosedReason).toHaveBeenCalledWith(visitRow);
     // Without these two columns the rule reads every visit as closed.
     expect(lastFirstCols.scheduled_services).toEqual(expect.arrayContaining(['status', 'scheduled_date']));
-  });
-
-  // Pre-push Codex P1: the closed line may name the customer's own Auto Pay
-  // link only when that link would go out (it refuses dues, prepay and
-  // one-time lanes, payer-billed customers, and a dark gate). The line names
-  // the TEXT button, so the text itself must pass too (no phone, STOP or a
-  // landline would refuse that tap the way the visit's button was refused).
-  test("customerLinkAvailable is true only when a text of the customer's Auto Pay link would go out", async () => {
-    const visitRow = { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null, status: 'on_site', scheduled_date: '2026-11-11' };
-    const customerRow = { id: 'cust-1', phone: '+19415550100' };
-    mockClosedReason.mockReturnValue('visit_not_live:on_site');
-    mockSetupLinkIneligibility.mockResolvedValue({ reason: null, customer: customerRow });
-    const read = async () => withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`);
-      expect(response.status).toBe(200);
-      return response.json();
-    });
-
-    stubTables({ scheduled_services: visitRow, appointment_card_requests: undefined, customers: { id: 'cust-1' } });
-    await expect(read()).resolves.toMatchObject({ closedReason: 'visit_not_live:on_site', customerLinkAvailable: true });
-    expect(mockSetupLinkIneligibility).toHaveBeenCalledWith('cust-1');
-    // The customer page's "Text Auto Pay link" is an office SMS send: same
-    // channel and trigger, on the customer row eligibility read.
-    expect(mockDeliveryPreflight).toHaveBeenCalledWith({ customerId: 'cust-1', customer: customerRow, delivery: 'sms', trigger: 'admin' });
-
-    // Eligible, but the text would not go out.
-    mockDeliveryPreflight.mockResolvedValue({ ok: false, reason: 'no_customer_phone' });
-    await expect(read()).resolves.toMatchObject({ customerLinkAvailable: false });
-
-    // Not eligible: the SMS preflight never runs.
-    mockDeliveryPreflight.mockClear();
-    mockSetupLinkIneligibility.mockResolvedValue({ reason: 'unsupported_billing_lane' });
-    await expect(read()).resolves.toMatchObject({ customerLinkAvailable: false });
-    expect(mockDeliveryPreflight).not.toHaveBeenCalled();
-
-    // An unreadable check names no fallback and never fails the panel.
-    mockSetupLinkIneligibility.mockRejectedValue(new Error('payment_methods unreadable'));
-    await expect(read()).resolves.toMatchObject({ closedReason: 'visit_not_live:on_site', customerLinkAvailable: false });
-  });
-
-  test('a live visit skips the Auto Pay link check', async () => {
-    stubTables({
-      scheduled_services: { id: 'svc-1', customer_id: 'cust-1', card_link_sent_at: null, status: 'confirmed', scheduled_date: '2099-01-01' },
-      appointment_card_requests: undefined,
-      customers: { id: 'cust-1' },
-    });
-    await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/admin/schedule/svc-1/card-request`);
-      await expect(response.json()).resolves.toMatchObject({ closedReason: null, customerLinkAvailable: false });
-    });
-    expect(mockSetupLinkIneligibility).not.toHaveBeenCalled();
-    expect(mockDeliveryPreflight).not.toHaveBeenCalled();
   });
 
   test('404 on an unknown visit', async () => {

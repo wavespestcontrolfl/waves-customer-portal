@@ -26589,24 +26589,6 @@ router.get('/:id/card-request', async (req, res, next) => {
         logger.warn(`[schedule] card-request autopay check failed for ${visit.id}: ${e.message}`);
       }
     }
-    // A closed visit points the office to the customer page's "Text Auto Pay
-    // link" only when that text would go out: the link's own eligibility
-    // (gate, no customer, payer, billing lane, Auto Pay state), then the
-    // read-only SMS preflight that tap's office send would meet (phone, SMS
-    // gate, STOP / consent, cached landline). An unreadable check names no
-    // fallback.
-    const closedReason = visitCardLinkClosedReason(visit);
-    let customerLinkAvailable = false;
-    if (closedReason) {
-      try {
-        const { setupLinkIneligibility, autopayDeliveryPreflight } = require('../services/autopay-setup-link');
-        const eligibility = await setupLinkIneligibility(visit.customer_id);
-        customerLinkAvailable = eligibility.reason === null
-          && (await autopayDeliveryPreflight({ customerId: visit.customer_id, customer: eligibility.customer, delivery: 'sms', trigger: 'admin' })).ok === true;
-      } catch (e) {
-        logger.warn(`[schedule] card-request Auto Pay link check failed for ${visit.id}: ${e?.code || e?.name || 'error'}`);
-      }
-    }
     res.json({
       enabled: await isSecureCardLaneReady(),
       autopayActive,
@@ -26614,8 +26596,7 @@ router.get('/:id/card-request', async (req, res, next) => {
       // Non-null once the visit can no longer take a card link (tech en route
       // or on site, done, cancelled, or a past date): the panel shows why in
       // place of a send button the funnel would refuse.
-      closedReason,
-      customerLinkAvailable,
+      closedReason: visitCardLinkClosedReason(visit),
       request: request
         ? {
           status: request.status,
