@@ -75,9 +75,14 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ application_rate: '0.8', rate_unit: 'fl_oz/gal' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: 0.8, rate_unit: 'FL OZ/GAL' }))).toBe('high');
     expect(applicationConcentration(row({ dilution_rate: '0.06%' }))).toBe('high');
-    expect(applicationConcentration(row({ dilution_rate: '0.1' }))).toBe('high');
+    expect(applicationConcentration(row({ dilution_rate: '0.1 %' }))).toBe('high');
     expect(applicationConcentration(row({ dilution_rate: '0.03%' }))).toBe('low');
     expect(applicationConcentration(row({ dilution_rate: 'unknown' }))).toBe('low');
+    // Text that is not an explicit percentage is no dilution: the recorded rate decides.
+    expect(applicationConcentration(row({ dilution_rate: '0.4 fl oz/gal' }))).toBe('low');
+    expect(applicationConcentration(row({ dilution_rate: '0.4 fl oz/gal', application_rate: '0.8', rate_unit: 'fl_oz/gal' }))).toBe('high');
+    expect(applicationConcentration(row({ dilution_rate: '0.03-0.06%' }))).toBe('low');
+    expect(applicationConcentration(row({ dilution_rate: '0.1' }))).toBe('low');
   });
 
   it('reads a later amount above the house mix (1.6 fl oz, one 4-gal tank) as the old 0.06% tank', () => {

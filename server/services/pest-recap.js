@@ -410,7 +410,7 @@ async function ledgerQuantitiesFor(recordId, knex) {
     const rows = await knex('property_application_history')
       .where({ service_record_id: recordId })
       .whereNull('retracted_at')
-      .select(['product_id', 'quantity_applied', 'quantity_unit']);
+      .select(['product_id', 'service_product_id', 'quantity_applied', 'quantity_unit']);
     return Array.isArray(rows) ? rows : [];
   } catch {
     return [];
@@ -471,6 +471,8 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
       .select([
         'product_name', 'product_category', 'active_ingredient', 'moa_group',
         'application_rate', 'rate_unit',
+        // The row id, to find its compliance-ledger row (the Taurus yearly-limit warning reads its quantity).
+        'id as service_product_id',
         ...(hasProductIdCol ? ['product_id'] : []),
       ])
       .catch(() => {
@@ -481,13 +483,18 @@ async function buildRecapContext(serviceId, knex = db, { includeCommonProducts =
 
   // The compliance ledger's quantity for each recorded product, for the Taurus yearly-limit warning on a
   // reopened recap. A recap save replaces its product rows without amounts, but the ledger keeps the quantity,
-  // and the yearly count reads the ledger. Matched by catalog id; fail-soft (no quantity, no warning input).
-  if (existingRecord && hasProductIdCol && existingProducts.length) {
-    const ledgerRows = await ledgerQuantitiesFor(existingRecord.id, knex);
-    const byProduct = new Map(ledgerRows.filter((row) => row.product_id != null && Number(row.quantity_applied) > 0 && row.quantity_unit)
-      .map((row) => [String(row.product_id), row]));
+  // and the yearly count reads the ledger. Fail-soft (no quantity, no warning input).
+  if (existingRecord && existingProducts.length) {
+    const ledgerRows = (await ledgerQuantitiesFor(existingRecord.id, knex))
+      .filter((row) => Number(row.quantity_applied) > 0 && row.quantity_unit);
+    // By the row's own link first (a legacy ledger row with no product_id is reachable only through it),
+    // then by catalog id.
+    const byServiceProduct = new Map(ledgerRows.filter((row) => row.service_product_id != null)
+      .map((row) => [String(row.service_product_id), row]));
+    const byProduct = new Map(ledgerRows.filter((row) => row.product_id != null).map((row) => [String(row.product_id), row]));
     for (const sp of existingProducts) {
-      const ledger = sp.product_id != null ? byProduct.get(String(sp.product_id)) : null;
+      const ledger = (sp.service_product_id != null ? byServiceProduct.get(String(sp.service_product_id)) : null)
+        || (sp.product_id != null ? byProduct.get(String(sp.product_id)) : null);
       if (ledger) {
         sp.ledger_quantity = Number(ledger.quantity_applied);
         sp.ledger_quantity_unit = ledger.quantity_unit;

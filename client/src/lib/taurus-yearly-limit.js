@@ -56,6 +56,8 @@ const flOzOf = (value, unit) => {
   if (unitKey(unit) === 'tsp') return n / TSP_PER_FL_OZ;
   return unit == null || isFlOzUnit(unit) ? n : 0;
 };
+// Whether a row's amount is the house mix's 1.6 fl oz (tsp converted; a unitless amount reads as fl oz).
+export const isHouseTaurusAmount = (totalAmount, amountUnit) => Math.abs(flOzOf(totalAmount, amountUnit) - HOUSE_TAURUS_FL_OZ) < 1e-6;
 export const isHighTaurusRate = (row) => {
   const rate = Number(row?.rate);
   const perGal = flOzPerGal(row?.rate, row?.rateUnit);

@@ -65,6 +65,17 @@ describe('FastCompleteSheet Taurus yearly limit', () => {
     expect(screen.queryByText(/yearly (Taurus )?limit/)).toBeNull();
   });
 
+  test('an edited house Taurus amount drops the inferred 0.4 rate: 3.2 fl oz after three 0.03% visits warns', async () => {
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const catalog = CATALOG.map((p) => (p.id === 'taurus' ? { ...p, default_rate: '0.8' } : p));
+    await open(threeLow, catalog);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.4');
+    fireEvent.change(screen.getByLabelText('Taurus SC'), { target: { value: '3.2' } });
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('');
+    expect(screen.getByText("Over the label's yearly Taurus limit at this home.")).toBeTruthy();
+  });
+
   test('room under the label: Taurus stays on the mix and nothing is said', async () => {
     await open(ROOM);
     expect(taurusTile()).toBeTruthy();

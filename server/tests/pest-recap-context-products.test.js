@@ -212,6 +212,21 @@ test('a reopened recap carries each recorded product\'s ledger quantity (the rec
   expect(cross).not.toHaveProperty('ledger_quantity');
 });
 
+test('a legacy ledger row with no product_id is found through its service product link', async () => {
+  const { knex } = contextDb({
+    record: { id: 'rec-1', technician_notes: null, status: 'completed' },
+    recordedProducts: [{ service_product_id: 'sp-1', product_name: 'Taurus SC', application_rate: '1.6000', rate_unit: 'oz', product_id: 'p-taurus' }],
+    ledgerRows: [
+      { product_id: null, service_product_id: 'sp-1', quantity_applied: '3.200', quantity_unit: 'fl_oz' },
+      { product_id: 'p-taurus', service_product_id: null, quantity_applied: '1.600', quantity_unit: 'fl_oz' },
+    ],
+  });
+
+  const result = await buildRecapContext(visit.id, knex);
+
+  expect(result.existingRecord.products[0]).toMatchObject({ ledger_quantity: 3.2, ledger_quantity_unit: 'fl_oz' });
+});
+
 test('a failed ledger read leaves the recorded products without a quantity and the context ok', async () => {
   const { knex } = contextDb({
     record: { id: 'rec-1', technician_notes: null, status: 'completed' },

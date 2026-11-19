@@ -121,7 +121,6 @@ const INPUT = {
   protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 6 }],
   inventoryReview: [
     { serviceKey: 'pest', productName: 'LESCO Crosscheck Plus', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Taurus SC', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Evolution Cockroach Gel Bait', status: 'in_stock', onHand: 8 },
