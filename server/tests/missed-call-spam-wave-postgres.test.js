@@ -639,6 +639,19 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(true);
     });
 
+    test('a redial one minute after a hang-up on another GBP line counts once that hang-up is past the voicemail grace at check time (pre-push audit)', async () => {
+      // The first call ended 1 minute before the judged call began; the check runs 10 minutes after the judged call.
+      await database('call_log').insert(call(CALLER, 11, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      // A hang-up that ended inside the grace at check time may still get its voicemail: it does not count.
+      const fresh = call('+17275550613', 2);
+      const redial = call('+17275550613', 1);
+      await database('call_log').insert([{ ...fresh, to_phone: SECOND_GBP_LINE }, redial]);
+      expect(await repeat(redial)).toBe(false);
+    });
+
     test('two earlier silent calls on any line make a repeat, but only a call on a GBP line is judged', async () => {
       await database('call_log').insert([call(CALLER, 60 * 24 * 3, { to_phone: OFFICE_LINE }), call(CALLER, 60 * 24, { to_phone: OFFICE_LINE })]);
       const row = judged();

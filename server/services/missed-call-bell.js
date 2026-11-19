@@ -229,8 +229,12 @@ const NOT_ON_LIVE_LEAD_SQL = `NOT EXISTS (SELECT 1 FROM leads ld WHERE ld.delete
 // The silent hang-ups of the `days` before `at` that the exchange trigger and
 // the repeat-caller rule count: an unknown North American caller nobody
 // answered (or who failed the screen), no message proven as described above,
-// never got through later, on no customer slot and no live lead.
-function silentHangupsBefore(at, days) {
+// never got through later, on no customer slot and no live lead. The voicemail
+// grace runs to `checkedAt`, the time of the check, not to `at`: a redial a
+// minute after a hang-up is judged minutes later, when the first call's
+// recording would have landed. Both callers sit in front of a delivery (the
+// ring or the bell), so the read is bounded and its caller fails open.
+function silentHangupsBefore(at, days, checkedAt = new Date()) {
   return db('call_log')
     .modify((qb) => whereNotSandboxCall(qb))
     .where('direction', 'inbound')
@@ -246,12 +250,13 @@ function silentHangupsBefore(at, days) {
       .where((none) => none
         .whereNull('recording_sid').whereNull('recording_url')
         .whereIn('status', TERMINAL_STATUSES)
-        .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(at.getTime() - VOICEMAIL_GRACE_MS)]))
+        .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)]))
       .orWhere('recording_duration_seconds', '<=', MAX_SILENT_RECORDING_SECONDS)
       .orWhere((screened) => screened.whereRaw(FAILED_SCREEN_SQL).where('recording_duration_seconds', '<=', FAILED_SCREEN_SILENT_SECONDS)))
     .whereRaw(calledBackSql({ retire: true }))
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
-    .whereRaw(NOT_ON_LIVE_LEAD_SQL);
+    .whereRaw(NOT_ON_LIVE_LEAD_SQL)
+    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true });
 }
 
 async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
@@ -259,11 +264,10 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
   const plus = String(fromPhone || '').trim().startsWith('+');
   if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
   const digits = raw.slice(-10);
-  const found = await silentHangupsBefore(at, EXCHANGE_DAYS)
+  const found = await silentHangupsBefore(at, EXCHANGE_DAYS, at)
     .whereRaw(`substr(${LAST10_SQL('from_phone')}, 1, 6) = ?`, [digits.slice(0, 6)])
     .whereRaw(`${LAST10_SQL('from_phone')} <> ?`, [digits])
     .select(db.raw(`COUNT(DISTINCT ${LAST10_SQL('from_phone')}) AS n`))
-    .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true })
     .first();
   if (Number(found?.n || 0) < EXCHANGE_MIN_NUMBERS) return false;
   const lead = await db('leads')
@@ -299,7 +303,7 @@ async function isRepeatSilentCaller(row) {
   if (!(plus ? /^1[2-9]\d{9}$/ : /^1?[2-9]\d{9}$/).test(raw)) return false;
   const otherLines = gbpLines().filter((d) => d !== String(row.to_phone || '').replace(/\D/g, '').slice(-10));
   const otherLineSql = otherLines.length ? `${LAST10_SQL('to_phone')} IN (${otherLines.map(() => '?').join(', ')})` : 'false';
-  const found = await silentHangupsBefore(new Date(row.created_at || Date.now()), REPEAT_DAYS)
+  const found = await silentHangupsBefore(new Date(row.created_at || Date.now()), REPEAT_DAYS, new Date())
     .whereNot('id', row.id)
     .whereRaw(`${CALLER_KEY} = ?`, [`1${raw.slice(-10)}`])
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
