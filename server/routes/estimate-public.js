@@ -10459,6 +10459,19 @@ async function sendAcceptedEstimateReplay(res, estimate) {
   }
 }
 
+async function sendConcurrentEstimateReceipt(res, token) {
+  const accepted = await db('estimates').where({
+    id: res.locals.acceptEstimateId, token, status: 'accepted',
+  }).first();
+  if (accepted?.status !== 'accepted') return false;
+  if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(accepted), { estimateStatus: accepted.status })) {
+    res.status(404).json({ error: 'Estimate not found' });
+  } else {
+    await sendAcceptedEstimateReplay(res, accepted);
+  }
+  return true;
+}
+
 router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req, res, next) => {
   // A captured SetupIntent a reloadable in-transaction refusal drops: retired
   // AFTER the transaction rolls back (never Stripe I/O under the row locks, and
@@ -11872,6 +11885,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         if (!Number.isInteger(acknowledged) || acknowledged !== chargeInfo.totalCents
           || !acknowledgedMethodKey || acknowledgedMethodKey !== currentMethodKey
           || !prepayConsentAccepted || !prepayVariantAttested) {
+          // Another confirmation can consume the credit in the acknowledged
+          // quote. A finished purchase has a receipt and needs no new quote.
+          if (await sendConcurrentEstimateReceipt(res, req.params.token)) return;
           return res.status(402).json({
             code: 'PREPAY_CHARGE_QUOTE',
             error: 'Confirm your exact annual prepay total to finish booking',
@@ -16972,17 +16988,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // lost appointment link or acceptance race into a successful receipt replay.
     if (err?.checkAcceptedReceipt || ['RESERVATION_EXPIRED', 'SLOT_UNAVAILABLE'].includes(err?.code)) {
       try {
-        const accepted = await db('estimates').where({
-          id: res.locals.acceptEstimateId,
-          token: req.params.token,
-          status: 'accepted',
-        }).first();
-        if (accepted?.status === 'accepted') {
-          if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(accepted), { estimateStatus: accepted.status })) {
-            return res.status(404).json({ error: 'Estimate not found' });
-          }
-          return await sendAcceptedEstimateReplay(res, accepted);
-        }
+        if (await sendConcurrentEstimateReceipt(res, req.params.token)) return;
       } catch {
         logger.warn('[estimate-accept] could not confirm a concurrent acceptance');
       }

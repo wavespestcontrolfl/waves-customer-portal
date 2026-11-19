@@ -4177,6 +4177,35 @@ describe('PAF prepay — annual prepay charged after the first visit', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 
+  test('a concurrent acceptance that used the quoted account credit returns its invoice without requoting', async () => {
+    const credit = require('../services/customer-credit');
+    storedEstimate().customer_id = 'cust-1';
+    credit.getBalance.mockResolvedValueOnce(25);
+    const quote = await quoteOf();
+    credit.getBalance.mockImplementationOnce(async () => {
+      storedEstimate().status = 'accepted';
+      db.__state.tables.annual_prepay_terms.push({
+        id: 'term-winner', source_estimate_id: 'est-paf-prepay', prepay_invoice_id: 'inv-winner',
+      });
+      db.__state.tables.invoices.push({
+        id: 'inv-winner', token: 'paid-winner', status: 'paid', total: String(quote.total),
+        credit_applied: 25, amount_paid: quote.total,
+      });
+      return 0;
+    });
+    const result = await accept({
+      prepayChargeAcknowledgedTotalCents: quote.totalCents,
+      prepayChargeAcknowledgedMethodKey: quote.methodKey,
+      prepayChargeConsentAccepted: true, prepayChargeConsentVariant: 'after_visit_prepay',
+    });
+    expect(credit.getBalance).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe(200);
+    expect(result.data).toMatchObject({ alreadyAccepted: true, invoiceId: 'inv-winner', invoicePayUrl: null });
+    expect(result.data).not.toHaveProperty('quote');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(require('../services/stripe').chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('an acknowledgement without the after-visit attestation is re-quoted, nothing committed', async () => {
     const quote = await quoteOf();
     const res = await accept({
