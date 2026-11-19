@@ -15,7 +15,7 @@
 //    name that product, and a recorded active ingredient must agree with
 //    the label's. Sharing an active ingredient is never enough — Topchoice
 //    (granular fipronil) is not Taurus SC, Distance IGR (pyriproxyfen) is not
-//    Gentrol IGR, LESCO Crosscheck Plus is not Talak 7.9 F.
+//    Gentrol IGR, LESCO Crosscheck Plus is not Talak 7.9 F (each has its own label here; owner ruling 2026-11-18).
 // 3. Nutrition wording names only nutrients the recorded active ingredient
 //    itself lists (see nutrientsListed) — never a family default.
 // Recorded `targets` (the technician's picks at completion) ride along as
@@ -49,7 +49,7 @@ const LABELS = {
   talak: {
     // Owner ruling 2026-09-11: Talak, Talstar P and Bifen I/T in the job
     // logs are the same bottle, Atticus Talak 7.9 F (product_aliases resolve
-    // them to Talak). LESCO Crosscheck Plus and Bifen XTS are different
+    // them to Talak). LESCO Crosscheck Plus (its own label below) and Bifen XTS are different
     // registrations and never match. The label states NO residual duration
     // and no mode-of-action description, so the family's neutral phrase is
     // used; only the rain / dry-surface instruction is quoted.
@@ -58,6 +58,16 @@ const LABELS = {
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talak 7.9 F label (EPA 91234-145)' },
     notes: [],
     factSlugs: ['fact-bifenthrin-talak-label'],
+  },
+  crosscheck: {
+    // Owner ruling 2026-11-18: LESCO Crosscheck Plus (EPA 10404-120) is the house bifenthrin now. It is its own label, never
+    // merged with Talak above: a "Talak" name never matches it and it never matches Talak. Same rule as Talak: only the rain /
+    // dry-surface instruction is quoted, with no residual claim and no mode-of-action description.
+    name: ['lesco crosscheck plus', 'crosscheck plus'], ai: ['bifenthrin'], source: 'LESCO Crosscheck Plus label (EPA 10404-120)',
+    phrase: null,
+    dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'LESCO Crosscheck Plus label (EPA 10404-120)' },
+    notes: [],
+    factSlugs: ['fact-bifenthrin-crosscheck-label'],
   },
   gentrol_igr: {
     // "Gentrol IGR" exactly — Gentrol Complete EC3 (its own label below) and
@@ -95,7 +105,7 @@ const LABELS = {
 // "you may still see … for a while"), labeled or not.
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg', 'antapex wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak', 'gentrol_complete_ec3'] },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'crosscheck plus', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak', 'crosscheck', 'gentrol_complete_ec3'] },
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', customerVisible: true, labels: ['gentrol_igr', 'gentrol_complete_ec3'] },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', customerVisible: true, labels: [] },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', customerVisible: true, labels: [] },

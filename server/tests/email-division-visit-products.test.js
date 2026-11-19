@@ -39,7 +39,8 @@ describe('readVisitProducts source scope: a recorded active ingredient wins over
     // Sharing the labeled product's active ingredient is never enough — the
     // claim is the LABEL's, and these are different labels (pricing.csv).
     ['Topchoice Granular Insecticide', 'Fipronil 0.0143%', false],
-    ['LESCO Crosscheck Plus', '7.9% Bifenthrin', false],
+    ['House Brand Bifenthrin Plus', 'bifenthrin', false],
+    ['LESCO Crosscheck Plus', 'lambda-cyhalothrin', false], // the name matches its own label, but the recorded AI is not bifenthrin
     ['House Brand Bifenthrin', 'bifenthrin', false],
     ['Distance IGR', 'Pyriproxyfen', false],
     ['Gentrol Point Source', 'hydroprene', false],
@@ -370,6 +371,9 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
   test.each([
     ['Talak 7.9 F', 'bifenthrin', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
     ['Bifen IT', 'Bifenthrin 7.9%', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
+    // Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin; it has its own label and register fact, never Talak's.
+    ['LESCO Crosscheck Plus', '7.9% Bifenthrin', 'fact-bifenthrin-crosscheck-label', 'LESCO Crosscheck Plus label (EPA 10404-120)', true],
+    ['LESCO Crosscheck Plus', '', 'fact-bifenthrin-crosscheck-label', 'LESCO Crosscheck Plus label (EPA 10404-120)', true],
     ['Gentrol IGR', 'hydroprene', 'fact-gentrol-igr-hydroprene', 'Gentrol IGR Concentrate label', true],
     ['Gentrol Complete EC3', 'Lambda-cyhalothrin 1.5% + (S)-Hydroprene 1.5%', 'fact-gentrol-complete-ec3', 'Gentrol Complete EC3 label (EPA 89459-119)', true],
     ['Gentrol Complete EC3', '', 'fact-gentrol-complete-ec3', 'Gentrol Complete EC3 label (EPA 89459-119)', true], // name only: the igr family reaches the same label

@@ -16,8 +16,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
   // House mix names per the 2026-09-27 ruling (#5049): Talstar P → Atticus
-  // Talak 7.9 F, bare surfactant → LESCO 90/10. Ids kept so assertions hold.
-  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  // Talak 7.9 F, then (owner 2026-11-18) LESCO Crosscheck Plus; bare surfactant → LESCO 90/10. Ids kept so assertions hold.
+  { id: 'talstar', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
 ];
@@ -63,7 +63,7 @@ describe('FastCompleteSheet', () => {
     expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
     // A liquid's bare "oz" is a fluid ounce, and a dose under 1 fl oz reads in
     // measuring spoons (0.25 fl oz = 1½ tsp) — never in mL.
-    expect(screen.getByRole('button', { name: /Atticus Talak 7\.9 F — 4 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /LESCO Crosscheck Plus — 4 fl oz/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant — 1½ tsp/ })).toBeTruthy();
   });
 
@@ -94,7 +94,7 @@ describe('FastCompleteSheet', () => {
 
     // Deselect every default product — now nothing is selected at all.
     fireEvent.click(screen.getByRole('button', { name: /Taurus SC/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Atticus Talak 7\.9 F/ }));
+    fireEvent.click(screen.getByRole('button', { name: /LESCO Crosscheck Plus/ }));
     fireEvent.click(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ }));
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     expect(submit.disabled).toBe(true);

@@ -710,7 +710,9 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     { id: 1, name: "Advion Ant Bait Gel" },
     { id: 2, name: "LESCO 90/10 Nonionic Surfactant" },
     { id: 3, name: "Taurus SC" },
-    { id: 4, name: "Atticus Talak 7.9 F" },
+    { id: 4, name: "LESCO Crosscheck Plus" },
+    // The house bifenthrin until 2026-11-18: still in the catalog, never seeded.
+    { id: 7, name: "Atticus Talak 7.9 F" },
     // The old bare surfactant identity — must never be substituted in.
     { id: 5, name: "Non-ionic Surfactant", category: "adjuvant" },
     // The retired Talstar P row (inactive in prod) — must never resolve.
@@ -803,13 +805,13 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     })).toBe(false);
   });
 
-  it("resolves Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 surfactant with the house totals", () => {
+  it("resolves Taurus SC, LESCO Crosscheck Plus, and the LESCO 90/10 surfactant with the house totals", () => {
     const selections = pestDefaultMixSelections(CATALOG);
     expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
       ["Taurus SC", 4],
-      ["Atticus Talak 7.9 F", 4],
-      // Exact identity only — the bare "Non-ionic Surfactant" and the
-      // retired "Talstar P" rows are never eligible.
+      ["LESCO Crosscheck Plus", 4],
+      // Exact identity only — the bare "Non-ionic Surfactant", the
+      // retired "Talstar P" and the old "Atticus Talak 7.9 F" rows are never eligible.
       ["LESCO 90/10 Nonionic Surfactant", 0.25],
     ]);
   });
@@ -818,18 +820,18 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     expect(
       pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Taurus SC"))
         .map((s) => s.product.name),
-    ).toEqual(["Atticus Talak 7.9 F", "LESCO 90/10 Nonionic Surfactant"]);
+    ).toEqual(["LESCO Crosscheck Plus", "LESCO 90/10 Nonionic Surfactant"]);
     // With the intended surfactant retired, the bare lawn/legacy surfactant
     // must NOT be auto-recorded in its place (codex P1 on #3611) — the
     // entry is skipped.
     expect(
       pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "LESCO 90/10 Nonionic Surfactant"))
         .map((s) => s.product.name),
-    ).toEqual(["Taurus SC", "Atticus Talak 7.9 F"]);
+    ).toEqual(["Taurus SC", "LESCO Crosscheck Plus"]);
     // Talstar P being in the catalog (inactive rows can still be loaded)
-    // never substitutes for Talak.
+    // never substitutes for Crosscheck, and neither does Talak (owner 2026-11-18).
     expect(
-      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Atticus Talak 7.9 F"))
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "LESCO Crosscheck Plus"))
         .map((s) => s.product.name),
     ).toEqual(["Taurus SC", "LESCO 90/10 Nonionic Surfactant"]);
   });

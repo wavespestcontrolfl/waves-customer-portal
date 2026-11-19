@@ -99,7 +99,7 @@ const SERVICE_DETAILS_COPY = {
     // Stylized in-house renders (gemini-3-pro-image, 2026-07-11 — no
     // manufacturer photography/trade dress). Owner-picked set, cut to Taurus
     // 2026-10-26: the Talstar P render shows a brand Waves does not buy (owner
-    // 2026-09-11: the bifenthrin bottle is Atticus Talak 7.9 F), and the
+    // 2026-09-11: the bifenthrin bottle was Atticus Talak 7.9 F; owner 2026-11-18: now LESCO Crosscheck Plus), and the
     // surfactant left pest stops (owner walkthrough 2026-10-03).
     productImages: {
       heading: 'A few of the products doing the work',
@@ -112,7 +112,7 @@ const SERVICE_DETAILS_COPY = {
       heading: 'Your plan at a glance',
       rows: [
         ['Service cadence', 'Quarterly, bi-monthly, or monthly \u2014 you pick on your estimate'],
-        ['Primary solutions', 'Taurus SC\u00ae (fipronil) & Atticus Talak 7.9 F (bifenthrin) \u2014 selected per inspection & label'],
+        ['Primary solutions', 'Taurus SC\u00ae (fipronil) & LESCO Crosscheck Plus (bifenthrin) \u2014 selected per inspection & label'],
         ['Covered pests', 'Ants (incl. ghost, big-headed, carpenter & fire-ant mounds near the structure), large roaches (American, Australian, smokybrown \u2014 \u201cpalmetto bugs\u201d), spiders (incl. widow & recluse), crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, stink & boxelder bugs'],
         // Owner 2026-10-22: the first visit includes an inside spray; after that the inside is up to the customer
         // (services/sms-company-facts.js, the same rule for Waves AI).
@@ -141,7 +141,7 @@ const SERVICE_DETAILS_COPY = {
     faq: [
       {
         q: 'Which pests are actually covered?',
-        a: 'The plan is built around two professional mainstays \u2014 Taurus SC\u00ae (fipronil, non-repellent) and Atticus Talak 7.9 F (bifenthrin, residual) \u2014 and covers the household pests on their labels: ants including ghost, big-headed, carpenter, and fire-ant mounds near the structure; the big Florida roaches (American, Australian, smokybrown \u2014 the \u201cpalmetto bugs\u201d); spiders including widow and recluse; crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, and stink and boxelder bugs. German-cockroach cleanouts, fleas, bed bugs, rodents, and turf insect programs are separate services with their own treatment plans.',
+        a: 'The plan is built around two professional mainstays \u2014 Taurus SC\u00ae (fipronil, non-repellent) and LESCO Crosscheck Plus (bifenthrin, residual) \u2014 and covers the household pests on their labels: ants including ghost, big-headed, carpenter, and fire-ant mounds near the structure; the big Florida roaches (American, Australian, smokybrown \u2014 the \u201cpalmetto bugs\u201d); spiders including widow and recluse; crickets, earwigs, silverfish, millipedes, centipedes, pillbugs, scorpions, wasps, and stink and boxelder bugs. German-cockroach cleanouts, fleas, bed bugs, rodents, and turf insect programs are separate services with their own treatment plans.',
       },
       {
         q: 'Does pest control spray around the house base or just the grass?',

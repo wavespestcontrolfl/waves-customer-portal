@@ -38,6 +38,16 @@ const DRY_4H = 'Avoid making applications when rainfall is expected before the p
 const LABEL_RAIN_RULES = Object.freeze({
   '53883-279': { product: 'Taurus SC', label: '053883-00279-20200617.pdf', duringRain: { page: 16, quote: 'Do not make treatments during times of precipitation.' } },
   '91234-145': { product: 'Atticus Talak 7.9 F', label: '083520-00003-20130321.pdf', olderLabel: true, duringRain: { page: 3, quote: 'Do not make applications during rain.' } },
+  // Read 2026-11-18 from the label PDF the catalog row's label_url names (SiteOne item D00001542; PDF pages). Owner 2026-11-18:
+  // LESCO Crosscheck Plus is the house bifenthrin now; the Talak rule above stays for old records and leftover stock.
+  '10404-120': {
+    product: 'LESCO Crosscheck Plus',
+    label: 'https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/d00001542-label/d00001542-label.pdf',
+    read: '2026-11-18',
+    duringRain: { page: 7, quote: 'Do not make applications during rain.' },
+    dryBeforeRain: { hours: 4, page: 7, quote: DRY_4H },
+    wind: { mph: 15, page: 5, quote: 'Do not apply when wind speed exceeds 15 MPH.' },
+  },
   '101563-6': { product: 'Delta Dust', label: '000432-00772-20141014.pdf', olderLabel: true, duringRain: { page: 5, quote: 'Do not make applications during rain.' } },
   '100-1066': {
     product: 'Demand CS',

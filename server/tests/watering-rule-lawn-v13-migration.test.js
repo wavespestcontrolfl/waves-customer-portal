@@ -43,7 +43,8 @@ describe('the v13 watering rules', () => {
     }
     // Stored on main by earlier label reads (20260930000001 seed).
     const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
-    const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);
+    // LESCO Crosscheck Plus: the house bifenthrin since owner ruling 2026-11-18; its 24 h hold is stored by 20261027190000.
+    const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F', 'LESCO Crosscheck Plus']);
     // Blindside (the v13 fallback weed spot) has its own migration.
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');

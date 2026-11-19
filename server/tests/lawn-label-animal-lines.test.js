@@ -34,16 +34,16 @@ describe('labelAnimalWarnings: which lines each kind gets', () => {
     const [w] = labelAnimalWarnings([{ name: 'Koi', type: 'Fish pond' }]);
     expect(w.kind).toBe('fish_pond');
     expect(w.lines).toHaveLength(1);
-    expect(w.lines[0]).toContain('Toxic to fish: Dimension, Talstar P, Talak, Advion, Topchoice, Dylox, Artavia, Heritage G, Heritage WDG, Headway, Headway G, Velista.');
+    expect(w.lines[0]).toContain('Toxic to fish: Dimension, Talstar P, Talak, LESCO Crosscheck Plus, Advion, Topchoice, Dylox, Artavia, Heritage G, Heritage WDG, Headway, Headway G, Velista.');
     expect(w.lines[0]).toContain('Topchoice 15 ft (fresh water) or 60 ft (estuarine water), Tetrino 25 ft.');
-    expect(w.lines[0]).toContain('Talstar P: avoid fish and reptile pets in ornamental ponds.');
+    expect(w.lines[0]).toContain('Talstar P and LESCO Crosscheck Plus: avoid fish and reptile pets in ornamental ponds.');
   });
 
   test('beehives: the label bee lines, with Tetrino worded as its label words it', () => {
     const [w] = labelAnimalWarnings([{ name: '', type: 'Beehives' }]);
     expect(w.kind).toBe('beehives');
     expect(w.names).toEqual(['no name']);
-    expect(w.lines[0]).toBe('Toxic to bees: Talstar P, Talak, Arena, Merit 2F, Alpine, Tetrino. No contact with blooming plants while bees forage: Arena, Merit 2F. Tetrino: no contact with blooming plants; manage flowering weeds for 10 days; keep a 10 ft downwind buffer when blooming plants are within 10 ft of the downwind edge.');
+    expect(w.lines[0]).toBe('Toxic to bees: Talstar P, Talak, LESCO Crosscheck Plus, Arena, Merit 2F, Alpine, Tetrino. No contact with blooming plants while bees forage: Arena, Merit 2F. Tetrino: no contact with blooming plants; manage flowering weeds for 10 days; keep a 10 ft downwind buffer when blooming plants are within 10 ft of the downwind edge.');
   });
 
   test('dogs, cats, Other, blank and unknown kinds get no warning', () => {

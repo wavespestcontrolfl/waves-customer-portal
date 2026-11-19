@@ -17,7 +17,9 @@
  *
  * Source of every claim below: the lawn product label research of 2026-11-14 (27 products, quotes with PDF pages), on the owner's
  * Mac: ~/lawn-pet-labels-20261114/labels-pets.md (the "Patterns" section) and summary-table.md. Nothing here comes from outside
- * those two files. Wording choices that follow the files and not the owner's decision-page text:
+ * those two files, except the LESCO Crosscheck Plus lines, which come from its label (SiteOne D00001542, read 2026-11-18; the house
+ * bifenthrin since owner ruling 2026-11-18): extremely toxic to fish, highly toxic to bees, avoid fish and reptile pets in ornamental
+ * ponds. Wording choices that follow the files and not the owner's decision-page text:
  *   - no "no waiting time" phrase: the files give no waiting time either way, only flat no-graze and no-feed lines;
  *   - Tetrino has its own bee line: its label says no contact with plants in bloom, not "while bees forage" (Arena and Merit 2F say that);
  *   - Topchoice's far distance reads "estuarine water", the label's word for the 60 ft rule.
@@ -31,8 +33,8 @@ const logger = require('./logger');
 
 const GRAZING = 'Labels say no grazing on the treated lawn and no clippings as feed: Stonewall, Prodiamine 65 WG, Merit 2F, Advion, Heritage G, Heritage WDG, Headway, Headway G, T-Storm Flowable, T-Storm 2G. T-Storm names poultry.';
 const BIRDS = 'Toxic to birds: Topchoice (spread evenly to reduce the risk to birds) and Dylox.';
-const FISH = 'Toxic to fish: Dimension, Talstar P, Talak, Advion, Topchoice, Dylox, Artavia, Heritage G, Heritage WDG, Headway, Headway G, Velista. Lawn distance from water: Topchoice 15 ft (fresh water) or 60 ft (estuarine water), Tetrino 25 ft. Talstar P: avoid fish and reptile pets in ornamental ponds.';
-const BEES = 'Toxic to bees: Talstar P, Talak, Arena, Merit 2F, Alpine, Tetrino. No contact with blooming plants while bees forage: Arena, Merit 2F. Tetrino: no contact with blooming plants; manage flowering weeds for 10 days; keep a 10 ft downwind buffer when blooming plants are within 10 ft of the downwind edge.';
+const FISH = 'Toxic to fish: Dimension, Talstar P, Talak, LESCO Crosscheck Plus, Advion, Topchoice, Dylox, Artavia, Heritage G, Heritage WDG, Headway, Headway G, Velista. Lawn distance from water: Topchoice 15 ft (fresh water) or 60 ft (estuarine water), Tetrino 25 ft. Talstar P and LESCO Crosscheck Plus: avoid fish and reptile pets in ornamental ponds.';
+const BEES = 'Toxic to bees: Talstar P, Talak, LESCO Crosscheck Plus, Arena, Merit 2F, Alpine, Tetrino. No contact with blooming plants while bees forage: Arena, Merit 2F. Tetrino: no contact with blooming plants; manage flowering weeds for 10 days; keep a 10 ft downwind buffer when blooming plants are within 10 ft of the downwind edge.';
 
 // Stored `type` values, lower case (matched case-insensitively), in the order the warnings are shown.
 const KINDS = Object.freeze([
