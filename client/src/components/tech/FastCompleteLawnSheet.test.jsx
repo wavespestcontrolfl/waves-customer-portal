@@ -295,6 +295,24 @@ describe('opening the sheet', () => {
     await waitFor(() => expect(request.mock.calls.filter(([path]) => path.split('?')[0].endsWith('/lawn-fast/context'))).toHaveLength(2));
   });
 
+  // The Today page opens the sheet at the tap and reads the catalog meanwhile
+  // (null until it arrives): the form, whose planned rows take units and stock
+  // from it, waits for it.
+  test('a catalog still being read holds the form, which opens once the catalog arrives', async () => {
+    const request = makeRequest();
+    const { rerender } = render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={null} onClose={() => {}} />);
+    await screen.findByText('Loading the product list…');
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+    rerender(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} />);
+    await screen.findByRole('heading', { name: 'Lawn assessment' });
+  });
+
+  test('a catalog that never came shows the parent\'s reason in place of the form', async () => {
+    render(<FastCompleteLawnSheet service={SERVICE} request={makeRequest()} catalog={null} catalogError="Could not load the product list." onClose={() => {}} />);
+    await screen.findByText('Could not load the product list.');
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+  });
+
   test('a visit that changed since the schedule loaded is named, not completed', async () => {
     const request = makeRequest({ ctx: context({ service: { ...VISIT, propertyId: 'prop-other' } }) });
     render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} />);

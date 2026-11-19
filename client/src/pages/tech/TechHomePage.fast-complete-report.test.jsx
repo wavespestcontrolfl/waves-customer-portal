@@ -38,7 +38,7 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
-  default: ({ service, catalog }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} />,
+  default: ({ service, catalog, catalogError }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} />,
 }));
 import TechHomePage from './TechHomePage';
 import { etDateString } from '../../lib/timezone';
@@ -345,9 +345,29 @@ it('a saved lawn visit attempt reopens the lawn visit sheet here, with the produ
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
   const sheet = await screen.findByTestId('lawn-visit-sheet');
   expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn' });
-  expect(JSON.parse(sheet.getAttribute('data-catalog'))).toEqual([{ id: 'prod-fixture', name: 'Fixture granular' }]);
+  await waitFor(() => expect(JSON.parse(screen.getByTestId('lawn-visit-sheet').getAttribute('data-catalog'))).toEqual([{ id: 'prod-fixture', name: 'Fixture granular' }]));
   expect(screen.queryByTestId('lawn-sheet')).not.toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('a saved lawn visit attempt opens with no product catalog: its same-key retry and discard need none', async () => {
+  mocks.attempts.set('svc-lawn', {
+    body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
+    summary: 'Lawn visit', sheet: 'lawn_visit',
+  });
+  vi.stubGlobal('fetch', vi.fn(async (path) => {
+    if (path.includes('/admin/dispatch/products/catalog')) throw new TypeError('Failed to fetch');
+    if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  }));
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const sheet = await screen.findByTestId('lawn-visit-sheet');
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn' });
+  // The sheet stays open; only its form (after a discard) waits on the catalog, and says why.
+  await waitFor(() => expect(screen.getByTestId('lawn-visit-sheet')).toHaveAttribute('data-catalog-error', expect.stringMatching(/Could not load the product list/)));
+  expect(JSON.parse(screen.getByTestId('lawn-visit-sheet').getAttribute('data-catalog'))).toBeNull();
 });
 
 it('a saved lawn visit attempt on a visit that now reads completed reopens the lawn visit sheet', async () => {

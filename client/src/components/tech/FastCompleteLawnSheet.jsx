@@ -1400,7 +1400,10 @@ function CustomerContact({ service, visit, request }) {
   );
 }
 
-export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
+// `catalog` null: the parent is still reading it (the Today page reads it at the
+// tap); the form waits for it, and `catalogError` says why it never came. Admin
+// Dispatch passes the array it read with the route.
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], catalogError = '', onClose, onCompleted, onFullForm, onViewDetails, suspended = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(!suspended, () => closeRef.current?.());
@@ -1416,7 +1419,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const refreshPlaces = useRef(null);
   const submitRequest = useMemo(() => plainErrors(request, reloadAreas, refreshPlaces), [request]);
   // `sheet` tags a saved attempt as this sheet's: its findings type matches the
-  // lawn re-service sheet's, and Tech Home cannot open this one.
+  // lawn re-service sheet's, and Tech Home reopens this sheet by the tag.
   const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit', invoiceFields: completionInvoiceFields(service) });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. "+ Other
@@ -1456,12 +1459,12 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay} suspended={suspended}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || wrapChecking || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting || wrapChecking} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
+      <SheetBody service={service} request={request} catalog={catalog} catalogError={catalogError} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} onWrapChecking={setWrapChecking} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
+function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -1480,6 +1483,9 @@ function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, 
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
+  // The planned rows take their units and stock from the catalog: no form
+  // without it. A saved attempt above needs none.
+  if (!catalog) return <ActionFeedback error={!!catalogError} className="tech-visit-feedback tech-visit-loading">{catalogError || 'Loading the product list…'}</ActionFeedback>;
   return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces}  onWrapChecking={onWrapChecking} />;
 }
 

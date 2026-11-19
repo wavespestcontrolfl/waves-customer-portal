@@ -85,6 +85,7 @@ import useTechEstimateSetup from '../../components/tech/useTechEstimates';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag, useFeatureFlagReady } from '../../hooks/useFeatureFlag';
 import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
+import { adminFetch } from '../../utils/admin-fetch';
 import { etDateString } from '../../lib/timezone';
 import {
   PICK_KEY, customerFirstName, customerLastName, readOptionsAnswer, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
@@ -132,6 +133,8 @@ const FIELD = {
 };
 
 const API = import.meta.env.VITE_API_URL || '';
+// What the lawn sheet says in place of its form when the catalog read fails.
+const LAWN_CATALOG_ERROR = 'Could not load the product list. Close this, check your signal, then tap Report again.';
 
 // Fast Complete (PR C, GATE_RESERVICE_FAST_COMPLETE): a pest re-service
 // (free between-visit callback, completionProfile.serviceKey ===
@@ -836,27 +839,21 @@ export default function TechHomePage({ section = 'today' }) {
     }
     openProjectForService(service);
   }, [openProjectForService]);
-  // Each Report tap (openServiceReport): a lawn sheet still reading its
-  // catalog opens only while no later tap came.
-  const reportTapSeq = useRef(0);
-  // The lawn visit sheet opens with the product catalog read at the tap, as
-  // Dispatch passes it the catalog it read with the route. No catalog, no
-  // sheet: its planned rows would have no units or stock.
-  const openLawnSheet = useCallback(async (service) => {
-    const tap = reportTapSeq.current;
-    let catalog = null;
-    try {
-      const data = await techRequest('/admin/dispatch/products/catalog');
-      if (Array.isArray(data?.products)) catalog = data.products;
-    } catch {
-      // Said below.
-    }
-    if (tap !== reportTapSeq.current) return;
-    if (!catalog) {
-      alert('Could not load the product list. Check your signal, then tap Report again.');
-      return;
-    }
-    setLawnFast({ service, catalog });
+  // The lawn visit sheet opens at once, and reads the product catalog at the
+  // tap (Dispatch passes the one it read with the route). The sheet holds its
+  // form until the catalog arrives (its planned rows take units and stock from
+  // it), and says so when the read fails. Its saved-attempt view needs no
+  // catalog, so a same-key retry or a discard never waits on one.
+  const openLawnSheet = useCallback((service) => {
+    const open = { service, catalog: null, catalogError: '' };
+    setLawnFast(open);
+    techRequest('/admin/dispatch/products/catalog')
+      .then((data) => (Array.isArray(data?.products) ? { catalog: data.products } : null))
+      .catch(() => null)
+      // Only onto the sheet this tap opened: not one closed or opened since.
+      .then((read) => setLawnFast((current) => (current === open
+        ? { ...open, ...(read || { catalogError: LAWN_CATALOG_ERROR }) }
+        : current)));
   }, []);
   // A visit that is neither typed nor pest control, routed as admin Dispatch
   // routes it (handleComplete): a lane visit under the lane voice fill opens
@@ -868,7 +865,7 @@ export default function TechHomePage({ section = 'today' }) {
   const openUntypedVisit = useCallback((service) => {
     if (isLaneReportEligible(service)) setFastCompleteService(service);
     else if (isProjectBackedCompletion(service)) openProjectOrContinue(service);
-    else if (shouldOpenLawnFastComplete(service)) void openLawnSheet(service);
+    else if (shouldOpenLawnFastComplete(service)) openLawnSheet(service);
     else openTypedCompletion(service);
   }, [openProjectOrContinue, openLawnSheet]);
   const projectServices = withSavedCompletions((selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
@@ -888,28 +885,30 @@ export default function TechHomePage({ section = 'today' }) {
   }, []);
   // Every entry point that would send a typed visit to the Dispatch deep link:
   // a lawn re-service under its gate, or a tree & shrub visit under its gate and
-  // the tech's flag, opens its Fast Complete sheet first, and a typed visit the
-  // reader reads opens the report-flow sheet; everything else is the deep
-  // link, as before.
+  // the tech's flag, opens its Fast Complete sheet first; a typed lawn
+  // treatment opens the lawn sheet, as on Dispatch (fastCompleteSheetFor), but
+  // never a whole-visit closeout or a project-backed visit (Dispatch takes
+  // those first, and its deep link still does); a typed visit the reader reads
+  // opens the report-flow sheet; everything else is the deep link, as before.
   const openTypedVisit = useCallback((service) => {
     if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
     else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
+    else if (!closesOutAsVisit(service) && !isProjectBackedCompletion(service) && shouldOpenLawnFastComplete(service)) openLawnSheet(service);
     else if (isTypedReportEligible(service, { stationMapOff, stationSheetOn })) setFastCompleteService(service);
     else openTypedCompletion(service);
-  }, [stationMapOff, stationSheetOn]);
+  }, [stationMapOff, stationSheetOn, openLawnSheet]);
   // A saved attempt on this device opens the sheet that made it, before any
   // normal eligibility decision: a successful /complete may already have made
   // the row terminal while its saved body still needs the same-key retry.
   const { resolveTap } = saved;
   const openServiceReport = useCallback(async (service) => {
-    reportTapSeq.current += 1;
     const tap = await resolveTap(service);
     if (!tap) return;
     if (tap.kind) {
       const savedSheet = {
         tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService, lawn_visit: openLawnSheet,
       }[tap.kind] || setFastCompleteService;
-      void savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
+      savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
       return;
     }
     if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
@@ -1293,9 +1292,13 @@ export default function TechHomePage({ section = 'today' }) {
         <FastCompleteLawnSheet
           key={lawnFastService.id}
           service={lawnSheetService(lawnFastService)}
-          request={techRequest}
+          // Dispatch's request (utils/admin-fetch), as there: a 2xx whose body
+          // cannot be read is an unknown outcome that keeps the saved attempt,
+          // and a refusal keeps its details (the refused product and place).
+          request={adminFetch}
           operatorId={staffIdForDevice}
           catalog={lawnFast.catalog}
+          catalogError={lawnFast.catalogError}
           onClose={(options) => {
             setLawnFast(null);
             if (options?.refresh) fetchSchedule();
