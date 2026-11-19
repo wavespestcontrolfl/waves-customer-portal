@@ -25,6 +25,7 @@ let jobCardOff = false;
 let jobCardDown = false;
 let jobCardEmpty = false;
 let protocolOn = false;
+let governedOn = false;
 let holdCard = null;
 const idsOf = (url) => (new URL(url, "http://x").searchParams.get("selectedConditionalProductIds") || "").split(",").filter(Boolean);
 
@@ -61,7 +62,8 @@ const cardFor = (url) => {
       { ...optionCard("sub", "Fixture substitute", { selectionId: "orig" }), conditional: !on.includes("orig"), planned: on.includes("orig") ? { amount: 5, unit: "fl oz" } : null },
       { id: "base", name: "Fixture base", role: "base", conditional: false, verdict: "ok", planned: { amount: 2, unit: "fl oz" }, line: "Fixture base line" },
       // A conditional line of a tree and shrub add-on: the server applies the ticks to the lawn plan only.
-      { id: "tree", name: "Fixture tree add-on", role: "conditional", conditional: true, verdict: "ok", planned: null, line: "Tree line" },
+      { id: "tree", name: "Fixture tree add-on", role: "conditional", conditional: true, verdict: "ok", planned: null, line: "Tree line",
+        ...(governedOn ? { governed: { sold: "Fixture bed treatment", rate: "0.5 oz per 1,000 sq ft", area: "500 sq ft", limit: "2 per year" } } : {}) },
       ...STEP_IDS.map((id) => optionCard(id, `Fixture ${id}`, { bermudaStep: true })),
     ],
   };
@@ -95,6 +97,7 @@ beforeEach(() => {
   jobCardDown = false;
   jobCardEmpty = false;
   protocolOn = false;
+  governedOn = false;
   holdCard = null;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
@@ -184,6 +187,21 @@ describe("the legacy Lawn tab", () => {
     expect(screen.queryByText("Amounts show on the Job tab.")).toBeNull();
   });
 
+  it("with the Job tab off, a Refresh hides the Lawn tab's mix until the card answers again", async () => {
+    jobCardOff = true;
+    await openLawnTab();
+    expect(await screen.findByText("Legacy mix product")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Plan" }));
+    const refresh = await screen.findByRole("button", { name: /Refresh/ });
+    holdCard = deferred();
+    fireEvent.click(refresh);
+    fireEvent.click(screen.getByRole("button", { name: "Lawn" }));
+    expect(await screen.findByText("Amounts show once the job card loads.")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy mix product")).toBeNull();
+    await act(async () => { holdCard.release(); });
+    expect(await screen.findByText("Legacy mix product")).toBeInTheDocument();
+  });
+
   it("an answer with no enabled flag (an empty 200) is no answer: the Lawn tab shows no mix amounts", async () => {
     jobCardEmpty = true;
     await openLawnTab();
@@ -267,6 +285,18 @@ describe("Use ticks on the Job tab", () => {
     expect(screen.queryByText("September visit")).toBeNull();
     await act(async () => { hold.release(); });
     expect(await screen.findByText("September visit")).toBeInTheDocument();
+  });
+
+  it("while a tick is re-read a governed add-on row shows no rate from the old card", async () => {
+    governedOn = true;
+    await mount();
+    expect(await screen.findByText("Rate: 0.5 oz per 1,000 sq ft")).toBeInTheDocument();
+    hold = deferred();
+    fireEvent.click(await screen.findByLabelText("Use Fixture optional"));
+    await screen.findAllByText("Checking the amounts…");
+    expect(screen.queryByText("Rate: 0.5 oz per 1,000 sq ft")).toBeNull();
+    await act(async () => { hold.release(); });
+    expect(await screen.findByText("Rate: 0.5 oz per 1,000 sq ft")).toBeInTheDocument();
   });
 
   it("shows the mixing order from the job card", async () => {

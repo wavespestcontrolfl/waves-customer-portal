@@ -1,9 +1,12 @@
 jest.mock('../models/db', () => {
-  const db = jest.fn(() => chain);
+  const db = jest.fn((table) => (table === 'scheduled_services as ss' ? addressChain : chain));
   const chain = { where: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
-    join: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(),
     modify: fn => { fn(chain); return chain; }, first: jest.fn() };
+  // The Plan tab's address read (scheduled_services as ss, joined to customers) has its own chain, so the
+  // visit-scope reads keep their order.
+  const addressChain = { join: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), first: jest.fn() };
   db.chain = chain;
+  db.addressChain = addressChain;
   db.raw = jest.fn((sql) => sql);
   return db;
 });
@@ -28,6 +31,7 @@ beforeEach(() => {
   process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
   process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
   db.chain.first.mockResolvedValue({ id: 'visit' });
+  db.addressChain.first.mockResolvedValue({ address_diverges: false });
   buildPlanForService.mockResolvedValue({ completionDefaults: { enabled: true } });
 });
 afterEach(() => { delete process.env.GATE_LAWN_COMPLETION_DEFAULTS; delete process.env.GATE_LAWN_PROPERTY_HISTORY; });
@@ -163,24 +167,37 @@ test.each([true, false])('a protocol line keeps its irrigation thresholds and lo
 });
 
 // The Plan tab's address rule is the Job card's own (its SQL, its block): at a non-primary address the plan on file is
-// the primary home's. The plan still comes back for the completion form; a failed check fails closed.
-test.each([true, false])('a visit at a non-primary address carries the Job card\'s address block; a failed check fails closed (technician=%s)', async tech => {
+// the primary home's. The plan still comes back for the completion form; an unchecked address fails closed.
+test.each([true, false])('a visit at a non-primary address carries the Job card\'s address block; an unchecked address fails closed (technician=%s)', async tech => {
   const { ALTERNATE_ADDRESS_BLOCK } = require('../services/job-card');
   buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [] } });
   const answer = async (row) => {
-    // A technician's two visit-scope reads come first; the address read is the last read of the request.
-    if (tech) db.chain.first.mockResolvedValueOnce({ id: 'visit' }).mockResolvedValueOnce({ id: 'visit' });
-    if (row instanceof Error) db.chain.first.mockRejectedValueOnce(row);
-    else db.chain.first.mockResolvedValueOnce(row);
+    if (row instanceof Error) db.addressChain.first.mockRejectedValueOnce(row);
+    else db.addressChain.first.mockResolvedValueOnce(row);
     return (await run({ tech })).body.plan;
   };
   const elsewhere = await answer({ address_diverges: true });
   expect(elsewhere.addressNotice).toEqual(ALTERNATE_ADDRESS_BLOCK);
   expect(elsewhere.protocol).toBeDefined();
   expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('ss.service_address_line1'));
-  expect(db.chain.where).toHaveBeenCalledWith('ss.id', 'visit');
+  expect(db.addressChain.where).toHaveBeenCalledWith('ss.id', 'visit');
   expect(await answer({ address_diverges: false })).not.toHaveProperty('addressNotice');
-  expect((await answer(new Error('read failed'))).addressNotice).toMatchObject({ code: 'address_unchecked' });
+  // No row (no visit, no customer), an answer that is not the read's boolean, or a failed read: unchecked.
+  for (const row of [undefined, { address_diverges: null }, new Error('read failed')]) {
+    expect((await answer(row)).addressNotice).toMatchObject({ code: 'address_unchecked' });
+  }
+});
+
+// The visit-scope check stays the last read (codex #5568 r2): a technician taken off the visit while the address
+// read runs gets no plan.
+test.each([false, true])('a technician reassigned during the address read gets no plan (post=%s)', async post => {
+  db.addressChain.first.mockImplementationOnce(async () => {
+    db.chain.first.mockResolvedValueOnce(null);
+    return { address_diverges: false };
+  });
+  const response = await run({ post, tech: true });
+  expect(response.statusCode).toBe(404);
+  expect(response.body).not.toHaveProperty('plan');
 });
 
 // The Plan tab's notice text: a stock block names no planned quantity and an unmatched line is described, not raw.

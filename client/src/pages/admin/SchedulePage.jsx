@@ -7113,14 +7113,16 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
 
 // A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
 // basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
-// grass sends the reason in place of the rate.
-export function JobCardGoverned({ governed, D }) {
+// grass sends the reason in place of the rate. `pending`: the card is being read again, so no rate
+// from the old read shows (the card's header says "Checking the amounts…").
+export function JobCardGoverned({ governed, D, pending = false }) {
   if (!governed) return null;
+  const rate = governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>;
   return (
     <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
       {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
       {governed.grass && <div>{governed.grass}</div>}
-      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      {!pending && rate}
       <div>Area: {governed.area}</div>
       <div>Limit: {governed.limit}</div>
       {governed.use && <div>{governed.use}</div>}
@@ -7178,7 +7180,7 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
     <JobCardCollapsible title={jobCardProductTitle(p)} right={right} aside={use && <JobCardUse name={p.name} use={use} D={D} />} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
-        <JobCardGoverned governed={p.governed} D={D} />
+        <JobCardGoverned governed={p.governed} D={D} pending={pending} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
@@ -8261,9 +8263,9 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                         lawn sqft before using product amounts.
                       </div>
                     )}
-                    {/* Mix amounts only on the server's word that the Job tab is off ({ enabled: false }): while the
-                        card loads, or after a failed read (503, a failed tick re-read), its checks are not there. */}
-                    {lawnMix && (jobCard?.enabled !== false ? (
+                    {/* Mix amounts only on the server's current word that the Job tab is off ({ enabled: false }): not
+                        while the card loads, after a failed read (503, a failed tick re-read), or while a Refresh is out. */}
+                    {lawnMix && (jobCard?.enabled !== false || cardPending ? (
                       <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
                         {jobCardEnabled ? "Amounts show on the Job tab." : "Amounts show once the job card loads."}
                       </div>

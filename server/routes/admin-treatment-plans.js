@@ -72,7 +72,9 @@ async function addressNotice(serviceId) {
   try {
     const row = await db('scheduled_services as ss').join('customers as c', 'ss.customer_id', 'c.id').where('ss.id', serviceId)
       .select(db.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`)).first();
-    return row?.address_diverges ? ALTERNATE_ADDRESS_BLOCK : null;
+    // Only the read's own boolean decides: no row (no visit, no customer) or any other answer is unchecked.
+    if (typeof row?.address_diverges !== 'boolean') return ADDRESS_UNCHECKED;
+    return row.address_diverges ? ALTERNATE_ADDRESS_BLOCK : null;
   } catch {
     return ADDRESS_UNCHECKED;
   }
@@ -111,10 +113,11 @@ async function completionScopeAllowed(req) {
 router.get('/:serviceId', async (req, res, next) => {
   try {
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
-    const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
+    // The address read runs with the build, so the visit-scope check below stays the last read.
+    const [plan, notice] = await Promise.all([buildPlanForService(req.params.serviceId, plannerOptions(req)), addressNotice(req.params.serviceId)]);
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req), notice: await addressNotice(req.params.serviceId) }) });
+    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req), notice }) });
   } catch (err) {
     next(err);
   }
@@ -123,10 +126,11 @@ router.get('/:serviceId', async (req, res, next) => {
 router.post('/:serviceId/build', async (req, res, next) => {
   try {
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
-    const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
+    // The address read runs with the build, so the visit-scope check below stays the last read.
+    const [plan, notice] = await Promise.all([buildPlanForService(req.params.serviceId, plannerOptions(req)), addressNotice(req.params.serviceId)]);
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req), notice: await addressNotice(req.params.serviceId) }) });
+    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req), notice }) });
   } catch (err) {
     next(err);
   }
