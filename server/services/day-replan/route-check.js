@@ -44,7 +44,10 @@ const { SLOT_MIN, serviceBlocks, _internals: gaps } = require('./close-gaps');
 const { coVisitGroups } = require('./app-sim');
 const RouteOptimizer = require('../route-optimizer');
 const { _internals: { groupRouteStops, storedOrderStale, clockOrder } } = require('../scheduling/arrival-route');
-const { promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute } = require('../route-reorder-window-fit');
+const {
+  promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
+} = require('../route-reorder-window-fit');
+const { SHIFT } = require('../scheduling/policy');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -58,6 +61,9 @@ const SCAN_DAYS = 14;
 // the service can start on the hour (AGENTS.md).
 const JOB_MIN = 60;
 const DRIVE_MIN = SLOT_MIN - JOB_MIN;
+// Dispatch's capacity day end (arrival-route.js evaluateArrivalPlacement: its 20:00 default, capped at the shift end).
+// The van is home by then.
+const DISPATCH_DAY_END = Math.min(20 * 60, SHIFT.endMinutes);
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
 const toMin = (value) => {
@@ -125,27 +131,50 @@ function hourSlots(o) {
  * booking and for find-time's arrival search (preserveCapacity):
  *   - its grouping (groupRouteStops): a visit's or a version-2 allocation's services are one stop at one arrival,
  *     their work summed;
+ *   - each stop's planned minutes (planning-minutes.js plannedWorkMinutes): every row carries preserveCapacity, as
+ *     dispatch stamps it (pre-push audit round 30), and the stops read selects every input the table reads;
  *   - its order rule: the stored order, or promised-window order when the stored one is stale (storedOrderStale);
- *   - each stop's work as that model charges it (a grouped stop's raw estimate is its summed work);
+ *   - its row mapping (a grouped stop's raw estimate is its summed work; an ordinary row keeps its raw estimate and
+ *     is charged its work minutes);
+ *   - its day end: the van home by DISPATCH_DAY_END, the drive home included (round 30);
  *   - the free scheduling drive clock with no requests (createSchedulingTravel: the conservative model; lookup never
  *     fetches).
- * Hour mode charges no stop more work or drive than this: it runs a visit's services one by one, sums co-visit
- * siblings' raw estimates and drives on the plain model. So no opening comes from a stop charged less than dispatch
- * charges it. Pre-push audit rounds 26, 28 and 29 each found a grouping of the check's own that charged less.
+ * This is the model dispatch places a new booking with when capacity applies. When planned minutes apply on every
+ * path (GATE_SCHEDULING_CAPACITY=plan, production on 11-19), hour mode charges no stop more work or drive than this:
+ * it runs a visit's services one by one, sums co-visit siblings' raw estimates and drives on the plain model.
+ * Pre-push audit rounds 26, 28, 29 and 30 each found a part of this model that the check's own copy lacked.
  * { skip: 'GROUP_UNMODELED' } when dispatch cannot group the day either (its own code: a visit's services apart in the
- * order or at two places, or promises that do not overlap); { skip: 'NO_SIMULATION' } when the simulation fails.
+ * order or at two places, or promises that do not overlap); { skip: 'NO_SIMULATION' } when the simulation fails,
+ * including a booked day that ends after DISPATCH_DAY_END (dispatch refuses every placement on it).
  */
 function simulateBookedDay(rows, { origin, departureMin, blocks, date }) {
-  const grouped = groupRouteStops(rows);
+  const stamped = rows.map((row) => ({ ...row, preserveCapacity: true }));
+  const grouped = groupRouteStops(stamped);
   if (!grouped) return { skip: 'GROUP_UNMODELED' };
-  const order = storedOrderStale(grouped, rows) ? clockOrder(grouped) : currentOrder(grouped);
+  const order = storedOrderStale(grouped, stamped) ? clockOrder(grouped) : currentOrder(grouped);
   const travel = RouteOptimizer.createSchedulingTravel({ maxRequests: 0 });
-  const sim = simulateArrivalRoute(RouteOptimizer, (row) => row.arrivalRange || effectiveWindowRange(row),
-    order.map((stop) => ({ ...stop, raw_estimate_minutes: stop.estimated_duration_minutes })), {
-      startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals: serviceBlocks(blocks),
-      legMinutes: (from, to, departMin) => travel.lookup({ date, from, to, departureMin: departMin }).minutes,
-    });
+  const seq = order.map((stop) => ({ ...stop,
+    raw_estimate_minutes: stop.memberIds ? stop.estimated_duration_minutes
+      : ('raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes),
+    estimated_duration_minutes: stop.memberIds ? stop.estimated_duration_minutes : workDuration(stop) }));
+  const sim = simulateArrivalRoute(RouteOptimizer, (row) => row.arrivalRange || effectiveWindowRange(row), seq, {
+    startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals: serviceBlocks(blocks),
+    dayEndMin: DISPATCH_DAY_END, includeReturnInFinish: true,
+    legMinutes: (from, to, departMin) => travel.lookup({ date, from, to, departureMin: departMin }).minutes,
+  });
   return sim ? { sim } : { skip: 'NO_SIMULATION' };
+}
+
+/**
+ * The latest minute the van can leave for home and be there by dayEnd (pure): leg = the drive home; a drive may not
+ * run through a block, so a block on the way moves the departure before it.
+ */
+function latestHomeDeparture(dayEnd, leg, blocks) {
+  let leave = dayEnd - leg;
+  for (const b of [...blocks].sort((x, y) => y.endMin - x.endMin)) {
+    if (leave < b.endMin && leave + leg > b.startMin) leave = b.startMin - leg;
+  }
+  return leave;
 }
 
 /**
@@ -202,7 +231,11 @@ function unmeasurable(rows) {
  * One tech-day's openings (pure). rows: the day's stops, in any order (they run in dispatch's order,
  * simulateBookedDay); blocks: the technician's schedule blocks; held: booked time, as intervals; origin: the start point,
  * where the van sets off and returns. slots: jobs that start on the hour after their drive (hourSlots);
- * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
+ * noticeSlots: the 07:05 notice's own count rule on the same openings (close-gaps: whole SLOT_MIN slots), so the two
+ * can be compared.
+ * The day's last opening (the tail) ends when a job there still leaves the drive home before DISPATCH_DAY_END
+ * (pre-push audit round 30). The job's place is unknown, so its drive home is taken as the booked day's own drive home
+ * from its last stop (the simulator's return leg). A job between two stops leaves the drive home as it is.
  */
 function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin, date }) {
   // Physical stops, not services: one visit's services at one place are one stop (physicalStops).
@@ -212,9 +245,13 @@ function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, clo
   const booked = simulateBookedDay(rows, { origin, departureMin, blocks, date });
   if (booked.skip) return { stops, skip: booked.skip };
   const { sim } = booked;
-  const open = openMin < closeMin
+  const homeLeg = sim.travelMin - sum(sim.arrivals, (a) => a.driveMin || 0);
+  const lastLeave = latestHomeDeparture(DISPATCH_DAY_END, homeLeg, serviceBlocks(blocks));
+  const open = (openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
-    : [];
+    : [])
+    .map((b) => (b.kind === 'tail' ? { ...b, min: Math.min(b.startMin + b.min, lastLeave) - b.startMin } : b))
+    .filter((b) => b.min > 0);
   // Kept: an opening that holds at least one whole job slot (the 07:05 notice's floor); `slots` then counts the jobs
   // in it that start on the hour.
   const openings = open.map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
@@ -450,8 +487,8 @@ async function measureRun(conn, now) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    recoverable, physicalStops, heldSpans, hourSlots, simulateBookedDay, measureTechDay, staffed, datesToMeasure, summarize,
-    unmeasurable,
+    recoverable, physicalStops, heldSpans, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
+    datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END,
     STAFFED_DAYS, DEMAND_DAYS,
   },
 };

@@ -169,6 +169,34 @@ describe('one tech-day', () => {
     expect(day([member('a1'), member('a2')], [{ startMin: 570, endMin: 600 }]).at(-1).departureMin).toBe(630);
   });
 
+  test("each stop is charged its planned minutes, as dispatch stamps them for a version-2 booking (round 30)", () => {
+    const { PLANNING_MINUTES } = require('../services/scheduling/planning-minutes');
+    // A one-time pest stop at 14:00 with a 15-minute estimate and no window end: charged the table's minutes.
+    const pest = stop('p1', '14:00:00', null, { service_type: 'One-Time Pest Control', estimated_duration_minutes: 15 });
+    expect(rc.measureTechDay({ ...open, rows: [pest] })).toMatchObject({ stops: 1, endMin: 840 + PLANNING_MINUTES.oneTimePest });
+    // A service the table does not name keeps its own estimate.
+    expect(rc.measureTechDay({ ...open, rows: [{ ...pest, service_type: 'Mosquito' }] })).toMatchObject({ endMin: 855 });
+  });
+
+  test("the last opening leaves the drive home before dispatch's day end; a block on the way home moves it earlier (round 30)", () => {
+    const RouteOptimizer = require('../services/route-optimizer');
+    const far = { lat: 27.9, lng: -82.45 }; // a 97-minute drive home on the conservative model
+    const leg = RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }).lookup({ date: MONDAY, from: far, to: HQ, departureMin: 600 }).minutes;
+    // The drive home is longer than the hour between the day's close (17:00) and dispatch's day end (18:00).
+    expect(rc.DISPATCH_DAY_END).toBe(18 * 60);
+    expect(leg).toBeGreaterThan(rc.DISPATCH_DAY_END - open.closeMin);
+    const lastTail = (blocks = []) => rc.measureTechDay({ ...open, rows: [stop('f1', '09:00:00', null, far)], blocks, date: MONDAY })
+      .openings.filter((o) => o.kind === 'tail').at(-1);
+    const tail = lastTail();
+    expect(tail.start + tail.min).toBe(rc.DISPATCH_DAY_END - leg);
+    // A block across that drive home: the van must leave before the block.
+    const blockStart = rc.DISPATCH_DAY_END - leg + 10;
+    const blocked = lastTail([{ startMin: blockStart, endMin: blockStart + 20 }]);
+    expect(blocked.start + blocked.min).toBe(blockStart - leg);
+    // A booked day that ends after the day end is not simulated: dispatch refuses every placement on it.
+    expect(rc.measureTechDay({ ...open, rows: [stop('late', '17:30:00', null)] }).skip).toBe('NO_SIMULATION');
+  });
+
   test('after the day closes there is no opening', () => {
     expect(rc.measureTechDay({ ...open, rows: [], departureMin: 1050, openMin: 1050 })).toMatchObject({ openings: [], slots: 0 });
   });
