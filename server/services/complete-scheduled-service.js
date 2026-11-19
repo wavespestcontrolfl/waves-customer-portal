@@ -4665,6 +4665,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
     ]);
+    // Provenance-kept copy of ONLY the picked action labels: the merged list
+    // above folds in [Protocol] / [Protocol optional] / [Action] note lines.
+    // A record that carries the technician's own note shows only this list
+    // (report-data buildProtocolPayload). Persisted beside the merged list as
+    // structured_notes.formProtocolActions, as formRecommendations is.
+    const formProtocolActions = normalizeCompletionTextArray(
+      Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : [],
+    );
     // Structured scope for each completed action — authoritative interior/
     // exterior signal for the re-entry advisory (see report-data treatmentScope).
     // Specialty preset lanes replace this list with server-derived metadata
@@ -7456,6 +7464,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...(treeShrubPestCheckFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
+            formProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,

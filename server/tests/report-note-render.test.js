@@ -152,7 +152,7 @@ describe('the report payload', () => {
       expect(JSON.stringify(data)).not.toMatch(/Light ant activity near the lanai|side yard/);
       const typed = await build({ technician_notes: tagged, structured_notes: unreadable, service_data: serviceData });
       expect(typed.typedReport.todaysResult).toEqual({ headline: 'Service completed.' });
-      expect(summaryCopySignature({ ...SERVICE, technician_notes: TITLED, structured_notes: unreadable })).toBe('');
+      expect(summaryCopySignature({ ...SERVICE, technician_notes: TITLED, structured_notes: unreadable })).toBe('-rn');
     }
   });
 
@@ -191,7 +191,7 @@ describe('the report payload', () => {
 
   test('the PDF key hashes the summary the report prints', async () => {
     const data = await build();
-    expect(summaryCopySignature(SERVICE)).toBe(keyOf(data.summary));
+    expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(data.summary)}-rn`);
   });
 });
 
@@ -237,26 +237,30 @@ describe('summaryCopySignature: the PDF key follows the note', () => {
 
   test('a note changes the key, and a changed note changes it again', () => {
     const sig = summaryCopySignature(raw());
-    expect(sig).toBe(keyOf(`${NOTE} — Jordan`));
+    expect(sig).toBe(`${keyOf(`${NOTE} — Jordan`)}-rn`);
     expect(summaryCopySignature(raw({ structured_notes: stored({ text: 'I spot-treated outside.' }) }))).not.toBe(sig);
     expect(summaryCopySignature({ technician_notes: raw().technician_notes })).toBe('');
   });
 
   test('the signature keys the PDF: the same text as fixed or as cleaned, or signed by another name, keys apart', () => {
     const signed = summaryCopySignature(raw());
-    expect(summaryCopySignature(raw({ structured_notes: stored({ source: 'fixed' }) }))).toBe(keyOf(NOTE));
+    expect(summaryCopySignature(raw({ structured_notes: stored({ source: 'fixed' }) }))).toBe(`${keyOf(NOTE)}-rn`);
     expect(summaryCopySignature(raw({ technician_name: 'Casey Rivers' }))).not.toBe(signed);
     // A titled report keeps the key it had: its body alone.
     const titled = visitReportCustomerCopy({ technician_notes: TITLED }).body;
     expect(summaryCopySignature({ technician_notes: TITLED, technician_name: 'Jordan Rivers' })).toBe(keyOf(titled));
   });
 
-  test("the key runs the report's own rule: a typed visit, the completion's rejection and a refused note key no summary", () => {
-    expect(summaryCopySignature(raw({ service_data: JSON.stringify({ typedReportSnapshot: typedCard({ body: NOTE, bodySource: 'technician_report' }) }) }))).toBe('');
-    expect(summaryCopySignature(raw({ service_data: '{"technicianReportBodyRejected":"trade_name"}' }))).toBe('');
-    expect(summaryCopySignature(raw({ structured_notes: stored({ text: UNSAFE }) }))).toBe('');
+  test("the key runs the report's own rule: a typed visit, the completion's rejection and a refused note key no summary, but still key the note", () => {
+    const typed = JSON.stringify({ typedReportSnapshot: typedCard({ body: 'We treated the kitchen.', bodySource: 'technician_report' }) });
+    expect(summaryCopySignature(raw({ service_data: typed }))).toBe('-rn');
+    // The same typed record without a note prints the card's report text, so
+    // it keys apart (pre-push P1 on 00e28dd712).
+    expect(summaryCopySignature(raw({ service_data: typed, structured_notes: '{}' }))).toBe('');
+    expect(summaryCopySignature(raw({ service_data: '{"technicianReportBodyRejected":"trade_name"}' }))).toBe('-rn');
+    expect(summaryCopySignature(raw({ structured_notes: stored({ text: UNSAFE }) }))).toBe('-rn');
     // A refused note never falls back to a titled report in the notes column.
-    expect(summaryCopySignature(raw({ technician_notes: TITLED, structured_notes: stored({ v: 2 }) }))).toBe('');
+    expect(summaryCopySignature(raw({ technician_notes: TITLED, structured_notes: stored({ v: 2 }) }))).toBe('-rn');
   });
 
   test('the cache lookup and the render key a signed note the same, by the name the identity snapshot froze', () => {
@@ -266,6 +270,6 @@ describe('summaryCopySignature: the PDF key follows the note', () => {
     const lookupRow = raw({ technician_name: 'Casey Rivers', service_data: frozen });
     const renderRow = applyReportIdentitySnapshot({ ...lookupRow });
     expect(summaryCopySignature(lookupRow)).toBe(summaryCopySignature(renderRow));
-    expect(summaryCopySignature(lookupRow)).toBe(keyOf(`${NOTE} — Jordan`));
+    expect(summaryCopySignature(lookupRow)).toBe(`${keyOf(`${NOTE} — Jordan`)}-rn`);
   });
 });

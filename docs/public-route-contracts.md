@@ -3050,15 +3050,19 @@ summary, or on a live view a narrative of the typed card under that narrative's
 own gate, which reads an empty recap) or empty, never `customerRecap`. A
 refused or malformed note is no text, and the raw column is never its fallback.
 Stored notes that cannot be read (a top-level value that is not an object)
-count as a note on every reader below too. Every frozen card's `todaysResult` drops a body it took from
-report text (`bodySource: 'technician_report'`) and keeps its headline. The
+count as a note on every reader below too. Every frozen card's `todaysResult`
+drops a body it took from report text (`bodySource: 'technician_report'`) and
+keeps its headline. The
 protocol lists (`actions`, `observations`, `recommendations`) carry only what the
 completion form recorded (`structured_notes.formProtocolActions`,
 `formObservations`, `formRecommendations`), never tagged lines of the raw note.
-The PDF key hashes the summary as it prints. The visit notes on the other
-surfaces (`customerSafeVisitNotes`) run the same rule. No key is added, and no
-query parameter. A record whose stored notes are an object without
-`reportNote` renders exactly as before.
+Completion writes `formProtocolActions` (the picked labels only) beside the
+merged `protocolActionsCompleted` on every visit. The PDF key hashes the
+summary as it prints, and on such a record it always carries `-rn` (just
+before any `-fson`/`-fsoff` part), summary or not. The visit notes on the
+other surfaces (`customerSafeVisitNotes`) run the same rule. The payload adds
+no key and no query parameter. A record whose stored notes are an object
+without `reportNote` renders exactly as before.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

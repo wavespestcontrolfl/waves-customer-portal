@@ -532,6 +532,16 @@ function genericCompletionFacts(opts = {}) {
       notes: 'On the Fast Complete report flow the pest protocol\'s sweep action ("Swept eaves, window frames, door frames, and lanai") comes from the note, never a box (owner 2026-10-08): visit-voice-facts.js reads whether the technician swept webs today and the sheet sends the action with its exterior scope. The full form keeps its checkbox.',
     },
     {
+      key: 'form_protocol_actions',
+      label: 'Protocol actions completed — form provenance only',
+      capture: ['prefill', 'voice', 'tap'],
+      storage: 'structured_notes.formProtocolActions',
+      writers: [COMPLETE_SERVICE],
+      readers: withExtra('form_protocol_actions', [{ file: REPORT_DATA, section: 'What we did, on a record that carries the technician\'s own note (buildProtocolPayload)' }]),
+      whenMissing: 'hidden',
+      notes: 'The picked action labels only. protocolActionsCompleted also folds in [Protocol] / [Protocol optional] / [Action] technician-note lines; on a record that carries structured_notes.reportNote the notes column is the raw note, so the report reads this list instead.',
+    },
+    {
       key: 'protocol_action_scopes_completed',
       label: 'Protocol action scopes completed (interior/exterior/treatment metadata per action)',
       capture: ['derived'],
@@ -676,7 +686,7 @@ function genericCompletionFacts(opts = {}) {
  * `structuredFindings` on top of it, never replaces it — and
  * complete-scheduled-service.js freezes these into structured_notes
  * unconditionally (~5755-5801, ~5854-5874): customerRecap, customerInteraction,
- * protocolActionsCompleted, protocolActionScopesCompleted, customerConcernText,
+ * protocolActionsCompleted, formProtocolActions, protocolActionScopesCompleted, customerConcernText,
  * timeOnSite, visitDurationAllocation, recommendations, formRecommendations,
  * techTips and technician_notes. report-data.js reads them the same way for a
  * typed report: buildProtocolPayload (~1791-1848, actions/recommendations/techTips)
@@ -701,6 +711,7 @@ const TYPED_SHARED_FACT_KEYS = Object.freeze([
   'customer_recap',
   'customer_interaction',
   'protocol_actions_completed',
+  'form_protocol_actions',
   'protocol_action_scopes_completed',
   'recommendations',
   'form_recommendations',

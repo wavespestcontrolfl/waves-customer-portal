@@ -509,6 +509,7 @@ function renderWriterRulesState() {
 function summaryCopySignature(service = {}) {
   const serviceData = recordServiceData(service);
   const parsed = visitReportCustomerCopy(service);
+  const ownNote = carriesReportNote(service.structured_notes);
   // THE summary rule, as the report runs it for a customer (a PDF is
   // customer-facing): technicianReportDrivesSummary on the frozen snapshots,
   // through the dark four-section transform, with the completion's rejection
@@ -517,8 +518,14 @@ function summaryCopySignature(service = {}) {
   // summary the live report dropped (codex r35 #3420).
   let state = '';
   if (reportDependsOnWriterRules(service)) state = reportWriterRulesLive() ? '-fson' : '-fsoff';
+  // A record that carries the technician's own note (or stored notes that
+  // cannot be read) prints its cards without report text and its actions
+  // from the form alone (report-data.js), with or without a summary. Its key
+  // always says so: a PDF cached before the record carried a note never
+  // stands after it.
+  if (ownNote) state = `-rn${state}`;
   if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({
-    serviceData, body: parsed.body, ownNote: carriesReportNote(service.structured_notes),
+    serviceData, body: parsed.body, ownNote,
   })) return state;
   // The key hashes the summary as the report prints it (a note in the
   // technician's own words signed), so every other summary keeps its key:
