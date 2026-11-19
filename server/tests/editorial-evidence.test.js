@@ -428,6 +428,8 @@ test('source extraction drops a colon that follows a link', () => {
     .toEqual(['https://blogs.ifas.ufl.edu/news/2023/02/22/empty-wallets/']);
   expect(evidence.sourceUrls('See https://edis.ifas.ufl.edu/publication/IN917: it lists three names.'))
     .toEqual(['https://edis.ifas.ufl.edu/publication/IN917']);
+  expect(evidence.sourceUrls('The guide says "https://edis.ifas.ufl.edu/publication/IN917: three names."'))
+    .toEqual(['https://edis.ifas.ufl.edu/publication/IN917']);
 });
 test('source extraction keeps a colon inside a link destination or a structured source', () => {
   expect(evidence.sourceUrls('The [record](https://example.org/record?id=ABC:) lists it.'))

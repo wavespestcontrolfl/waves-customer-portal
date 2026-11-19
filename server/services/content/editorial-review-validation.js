@@ -48,8 +48,9 @@ function validateChecks(checks, document, title, sources) {
 // their digits are not figures. Only these prefixes: a rating such as MERV-13 or SEER-16 is a figure. They
 // are removed for the figure test only: an attributed quote is detected on the passage as written.
 const DOCUMENT_CODE_RE = /\b(?:EENY|ENY|ENH|LH|SL|IN|CIR)-?\d+[A-Z]?\b/g;
-// A figure may sit right against its unit ("38mm", "5ft"), so no word boundary is needed after it.
-const FIGURE_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
+// A figure may sit right against its unit ("38mm", "5ft") or inside emphasis ("_5_"), so it needs
+// only no letter or digit right before it ("EENY514" and "CO2" stay names).
+const FIGURE_RE = /(?:\$|%|(?<![A-Za-z0-9])\d+(?:[.,]\d+)?|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
 // A Markdown link's destination, with any title, is not read as prose
 // ("[guide](/pest-control/2026-roach-guide/ 'Roaches')"); its text is. A bare URL stays in: it is visible
 // text. A form this misses counts its digits, which costs a repair, never a pass (holdUnsourcedFigures).

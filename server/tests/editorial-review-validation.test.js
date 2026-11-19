@@ -92,6 +92,7 @@ describe('editorial review coverage validation', () => {
     'Remove 2 ounces of bait from each station.',
     'Remove 2 bags of mulch from the bed.',
     'Adults grow to about 38mm long.',
+    'Adults grow to about _5_ centimeters long.',
     'See https://example.org/guide,40% of homes have roaches.',
     'Check 3 days later for new droppings.',
     'Check 2 traps, since 40% of roaches hide there.',

@@ -73,7 +73,7 @@ function trimTrailingUrlNoise(url) {
 function bodyUrl(body, match) {
   const raw = match[0];
   const before = body.slice(Math.max(0, match.index - 2), match.index);
-  if (/["'<]$/.test(before)) return raw; // an autolink or an HTML attribute value is delimited too
+  if (before.endsWith('<') || /=["']$/.test(before)) return raw; // an autolink or an HTML attribute value
   if (before === '](') {
     let depth = 0;
     for (let i = 0; i < raw.length; i += 1) {
