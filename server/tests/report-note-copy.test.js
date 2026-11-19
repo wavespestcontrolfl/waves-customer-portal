@@ -42,7 +42,8 @@ const MALFORMED = [
 ];
 // Stored notes that cannot be read may hold a note: a cut-off serialized note,
 // or a string that parses to something other than an object.
-const UNREADABLE = ['{not json', '{"reportNote":{"v":1,"text":"I treated the la', '"a string"', '42'];
+// pg decodes a JSONB scalar to a number or boolean (pre-push P1 on b005660da2).
+const UNREADABLE = ['{not json', '{"reportNote":{"v":1,"text":"I treated the la', '"a string"', '42', 42, true, false, [], ['x']];
 
 describe('reportNoteCustomerCopy: the stored shape', () => {
   test('reads the note from an object or a JSON string', () => {
@@ -124,6 +125,18 @@ describe('printedReportSummary: the note as the report prints it', () => {
     expect(printedReportSummary({ body: NOTE, source: 'cleaned' }, record({ technician_first_name: 'Jo' }))).toBe(`${NOTE} — Jo`);
     expect(printedReportSummary({ body: NOTE, source: 'cleaned' }, record({ technician_name: 'Waves Technician' }))).toBe(NOTE);
     expect(printedReportSummary({ body: NOTE, source: 'cleaned' }, {})).toBe(NOTE);
+  });
+
+  // Pre-push P1 on b005660da2: a generic label in the first-name field signed the note.
+  test('a generic label in any name field signs nothing', () => {
+    [
+      { technician_first_name: 'Waves Technician' },
+      { technician_first_name: 'your technician' },
+      { technician_first_name: 'Waves', technician_last_name: 'Team' },
+      { technician_first_name: 'Technician' },
+      { technician_first_name: '', technician_name: 'Technician' },
+    ].forEach((fields) => expect(reportTechnicianFirstName(record(fields))).toBeNull());
+    expect(reportTechnicianFirstName(record({ technician_first_name: 'Mary Ann', technician_last_name: 'Rivers' }))).toBe('Mary Ann');
   });
 
   test('the name is the one the identity snapshot froze, not a later row', () => {

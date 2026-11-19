@@ -348,20 +348,23 @@ const REPORT_NOTE_VERSION = 1;
 const REPORT_NOTE_SOURCES = Object.freeze(['cleaned', 'fixed']);
 const MAX_REPORT_NOTE_CHARS = 900;
 
-// Stored notes that cannot be read (a string that does not parse to an
-// object) may hold a note: they count as one, so the raw column beside them
+// Stored notes that cannot be read (a string that does not parse, or any
+// value but an object: a number or boolean as pg decodes a JSONB scalar, an
+// array) may hold a note: they count as one, so the raw column beside them
 // is never customer copy.
 const UNREADABLE_NOTES = Symbol('unreadable structured_notes');
 
-// The record's stored note, in whatever shape: undefined = it carries none.
+// The record's stored note, in whatever shape: undefined = it carries none
+// (no notes, blank notes, JSON null, or an object without the key).
 function storedReportNote(structuredNotes) {
   let notes = structuredNotes;
   if (typeof notes === 'string') {
     if (!notes.trim()) return undefined;
     try { notes = JSON.parse(notes); } catch { return UNREADABLE_NOTES; }
-    if (notes !== null && typeof notes !== 'object') return UNREADABLE_NOTES;
   }
-  return notes && typeof notes === 'object' ? notes.reportNote : undefined;
+  if (notes === null || notes === undefined) return undefined;
+  if (typeof notes !== 'object' || Array.isArray(notes)) return UNREADABLE_NOTES;
+  return notes.reportNote;
 }
 
 // A record that carries a note (in any shape), or notes that cannot be read,
@@ -392,19 +395,26 @@ function reportNoteCustomerCopy(structuredNotes) {
   return { body: violations.length ? null : text, violations, source: note.source };
 }
 
+// The words of the generic technician labels (utils/technician-name): a
+// signature that is one of them names no technician.
+const GENERIC_SIGNER_WORDS = new Set(['your', 'waves', 'technician', 'tech', 'team']);
+
 // The first name a report prints for its technician (the signature on a
 // technician's own note): the record's technician row as its identity
-// snapshot froze it, never a generic label.
+// snapshot froze it. A generic label in any name field signs nothing: the
+// first name alone, the first and last name together, the name column, or
+// one word of a label.
 function reportTechnicianFirstName(service = {}) {
   // Required here: the identity snapshot loads the address helpers and the
   // db module, which the copy rules do not need.
   const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
   const row = applyReportIdentitySnapshot(service || {});
   const first = String(row.technician_first_name || '').trim();
-  const name = formatTechnicianForCustomer({
-    name: row.technician_name, first_name: row.technician_first_name, last_name: row.technician_last_name,
-  });
-  return first || (isGenericTechnicianLabel(name) ? null : name.split(/\s+/)[0]);
+  const last = String(row.technician_last_name || '').trim();
+  const full = first ? `${first} ${last}`.trim() : formatTechnicianForCustomer({ name: row.technician_name });
+  if (isGenericTechnicianLabel(first) || isGenericTechnicianLabel(full)) return null;
+  const signer = first || full.split(/\s+/)[0];
+  return GENERIC_SIGNER_WORDS.has(signer.toLowerCase()) ? null : signer;
 }
 
 // The summary a visit's report text prints as: a note in the technician's
