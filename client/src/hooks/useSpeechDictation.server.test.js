@@ -298,6 +298,27 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
+  it("a 2xx answer cut off before its words is sent again, never read as silence", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const answer = fetchMock.getMockImplementation();
+    let posts = 0;
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === "POST" && ++posts === 1) {
+        return { ok: true, status: 200, json: async () => { throw new TypeError("Load failed"); } };
+      }
+      return answer(url, opts);
+    });
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."), { timeout: 3000 });
+    expect(postsTo(fetchMock)).toHaveLength(2);
+    expect(alert).not.toHaveBeenCalled();
+  });
+
   it("no connection after the retries: a plain message, not the browser's bare 'Load failed'", async () => {
     const onTranscript = vi.fn();
     const fetchMock = stubServer();
@@ -312,7 +333,7 @@ describe("useSpeechDictation with server dictation on", () => {
     await waitFor(() => expect(result.current.listening).toBe(true));
     await act(async () => { result.current.toggle(); });
     await waitFor(
-      () => expect(alert).toHaveBeenCalledWith("Dictation error: No connection. The recording did not send; try again."),
+      () => expect(alert).toHaveBeenCalledWith("Dictation error: The recording did not go through. Check the connection and try again."),
       { timeout: 4000 },
     );
     expect(postsTo(fetchMock)).toHaveLength(3);

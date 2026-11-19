@@ -91,31 +91,42 @@ function takeLiveSessionBudget(key) {
 // The browser sends a clip again when no answer reached it (fetchWithNetworkRetry on iOS "Load failed", client
 // hooks/serverDictation.js). When the first answer was lost on the way back, the transcriber already ran: the same
 // login, route context and audio bytes within RECENT_CLIP_MS share that first call (or the call still running)
-// instead of paying for it twice. A miss (null) or a throw is not kept, so a later send tries again.
+// instead of paying for it twice. A miss (null) or a throw is not kept, so a later send tries again. A call still
+// running is never dropped: RECENT_CLIP_MS counts from when it settles, and the size cap drops settled entries only
+// (running calls are bounded by dictationLimiter's 40 clips per 15 minutes per login).
 const crypto = require('crypto');
 const RECENT_CLIP_MS = 2 * 60 * 1000;
 const RECENT_CLIP_MAX = 100;
 const recentClips = new Map();
 
-function forgetClip(key, result) {
-  if (recentClips.get(key)?.result === result) recentClips.delete(key);
+function forgetClip(key, entry) {
+  if (recentClips.get(key) === entry) recentClips.delete(key);
 }
 
-/** `transcribe()` once per (scope, audio bytes) in RECENT_CLIP_MS; returns its promise. */
-function transcribeClipOnce(scope, buffer, transcribe) {
-  const now = Date.now();
-  // Oldest first (Map keeps insertion order): drop expired entries and keep room for one more.
+function pruneRecentClips(now) {
   for (const [key, entry] of recentClips) {
-    if (now - entry.at < RECENT_CLIP_MS && recentClips.size < RECENT_CLIP_MAX) break;
-    recentClips.delete(key);
+    if (entry.settledAt !== null && now - entry.settledAt >= RECENT_CLIP_MS) recentClips.delete(key);
   }
+  // Oldest settled first (Map keeps insertion order), leaving room for one more.
+  for (const [key, entry] of recentClips) {
+    if (recentClips.size < RECENT_CLIP_MAX) break;
+    if (entry.settledAt !== null) recentClips.delete(key);
+  }
+}
+
+/** `transcribe()` once per (scope, audio bytes) while it runs and RECENT_CLIP_MS after; returns its promise. */
+function transcribeClipOnce(scope, buffer, transcribe) {
+  pruneRecentClips(Date.now());
   const key = `${scope}|${crypto.createHash('sha256').update(buffer).digest('hex')}`;
   const hit = recentClips.get(key);
   if (hit) return hit.result;
-  const result = Promise.resolve().then(transcribe);
-  recentClips.set(key, { at: now, result });
-  result.then((value) => { if (!value) forgetClip(key, result); }, () => forgetClip(key, result));
-  return result;
+  const entry = { result: Promise.resolve().then(transcribe), settledAt: null };
+  recentClips.set(key, entry);
+  entry.result.then(
+    (value) => { if (value) entry.settledAt = Date.now(); else forgetClip(key, entry); },
+    () => forgetClip(key, entry),
+  );
+  return entry.result;
 }
 
 module.exports = {

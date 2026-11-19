@@ -435,6 +435,28 @@ describe('server dictation endpoint', () => {
       });
     });
 
+    test('a call still running is kept past RECENT_CLIP_MS: a late resend waits on it instead of paying again', async () => {
+      const t0 = Date.now();
+      const now = jest.spyOn(Date, 'now');
+      let finish;
+      mockTranscribe.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+      try {
+        await withServer(async (baseUrl) => {
+          now.mockReturnValue(t0);
+          const first = clip(baseUrl);
+          await new Promise((resolve) => { const wait = () => (finish ? resolve() : setTimeout(wait, 5)); wait(); });
+          now.mockReturnValue(t0 + 5 * 60 * 1000);
+          const late = clip(baseUrl);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          finish({ text: 'Long clip.' });
+          for (const res of await Promise.all([first, late])) expect(await res.json()).toEqual({ text: 'Long clip.' });
+          expect(mockTranscribe).toHaveBeenCalledTimes(1);
+        });
+      } finally {
+        now.mockRestore();
+      }
+    });
+
     test('after RECENT_CLIP_MS the same bytes are heard again', async () => {
       const t0 = Date.now();
       const now = jest.spyOn(Date, 'now');
@@ -455,8 +477,10 @@ describe('server dictation endpoint', () => {
   test('paid endpoint is rate-limited per caller bucket', async () => {
     await withServer(async (baseUrl) => {
       let last;
-      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl);
+      // Distinct recordings: a resend of the same bytes would share one transcription and prove nothing.
+      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl, { bytes: `opus-bytes-${i}` });
       expect(last.status).toBe(429);
+      expect(mockTranscribe.mock.calls.length).toBeGreaterThan(0);
       expect(mockTranscribe.mock.calls.length).toBeLessThanOrEqual(40);
     });
   });

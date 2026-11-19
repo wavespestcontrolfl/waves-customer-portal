@@ -175,8 +175,10 @@ describe('tech dictation upload', () => {
   test('paid endpoint is rate-limited per caller bucket', async () => {
     await withServer(async (baseUrl) => {
       let last;
-      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl);
+      // Distinct recordings: a resend of the same bytes would share one transcription and prove nothing.
+      for (let i = 0; i < 41; i += 1) last = await clip(baseUrl, { bytes: `opus-bytes-${i}` });
       expect(last.status).toBe(429);
+      expect(mockTranscribe.mock.calls.length).toBeGreaterThan(0);
       expect(mockTranscribe.mock.calls.length).toBeLessThanOrEqual(40);
     });
   });

@@ -2,7 +2,7 @@
 // our server transcribes it (POST /api/tech/dictation) instead of the browser's
 // speech recognition. This module is the client half of that endpoint: the
 // per-session availability answer and the clip upload. See useSpeechDictation.js.
-import { fetchWithNetworkRetry } from "../lib/fetchRetry";
+import { withNetworkRetry } from "../lib/fetchRetry";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -82,17 +82,24 @@ function clipForm(blob, durationSeconds) {
 
 // iOS 18 sends a POST on a connection the server already closed and never resends it: the clip
 // failed with a bare "Load failed" (owner 2026-11-06 10:49, the IB mic; the server got the
-// headers and no audio). fetchWithNetworkRetry repeats only when no response came back, and
-// both routes only transcribe (no writes), so a repeat costs at most one more transcription.
+// headers and no audio). The clip is sent again when no answer arrived, or when a 2xx answer
+// was cut off before its words (reading `{}` there used to drop the recording without a word).
+// Both routes only transcribe, and the server shares the first transcription with a resend
+// (transcribeClipOnce, server/services/dictation-upload.js), so a resend never pays twice.
 async function postClip(url, blob, durationSeconds, token) {
+  const init = { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) };
   let r;
+  let data;
   try {
-    r = await fetchWithNetworkRetry(url, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: clipForm(blob, durationSeconds) });
+    ({ r, data } = await withNetworkRetry(async () => {
+      const res = await fetch(url, init);
+      // A refusal's body is optional; a 2xx body that cannot be read is a failed send.
+      return { r: res, data: res.ok ? await res.json() : await res.json().catch(() => ({})) };
+    }));
   } catch (e) {
     if (e?.name === "AbortError") throw e;
-    throw new Error("No connection. The recording did not send; try again.");
+    throw new Error("The recording did not go through. Check the connection and try again.");
   }
-  const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const err = new Error(data?.error || `Transcription failed (HTTP ${r.status})`);
     err.status = r.status;
