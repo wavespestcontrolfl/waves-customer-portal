@@ -2,7 +2,11 @@
  * Pest Insider issue builder: plan -> copy check -> render -> send-gate check.
  *
  * Content core only. Nothing here sends, schedules, calls a model or touches
- * the database; the caller supplies the send date and recent picks. Every
+ * the database; the caller supplies the send date and recent picks. The
+ * builder always plans with `planIssue`, which picks only an eligible fact
+ * and an approved species, and takes no planner from the caller: a caller's
+ * planner would supply both the copy and the evidence it is checked against
+ * (pre-push round 17). Tests mock the plan module instead. Every
  * word of the lead and of "What's this?" is fixed, reviewed copy: the fact
  * bank's `lead` sentences and title, and the identifier species entry's
  * fact. A fact marked recheck_before_send leads only when the caller names
@@ -40,15 +44,14 @@ function sendGateErrors(issue) {
 
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
- *   recheckedFactIds?: string[], plan?: Function }} input   `plan` is the planner (injectable
- *   for tests). The issue is one email for every subscriber and takes no caller text
- *   (render.js says why).
+ *   recheckedFactIds?: string[] }} input   The issue is one email for every subscriber and
+ *   takes no caller text (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], plan = planIssue }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [] }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [] };
 
-  const { leadFact, idItem, reason } = plan({
+  const { leadFact, idItem, reason } = planIssue({
     sendDate: dateET,
     recentFactIds: recent.factIds || [],
     recentSpeciesSlugs: recent.speciesSlugs || [],
