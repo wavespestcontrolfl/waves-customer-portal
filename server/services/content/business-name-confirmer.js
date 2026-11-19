@@ -374,18 +374,8 @@ function ownerListError(code, message, fields) {
  * human-merge stamp instead of throwing. Returns { extraction,
  * requiresHumanMerge }.
  */
-async function assertOwnerListForCommit({ draft, brief = {}, frontmatter: committedFrontmatter = {}, body = '', humanApproved = false, humanMergeFallback = false, liveProtectedMetaTitle } = {}) {
+async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, body = '', humanApproved = false, humanMergeFallback = false, liveProtectedMetaTitle } = {}) {
   const gate = require('./comparison-table-gate');
-  // liveProtectedMetaTitle (publishRefresh on a service/location page): the
-  // live page's metaTitle, which automation never edits (owner rule
-  // 2026-07-16), so the commit carries it over as the owner wrote it. Those
-  // long near-me lists hold ranking words ("Best Lawn Care Near Me in
-  // Parrish, FL") the comparison gate reads as self-ranking, and judging
-  // them parked every refresh of about half the service pages for text no
-  // draft wrote or may change. Only a metaTitle identical to the live one is
-  // left out of both checks; any other value is judged as usual.
-  const frontmatter = { ...committedFrontmatter };
-  if (liveProtectedMetaTitle !== undefined && frontmatter.metaTitle === liveProtectedMetaTitle) delete frontmatter.metaTitle;
   const finalDraft = {
     frontmatter, body, title: frontmatter.title, meta_description: frontmatter.meta_description,
   };
@@ -405,8 +395,24 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter: commit
     operatorBriefText: operatorBriefTextForComparisonGate({ bucket: brief?.gsc_signal?.bucket }, brief),
   };
   const comparison = gateByField(gate, { frontmatter, body }, gateOptions);
+  // liveProtectedMetaTitle (publishRefresh on a service/location page): the
+  // live metaTitle, which automation never edits (owner rule 2026-07-16).
+  // Those long near-me lists hold ranking words ("Best Lawn Care Near Me in
+  // Parrish, FL") the gate reads as self-ranking, which parked every refresh
+  // of about half the service pages for text no draft wrote or may change.
+  // When the committed metaTitle is that live value, a ranking finding is
+  // waived only if the text WITHOUT the title raises none. Every other
+  // finding, and the company extraction, still read the title.
+  let rankingOnlyInProtectedMetaTitle = false;
+  if (liveProtectedMetaTitle !== undefined && frontmatter.metaTitle === liveProtectedMetaTitle) {
+    const withoutProtectedTitle = { ...frontmatter };
+    delete withoutProtectedTitle.metaTitle;
+    rankingOnlyInProtectedMetaTitle = !gateByField(gate, { frontmatter: withoutProtectedTitle, body }, gateOptions)
+      .findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING');
+  }
   const blocking = (comparison.findings || []).filter((f) => (f.severity === 'P0' || f.severity === 'P1')
-    && !(humanMergeFallback && f.code === 'COMPARISON_UNCLASSIFIED_OPTION'));
+    && !(humanMergeFallback && f.code === 'COMPARISON_UNCLASSIFIED_OPTION')
+    && !(rankingOnlyInProtectedMetaTitle && f.code === 'COMPARISON_RIGGED_RANKING'));
   if (blocking.length) {
     throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
       `final text fails the comparison gate: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`,
