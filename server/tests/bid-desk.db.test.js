@@ -545,10 +545,10 @@ describeDb('Bid Desk (PostgreSQL)', () => {
         ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ' Advertisement Type: Invitation to Bid',
         ' Title: Sample Canal Weed Control', ' Close Date: Oct 29, 2026',
       ].join('\n');
-      const legacyNotice = (threadId, number = 'ITB-17500') => storeEmail({
-        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
-        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
-        subject: `Advertisement Posted - ${number}`, body_text: body(number),
+      const authFor = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=${domain}`;
+      const legacyNotice = (threadId, number = 'ITB-17500', domain = 'dms.myflorida.com') => storeEmail({
+        from_address: `MFMP.NoReply@${domain}`, from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: authFor(domain), subject: `Advertisement Posted - ${number}`, body_text: body(number),
       });
       const blank = { group_key: null, gc_or_agency: null, project_title: null, solicitation_number: null, due_at: null, due_source_line: null };
       // Two rows the subject-only rule filed for one advertisement before this template: the older declined, the newer
@@ -560,10 +560,16 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(newer.created).toBe(true);
       await mockPg('emails').where({ id: newerEmail.id }).update({ subject: 'Advertisement Posted - ITB-17500', body_text: body('ITB-17500') });
       await mockPg('bid_opportunities').where({ id: newer.bidId }).update(blank);
+      // A repeat in the declined copy's own thread gives that copy the key first.
+      const sameThread = await service.ingestEmail(await legacyNotice('t-mfmp-dup-1'));
+      expect(sameThread).toMatchObject({ created: false, bidId: older.bidId });
+      expect(await bidRow(older.bidId)).toMatchObject({ status: 'no_bid', group_key: 'mfmp|itb 17500' });
+      // A repeat in a new thread still joins the open copy, not the declined keyed one, from a verified subdomain too.
       const repeat = await service.ingestEmail(await legacyNotice('t-mfmp-dup-3'));
       expect(repeat).toMatchObject({ created: false, bidId: newer.bidId });
       expect(await bidRow(newer.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17500' });
-      expect(await bidRow(older.bidId)).toMatchObject({ status: 'no_bid', group_key: null });
+      const sub = await service.ingestEmail(await legacyNotice('t-mfmp-dup-4', 'ITB-17500', 'vip.dms.myflorida.com'));
+      expect(sub).toMatchObject({ created: false, bidId: newer.bidId });
     });
 
     test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {

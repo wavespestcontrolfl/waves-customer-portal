@@ -16,7 +16,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam, domainOf } = require('./detector');
+const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
 const { etDateString } = require('../../utils/datetime-et');
 const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 const alerts = require('./alerts');
@@ -104,21 +104,26 @@ const REPEAT_JOINS_DECIDED = new Set(['mfmp']);
 const DAY_ONLY_TEMPLATES = new Set(['mfmp']);
 const MFMP_SENDER_DOMAIN = 'dms.myflorida.com';
 
-// A bid filed from an MFMP notice before the template existed has no key. The first repeat finds it by reading its
-// own linked notices with today's parser and sender check (a forged notice never verifies), and the caller gives it
-// the key (`!existing.group_key && parsed.group_key`). No row cap: a verified MFMP notice now always files with a key,
-// so this set is the few bids filed before the template (plus any filed while the template no longer parses).
-// Among matches, the same order as a keyed lookup: the oldest open bid, else the newest decided one.
-async function legacyMfmpBid(trx, groupKey) {
-  const rows = await trx('bid_opportunities as b')
+// The bid a repeat MFMP advertisement belongs to, open or decided. Candidates are the bids with its key AND the bids
+// filed from its notices before the template existed (no key): such a bid is found by reading its own linked notices
+// with today's parser and sender check, so only a verified MFMP notice of this advertisement counts (a forged one
+// never verifies), and the caller then gives it the key (`!existing.group_key && parsed.group_key`). One order for
+// all of them, as a keyed lookup: the oldest open bid, else the newest decided one. No row cap: a verified MFMP
+// notice now always files with a key, so the keyless set is the few bids filed before the template (plus any filed
+// while the template no longer parses).
+async function mfmpRepeatBid(trx, groupKey) {
+  const keyed = await trx('bid_opportunities').where({ group_key: groupKey }).select('id', 'status', 'created_at');
+  const keyless = await trx('bid_opportunities as b')
     .join('bid_opportunity_emails as l', 'l.bid_id', 'b.id').join('emails as e', 'e.id', 'l.email_id')
-    .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%@${MFMP_SENDER_DOMAIN}`])
-    .orderBy('b.created_at')
-    .select('b.id as bid_id', 'b.status', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
-  const matches = rows.filter((row) => domainOf(row.from_address) === MFMP_SENDER_DOMAIN
-    && parseBidEmail(withProviderCheck(row)).group_key === groupKey);
-  const hit = matches.find((row) => OPEN_STATUSES.includes(row.status)) || matches[matches.length - 1];
-  return hit ? trx('bid_opportunities').where({ id: hit.bid_id }).first() : null;
+    .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%${MFMP_SENDER_DOMAIN}`])
+    .select('b.id', 'b.status', 'b.created_at', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
+  const legacy = keyless.filter((row) => {
+    const parsed = parseBidEmail(withProviderCheck(row));
+    return parsed.template === 'mfmp' && parsed.group_key === groupKey;
+  });
+  const all = [...keyed, ...legacy].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const hit = all.find((row) => OPEN_STATUSES.includes(row.status)) || all[all.length - 1];
+  return hit ? trx('bid_opportunities').where({ id: hit.id }).first() : null;
 }
 
 // What a later email tells attachPatch. MFMP's Close Date names a day, not an hour: a repeat for the same Eastern day
@@ -155,10 +160,7 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null, temp
   // An addendum or a reminder is never new work: with no open bid to join, one for a bid already decided joins that
   // bid (the newest with the key), so a county's addendum to a bid we declined does not file it again. It rings
   // nothing there (attachPatch: closed).
-  if (REPEAT_JOINS_DECIDED.has(template)) {
-    const keyed = await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first();
-    return keyed || (await legacyMfmpBid(trx, groupKey)) || null;
-  }
+  if (REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   if (!ADDS_TO_EXISTING.has(kind)) return null;
   return (await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first()) || null;
 }
