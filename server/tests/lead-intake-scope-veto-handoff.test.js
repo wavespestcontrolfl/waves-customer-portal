@@ -332,6 +332,28 @@ describe('two-service reply (pest_lawn)', () => {
     expect(mockEstimateInserts[0].service_interest).toBe(PEST_LAWN_LABEL);
     expect(mockOwnerAlerts[0][1].why).toBe(`Texted for ${PEST_LAWN_LABEL}; the draft estimate needs a price.`);
   });
+
+  test.each([
+    'pest and lawn',
+    'lawn fertilization and pest control',
+    'pest and lawn services',
+    'both pest and lawn, like on the form',
+    'I want pest and lawn',
+    '"pest and lawn"',
+  ])('a combined reply "street, %s" saves the street without the pair and drafts both', async (pair) => {
+    mockClassify.mockResolvedValue({ interest: 'pest_lawn', confidence: 0.8, method: 'ai' });
+    mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
+      ? { started: false, skipped: 'scope_check_only' }
+      : { started: false, skipped: 'gate_off' }));
+
+    const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, `100 Palm Ave, Venice FL 34285, ${pair}`);
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    expect(mockCustomerUpdates).toContainEqual({ address_line1: '100 Palm Ave, Venice FL 34285' });
+    expect(mockCustomerUpdates).toContainEqual({ lead_service_interest: 'pest_lawn' });
+    expect(mockEstimateInserts).toHaveLength(1);
+    expect(mockEstimateInserts[0].service_interest).toBe(PEST_LAWN_LABEL);
+  });
 });
 
 describe('successful handoff', () => {

@@ -41,6 +41,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { PAIR_REQUEST_PATTERN } = require('./service-pair-terms');
 
 // Tokens that unambiguously imply each branch.
 const PEST_KEYWORDS = [
@@ -57,6 +58,11 @@ const LAWN_KEYWORDS = [
   'fertilization', 'mow', 'mowing', 'plug', 'plugs', 'plugging',
   'sod', 'dethatch', 'dethatching', 'top dress', 'top-dress', 'top dressing',
   'yard', 'yellow grass', 'brown grass', 'crabgrass', 'chinch',
+  // Turf insects, the Lawn Pest Knockdown list (chinch bugs above, sod
+  // webworms, armyworms, grubs): lawn signals. With a pest word in the same
+  // reply ("quarterly pest control and grub treatment") the reply goes to the
+  // model, whose prompt reads turf insects as lawn care.
+  'grub', 'grubs', 'webworm', 'webworms', 'armyworm', 'armyworms',
 ];
 
 // "one time" / "one-time" / "just once" / "single visit"
@@ -66,24 +72,13 @@ const ONE_TIME_RE = /\b(one[\s-]?time|just once|one visit|single visit|one[\s-]?
 // pest control", "pest/lawn"): one request for both. The fast path takes
 // only a reply that IS the pair, with polite filler or a form reference
 // around it ("Residential pest & lawn care", "Pest and lawn as per form I
-// filled out"). A pair inside other words ("I already have pest and lawn
-// care. I only need mosquitoes.") goes to the model, which reads the
-// context. So do "bugs in my yard", "chinch bugs in the lawn" and the
-// lawn-line "lawn pest control": they carry both keyword sets but ask for
+// filled out"): PAIR_REQUEST_PATTERN (./service-pair-terms), which lead
+// intake's street-line strip shares. A pair inside other words ("I already
+// have pest and lawn care. I only need mosquitoes.") goes to the model, which
+// reads the context. So do "bugs in my yard", "chinch bugs in the lawn" and
+// the lawn-line "lawn pest control": they carry both keyword sets but ask for
 // one service.
-// Each separator has one way to match (a comma takes the spaces around it,
-// and "and" takes none of them), so no two parts of the pattern can take the
-// same characters. At most 3 words come before the pair and 4 after it, each
-// after a comma or spaces, so matching stays linear in the length of the text.
-const PEST_SERVICE = 'pests?(?:\\s+control)?';
-const LAWN_SERVICE = '(?:lawn(?:\\s+(?:care|fertilization|treatments?|maintenance|service))?|fertilization)';
-const PAIR_JOIN = '(?:(?:\\s*,\\s*|\\s+)(?:and|plus)\\s+|\\s*[&+/]\\s*)';
-const SERVICE_PAIR_PATTERN = `(?:${PEST_SERVICE}${PAIR_JOIN}${LAWN_SERVICE}|${LAWN_SERVICE}${PAIR_JOIN}${PEST_SERVICE})`;
-const WORD_SEP = '(?:\\s*,\\s*|\\s+)';
-const PAIR_LEAD = `(?:(?:residential|both|just|i['’]d\\s+like|i\\s+would\\s+like|i\\s+want|i\\s+need|need|want|looking\\s+for|interested\\s+in)${WORD_SEP}){0,3}`;
-const PAIR_FORM = '(?:as\\s+per|per|like\\s+on|like|on|from)\\s+(?:the\\s+|my\\s+)?form(?:\\s+i\\s+(?:filled(?:\\s+(?:out|in))?|sent|submitted))?';
-const PAIR_TRAIL = `(?:${WORD_SEP}(?:services?|please|pls|thanks|thank\\s+you|both|${PAIR_FORM})){0,4}`;
-const SERVICE_PAIR_RE = new RegExp(`^${PAIR_LEAD}${SERVICE_PAIR_PATTERN}${PAIR_TRAIL}$`);
+const SERVICE_PAIR_RE = new RegExp(`^${PAIR_REQUEST_PATTERN}$`);
 // Spaces and plain punctuation become one space. Every other character stays
 // (a "?", an emoji, a word in another script: "不要 pest and lawn"), so that
 // reply does not match and goes to the model.

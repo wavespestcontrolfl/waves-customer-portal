@@ -7,13 +7,15 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mo
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { classifyServiceIntent } = require('../services/sms-service-intent');
+const { SERVICE_TAIL_RE, cutAddressClause } = require('../services/service-pair-terms');
 
 beforeEach(() => {
   mockDispatch.mockReset();
   mockDispatch.mockResolvedValue({ ok: true, json: { interest: 'unknown', confidence: 0.4 } });
 });
 
-// Replies that are a pair request: the classifier's fast path takes each one.
+// Replies that are a pair request: the classifier's fast path takes each one,
+// and lead intake's street-line strip drops each one whole (the last describes).
 const PAIR_REPLIES = [
   'Residential pest & lawn care',
   'Lawn and pest',
@@ -52,6 +54,10 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     ['chinch bugs in the lawn', 'lawn'],
     // The lawn-line turf-pest product, not two services.
     ['Lawn pest control', 'lawn'],
+    // A turf insect is a lawn signal, so a pest word beside it is no
+    // pest-only answer: the model reads the request.
+    ['Quarterly pest control and grub treatment', 'pest_lawn'],
+    ['roaches inside and armyworms in the grass', 'pest_lawn'],
   ])('%j => the model decides (%s)', async (body, modelInterest) => {
     mockDispatch.mockResolvedValue({ ok: true, json: { interest: modelInterest, confidence: 0.8 } });
     await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: modelInterest, confidence: 0.8, method: 'ai' });
@@ -92,6 +98,13 @@ describe('unchanged single-service and one-time answers', () => {
   });
 });
 
+describe('turf insects are lawn signals (the Lawn Pest Knockdown list)', () => {
+  test.each(['grubs', 'Grub treatment please', 'sod webworms', 'armyworms all over', 'chinch damage'])('%j => lawn, no model call', async (body) => {
+    await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: 'lawn', confidence: 0.9, method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+});
+
 describe('a long reply cannot stall the event loop', () => {
   test('a pair followed by many filler words and a stray word is read at once and goes to the model', async () => {
     // Before, each separator had two ways to match and the regex tried them
@@ -101,5 +114,69 @@ describe('a long reply cannot stall the event loop', () => {
     await classifyServiceIntent(body);
     expect(Date.now() - startedAt).toBeLessThan(250);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the shared address-tail pattern drops the whole pair request, and single-service tails as before', () => {
+  const strip = (address) => {
+    let out = address;
+    while (SERVICE_TAIL_RE.test(out)) out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
+    return out;
+  };
+  test.each([
+    ['123 Main St, pest and lawn', '123 Main St'],
+    ['123 Main St, lawn fertilization and pest control', '123 Main St'],
+    ['123 Main St, pest and lawn services', '123 Main St'],
+    ['123 Main St, both pest and lawn', '123 Main St'],
+    ['123 Main St, pest and lawn per the form', '123 Main St'],
+    ['123 Main St, Sarasota, quarterly pest & lawn care', '123 Main St, Sarasota'],
+    ['100 Palm Ave, Venice FL 34285, lawn/pest', '100 Palm Ave, Venice FL 34285'],
+    ['123 Main St, pest control', '123 Main St'],
+    ['123 Main St, pest service', '123 Main St'],
+    ['45 Lawn Ave', '45 Lawn Ave'],
+    // Plain punctuation the classifier reads as a space may wrap the tail.
+    ['123 Main St, "pest and lawn"', '123 Main St'],
+    ['123 Main St, “Both pest and lawn”', '123 Main St'],
+    ['123 Main St (pest and lawn)', '123 Main St'],
+    ['123 Main St - pest control', '123 Main St'],
+    ['123 Main St Apt 4 pest and lawn', '123 Main St Apt 4'],
+  ])('%j => %j', (address, street) => {
+    expect(strip(address)).toBe(street);
+  });
+
+  test.each(PAIR_REPLIES)('a street line, then the fast-path reply %j: the street line keeps none of the reply', (reply) => {
+    // The address reader cuts the text at its first clause end before the strip.
+    expect(strip(`123 Main St, ${reply}`.split(/[.;!?\n]/)[0])).toBe('123 Main St');
+    expect(strip(`123 Main St, "${reply}"`.split(/[.;!?\n]/)[0])).toBe('123 Main St');
+  });
+
+  test('a long run of commas or spaces is tried once, not from each of its characters', () => {
+    // Before the lookbehind, 12,800 commas took about 4 s and 25,600 spaces about 1 s.
+    const startedAt = Date.now();
+    expect(strip(`1 Main St${', '.repeat(12800)}x`)).toMatch(/x$/);
+    expect(strip(`1 Main St, pest and lawn${' '.repeat(25600)}x`)).toMatch(/x$/);
+    expect(strip(`1 Main St${' "-'.repeat(12800)}x`)).toMatch(/x$/);
+    expect(Date.now() - startedAt).toBeLessThan(250);
+  });
+});
+
+describe('the street-line cut ends at a connector word, but keeps a service tail whole', () => {
+  test.each([
+    // The pair request's own words ("want", "please") are not cut.
+    ['123 Main St, I want pest and lawn', '123 Main St, I want pest and lawn'],
+    ['123 Main St, pest and lawn please', '123 Main St, pest and lawn please'],
+    // Connector prose before the tail still ends the line, tail and all.
+    ['123 Main St for ants, they are everywhere', '123 Main St'],
+    ['123 Main St for my mom, pest and lawn', '123 Main St'],
+    ['Fort Myers, 123 Main St', 'Fort Myers, 123 Main St'],
+  ])('%j => %j', (clause, line) => {
+    expect(cutAddressClause(clause)).toBe(line);
+  });
+
+  test('a long run of spaces is tried once, not from each of its characters', () => {
+    // The connector split took 1.5 s on these 25,600 spaces before its lookbehind.
+    const startedAt = Date.now();
+    expect(cutAddressClause(`1 Main St, pest and lawn${' '.repeat(25600)}x`)).toMatch(/x$/);
+    expect(Date.now() - startedAt).toBeLessThan(250);
   });
 });
