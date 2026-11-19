@@ -91,6 +91,13 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ dilution_rate: '0.06%', application_rate: '0.4', rate_unit: 'fl_oz/gal' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: '0.8', rate_unit: 'fl_oz/gal', quantity_applied: '1.6', quantity_unit: 'fl_oz' }))).toBe('high');
   });
+
+  it('reads an oz/gal rate like fl_oz/gal, and a teaspoon amount in fl oz', () => {
+    expect(applicationConcentration(row({ application_rate: '0.8', rate_unit: 'oz/gal' }))).toBe('high');
+    expect(applicationConcentration(row({ application_rate: '0.4', rate_unit: 'oz/gal', quantity_applied: 3.2, quantity_unit: 'fl_oz' }))).toBe('low');
+    expect(applicationConcentration(row({ quantity_applied: 19.2, quantity_unit: 'tsp' }))).toBe('high'); // 3.2 fl oz
+    expect(applicationConcentration(row({ quantity_applied: 9.6, quantity_unit: 'tsp' }))).toBe('low'); // 1.6 fl oz
+  });
 });
 
 describe('etYearBounds', () => {

@@ -17,6 +17,7 @@
 // known); the line says so and the tech adds it by hand. Nothing here blocks
 // a save.
 
+import { TSP_PER_FL_OZ } from './measure-units';
 const TAURUS_RE = /^taurus\s*sc\b/i;
 
 export const isTaurusProduct = (product) => TAURUS_RE.test(String(product?.name || product?.product_name || product?.productName || '').trim());
@@ -37,13 +38,21 @@ const HOUSE_FL_OZ_PER_GAL = 0.4;
 const HOUSE_TAURUS_FL_OZ = 1.6;
 const unitKey = (unit) => String(unit ?? '').trim().toLowerCase().replace(/[\s.]+/g, '_');
 const isFlOzUnit = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
+// A per-gallon rate in fl oz: the catalog's "fl_oz/gal" and the also-supported "oz/gal".
+const isFlOzPerGal = (unit) => ['fl_oz/gal', 'oz/gal', 'floz/gal'].includes(unitKey(unit));
+// An amount in fl oz: teaspoons (the sheet shows small amounts in tsp) are converted first.
+const flOzOf = (value, unit) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  if (unitKey(unit) === 'tsp') return n / TSP_PER_FL_OZ;
+  return unit == null || isFlOzUnit(unit) ? n : 0;
+};
 export const isHighTaurusRate = (row) => {
   const rate = Number(row?.rate);
-  if (unitKey(row?.rateUnit) === 'fl_oz/gal' && Number.isFinite(rate) && rate > 0) return rate > HOUSE_FL_OZ_PER_GAL;
-  const amountUnit = row?.amountUnit ?? row?.unit;
+  if (isFlOzPerGal(row?.rateUnit) && Number.isFinite(rate) && rate > 0) return rate > HOUSE_FL_OZ_PER_GAL;
   const amounts = [
-    isFlOzUnit(row?.rateUnit) ? rate : 0,
-    amountUnit == null || isFlOzUnit(amountUnit) ? Number(row?.totalAmount ?? row?.amount) : 0,
+    row?.rateUnit == null ? 0 : flOzOf(rate, row.rateUnit),
+    flOzOf(row?.totalAmount ?? row?.amount, row?.amountUnit ?? row?.unit),
   ];
   return amounts.some((n) => Number.isFinite(n) && n > HOUSE_TAURUS_FL_OZ);
 };

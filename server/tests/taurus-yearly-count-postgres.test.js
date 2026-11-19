@@ -79,6 +79,11 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await db('products_catalog').insert({ name: 'Taurus SCX' });
   });
 
+  // Homes are shared across tests and every account's rows at a home now count, so each test starts empty.
+  beforeEach(async () => {
+    await db.raw('TRUNCATE property_application_history, service_records, scheduled_services, service_products');
+  });
+
   afterAll(async () => {
     if (!db) return;
     await db.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
@@ -116,24 +121,28 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
 
   it('applies the label scenarios: 4 at 0.03%, 1 at 0.06% + 2 at 0.03%, 2 at 0.06%', async () => {
     const four = randomUUID();
-    for (let i = 0; i < 4; i += 1) await application({ cust: four, property: propA });
-    expect(await count(four, propA)).toMatchObject({ high: 0, low: 4, eligible: false });
+    const fourHome = randomUUID();
+    for (let i = 0; i < 4; i += 1) await application({ cust: four, property: fourHome });
+    expect(await count(four, fourHome)).toMatchObject({ high: 0, low: 4, eligible: false });
 
     const three = randomUUID();
-    for (let i = 0; i < 3; i += 1) await application({ cust: three, property: propA });
-    expect(await count(three, propA)).toMatchObject({ high: 0, low: 3, eligible: true });
+    const threeHome = randomUUID();
+    for (let i = 0; i < 3; i += 1) await application({ cust: three, property: threeHome });
+    expect(await count(three, threeHome)).toMatchObject({ high: 0, low: 3, eligible: true });
 
     const oneHigh = randomUUID();
-    await application({ cust: oneHigh, property: propA, date: OLD });
-    await application({ cust: oneHigh, property: propA });
-    expect(await count(oneHigh, propA)).toMatchObject({ high: 1, low: 1, eligible: true });
-    await application({ cust: oneHigh, property: propA });
-    expect(await count(oneHigh, propA)).toMatchObject({ high: 1, low: 2, eligible: false });
+    const oneHighHome = randomUUID();
+    await application({ cust: oneHigh, property: oneHighHome, date: OLD });
+    await application({ cust: oneHigh, property: oneHighHome });
+    expect(await count(oneHigh, oneHighHome)).toMatchObject({ high: 1, low: 1, eligible: true });
+    await application({ cust: oneHigh, property: oneHighHome });
+    expect(await count(oneHigh, oneHighHome)).toMatchObject({ high: 1, low: 2, eligible: false });
 
     const twoHigh = randomUUID();
-    await application({ cust: twoHigh, property: propA, date: OLD });
-    await application({ cust: twoHigh, property: propA, date: '2026-09-09' });
-    expect(await count(twoHigh, propA)).toMatchObject({ high: 2, low: 0, eligible: false });
+    const twoHighHome = randomUUID();
+    await application({ cust: twoHigh, property: twoHighHome, date: OLD });
+    await application({ cust: twoHigh, property: twoHighHome, date: '2026-09-09' });
+    expect(await count(twoHigh, twoHighHome)).toMatchObject({ high: 2, low: 0, eligible: false });
   });
 
   it('reads a later 0.06% row from its rate or dilution', async () => {
@@ -213,5 +222,18 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     // 2025's rows read as 0.06% (before the cutoff), so 2025 is used up; 2026 is empty. Today alone says eligible, both years say not.
     expect(await count(cust, propA, undefined, now)).toMatchObject({ count: 0, eligible: true });
     expect(await count(cust, propA, undefined, now, '2025-12-30')).toMatchObject({ eligible: false, year: 2025 });
+  });
+
+  it('counts every account\'s applications at the home (a home that changed hands), and only this account\'s rows with no home', async () => {
+    const oldOwner = randomUUID();
+    const newOwner = randomUUID();
+    await application({ cust: oldOwner, property: propA, date: NEW });
+    await application({ cust: oldOwner, property: propA, date: NEW });
+    await application({ cust: oldOwner, property: null, date: NEW, withVisit: false }); // the old owner's, no home recorded
+    await application({ cust: newOwner, property: propA, date: NEW });
+    await application({ cust: newOwner, property: propB, date: NEW }); // the new owner's other home
+    expect((await count(newOwner, propA)).count).toBe(3);
+    expect((await count(oldOwner, propA)).count).toBe(4);
+    expect((await count(newOwner, null)).count).toBe(2);
   });
 });

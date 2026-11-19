@@ -64,8 +64,7 @@ const LEDGER_SQL = `
   FROM property_application_history pah
   LEFT JOIN service_records sr ON sr.id = pah.service_record_id
   LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
-  WHERE pah.customer_id = :customerId
-    AND pah.retracted_at IS NULL
+  WHERE pah.retracted_at IS NULL
     AND pah.application_date >= CAST(:yearStart AS date)
     AND pah.application_date < CAST(:nextYearStart AS date)
     AND (
@@ -79,10 +78,12 @@ const LEDGER_SQL = `
       SELECT 1 FROM service_records cur
       WHERE cur.id = pah.service_record_id AND cur.scheduled_service_id = CAST(:visitId AS uuid)
     )
+    -- The label limit is per structure: with a known home, every account's applications at that property
+    -- count (a home that changed hands); this customer's rows with no property recorded count too.
     AND (
-      CAST(:propertyId AS uuid) IS NULL
-      OR COALESCE(pah.property_id, ss.property_id) = CAST(:propertyId AS uuid)
-      OR COALESCE(pah.property_id, ss.property_id) IS NULL
+      (CAST(:propertyId AS uuid) IS NOT NULL AND COALESCE(pah.property_id, ss.property_id) = CAST(:propertyId AS uuid))
+      OR (pah.customer_id = :customerId
+          AND (CAST(:propertyId AS uuid) IS NULL OR COALESCE(pah.property_id, ss.property_id) IS NULL))
     )
 `;
 
@@ -96,7 +97,11 @@ function etYearBounds(now = new Date()) {
 
 const unitKey = (unit) => String(unit || '').trim().toLowerCase().replace(/[\s.]+/g, '_');
 const isFlOz = (unit) => ['oz', 'fl_oz', 'floz'].includes(unitKey(unit));
+// A per-gallon rate in fl oz: the catalog's "fl_oz/gal" and the also-supported "oz/gal".
+const isFlOzPerGal = (unit) => ['fl_oz/gal', 'oz/gal', 'floz/gal'].includes(unitKey(unit));
+const TSP_PER_FL_OZ = 6;
 const flOzAmount = (value, unit) => {
+  if (unitKey(unit) === 'tsp') { const t = Number(value); return Number.isFinite(t) && t > 0 ? t / TSP_PER_FL_OZ : 0; }
   const n = Number(value);
   return isFlOz(unit) && Number.isFinite(n) && n > 0 ? n : 0;
 };
@@ -108,7 +113,7 @@ function applicationConcentration(row) {
   const dilution = parseFloat(String(row.dilution_rate ?? '').replace('%', ''));
   if (Number.isFinite(dilution) && dilution > 0) return dilution >= HIGH_DILUTION_PERCENT ? 'high' : 'low';
   const rate = Number(row.application_rate);
-  if (unitKey(row.rate_unit) === 'fl_oz/gal' && Number.isFinite(rate) && rate > 0) return rate > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
+  if (isFlOzPerGal(row.rate_unit) && Number.isFinite(rate) && rate > 0) return rate > LOW_RATE_MAX_FL_OZ_PER_GAL ? 'high' : 'low';
   // No usable concentration: an amount above the house mix (a bare oz / fl oz quantity, or a bare oz rate
   // that is the tank amount) is read as the old 0.06% tank (one 4-gal tank per home).
   const amounts = [flOzAmount(row.quantity_applied, row.quantity_unit), flOzAmount(row.application_rate, row.rate_unit)];

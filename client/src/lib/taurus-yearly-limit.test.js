@@ -137,6 +137,14 @@ describe('isHighTaurusRate (the same rule the server applies to a saved ledger r
     expect(isHighTaurusRate({ name: 'Taurus SC' })).toBe(false);
   });
 
+  it('reads an oz/gal rate like fl_oz/gal, and converts a teaspoon amount to fl oz first', () => {
+    expect(isHighTaurusRate({ rate: '0.8', rateUnit: 'oz/gal' })).toBe(true);
+    expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'oz/gal', totalAmount: 3.2, amountUnit: 'fl_oz' })).toBe(false);
+    expect(isHighTaurusRate({ totalAmount: 19.2, amountUnit: 'tsp' })).toBe(true);
+    expect(isHighTaurusRate({ totalAmount: 9.6, amountUnit: 'tsp' })).toBe(false);
+    expect(isHighTaurusRate({ rate: 9.6, rateUnit: 'tsp' })).toBe(false);
+  });
+
   it('warns when a 3.2 oz edit is made after three 0.03% applications (no 0.06% slot left after them)', () => {
     const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
     expect(taurusOverLimitWarning(threeLow, [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }])).toBeNull();
