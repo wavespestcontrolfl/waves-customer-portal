@@ -4,7 +4,7 @@
  *
  * Every hour from 7:30 AM to 7:30 PM ET (scheduler.js) it recalculates, from the live schedule, every staffed day after
  * today up to STAFFED_DAYS staffed days ahead (at least DEMAND_DAYS calendar days, for the 7-day demand view), for each
- * technician who works that day. It records one row in route_check_runs:
+ * technician who works that day. It records one row per ET hour in route_check_runs:
  *   - each opening that holds a new job and its drive (close-gaps SLOT_MIN), and the jobs that fit there (`slots`: the
  *     drive, then a 60-minute service that starts on the hour, AGENTS.md; `noticeSlots`: the 07:05 notice's own
  *     whole-slot count, to compare). While the occupancy check is tech-blind (one booking holds its time for every
@@ -37,7 +37,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../../utils/datetime-et');
 const { _internals: replan } = require('./index');
 const { SLOT_MIN, serviceBlocks, _internals: gaps } = require('./close-gaps');
 const { simulate, coVisitGroups } = require('./app-sim');
@@ -337,9 +337,16 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
  * One hourly run: every read in one read-only snapshot, then one route_check_runs row written outside it. A run-wide
  * read failing (technicians, blackout days, absences, start points, departure time) still writes the hour's row,
  * status 'failed', with the error in its totals.
+ *
+ * One row per ET hour. runExclusive stops two instances running at the same time only: a second instance (a deploy
+ * overlap) whose tick waited for a lock slot can run after the first released the lock. The unique key on
+ * (service_date, run_hour) keeps the first row of the hour; the second run writes nothing and returns 'duplicate'.
+ * run_hour is the hour the run starts, which is its tick's hour: a tick waits at most SLOT_WAIT_MAX_MS (10 minutes)
+ * past :30 for a slot (utils/cron-lock.js).
  */
 async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   const today = etDateString(now);
+  const hour = etParts(now).hour;
   let run;
   try {
     run = await inSnapshot(conn, (reader) => measureRun(reader, now));
@@ -347,9 +354,14 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     logger.warn(`[route-check] ${today}: run failed (${err.message}); recorded`);
     run = { status: 'failed', days: [], totals: { error: String(err.message).slice(0, 200) }, ad: {} };
   }
-  await conn(TABLE).insert({
-    run_at: now, service_date: today, status: run.status, days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
-  });
+  const written = await conn(TABLE).insert({
+    run_at: now, service_date: today, run_hour: hour, status: run.status,
+    days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
+  }).onConflict(['service_date', 'run_hour']).ignore().returning('id');
+  if (!written.length) {
+    logger.info(`[route-check] ${today} ${hour}:00 already recorded by another instance; this run wrote nothing`);
+    return { status: 'duplicate', totals: run.totals, days: run.days.length };
+  }
   if (run.status !== 'failed') {
     logger.info(`[route-check] ${run.status}: next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}`);
   }
@@ -396,13 +408,14 @@ async function measureRun(conn, now) {
     }
   }
   const totals = summarize(days, today, { techBlind: env.techBlind });
-  const status = days.some((d) => d.skip === 'FAILED') ? 'completed_with_errors' : 'completed';
-  // The read throws inside its savepoint (rolled back there), and only then is caught.
-  const live = await recoverable(conn, (c) => liveAdModes(c)).catch((err) => {
+  // The read throws inside its savepoint (rolled back there), and only then is caught. An unread list is an error of
+  // the run, with its message: never a list with no campaigns.
+  const ad = await recoverable(conn, async (c) => ({ live: await liveAdModes(c) })).catch((err) => {
     logger.warn(`[route-check] ad campaigns unread (${err.message})`);
-    return null;
+    return { live: null, error: String(err.message).slice(0, 200) };
   });
-  return { status, days, totals, ad: { live } };
+  const failed = ad.live === null || days.some((d) => d.skip === 'FAILED');
+  return { status: failed ? 'completed_with_errors' : 'completed', days, totals, ad };
 }
 
 module.exports = {

@@ -236,23 +236,42 @@ describe('the totals', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
-  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }] } = {}) {
+  // `campaigns` an Error: the campaign read throws. `taken`: the unique key's rows, shared across runs.
+  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Set() } = {}) {
     const writes = [];
+    const conflicts = [];
     const conn = (table) => {
       const q = {
         leftJoin() { return q; }, where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
         select: async () => {
           if (table === 'technicians') return [{ id: TECH }];
-          if (table === 'ad_campaigns') return campaigns;
+          if (table === 'ad_campaigns') {
+            if (campaigns instanceof Error) throw campaigns;
+            return campaigns;
+          }
           return [];
         },
-        insert: async (row) => { writes.push([table, row]); return [1]; },
+        // ON CONFLICT (cols) DO NOTHING RETURNING id: no row back when the key is taken.
+        insert: (row) => ({
+          onConflict: (cols) => ({
+            ignore: () => ({
+              returning: async () => {
+                conflicts.push(cols);
+                const key = cols.map((c) => row[c]).join('|');
+                if (taken.has(key)) return [];
+                taken.add(key);
+                writes.push([table, row]);
+                return [{ id: `r${writes.length}` }];
+              },
+            }),
+          }),
+        }),
         update: async (row) => { writes.push([table, row]); return 1; },
       };
       return q;
     };
     conn.raw = (sql) => sql;
-    return { conn, writes };
+    return { conn, writes, conflicts };
   }
 
   beforeEach(() => {
@@ -266,11 +285,12 @@ describe('runRouteCheck', () => {
   });
 
   test('records one row: the staffed days after today, and the ad shadow; nothing else is written', async () => {
-    const { conn, writes } = fakeConn();
+    const { conn, writes, conflicts } = fakeConn();
     const result = await runRouteCheck({ conn, now: NOW });
     expect(writes.map(([table]) => table)).toEqual(['route_check_runs']);
     const row = writes[0][1];
-    expect(row).toMatchObject({ run_at: NOW, service_date: '2026-11-19', status: 'completed' });
+    expect(row).toMatchObject({ run_at: NOW, service_date: '2026-11-19', run_hour: 10, status: 'completed' });
+    expect(conflicts).toEqual([['service_date', 'run_hour']]);
     const days = JSON.parse(row.days);
     // Today is not measured: its room depends on where the van is now (a follow-up).
     expect(days.map((d) => d.date)).toEqual(['2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25']);
@@ -336,6 +356,31 @@ describe('runRouteCheck', () => {
     expect(days.find((d) => d.date === '2026-11-22')).toMatchObject({ skip: 'FAILED' }); // staffed when unknown
   });
 
+  test('one row per ET hour: a second run of an hour already recorded writes nothing and is no failure', async () => {
+    const taken = new Set();
+    const first = fakeConn({ taken });
+    expect((await runRouteCheck({ conn: first.conn, now: NOW })).status).toBe('completed');
+    // A second instance's run of the same 10:30 tick, after the first released the lock (a slot wait, at most 10 min).
+    const second = fakeConn({ taken });
+    const result = await runRouteCheck({ conn: second.conn, now: new Date('2026-11-19T15:39:00Z') });
+    expect(result).toMatchObject({ status: 'duplicate' });
+    expect(second.writes).toHaveLength(0);
+    // The next hour records its own row.
+    const next = fakeConn({ taken });
+    expect((await runRouteCheck({ conn: next.conn, now: new Date('2026-11-19T16:30:00Z') })).status).toBe('completed');
+    expect(next.writes[0][1]).toMatchObject({ service_date: '2026-11-19', run_hour: 11 });
+  });
+
+  test('an unread campaign list is an error of the run, with its message; an empty list is a completed run', async () => {
+    const unread = fakeConn({ campaigns: new Error('timeout') });
+    expect((await runRouteCheck({ conn: unread.conn, now: NOW })).status).toBe('completed_with_errors');
+    expect(unread.writes[0][1].status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow)).toEqual({ live: null, error: 'timeout' });
+    const none = fakeConn({ campaigns: [] });
+    expect((await runRouteCheck({ conn: none.conn, now: NOW })).status).toBe('completed');
+    expect(JSON.parse(none.writes[0][1].ad_shadow)).toEqual({ live: [] });
+  });
+
   test('a run-wide read failing still writes the hour, as failed with its error', async () => {
     getBlackoutDates.mockRejectedValueOnce(new Error('timeout'));
     const { conn, writes } = fakeConn();
@@ -385,7 +430,7 @@ describe('runRouteCheck', () => {
   test('every read of a run comes from one read-only snapshot, each recoverable read in a savepoint; the row is written outside it', async () => {
     const { conn, writes } = fakeConn();
     const seen = [];
-    const snap = (table) => ({ ...conn(table), insert: async () => { throw new Error('written inside the snapshot'); } });
+    const snap = (table) => ({ ...conn(table), insert: () => { throw new Error('written inside the snapshot'); } });
     snap.raw = conn.raw;
     snap.isTransaction = true;
     snap.transaction = jest.fn(async (fn) => fn(snap)); // a savepoint

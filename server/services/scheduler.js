@@ -2171,8 +2171,9 @@ function initScheduledJobs() {
       await runExclusive('route-check', async () => {
         const result = await require('./day-replan/route-check').runRouteCheck();
         logger.info(`[route-check] ${result.status} slots=${result.totals?.next?.slots ?? 'n/a'}`);
-        // A failed run or a failed date read is recorded first; it still counts as a failed run in job health.
-        if (result.status !== 'completed') throw new Error(`route check ${result.status} (recorded)`);
+        // A failed run or a failed read is recorded first; it still counts as a failed run in job health. A second
+        // instance's run of an hour already recorded ('duplicate') writes nothing and is no failure.
+        if (result.status !== 'completed' && result.status !== 'duplicate') throw new Error(`route check ${result.status} (recorded)`);
       });
     } catch (err) {
       logger.error(`[route-check] tick failed: ${err.message}`);
