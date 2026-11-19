@@ -107,18 +107,18 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
 // after quiet hours, so an unverifiable checkout state must hold the row (the
 // caller's catch turns the throw into the retryable recheck-failed verdict),
 // the same as the reply-pause check beside it.
-// A grouped estimate (estimate_group_id) shows every live sibling on one
-// link page, and the customer can book ANY sibling through its own accept
-// link, so the hold and the card step are looked up for the whole group. The
-// sibling ids come from publishedGroupLinks, the lister the group's link
-// page and admin send use. `conn` lets the engine run the read inside its
-// final-check snapshot.
+// A grouped estimate (estimate_group_id) shows its siblings on one link page,
+// and the customer can book ANY of them through its own accept link, so the
+// hold and the card step are looked up for the whole group. The ids are EVERY
+// estimate with the same estimate_group_id, one plain read, not the published
+// link lister: that lister drops a sibling whose call or move lookup is
+// unavailable, which would hide that sibling's checkout. `conn` lets the
+// engine run the read inside its final-check snapshot.
 const CHECKOUT_ACTIVE_MINUTES = 20;
 async function checkoutEstimateIds(estimateId, groupId, conn) {
   if (!groupId) return [estimateId];
-  const { publishedGroupLinks } = require("./estimate-group-navigation");
-  const links = await publishedGroupLinks(conn, { estimate_group_id: groupId });
-  return [...new Set([estimateId, ...links.map((l) => l.id)])];
+  const rows = await conn("estimates").where({ estimate_group_id: groupId }).select("id");
+  return [...new Set([estimateId, ...(rows || []).map((r) => r.id)])];
 }
 
 async function estimateMidCheckout(estimateId, { throwOnError = false, conn = db, groupId = null } = {}) {
@@ -327,14 +327,26 @@ function replayHoldVerdict(reason, est, nowMs) {
 // authorizing delivery on an unchecked condition could nudge a customer who
 // already declined or paid — the executor reschedules the row and re-checks
 // on the next pass instead.
-// `stage` is the queued row's followup_stage. The unviewed stage means "sent
+// `stage` and `quotedExpiresAt` are the queued row's followup_stage and
+// quoted_expires_at. The unviewed stage means "sent
 // and never opened": once the customer has opened the estimate that reminder
 // is moot for good, so it is a final verdict, not a timed wait. Every other
 // stage still applies after a view and keeps the timed retry.
-async function deferredFollowupStillEligible(estimateId, { stage = null } = {}) {
+async function deferredFollowupStillEligible(estimateId, { stage = null, quotedExpiresAt = null } = {}) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
     if (!est) return { eligible: false, reason: "estimate-missing" };
+    // An expiring text quotes the deadline it was queued with. If an extension
+    // moved it during the wait (including a view-hold retry), the copy is wrong
+    // for good: final, as the extension-confirmation replay does. A row queued
+    // before the stamp existed has none and skips this check.
+    if (quotedExpiresAt) {
+      const live = est.expires_at ? new Date(est.expires_at).getTime() : null;
+      const quoted = new Date(quotedExpiresAt).getTime();
+      if (live === null || Number.isNaN(quoted) || live !== quoted) {
+        return { eligible: false, reason: "deadline-changed" };
+      }
+    }
     if (stage === "unviewed" && est.viewed_at) return { eligible: false, reason: "estimate-viewed" };
     // replay:true — the reply-pause lookup THROWS on a transient failure
     // here (codex r27) instead of the cron path's fail-open false, so an
@@ -710,7 +722,8 @@ async function withFollowupPropertyRow(est, payload) {
 }
 
 // `outcome` (optional): set to { midCheckout: true } when the email was held at the
-// provider boundary because the customer is mid-checkout.
+// provider boundary because the customer is mid-checkout. The hold applies with or
+// without it; the engine passes one to tell a hold from a failed send.
 async function sendDualChannel(est, { sms, email }, outcome = null) {
   let attempted = false;
   let smsHold = null;
@@ -798,6 +811,11 @@ async function sendDualChannel(est, { sms, email }, outcome = null) {
           entry_point: "estimate_follow_up_deferred",
           estimate_id: est.id,
           followup_stage: email?.stage || null,
+          // The expiring text quotes this deadline in its body; the replay
+          // suppresses it if an extension moved the deadline while it waited.
+          ...(email?.stage === "expiring" && est.expires_at
+            ? { quoted_expires_at: new Date(est.expires_at).toISOString() }
+            : {}),
           original_block_code: smsHold.code,
           // Customer rows resolve their LOCATION from-number at send time
           // (from_phone above is a NOT-NULL placeholder) and re-read the
@@ -859,12 +877,12 @@ async function sendDualChannel(est, { sms, email }, outcome = null) {
         ...(pdfCopy.attachments.length ? { attachments: pdfCopy.attachments } : {}),
         // The fence rides every prepared send, with the file or without it. With the
         // monthly average the send-time average check rides too (composed with it).
-        ...(email.averageText
-          ? { withProviderHandoff: innerHandoff }
-          : (pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {})),
-        // A caller that passes `outcome` (the engagement engine) also gets the
-        // mid-checkout check, composed last, after those two.
-        ...(outcome ? { withProviderHandoff: checkoutProviderHandoff(est, outcome, innerHandoff) } : {}),
+        // The mid-checkout check rides every follow-up email (the stage cron's
+        // legacy and payment-step sends too), composed last, after the PDF fence
+        // and the average check. A veto is a definite non-send: sendDualChannel
+        // returns false, and each stage caller releases its claim without
+        // counting an attempt, so the next tick looks again.
+        withProviderHandoff: checkoutProviderHandoff(est, outcome, innerHandoff),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,

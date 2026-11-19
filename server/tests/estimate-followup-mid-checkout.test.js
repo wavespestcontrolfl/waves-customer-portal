@@ -48,15 +48,11 @@ const mockPdf = { copy: { attachments: [], payload: {} } };
 jest.mock('../services/estimate-email-pdf', () => ({
   openEstimateEmailPdf: jest.fn(async () => mockPdf.copy),
 }));
-jest.mock('../services/estimate-group-navigation', () => ({
-  publishedGroupLinks: jest.fn(async () => []),
-}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { _private } = require('../services/estimate-follow-up');
-const { publishedGroupLinks } = require('../services/estimate-group-navigation');
 
 // A knex-builder stub per table: every chain method returns the builder, and
 // first() resolves the row the test set for that table (or rejects with an error).
@@ -120,15 +116,27 @@ describe('estimateMidCheckout', () => {
     expect(logged).not.toContain('5551234');
   });
 
-  test('a grouped estimate also looks for a hold or card step on every live sibling', async () => {
-    publishedGroupLinks.mockResolvedValueOnce([{ id: 'est-1' }, { id: 'est-2' }, { id: 'est-3' }]);
-    const stubs = arrange({ hold: undefined, card: { id: 'evt-2' } });
+  test('a grouped estimate looks for a hold or card step on EVERY estimate in the group, published or not', async () => {
+    // One plain read of the group's ids; no link lister that could drop a sibling.
+    const estimates = tableStub(undefined);
+    estimates.select = jest.fn(() => Promise.resolve([{ id: 'est-1' }, { id: 'est-2' }, { id: 'est-3' }]));
+    const stubs = { estimates, scheduled_services: tableStub(undefined), estimate_checkout_events: tableStub({ id: 'evt-2' }) };
+    db.mockImplementation((table) => stubs[table] || tableStub(undefined));
 
     await expect(_private.estimateMidCheckout('est-1', { groupId: 'grp-1' })).resolves.toBe(true);
 
-    expect(publishedGroupLinks).toHaveBeenCalledWith(db, { estimate_group_id: 'grp-1' });
+    expect(estimates.calls.where).toEqual([{ estimate_group_id: 'grp-1' }]);
     expect(stubs.scheduled_services.calls.whereIn).toEqual([['source_estimate_id', ['est-1', 'est-2', 'est-3']]]);
     expect(stubs.estimate_checkout_events.calls.whereIn).toEqual([['estimate_id', ['est-1', 'est-2', 'est-3']]]);
+  });
+
+  test('an unreadable group is not "no checkout": the replay holds, the cron fails open', async () => {
+    const estimates = tableStub(undefined);
+    estimates.select = jest.fn(() => Promise.reject(Object.assign(new Error('db down'), { code: '57P01' })));
+    db.mockImplementation((table) => (table === 'estimates' ? estimates : tableStub(undefined)));
+
+    await expect(_private.estimateMidCheckout('est-1', { groupId: 'grp-1', throwOnError: true })).rejects.toThrow('db down');
+    await expect(_private.estimateMidCheckout('est-1', { groupId: 'grp-1' })).resolves.toBe(false);
   });
 
   test('reads through the connection it is given (the engine passes its snapshot transaction)', async () => {
@@ -236,6 +244,26 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
     }
   });
 
+  test('an expiring text whose quoted deadline changed while it waited is final, even mid-checkout or after a view', async () => {
+    const quoted = new Date('2026-11-25T15:00:00Z');
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    arrangeReplay({ hold: { id: 'hold-1' }, est: { expires_at: new Date('2026-12-02T15:00:00Z'), last_viewed_at: viewedAt, viewed_at: viewedAt } });
+
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'expiring', quotedExpiresAt: quoted.toISOString() }))
+      .resolves.toEqual({ eligible: false, reason: 'deadline-changed' });
+  });
+
+  test('an unchanged quoted deadline keeps the timed retry; a row without the stamp skips the check', async () => {
+    const expires = new Date('2026-11-25T15:00:00Z');
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    arrangeReplay({ est: { expires_at: expires, last_viewed_at: viewedAt, viewed_at: viewedAt } });
+
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'expiring', quotedExpiresAt: expires.toISOString() }))
+      .resolves.toMatchObject({ reason: 'recently-opened', retryable: true });
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'expiring' }))
+      .resolves.toMatchObject({ reason: 'recently-opened', retryable: true });
+  });
+
   test('the unopened-estimate reminder on an estimate that was never opened stays eligible', async () => {
     arrangeReplay();
     await expect(deferredFollowupStillEligible('est-1', { stage: 'unviewed' })).resolves.toEqual({ eligible: true });
@@ -305,8 +333,18 @@ describe('provider-boundary checkout check (sendDualChannel with an outcome)', (
     expect(outcome.midCheckout).toBeUndefined();
   });
 
-  test('without an outcome (the stage cron) the send is installed exactly as before', async () => {
+  test('without an outcome (the stage cron: legacy and payment-step sends) the same veto applies', async () => {
+    arrange();
     await _private.sendDualChannel(est, { email });
-    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].withProviderHandoff).toBeUndefined();
+    const handoff = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].withProviderHandoff;
+    let check;
+    await handoff(async (_database, providerCheck) => { check = providerCheck; });
+    arrange({ hold: { id: 'hold-1' } });
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'customer_mid_checkout' });
+  });
+
+  test('a vetoed send returns false, so every stage caller releases its claim and counts nothing', async () => {
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, aborted: true, boundaryBlocked: true, reason: 'provider_boundary_blocked' });
+    await expect(_private.sendDualChannel(est, { email })).resolves.toBe(false);
   });
 });

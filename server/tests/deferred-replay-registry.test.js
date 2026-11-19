@@ -1647,11 +1647,11 @@ describe('deferred-replay registry', () => {
     db.mockReset();
   });
 
-  test('the estimate follow-up recheck hands the queued row\'s stage to the eligibility check', async () => {
+  test('the estimate follow-up recheck hands the queued row\'s stage and quoted deadline to the eligibility check', async () => {
     const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
     deferredFollowupStillEligible.mockClear();
-    await recheckDeferredReplay('estimate_follow_up_deferred', { estimate_id: 'est-1', followup_stage: 'unviewed' });
-    expect(deferredFollowupStillEligible).toHaveBeenCalledWith('est-1', { stage: 'unviewed' });
+    await recheckDeferredReplay('estimate_follow_up_deferred', { estimate_id: 'est-1', followup_stage: 'expiring', quoted_expires_at: '2026-11-25T15:00:00.000Z' });
+    expect(deferredFollowupStillEligible).toHaveBeenCalledWith('est-1', { stage: 'expiring', quotedExpiresAt: '2026-11-25T15:00:00.000Z' });
   });
 
   test('terminal-hook sweep (r16): re-runs stamped rows bounded, clears loudly at exhaustion', async () => {

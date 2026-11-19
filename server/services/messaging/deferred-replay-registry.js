@@ -345,7 +345,7 @@ const REGISTRY = {
     async recheck(meta) {
       if (!meta.estimate_id) return { eligible: true };
       const { deferredFollowupStillEligible } = require('../estimate-follow-up');
-      return deferredFollowupStillEligible(meta.estimate_id, { stage: meta.followup_stage });
+      return deferredFollowupStillEligible(meta.estimate_id, { stage: meta.followup_stage, quotedExpiresAt: meta.quoted_expires_at });
     },
   },
 

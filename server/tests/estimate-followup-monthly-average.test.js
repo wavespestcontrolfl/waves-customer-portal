@@ -325,12 +325,16 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     return EmailTemplates.sendTemplate.mock.calls[0][0].withProviderHandoff;
   };
 
-  test('the email spec records the exact copy it carries; an unpinned email installs no handoff', async () => {
+  test('the email spec records the exact copy it carries; an unpinned email carries only the checkout handoff', async () => {
     const email = await pinned();
     expect(email.averageText).toBe('$94.00 per application · $31.33 a month\nAveraged over the year. You pay after each application.');
     mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     const plain = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
-    expect(await installedHandoff(await _private.withAverageEmail(plain, row()))).toBeUndefined();
+    const handoff = await installedHandoff(await _private.withAverageEmail(plain, row()));
+    // No average and no PDF: the only check is the mid-checkout one, which passes for an idle customer.
+    const check = await checkOf(handoff);
+    await expect(check()).resolves.toEqual({ ok: true });
+    freshOverride = undefined;
   });
 
   test('unchanged row: the check passes (PDF gate off)', async () => {
@@ -379,12 +383,16 @@ describe('send-time check: the average is re-read at the provider boundary', () 
     await expect(check()).rejects.toMatchObject({ reason: 'monthly_average_changed' });
   });
 
-  test('a PDF-only email (no average) keeps the PDF handoff untouched', async () => {
-    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(); return { ok: true }; });
+  test('a PDF-only email (no average) keeps the PDF handoff, with the checkout check composed after it', async () => {
+    const pdfCheck = jest.fn(async () => ({ ok: true }));
+    const pdfHandoff = jest.fn(async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; });
     mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: pdfHandoff };
     mockTemplate.activeVersion = { id: 'ver-1', blocks: [NOTE_BLOCKS[0]], text_body: null }; // no note block: no average
     const email = { templateKey: KEY, stage: 'unviewed', payload: { first_name: 'T' } };
-    expect(await installedHandoff(await _private.withAverageEmail(email, row()))).toBe(pdfHandoff);
+    const check = await checkOf(await installedHandoff(await _private.withAverageEmail(email, row())));
+    expect(pdfHandoff).toHaveBeenCalledTimes(1);
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(pdfCheck).toHaveBeenCalledTimes(1);
   });
 
   test('a vetoed send (no text went out) takes the existing abort path: counters stay, the stage claim is released', async () => {
