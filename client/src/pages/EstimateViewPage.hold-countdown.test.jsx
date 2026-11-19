@@ -631,7 +631,7 @@ describe('hold countdown bar', () => {
   it('treats accept\'s no-booking 409s like the extend ones (codex r17 P2)', () => {
     const src = pageSource;
     const at = src.indexOf("const expired = body.code === 'RESERVATION_EXPIRED'");
-    const handler = src.slice(at, at + 1400);
+    const handler = src.slice(at, at + 1700);
     // A reshape landing after the last successful extension comes back from
     // /accept with these bodies; slot_conflict told the customer their slot
     // was taken and offered slot-retry UX for a flow that books nothing.

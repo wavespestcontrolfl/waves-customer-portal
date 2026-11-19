@@ -4785,6 +4785,36 @@ export function EstimateErrorBanner({ error }) {
   );
 }
 
+// The accept said the 15-minute hold ran out. The customer already chose this
+// time and confirmed it, so hold it again if it is still free (the server
+// re-checks every conflict, so a time someone else took still refuses). Answers
+// { held } with the new hold, { taken } when the time is gone, { review } when the
+// office parked the estimate, or { failed } for anything else (the caller then reopens the time list). Never throws.
+export async function holdSameTimeAgain({ token, slotId, serviceMode, selectedFrequency, serviceCadences }) {
+  if (!token || !slotId) return { failed: true };
+  const payload = { slotId, serviceMode };
+  if (serviceMode !== 'one_time' && selectedFrequency) payload.selectedFrequency = selectedFrequency;
+  if (serviceMode !== 'one_time' && serviceCadences) payload.serviceCadences = serviceCadences;
+  try {
+    const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (r.status === 409) {
+      const body = await r.json().catch(() => ({}));
+      // Parked for the office (B18): the caller takes it through the one transition.
+      if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') return { review: body };
+      return /slot no longer available/i.test(body.error || '') ? { taken: true } : { failed: true };
+    }
+    if (!r.ok) return { failed: true };
+    const body = await r.json();
+    return body.scheduledServiceId && body.expiresAt ? { held: body } : { failed: true };
+  } catch {
+    return { failed: true };
+  }
+}
+
 export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   const expired = kind === 'expired';
   // 'stale_hold': the recovery could not release the old hold, so the server
@@ -4795,8 +4825,12 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   // needs a time, and a bare scroll back to the times read as the page
   // starting over (a customer gave up and phoned in).
   const pickTime = kind === 'pick_time';
+  // 'reheld': the 15-minute hold ran out while the customer was confirming and
+  // the same time was still free, so it was held again. Nothing is booked yet,
+  // and the banner has to say so (a customer once left believing she was done).
+  const reheld = kind === 'reheld';
   return (
-    <div role="status" style={{
+    <div role={reheld ? 'alert' : 'status'} style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
@@ -4808,13 +4842,18 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
             <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.navy, fontWeight: 600 }}>{WAVES_PHONE_DISPLAY}</a>
             {' '}and we&apos;ll set it up.
           </>
+        ) : reheld ? (
+          <>
+            <strong>Your time ran out, so we held it again.</strong>{' '}
+            Your visit is not booked yet. Tap the confirm button below to finish.
+          </>
         ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
-            ? 'Your time-slot hold expired — pick a time again to finish signing up.'
+            ? 'Your held time ran out and nothing was booked. Pick a time below to finish signing up.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
-      {onRetry ? (
+      {onRetry && !reheld ? (
         <button
           type="button"
           onClick={onRetry}
@@ -8016,6 +8055,35 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }
   }, [readOnlyPreview, contactPhoneSaving, contactPhone, token, loadEstimate]);
 
+  // The accept said the 15-minute hold ran out. This customer already chose this
+  // time and confirmed it (the card step is done), so hold the same time again
+  // when it is still free and ask for one more tap on the confirm button. When
+  // it is gone, say so and reopen the time list (the recovery reads the next
+  // open times). True when it handled the page; false leaves the plain expiry
+  // recovery to the caller. A reloaded page's adopted hold has no slot id to
+  // send again and keeps the plain recovery.
+  const reholdSameTime = useCallback(async () => {
+    if (!selectedSlotId || existingAppointment) return false;
+    const again = await holdSameTimeAgain({ token, slotId: selectedSlotId, serviceMode, selectedFrequency, serviceCadences });
+    if (again.held) {
+      setReservation({ scheduledServiceId: again.held.scheduledServiceId, expiresAt: again.held.expiresAt, reheld: true });
+      setCtaPhase('review');
+      setError(null);
+      try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch { /* scrolling is a convenience */ }
+      return true;
+    }
+    if (again.taken) {
+      recoverFromDeadHold('slot_conflict', 'That time was just taken. Pick another time below.');
+      return true;
+    }
+    if (again.review) {
+      const body = again.review;
+      await enterContactReviewRef.current(body);
+      return true;
+    }
+    return false;
+  }, [token, selectedSlotId, existingAppointment, serviceMode, selectedFrequency, serviceCadences, recoverFromDeadHold]);
+
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
     // blocks the flow before review, and the server 409s a draft accept.
@@ -8457,6 +8525,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // existing_appointment, so clearing the reservation alone left the
           // customer with recovery copy and no slot picker — and choosing a
           // payment method re-adopted the dead hold.
+          // A lapsed hold: hold the same time again when it is still free
+          // (reholdSameTime says the rest) before the recovery below.
+          const reheld = expired && await reholdSameTime();
+          if (reheld) return;
           if (expired || slotGone) {
             recoverFromDeadHold(expired ? 'reservation_expired' : 'slot_conflict');
             return;
@@ -8493,7 +8565,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, consumerNoticeBlocked, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, reholdSameTime, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -10750,6 +10822,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? ctaPhase
         : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
+  ) : ctaPhase === 'review' && reservation?.reheld ? (
+    <SlotIssueBanner kind="reheld" />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
