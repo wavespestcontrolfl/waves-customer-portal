@@ -49,6 +49,11 @@ describe('the sentence rules', () => {
     expect(sentenceProblem('They swarm from April through June.', loose(oct))).toBeNull();
     expect(sentenceProblem('Swarms peak in May.', loose(oct))).toBeNull();
     expect(sentenceProblem('Swarms peak in October.', loose(oct))).toMatch(/october/);
+    // a possessive, a dash or lowercase does not hide a month; lowercase "march" and "may" stay words (pre-push round 14)
+    expect(sentenceProblem("Eggs hatch with June's first rain.", factSource(FACT))).toMatch(/month or season not in the source: june/);
+    expect(sentenceProblem('Eggs hatch with the first june rain.', factSource(FACT))).toMatch(/june/);
+    expect(sentenceProblem('They swarm October-November.', loose(oct))).toMatch(/october/);
+    expect(sentenceProblem('Swarmers march toward lights.', loose(oct))).toBeNull();
   });
 
   test('a season word that is not in the fact fails', () => {
@@ -119,6 +124,9 @@ describe('the sentence rules', () => {
     expect(sentenceProblem('A German roach can survive only 42 days with food but no water.', src)).toMatch(/word for word/);
     // a sentence with no number or month may use its own words
     expect(sentenceProblem('Water matters more than food to a roach.', src)).toBeNull();
+    // a scale word alone is a count, bound to its own claim (pre-push round 14; A01's million counts ants in one colony)
+    const A01 = factById('A01');
+    expect(sentenceProblem('There are millions of colonies in your yard.', factSource(A01))).toMatch(/word for word/);
     // months are bound the same way (T03: R. hageni December to February, R. flavipes January to April)
     const T03 = factById('T03');
     expect(sentenceProblem('Native termites fly from December to April.', factSource(T03))).toMatch(/word for word/);

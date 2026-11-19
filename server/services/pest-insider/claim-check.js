@@ -158,14 +158,21 @@ const SEASON_RES = [
   ['dry season', /\bdry\s+season\b/i], ['rainy season', /\brainy\s+season\b/i], ['hurricane season', /\bhurricane\s+season\b/i],
 ];
 
+// A month name counts however it is written: possessive ("June's first
+// rain") or next to a dash ("April-June") (pre-push round 14), and in
+// lowercase too, except the words that are also a verb or an adjective
+// (may, march, august), which count only capitalized.
+const LOWERCASE_MONTH = new RegExp(`\\b(${MONTHS.filter((m) => !['may', 'march', 'august'].includes(m)).join('|')})\\b`, 'g');
+
 function timeTokens(text) {
   const t = norm(text);
   const out = new Set();
-  for (const m of t.matchAll(/\b([A-Z][a-z]+)\b(\.?)(?=\s|[,.;:)]|$)/g)) {
+  for (const m of t.matchAll(/\b([A-Z][a-z]+)\b(\.?)/g)) {
     const word = m[1].toLowerCase();
     if (MONTHS.includes(word) && word !== 'may') out.add(word);
     else if (MONTH_ABBR[word] && m[2] === '.') out.add(MONTH_ABBR[word]);
   }
+  for (const m of t.matchAll(LOWERCASE_MONTH)) out.add(m[1]);
   // "May" is also a verb: it is a month only when capitalized mid-sentence or
   // in front of a date or range word.
   if (/(?<!^)(?<=[a-z,;:]\s)May\b|(?:^|[.!?]\s)May\s+(?:\d|through|to|and|until|is|brings)\b|\bMay\s+\d/.test(t)) out.add('may');
@@ -266,7 +273,10 @@ function stripAttribution(c, labels) {
     .replace(new RegExp(` (?:the )?(?:${names}) ${ATTRIBUTION_VERBS}$`), '');
 }
 
-const needsCopy = (text) => [...numberTokens(text)].some((t) => !t.startsWith('scale:')) || [...timeTokens(text)].some((t) => MONTHS.includes(t));
+// A scale word alone ("millions of colonies") is a count too, so it must
+// copy the source unit it comes from, not move to another subject
+// (pre-push round 14).
+const needsCopy = (text) => numberTokens(text).size > 0 || [...timeTokens(text)].some((t) => MONTHS.includes(t));
 
 /** Why a number or month sentence is not a word-for-word copy of one source unit, or null. */
 function copyProblem(text, units, labels) {

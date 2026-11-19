@@ -4,7 +4,7 @@
   "facts": [
     {
       "id": "L01",
-      "title": "Reclaimed water feeds your lawn",
+      "title": "Reclaimed water can help feed your lawn",
       "statement": "Most reclaimed irrigation water carries nitrogen and phosphorus, so a lawn on reclaimed water may need less fertilizer.",
       "lead": [
         "Most reclaimed irrigation water carries nitrogen and phosphorus, so a lawn on reclaimed water may need less fertilizer.",
@@ -106,7 +106,7 @@
     },
     {
       "id": "L03",
-      "title": "Dollarweed means too much water",
+      "title": "Dollarweed often means too much water",
       "statement": "Dollarweed and sedges are often a sign of overwatering; UF says to adjust irrigation or improve drainage where they grow.",
       "lead": [
         "UF/IFAS says overwatering promotes weeds such as dollarweed and sedges.",
@@ -303,7 +303,7 @@
     {
       "id": "L07",
       "title": "Why grass can yellow after a spring nitrogen feeding",
-      "statement": "A lawn that turns yellow in spring right after a nitrogen feeding is often short on iron; it usually fades within a few weeks.",
+      "statement": "Iron deficiency is common in Florida lawns in spring after a nitrogen feeding, and it usually fades within a few weeks.",
       "lead": [
         "UF/IFAS says iron deficiency is common in Florida lawns in the spring, after nitrogen fertilizer goes down.",
         "It shows up most in bahiagrass, centipedegrass and St. Augustinegrass, which can look yellow in spots just when you expect them to green up.",
@@ -340,7 +340,7 @@
     },
     {
       "id": "L08",
-      "title": "Too much nitrogen feeds lawn fungus",
+      "title": "Too much nitrogen invites lawn fungus",
       "statement": "Extra nitrogen invites brown patch and gray leaf spot; too little invites dollar spot. Nitrogen is easy to add and impossible to remove.",
       "lead": [
         "UF/IFAS says too much nitrogen encourages brown patch and gray leaf spot, while very low nitrogen sets the stage for dollar spot.",
@@ -391,9 +391,9 @@
     {
       "id": "L09",
       "title": "Large patch is a cool-season disease",
-      "statement": "Large patch shows up from November through May, when temperatures are below 80°F and the grass stays wet for 48 hours or more; the fungus does not affect roots.",
+      "statement": "Large patch is most likely to show up from November through May, when temperatures are below 80°F and the grass stays wet for 48 hours or more; the fungus does not affect roots.",
       "lead": [
-        "Large patch shows up from November through May, when temperatures are below 80°F and the grass stays wet for 48 hours or more.",
+        "Large patch is most likely to show up from November through May, when temperatures are below 80°F and the grass stays wet for 48 hours or more.",
         "Rain, extra irrigation or long stretches of high humidity can keep the leaves wet that long.",
         "The fungus does not affect the roots."
       ],
@@ -759,7 +759,7 @@
     },
     {
       "id": "P01",
-      "title": "Leave the yellow fronds on",
+      "title": "A palm short on potassium needs its old fronds",
       "statement": "Discolored older palm fronds are feeding the palm potassium; cutting them off makes the palm pull potassium from the green fronds above.",
       "lead": [
         "When a palm is short on potassium, its older, discolored fronds keep feeding it potassium.",
@@ -836,7 +836,7 @@
     },
     {
       "id": "P03",
-      "title": "Lawn fertilizer can kill your palm",
+      "title": "High-nitrogen lawn fertilizer can kill a palm",
       "statement": "The roots of large palms typically reach 50 feet or more from the trunk; high-nitrogen lawn fertilizer, even 30 feet away, has killed palms by triggering potassium deficiency.",
       "lead": [
         "The roots of large palms typically reach 50 feet or more from the trunk.",
@@ -878,9 +878,9 @@
     {
       "id": "P04",
       "title": "Ganoderma has no cure, and it stays in the soil",
-      "statement": "Ganoderma butt rot currently has no cure once a palm is infected, and the fungus survives in the soil, so replanting a palm in the same spot is not recommended without special precautions.",
+      "statement": "There are currently no cultural or chemical controls that prevent Ganoderma butt rot or cure it once a palm is infected, and the fungus survives in the soil, so replanting a palm in the same spot is not recommended without special precautions.",
       "lead": [
-        "UF/IFAS says nothing currently prevents Ganoderma butt rot or cures it once a palm is infected.",
+        "UF/IFAS says there are currently no cultural or chemical controls that prevent Ganoderma butt rot or cure it once a palm is infected.",
         "All palms are considered hosts of this fungus.",
         "Because the fungus survives in the soil, planting another palm in the same spot is not recommended without special precautions."
       ],
@@ -971,7 +971,7 @@
     },
     {
       "id": "P06",
-      "title": "Mulch volcanoes rot trunks",
+      "title": "Mulch volcanoes can rot trunks",
       "statement": "Mulch piled against a trunk holds extra moisture that can cause rot and insect infestations; keep mulch 12 to 18 inches back from trees.",
       "lead": [
         "Mulch piled against a trunk is called volcano mulching.",
@@ -1028,7 +1028,7 @@
       "lead": [
         "Aedes mosquitoes lay their eggs on the inside walls of containers that hold water, just above the waterline.",
         "The CDC says eggs can survive drying out for up to 8 months.",
-        "That is why the CDC says to empty and scrub anything that holds water once a week."
+        "The CDC says to empty and scrub anything that holds water once a week."
       ],
       "quotes": [
         "Adult female mosquitoes lay eggs on the inner walls of containers with water, above the waterline.",
@@ -1074,11 +1074,11 @@
     },
     {
       "id": "M02",
-      "title": "Your daytime biters live next door; salt marsh mosquitoes travel",
-      "statement": "Yard mosquitoes like Aedes aegypti fly only a few blocks, but salt marsh mosquitoes come in from the coast after rains and flooding.",
+      "title": "Aedes mosquitoes stay close; black salt marsh mosquitoes travel",
+      "statement": "Aedes aegypti and Aedes albopictus fly only a few blocks in their lifetime, but the black salt marsh mosquito has a long flight range and emerges in large numbers after rains and flooding.",
       "lead": [
-        "The CDC says yard mosquitoes like Aedes aegypti and Aedes albopictus fly only a few blocks in their lifetime.",
-        "Salt marsh mosquitoes are different: UF/IFAS says they breed in coastal salt marshes but have a long flight range and can turn up far inland.",
+        "The CDC says Aedes aegypti and Aedes albopictus mosquitoes fly only a few blocks in their lifetime.",
+        "Black salt marsh mosquitoes are different: UF/IFAS says they breed in coastal salt marshes but have a long flight range and can turn up far inland.",
         "They emerge in large numbers after rain and flooding, and they bite aggressively."
       ],
       "quotes": [
@@ -1163,12 +1163,11 @@
     },
     {
       "id": "M04",
-      "title": "Bug zappers kill almost no mosquitoes",
+      "title": "One bug zapper, 10,000 insects, only 8 mosquitoes",
       "statement": "In a one-night test that UF/IFAS reported in 1997, a bug zapper killed about 10,000 insects, and only eight were mosquitoes.",
       "lead": [
         "In a one-night test that UF/IFAS reported in 1997, a bug zapper killed about 10,000 insects, and only eight were mosquitoes.",
-        "UF/IFAS says zappers actually make things worse by drawing more mosquitoes into your yard.",
-        "They also kill thousands of helpful insects that do not bother people."
+        "UF/IFAS says zappers actually make things worse by drawing more mosquitoes into your yard."
       ],
       "quotes": [
         "Out of some 10,000 insects destroyed by one bug zapper during a one-night test period, only eight were mosquitoes.",
@@ -1252,7 +1251,7 @@
       "statement": "Formosan termites swarm from early April, just after sunset, peaking in May, and porch lights pull them to your house.",
       "lead": [
         "Formosan termites swarm from early April, just after sunset, peaking in May.",
-        "UF/IFAS says these swarms can hold tens of thousands of termites.",
+        "UF/IFAS says these dispersal flights can contain upwards of tens of thousands of individuals.",
         "The swarmers are drawn to lights, which can lead them to houses."
       ],
       "quotes": [
@@ -1332,7 +1331,7 @@
     },
     {
       "id": "T04",
-      "title": "Termites can hollow a live tree",
+      "title": "Formosan termites can hollow a live tree",
       "statement": "Formosan termites can hollow out a living tree's core, leaving a healthy-looking tree that can collapse in high winds.",
       "lead": [
         "UF/IFAS says Formosan termites also infest live trees, feeding on the dead wood at the center and hollowing the tree out.",
@@ -1366,8 +1365,8 @@
     },
     {
       "id": "A01",
-      "title": "White-footed ant colonies reach 3 million",
-      "statement": "White-footed ant colonies range from 8,000 to 3 million ants, and nearly half are egg-laying females; plants touching the walls give them a way inside.",
+      "title": "White-footed ant colonies can reach 3 million",
+      "statement": "White-footed ant colonies range from 8,000 to 3 million ants, and nearly half are egg-laying females; the best policy is to keep plants from touching outside walls.",
       "lead": [
         "UF/IFAS says white-footed ant colonies range from 8,000 to 3 million ants.",
         "Nearly half are egg-laying females.",
@@ -1415,7 +1414,7 @@
     },
     {
       "id": "A02",
-      "title": "Florida carpenter ants leave sound wood alone",
+      "title": "Florida carpenter ants do not nest in sound wood",
       "statement": "Florida carpenter ants nest in voids and rotten wood, never sound wood; they bite but do not sting.",
       "lead": [
         "UF/IFAS says Florida carpenter ants nest in existing voids or dig only into soft material, such as rotten wood or foam.",
@@ -1462,7 +1461,7 @@
     },
     {
       "id": "R01",
-      "title": "Big \"palmetto bugs\" are outdoor roaches",
+      "title": "Big \"palmetto bugs\" are mostly outdoor roaches",
       "statement": "The big roaches Floridians call palmetto bugs are generally found outdoors and do not survive well inside, so a single one in the kitchen is usually a visitor.",
       "lead": [
         "The big roaches Floridians call palmetto bugs, the American, Australian, brown and smokybrown, are generally found outdoors.",
@@ -1501,8 +1500,8 @@
     },
     {
       "id": "R02",
-      "title": "Roaches need water more than food",
-      "statement": "A German roach can survive only 12 days with food but no water, but about 42 days with water but no food; drought drives roaches inside.",
+      "title": "Cockroaches need water more than food",
+      "statement": "A German roach can survive only 12 days with food but no water, but about 42 days with water but no food; cockroaches often come indoors in a drought, looking for moisture.",
       "lead": [
         "German cockroaches can survive only 12 days with food but no water.",
         "However, if only water is present with no food, cockroaches can survive for about 42 days.",
@@ -1582,7 +1581,7 @@
     },
     {
       "id": "D01",
-      "title": "Roof rats live in palm skirts and can jump to your roof",
+      "title": "Roof rats nest in old palm fronds and can jump to a house",
       "statement": "Roof rats, Florida's top rodent pest, nest in old palm fronds and attics, and can jump eight feet from a tree to a house.",
       "lead": [
         "UF/IFAS says roof rats are now the number one rodent pest in Florida.",
@@ -1704,7 +1703,7 @@
       "lead": [
         "The CDC says not to sweep or vacuum rodent urine, droppings or nesting material.",
         "Diseases mainly spread from rodents to people when people breathe in contaminated air.",
-        "The CDC says to spray the droppings with a disinfectant until they are very wet, then let it soak as the label directs."
+        "The CDC says to spray the droppings with an EPA-registered disinfectant until they are very wet, then let it soak as the label directs."
       ],
       "quotes": [
         "Don't vacuum or sweep rodent urine, droppings, or nesting materials.",
@@ -1801,7 +1800,7 @@
     },
     {
       "id": "S02",
-      "title": "A crushed yellowjacket calls the colony",
+      "title": "A crushed yellowjacket can call the colony",
       "statement": "An injured yellowjacket often releases an alarm scent that sets off the colony, and unlike honeybees they can sting again and again.",
       "lead": [
         "UF/IFAS says an injured yellowjacket or hornet often releases an alarm scent that quickly sets off an aggressive defense from the rest of the colony.",
