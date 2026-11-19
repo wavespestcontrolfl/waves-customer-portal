@@ -466,6 +466,7 @@ describe('estimate manual acceptance', () => {
       skipWelcomeSms: true,
       deferCommercialScheduleNotification: true,
       autoSendInvoice: false,
+      verifyAnnualPrepayTermStart: expect.any(Function),
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
       // The prepay invoice bills a misting install when the estimate carries one (misting PR 2a): the install office bell is armed.
@@ -1636,6 +1637,46 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
     expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
       database, 'customer-onbook', '2026-07-12', false, expect.any(String), 'estimate-prepay-onbook',
+    );
+  });
+
+  test('rechecks the final normalized term start when the booked anchor disappears during conversion', async () => {
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    lockAndAssertNoAnnualPrepayOverlap.mockClear();
+    const overlapErr = new Error('Customer already has an annual prepay term through 2026-07-01. Use a start date after 2026-07-01.');
+    overlapErr.annualPrepayOverlap = { activeTermId: 'term-old', activeTermEnd: '2026-07-01' };
+    lockAndAssertNoAnnualPrepayOverlap
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(overlapErr);
+    const estimate = {
+      id: 'estimate-prepay-anchor-race', status: 'viewed', customer_id: 'customer-race',
+      sent_at: '2026-05-10T12:00:00.000Z', monthly_total: '55.00', annual_total: '660.00',
+      estimate_data: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } },
+    };
+    const { database } = makeDb(estimate, null, '2026-07-12');
+    const estimateConverter = {
+      convertEstimate: jest.fn(async (_id, opts) => {
+        await opts.verifyAnnualPrepayTermStart('2026-06-01');
+        return { customerId: 'customer-race', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-race' };
+      }),
+    };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-race',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      annualPrepayOverlap: expect.objectContaining({ activeTermEnd: '2026-07-01' }),
+    });
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenNthCalledWith(
+      1, database, 'customer-race', '2026-07-12', false, expect.any(String), estimate.id,
+    );
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenNthCalledWith(
+      2, database, 'customer-race', '2026-06-01', false, expect.any(String), estimate.id,
     );
   });
 

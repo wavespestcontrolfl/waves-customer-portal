@@ -90,6 +90,7 @@ const {
   lineFlagsBlockPercentDiscount,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
+const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1846,8 +1847,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      liveServiceOrHold(builder);
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -1963,7 +1963,6 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         const cw = baseQuery()
           .where('customer_id', estimate.customer_id)
           .whereNull('source_estimate_id')
-          .whereNull('reservation_expires_at')
           // Candidate rows carry their catalog identity so classification
           // survives stale service_type labels (codex #3228 r5).
           .leftJoin('services', 'services.id', 'scheduled_services.service_id')
@@ -13732,26 +13731,29 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        try {
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            customerId,
-            overlapTermStart,
-            false,
-            'Customer already has an annual prepay term through',
-            estimate.id,
-          );
-        } catch (overlapErr) {
-          if (overlapErr && overlapErr.annualPrepayOverlap) {
-            const conflict = estimateAcceptError(
-              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-              409,
+        const assertAnnualPrepayStart = async (termStart) => {
+          try {
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              customerId,
+              termStart,
+              false,
+              'Customer already has an annual prepay term through',
+              estimate.id,
             );
-            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-            throw conflict;
+          } catch (overlapErr) {
+            if (overlapErr && overlapErr.annualPrepayOverlap) {
+              const conflict = estimateAcceptError(
+                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+                409,
+              );
+              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+              throw conflict;
+            }
+            throw overlapErr;
           }
-          throw overlapErr;
-        }
+        };
+        await assertAnnualPrepayStart(overlapTermStart);
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13827,6 +13829,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
+          // The converter re-reads paid visits. If dispatch cancels or moves
+          // the anchor after the check above, verify the exact normalized
+          // start createTermForAnnualPrepay is about to write while this
+          // transaction still owns the same customer overlap lock.
+          verifyAnnualPrepayTermStart: async (normalizedStart) => {
+            if (dateOnly(normalizedStart) === overlapTermStart) return;
+            await assertAnnualPrepayStart(dateOnly(normalizedStart));
+          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation
@@ -22396,7 +22406,7 @@ function validateRecurringSlotPaymentPreference({
 }
 
 function isReservationHeldAppointment(row = {}) {
-  return !!row?.reservation_expires_at;
+  return row?.customer_id == null && !!row?.reservation_expires_at;
 }
 
 function assertExistingAppointmentUpdateApplied(updatedCount) {

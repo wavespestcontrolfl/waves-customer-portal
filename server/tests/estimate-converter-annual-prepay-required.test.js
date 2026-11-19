@@ -148,6 +148,22 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(invoiceService.voidInvoice).toHaveBeenCalledWith('invoice-1');
   });
 
+  test('threads the caller final-start verifier to the actual term creation boundary', async () => {
+    const { EstimateConverter, renewals } = setup([
+      { service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' },
+    ]);
+    const verifyAnnualPrepayTermStart = jest.fn();
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', {
+      ...convertOpts,
+      verifyAnnualPrepayTermStart,
+    })).rejects.toThrow('Annual prepay term was not created');
+
+    expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
+      verifyNormalizedStart: verifyAnnualPrepayTermStart,
+    }));
+  });
+
   describe('lawn 9x rounds: the term records the pattern the series is written with', () => {
     const lawn9x = [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'every_6_weeks', visitsPerYear: 9 }];
 

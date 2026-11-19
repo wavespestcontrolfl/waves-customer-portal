@@ -6,6 +6,8 @@ const postgres = SKIP ? describe.skip : describe;
 const { randomUUID } = require('node:crypto');
 
 const { paidEstimateVisitsQuery } = require('../services/assessment-booking');
+const { createTermForAnnualPrepay } = require('../services/annual-prepay-renewals');
+const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
 
 function dateOnly(value) {
   return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
@@ -124,5 +126,54 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
 
     expect(rows.map((row) => row.id)).toEqual([firstPaid, secondPaid]);
     expect(rows.map((row) => dateOnly(row.scheduled_date))).toEqual(['2098-02-10', '2098-03-10']);
+  });
+
+  test.each([
+    ['cancelled', { status: 'cancelled' }, null],
+    ['moved behind the current term', { scheduled_date: '2097-12-15' }, '2097-12-15'],
+  ])('an anchor %s after preflight cannot move the final term start behind existing coverage', async (_label, change, expectedFinalStart) => {
+    const paid = await visit({ scheduled_date: '2098-02-10' });
+    await trx('annual_prepay_terms').insert({
+      id: randomUUID(),
+      customer_id: customerId,
+      status: 'active',
+      term_start: '2097-02-01',
+      term_end: '2098-01-31',
+      prepay_amount: 600,
+      plan_label: 'Synthetic Existing Coverage',
+    });
+
+    const verifiedStart = dateOnly((await paidEstimateVisitsQuery(trx, { estimateId, customerId }).first()).scheduled_date);
+    expect(verifiedStart).toBe('2098-02-10');
+    await expect(lockAndAssertNoAnnualPrepayOverlap(
+      trx, customerId, verifiedStart, false, 'Customer already has an annual prepay term through', estimateId,
+    )).resolves.toBeUndefined();
+
+    // Dispatch changes the source after preflight. Re-run the converter's
+    // canonical paid-visit query and pass the same final start it would.
+    await trx('scheduled_services').where({ id: paid }).update(change);
+    const finalPaid = await paidEstimateVisitsQuery(trx, { estimateId, customerId }).first('scheduled_services.scheduled_date');
+    const converterTermStart = dateOnly(finalPaid?.scheduled_date || '') || null;
+    let finalStart = null;
+    await expect(createTermForAnnualPrepay({
+      customerId,
+      sourceEstimateId: estimateId,
+      termStart: converterTermStart,
+      conn: trx,
+      verifyNormalizedStart: async (normalizedStart) => {
+        finalStart = normalizedStart;
+        if (normalizedStart === verifiedStart) return;
+        await lockAndAssertNoAnnualPrepayOverlap(
+          trx, customerId, normalizedStart, false, 'Customer already has an annual prepay term through', estimateId,
+        );
+      },
+    })).rejects.toMatchObject({
+      annualPrepayOverlap: expect.objectContaining({ activeTermEnd: '2098-01-31' }),
+    });
+    expect(finalStart).toMatch(/^20\d\d-\d\d-\d\d$/);
+    if (expectedFinalStart) expect(finalStart).toBe(expectedFinalStart);
+    expect(finalStart < '2098-01-31').toBe(true);
+    expect(await trx('annual_prepay_terms').where({ source_estimate_id: estimateId }).count('id as count').first())
+      .toMatchObject({ count: '0' });
   });
 });

@@ -146,9 +146,8 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
       expect.arrayContaining([['customer_id', 'cust-1']])
     );
     const nullChecks = clauseArgs(cw, 'whereNull').flat();
-    expect(nullChecks).toEqual(
-      expect.arrayContaining(['source_estimate_id', 'reservation_expires_at'])
-    );
+    expect(nullChecks).toContain('source_estimate_id');
+    expect(nullChecks).not.toContain('reservation_expires_at');
     // Same upcoming/status guards as the linked query (columns qualified —
     // the fallback left-joins `services` for catalog identity).
     expect(clauseArgs(cw, 'whereIn')).toEqual(

@@ -5670,6 +5670,9 @@ const EstimateConverter = {
     const annualPrepayTermStart = typeof opts.annualPrepayTermStart === 'string' && opts.annualPrepayTermStart
       ? opts.annualPrepayTermStart
       : null;
+    const verifyAnnualPrepayTermStart = typeof opts.verifyAnnualPrepayTermStart === 'function'
+      ? opts.verifyAnnualPrepayTermStart
+      : null;
     // Coverage override for a prepay accept made WHILE booking: the booked
     // scheduled_services rows are the coverage series, so the term's
     // coverage_service_type must equal the BOOKED service_type (and the visit
@@ -8787,6 +8790,7 @@ const EstimateConverter = {
                     * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
+              ...(verifyAnnualPrepayTermStart ? { verifyNormalizedStart: verifyAnnualPrepayTermStart } : {}),
               // Coverage config for the single recurring service → visits get
               // stamped on payment. A single service that couldn't be derived
               // fails closed above, so a single-service term always ships WITH
