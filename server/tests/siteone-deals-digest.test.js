@@ -44,6 +44,7 @@ describe('isDealEmail', () => {
     ['price-match reply with attachment', { subject: 'RE: Price-match request: 3 items (up to 16% per unit)', has_attachments: true }],
     ['maker domain subdomain', { from_address: 'news@mail.basf.com', subject: 'Fall rebate is open' }],
     ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
+    ['case price with a product code', { subject: '10% off by the case: SKU12345' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
