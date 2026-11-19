@@ -371,6 +371,21 @@ describe('bookedInterviewWindowsForDate (reciprocal occupancy for customer sched
       { start: '00:00', end: '00:50' },
     ]);
   });
+
+  test('batches several route dates into one interview read', async () => {
+    const { bookedInterviewWindowsForDates } = require('../services/interview-slots');
+    const q = {};
+    ['whereIn', 'whereNotNull', 'where'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.select = jest.fn(async () => [
+      { id: 'a1', interview_at: '2027-03-16T20:00:00.000Z', interview_end_at: '2027-03-16T20:30:00.000Z' },
+      { id: 'a2', interview_at: '2027-03-18T14:00:00.000Z', interview_end_at: '2027-03-18T14:30:00.000Z' },
+    ]);
+    const conn = jest.fn(() => q);
+    const windows = await bookedInterviewWindowsForDates(['2027-03-16', '2027-03-18'], { conn });
+    expect(conn).toHaveBeenCalledTimes(1);
+    expect(windows.get('2027-03-16')).toEqual([{ start: '15:45', end: '16:45', applicationId: 'a1' }]);
+    expect(windows.get('2027-03-18')).toEqual([{ start: '09:45', end: '10:45', applicationId: 'a2' }]);
+  });
 });
 
 describe('bookedInterviewWindowsForDate — ET day boundary (Codex r5 P2)', () => {

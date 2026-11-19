@@ -60,6 +60,7 @@ const TZ_START = (hhmm) => parseETDateTime(`${DAY}T${hhmm}`).getTime();
 
 maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)', () => {
   let database;
+  let contentionDatabase;
   let runDayReplanIfEnabled;
   let rebooker;
   let techId;
@@ -72,13 +73,18 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     const ci = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(target.hostname) && target.pathname === '/waves_test';
     if (!privateQa && !ci) throw new Error('Use a private QA or isolated CI database');
     database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
-    for (const key of ['GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY']) saved[key] = process.env[key];
+    contentionDatabase = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 3 } });
+    for (const key of [
+      'GATE_DAY_REPLAN', 'DAY_REPLAN_DAYS_AHEAD', 'GATE_MULTI_TECH_CONFIRM', 'GATE_SCHEDULING_CAPACITY',
+      'GATE_TECH_START_POINTS', 'GATE_AUTO_DISPATCH_DAY_RULES', 'GATE_AUTO_DISPATCH_SHARED_MODEL', 'GATE_SLOT_TRAVEL_GAP',
+    ]) saved[key] = process.env[key];
     ({ runDayReplanIfEnabled } = require('../services/day-replan'));
     rebooker = require('../services/rebooker');
   });
 
   afterAll(async () => {
     if (database) await database.destroy();
+    if (contentionDatabase) await contentionDatabase.destroy();
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   });
 
@@ -89,6 +95,10 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     process.env.DAY_REPLAN_DAYS_AHEAD = '1';
     delete process.env.GATE_MULTI_TECH_CONFIRM;
     delete process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_TECH_START_POINTS;
+    delete process.env.GATE_AUTO_DISPATCH_DAY_RULES;
+    delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    delete process.env.GATE_SLOT_TRAVEL_GAP;
     mockConn = await database.transaction();
 
     techId = randomUUID();
@@ -149,6 +159,410 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
   afterEach(async () => {
     jest.restoreAllMocks();
     await mockConn.rollback();
+  });
+
+  async function scoredCrossDay({ destinationExpiry } = {}) {
+    const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
+    const { DAY_CLOSE, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
+    const date = '2097-06-11';
+    const [mover, , left, right] = visits;
+    for (const [v, start, end, n] of [[left, '13:00', '14:00', 1], [right, '15:00', '16:00', 2]]) {
+      await mockConn('scheduled_services').where('id', v.id).update({ scheduled_date: date, window_start: start, window_end: end, route_order: n });
+    }
+    if (destinationExpiry) await mockConn('scheduled_services').where({ id: left.id }).update({ reservation_expires_at: destinationExpiry });
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
+    const others = rows.filter(r => r.dateStr === DAY && r.id !== mover.id);
+    const source = rows.find(r => r.id === mover.id);
+    const target = { ...source, window_start: '14:00', window_end: '15:00' };
+    const position = positionFor(rows.filter(r => r.dateStr === date), target, {
+      sourceStamp: routeStamp(others, source), origin: HQ, departureMin: 450, dayEndMin: DAY_CLOSE,
+    });
+    expect(position.order).toEqual([left.id, mover.id, right.id]);
+    return { date, left, right, mover, position };
+  }
+
+  async function rankCrossDay(date, mover, position, start = '14:00', end = '15:00') {
+    const { filterAndScoreSharedModelCandidates } = require('../services/auto-dispatch/candidate-slots')._internals;
+    const service = await mockConn('scheduled_services').where({ id: mover.id }).first();
+    const candidate = { date, technician_id: techId, start_time: start, end_time: end };
+    return filterAndScoreSharedModelCandidates(service, { lat: HQ.lat, lng: HQ.lng + mover.lngOffset },
+      [candidate], { db: mockConn, sourceRouteStamp: position.sourceStamp, departureMinutes: 450 }, {});
+  }
+
+  test('the auto-dispatch writer puts a cross-day move exactly between its scored neighbors', async () => {
+    const { date, left, right, mover, position } = await scoredCrossDay({ destinationExpiry: '2001-01-01T00:00Z' });
+    await rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position });
+    const ordered = await mockConn('scheduled_services').where({ technician_id: techId, scheduled_date: date }).orderBy('route_order');
+    expect(ordered.map(r => [r.id, r.route_order])).toEqual([[left.id, 1], [mover.id, 2], [right.id, 3]]);
+  });
+
+  test('a priced order with a duplicate or missing destination stop cannot alter the schedule', async () => {
+    const { date, left, mover, position } = await scoredCrossDay();
+    for (const order of [[left.id, mover.id], [left.id, left.id, mover.id]]) {
+      await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+        { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: { ...position, order } })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    }
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+  });
+
+  test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('a destination %s stops the scored renumbering, including the locked re-read', async (flag) => {
+    const { date, left, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: left.id }).update({ [flag]: true });
+
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('dispatch keeps a grouped visit together when ranking a route and when saving it', async () => {
+    const { ROUTE_POSITION } = require('../services/auto-dispatch/route-position');
+    const { date, left, right, mover, position } = await scoredCrossDay();
+    const visitId = randomUUID();
+    await mockConn('service_visits').insert({ id: visitId, customer_id: left.customerId, scheduled_date: date,
+      technician_id: techId, stop_base_key: visitId, created_by: 'test' });
+    await mockConn('scheduled_services').whereIn('id', [left.id, right.id]).update({
+      visit_id: visitId, customer_id: left.customerId, lng: HQ.lng + left.lngOffset,
+    });
+    const [early] = await rankCrossDay(date, mover, position, '09:00', '10:00');
+    expect(early[ROUTE_POSITION].order).toEqual([mover.id, left.id, right.id]);
+    expect(await rankCrossDay(date, mover, position)).toHaveLength(0);
+    const split = { ...position, destinationStamp: early[ROUTE_POSITION].destinationStamp };
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: split })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('dispatch simulates and saves a version-2 allocation as one physical arrival', async () => {
+    const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
+    const { DAY_CLOSE, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
+    const { date, left, right, mover } = await scoredCrossDay();
+    const mix = { version: 2, allocatedServiceIds: [left.id, right.id], durations: [121, 1], durationMinutes: 122 };
+    await mockConn('scheduled_services').where({ id: left.id }).update({
+      customer_id: left.customerId, window_start: '09:00', window_end: '10:00',
+      estimated_duration_minutes: 121, route_order: 1, reservation_service_mix: mix,
+      lat: HQ.lat, lng: HQ.lng,
+    });
+    await mockConn('scheduled_services').where({ id: right.id }).update({
+      customer_id: left.customerId, window_start: '09:00', window_end: '09:01',
+      estimated_duration_minutes: 1, route_order: 2, reservation_service_mix: mix,
+      lat: HQ.lat, lng: HQ.lng,
+    });
+    await mockConn('scheduled_services').where({ id: mover.id }).update({ lat: HQ.lat, lng: HQ.lng });
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
+    const source = rows.find((row) => row.id === mover.id);
+    const sourceDay = rows.filter((row) => row.dateStr === DAY && row.id !== mover.id);
+    const destination = rows.filter((row) => row.dateStr === date);
+    const target = { ...source, technician_id: techId, window_start: '13:00', window_end: '14:00' };
+    const scoredPosition = positionFor(destination, target, {
+      sourceStamp: routeStamp(sourceDay, source), origin: HQ, departureMin: 450, dayEndMin: DAY_CLOSE,
+    });
+    expect(scoredPosition.order).toEqual([left.id, right.id, mover.id]);
+    await rebooker.reschedule(mover.id, date, { start: '13:00', end: '14:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: scoredPosition });
+    const ordered = await mockConn('scheduled_services').where({ technician_id: techId, scheduled_date: date }).orderBy('route_order');
+    expect(ordered.map((row) => row.id)).toEqual([left.id, right.id, mover.id]);
+  });
+
+  test('a different writer cannot use a cross-day dispatch position', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'admin', 'admin',
+      { seriesPolicy: 'single', dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+  });
+
+  test('a change to just the original stop number invalidates the projected drive saving', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: mover.id }).update({ route_order: 8 });
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY, route_order: 8 }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('a mover that joins a version-2 allocation after scoring cannot use the saved route position', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: mover.id }).update({
+      reservation_service_mix: {
+        version: 2,
+        allocatedServiceIds: [mover.id, randomUUID()],
+        durationMinutes: 120,
+      },
+    });
+
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('the apply CAS loses to a concurrent version-2 attachment after its null read', async () => {
+    const schemaName = `route_allocation_${randomUUID().replaceAll('-', '')}`;
+    const rowId = randomUUID();
+    let allocationTrx;
+    let moveTrx;
+    let schemaCreated = false;
+    try {
+      await contentionDatabase.schema.createSchema(schemaName);
+      schemaCreated = true;
+      await contentionDatabase.schema.withSchema(schemaName).createTable('scheduled_services', (table) => {
+        table.uuid('id').primary();
+        table.jsonb('reservation_service_mix').nullable();
+        table.text('window_start');
+      });
+      await contentionDatabase.withSchema(schemaName).table('scheduled_services').insert({ id: rowId, window_start: '09:00' });
+      // The apply preflight saw NULL. Before its conditional UPDATE reaches
+      // the row, allocation conversion attaches v2 and holds that write.
+      allocationTrx = await contentionDatabase.transaction();
+      moveTrx = await contentionDatabase.transaction();
+      await allocationTrx.raw('SELECT set_config(\'search_path\', ?, true)', [schemaName]);
+      await moveTrx.raw('SELECT set_config(\'search_path\', ?, true)', [schemaName]);
+      await allocationTrx('scheduled_services').where({ id: rowId }).update({
+        reservation_service_mix: { version: 2, allocatedServiceIds: [rowId, randomUUID()] },
+      });
+      const pidResult = await moveTrx.raw('SELECT pg_backend_pid() AS pid');
+      const movePid = pidResult.rows[0].pid;
+      const pendingMove = Promise.resolve(moveTrx('scheduled_services')
+        .where({ id: rowId, reservation_service_mix: null })
+        .update({ window_start: '10:00' }).returning('id'));
+      const deadline = Date.now() + 5000;
+      let waiting = false;
+      while (Date.now() < deadline && !waiting) {
+        const activity = await contentionDatabase('pg_stat_activity').where({ pid: movePid }).first('wait_event_type');
+        waiting = activity?.wait_event_type === 'Lock';
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+
+      await allocationTrx.commit();
+      allocationTrx = null;
+      expect(await pendingMove).toEqual([]);
+      expect(await moveTrx('scheduled_services').where({ id: rowId }).first('window_start', 'reservation_service_mix'))
+        .toMatchObject({ window_start: '09:00', reservation_service_mix: { version: 2 } });
+      await moveTrx.commit();
+      moveTrx = null;
+    } finally {
+      if (allocationTrx) await allocationTrx.rollback();
+      if (moveTrx) await moveTrx.rollback();
+      if (schemaCreated) await contentionDatabase.schema.dropSchema(schemaName, true);
+    }
+  });
+
+  test('a second scoring pass refreshes the mover stop number with its source-day neighbors', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const { routeStamp } = require('../services/auto-dispatch/route-position');
+    const { routeCost } = require('../services/auto-dispatch/route-model');
+    const { computeCurrentPlacement, _internals: { loadDayStopRows, filterAndScoreSharedModelCandidates } } = require('../services/auto-dispatch/candidate-slots');
+    const mover = visits[0];
+    const stale = await mockConn('scheduled_services').where({ id: mover.id }).first();
+    await mockConn('scheduled_services').where({ id: visits[1].id }).update({ route_order: 1 });
+    await mockConn('scheduled_services').where({ id: visits[2].id }).update({ route_order: 2 });
+    await mockConn('scheduled_services').where({ id: mover.id }).update({ route_order: 3 });
+    await mockConn('scheduled_services').where({ id: visits[3].id }).update({ route_order: 4 });
+
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY], technicianIds: [techId] });
+    const fresh = rows.find((row) => row.id === mover.id);
+    const others = rows.filter((row) => row.id !== mover.id);
+    const expected = routeCost(others, fresh, HQ);
+    const staleCost = routeCost(others, { ...fresh, route_order: stale.route_order }, HQ);
+    expect(expected.detourMinutes).not.toBeCloseTo(staleCost.detourMinutes, 5);
+
+    const ctx = { db: mockConn, capabilityFor: () => 'qualified' };
+    const current = await computeCurrentPlacement(stale, { service_category: 'general' }, ctx);
+    expect(ctx.sourceRouteStamp).toBe(routeStamp(others, fresh));
+    expect(current.detour_minutes).toBeCloseTo(expected.detourMinutes, 5);
+    expect(current.total_drive_minutes).toBeCloseTo(expected.driveWithMinutes, 5);
+
+    // A same-day retime keeps its route number. Candidate scoring must reuse
+    // the refreshed number above, not the pass-1 row's stale number.
+    const [sameDay] = await filterAndScoreSharedModelCandidates(stale, fresh.geo, [{
+      date: DAY, technician_id: techId,
+      start_time: String(fresh.window_start).slice(0, 5),
+      end_time: String(fresh.window_end).slice(0, 5),
+    }], ctx, {});
+    expect(sameDay.detour_minutes).toBeCloseTo(expected.detourMinutes, 5);
+    expect(sameDay.total_drive_minutes).toBeCloseTo(expected.driveWithMinutes, 5);
+  });
+
+  test('a destination with a windowless or completed stop is excluded before ranking and again at commit', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    const score = () => rankCrossDay(date, mover, position);
+    expect(await score()).toHaveLength(1);
+    const [extra] = await mockConn('scheduled_services').insert({ customer_id: mover.customerId, technician_id: techId,
+      scheduled_date: date, service_type: 'Quarterly Pest Control Service', status: 'pending' }).returning('id');
+    expect(await score()).toHaveLength(0);
+    await mockConn('scheduled_services').where({ id: extra.id }).update({ window_start: '08:00', window_end: '09:00', status: 'completed' });
+    expect(await score()).toHaveLength(0);
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+  });
+
+  test('a graduated customer-linked hold keeps blocking its occupied window after its expiry stamp', async () => {
+    const { date, left, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: left.id }).update({
+      window_start: '14:00', window_end: '15:00', reservation_expires_at: '2001-01-01T00:00:00Z',
+    });
+    expect(await rankCrossDay(date, mover, position, '14:00', '15:00')).toHaveLength(0);
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false }))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+  });
+
+  test('a booked interview blocks an insertion that would delay the following stop through it', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    const [before] = await rankCrossDay(date, mover, position, '14:00', '15:00');
+    expect(before).toBeTruthy();
+    const applicationId = randomUUID();
+    await mockConn('job_applications').insert({
+      id: applicationId,
+      status: 'interview',
+      contact_snapshot: {},
+      interview_at: parseETDateTime(`${date}T15:15`),
+      interview_end_at: parseETDateTime(`${date}T16:45`),
+    });
+
+    expect(await rankCrossDay(date, mover, position, '14:00', '15:00')).toHaveLength(0);
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: before[require('../services/auto-dispatch/route-position').ROUTE_POSITION] }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+  });
+
+  test('a late calendar block that pushes the last job past closing aborts the priced move', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await mockConn('tech_schedule_blocks').insert({ date, technician_id: techId, block_type: 'blocked', start_time: '15:30', end_time: '16:30' });
+    expect(await rankCrossDay(date, mover, position)).toHaveLength(0);
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('a changed destination hour after pricing aborts the whole cross-day move', async () => {
+    const { date, right, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where('id', right.id).update({ window_start: '16:00', window_end: '17:00' });
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  async function scoredEarlyCrossDay() {
+    const { driveMin } = require('../services/auto-dispatch/geo');
+    const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
+    const { DAY_CLOSE, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
+    const departure = require('../services/scheduling/departure-time');
+    const date = '2097-06-12';
+    const mover = visits[0];
+    let pin = null;
+    for (let offset = 0.01; offset < 1; offset += 0.01) {
+      const candidate = { lat: HQ.lat, lng: HQ.lng + offset };
+      const minutesAway = driveMin(HQ, candidate);
+      if (minutesAway >= 25 && minutesAway <= 35) { pin = candidate; break; }
+    }
+    expect(pin).toBeTruthy();
+    await mockConn('scheduled_services').where({ id: mover.id }).update(pin);
+    await mockConn('tech_schedule_blocks').insert({
+      date, technician_id: techId, block_type: 'blocked', start_time: '07:45', end_time: '09:45',
+    });
+    const setDeparture = value => mockConn('system_settings').insert({
+      key: departure.DEPARTURE_TIME_KEY, value: JSON.stringify(value),
+    }).onConflict('key').merge();
+    await setDeparture('07:00');
+    const departureMin = await departure.dayDepartureMinutes(mockConn, { enabled: true });
+    expect(departureMin).toBe(7 * 60);
+    const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
+    const source = rows.find(row => row.id === mover.id);
+    const sourceDay = rows.filter(row => row.dateStr === DAY && row.id !== mover.id);
+    const target = { ...source, window_start: '08:00', window_end: '09:00' };
+    const blocks = [{ startMin: 7 * 60 + 45, endMin: 9 * 60 + 45 }];
+    const position = positionFor([], target, {
+      sourceStamp: routeStamp(sourceDay, source), origin: HQ, sourceOrigin: HQ,
+      departureMin, configuredDeparture: true, dayEndMin: DAY_CLOSE, blocks,
+    });
+    expect(position).toBeTruthy();
+    return { date, mover, position, setDeparture };
+  }
+
+  test('the save rereads a configured departure and refuses an early first promise that became infeasible', async () => {
+    const { date, mover, position, setDeparture } = await scoredEarlyCrossDay();
+    await setDeparture('08:00');
+
+    await expect(rebooker.reschedule(mover.id, date, { start: '08:00', end: '09:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('the save accepts the same early first promise when the configured departure is unchanged', async () => {
+    const { date, mover, position } = await scoredEarlyCrossDay();
+
+    await rebooker.reschedule(mover.id, date, { start: '08:00', end: '09:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: date, route_order: 1 }).first('id')).toBeTruthy();
+  });
+
+  test('a first departure-time save waits for the route verifier lock', async () => {
+    const departure = require('../services/scheduling/departure-time');
+    const schemaName = `route_departure_${randomUUID().replaceAll('-', '')}`;
+    await contentionDatabase.schema.createSchema(schemaName);
+    await contentionDatabase.schema.withSchema(schemaName).createTable('system_settings', (table) => {
+      table.text('key').primary();
+      table.text('value');
+      table.text('category');
+      table.text('description');
+      table.timestamp('updated_at');
+    });
+    let routeTrx;
+    let writerTrx;
+    try {
+      routeTrx = await contentionDatabase.transaction();
+      writerTrx = await contentionDatabase.transaction();
+      // Both real connections see only this test's empty settings table. The
+      // global advisory lock still collides, while shared QA state is never
+      // read, deleted or restored even if the test is interrupted.
+      await routeTrx.raw("SELECT set_config('search_path', ?, true)", [schemaName]);
+      await writerTrx.raw("SELECT set_config('search_path', ?, true)", [schemaName]);
+      expect(await departure.lockedDayDepartureMinutes(routeTrx, { enabled: true }))
+        .toBe(departure.DEFAULT_DEPARTURE_MINUTES);
+      const pidResult = await writerTrx.raw('SELECT pg_backend_pid() AS pid');
+      const writerPid = pidResult.rows[0].pid;
+      const pendingWrite = departure.writeDepartureSetting(writerTrx, '08:00');
+      const deadline = Date.now() + 5000;
+      let waiting = false;
+      while (Date.now() < deadline && !waiting) {
+        const activity = await contentionDatabase('pg_stat_activity').where({ pid: writerPid }).first('wait_event_type', 'wait_event');
+        waiting = activity?.wait_event_type === 'Lock' && activity?.wait_event === 'advisory';
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      await routeTrx.rollback();
+      routeTrx = null;
+      await pendingWrite;
+      expect(await writerTrx('system_settings').where({ key: departure.DEPARTURE_TIME_KEY }).first('value'))
+        .toEqual({ value: '"08:00"' });
+    } finally {
+      if (routeTrx) await routeTrx.rollback();
+      if (writerTrx) await writerTrx.rollback();
+      await contentionDatabase.schema.dropSchema(schemaName, true);
+    }
+  });
+
+  test('the save refuses a start-point change that invalidates the priced route origin', async () => {
+    process.env.GATE_TECH_START_POINTS = 'true';
+    await mockConn('technicians').where({ id: techId }).update({ start_lat: HQ.lat, start_lng: HQ.lng });
+    const { date, mover, position } = await scoredEarlyCrossDay();
+    await mockConn('technicians').where({ id: techId }).update({ start_lat: HQ.lat + 1, start_lng: HQ.lng + 1 });
+
+    await expect(rebooker.reschedule(mover.id, date, { start: '08:00', end: '09:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
   });
 
   const visitRows = async () => mockConn('scheduled_services').whereIn('id', visits.map((v) => v.id)).select('id', 'window_start', 'window_end', 'route_order', 'status');

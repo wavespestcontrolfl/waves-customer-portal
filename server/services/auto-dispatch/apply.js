@@ -70,7 +70,8 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed',
+      'reservation_service_mix', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -85,6 +86,9 @@ async function revalidatePlacement(service) {
   }
   if (fresh.customer_confirmed === true) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
+  }
+  if (fresh.reservation_service_mix?.version === 2) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Visit joined a version-2 allocation after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -353,6 +357,13 @@ function makeMoveGuard({ service, best, config = {} }) {
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
+    // Version-2 allocation members share one arrival and occupied span, but
+    // auto-dispatch has no allocation-unit writer. Fence the committed row as
+    // well as candidate scoring so a same-day/unassigned path, stale input,
+    // or direct apply cannot split the allocation.
+    if (row.reservation_service_mix?.version === 2) {
+      throw refuse(row.id, 'belongs to a version-2 allocation that must move as one unit');
+    }
     if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
@@ -911,6 +922,8 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
+  const position = best[require('./route-position').ROUTE_POSITION];
+  if (position) options.dispatchRoutePosition = position;
   // Remaining per-run change budget (orchestrator): a grouped visit whose
   // LOCKED member count exceeds it is refused inside the unit move before
   // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
@@ -944,6 +957,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
   options.expect = {
     auto_dispatch_locked: false,
     auto_dispatch_excluded: false,
+    ...(position ? { visit_id: null } : {}),
     status: fresh.status, // original status too — a flip to 'rescheduled' fails the match → 409
     scheduled_date: toDateStr(fresh.scheduled_date),
     // Full original placement too, so a same-date window/tech edit by an operator
@@ -955,7 +969,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
     // location fields, null when absent. customer_confirmed for every visit
     // (owner 2026-10-09): a confirmation that lands between the read above
     // and the move fails the atomic match.
-    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS]
+    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', 'reservation_service_mix', ...LOCATION_FIELDS]
       .map((field) => [field, fresh[field] ?? null])),
   };
 

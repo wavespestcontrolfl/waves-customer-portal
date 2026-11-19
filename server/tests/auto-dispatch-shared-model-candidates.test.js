@@ -37,7 +37,7 @@ const {
   findValidCandidateSlots,
   computeCurrentPlacement,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, scoreOnSharedModel, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -77,6 +77,7 @@ function emptyDb() {
   ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
     .forEach((m) => { c[m] = () => c; });
   c.select = async () => [];
+  c.distinct = async () => [];
   return () => c;
 }
 
@@ -180,6 +181,7 @@ function singleCandidateDb(dayStops) {
       if (n === 2) return dayStops; // the candidate tech-days' stops (one batched read)
       return []; // current-placement queries (legacy + shared-model)
     };
+    c.distinct = async () => [];
     return c;
   };
 }
@@ -247,6 +249,7 @@ function windowlessAwareSingleCandidateDb(dayStopsFixture) {
       if (field === 'scheduled_services.window_start') filteredWindowless = true;
       return c;
     };
+    c.distinct = async () => dayStopsFixture.filter(row => row.window_start == null);
     c.select = async () => {
       if (n === 1) return [];
       if (n === 2) return filteredWindowless ? dayStopsFixture.filter((r) => r.window_start != null) : dayStopsFixture;
@@ -256,7 +259,7 @@ function windowlessAwareSingleCandidateDb(dayStopsFixture) {
   };
 }
 
-test('a day whose only "stop" is a windowless placeholder scores like an empty day (Codex pre-push P1)', async () => {
+test('a windowless placeholder is never a timed stop and its technician-day cannot be renumbered by dispatch', async () => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
   const SLOT = { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 1, score: 2 };
   const placeholderRow = {
@@ -276,10 +279,9 @@ test('a day whose only "stop" is a windowless placeholder scores like an empty d
     SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([]) },
   );
 
-  expect(withPlaceholder).toHaveLength(1);
-  expect(withPlaceholder[0].detour_minutes).toBe(empty[0].detour_minutes);
-  expect(withPlaceholder[0].total_drive_minutes).toBe(empty[0].total_drive_minutes);
-  expect(withPlaceholder[0].same_area_share).toBe(0);
+  expect(withPlaceholder).toHaveLength(0);
+  expect(empty).toHaveLength(1);
+  expect(empty[0].same_area_share).toBe(0);
 });
 
 test('computeCurrentPlacement: a current-day expired hold / no_show does not count toward detour or clustering', async () => {
@@ -643,7 +645,7 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       return c;
     };
     await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: withVisit(db) });
-    expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
+    expect(new Set(capturedExcludeIds)).toEqual(new Set(['sib1']));
   });
 });
 
@@ -822,9 +824,10 @@ test('openMembers is read exactly once per evaluation; the current placement and
 
   await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
   expect(openMembers).toHaveBeenCalledTimes(1);
-  // Both sides' day-stop reads (the candidates' batch and the current day)
-  // exclude the same unit.
-  expect(dayStopExcludes).toEqual([['s1', 'sib1'], ['s1', 'sib1']]);
+  // Candidate-day scoring excludes the moving unit. The source-day read keeps
+  // the mover so its live route_order and its neighbors share one snapshot,
+  // but still excludes the sibling that moves with it.
+  expect(dayStopExcludes).toEqual([['sib1'], ['s1', 'sib1']]);
   expect([...probeMoveConflicts.mock.calls[0][0].excludeServiceIds].sort()).toEqual(['s1', 'sib1']);
 
   // A later evaluation (the retry re-evaluation) reads the group afresh, once.
@@ -885,6 +888,67 @@ test('a reservation_policy_version 2 day stop keeps its planning minutes with th
   const [v2] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([pest(2)]) }, {});
   const [v1] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([pest(1)]) }, {});
   expect(v1.route_minutes - v2.route_minutes).toBeCloseTo(60 - 35, 5); // v2 plans at the table's 35 (owner 2026-10-30), v1 at its 60 estimate
+});
+
+test('a version-2 moving stop keeps its planning minutes in the saved route simulation', () => {
+  delete process.env.GATE_SCHEDULING_CAPACITY;
+  const geo = { lat: 27.4, lng: -82.5 };
+  const service = {
+    ...SERVICE,
+    status: 'confirmed',
+    service_type: 'Quarterly Pest Control Service',
+    is_recurring: true,
+    reservation_policy_version: 2,
+    estimated_duration_minutes: 60,
+    created_at: '2026-07-01T00:00:00Z',
+  };
+  const candidate = { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' };
+  const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
+  const ctx = { sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60 };
+  const blocks = [{ startMin: 8 * 60 + 40, endMin: 17 * 60 }];
+
+  const v2 = scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, ctx, blocks);
+  const legacy = scoreOnSharedModel({ ...service, reservation_policy_version: 1 }, geo, candidate, [], [], placement, geo, ctx, blocks);
+  const { ROUTE_POSITION } = require('../services/auto-dispatch/route-position');
+  expect(v2[ROUTE_POSITION]).toBeTruthy();
+  expect(legacy).toBeNull();
+});
+
+test.each([
+  ['cross-day assigned', { scheduled_date: '2026-08-04', technician_id: 't1' }, { date: '2026-08-06', technician_id: 't1' }],
+  ['same-day same-tech', { scheduled_date: '2026-08-06', technician_id: 't1' }, { date: '2026-08-06', technician_id: 't1' }],
+  ['unassigned source', { scheduled_date: '2026-08-06', technician_id: null }, { date: '2026-08-06', technician_id: 't1' }],
+])('an allocation-only moving member is rejected before the %s scoring branch', (_label, source, destination) => {
+  const geo = { lat: 27.4, lng: -82.5 };
+  const service = {
+    ...SERVICE,
+    ...source,
+    status: 'confirmed',
+    created_at: '2026-07-01T00:00:00Z',
+    reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'], durationMinutes: 70 },
+  };
+  const candidate = { ...destination, start_time: '08:00', end_time: '09:00' };
+  const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
+  expect(scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, {
+    sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60,
+  })).toBeNull();
+});
+
+test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('a destination with a %s stop is not renumbered', (flag) => {
+  const { positionFor } = require('../services/auto-dispatch/route-position');
+  const origin = { lat: 27.4, lng: -82.5 };
+  const stop = {
+    id: 'pinned', technician_id: 't1', status: 'confirmed', window_start: '10:00', window_end: '11:00',
+    route_order: 1, created_at: '2026-07-01T00:00:00Z', lat: origin.lat, lng: origin.lng, geo: origin,
+    [flag]: true,
+  };
+  const target = {
+    id: 'moving', technician_id: 't1', status: 'confirmed', window_start: '09:00', window_end: '10:00',
+    created_at: '2026-07-01T00:00:00Z', lat: origin.lat, lng: origin.lng, geo: origin,
+  };
+  expect(positionFor([stop], target, {
+    sourceStamp: 'source', origin, departureMin: 8 * 60, dayEndMin: 17 * 60,
+  })).toBeNull();
 });
 
 // Codex pre-push P1: group siblings are excluded from the day's stops because
@@ -952,6 +1016,47 @@ test('day-stop rows carry route_order/created_at and the co-visit inputs — a l
   const [single] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([coVisit('p')]) }, {});
   expect(pair.route_minutes).toBeCloseTo(single.route_minutes, 5);
   expect(pair.detour_minutes).toBeCloseTo(single.detour_minutes, 5);
+});
+
+test('routeFits keeps two estimate-less legacy co-visits to their one shared hour', () => {
+  const { routeFits } = require('../services/auto-dispatch/route-position');
+  const { groupRouteStops } = require('../services/scheduling/arrival-route');
+  const origin = { lat: 27.4, lng: -82.5 };
+  const coVisit = (id, routeOrder) => ({
+    id, visit_id: null, customer_id: 'c9', technician_id: 't1', scheduled_date: '2026-08-06', status: 'confirmed',
+    window_start: '08:00', window_end: '09:00', estimated_duration_minutes: null,
+    route_order: routeOrder, created_at: '2026-07-01T12:00:00Z', lat: origin.lat, lng: origin.lng,
+    service_address_line1: '12 Palm Way', service_address_line2: null,
+    service_address_city: 'Bradenton', service_address_zip: '34203',
+  });
+  const rows = [coVisit('pest', 1), coVisit('lawn', 2)];
+  expect(groupRouteStops(rows).map((row) => row.raw_estimate_minutes)).toEqual([null, null]);
+  expect(groupRouteStops(rows).every((row) => row.memberIds === undefined)).toBe(true);
+
+  // Depart at 08:00 and close at 09:30. One shared 60-minute visit fits;
+  // the former phantom 120 minutes does not.
+  expect(routeFits(rows, rows.map((row) => row.id), {
+    origin, departureMin: 8 * 60, dayEndMin: 9 * 60 + 30,
+  })).toBe(true);
+
+  const originalCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+  try {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    expect(routeFits(rows, rows.map((row) => row.id), {
+      origin, departureMin: 8 * 60, dayEndMin: 9 * 60 + 30,
+    })).toBe(true);
+  } finally {
+    if (originalCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = originalCapacity;
+  }
+
+  // A real allocation remains additive when folded to one arrival.
+  const mix = { version: 2, allocatedServiceIds: ['pest', 'lawn'] };
+  const allocation = rows.map((row) => ({ ...row, window_end: '08:30', estimated_duration_minutes: 45,
+    reservation_service_mix: mix }));
+  expect(groupRouteStops(allocation)).toEqual([expect.objectContaining({
+    memberIds: ['pest', 'lawn'], estimated_duration_minutes: 90, raw_estimate_minutes: 90,
+  })]);
 });
 
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's

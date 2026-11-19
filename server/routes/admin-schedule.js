@@ -30021,15 +30021,7 @@ router.put('/departure-time', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'departureTime must be a time from 06:00 to 08:00 in 15-minute steps' });
     }
     const departureTime = departure.formatDepartureTime(minutes);
-    await db('system_settings')
-      .insert({
-        key: departure.DEPARTURE_TIME_KEY,
-        value: JSON.stringify(departureTime),
-        category: 'scheduling',
-        description: 'The time the van leaves its start point (HH:MM). Read by the night tool, the 04:20 route pass and the day reports while GATE_AUTO_DISPATCH_DAY_RULES is on.',
-      })
-      .onConflict('key')
-      .merge({ value: JSON.stringify(departureTime), updated_at: db.fn.now() });
+    await departure.writeDepartureSetting(db, departureTime);
     logger.info(`[schedule] departure time set to ${departureTime}`);
     res.json({
       success: true,

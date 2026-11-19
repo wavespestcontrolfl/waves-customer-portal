@@ -111,7 +111,9 @@ describe('every place that classifies a mover knows day_replan', () => {
   test('the funnel\'s automatic-mover list, the proofreader\'s program list and the rebooker\'s night-writer rule', () => {
     expect(read('services/sms-scheduling-funnel.js')).toMatch(/AUTOMATIC_MOVE_INITIATORS = Object\.freeze\(\[[^\]]*'day_replan'/);
     expect(read('services/auto-dispatch/proofreader/record.js')).toMatch(/PROGRAM_RESCHEDULERS = \[[^\]]*'day_replan'/);
-    expect(read('services/rebooker.js')).toMatch(/const isNightWriter = \(initiatedBy\) => initiatedBy === 'auto_dispatch' \|\| initiatedBy === 'day_replan'/);
+    const rebooker = read('services/rebooker.js');
+    expect(rebooker).toContain("const AUTO_DISPATCH_INITIATOR = 'auto_dispatch'");
+    expect(rebooker).toMatch(/const isNightWriter = \(initiatedBy\) => initiatedBy === AUTO_DISPATCH_INITIATOR \|\| initiatedBy === 'day_replan'/);
   });
 
   test('the rebooker applies the night-writer rule everywhere it used to name auto_dispatch alone', () => {
