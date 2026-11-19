@@ -18,9 +18,11 @@ let mockLegsSent = [];
 let mockLegBodies = [];
 // The device row the sender hands the per-device form: a leg's own (its
 // platform, default the staff app on an iPhone), or one default device.
-const mockDefaultDevice = { id: 'dev-1', platform: 'ios', device_token: 'tok-dev-1' };
+// A staff-app row's route data, as the sender reads it (subscription_data).
+const mockRouteData = JSON.stringify({ topic: 'com.wavespestcontrol.wavespay', environment: 'production', session_exp: 4102444800 });
+const mockDefaultDevice = { id: 'dev-1', platform: 'ios', device_token: 'tok-dev-1', subscription_data: mockRouteData };
 const mockDeviceOf = (leg) => (leg
-  ? { id: leg.id, platform: leg.platform === undefined ? 'ios' : leg.platform, device_token: leg.token || `tok-${leg.id}` }
+  ? { id: leg.id, platform: leg.platform === undefined ? 'ios' : leg.platform, device_token: leg.token || `tok-${leg.id}`, subscription_data: leg.data || mockRouteData }
   : mockDefaultDevice);
 // The notification one device gets: the sender's per-device form (a function
 // of the staff id and the device row) or one notification for every device.
@@ -251,7 +253,7 @@ function staffAppChain() {
     if (mockStaffAppRows instanceof Error) throw mockStaffAppRows;
     if (mockStaffAppRows) return mockStaffAppRows;
     const devices = mockLegs ? mockLegs.map(mockDeviceOf) : [mockDefaultDevice];
-    return devices.filter((d) => d.platform === 'ios').map((d) => ({ id: d.id, device_token: d.device_token }));
+    return devices.filter((d) => d.platform === 'ios').map((d) => ({ id: d.id, device_token: d.device_token, subscription_data: d.subscription_data }));
   });
   lastStaffAppQuery = c;
   return c;
@@ -1154,7 +1156,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
   test('a phone that a newer sign-in took over during the send gets the first line only (pre-push audit P0)', async () => {
     mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
     // d2's token was re-pointed to another sign-in after the sender read the rows.
-    mockBeforeLeg = async (leg) => { if (leg.id === 'd2') mockStaffAppRows = [{ id: 'd1', device_token: 'tok-d1' }]; };
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd2') mockStaffAppRows = [{ id: 'd1', device_token: 'tok-d1', subscription_data: mockRouteData }]; };
     await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
     expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
   });
@@ -1170,6 +1172,8 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
       ['whereRaw', "ps.subscription_data::jsonb->>'topic' = ?", ['com.wavespestcontrol.wavespay']],
       // A token another row holds, in any letter case and any state, is ambiguous.
       ['whereRaw', 'NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))'],
+      // The sign-in that registered the phone still stands.
+      ['whereRaw', expect.stringContaining("(ps.subscription_data::jsonb->>'session_exp')::numeric > extract(epoch FROM now())")],
     ]));
   });
 
@@ -1187,7 +1191,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     await officeMove('v-1');
     await officeMove('v-2');
     mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
-    mockStaffAppRows = [{ id: 'd2', device_token: 'tok-d2' }];
+    mockStaffAppRows = [{ id: 'd2', device_token: 'tok-d2', subscription_data: mockRouteData }];
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockLegBodies[0]).toBe('');
     expect(mockLegBodies[1]).toMatch(/^Ana Ruiz · Pest Control · /);
@@ -1245,6 +1249,12 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(lastStaffAppQuery.calls).toEqual(expect.arrayContaining([
       ['whereRaw', '(t.mfa_enabled_at IS NULL OR ps.staff_mfa = true)'],
     ]));
+  });
+
+  test('a phone whose row now routes differently than the row the sender read gets the first line only (pre-push audit P0)', async () => {
+    mockStaffAppRows = [{ id: 'dev-1', device_token: 'tok-dev-1', subscription_data: JSON.stringify({ topic: 'com.wavespestcontrol.wavespay', environment: 'sandbox', session_exp: 4102444800 }) }];
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
   });
 
   test('a single unverified visit gets its own first line only', async () => {

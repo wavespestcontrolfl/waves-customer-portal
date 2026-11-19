@@ -317,7 +317,13 @@ function fitBody(text) {
 // letter case, so a token another row holds in any case, active or not, is
 // ambiguous and is not in it either (a sign-out of one row must not make the
 // other count). The sender's two-step filter (staffMfaPushFilter) applies
-// again here, as on its own lookup.
+// again here, as on its own lookup, and the sign-in that registered the
+// phone must still stand (session_exp, stored at sign-up by admin-push). Each
+// entry keeps the row's route data, so a device the sender routes by an
+// older read of its row never counts.
+const SIGN_IN_STANDS_SQL = "CASE WHEN jsonb_typeof(ps.subscription_data::jsonb->'session_exp') = 'number' "
+  + "THEN (ps.subscription_data::jsonb->>'session_exp')::numeric > extract(epoch FROM now()) ELSE false END";
+const routeData = (value) => (typeof value === 'string' ? value : JSON.stringify(value ?? null));
 async function namedDevices(technicianId, conn) {
   const { STAFF_APP_BUNDLE_ID } = require('./apns');
   const { staffMfaPushFilter } = require('./push-notifications');
@@ -328,20 +334,24 @@ async function namedDevices(technicianId, conn) {
     .whereNull('ps.customer_id')
     .whereRaw('ps.staff_token_version = t.auth_token_version')
     .whereRaw("ps.subscription_data::jsonb->>'topic' = ?", [STAFF_APP_BUNDLE_ID])
-    .whereRaw('NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))'))
-    .select('ps.id', 'ps.device_token');
-  return new Map(rows.map((row) => [String(row.id), row.device_token]));
+    .whereRaw('NOT EXISTS (SELECT 1 FROM push_subscriptions o WHERE o.id <> ps.id AND lower(o.device_token) = lower(ps.device_token))')
+    .whereRaw(SIGN_IN_STANDS_SQL))
+    .select('ps.id', 'ps.device_token', 'ps.subscription_data');
+  return new Map(rows.map((row) => [String(row.id), { token: row.device_token, data: routeData(row.subscription_data) }]));
 }
 
 // What one device shows (sendToAdminUsers' per-device form, which the sender
 // calls right after that device's recheck): the visit's details only on a
-// device namedDevices verified at that recheck; any other, the first line
-// only. A verified device gets `push` itself, so a recheck that clears its
-// second line still reaches it.
-const forDevice = (push, verifiedNow) => (_adminUserId, sub) => (
-  sub && sub.platform === 'ios' && sub.device_token && verifiedNow().get(String(sub.id)) === sub.device_token
+// device namedDevices verified at that recheck, with the same token and the
+// same route data the sender sends by; any other, the first line only. A
+// verified device gets `push` itself, so a recheck that clears its second
+// line still reaches it.
+const forDevice = (push, verifiedNow) => (_adminUserId, sub) => {
+  const seen = sub && sub.platform === 'ios' && sub.device_token ? verifiedNow().get(String(sub.id)) : null;
+  return seen && seen.token === sub.device_token && seen.data === routeData(sub.subscription_data)
     ? push
-    : { ...push, body: '' });
+    : { ...push, body: '' };
+};
 
 /**
  * Compose the card's headline / message / payload for one kind. Pure.
