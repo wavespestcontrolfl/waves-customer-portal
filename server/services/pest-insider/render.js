@@ -52,7 +52,7 @@ const small = (html) => `<p class="dm-muted" style="margin:0 0 14px 0;font-size:
 
 function leadBlock({ lead }) {
   // Every issue links the lead fact's post, and only a reviewed post URL.
-  if (!POST_URLS.has(lead.postUrl)) throw new Error('pest-insider render: the lead link must be a reviewed post URL (posts.js)');
+  if (!POST_URLS.includes(lead.postUrl)) throw new Error('pest-insider render: the lead link must be a reviewed post URL (posts.js)');
   const body = lead.sentences.map((s) => s.text).join(' ');
   const html = [
     headingHtml(0, 'Today I learned'),

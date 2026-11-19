@@ -17,10 +17,17 @@ describe('the reviewed post list', () => {
     for (const [id, post] of Object.entries(POSTS)) {
       expect(MAIN.map((f) => f.id)).toContain(id);
       expect(postUrl(id)).toBe(`${SITE}${post.path}`);
-      expect(POST_URLS.has(postUrl(id))).toBe(true);
+      expect(POST_URLS).toContain(postUrl(id));
     }
     expect(postUrl('Z99')).toBeNull();
     expect(Object.isFrozen(POSTS) && Object.isFrozen(POSTS[FIRST])).toBe(true);
+  });
+
+  test('the link allowlist lists each post once and cannot be widened', () => {
+    expect(new Set(POST_URLS).size).toBe(POST_URLS.length);
+    expect(POST_URLS).toEqual([...new Set(Object.keys(POSTS).map(postUrl))]);
+    expect(() => POST_URLS.push('https://www.example.com/post/')).toThrow(TypeError);
+    expect(POST_URLS).not.toContain('https://www.example.com/post/');
   });
 
   test.each([
@@ -68,7 +75,8 @@ describe('the reviewed post list', () => {
 });
 
 describe('checkLivePosts', () => {
-  const ids = Object.keys(POSTS).slice(0, 4);
+  // four facts with four different posts (D02 and D03 share one)
+  const ids = Object.keys(POSTS).filter((id, i, all) => all.findIndex((x) => postUrl(x) === postUrl(id)) === i).slice(0, 4);
   const answers = (byUrl) => jest.fn(async (url) => {
     const a = byUrl[url];
     if (a instanceof Error) throw a;
@@ -92,9 +100,27 @@ describe('checkLivePosts', () => {
 
   test('asks only for facts with a reviewed post, and every reviewed post by default', async () => {
     const fetchImpl = answers(Object.fromEntries(Object.keys(POSTS).map((id) => [postUrl(id), 200])));
-    await expect(checkLivePosts({ factIds: ['Z99', FIRST], fetchImpl })).resolves.toEqual([FIRST]);
+    await expect(checkLivePosts({ factIds: ['Z99', FIRST, FIRST], fetchImpl })).resolves.toEqual([FIRST]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    fetchImpl.mockClear();
     await expect(checkLivePosts({ fetchImpl })).resolves.toEqual(Object.keys(POSTS));
+    expect(fetchImpl).toHaveBeenCalledTimes(POST_URLS.length);
+  });
+
+  test('facts that share a post get one request and the same answer (pre-push r1)', async () => {
+    const byUrl = new Map();
+    for (const id of Object.keys(POSTS)) byUrl.set(postUrl(id), [...(byUrl.get(postUrl(id)) || []), id]);
+    const [url, shared] = [...byUrl].find(([, list]) => list.length > 1);
+    // a second request would answer differently: the check must not make one
+    let calls = 0;
+    const fetchImpl = jest.fn(async () => {
+      calls += 1;
+      if (calls > 1) throw new Error('timeout');
+      return { status: 200, body: { cancel: jest.fn(async () => {}) } };
+    });
+    await expect(checkLivePosts({ factIds: shared, fetchImpl })).resolves.toEqual(shared);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0][0]).toBe(url);
   });
 
   test('a post that does not answer in time is not live', async () => {

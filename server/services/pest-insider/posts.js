@@ -59,33 +59,46 @@ const POSTS = validatePosts(data);
 /** The full URL of a fact's reviewed post, or null when it has none. */
 const postUrl = (factId) => (Object.prototype.hasOwnProperty.call(POSTS, factId) ? `${SITE}${POSTS[factId].path}` : null);
 
-/** Every reviewed post URL; the renderer links no other blog page. */
-const POST_URLS = Object.freeze(new Set(Object.keys(POSTS).map(postUrl)));
+/**
+ * Every reviewed post URL, once each; the renderer links no other blog page.
+ * A frozen array, not a Set: a frozen Set still takes add(), so a caller
+ * could widen the allowlist.
+ */
+const POST_URLS = Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]);
+
+// One GET; only a 200 answered by the post itself (no redirect) is live.
+async function answersLive(url, fetchImpl, timeoutMs) {
+  try {
+    const res = await fetchImpl(url, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'user-agent': 'WavesPestInsider/1 (link check)' },
+    });
+    if (res.body && typeof res.body.cancel === 'function') await res.body.cancel().catch(() => {});
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Asks the website for each fact's post and returns the ids whose post
  * answered 200 itself. A redirect, any other status, a network error or a
- * timeout means "not live": the issue then leads with another fact.
+ * timeout means "not live": the issue then leads with another fact. Each
+ * post is asked once per check, so facts that share a post (D02 and D03)
+ * always get the same answer.
  * @param {{ factIds?: string[], fetchImpl?: Function, timeoutMs?: number }} [opts]
  * @returns {Promise<string[]>}
  */
 async function checkLivePosts({ factIds = Object.keys(POSTS), fetchImpl = fetch, timeoutMs = 10000 } = {}) {
+  const answers = new Map();
   const live = [];
-  for (const id of factIds) {
+  for (const id of new Set(factIds)) {
     const url = postUrl(id);
     if (!url) continue;
-    try {
-      const res = await fetchImpl(url, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: { 'user-agent': 'WavesPestInsider/1 (link check)' },
-      });
-      if (res.body && typeof res.body.cancel === 'function') await res.body.cancel().catch(() => {});
-      if (res.status === 200) live.push(id);
-    } catch {
-      // not live
-    }
+    if (!answers.has(url)) answers.set(url, await answersLive(url, fetchImpl, timeoutMs));
+    if (answers.get(url)) live.push(id);
   }
   return live;
 }

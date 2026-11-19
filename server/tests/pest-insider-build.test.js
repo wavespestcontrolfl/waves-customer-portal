@@ -22,7 +22,7 @@ jest.mock('../services/pest-insider/posts', () => {
     return [f.id, Object.freeze({ path: `/pest-control/${name}/`, file: `src/content/blog/pest-control/${name}.md`, states: f.statement })];
   })));
   const postUrl = (id) => (Object.prototype.hasOwnProperty.call(POSTS, id) ? `${actual.SITE}${POSTS[id].path}` : null);
-  return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze(new Set(Object.keys(POSTS).map(postUrl))) };
+  return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]) };
 });
 const { buildIssue } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
