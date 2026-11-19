@@ -670,6 +670,25 @@ describe('customer-question manifest 2026-11-18', () => {
     expect(waves).not.toMatch(/inspect/i);
   });
 
+  // Section 482.227 lists "no warranty" among a contract's options, but
+  // Florida Administrative Code rule 5E-14.105(3) requires a retreatment
+  // warranty on preventive treatment for new construction, so the builder
+  // guide names no warranty type (pre-push audit).
+  test('CQ07 names no warranty type and no longer cites section 482.227', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ07');
+    expect([b.thesis, ...b.outline].join(' ')).not.toMatch(/warrant|guarantee|482\.227/i);
+    expect(composeSeedBrief(manifest, 'CQ07').voice_constraints.operator_brief.required_sources.join(' ')).not.toContain('482.227');
+    expect(b.outline.join(' ')).toContain('read what it says about retreatment and repair');
+  });
+
+  // The UF/IFAS line on frequent inspections lived in IN1397, which CQ04
+  // dropped for the review's source budget; its FAQ must not still quote it.
+  test('CQ04 quotes no line from a guide it no longer cites', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ04');
+    expect(b.sources).not.toContain('https://edis.ifas.ufl.edu/publication/IN1397');
+    expect(JSON.stringify(b)).not.toMatch(/inspected frequently|frequent inspections/i);
+  });
+
   // CQ03 gives no Waves waiting time (no fetched source documents one), but a
   // cleaner still needs an endpoint: the waits for vacuuming droppings and
   // wet-mopping cabinet insides point to the prep guide the visit sent, not
