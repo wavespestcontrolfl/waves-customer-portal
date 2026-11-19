@@ -686,6 +686,34 @@ describe('customer-question manifest 2026-11-18', () => {
       .toContain('UNSUPPORTED_BODY_SYNTAX');
   });
 
+  // The completion gate's conversion CTA is judged on the link anchor: it
+  // must ask for an estimate or quote and name the brief's own service
+  // ("the contact page" does not qualify). Each Waves section names the
+  // anchor and the path, so the composed brief is checked with both.
+  test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s names a CTA anchor that the conversion CTA and name checks accept on its CTA path', (id) => {
+    const { hasConversionCta } = require('../services/content/seo-completion-gate')._internals;
+    const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const brief = composeSeedBrief(manifest, id);
+    const waves = brief.voice_constraints.operator_brief.outline.find((item) => /^What Waves does and does not do:/.test(item));
+    const named = /call to action: link "([^"]+)" to (\/[a-z-]+\/)/.exec(waves || '');
+    expect(named).not.toBeNull();
+    const [, anchor, href] = named;
+    const payload = manifest.briefs.find((b) => b.id === id);
+    expect(href).toBe(payload.cta.includes('CONTACT') ? '/contact/' : '/pest-control-quote/');
+    const body = `Guidance for homes in Sarasota and Bradenton.\n\n[${anchor}](${href})\n`;
+    expect(hasConversionCta(body, brief)).toBe(true);
+    // Control: the wording this replaced does not qualify.
+    expect(hasConversionCta(`Guidance for homes in Sarasota and Bradenton.\n\n[the contact page](${href})\n`, brief)).toBe(false);
+    const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
+    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
+    try {
+      expect(checkRedactionPassedAllLanes({ body, frontmatter: {} }).ok).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
+      else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
+    }
+  });
+
   test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s composes as a regional post with a hub link the gate accepts, a CTA route and the series rule', (id) => {
     const brief = composeSeedBrief(manifest, id);
     expect(brief.city).toBeNull();
