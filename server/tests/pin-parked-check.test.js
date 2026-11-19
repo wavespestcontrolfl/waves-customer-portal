@@ -330,15 +330,20 @@ describe('one decision per customer', () => {
   test('nothing qualifying means nothing to do', () => {
     expect(p.decideCustomer([judged({ flag: false, reason: 'stop_too_short' })]).action).toBe('none');
   });
-  test("a visit cleared as another customer's stop is named on the decision, whatever else is decided", () => {
+  test("a visit whose stop is another customer's (either rule) is named on the decision, whatever else is decided", () => {
     const cleared = judged({ flag: false, reason: 'other_customer_stop' });
     const unknown = judged({ flag: false, reason: 'stops_unreadable', unknown: true });
-    expect(p.decideCustomer([cleared])).toEqual({ action: 'none', clearedVisitIds: ['visit-1'] });
-    expect(p.decideCustomer([cleared, flagged(540)])).toMatchObject({ action: 'flag', verdict: { distanceM: 540 }, clearedVisitIds: ['visit-1'] });
-    expect(p.decideCustomer([cleared, unknown])).toEqual({ action: 'skip', clearedVisitIds: ['visit-1'] });
+    const explained = [{ serviceId: 'visit-1', visitId: null, reason: 'other_customer_stop' }];
+    expect(p.decideCustomer([cleared])).toEqual({ action: 'none', explained });
+    expect(p.decideCustomer([cleared, flagged(540)])).toMatchObject({ action: 'flag', verdict: { distanceM: 540 }, explained });
+    expect(p.decideCustomer([cleared, unknown])).toEqual({ action: 'skip', explained });
     expect(p.decideCustomer([cleared, atPin()]).action).toBe('ok');
-    // nothing cleared: the decision is exactly what it was
-    expect(p.decideCustomer([flagged(540)])).not.toHaveProperty('clearedVisitIds');
+    // the neighbour rule explains a stop the same way; a grouped visit carries its visit_id
+    const neighbour = { visit: visit({ id: 'visit-2', visit_id: 'group-7' }), verdict: { flag: false, reason: 'neighbour_visit' } };
+    expect(p.decideCustomer([neighbour]).explained).toEqual([{ serviceId: 'visit-2', visitId: 'group-7', reason: 'neighbour_visit' }]);
+    // nothing explained: the decision is exactly what it was
+    expect(p.decideCustomer([flagged(540)])).not.toHaveProperty('explained');
+    expect(p.decideCustomer([judged({ flag: false, reason: 'stop_too_short' })])).toEqual({ action: 'none' });
   });
 });
 
@@ -439,25 +444,59 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
     expect(p.decideCustomer(judged).action).toBe('skip');
   });
 
-  test('the open suggestion of a cleared visit is retired, whatever else is decided; another visit\'s suggestion stays', async () => {
+  describe('retiring the suggestion an earlier run made from an explained visit', () => {
     const store = require('../services/customer-pin-suggestions');
-    const close = jest.spyOn(store, 'closeSuggestion').mockResolvedValue({ id: 's-1' });
-    try {
+    const openFrom = (serviceId) => new Map([['customer-1', { id: 's-1', scheduled_service_id: serviceId }]]);
+    const explainedAs = (reason, extra = {}) => [{ serviceId: 'visit-1', visitId: null, reason, ...extra }];
+    // A stand-in for knex that answers the one read of a suggestion's service (its visit_id).
+    const servicesConn = (visitId) => {
+      const conn = jest.fn(() => ({ where: () => ({ first: async () => ({ visit_id: visitId }) }) }));
+      return conn;
+    };
+    let close;
+    beforeEach(() => { close = jest.spyOn(store, 'closeSuggestion').mockResolvedValue({ id: 's-1' }); });
+    afterEach(() => close.mockRestore());
+
+    test("it is retired whatever else is decided; another visit's suggestion stays", async () => {
       const tally = { created: 0, closed: 0 };
-      const openFrom = (visitId) => new Map([['customer-1', { id: 's-1', scheduled_service_id: visitId }]]);
       for (const action of ['none', 'skip']) {
-        const decision = { action, clearedVisitIds: ['visit-1'] };
+        const decision = { action, explained: explainedAs('other_customer_stop') };
         await p.applyDecision({}, 'customer-1', decision, openFrom('visit-9'), tally);
         expect(close).not.toHaveBeenCalled();
         await p.applyDecision({}, 'customer-1', decision, openFrom('visit-1'), tally);
-        expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({ reason: 'other_customer_stop' }));
+        expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({
+          reason: 'other_customer_stop', resolution: expect.stringMatching(/^Closed: the truck also came to the pin that day/),
+        }));
         close.mockClear();
       }
       expect(tally.closed).toBe(2);
-      // no cleared visit: nothing is closed for a customer with nothing to say
+      // nothing explained: nothing is closed for a customer with nothing to say
       await p.applyDecision({}, 'customer-1', { action: 'none' }, openFrom('visit-1'), tally);
       expect(close).not.toHaveBeenCalled();
-    } finally { close.mockRestore(); }
+    });
+
+    test("a stop the neighbour rule explains since (their visit was completed after the bell) retires it too", async () => {
+      const tally = { created: 0, closed: 0 };
+      await p.applyDecision({}, 'customer-1', { action: 'none', explained: explainedAs('neighbour_visit') }, openFrom('visit-1'), tally);
+      expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({
+        reason: 'neighbour_visit', resolution: "Closed: the truck's stop was at another customer's visit that day",
+      }));
+      expect(tally.closed).toBe(1);
+    });
+
+    test('grouped services of one physical visit match by visit_id; a standalone visit never reads the service', async () => {
+      const grouped = explainedAs('other_customer_stop', { serviceId: 'partner-2', visitId: 'group-7' });
+      const same = servicesConn('group-7');
+      expect(await p.explainedSource(same, { id: 's-1', scheduled_service_id: 'partner-1' }, grouped)).toEqual(grouped[0]);
+      expect(same).toHaveBeenCalledWith('scheduled_services');
+      expect(await p.explainedSource(servicesConn('group-8'), { id: 's-1', scheduled_service_id: 'partner-1' }, grouped)).toBeNull();
+      expect(await p.explainedSource(servicesConn(null), { id: 's-1', scheduled_service_id: 'partner-1' }, grouped)).toBeNull();
+      const never = servicesConn('group-7');
+      expect(await p.explainedSource(never, { id: 's-1', scheduled_service_id: 'visit-9' }, explainedAs('other_customer_stop'))).toBeNull();
+      expect(await p.explainedSource(never, { id: 's-1', scheduled_service_id: null }, grouped)).toBeNull();
+      expect(await p.explainedSource(never, null, grouped)).toBeNull();
+      expect(never).not.toHaveBeenCalled();
+    });
   });
 
   test('the run reads the short gaps (1 minute and up) and clears before it decides', () => {

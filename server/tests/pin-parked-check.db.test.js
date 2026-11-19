@@ -417,6 +417,46 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect((await bellNow(bell.id)).done_at).not.toBeNull();
     });
 
+    test("a neighbour's visit completed after the bell explains the stop: the old suggestion is retired with its bell", async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      const neighbourPin = north(520);
+      const neighbourId = await customer(neighbourPin);
+      await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      const [row] = await open(customerId);
+      const bell = await bellFor(row);
+      // The neighbour's job that day is closed out a day late, after the bell.
+      await completedVisit(neighbourId, techId, { lat: neighbourPin.lat, lng: neighbourPin.lng, completed_at: new Date('2026-10-09T13:00:00Z') });
+      const later = () => runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
+      expect(await later()).toMatchObject({ visits: 2, created: 0, closed: 1, neighbour_visit: 1, stop_at_pin: 1 });
+      expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
+      expect((await bellNow(bell.id)).done_at).not.toBeNull();
+      expect(await later()).toMatchObject({ created: 0, closed: 0 });
+    });
+
+    test('a grouped partner completed after the bell is the row judged next; the suggestion of the first partner is still retired', async () => {
+      const techId = await technician();
+      const customerId = await customer();
+      await customer(north(338));
+      const [group] = await mockPg('service_visits').insert({
+        customer_id: customerId, scheduled_date: '2026-10-08', stop_base_key: `fixture-${customerId}`, created_by: 'fixture',
+      }).returning('id');
+      const first = await completedVisit(customerId, techId, { visit_id: group.id });
+      await shortThenLong({ arrivalReceivedAt: '2026-10-09T13:00:00Z' });
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      const [row] = await open(customerId);
+      expect(row.scheduled_service_id).toBe(first);
+      const bell = await bellFor(row);
+      // The partner service of the same stop is closed out later, so it is the row oneRowPerVisit keeps.
+      const partner = await completedVisit(customerId, techId, { visit_id: group.id, completed_at: new Date('2026-10-09T14:00:00Z') });
+      expect(partner).not.toBe(first);
+      expect(await runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg })).toMatchObject({ visits: 1, created: 0, closed: 1, other_customer_stop: 1 });
+      expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
+      expect((await bellNow(bell.id)).done_at).not.toBeNull();
+    });
+
     test('a short stop at the pin on another day does not clear the long stop', async () => {
       // The visit was started Oct 7 (a 3 minute stop at the pin) and done Oct 8 (29 minutes at the other customer's).
       const techId = await technician();

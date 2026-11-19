@@ -530,14 +530,17 @@ async function clearStopsAtOtherCustomers(conn, judged, radius) {
  *   skip  no such stop, but a truck's data could not be read, so the pin cannot be judged today
  *   flag  none had a stop at the pin and at least one qualifies: suggest from the NEWEST qualifying visit
  *   none  nothing to say
- * Whatever is decided, `clearedVisitIds` names the visits cleared as another customer's stop: a suggestion an earlier
- * run made from one of them (before its short stop at the pin was read) no longer stands, also when another visit
- * still qualifies or cannot be judged today (applyDecision retires it first).
+ * Whatever is decided, `explained` names the visits whose stop is now known to be another customer's (EXPLAINED_STOP):
+ * a suggestion an earlier run made from one of them (before its short stop at the pin was read, or before the
+ * neighbour's visit was completed) no longer stands, also when another visit still qualifies or cannot be judged
+ * today (applyDecision retires it first).
  */
 function decideCustomer(judged) {
   const decision = decideFromVerdicts(judged);
-  const clearedVisitIds = judged.filter((j) => j.verdict.reason === 'other_customer_stop').map((j) => String(j.visit.id));
-  return clearedVisitIds.length ? { ...decision, clearedVisitIds } : decision;
+  const explained = judged.filter((j) => EXPLAINED_STOP[j.verdict.reason]).map((j) => ({
+    serviceId: String(j.visit.id), visitId: j.visit.visit_id ? String(j.visit.visit_id) : null, reason: j.verdict.reason,
+  }));
+  return explained.length ? { ...decision, explained } : decision;
 }
 
 function decideFromVerdicts(judged) {
@@ -548,9 +551,26 @@ function decideFromVerdicts(judged) {
   return flagged.length ? { action: 'flag', visit: flagged[0].visit, verdict: flagged[0].verdict } : { action: 'none' };
 }
 
-/** Is this open suggestion one an earlier run made from a visit that is now cleared as another customer's stop? */
-const madeFromClearedVisit = (open, decision) => Boolean(open)
-  && (decision.clearedVisitIds || []).includes(String(open.scheduled_service_id));
+// A visit judged again whose stop is another customer's, by either rule: the suggestion an earlier run made from it
+// no longer stands. The value is the resolution staff read on the closed bell.
+const EXPLAINED_STOP = {
+  other_customer_stop: "Closed: the truck also came to the pin that day; the long stop was at another customer's",
+  neighbour_visit: "Closed: the truck's stop was at another customer's visit that day",
+};
+
+/**
+ * The explained visit an open suggestion was made from, or null. A suggestion names one scheduled service. Grouped
+ * partners of one physical visit (one visit_id) are one stop, and oneRowPerVisit may keep another partner today (one
+ * completed since), so a grouped visit is matched by its visit_id.
+ */
+async function explainedSource(conn, open, explained = []) {
+  if (!open || !open.scheduled_service_id || !explained.length) return null;
+  const direct = explained.find((e) => e.serviceId === String(open.scheduled_service_id));
+  if (direct || !explained.some((e) => e.visitId)) return direct || null;
+  const service = await conn('scheduled_services').where({ id: open.scheduled_service_id }).first('visit_id');
+  const visitId = service && service.visit_id ? String(service.visit_id) : null;
+  return (visitId && explained.find((e) => e.visitId === visitId)) || null;
+}
 
 async function applyDecision(conn, customerId, decision, openByCustomer, tally) {
   const open = openByCustomer.get(String(customerId));
@@ -563,11 +583,10 @@ async function applyDecision(conn, customerId, decision, openByCustomer, tally) 
     return;
   }
   // Retired BEFORE a newer visit's suggestion is recorded: insertSuggestion keeps an open suggestion for the same
-  // pin ("already_open"), which would leave the cleared visit's truck spot on offer.
-  if (madeFromClearedVisit(open, decision)) {
-    const closed = await store.closeSuggestion(open.id, 'superseded', {
-      reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's", conn,
-    });
+  // pin ("already_open"), which would leave the explained visit's truck spot on offer.
+  const source = await explainedSource(conn, open, decision.explained);
+  if (source) {
+    const closed = await store.closeSuggestion(open.id, 'superseded', { reason: source.reason, resolution: EXPLAINED_STOP[source.reason], conn });
     if (closed) tally.closed += 1;
   }
   if (decision.action === 'flag') {
@@ -619,7 +638,7 @@ module.exports = {
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
     alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
-    clearStopsAtOtherCustomers, otherCustomerPinNear, applyDecision, withinSql, BRIEF_STOP_MIN_MINUTES,
+    clearStopsAtOtherCustomers, otherCustomerPinNear, applyDecision, explainedSource, withinSql, BRIEF_STOP_MIN_MINUTES,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };
