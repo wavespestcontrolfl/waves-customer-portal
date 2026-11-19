@@ -5704,6 +5704,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :50, 9 AM to 7 PM ET — Paid-at-the-visit receipt check (owner 2026-11-18). One
+  // Billing bell per invoice paid at its visit that still has no receipt after 2
+  // hours (a tender sheet recorded the payment and no receipt went out); it closes
+  // itself once the receipt goes out. Read-only: sends nothing to a customer,
+  // writes only admin notification rows. No GATE_* (owner rule 2026-11-05).
+  // The plain hour range is deliberate: node-cron 3 reads a stepped range oddly.
+  // =========================================================================
+  cron.schedule('0 50 9-19 * * *', async () => {
+    try {
+      await runExclusive('paid-visit-receipt-check', async () => {
+        const result = await require('./paid-visit-receipt-check').runPaidVisitReceiptCheck();
+        logger.info(`Paid-visit receipt check: ${result.raised} raised, ${result.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Paid-visit receipt check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // MONDAYS 9:20AM — Monday review bell. Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
   // promises, completed visits with only a draft invoice, open past visits. The

@@ -659,6 +659,36 @@ relevance sweep (class `tech_estimate_office_first`) closes the row once the est
 or gone. A send that is only queued, in flight or failed keeps the row open, because the close is final. A failure to raise is
 logged with ids only and never fails the technician's create. It sends nothing to a customer.
 
+Paid-at-the-visit receipt check (owner 2026-11-18, "the daily check"; no gate, read-only): `server/services/paid-visit-receipt-check.js`
+runs hourly at :50 from 9 AM to 7 PM Eastern (scheduler job `paid-visit-receipt-check`, under `runExclusive`). A customer paid by
+check at checkout; the dispatch check and cash tender sheets recorded it with `sendReceipt: false`, no receipt went out and nobody saw
+it until the customer texted. It rings ONE bell per invoice that is `paid`, has no `receipt_sent_at` and no `receipt_sms_sent_at` (an accepted receipt text), is not archived, has a total above 0,
+is not a payer statement child or payer-billed (stamped, or right now through `invoicePayerOwnership`: a payer assigned through
+the visit or the customer default after the invoice was minted; an owner that cannot be verified fails that row closed), links to a visit (directly, or through its service record) whose `scheduled_date` is the Eastern day of `paid_at`, was paid
+between 7 days and 2 hours ago, is not owned by today's closeout item (with `GATE_CLOSEOUT_MONEY_COMMS_ALERTS` on, a completed visit
+scheduled today already shows its `paid_receipt_not_sent` gap in `closeout_gaps_today`; that item covers today only, so this bell
+takes over the next day), and whose customer is not an internal test customer and has not turned `payment_receipt` off in
+`notification_prefs`. An accepted receipt email (`email_messages` with `trigger_event_id` `invoice_receipt:<id>`, or
+`invoice:<id>:receipt` from the routed billing Email leg in `billing-channel-email.js`, and
+status sent, delivered, opened, clicked, spam_report or unsubscribed (the last two only follow a delivered email), or a
+`delivered_at` / `opened_at` / `clicked_at` stamp; every templated receipt send stamps it, the inspection-credit resend included), an
+accepted receipt text (`findAcceptedBillingTextLeg` on the key `invoice:<id>:receipt`: provider-accepted rows only, send reservations
+excluded), or a job
+that delivered a leg (`email_result.ok`, `sms_result.sent`, read even on a job still running) is skipped: the customer has the
+receipt. A `receipt_delivery_jobs` row still in flight (any status but `completed` or `failed`) holds it back; a failed job that
+delivered nothing is a hit. A Text leg the visit summary carried (`carried_by_visit_summary`) but never got accepted is skipped only while the
+queue's own carried-receipt alert (`CARRIED_RECEIPT_ALERT_PREFIX`, `summary-carried-receipt-email:<invoice id>`) stands for it, so one
+invoice keeps one bell. Category `billing` with `bell: true` (billing is silenced by default), headline "Billing — confirm
+<name> got a receipt", why "The $125.00 invoice was paid by check at the Nov 18 visit; no sent receipt is on record." (the invoice's
+total, not the tender), link `/admin/invoices?invoice=<id>`. One wording for every hit: a send whose outcome is unknown (an operator
+send held for reconciliation, a provider hand-off marked uncertain) may have reached the customer, so the bell never says none went
+out, and no standing bell carries a stale instruction. The invoice's stamps are read again right before each raise (no row lock: a sweep never row-locks invoices).
+Done-when `receipt_sent`, dedupeKey `paid-visit-no-receipt:<invoice id>` raised through `raiseAdminAlertWithReopen` (once per
+episode; a person's Done stays done). Each run first closes every open bell whose invoice now has a receipt stamp, is no longer
+paid, is archived or is gone, is billed to a payer now, whose receipt email or text was accepted or a job delivered it, whose carried receipt the queue's alert now covers, or whose customer turned receipts off since
+(a job still in flight keeps it open). A lookup that throws fails closed for that row (no raise, no close) and the run throws at the end so
+`job_health` shows it. No `RERING` entry is owed (no `dedupeOpenOnly`). It sends nothing to a customer.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns
