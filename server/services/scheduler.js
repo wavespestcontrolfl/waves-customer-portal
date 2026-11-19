@@ -2172,8 +2172,8 @@ function initScheduledJobs() {
       await runExclusive('route-check', async () => {
         const result = await require('./day-replan/route-check').runRouteCheck();
         logger.info(`[route-check] ${result.status} ad=${result.ad.decision}`);
-        // A run-wide failure is recorded as 'unknown' first; it still counts as a failed run in job health.
-        if (result.status === 'failed') throw new Error('route check run failed (recorded as unknown)');
+        // A failed run or a failed date read is recorded first; it still counts as a failed run in job health.
+        if (result.status !== 'completed') throw new Error(`route check ${result.status} (recorded)`);
       });
     } catch (err) {
       logger.error(`[route-check] tick failed: ${err.message}`);

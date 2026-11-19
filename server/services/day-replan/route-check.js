@@ -39,7 +39,7 @@ const { etDateString, etParts, addETDays } = require('../../utils/datetime-et');
 const { _internals: replan } = require('./index');
 const { SLOT_MIN, serviceBlocks, _internals: gaps } = require('./close-gaps');
 const { simulate, coVisitGroups, coVisitMinutes } = require('./app-sim');
-const { promisedWindowOrder, workDuration, currentOrder, staleOrderReasons } = require('../route-reorder-window-fit');
+const { promisedWindowOrder, workDuration, currentOrder, staleOrderReasons, effectiveWindowRange } = require('../route-reorder-window-fit');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -169,7 +169,7 @@ function hourSlots(o, { driveFrom = o.start } = {}) {
  */
 function routeOrder(rows, { today = false } = {}) {
   if (rows.length && !staleOrderReasons(rows, rows, { futureDay: !today }).length) return currentOrder(rows);
-  const startOf = (stop) => Math.min(...stop.flat().map((r) => toMin(r.window_start)));
+  const startOf = (stop) => Math.min(...stop.flat().map((r) => promisedStart(r) ?? Infinity));
   return physicalStops(rows).map((stop, i) => ({ stop, i })).sort((a, b) => startOf(a.stop) - startOf(b.stop) || a.i - b.i)
     .flatMap(({ stop }) => stop.flat());
 }
@@ -211,9 +211,15 @@ async function departureMinutes(conn) {
   return departure.effectiveDepartureMinutes(await departure.readDepartureSetting(conn));
 }
 
-/** Why a tech-day cannot be simulated, or null. A stop with no time or no place leaves the day out. */
+/** A stop's promised start minute (the shared resolver: window_start, or a legacy time_window), or null. */
+const promisedStart = (row) => {
+  const start = (row.arrivalRange || effectiveWindowRange(row))?.startMin;
+  return Number.isFinite(start) ? start : null;
+};
+
+/** Why a tech-day cannot be simulated, or null. A stop with no promised time or no place leaves the day out. */
 function unmeasurable(rows) {
-  if (rows.some((r) => !r.window_start)) return 'UNTIMED_STOP';
+  if (rows.some((r) => promisedStart(r) == null)) return 'UNTIMED_STOP';
   if (rows.some((r) => !hasCoords(r))) return 'STOP_WITHOUT_COORDINATES';
   return null;
 }
@@ -238,9 +244,12 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
     : [];
   // Kept: an opening that holds a job either way. The one at the start of the working day may begin its drive at the
   // departure minute, before the day, so it can hold a job in under SLOT_MIN.
+  // The early drive needs the van free from the departure minute to the opening (no block or booking in between).
+  const freeBefore = (o) => ![...blocks, ...held].some((b) => b.startMin < o.start && b.endMin > departureMin);
+  const driveFrom = (o) => (o.start <= openMin && departureMin < o.start && freeBefore(o) ? departureMin : o.start);
   const openings = open.filter((b) => !(first.length && b.kind === 'start'))
     .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
-    .map((o) => ({ ...o, slots: hourSlots(o, { driveFrom: o.start <= openMin ? departureMin : o.start }), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
+    .map((o) => ({ ...o, slots: hourSlots(o, { driveFrom: driveFrom(o) }), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
     .filter((o) => o.slots > 0 || o.noticeSlots > 0);
   return {
     stops: all.length,

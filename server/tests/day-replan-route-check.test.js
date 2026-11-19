@@ -254,6 +254,15 @@ describe('the totals and the ad rule shadow', () => {
     const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 540, endMin: 1020 }] });
     expect(fig.openings).toEqual([expect.objectContaining({ start: 480, min: 60, slots: 1, noticeSlots: 0 })]);
     expect(rc.hourSlots({ start: 480, min: 60 })).toBe(0); // without the early drive it would not fit
+    // A block to 8:00 too: the van cannot drive before 8, so 8-9 holds no job.
+    const boxed = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 450, endMin: 480 }, { startMin: 540, endMin: 1020 }] });
+    expect(boxed.slots).toBe(0);
+  });
+
+  test('a legacy time_window promise is a promised time, not an untimed stop', () => {
+    const legacy = stop('a', null, null, { time_window: 'afternoon' });
+    expect(rc.unmeasurable([legacy])).toBeNull();
+    expect(rc.unmeasurable([stop('b', null, null)])).toBe('UNTIMED_STOP');
   });
 
   test('a job is the drive, then a service that starts on the hour', () => {
