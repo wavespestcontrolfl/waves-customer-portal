@@ -534,11 +534,13 @@ function groupKeys(fields) {
 }
 
 // MFMP's identity is the state's advertisement number alone: a re-sent notice may carry a corrected title or agency
-// name, and the number never names new work.
-function mfmpKeys(fields) {
+// name, and the number never names new work. Only a solicitation takes the key: a decision or other notice filed by
+// hand never holds the key a later solicitation of the same number would join.
+function mfmpKeys(fields, lines) {
   const org = normalizeTitle(fields.gc_or_agency);
   const number = normalizeTitle(fields.solicitation_number);
-  if (!number) return { org: org || null, group_base: null, group_key: null };
+  const type = labelledValues(lines, 'Advertisement Type')[0]?.value;
+  if (!number || !type || !MFMP_SOLICITATION.test(type)) return { org: org || null, group_base: null, group_key: null };
   const key = `mfmp|${keyPart(number)}`;
   return { org: org || null, group_base: key, group_key: key };
 }
@@ -563,7 +565,8 @@ function parseBidEmail(email = {}) {
   const kindOfSender = senderKind(email);
   const template = TEMPLATE_PARSERS[kindOfSender] ? kindOfSender : null;
   const lines = { bluebook: bluebookLines }[template] || (template ? bodyLines : () => []);
-  const { fields, due, jobWalk } = templateFields(template, lines(email));
+  const bodyOf = lines(email);
+  const { fields, due, jobWalk } = templateFields(template, bodyOf);
   const pick = (key) => fields[key] || null;
   return {
     template,
@@ -580,7 +583,7 @@ function parseBidEmail(email = {}) {
     due_source_line: due?.line || null,
     job_walk_at: jobWalk?.at || null,
     questions_due_at: null,
-    ...(template === 'mfmp' ? mfmpKeys(fields) : groupKeys(fields)),
+    ...(template === 'mfmp' ? mfmpKeys(fields, bodyOf) : groupKeys(fields)),
   };
 }
 

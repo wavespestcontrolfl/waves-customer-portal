@@ -560,11 +560,11 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(newer.created).toBe(true);
       await mockPg('emails').where({ id: newerEmail.id }).update({ subject: 'Advertisement Posted - ITB-17500', body_text: body('ITB-17500') });
       await mockPg('bid_opportunities').where({ id: newer.bidId }).update(blank);
-      // A repeat in the declined copy's own thread gives that copy the key first.
+      // A repeat even in the declined copy's own Gmail thread joins the open copy: a keyed MFMP notice joins by number only.
       const sameThread = await service.ingestEmail(await legacyNotice('t-mfmp-dup-1'));
-      expect(sameThread).toMatchObject({ created: false, bidId: older.bidId });
-      expect(await bidRow(older.bidId)).toMatchObject({ status: 'no_bid', group_key: 'mfmp|itb 17500' });
-      // A repeat in a new thread still joins the open copy, not the declined keyed one, from a verified subdomain too.
+      expect(sameThread).toMatchObject({ created: false, bidId: newer.bidId });
+      expect(await bidRow(older.bidId)).toMatchObject({ status: 'no_bid', group_key: null });
+      // A repeat in a new thread joins the open copy too, from a verified subdomain as well.
       const repeat = await service.ingestEmail(await legacyNotice('t-mfmp-dup-3'));
       expect(repeat).toMatchObject({ created: false, bidId: newer.bidId });
       expect(await bidRow(newer.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17500' });
@@ -591,6 +591,27 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       const real = await service.ingestEmail(await notice('t-mfmp-dec-2', 'Invitation to Bid'));
       expect(real.created).toBe(true);
       expect(real.bidId).not.toBe(decision.bidId);
+      expect(rung('new')).toHaveLength(1);
+    });
+
+    test('a real solicitation in the thread of a declined legacy decision notice files as new; a hand-filed decision holds no key', async () => {
+      const notice = (threadId, type, number = 'ITB-17800') => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: `Advertisement Posted - ${number}`, body_text: [
+          ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ` Advertisement Type: ${type}`,
+          ' Title: Sample Marsh Weed Control', ' Close Date: Oct 29, 2026',
+        ].join('\n'),
+      });
+      // A decision notice filed by hand: fields, no key. Declined.
+      const decided = await service.ingestEmail(await notice('t-mfmp-thr-1', 'Agency Decision'), { manual: true });
+      expect(await bidRow(decided.bidId)).toMatchObject({ solicitation_number: 'ITB-17800', group_key: null });
+      await mockPg('bid_opportunities').where({ id: decided.bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      // The real solicitation lands in the same Gmail thread: it is new work, filed with the key, and rings.
+      const real = await service.ingestEmail(await notice('t-mfmp-thr-1', 'Invitation to Bid'));
+      expect(real.created).toBe(true);
+      expect(await bidRow(real.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17800' });
       expect(rung('new')).toHaveLength(1);
     });
 

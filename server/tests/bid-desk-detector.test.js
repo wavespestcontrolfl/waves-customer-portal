@@ -535,6 +535,11 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     expect(parseBidEmail(mfmpNotice({}, { close: 'December 3, 2026' })).due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z');
   });
 
+  test('only a solicitation takes the key; a decision notice keeps its fields but no key', () => {
+    const decision = parseBidEmail(mfmpNotice({}, { type: 'Agency Decision' }));
+    expect(decision).toMatchObject({ template: 'mfmp', solicitation_number: 'ITB-17200', group_key: null, group_base: null });
+  });
+
   test('only one plain address is read as the buyer email', () => {
     expect(parseBidEmail(mfmpNotice({}, { email: 'a@fixture-agency.example, b@fixture-agency.example' })).buyer_email).toBeNull();
     expect(parseBidEmail(mfmpNotice({}, { email: 'Casey.Sample@Fixture-Agency.example' })).buyer_email).toBe('casey.sample@fixture-agency.example');

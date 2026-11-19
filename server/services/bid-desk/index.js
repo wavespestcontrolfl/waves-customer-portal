@@ -138,6 +138,9 @@ function patchInput(existing, parsed) {
 }
 
 async function findBid(trx, email, groupKey, groupBase = null, kind = null, template = null) {
+  // A keyed MFMP notice joins by its advertisement number only (mfmpRepeatBid also finds keyless bids filed before the
+  // template): Gmail threads MFMP notices by subject, so a thread is no identity for it.
+  if (groupKey && REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   const thread = email.gmail_thread_id;
   if (thread) {
     const byThread = await trx('bid_opportunities')
@@ -148,8 +151,6 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null, temp
     if (byThread) return byThread;
   }
   if (!groupKey) return null;
-  // An MFMP advertisement has its own lookup over keyed and keyless bids (one order for both).
-  if (REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   // Only OPEN bids group by key: a GC's new solicitation with the same project and package after the old one was
   // decided is new work. (A reply in the bid's own thread above still joins it.)
   const exact = await trx('bid_opportunities').where({ group_key: groupKey }).whereIn('status', OPEN_STATUSES)
