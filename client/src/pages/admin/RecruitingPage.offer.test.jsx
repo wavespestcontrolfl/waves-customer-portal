@@ -525,7 +525,8 @@ describe('RecruitingPage offer flow: read failures, re-offers and drafts', () =>
     expect(screen.getByRole('button', { name: 'Offer' })).toBeDisabled();
   });
 
-  it.each(['withdrawn', 'expired'])('offers Make an offer next to a %s offer while the application is in Offer', async (status) => {
+  // accepted and declined: the application was hired or withdrawn, then moved back to Offer.
+  it.each(['withdrawn', 'expired', 'accepted', 'declined'])('offers Make an offer next to a %s offer while the application is in Offer', async (status) => {
     const old = offerRecord({ status, timeline: [{ at: '2026-12-11T15:20:00Z', kind: status, label: 'Closed' }] });
     setupFetch({}, { offer: offerPayload({ current: old }), detail: detailFixture({ status: 'offer' }) });
     await openDetail();
@@ -644,6 +645,79 @@ describe('RecruitingPage offer flow: owner actions, stale reads and applicant sw
     releaseRevise();
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
+  });
+
+  it('after a slow offer action the list reloads the tab on screen, not the tab open when the action began', async () => {
+    let releaseRevise;
+    const pending = new Promise((resolve) => { releaseRevise = resolve; });
+    const sent = offerRecord({ status: 'sent', timeline: [] });
+    const listCalls = [];
+    const fetchMock = vi.fn((url, options = {}) => {
+      const method = options.method || 'GET';
+      const path = String(url).replace(/^.*\/api/, '');
+      if (path.startsWith('/admin/careers?status=')) {
+        const status = new URLSearchParams(path.split('?')[1]).get('status');
+        listCalls.push(status);
+        const applications = status === 'rejected'
+          ? [{ id: 'app-9', role: 'technician', status: 'rejected', contact_snapshot: { name: 'Riley Park' }, created_at: '2026-09-12T12:00:00Z' }]
+          : [{ id: 'app-1', role: 'technician', status: 'offer', contact_snapshot: { name: CONTACT.name }, created_at: '2026-09-10T12:00:00Z' }];
+        return Promise.resolve(res(200, { applications, counts: {} }));
+      }
+      if (method === 'POST' && path.endsWith('/offer/offer-1/revise')) return pending.then(() => res(200, { offer: offerRecord({ id: 'offer-2' }) }));
+      if (path === '/admin/careers/app-1/offer') return Promise.resolve(res(200, offerPayload({ current: sent })));
+      if (path === '/admin/careers/app-1') return Promise.resolve(res(200, { application: detailFixture({ status: 'offer' }) }));
+      return Promise.resolve(res(200, {}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Revise' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByTestId('offer-card')).toBeNull());
+    fireEvent.click(screen.getByRole('tab', { name: /Rejected/ }));
+    expect(await screen.findByText('Riley Park')).toBeInTheDocument();
+    releaseRevise();
+    await waitFor(() => expect(listCalls.filter((s) => s === 'rejected').length).toBeGreaterThanOrEqual(2));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(listCalls.at(-1)).toBe('rejected');
+    expect(screen.getByText('Riley Park')).toBeInTheDocument();
+  });
+
+  it('a failed application re-read after an offer change stays on the detail with Try again, and stage moves wait for it', async () => {
+    let failDetail = false;
+    let current = offerRecord({ status: 'sent', timeline: [] });
+    const detail = detailFixture({ status: 'offer' });
+    setupFetch(
+      {
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => {
+          current = offerRecord({ status: 'withdrawn', timeline: [] });
+          failDetail = true;
+          return res(200, { offer: current });
+        },
+        'GET /admin/careers/app-1': () => (failDetail ? res(500, { error: 'Server error' }) : res(200, { application: detail })),
+      },
+      { offer: () => res(200, offerPayload({ current })), detail },
+    );
+    await openDetail();
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const confirm = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Withdraw' }));
+    const detailDialog = screen.getByRole('heading', { name: /Jordan Rivera — / }).closest('[role="dialog"]');
+    const notice = 'This application could not be reloaded after the offer change, so its stage may be out of date. Stage moves stay off until it loads.';
+    // The list reload that follows does not clear it.
+    expect(await within(detailDialog).findByText(notice)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(within(detailDialog).getByText(notice)).toBeInTheDocument();
+    expect(within(detailDialog).getByRole('button', { name: 'Hired' })).toBeDisabled();
+    failDetail = false;
+    detail.status = 'interview';
+    fireEvent.click(within(detailDialog).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(within(detailDialog).queryByText(notice)).toBeNull());
+    expect(within(detailDialog).getByRole('button', { name: 'Hired' })).not.toBeDisabled();
+    // The re-read applied: the application is in Interview now, so Interview is no longer a move.
+    expect(within(detailDialog).queryByRole('button', { name: 'Interview' })).toBeNull();
   });
 });
 

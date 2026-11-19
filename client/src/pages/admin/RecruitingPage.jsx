@@ -830,7 +830,7 @@ const CLOSED_STATUSES = ["hired", "rejected", "withdrawn"];
 // The Offer button opens the Offer form while the offer flow is on for a
 // technician application, and is today's status-only move only when the
 // server said the flow is off (or for a non-technician).
-function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOfferChanged, onOpenStageDialog, onOpenApplication, onClose }) {
+function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOfferChanged, refreshError, onRetryRefresh, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
   const technician = detail.role === "technician";
   // A closed application cannot take an offer: Offer is the plain status move there.
@@ -848,6 +848,11 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
         </DialogTitle>
       </DialogHeader>
       <DialogBody>
+        {refreshError && (
+          <ActionFeedback error className="mb-4" onRetry={onRetryRefresh}>
+            This application could not be reloaded after the offer change, so its stage may be out of date. Stage moves stay off until it loads.
+          </ActionFeedback>
+        )}
         <div className="flex flex-wrap items-center gap-3 mb-4">
           {CONTACT_LINKS.filter(({ key }) => contact[key]).map(
             ({ key, scheme, Icon, label }) => (
@@ -937,7 +942,7 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
                 size="sm"
                 variant="secondary"
                 onClick={() => onStageButton(key)}
-                disabled={key === "offer" && offerPending}
+                disabled={Boolean(refreshError) || (key === "offer" && offerPending)}
               >
                 {label}
               </Button>
@@ -955,6 +960,8 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
 export default function RecruitingPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState("new");
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
   const [applications, setApplications] = useState([]);
   // The status whose rows `applications` holds. A failed read for another
   // tab must not show the previous tab's cards under it, or an empty state
@@ -964,6 +971,8 @@ export default function RecruitingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
+  // Set when the in-place re-read of the open application after an offer change failed.
+  const [detailRefreshError, setDetailRefreshError] = useState(null);
   const [replyMedia, setReplyMedia] = useState({});
   // The open applicant's other records (same phone number), from the detail read.
   const [samePhone, setSamePhone] = useState([]);
@@ -1024,15 +1033,23 @@ export default function RecruitingPage() {
       setDetail(data.application);
       setReplyMedia(data.reply_media || {});
       setSamePhone(data.same_phone || []);
+      setDetailRefreshError(null);
       if (!refresh) stageWorkflow.resetForNewApplicant();
     } catch (err) {
-      if (seq === detailSeq.current) setError(err.message);
+      if (seq !== detailSeq.current) return;
+      // A failed in-place re-read stays on the detail (the list reload clears the page error).
+      if (refresh) {
+        if (detailIdRef.current === id) setDetailRefreshError(err.message);
+      } else {
+        setError(err.message);
+      }
     }
   }, [stageWorkflow]);
 
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open
     setDetail(null);
+    setDetailRefreshError(null);
     setSamePhone([]);
     // The stage dialog nests inside the detail dialog's lifetime — closing
     // the outer one must not leave the inner one open over a null detail.
@@ -1042,13 +1059,15 @@ export default function RecruitingPage() {
   // After any offer write, or one the server refused because something moved
   // on: re-read the offer, then the open application and the list in place. A
   // signature or a close moves the stage, so the detail must follow. A switch
-  // to another applicant meanwhile stays untouched. Returns the offer read.
+  // to another applicant meanwhile stays untouched, and the list reloads the tab
+  // on screen when the reads finish, not the one open when the action began.
+  // Returns the offer read.
   const refreshAfterOffer = async () => {
     const forId = detail?.id;
     const next = await offerFlow.reload();
     if (forId) {
       await openDetail(forId, { refresh: true });
-      load(tab);
+      load(tabRef.current);
     }
     return next;
   };
@@ -1206,6 +1225,8 @@ export default function RecruitingPage() {
             samePhone={samePhone}
             offerFlow={offerFlow}
             onOfferChanged={refreshAfterOffer}
+            refreshError={detailRefreshError}
+            onRetryRefresh={() => openDetail(detail.id, { refresh: true })}
             onOpenStageDialog={stageWorkflow.openStageDialog}
             onOpenApplication={openDetail}
             onClose={closeDetail}
