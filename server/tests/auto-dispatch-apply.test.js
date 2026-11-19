@@ -76,7 +76,7 @@ test('applies the move and atomically increments the change count', async () => 
   // atomic expect predicate (full original placement + status) carried into the rebooker's move transaction
   expect(callArgs[5].expect).toMatchObject({
     auto_dispatch_locked: false, auto_dispatch_excluded: false, status: 'confirmed', scheduled_date: '2026-08-04',
-    window_start: '09:00', window_end: '11:00', technician_id: 't1',
+    window_start: '09:00', window_end: '11:00', technician_id: 't1', reservation_service_mix: null,
   });
   expect(res).toMatchObject({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   expect(update.mock.calls[0][0].auto_dispatch_change_count).toEqual({ raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' });
@@ -1186,6 +1186,31 @@ test('apply refuses a stale or out-of-bounds recurring due-date placement before
 
   db.mockImplementation(() => readRow({ ...row, recurring_dispatch_due_date: '2026-08-05' }));
   await expect(applyAutoDispatchMove(row, { ...BEST, date: '2026-08-06' }, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+});
+
+test('apply refuses a visit that joined a version-2 allocation after scoring', async () => {
+  db.mockImplementation(() => readRow({
+    ...SERVICE,
+    auto_dispatch_locked: false,
+    auto_dispatch_excluded: false,
+    reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'] },
+  }));
+
+  await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {}))
+    .rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('the move-transaction guard refuses a version-2 allocation that appears after preflight', async () => {
+  const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+  const trx = jest.fn();
+  await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({
+    trx,
+    technicianId: 't1',
+    service: { ...SERVICE, reservation_service_mix: { version: 2, allocatedServiceIds: ['s1', 's2'] } },
+    destination: { date: BEST.date, windowStart: BEST.start_time, windowEnd: BEST.end_time },
+  })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', statusCode: 409 });
+  expect(trx).not.toHaveBeenCalled();
 });
 
 const LOCATION = {

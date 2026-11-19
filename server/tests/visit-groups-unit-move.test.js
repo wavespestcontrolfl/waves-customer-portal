@@ -60,6 +60,7 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitReschedule
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { moveVisitAsUnit, visitSummaryForService, _test: { shiftClock, expectMatchesRow } } = require('../services/visit-groups');
 
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', technician_id: 't1', window_start: '09:00', window_end: '11:00' };
@@ -357,7 +358,7 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b')] });
     let rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1', status: 'confirmed' });
+    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1', status: 'confirmed', reservation_service_mix: null });
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expectAnchor: { scheduled_date: '2026-08-30' } } });
@@ -444,7 +445,7 @@ describe('moveVisitAsUnit', () => {
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
     // status rides in the contract too (local audit): a sibling gone en_route/terminal after the plan aborts the primary's move
-    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1', status: 'confirmed' }]);
+    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', reservation_service_mix: null }]);
     // the sibling's own move verifies the PRIMARY at its landed target (codex r6)
     expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
@@ -468,6 +469,43 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b', { auto_dispatch_locked: true })] });
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' });
     expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+  });
+
+  test('auto-dispatch preflights every grouped member allocation before the first write', async () => {
+    db.__script = script({ members: [
+      member('a'),
+      member('b', { reservation_service_mix: { version: 2, allocatedServiceIds: ['b', 'c'] } }),
+    ] });
+    const rebooker = fakeRebooker();
+
+    await expect(moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch',
+    })).rejects.toMatchObject({
+      statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 'b',
+    });
+
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((call) => call.op === 'update')).toBe(false);
+  });
+
+  test('a conflict unique to a later sibling rejects before the primary write', async () => {
+    db.__script = script({ members: [
+      member('a', { window_start: '09:00', window_end: '10:00' }),
+      member('b', { window_start: '10:00', window_end: '11:00' }),
+    ] });
+    findConflictingVisits
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'outside-job' }]);
+    const rebooker = fakeRebooker();
+
+    await expect(moveVisitAsUnit({
+      rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch',
+    })).rejects.toMatchObject({
+      statusCode: 409, code: 'SLOT_TAKEN', memberId: 'b', conflictId: 'outside-job',
+    });
+
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((call) => call.op === 'update')).toBe(false);
   });
 
   test('a row that joined the visit after the plan snapshot is detached at retarget, with a warning — by the full target stop, not the date alone', async () => {

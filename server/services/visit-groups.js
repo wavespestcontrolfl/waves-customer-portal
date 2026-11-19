@@ -1887,6 +1887,40 @@ function assertShownMembership(shown, visitId, liveMemberIds) {
   }
 }
 
+// Ask the rebooker's canonical occupancy predicate about every member before
+// a grouped move writes its primary. The whole visit is excluded as one
+// physical stop, so only outside occupancy can reject the unit.
+async function preflightMemberConflicts(t, { members, targets, newDateStr, options }) {
+  const warnings = [];
+  const { probeMoveConflicts, occupancyProbeEnd } = require('./rebooker');
+  const memberIds = members.map((m) => String(m.id));
+  for (const target of targets.filter((x) => !x.alreadyAtTarget && x.startHHMM)) {
+    const member = members.find((x) => String(x.id) === String(target.id));
+    const probeEnd = target.endHHMM || occupancyProbeEnd(target.startHHMM, null, member.estimated_duration_minutes);
+    const { rows: clashes } = await probeMoveConflicts({
+      conn: t,
+      target: {
+        id: target.id, date: newDateStr, windowStart: target.startHHMM, windowEnd: probeEnd,
+        technicianId: options.technicianId !== undefined ? options.technicianId : member.technician_id,
+        changes: { scheduled_date: newDateStr, window_start: target.startHHMM, window_end: target.endHHMM },
+      },
+      excludeServiceIds: [...new Set([...(options.excludeServiceIds || []).map(String), ...memberIds])],
+      options: {
+        ...options,
+        ...(Object.prototype.hasOwnProperty.call(options, 'technicianId') ? { occupancyTechBlind: true } : {}),
+      },
+    });
+    if (!clashes.length) continue;
+    if (options.overlapAdvisory !== true) {
+      throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+        statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: target.id, conflictId: clashes[0].id,
+      });
+    }
+    warnings.push(`service ${target.id} overlaps another job at its destination (${clashes[0].id})`);
+  }
+  return warnings;
+}
+
 async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
   if (!rebooker || !service || !service.visit_id) return null;
   const logger = require('./logger');
@@ -1924,6 +1958,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const members = await t('scheduled_services').where({ visit_id: visit.id })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
           .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded',
+            'reservation_service_mix',
             // The lawn rounds size rule (rebooker.movesAsSeries) is judged on these locked rows.
             'recurring_pattern', 'date_exception', 'date_exception_cadence_date');
         const primary = members.find((m) => String(m.id) === String(serviceId));
@@ -2007,6 +2042,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           if (String(initiatedBy) === 'auto_dispatch' && (m.auto_dispatch_locked === true || m.auto_dispatch_excluded === true)) {
             throw Object.assign(new Error('Cannot auto-move this stop: a grouped service is locked or excluded from auto-dispatch'), { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_OPT_OUT', memberId: m.id, isOperational: true });
           }
+          // A v2 allocation is one physical capacity reservation represented
+          // by several service rows. Auto-dispatch has no allocation-unit
+          // writer, so moving even a grouped visit containing one would split
+          // the allocation. Check every locked member before the first write.
+          if (String(initiatedBy) === 'auto_dispatch' && m.reservation_service_mix?.version === 2) {
+            throw Object.assign(new Error('Cannot auto-move this stop: a grouped service belongs to a version-2 allocation that must move as one unit'), { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: m.id, isOperational: true });
+          }
           if (!movable(m.status)) {
             throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${m.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: m.id });
           }
@@ -2031,6 +2073,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           return {
             id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
             startHHMM: norm(targetStart) || norm(m.window_start) || null,
+            endHHMM: norm(targetEnd) || norm(m.window_end) || null,
             // Original bounds kept SEPARATELY (local audit): a null end must
             // roll back as { start, end: null }, never as a zero-length
             // "09:00-09:00" window.
@@ -2044,7 +2087,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             // status too (local audit): a sibling that went en_route / on_site
             // / terminal after the plan released its locks fails ITS CAS and
             // the primary's excludeExpect contract before the first write.
-            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null, status: String(m.status) },
+            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null, status: String(m.status), reservation_service_mix: m.reservation_service_mix ?? null },
           };
         });
         // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
@@ -2066,6 +2109,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (typeof options.memberGuard === 'function') {
           await options.memberGuard({ trx: t, members, primaryId: primary.id, visitId: visit.id, targets });
         }
+        // Preflight the writer's canonical occupancy predicate for EVERY
+        // changing member while the complete group snapshot is locked. A
+        // conflict unique to a later sibling must reject before the primary
+        // commits, not strand a partially moved stop. The group is excluded
+        // as one physical stop; named-tech unit moves are probed tech-blind
+        // because their per-member writes retain the old tech until the
+        // canonical assignment step.
+        const conflictWarnings = await preflightMemberConflicts(t, { members, targets, newDateStr, options });
         // Destination-technician occupancy for EVERY derived member window
         // (local codex audit r24), before the first write: a hard clash
         // refuses the whole unit (SLOT_TAKEN — the callers' existing
@@ -2090,7 +2141,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
-          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings,
+          customerId: visit.customer_id, propertyId: visit.property_id,
+          techClashWarnings: [...conflictWarnings, ...techClashWarnings],
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primary,
