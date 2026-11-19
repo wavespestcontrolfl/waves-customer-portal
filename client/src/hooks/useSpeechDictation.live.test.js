@@ -91,6 +91,39 @@ describe("useSpeechDictation live words", () => {
     expect(sessions[0].abort).toHaveBeenCalled();
   });
 
+  it("the login changed while the mic permission was open: no session, no recording, the mic is let go", async () => {
+    stubServer();
+    const stop = vi.fn();
+    navigator.mediaDevices.getUserMedia.mockImplementationOnce(async () => {
+      localStorage.setItem("waves_admin_token", "other-staff-jwt");
+      return { getTracks: () => [{ stop }] };
+    });
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), {}));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.starting).toBe(false));
+    expect(result.current.listening).toBe(false);
+    expect(sessions).toHaveLength(0);
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it("another tab switches the login while recording: the recording stops, the preview ends and nothing is sent", async () => {
+    stubServer();
+    const { result } = await recording({ dictationContext: { customerId: CUSTOMER } });
+    expect(sessions).toHaveLength(1);
+    act(() => sessions[0].args.onText("Treated the"));
+    // a storage write that leaves the login alone changes nothing
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "admin_ib_recents" })); });
+    expect(result.current.listening).toBe(true);
+    localStorage.setItem("waves_admin_token", "other-staff-jwt");
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+    await waitFor(() => expect(result.current.listening).toBe(false));
+    // the preview is dropped at once (abort), not left to bring its last words (stop)
+    await waitFor(() => expect(result.current.liveText).toBe(""));
+    expect(sessions[0].abort).toHaveBeenCalled();
+    expect(fetch.mock.calls.filter(([, o]) => o?.method === "POST")).toHaveLength(0);
+  });
+
   it("opens no session when the server did not offer live words", async () => {
     stubServer({ liveWords: false });
     const { result } = await recording({});
@@ -144,6 +177,29 @@ describe("useSpeechDictation live words", () => {
     const { unmount } = await recording({});
     unmount();
     expect(sessions[0].abort).toHaveBeenCalled();
+  });
+
+  it("another tab switches the login after Stop while the words are on the way: the preview clears at once", async () => {
+    stubServer();
+    let release;
+    clipResponse = () => new Promise((resolve) => { release = () => resolve(yes({ text: "Treated the lanai." })); });
+    const { result } = await recording({ dictationContext: { customerId: CUSTOMER } });
+    act(() => sessions[0].args.onText("Treated the"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(result.current.liveText).toBe("Treated the");
+    localStorage.setItem("waves_admin_token", "other-staff-jwt");
+    // a late word that comes before the storage event shows under the new login neither
+    act(() => sessions[0].args.onText("Treated the lanai"));
+    expect(result.current.liveText).toBe("Treated the");
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+    expect(result.current.liveText).toBe("");
+    expect(sessions[0].abort).toHaveBeenCalled();
+    act(() => sessions[0].args.onText("late words"));
+    expect(result.current.liveText).toBe("");
+    await act(async () => { release(); });
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(result.current.liveText).toBe("");
   });
 
   it("a target change mid-recording ends the session and drops the words; late words are ignored", async () => {

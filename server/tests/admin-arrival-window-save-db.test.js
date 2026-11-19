@@ -170,6 +170,17 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     expect(await mockConn('scheduled_services').where({ id: NEIGHBOUR }).first()).toEqual(before);
   });
 
+  test.each([true, false])('the saved route warns for an expired hold only when staff booked it (booked: %s)', async booked => {
+    await mockConn('scheduled_services').where({ id: CHILD }).update({ estimated_duration_minutes: 240 });
+    await mockConn('scheduled_services').where({ id: NEIGHBOUR }).update({
+      customer_id: booked ? CUSTOMER : null,
+      reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 minute'"),
+    });
+    const result = await save({ technicianId: TECH, assignmentScope: 'following' }, CHILD);
+    expect(result.status).toBe(200);
+    expect(result.body.warnings || []).toEqual(booked ? [expect.stringContaining(LATER)] : []);
+  });
+
   test('all affected occupancy dates are locked before the first reassignment write', async () => {
     const statements = [];
     const listener = query => { statements.push({ sql: query.sql, bindings: query.bindings }); };
@@ -317,7 +328,11 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
         { ...stop, id: MOVER, scheduled_date: LATER, window_start: '09:00', window_end: '10:00', lat: 27.545 },
       ]);
     });
-    test('the save fits the visit between the stops and numbers the day', async () => {
+    test.each([false, true])('the save numbers all booked stops around the inserted visit (retained hold expiry: %s)', async retained => {
+      if (retained) {
+        await mockConn('scheduled_services').where({ id: SOUTH_STOP })
+          .update({ reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 minute'") });
+      }
       const result = await move();
       expect(result.status).toBe(200);
       expect(result.body.warnings).toBeUndefined();

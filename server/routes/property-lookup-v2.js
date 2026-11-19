@@ -3104,6 +3104,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     poolCageSize: classifyPoolCageSize(rc?.poolCageSqft) || normalizePoolCageSize(ai?.poolCageSize, ai?.poolCage),
     poolCageSizeInferred: !rc?.poolCageSqft
       && ai?.poolCage === 'YES' && !['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(String(ai?.poolCageSize || '').toUpperCase()),
+    // GATE_CAGE_TWO_SIZES only: the four-size answer, for the website hold.
+    ...(cageTwoSizesLive() ? { poolCageLegacySize: poolCageLegacySize(rc, ai) } : {}),
     // County permit evidence (positive-only; _poolPermits rides the cached
     // record). A permit proves a pool/cage the annual roll hasn't caught up
     // to; absence proves nothing — open-permit layers, new-construction-only
@@ -4310,19 +4312,43 @@ function poolRecordContext(propertyRecord) {
 // sqft is on the tax roll, so the classification becomes deterministic.
 // Positive-only: no cage row never downgrades a vision-detected cage
 // (attached lanais are sometimes rolled into the building areas).
+//
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "cage 1000"): two sizes, Medium up to
+// 1,000 sq ft and Large above. Read at call time; `?.()` so a whole-module
+// feature-gates mock without the reader reads as off. The engine still reads
+// all four sizes (saved estimates keep their price).
+const cageTwoSizesLive = () => require('../config/feature-gates').cageTwoSizesLive?.() === true;
+// The size policy lives in one module (property-lookup/cage-sizes.js).
+const {
+  fourBandCageSize, twoSizeFromArea, fourToTwo,
+} = require('../services/property-lookup/cage-sizes');
+
 function classifyPoolCageSize(sqft) {
-  if (!Number.isFinite(sqft) || sqft <= 0) return null;
-  if (sqft < 300) return 'SMALL';
-  if (sqft <= 600) return 'MEDIUM';
-  if (sqft <= 900) return 'LARGE';
-  return 'OVERSIZED';
+  return cageTwoSizesLive() ? twoSizeFromArea(sqft) : fourBandCageSize(sqft);
 }
 
-
-function normalizePoolCageSize(value, poolCage) {
+function normalizePoolCageSizeFourSizes(value, poolCage) {
   const raw = String(value || '').toUpperCase();
   if (['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'].includes(raw)) return raw;
   return poolCage === 'YES' ? 'MEDIUM' : 'NONE';
+}
+
+// The satellite answer. The AI prompt still answers four sizes; with two sizes
+// on, Small, Medium and Large read Medium (an old Large, 600 to 900 sq ft, is
+// now Medium) and only Oversized reads Large. This also covers a stored answer
+// rebuilt on a cache hit.
+function normalizePoolCageSize(value, poolCage) {
+  const size = normalizePoolCageSizeFourSizes(value, poolCage);
+  return cageTwoSizesLive() ? (fourToTwo(size) || size) : size;
+}
+
+// Two sizes on only: the four-size answer today's rule gives, so the website
+// quote can keep holding a cage the four sizes call Large or Oversized.
+// Undefined with the gate off (the key is then absent from the profile).
+function poolCageLegacySize(rc, ai) {
+  if (!cageTwoSizesLive()) return undefined;
+  return fourBandCageSize(rc?.poolCageSqft)
+    || normalizePoolCageSizeFourSizes(ai?.poolCageSize, ai?.poolCage);
 }
 
 function inferFoundation(rc, ai) {
@@ -6427,6 +6453,10 @@ router.post('/calculate-estimate', async (req, res) => {
         if (verdict.eligible) mapped.offerTiersAvailable = true;
       }
     } catch (_) { /* a convenience flag; the save decides */ }
+    // GATE_CAGE_TWO_SIZES: tell the tool its Pool Cage Size box offers two sizes
+    // even with no property lookup on this estimate. Present only while the gate
+    // is on, so gate-off shapes are unchanged. Never a price field.
+    if (cageTwoSizesLive()) mapped.poolCageTwoSizes = true;
     // The linked member's current services at the tier this quote moves
     // them to, for staff to tick (owner 2026-10-30 option B). Read-only; a
     // failure only leaves the list off.

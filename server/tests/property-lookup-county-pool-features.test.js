@@ -282,3 +282,77 @@ describe('enriched profile pool integration', () => {
     expect(poolFlag({ hasPool: true, poolAreaSqft: 288 }, { pool: 'YES', confidenceScore: 80 })).toBe(false);
   });
 });
+
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "cage 1000"): Medium up to 1,000 sq ft,
+// Large above. The profile also carries the four-size answer for the website hold.
+describe('GATE_CAGE_TWO_SIZES: two sizes in the lookup', () => {
+  const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+  let prior;
+  beforeAll(() => { prior = process.env[TWO_SIZES]; });
+  afterAll(() => {
+    if (prior === undefined) delete process.env[TWO_SIZES];
+    else process.env[TWO_SIZES] = prior;
+  });
+  beforeEach(() => { delete process.env[TWO_SIZES]; });
+
+  const profile = (rc, ai = { pool: 'YES', confidenceScore: 80 }) => buildEnrichedProfile(rc, ai, 27.44, -82.39);
+  const countyCage = (sqft) => ({ hasPool: true, poolAreaSqft: 288, poolCageSqft: sqft });
+  const aiCage = (size) => ({ pool: 'YES', poolCage: 'YES', poolCageSize: size, confidenceScore: 80 });
+
+  it('on: classifyPoolCageSize is Medium up to 1,000 sq ft and Large above; invalid stays null', () => {
+    process.env[TWO_SIZES] = 'true';
+    expect(classifyPoolCageSize(250)).toBe('MEDIUM');
+    expect(classifyPoolCageSize(750)).toBe('MEDIUM');
+    expect(classifyPoolCageSize(1000)).toBe('MEDIUM');
+    expect(classifyPoolCageSize(1001)).toBe('LARGE');
+    expect(classifyPoolCageSize(2400)).toBe('LARGE');
+    expect(classifyPoolCageSize(0)).toBeNull();
+    expect(classifyPoolCageSize(null)).toBeNull();
+  });
+
+  it('on: a county cage reads Medium or Large and keeps the four-size answer beside it', () => {
+    process.env[TWO_SIZES] = 'true';
+    const cases = [[250, 'MEDIUM', 'SMALL'], [500, 'MEDIUM', 'MEDIUM'], [750, 'MEDIUM', 'LARGE'],
+      [950, 'MEDIUM', 'OVERSIZED'], [1200, 'LARGE', 'OVERSIZED']];
+    for (const [sqft, size, legacy] of cases) {
+      const enriched = profile(countyCage(sqft));
+      expect(enriched.poolCageSize).toBe(size);
+      expect(enriched.poolCageLegacySize).toBe(legacy);
+    }
+  });
+
+  it('on: the satellite answer maps Small, Medium and Large to Medium, and Oversized to Large', () => {
+    process.env[TWO_SIZES] = 'true';
+    // An old Large (600 to 900 sq ft) reads Medium; an old Oversized reads Large.
+    const mapped = { SMALL: 'MEDIUM', MEDIUM: 'MEDIUM', LARGE: 'MEDIUM', OVERSIZED: 'LARGE' };
+    for (const [answer, size] of Object.entries(mapped)) {
+      const enriched = profile({ hasPool: null }, aiCage(answer));
+      expect(enriched.poolCageSize).toBe(size);
+      expect(enriched.poolCageLegacySize).toBe(answer);
+      expect(enriched.poolCageSizeInferred).toBe(false);
+    }
+    // No size in the answer: today's Medium default, still marked inferred.
+    const inferred = profile({ hasPool: null }, aiCage(undefined));
+    expect(inferred.poolCageSize).toBe('MEDIUM');
+    expect(inferred.poolCageSizeInferred).toBe(true);
+    // No cage: nothing changes, and the legacy answer is NONE.
+    const none = profile({ hasPool: null }, { pool: 'NO', poolCage: 'NO', poolCageSize: 'NONE', confidenceScore: 80 });
+    expect(none.poolCageSize).toBe('NONE');
+    expect(none.poolCageLegacySize).toBe('NONE');
+  });
+
+  it('off or unset: four sizes as before and no poolCageLegacySize key', () => {
+    for (const value of [undefined, 'false', '1']) {
+      if (value === undefined) delete process.env[TWO_SIZES]; else process.env[TWO_SIZES] = value;
+      expect(classifyPoolCageSize(250)).toBe('SMALL');
+      expect(classifyPoolCageSize(750)).toBe('LARGE');
+      expect(classifyPoolCageSize(1200)).toBe('OVERSIZED');
+      const county = profile(countyCage(1200));
+      expect(county.poolCageSize).toBe('OVERSIZED');
+      expect(Object.prototype.hasOwnProperty.call(county, 'poolCageLegacySize')).toBe(false);
+      const sat = profile({ hasPool: null }, aiCage('SMALL'));
+      expect(sat.poolCageSize).toBe('SMALL');
+      expect(Object.prototype.hasOwnProperty.call(sat, 'poolCageLegacySize')).toBe(false);
+    }
+  });
+});

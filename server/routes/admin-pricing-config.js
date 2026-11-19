@@ -1527,6 +1527,12 @@ router.get('/:key', async (req, res, next) => {
       featureAvailable: configKeyFeatureAvailable(req.params.key),
       ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
       ...(req.params.key === 'lawn_pricing_v2' ? { areaAddOns: areaAddOnsAvailability() } : {}),
+      // GATE_CAGE_TWO_SIZES (strict 'true', never gateEnvOn: the two must not disagree). The
+      // estimator's startup read of this row also tells the Pool Cage Size box the pest cage gate,
+      // so the box needs no new fetch (the bermudaSuppression / areaAddOns pattern). Present only
+      // while the gate is on, so gate-off shapes are unchanged.
+      ...(req.params.key === 'lawn_pricing_v2' && require('../config/feature-gates').cageTwoSizesLive?.() === true
+        ? { poolCageTwoSizes: true } : {}),
       ...(req.params.key === 'mosquito_misting_pricing' ? { misting: mistingAvailability() } : {}),
       ...(req.params.key === 'termite_install' ? { effective: await effectiveTermiteInstallBasis() } : {}),
     });

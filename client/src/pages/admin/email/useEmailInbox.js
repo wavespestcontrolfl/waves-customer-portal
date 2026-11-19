@@ -319,8 +319,8 @@ export default function useEmailInbox(active, clearDraftResult) {
     } catch { /* keep the stale row; the error feedback still explains the outcome */ }
   };
 
-  // GATE_EMAIL_RECLASSIFY_PICK: the labels staff may pick. Fails closed — off
-  // or unreadable, Reclassify only re-runs the AI, as before.
+  // The labels staff may pick on Reclassify. Fails closed: when the list is
+  // unreadable, Reclassify only re-runs the AI.
   const [reclassifyLabels, setReclassifyLabels] = useState([]);
   useEffect(() => {
     if (!active) return undefined;
@@ -329,7 +329,7 @@ export default function useEmailInbox(active, clearDraftResult) {
       try {
         const response = await adminFetch("/api/admin/email/reclassify-options");
         const data = response.ok ? await response.json() : null;
-        if (current) setReclassifyLabels(data?.enabled === true && Array.isArray(data.categories) ? data.categories : []);
+        if (current) setReclassifyLabels(Array.isArray(data?.categories) ? data.categories : []);
       } catch { if (current) setReclassifyLabels([]); }
     })();
     return () => { current = false; };

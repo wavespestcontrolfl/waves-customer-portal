@@ -1565,6 +1565,9 @@ router.get('/:id/edit-source', async (req, res, next) => {
           }).eligible === true || OfferTiers.offerTiersMarkedPestOnlyState(estData);
         } catch (_) { return false; }
       })(),
+      // GATE_CAGE_TWO_SIZES, read LIVE (never from the stored result): the Pool Cage
+      // Size box offers two sizes on a reopened estimate. Present only while the gate is on.
+      ...(require('../config/feature-gates').cageTwoSizesLive?.() === true ? { poolCageTwoSizes: true } : {}),
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
       propertyId: estimate.property_id || null,

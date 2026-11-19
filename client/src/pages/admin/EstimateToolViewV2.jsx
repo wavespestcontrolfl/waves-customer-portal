@@ -1220,6 +1220,42 @@ function InputV2({ k, id = `estimate-${k}`, ...rest }) {
   return <Input id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest} />;
 }
 
+const POOL_CAGE_SIZE_OPTIONS = [
+  { value: "SMALL", label: "Small (+$5)" },
+  { value: "MEDIUM", label: "Medium (+$8)" },
+  { value: "LARGE", label: "Large (+$12)" },
+  { value: "OVERSIZED", label: "Oversized (+$18)" },
+];
+
+// GATE_CAGE_TWO_SIZES: with two sizes the box offers Medium and Large. A Small or Oversized
+// that was LOADED from an existing estimate stays listed (even after the operator moves away,
+// so they can return to the saved value); a fresh pick of either is coerced by the tool.
+// Gate off or unknown = all four, as before.
+function poolCageSizeOptions(twoSizes, loadedSize) {
+  if (!twoSizes) return POOL_CAGE_SIZE_OPTIONS;
+  return POOL_CAGE_SIZE_OPTIONS.filter((o) => o.value === "MEDIUM" || o.value === "LARGE" || o.value === loadedSize);
+}
+
+// A Small or Oversized read as two sizes. Medium and Large are also two-size words, so a size whose
+// source is not a four-size lookup keeps them.
+const POOL_CAGE_TWO_SIZE_OF = { SMALL: "MEDIUM", OVERSIZED: "LARGE" };
+
+// The two-size reading of a FOUR-size lookup's cage (a profile without poolCageLegacySize, from a lookup
+// made while the gate was off): the county area first (Medium up to 1,000 sq ft, Large above), else its
+// four-size answer (Small, Medium and Large read Medium, Oversized reads Large). Null for a two-size
+// lookup (it carries the key; the caller also skips a lookup whose own meta said two sizes), which is
+// already two sizes, and for no cage answer. Mirrors twoSizeOf in
+// server/services/property-lookup/cage-sizes.js; the client cannot import it.
+const POOL_CAGE_TWO_SIZES_MEDIUM_MAX_SQFT = 1000;
+function lookupTwoSizeCage(lookupProfile) {
+  if (!lookupProfile || Object.prototype.hasOwnProperty.call(lookupProfile, "poolCageLegacySize")) return null;
+  const area = Number(lookupProfile.poolCageSqft);
+  if (Number.isFinite(area) && area > 0) return area <= POOL_CAGE_TWO_SIZES_MEDIUM_MAX_SQFT ? "MEDIUM" : "LARGE";
+  const four = String(lookupProfile.poolCageSize || "").toUpperCase();
+  if (four === "OVERSIZED") return "LARGE";
+  return ["SMALL", "MEDIUM", "LARGE"].includes(four) ? "MEDIUM" : null;
+}
+
 function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
   return <Select id={id} value={form[k] ?? ""} onChange={(e) => set(k, e.target.value)} {...rest}>
@@ -2492,6 +2528,9 @@ export default function EstimateToolViewV2({
         // The stored result does not carry the server's tier-availability flag
         // (it is stamped on fresh calculate responses): restore it from the
         // edit source so the Good / Better / Best checkbox shows on a reopen.
+        // The edit source's LIVE gate value for the Pool Cage Size box (never the stored result's).
+        setCageTwoSizes(d.poolCageTwoSizes === true);
+        setLoadedCageSize(String(seeded.poolCageSize || "").toUpperCase());
         setEstimate(d.result && !stale
           ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
           : null);
@@ -2599,6 +2638,7 @@ export default function EstimateToolViewV2({
     draftIdRef.current = null;
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
+    setLoadedCageSize("");
     setEnrichedProfile(null);
     forgetScopeAnswer();
     setSatelliteData(null);
@@ -3201,6 +3241,13 @@ export default function EstimateToolViewV2({
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   const [lookupMeta, setLookupMeta] = useState(null);
+  // GATE_CAGE_TWO_SIZES is global, not per property: the Pool Cage Size box offers two
+  // sizes once ANY server response says so (lookup, calculate, reopen) and the latest
+  // response replaces it. Never cleared with the estimate, the lookup or an address change.
+  const [cageTwoSizes, setCageTwoSizes] = useState(false);
+  // The cage size an existing estimate was opened with (SMALL or OVERSIZED stays listed, see
+  // poolCageSizeOptions). Set at the reopen sites, reset when a new estimate starts.
+  const [loadedCageSize, setLoadedCageSize] = useState("");
   // Business-identity scope question (GATE_LOOKUP_BUSINESS_IDENTITY): the
   // CSR's answer for ONE address, re-sent on every lookup of it; a server 409
   // can raise the question on its own.
@@ -3573,6 +3620,9 @@ export default function EstimateToolViewV2({
         if (!r.ok) return;
         const row = await r.json();
         if (active) {
+          // The same row carries the pest cage gate (GATE_CAGE_TWO_SIZES): only ever sets true here;
+          // the lookup, calculate and reopen responses keep setting the exact value.
+          if (row?.poolCageTwoSizes === true) setCageTwoSizes(true);
           setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
           setAreaAddOnCatalog(readAreaAddOnCatalog(row));
           setBahiaOffered(row?.subFeaturesAvailable?.bahiaOffered !== false);
@@ -3588,6 +3638,28 @@ export default function EstimateToolViewV2({
       active = false;
     };
   }, []);
+  // GATE_CAGE_TWO_SIZES: once the gate is known, a size that was not loaded from an existing estimate
+  // moves to its two-size reading, visibly. A size the lookup filled (not an operator pick) reads from
+  // that lookup when it was a four-size lookup: a 750 sq ft Large and a 950 sq ft Oversized both read
+  // Medium. Any other Small or Oversized (a pick made before the gate was known, or a stale draft) moves
+  // to Medium or Large; an operator's Medium or Large stays.
+  useEffect(() => {
+    if (!cageTwoSizes) return;
+    const size = String(form.poolCageSize || "").toUpperCase();
+    if (!size || size === loadedCageSize) return;
+    const operatorPick = !!form._poolCageSizeEdited || (form._manualFields || []).includes("poolCageSize");
+    const fromLookup = !operatorPick && lookupMeta?.poolCageTwoSizes !== true ? lookupTwoSizeCage(enrichedProfile) : null;
+    const reading = fromLookup || POOL_CAGE_TWO_SIZE_OF[size];
+    if (reading && reading !== size) {
+      // Not set(): an automatic conversion is not an operator pick. It must not join _manualFields or
+      // _poolCageSizeEdited, so it keeps its provenance (a later lookup may still replace it). It does the
+      // same estimate invalidation a size change normally causes.
+      setForm((f) => ({ ...f, poolCageSize: reading }));
+      setEstimate(null);
+      setSavedId(null);
+      setSavedViewUrl(null);
+    }
+  }, [cageTwoSizes, form.poolCageSize, form._poolCageSizeEdited, form._manualFields, loadedCageSize, enrichedProfile, lookupMeta]);
   useEffect(() => {
     (async () => {
       try {
@@ -3795,6 +3867,8 @@ export default function EstimateToolViewV2({
     setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
+    // The previous estimate's saved cage size no longer applies to this new property.
+    setLoadedCageSize("");
     const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
     setForm((f) => ({
       ...buildDefaultEstimateForm({
@@ -3960,7 +4034,10 @@ export default function EstimateToolViewV2({
         businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
         addressStatus: data.meta?.addressStatus || null,
         campusParcel: data.meta?.campusParcel || null,
+        // This lookup's own cage era: a two-size lookup's size is never reclassified.
+        poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
       });
+      setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
       unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
 
@@ -4848,6 +4925,8 @@ export default function EstimateToolViewV2({
         setLookupStatus((s) => ({ ...s, type: "err", msg: result.error }));
         return null;
       }
+      // The route stamps poolCageTwoSizes whenever the gate is on, so absence means off.
+      setCageTwoSizes(result.poolCageTwoSizes === true);
 
       // Stale rental gate (codex P1, round 2): the availability probe runs
       // once at mount, so GATE_TERMITE_STATION_RENTAL flipped OFF mid-session
@@ -5151,6 +5230,8 @@ export default function EstimateToolViewV2({
     // same-customer guard (codex #3244 r5). Clearing it also lets the
     // intake-list effect clear extracted addresses.
     setGroupAnchorId(null);
+    // The previous estimate's saved cage size no longer applies to the next estimate.
+    setLoadedCageSize("");
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),
@@ -5333,6 +5414,8 @@ export default function EstimateToolViewV2({
       if (!source.editable) setEditLoadError(source.blockReason);
       // Same as the edit loader: the stored result carries no tier-availability
       // flag, so the Good / Better / Best checkbox survives the post-send refresh.
+      setCageTwoSizes(source.poolCageTwoSizes === true);
+      setLoadedCageSize(String(seeded.poolCageSize || "").toUpperCase());
       setEstimate(source.result && !stale
         ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
         : null);
@@ -6688,12 +6771,7 @@ export default function EstimateToolViewV2({
                 <Field label="Pool Cage Size" id="estimate-poolCageSize" className="mb-4">
                   <SelectV2
                     k="poolCageSize"
-                    options={[
-                      { value: "SMALL", label: "Small (+$5)" },
-                      { value: "MEDIUM", label: "Medium (+$8)" },
-                      { value: "LARGE", label: "Large (+$12)" },
-                      { value: "OVERSIZED", label: "Oversized (+$18)" },
-                    ]}
+                    options={poolCageSizeOptions(cageTwoSizes, loadedCageSize)}
                   />
                 </Field>
               )}

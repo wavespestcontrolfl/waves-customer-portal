@@ -29,6 +29,8 @@ const {
 // palm-type table, so the two lists cannot drift. multi_select stores a
 // comma-joined string, so no option may contain a comma.
 const TREE_SHRUB_PALM_TYPE_OPTIONS = require('../config/tree-shrub-field-guide.json').palmTypes.rows.map((row) => row.name);
+const TREE_SHRUB_FERTILIZER_EVIDENCE = require('../../shared/tree-shrub-fertilizer-evidence.json');
+const TREE_SHRUB_PEST_EVIDENCE = require('../../shared/tree-shrub-pest-check.json');
 
 const WDO_TARGET_OPTIONS = [
   'Subterranean termites',
@@ -956,10 +958,23 @@ const PROJECT_TYPES = {
       // validateTreeShrubTypedCompliance): pollinator status gates
       // bee-sensitive insect applications, IRAC/FRAC confirms resistance
       // rotation was checked for pesticide products.
-      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: [
+      { key: 'pollinator_status', label: 'Flowering / pollinator status', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect', options: [
         'No blooms or no bees', 'Blooming — no bees active', 'Blooming — bees active', 'No insecticide applied',
       ] },
-      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, options: ['Yes', 'No'] },
+      { key: 'irac_frac_logged', label: 'IRAC / FRAC rotation checked & logged', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'rotation', options: ['Yes', 'No'] },
+      { key: 'insect_target', label: 'Current live insect target', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_live', options: TREE_SHRUB_PEST_EVIDENCE.insectTypes.map((item) => item.label) },
+      { key: 'insect_life_stage', label: 'Current live insect stage', type: 'select', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_live', options: TREE_SHRUB_PEST_EVIDENCE.lifeStages.map((item) => item.label) },
+      { key: 'insect_preventive_reason', label: 'Documented label-supported preventive reason', type: 'text', section: 'Compliance', internal: true, pesticideOnly: true, pesticideComplianceWhen: 'insect_preventive', placeholder: 'Label use plus site or documented history reason' },
+      // NutriRoot is 2-2-3 with all-soluble nitrogen. Ordinary use is not
+      // valid in Sarasota/North Port; Manatee use needs a P-deficient soil
+      // test and must be outside the N/P blackout. The second option exists
+      // only so an application that already happened is recorded truthfully
+      // and routed for office review instead of being erased from the ledger.
+      { key: 'nutriroot_application_basis', label: 'NutriRoot application basis (only if applied)', type: 'select', section: 'Compliance', internal: true, options: [
+        TREE_SHRUB_FERTILIZER_EVIDENCE.nutriRoot.soilTestBasis,
+        TREE_SHRUB_FERTILIZER_EVIDENCE.nutriRoot.alreadyAppliedBasis,
+      ] },
+      { key: 'nutriroot_soil_test_reference', label: 'NutriRoot soil-test report date / file reference', type: 'text', section: 'Compliance', internal: true, placeholder: 'e.g. UF report 2026-10-14, customer file' },
       { key: 'customer_recommendations', label: 'Customer recommendations', type: 'multi_select', section: 'Recommendations', options: [
         'Adjust irrigation', 'Avoid over-pruning', 'Remove dead plant material',
         'Trim away from structure', 'Keep mulch off trunks / stems', 'Monitor decline',

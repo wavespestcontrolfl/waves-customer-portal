@@ -256,8 +256,20 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
         const got = engine.selectProtocolVisit({ grass_type: grass }, date, null, { requireKnownGrass });
         expect(got.trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
         expect(got.visit).toBe(v13[LAWN_V13_ANY_GRASS_TRACK].visits.find((v) => v.month === 'Oct'));
+        expect(got.herbicideTurfHold).toBe(true);
       }
     });
+  });
+
+  test('a mixed or unidentified treated patch holds herbicides but leaves non-herbicide work available', () => {
+    expect(engine.unresolvedTreatedTurf({ treatedTurfSpecies: 'unidentified' })).toBe(true);
+    expect(engine.unresolvedTreatedTurf({ conditionFlags: ['mixed turf treated patch'] })).toBe(true);
+    expect(engine.unresolvedTreatedTurf({ treatedTurfSpecies: 'zoysia' })).toBe(false);
+    const herbicide = { product: { id: 'h', name: 'Celsius WG', category: 'herbicide' }, selected: true };
+    const nutrition = { product: { id: 'n', name: 'Iron Plus', category: 'micronutrient' }, selected: true };
+    const held = engine.holdUnresolvedTurfHerbicides([herbicide, nutrition], new Map(), true);
+    expect(held[0]).toMatchObject({ selected: false, fieldHold: 'turf_species_herbicide_hold' });
+    expect(held[1]).toBe(nutrition);
   });
 
   test.each(['mixed', 'unknown', 'centipede'])('gate off: recorded %s still has no track', (grass) => {
@@ -492,7 +504,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     2: [migration.NAMES.F24],
     3: [migration.NAMES.DIM, migration.NAMES.NT],
     4: [F44_0_0],
-    5: [migration.NAMES.TET],
+    5: [],
     6: [migration.NAMES.NT, migration.NAMES.DIM],
     7: [],
     8: [migration.NAMES.NT, potassiumMigration.NAME],
@@ -766,14 +778,14 @@ describe('plan engine reads the matched v13 protocol row', () => {
   });
 
   test('sunnyTurfOnly narrows a whole-lawn line by the profile sun exposure; no flag, no change', () => {
-    const [tetrino] = engine.parseProtocolLines(visitFor(5).primary, 'base', { exactName: true });
-    expect(tetrino.scope).toBe('BROADCAST_FULL');
-    const flagged = { ...tetrino, sunnyTurfOnly: true };
+    const [tetrino] = engine.parseProtocolLines(visitFor(5).secondary, 'conditional', { exactName: true });
+    expect(tetrino.scope).toBe('CONDITIONAL_RESCUE');
+    const flagged = { ...tetrino, sunnyTurfOnly: true, selected: true };
     expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'full_sun' })).toBe(1);
     expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'partial_shade' })).toBe(0.5);
     expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'heavy_shade' })).toBe(0);
     expect(engine.effectiveAreaFactor(flagged, {})).toBe(0.5);
-    expect(engine.effectiveAreaFactor(tetrino, { sunExposure: 'heavy_shade' })).toBe(1);
+    expect(engine.effectiveAreaFactor(tetrino, { sunExposure: 'heavy_shade' })).toBe(0);
     // Only the Tetrino row asks for it.
     const asking = migration.PRODUCTS.filter(([, s]) => s[7]?.sunnyTurfOnly).map(([, s]) => s[0]);
     expect(asking).toEqual([migration.NAMES.TET]);
@@ -851,11 +863,10 @@ describe('the material-cost audit reads the gate-aware program', () => {
       expect(itemOf(analyze(2), N.F24).mix.ratePer1000).toBe(4.2);
     });
 
-    test('sunnyTurfOnly narrows the Tetrino line to the half the audit has no profile for', () => {
+    test('the optional Tetrino line is not costed before a scouting decision selects it', () => {
       const rows = rowsFor(5, { tet: { ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true } } });
-      const narrowed = itemOf(analyze(5, rows), N.TET).mix;
-      const whole = itemOf(analyze(5), N.TET).mix;
-      expect(narrowed.amount).toBeCloseTo(whole.amount / 2, 3);
+      expect(itemOf(analyze(5, rows), N.TET).mix).toMatchObject({ amount: null, treatedSqft: null, areaFactor: 0 });
+      expect(itemOf(analyze(5), N.TET).mix).toMatchObject({ amount: null, treatedSqft: null, areaFactor: 0 });
     });
 
     test('a spot row is not priced: no amount, as in the plan; the whole-lawn rows around it still are', () => {
@@ -863,7 +874,7 @@ describe('the material-cost audit reads the gate-aware program', () => {
       const rows = new Map([['bermuda|May', new Map([['are', { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: {} }], ['tet', { applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz', gates: {} }]])]]);
       const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: withArena, options, v13Rows: rows });
       expect(itemOf(result, matrixMigration.ARENA_OLD).mix).toBeNull();
-      expect(itemOf(result, N.TET).mix.amount).toBeGreaterThan(0);
+      expect(itemOf(result, N.TET).mix).toMatchObject({ amount: null, treatedSqft: null, areaFactor: 0 });
     });
 
     test('with the gate off the loader returns an empty row set for every track and month', async () => {
@@ -1056,7 +1067,8 @@ describe('nematode lab note (owner 2026-11-01, YouTube lawn-problems read, chang
     expect(soil).toBeGreaterThan(-1);
     expect(notes.indexOf(NEMATODE)).toBe(soil + 1);
     // The soil-test rule (owner 2026-10-31) still orders the labs: soil test first, one lab sample at a time.
-    expect(notes[soil]).toContain('A soil test comes before a UF plant lab sample, never both at once.');
+    expect(notes[soil]).toContain('do not delay an urgent disease or virus diagnosis');
+    expect(notes[soil]).toContain('Never collect both samples at once.');
   });
 
   test.each(V13_GRASSES)('%s: the soil-test note keeps the free trigger tests and adds the paid test (owner 2026-11-02)', (grass) => {
