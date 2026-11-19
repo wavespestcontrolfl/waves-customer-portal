@@ -49,7 +49,7 @@ function owedReadSql(t) {
 
 const wordsOf = (text) => [...String(text || '').matchAll(/[a-z0-9]+/gi)].map((m) => ({ w: m[0].toLowerCase(), at: m.index, end: m.index + m[0].length }));
 
-// Where a turn first says the quote, as [start, end] in its text, or null (then the excerpt starts at the turn's start).
+// Where a turn first says the quote, as [start, end] in its text, or null (then the whole turn is shown).
 function spanOf(text, quote) {
   const tokens = wordsOf(text);
   const q = wordsOf(quote).map((t) => t.w);
@@ -60,10 +60,11 @@ function spanOf(text, quote) {
 }
 
 // The words to show: the caller's whole turn, or, past CALLER_WORDS_CHARS, a cut around the quote. The quote's own
-// words are never cut, so the office always sees what the caller chose.
-function excerptOf(text, [qs, qe]) {
+// words are never cut, so the office always sees what the caller chose; with no span, nothing is cut.
+function excerptOf(text, span) {
   const tidy = (x) => x.replace(/\s+/g, ' ').trim();
-  if (tidy(text).length <= CALLER_WORDS_CHARS) return tidy(text);
+  if (!span || tidy(text).length <= CALLER_WORDS_CHARS) return tidy(text);
+  const [qs, qe] = span;
   const room = Math.max(0, CALLER_WORDS_CHARS - 2 - (qe - qs));
   const start = Math.max(0, qs - Math.floor(room / 2));
   const end = Math.min(text.length, Math.max(qe, start + (qe - qs) + room));
@@ -73,7 +74,8 @@ function excerptOf(text, [qs, qe]) {
 // The caller's own words for the plan choice, from the caller turns that hold an evidence quote for billing_choice
 // (labeled the caller's) word for word, with outbound labels oriented the way the triage flags read them:
 // { words, plain }. The shared tools ground the quote (a short one must be a whole caller turn); then every caller turn
-// that says it, at any length, is screened. plain = every such turn, whole, passes the shared plain-statement screen.
+// that says it, at any length, is screened. plain = in every such turn, the whole turn, each of its sentences (the
+// grounding tools' split, so each sentence start meets the question check) and the quote pass the shared screen.
 // words = the first turn that does not (so the office sees the "no"), else the latest turn, cut around the quote. Null
 // when no caller turn holds a quote; an unlabeled or one-speaker transcript grounds nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
@@ -91,7 +93,9 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
     const hit = grounded.find((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
     if (!hit) continue;
     const text = String(turn.raw || '');
-    held.push({ words: excerptOf(text, spanOf(text, hit.quote) || [0, 0]), plain: quoteIsPlainStatement(text) });
+    const plain = quoteIsPlainStatement(text) && quoteIsPlainStatement(hit.quote)
+      && turn.sentences.every((x) => !x.question && quoteIsPlainStatement(x.ns));
+    held.push({ words: excerptOf(text, spanOf(text, hit.quote)), plain });
   }
   if (!held.length) return null;
   return held.find((h) => !h.plain) || held[held.length - 1];

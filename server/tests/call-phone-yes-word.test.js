@@ -46,8 +46,14 @@ describe("the caller's words", () => {
     ['a turn with a condition after it', 'Bill me each time. Only if the price stays the same.'],
     ['a turn with a question before it', 'Can you just bill me each time? Okay then. Yes, just bill me each time.'],
     ['a turn that turns down another plan first', "I don't want the annual. Just bill me each time."],
+    ['a later sentence that asks, with no question mark', 'I understand. Can you bill me each time.'],
   ])('a quote inside %s is shown, and is not plain', (_name, line) => {
     expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toEqual(notPlain(line));
+  });
+
+  test('a quote that itself asks is not plain, wherever it sits', () => {
+    expect(callerWordsOf(evidence(choice('can you bill me each time')), talk('I said can you bill me each time.')))
+      .toEqual(notPlain('I said can you bill me each time.'));
   });
 
   test('a price in the turn is fine', () => {
@@ -70,6 +76,11 @@ describe("the caller's words", () => {
     // The grounding tools' own spelling rule: "9am" and "9 a.m." are the same words.
     expect(callerWordsOf(evidence(choice('bill me each time at 9am')), twice('Bill me each time at 9am.', "Don't bill me each time at 9 a.m.")))
       .toEqual(notPlain("Don't bill me each time at 9 a.m."));
+  });
+
+  test('a long turn whose spelling differs from the quote is shown whole, so the quote is never lost', () => {
+    const line = `${'so we talked about it and '.repeat(10)}bill me each time at 9 a.m. please.`;
+    expect(callerWordsOf(evidence(choice('bill me each time at 9am')), talk(line))).toEqual(plain(line));
   });
 
   test('a quote across two sentences is screened with both', () => {
