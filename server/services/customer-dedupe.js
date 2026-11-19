@@ -53,7 +53,7 @@ const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 // The retire write's sentinel phone (merge-retired.js) marks a merged-away row.
 const { MERGE_RETIRED_PHONE_PREFIX } = require('./merge-retired');
 const { NEW_SOD_COLUMNS, NEW_SOD_DATE_COLUMNS, clearedNewSodColumns } = require('./lawn-sod-holds');
-const { CONTROLLER_TIMER_FIELDS } = require('./controller-timer');
+const { CONTROLLER_TIMER_FIELDS, controllerTimerToCarry } = require('./controller-timer');
 const { dateOnlyString } = require('../utils/datetime-et');
 const { dedupeNoUnverifiedBackfillLive } = require('../config/feature-gates');
 
@@ -1526,6 +1526,10 @@ function newSodBeforeImage(row) {
   return image;
 }
 
+// property_preferences columns that are part of one whole record about one home (the new-sod record, the
+// sprinkler timer on file). The merge settles each record as a group, never column by column.
+const WHOLE_RECORD_PREF_COLUMNS = new Set([...NEW_SOD_COLUMNS, ...CONTROLLER_TIMER_FIELDS]);
+
 // copyNewSod (property_preferences only): the loser's new-sod record describes the loser's HOME, so it is
 // copied onto a winner with no sod date only when the merge is a SAME-home one (the executor passes true then).
 // The four sod columns are one fact: they are copied together or not at all, never one by one.
@@ -1583,7 +1587,7 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId, { co
     // Settled above: receipts are always on after a merge.
     if (table === 'notification_prefs' && col === 'payment_receipt') continue;
     // The new-sod record and the sprinkler timer on file are each settled as one group below, never column by column.
-    if (table === 'property_preferences' && (NEW_SOD_COLUMNS.includes(col) || CONTROLLER_TIMER_FIELDS.includes(col))) continue;
+    if (table === 'property_preferences' && WHOLE_RECORD_PREF_COLUMNS.has(col)) continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -1606,12 +1610,10 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId, { co
   // The new-sod record (a fact about one home): on a same-home merge a winner with no sod date takes the
   // loser's whole record; a winner that has a date keeps its own record untouched. A different-homes merge
   // never copies it (the winner's primary home did not move).
-  if (table === 'property_preferences' && copyNewSod && !winnerRow.sod_laid_on && loserRow.sod_laid_on) {
-    for (const col of NEW_SOD_COLUMNS) updates[col] = loserRow[col] ?? null;
-  }
-  // The sprinkler timer on file, under the same premise: a winner with no timer takes the loser's whole one.
-  if (table === 'property_preferences' && copyNewSod && !winnerRow.irrigation_controller_brand && loserRow.irrigation_controller_brand) {
-    for (const col of CONTROLLER_TIMER_FIELDS) updates[col] = loserRow[col] ?? null;
+  if (table === 'property_preferences' && copyNewSod) {
+    if (!winnerRow.sod_laid_on && loserRow.sod_laid_on) for (const col of NEW_SOD_COLUMNS) updates[col] = loserRow[col] ?? null;
+    // The sprinkler timer on file, under the same premise: a winner with no timer takes the loser's whole one.
+    Object.assign(updates, controllerTimerToCarry(winnerRow, loserRow));
   }
   if (table === 'notification_prefs' && Object.hasOwn(winnerRow, 'request_channel_explicit')) {
     const channel = updates.request_channel || winnerRow.request_channel;

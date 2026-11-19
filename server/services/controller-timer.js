@@ -45,4 +45,11 @@ function settleControllerTimer(updates, { fresh = true } = {}) {
   return named.map((field) => ({ field: REQUEST_NAMES[field], message }));
 }
 
-module.exports = { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerProblem, settleControllerTimer };
+// A same-home customer merge: the surviving row takes the other row's whole timer only when it has none.
+// Whole or nothing, like every other write of this record. Returns the columns to set ({} = leave the row alone).
+function controllerTimerToCarry(winnerRow, loserRow) {
+  if (winnerRow?.[BRAND] || !loserRow?.[BRAND]) return {};
+  return Object.fromEntries(CONTROLLER_TIMER_FIELDS.map((field) => [field, loserRow[field] ?? null]));
+}
+
+module.exports = { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerProblem, controllerTimerToCarry, settleControllerTimer };

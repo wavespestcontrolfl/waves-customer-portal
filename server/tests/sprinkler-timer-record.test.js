@@ -43,7 +43,7 @@ const db = require('../models/db');
 const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
 const { PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS, validatePrefsBody } = require('../services/property-preferences-schema');
 const { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS } = require('../services/irrigation-schedule-confirmation');
-const { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, settleControllerTimer } = require('../services/controller-timer');
+const { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, controllerTimerToCarry, settleControllerTimer } = require('../services/controller-timer');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const propertyRouter = require('../routes/property');
 
@@ -135,6 +135,15 @@ describe('the timer saves whole or not at all', () => {
       expect(rejected).toHaveLength(3);
       expect(rejected[0].message).toMatch(/home on this account changed/);
     }
+  });
+
+  test('a same-home merge carries the other row\'s whole timer, and only onto a row that has none', () => {
+    const x2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+    expect(controllerTimerToCarry({ irrigation_controller_brand: null, irrigation_controller_model: null }, x2)).toEqual(x2);
+    expect(controllerTimerToCarry({}, { irrigation_controller_brand: 'rain_bird' }))
+      .toEqual({ irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null });
+    expect(controllerTimerToCarry({ irrigation_controller_brand: 'rain_bird' }, x2)).toEqual({});
+    expect(controllerTimerToCarry({}, { irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' })).toEqual({});
   });
 });
 

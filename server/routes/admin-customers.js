@@ -5329,20 +5329,14 @@ function sodWriteIsFresh(current, sodInput, renderStamp) {
 // The sod record saves whole or not at all: one rejected sod field drops the
 // other sod fields of the batch too (a valid date with a bad covers value must
 // not persist as a whole-lawn record). Other fields still save.
-// A sod record the stored row could not accept joins `rejected`; true when it
-// was the only thing in the batch (nothing was written).
-function sodRejectedWithNothingSaved(outcome, rejected) {
-  if (!outcome.sodRejected) return false;
-  rejected.push(outcome.sodRejected);
-  return !outcome.written.length;
-}
-
-// The sprinkler timer on file follows the same contract (services/controller-timer.js): a timer the stored row
-// could not accept joins `rejected`; true when it was the only thing in the batch (nothing was written).
-function timerRejectedWithNothingSaved(outcome, rejected) {
-  if (!outcome.timerRejected?.length) return false;
-  rejected.push(...outcome.timerRejected);
-  return !outcome.written.length;
+// A sod record the stored row could not accept joins `rejected`. So does a sprinkler timer on file, which follows
+// the same contract (services/controller-timer.js). Returns the 400 message when those were the only things in the
+// batch (nothing was written), else null.
+function recordsRejectedWithNothingSaved(outcome, rejected) {
+  const refused = [outcome.sodRejected, ...(outcome.timerRejected || [])].filter(Boolean);
+  rejected.push(...refused);
+  if (!refused.length || outcome.written.length) return null;
+  return [...new Set(refused.map((r) => r.message))].join('; ');
 }
 
 // The field names a prefs write saved, for the audit trail (names only, sorted).
@@ -5527,11 +5521,9 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body) }))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    const sodOnlyRejected = sodRejectedWithNothingSaved(outcome, rejected);
-    const timerOnlyRejected = timerRejectedWithNothingSaved(outcome, rejected);
-    if (sodOnlyRejected || timerOnlyRejected) {
-      const messages = [outcome.sodRejected?.message, outcome.timerRejected[0]?.message].filter(Boolean);
-      return res.status(400).json({ error: messages.join('; '), rejected });
+    const nothingSaved = recordsRejectedWithNothingSaved(outcome, rejected);
+    if (nothingSaved) {
+      return res.status(400).json({ error: nothingSaved, rejected });
     }
 
     const preferences = await db('property_preferences')
