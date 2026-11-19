@@ -1206,6 +1206,21 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   // A legacy plan split across the two recurring blocks: accept counts two units and refuses prepay, so the page offers
   // none. The page's fee reader sees one block and still shows the $99 setup fee accept never bills; which reader is
   // right is a separate ruling for the owner (CLAUDE.md rule 22), so the fee line stays as built.
+  // The unit count is the converter's; when it fails the answer is unknown, never "one unit": no prepay, no waiver.
+  test('the server-rendered page: a unit count that fails closes prepay', () => {
+    const control = renderPage('prepay-ssr-count', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+    expect(control).toContain('data-payment-setup="prepay_annual"');
+    const spy = jest.spyOn(require('../services/estimate-converter'), 'annualPrepayRecurringUnitCount')
+      .mockImplementation(() => { throw new TypeError('unreadable row'); });
+    try {
+      const failed = renderPage('prepay-ssr-count', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
+      expect(failed).not.toContain('data-payment-setup="prepay_annual"');
+      expect(failed).not.toContain('data-pay-pref="prepay_annual"');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('the server-rendered page: a second service in the root block closes prepay; the fee line stays as built', () => {
     const control = renderPage('prepay-ssr-fee', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
     const split = renderPage('prepay-ssr-fee', lead(), {
@@ -1350,6 +1365,21 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       expect(out.annualPrepayEligible).toBe(false);
       expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
       expect(out.hiddenLawnFrequencies).toEqual([{ key: 'lawn_6', annualPrepayEligible: false }]);
+    });
+
+    test('a unit count that fails closes prepay and its waiver, as two units would', () => {
+      const spy = jest.spyOn(require('../services/estimate-converter'), 'annualPrepayRecurringUnitCount')
+        .mockImplementation(() => { throw new TypeError('unreadable row'); });
+      try {
+        const out = withMultiServicePrepayClosed(bundle({
+          firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
+        }), { result: { recurring: { services: [pestRow] } } }, NO_CHOICE);
+        expect(out.annualPrepayEligible).toBe(false);
+        expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+        expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('a split plan showing a setup fee: prepay closes everywhere, the fee row stays, its waiver line goes', () => {
