@@ -760,13 +760,16 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
       return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
     }
     // The picture is planned from the SAVED row. The editor sends the post
-    // type it has selected: one that changes the identification rules but is
-    // not saved yet would buy a hero planned under the old rules, which an
-    // identification post's publish then refuses. Refuse before the image
-    // call. (A caller that sends no post_type, e.g. a tab opened before this
-    // change, skips this check; the publish-time marker check still holds.)
+    // type it has selected: one that would make the post an identification
+    // post, not saved yet, would buy a hero planned without that post type's
+    // picture limits, which publish then refuses. Refuse before the image
+    // call. A hero planned for an identification post is safe on any post,
+    // so the other direction goes on. (A caller that sends no post_type, e.g.
+    // a tab opened before this change, skips this check; the publish-time
+    // marker check still holds.)
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'post_type')
-        && isIdentificationPost({ ...post, post_type: req.body.post_type || null }) !== isIdentificationPost(post)) {
+        && !isIdentificationPost(post)
+        && isIdentificationPost({ ...post, post_type: req.body.post_type || null })) {
       return res.status(409).json({ error: 'Save the post type change first: the picture is planned from the saved post type.' });
     }
 
@@ -779,16 +782,23 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
     });
 
     // Same predicates ATOMICALLY on the write (the image call above is slow —
-    // a publish can start during it), plus the identification answer the
-    // picture was planned for (isIdentificationPost: post_type 'diagnostic'):
-    // a post made, or no longer, an identification post mid-call must not
-    // save this hero. A change between two other post types keeps it.
-    const [updated] = await whereNoLivePublishClaim(
-      db('blog_posts')
-        .where('id', req.params.id)
-        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
-        .whereRaw(isIdentificationPost(post) ? "btrim(coalesce(post_type, '')) = 'diagnostic'" : "btrim(coalesce(post_type, '')) <> 'diagnostic'"),
-    )
+    // a publish can start during it). A hero planned for a post that is not
+    // an identification post must not land on a row that became one mid-call
+    // (isIdentificationPost: the trimmed post_type is 'diagnostic'): the row's
+    // type must be unchanged, null, or free of the word 'diagnostic', which
+    // every identification type contains. A change between two other post
+    // types keeps the paid picture. A hero planned for an identification post
+    // is safe on any row.
+    let save = db('blog_posts')
+      .where('id', req.params.id)
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'));
+    if (!isIdentificationPost(post)) {
+      save = save.where((q) => {
+        q.whereNull('post_type').orWhereRaw("strpos(post_type, 'diagnostic') = 0");
+        if (post.post_type != null) q.orWhere('post_type', post.post_type);
+      });
+    }
+    const [updated] = await whereNoLivePublishClaim(save)
       .update({ featured_image_url: url, updated_at: new Date() })
       .returning('*');
     if (!updated) return res.status(409).json({ error: 'The post changed while the picture was made (a publish started, or its post type changed) — retry.' });
