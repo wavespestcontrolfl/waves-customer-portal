@@ -64,7 +64,7 @@ async function fetchSources(sourceUrls) {
   const seenFinalUrls = new Set();
   for (const url of normalized.urls) {
     if (!remaining) { errors.push(`Total source evidence exceeds ${LIMITS.totalSourceChars} characters.`); break; }
-    const page = await fetchPage(url, { timeoutMs: 10000, maxRedirects: 3 });
+    const page = await fetchPage(url, { timeoutMs: 10000, maxRedirects: 3, carryCookies: true });
     if (!page || page.blocked || !page.html || page.status < 200 || page.status >= 300) {
       errors.push(`Source could not be safely retrieved: ${url}`);
       continue;
