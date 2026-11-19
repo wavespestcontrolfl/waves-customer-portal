@@ -257,6 +257,9 @@ describe('the totals and the ad rule shadow', () => {
     // A block to 8:00 too: the van cannot drive before 8, so 8-9 holds no job.
     const boxed = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 450, endMin: 480 }, { startMin: 540, endMin: 1020 }] });
     expect(boxed.slots).toBe(0);
+    // A block to 7:35 only: the 25 free minutes after it still carry the drive.
+    const brief = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 450, endMin: 455 }, { startMin: 540, endMin: 1020 }] });
+    expect(brief.slots).toBe(1);
   });
 
   test('a legacy time_window promise is a promised time, not an untimed stop', () => {
@@ -518,6 +521,22 @@ describe('runRouteCheck', () => {
     if (saved === undefined) delete process.env.GATE_AUTO_DISPATCH_DAY_RULES; else process.env.GATE_AUTO_DISPATCH_DAY_RULES = saved;
     expect(result).toMatchObject({ status: 'failed', ad: { decision: 'unknown' } });
     expect(writes[0][1]).toMatchObject({ status: 'failed' });
+  });
+
+  test("today's stops and progress are read in one read-only snapshot", async () => {
+    const { conn, writes } = fakeConn({ progress: [{ id: 'x1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }] });
+    const seen = [];
+    const snap = (table) => conn(table);
+    snap.raw = conn.raw;
+    snap.isTransaction = true;
+    const pool = (table) => conn(table);
+    pool.raw = conn.raw;
+    pool.transaction = jest.fn(async (fn, opts) => { seen.push(opts); return fn(snap); });
+    await runRouteCheck({ conn: pool, now: NOW });
+    expect(pool.transaction).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    expect(replan.loadDayStops.mock.calls.find(([, d]) => d === '2026-11-19')[0]).toBe(snap);
+    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ van: 'completed' });
   });
 
   test("a failed progress read on a Sunday keeps today's technicians, marked FAILED", async () => {

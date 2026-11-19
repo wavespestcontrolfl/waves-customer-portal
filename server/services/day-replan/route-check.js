@@ -244,9 +244,14 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
     : [];
   // Kept: an opening that holds a job either way. The one at the start of the working day may begin its drive at the
   // departure minute, before the day, so it can hold a job in under SLOT_MIN.
-  // The early drive needs the van free from the departure minute to the opening (no block or booking in between).
-  const freeBefore = (o) => ![...blocks, ...held].some((b) => b.startMin < o.start && b.endMin > departureMin);
-  const driveFrom = (o) => (o.start <= openMin && departureMin < o.start && freeBefore(o) ? departureMin : o.start);
+  // The early drive uses the free minutes between the departure (or a block or booking) and the opening.
+  const driveFrom = (o) => {
+    if (!(o.start <= openMin && departureMin < o.start)) return o.start;
+    // From the end of the last block or booking before the opening: only the free minutes right before it count.
+    const busyEnd = [...blocks, ...held].filter((b) => b.startMin < o.start && b.endMin > departureMin)
+      .reduce((end, b) => Math.max(end, b.endMin), departureMin);
+    return Math.min(o.start, busyEnd);
+  };
   const openings = open.filter((b) => !(first.length && b.kind === 'start'))
     .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
     .map((o) => ({ ...o, slots: hourSlots(o, { driveFrom: driveFrom(o) }), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
@@ -367,9 +372,31 @@ async function eligibility(conn, from, to) {
   return { blackout, techIds, absent };
 }
 
-/** A date's live rows (the re-plan's own read: expired holds out), read once per run; null when the read failed. */
-function rowReader(conn) {
-  const cache = new Map();
+// Today's stops and their progress read as of one moment (the FINAL_CHECK_SNAPSHOT pattern, visit-prep.js).
+const TODAY_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+
+/**
+ * Today's rows and progress from one consistent snapshot, so a stop finished, cancelled or moved between two reads
+ * shows the same in both. Either read failing returns nulls (today is then FAILED). A transaction or a test double
+ * reads on its own connection.
+ */
+async function readToday(conn, today) {
+  const read = async (c) => ({ rows: await replan.loadDayStops(c, today), progress: await loadProgress(c, today) });
+  try {
+    if (typeof conn.transaction !== 'function' || conn.isTransaction) return await read(conn);
+    return await conn.transaction((trx) => read(trx), TODAY_SNAPSHOT);
+  } catch (err) {
+    logger.warn(`[route-check] ${today}: today's read failed (${err.message})`);
+    return { rows: null, progress: null };
+  }
+}
+
+/**
+ * A date's live rows (the re-plan's own read: expired holds out), read once per run; null when the read failed.
+ * seed: rows already read (today's, from the snapshot).
+ */
+function rowReader(conn, seed = new Map()) {
+  const cache = new Map(seed);
   return async (day) => {
     if (!cache.has(day)) {
       try {
@@ -482,16 +509,9 @@ async function measureRun(conn, now) {
   const today = etDateString(now);
   const p = etParts(now);
   const elig = await eligibility(conn, today, dayAfter(today, SCAN_DAYS));
-  const rowsOn = rowReader(conn);
-  // Today's rows first, then the progress: a stop finished between the two reads shows as done, never in neither.
-  // A failed read marks what it affects (FAILED), never loses the hour's row.
-  await rowsOn(today);
-  let progress = null;
-  try {
-    progress = await loadProgress(conn, today);
-  } catch (err) {
-    logger.warn(`[route-check] ${today}: progress read failed (${err.message})`);
-  }
+  // Today's rows and progress from one snapshot. A failed read marks what it affects (FAILED), never loses the row.
+  const { rows: todayRows, progress } = await readToday(conn, today);
+  const rowsOn = rowReader(conn, new Map([[today, todayRows]]));
   // A technician with a stop that day (null when the read failed); today counts the stops already done too (a Sunday
   // stays staffed after its last stop).
   const withStopsOn = async (day) => {
