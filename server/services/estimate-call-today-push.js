@@ -1,7 +1,11 @@
 'use strict';
 
-// The 9:00 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1, "do phase 1 first":
-// "Estimates: a 9 AM push with the 'Call today' list (estimates sent the day before and not yet won)").
+// The 9:00 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1, "do phase 1 first").
+// The plan names it "a 9 AM push with the 'Call today' list" and describes that list loosely in a parenthetical
+// ("estimates sent the day before and not yet won"). The list is the Estimates page's EXISTING Call today list:
+// a viewed, unarchived estimate with a phone, last touched by the customer 2 h to 48 h ago, with no call or follow-up
+// since (shared/estimate-call-today.cjs). The push counts that list, and the link opens it; it does not count a
+// different cohort.
 //
 // ONE phone banner a day to the admin phones: "Call today: N estimates", and a tap opens the Estimates page on its
 // "Call today" filter (/admin/estimates?view=call_today). The count is the page's own list: the rows are the ones the
@@ -82,10 +86,19 @@ async function releaseDay(day) {
   }
 }
 
-// What the dispatch did. Sent only when a phone accepted it (push.sent > 0). An error, unreadable preferences, push off
-// (push null) or nothing to send to (no device, expired devices, a policy skip) is a skip: the claim is released so a
-// later run may try. A send that failed on a device, or came back in a shape we do not know, is uncertain: the claim
-// stays, so there is never a second banner that day. The log lines are fixed text.
+// What the dispatch did. Sent only when a phone accepted it (push.sent > 0). An error or unreadable preferences, push
+// off (push null) or a RECOGNIZED nothing-to-send-to result (no device, expired devices, a policy skip: sent 0 with no
+// failure counted) is a skip: the claim is released so a later run may try. Anything else (a device failed, a retry is
+// pending, or a result shape we do not recognize, such as missing counters) is uncertain: the claim stays, so there is
+// never a second banner that day. The log lines are fixed text.
+function isRecognizedNoDelivery(push) {
+  if (push === null) return true;
+  if (!push || typeof push !== 'object' || push.sent !== 0) return false;
+  if (Number(push.retryable) > 0) return false;
+  if (typeof push.skipped === 'string' && push.skipped) return true; // { sent: 0, skipped: 'reason' }
+  return push.failed === 0; // the push service's own summary with its counters
+}
+
 async function settle(day, count, result) {
   const push = result?.push;
   if (!result || result.error || result.prefsUnavailable) {
@@ -97,13 +110,13 @@ async function settle(day, count, result) {
     logger.info(`[estimate-call-today] ${day}: ${count} on the list, banner sent`);
     return { count, sent: true, result };
   }
-  if (push && (Number(push.failed) > 0 || Number(push.retryable) > 0)) {
-    logger.error(`[estimate-call-today] ${day}: delivery uncertain (no device accepted it, some failed); claim kept`);
-    return { count, sent: false, error: 'delivery_uncertain' };
+  if (isRecognizedNoDelivery(push)) {
+    await releaseDay(day);
+    logger.warn(`[estimate-call-today] ${day}: banner skipped (push off or no device to send to); claim released`);
+    return { count, sent: false, skipped: 'no_push_delivered' };
   }
-  await releaseDay(day);
-  logger.warn(`[estimate-call-today] ${day}: banner skipped (push off or no device to send to); claim released`);
-  return { count, sent: false, skipped: 'no_push_delivered' };
+  logger.error(`[estimate-call-today] ${day}: delivery uncertain (no device accepted it, or the result was not recognized); claim kept`);
+  return { count, sent: false, error: 'delivery_uncertain' };
 }
 
 // The send for a day with a list: claim the day, then the pushOnly banner. Never throws.

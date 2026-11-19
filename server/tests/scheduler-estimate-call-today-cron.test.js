@@ -82,3 +82,32 @@ test('a failed run is logged, never thrown out of the tick', async () => {
   await expect(pushTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Estimate call-today push failed: connection reset');
 });
+
+// Job health (cron-lock runExclusive) records a resolved callback as a success and a thrown one as a failure.
+test('a count, claim or delivery failure reported by the worker is thrown inside the runExclusive callback', async () => {
+  for (const error of ['count_failed', 'claim_failed', 'dispatch_failed', 'delivery_uncertain']) {
+    jest.clearAllMocks();
+    runEstimateCallTodayPush.mockResolvedValueOnce({ count: 1, sent: false, error });
+    let thrown;
+    runExclusive.mockImplementationOnce(async (_key, task) => {
+      try { return await task(); } catch (err) { thrown = err; throw err; }
+    });
+    await expect(pushTick()).resolves.toBeUndefined();
+    expect(thrown).toEqual(new Error(`estimate call-today push: ${error}`)); // a fixed code, never a database error text
+    expect(logger.error).toHaveBeenCalledWith(`Estimate call-today push failed: estimate call-today push: ${error}`);
+  }
+});
+
+test('a skip stays a success: nothing on the list, already claimed, no device to send to', async () => {
+  for (const skipped of ['nothing_to_call', 'already_claimed', 'no_push_delivered']) {
+    jest.clearAllMocks();
+    runEstimateCallTodayPush.mockResolvedValueOnce({ count: 0, sent: false, skipped });
+    let outcome = 'pending';
+    runExclusive.mockImplementationOnce(async (_key, task) => {
+      try { const result = await task(); outcome = 'resolved'; return result; } catch (err) { outcome = 'thrown'; throw err; }
+    });
+    await pushTick();
+    expect(outcome).toBe('resolved');
+    expect(logger.error).not.toHaveBeenCalled();
+  }
+});

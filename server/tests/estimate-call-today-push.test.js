@@ -247,9 +247,31 @@ describe('the banner', () => {
       mockTrigger.mockResolvedValue({ bellWritten: false, push: { subscriptions: 1, sent: 0, failed: 1 } });
       await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'delivery_uncertain' });
       expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
-      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: delivery uncertain (no device accepted it, some failed); claim kept');
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: delivery uncertain (no device accepted it, or the result was not recognized); claim kept');
       await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
       expect(mockTrigger).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['an empty push object', { push: {} }],
+      ['counters missing', { push: { subscriptions: 1 } }],
+      ['sent without a number', { push: { sent: 'x', failed: 0 } }],
+      ['sent 0 with no failed counter', { push: { sent: 0 } }],
+      ['a retry pending', { push: { sent: 0, failed: 0, retryable: 1 } }],
+      ['push not an object', { push: 'ok' }],
+      ['no push field at all', {}],
+    ])('an unrecognized delivery result (%s): uncertain, the claim stays, a same-day rerun does not dispatch again', async (_label, result) => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, ...result });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'delivery_uncertain' });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+      await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
+      expect(mockTrigger).toHaveBeenCalledTimes(1);
+    });
+
+    test('a recognized policy skip (sent 0 with a skipped reason): a skip, the claim is released', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' } });
+      await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });
+      expect([...claimed]).toEqual([]);
     });
 
     test('one device took it and another failed: sent', async () => {

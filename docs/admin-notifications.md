@@ -638,7 +638,8 @@ only, never a customer name or phone. With nothing on the list it sends nothing.
 trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
 day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
 is not made up). The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
-(a later run may try); after a device failure it is kept (no second banner). The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
+(a later run may try); after a device failure, or any result it does not recognize, it is kept (no second banner). A count, claim or delivery failure
+throws inside the cron's `runExclusive` callback, so job health records the run as failed; a skip stays a success. The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
 (Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
 
 The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge
