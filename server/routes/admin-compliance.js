@@ -12,14 +12,8 @@ router.use(adminAuthenticate, requireAdmin);
 // POST /api/admin/compliance/check-limits — check proposed products
 router.post('/check-limits', async (req, res, next) => {
   try {
-    const { customerId, products, propertyId = null, serviceType = null, applicationMethod = null } = req.body;
+    const { customerId, products, propertyId = null } = req.body;
     if (!customerId || !products?.length) return res.status(400).json({ error: 'customerId and products required' });
-    // The visit's service type and the application's method, when the caller knows them: a yearly cap kept to lawn applications (LESCO
-    // Crosscheck Plus) then passes a pest perimeter spray (application-limits judgedForServiceLine). With either one missing, every cap
-    // judges the proposal.
-    for (const [field, value, max, code] of [['serviceType', serviceType, 200, 'invalid_service_type'], ['applicationMethod', applicationMethod, 64, 'invalid_application_method']]) {
-      if (value != null && (typeof value !== 'string' || value.length > max)) return res.status(400).json({ error: `${field} must be a short string`, code });
-    }
     // A named property must be a UUID and one of THIS customer's properties: a yearly count is that
     // lawn's, and another customer's property would read as its own history.
     if (propertyId != null) {
@@ -30,7 +24,7 @@ router.post('/check-limits', async (req, res, next) => {
 
     const results = [];
     for (const p of products) {
-      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date(), undefined, { propertyId: propertyId || null, proposal: true, serviceType, applicationMethod });
+      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date(), undefined, { propertyId: propertyId || null, proposal: true });
       results.push({ productId: p.productId, productName: p.name, ...check });
     }
 

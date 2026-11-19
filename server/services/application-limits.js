@@ -125,57 +125,10 @@ function familyConvert(amount, unit, capUnit) {
 }
 
 // The history rows a v13 yearly amount cap counts: the product's own, or, when the cap says the label's maximum is shared (Advion Insect
-// Granule and the pest-control Advion WDG Granular are one granule, EPA 100-1483), every catalog row with that EPA number. A cap for one
-// service line's applications (history_service_line) also reads each row's visit type, add-on key and method, for countsForServiceLine.
+// Granule and the pest-control Advion WDG Granular are one granule, EPA 100-1483), every catalog row with that EPA number.
 function amountHistoryProducts(query, database, product, limit) {
-  if (limit.history_service_line) {
-    query.leftJoin('service_records as amount_sr', 'pah.service_record_id', 'amount_sr.id')
-      .select('amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key', 'pah.application_method as history_application_method');
-  }
   if (!limit.history_epa_reg_number) return query.where('pah.product_id', product.id);
   return query.whereIn('pah.product_id', database('products_catalog').where({ epa_reg_number: limit.history_epa_reg_number }).select('id'));
-}
-
-// Whether a visit type is known to be another service line's work than `line`. detectServiceLine answers 'pest' for any visit type it
-// cannot place, so a 'pest' answer is known only when the type names pest work ("Quarterly Pest Control Service"); a type it cannot
-// place ("Service Visit", "Callback") is not known to be another line's, and so it is treated as the cap's own line.
-const NAMES_PEST_WORK = /\b(pest|palmetto)\b/i;
-function knownOtherServiceLine(serviceType, line) {
-  const { detectServiceLine } = require('./service-report/service-line-configs');
-  const detected = detectServiceLine(serviceType);
-  if (detected === line) return false;
-  return detected !== 'pest' || NAMES_PEST_WORK.test(String(serviceType));
-}
-
-// An application that records lawn work itself, whatever its visit's type: a treated area, or a broadcast. A mosquito or pest visit
-// can carry a lawn broadcast. Production 2026-11-18: no pest visit's bifenthrin row recorded an area or a broadcast; its perimeter
-// and spot sprays are recorded per gallon with no area, and so, counted, each would read as a full-rate lawn pass.
-const BROADCAST_METHODS = new Set(['broadcast_spray', 'granular_broadcast']);
-function recordsLawnWork(areaSqft, method) {
-  return Number(areaSqft) > 0 || BROADCAST_METHODS.has(String(method || '').trim().toLowerCase());
-}
-
-// Whether a history row counts toward a cap for one service line's applications (history_service_line; LESCO Crosscheck Plus: lawn, as
-// its label limit is for turf and the same bottle is the pest, mosquito and termite bifenthrin). A row counts unless its visit is known
-// to be another line and the row itself records no lawn work: an area add-on row counts (the closeout audits add-on rows as lawn work),
-// and so do a row with no visit and, for the lawn, a row with a treated area or a broadcast on any visit.
-function countsForServiceLine(row, limit) {
-  if (!limit.history_service_line || row.history_area_addon_key || !row.history_service_type) return true;
-  if (limit.history_service_line === 'lawn' && recordsLawnWork(row.area_treated_sqft, row.history_application_method)) return true;
-  return !knownOtherServiceLine(row.history_service_type, limit.history_service_line);
-}
-
-// Whether the application being judged is work of the cap's service line. A cap on one line's applications (history_service_line)
-// does not judge another line's work: a perimeter spray of the house bifenthrin is not a lawn application. It passes unjudged only
-// when the caller names both the visit type (ctx.serviceType), known to be another line's work, and a method that cannot put it on
-// the lawn: for the lawn line, only a perimeter spray (a band at the foundation). A spot treatment can land on turf (an ant mound in
-// the lawn) and an unknown method can be anything, so both are judged. A caller that names neither (the lawn plan, the lawn brief,
-// a status read), or only one, is judged.
-const OFF_TURF_METHODS = new Set(['perimeter_spray']);
-function judgedForServiceLine(limit, ctx) {
-  if (!limit.history_service_line || !ctx.serviceType || !ctx.applicationMethod) return true;
-  if (limit.history_service_line === 'lawn' && !OFF_TURF_METHODS.has(String(ctx.applicationMethod).trim().toLowerCase())) return true;
-  return !knownOtherServiceLine(ctx.serviceType, limit.history_service_line);
 }
 
 // One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
@@ -298,9 +251,6 @@ class ApplicationLimitChecker {
   // count and its minimum interval (and the v13 yearly amount) at that PLACE of the lawn: the rows placed elsewhere on the
   // lawn are left out, a row with no place on record still counts. The shared active-ingredient cap, the MOA rotation and
   // every limit that is not about this product's own applications stay lawn-wide.
-  // opts.serviceType (the visit's service type) with opts.applicationMethod (perimeter_spray, broadcast_spray, ...) lets a v13 yearly
-  // amount cap kept to one service line's applications (LESCO Crosscheck Plus: the lawn) pass work known to be another line's that is
-  // not lawn work, a perimeter pest spray (judgedForServiceLine). One of them alone judges the application.
   async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
@@ -642,9 +592,7 @@ class ApplicationLimitChecker {
   // recorded applications of this product this year, each as a share of the cap (an unreadable one counts
   // at the cap row's fallback rate), plus the application being planned. Per 1,000 sq ft of the treated
   // area, as the shared active-ingredient cap reads it: a spot is its recorded rate, not scaled to its area.
-  // A cap on one service line's applications passes another line's work unjudged (judgedForServiceLine).
   async evaluateV13AmountCap(limit, product, ctx, database = db) {
-    if (!judgedForServiceLine(limit, ctx)) return { violated: false };
     const query = amountHistoryProducts(database('property_application_history as pah')
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
       .where('pah.customer_id', ctx.customerId), database, product, limit)
@@ -813,10 +761,8 @@ class ApplicationLimitChecker {
   // The v13 yearly amount of already-loaded history rows, as a share of the cap, per lawn: with a treated
   // property the rows are already that property's (summed); a caller with none (the compliance page, the
   // legacy check-limits route) is judged on the busiest property of the customer, never the sum across
-  // properties. Rows that cannot be sized count at the cap row's fallback rate. A cap for one service
-  // line's applications counts only that line's rows (countsForServiceLine).
-  async lawnAmountShare(database, allRows, limit, { propertyId } = {}) {
-    const rows = allRows.filter((row) => countsForServiceLine(row, limit));
+  // properties. Rows that cannot be sized count at the cap row's fallback rate.
+  async lawnAmountShare(database, rows, limit, { propertyId } = {}) {
     const sized = rows.map((row) => v13AmountShare(row, limit));
     const estimated = sized.filter((entry) => entry.estimated).length;
     if (propertyId || rows.length < 2) return { share: sized.reduce((sum, entry) => sum + entry.share, 0), estimated };
@@ -946,6 +892,3 @@ module.exports.bermudaRowRate = bermudaRowRate;
 module.exports.measureFamily = (unit) => unitFamily(String(unit || '').replace(/\s*\/\s*1000\s*(sf|sq\.?\s*ft)?$/i, '').replace(/_/g, ' '));
 module.exports.assertRollingIsCountOnly = assertRollingIsCountOnly;
 module.exports.scopeHistoryToTreatment = scopeHistoryToTreatment;
-module.exports.amountHistoryProducts = amountHistoryProducts;
-module.exports.countsForServiceLine = countsForServiceLine;
-module.exports.judgedForServiceLine = judgedForServiceLine;

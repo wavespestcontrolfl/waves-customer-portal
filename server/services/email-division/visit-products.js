@@ -53,8 +53,9 @@ const LABELS = {
     // registrations and never match. The label states NO residual duration
     // and no mode-of-action description, so the family's neutral phrase is
     // used; only the rain / dry-surface instruction is quoted. Owner 2026-11-18: those aliases resolve to
-    // LESCO Crosscheck Plus now, so an alias reaches the label of the bottle its visit row stored (labelFor).
-    name: ['talak'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
+    // LESCO Crosscheck Plus now, so an alias reaches the label of the bottle its visit row stored, and with
+    // no stored product only an application before 2026-11-18 (aliasOnlyBefore; aliasReaches).
+    name: ['talak'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], aliasOnlyBefore: '2026-11-18', ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
     phrase: null,
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talak 7.9 F label (EPA 91234-145)' },
     notes: [],
@@ -63,7 +64,8 @@ const LABELS = {
   crosscheck: {
     // Owner ruling 2026-11-18: LESCO Crosscheck Plus (EPA 10404-120) is the house bifenthrin now. It is its own label, never
     // merged with Talak above: a "Talak" name never matches it and it never matches Talak. Same rule as Talak: only the rain /
-    // dry-surface instruction is quoted, with no residual claim and no mode-of-action description.
+    // dry-surface instruction is quoted, with no residual claim and no mode-of-action description. An alias reaches it only through a
+    // stored Crosscheck product (aliasReaches): from the switch on, an alias alone does not say which bottle was used.
     name: ['lesco crosscheck plus', 'crosscheck plus'], aliases: ['talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'LESCO Crosscheck Plus label (EPA 10404-120)',
     phrase: null,
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'LESCO Crosscheck Plus label (EPA 10404-120)' },
@@ -275,23 +277,38 @@ function classifyProduct({ productName, activeIngredient, productCategory, catal
 // the labeled product; a recorded active ingredient must also agree (a
 // brand name never pulls a different chemistry into a label claim — e.g.
 // a "Taurus SC" row recorded as imidacloprid). A blank AI leaves the name
-// as the only evidence. An alias ("Talstar P") names the bottle the visit row
-// stored: with a stored catalog product it reaches only the label whose own name
-// that product carries (the aliases moved from Talak to LESCO Crosscheck Plus,
-// owner 2026-11-18); with none it reaches the first label listing it, as before.
-function labelFor(family, productName, activeIngredient, catalogName) {
+// as the only evidence. An alias ("Talstar P") is an older name, so it reaches
+// a label only with evidence of the bottle (aliasReaches).
+function labelFor(family, productName, activeIngredient, catalogName, appliedAt) {
   const name = String(productName || '').toLowerCase();
   const ai = String(activeIngredient || '').trim().toLowerCase();
   const catalog = String(catalogName || '').toLowerCase();
+  const appliedOn = etDay(appliedAt);
   for (const key of FAMILIES[family].labels) {
     const label = LABELS[key];
-    const ownName = (text) => label.name.some((s) => text.includes(s));
-    const alias = (label.aliases || []).some((s) => name.includes(s)) && (!catalog || ownName(catalog));
-    if (!ownName(name) && !alias) continue;
+    const aliasNamed = (label.aliases || []).some((s) => name.includes(s));
+    if (!label.name.some((s) => name.includes(s)) && !(aliasNamed && aliasReaches(label, catalog, appliedOn))) continue;
     if (ai && !label.ai.some((s) => ai.includes(s))) continue;
     return label;
   }
   return null;
+}
+
+// Which bottle an alias ("Talstar P", "Bifen I/T") names. A catalog product stored under its own name decides: the alias reaches only
+// the label whose own name that product carries (owner 2026-11-18: the aliases resolve to LESCO Crosscheck Plus). With none stored, or
+// one stored under an older name itself (the inactive Talstar P row), the visit row's ET date is the evidence: an application before
+// the label's aliasOnlyBefore date reaches it (Talak: before 2026-11-18; owner ruling 2026-09-11, the job logs' aliases are the Talak
+// bottle). A later application, or one with no date, reaches no label, and the family's neutral wording stands.
+function aliasReaches(label, catalog, appliedOn) {
+  const olderName = (label.aliases || []).some((s) => catalog.includes(s));
+  if (catalog && !olderName) return label.name.some((s) => catalog.includes(s));
+  return Boolean(label.aliasOnlyBefore && appliedOn && appliedOn < label.aliasOnlyBefore);
+}
+
+function etDay(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : etDateString(date);
 }
 
 /** Every product applied at one visit, with `primary`/`secondary`
@@ -314,7 +331,7 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
       catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
     });
     const def = FAMILIES[family];
-    const label = labelFor(family, row.product_name, row.active_ingredient, row.catalog_name);
+    const label = labelFor(family, row.product_name, row.active_ingredient, row.catalog_name, row.applied_at || row.created_at);
     const phrase = label?.phrase || (family === 'nutrition' ? nutritionPhrase(row.active_ingredient) : def.phrase);
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,

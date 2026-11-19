@@ -68,7 +68,7 @@ describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June an
     expect(track.notes.join(' ')).toContain('Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets');
     expect(track.notes.join(' ')).toMatch(/Mole cricket nymphs, June and the July scout visit/);
     expect(track.notes.join(' ')).not.toMatch(/Mole cricket nymphs, July and August/);
-    expect(track.safety_rules).toContain('Bifenthrin (LESCO Crosscheck Plus): delay watering 24 hours.');
+    expect(track.safety_rules).toContain('Bifenthrin (LESCO Crosscheck Plus): delay watering 24 hours; at least 25 ft from water.');
     expect(JSON.stringify(v13)).not.toMatch(/except mole cricket|water in at once/);
   });
   test('June is a hose visit and July the scout visit with backpack spots: the bait is a hand-shaker spot tool, never a second whole-lawn tool', () => {

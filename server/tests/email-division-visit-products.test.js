@@ -370,7 +370,7 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
 
   test.each([
     ['Talak 7.9 F', 'bifenthrin', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
-    ['Bifen IT', 'Bifenthrin 7.9%', 'fact-bifenthrin-talak-label', 'Talak 7.9 F label (EPA 91234-145)', true],
+    // An alias ("Bifen IT") needs evidence of the bottle: the dated alias cases below.
     // Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin; it has its own label and register fact, never Talak's.
     ['LESCO Crosscheck Plus', '7.9% Bifenthrin', 'fact-bifenthrin-crosscheck-label', 'LESCO Crosscheck Plus label (EPA 10404-120)', true],
     ['LESCO Crosscheck Plus', '', 'fact-bifenthrin-crosscheck-label', 'LESCO Crosscheck Plus label (EPA 10404-120)', true],
@@ -389,20 +389,38 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
   });
 
   // Owner 2026-11-18: the job-log aliases moved from Talak to LESCO Crosscheck Plus, so the product the visit row stored decides
-  // which bottle an alias names. Production holds 147 "Talstar P" rows stored under Talak (read 2026-11-18).
+  // which bottle an alias names. Production holds 230 alias rows stored under Talak and 1 with no stored product (2026-05-15; read
+  // 2026-11-19). With no stored product, or one stored under an older name itself, the visit's ET date decides: before 2026-11-18 the
+  // alias is the Talak bottle (owner ruling 2026-09-11); from then on it names no label.
+  const SEPT = '2026-09-10T14:00:00Z';
+  const AFTER = '2026-11-20T14:00:00Z';
   test.each([
-    ['Talstar P', 'Atticus Talak 7.9 F', 'fact-bifenthrin-talak-label'],
-    ['Talstar P', 'LESCO Crosscheck Plus', 'fact-bifenthrin-crosscheck-label'],
-    ['Bifen I/T', 'LESCO Crosscheck Plus', 'fact-bifenthrin-crosscheck-label'],
-    ['Talstar P', null, 'fact-bifenthrin-talak-label'], // no stored product: the alias reaches Talak's label, as before
-    ['Talstar P', 'Bifen XTS', null], // another registration stored: neither label
+    ['Talstar P', 'Atticus Talak 7.9 F', AFTER, 'fact-bifenthrin-talak-label'],
+    ['Talstar P', 'LESCO Crosscheck Plus', SEPT, 'fact-bifenthrin-crosscheck-label'],
+    ['Bifen I/T', 'LESCO Crosscheck Plus', AFTER, 'fact-bifenthrin-crosscheck-label'],
+    ['Talstar P', null, SEPT, 'fact-bifenthrin-talak-label'],
+    ['Bifen IT', null, SEPT, 'fact-bifenthrin-talak-label'],
+    ['Bifen I/T', null, '2026-11-18T04:59:00Z', 'fact-bifenthrin-talak-label'], // 23:59 ET on Nov 17
+    ['Bifen I/T', null, '2026-11-18T05:00:00Z', null], // 00:00 ET on Nov 18
+    ['Talstar P', null, AFTER, null],
+    ['Talstar P', null, null, null], // no date on the row: no evidence of the bottle
+    ['Talstar P', 'Talstar P', SEPT, 'fact-bifenthrin-talak-label'], // stored under an older name itself: the date decides
+    ['Talstar P', 'Talstar P', AFTER, null],
+    ['Talstar P', 'Bifen XTS', SEPT, null], // another registration stored: neither label
     // An own name is not an alias: "Gentrol IGR" lines stored under Gentrol Complete EC3 keep the Gentrol IGR label (above).
-    ['Gentrol IGR', 'Gentrol Complete EC3', 'fact-gentrol-igr-hydroprene'],
-  ])('%s stored as %s -> slug %s', async (productName, catalogName, slug) => {
+    ['Gentrol IGR', 'Gentrol Complete EC3', AFTER, 'fact-gentrol-igr-hydroprene'],
+    ['LESCO Crosscheck Plus', null, null, 'fact-bifenthrin-crosscheck-label'],
+  ])('%s stored as %s, applied %s -> slug %s', async (productName, catalogName, appliedAt, slug) => {
     const activeIngredient = productName === 'Gentrol IGR' ? '(S)-Hydroprene 9.0%' : 'bifenthrin';
-    const product = await readOne({ product_name: productName, catalog_name: catalogName, active_ingredient: activeIngredient });
+    const product = await readOne({ product_name: productName, catalog_name: catalogName, active_ingredient: activeIngredient, applied_at: appliedAt });
     expect(product.factSlugs).toEqual(slug ? [slug] : []);
     expect(product.verified).toBe(Boolean(slug));
+    if (!slug) expect(product).toMatchObject({ phrase: 'an insecticide', dryRule: null });
+  });
+
+  test('a row with no applied_at takes its date from created_at', async () => {
+    const product = await readOne({ product_name: 'Talstar P', active_ingredient: 'bifenthrin', applied_at: null, created_at: new Date(SEPT) });
+    expect(product.factSlugs).toEqual(['fact-bifenthrin-talak-label']);
   });
 
   test('every family phrase is target-neutral: no pest name, and no pest word outside a sourced label phrase', () => {

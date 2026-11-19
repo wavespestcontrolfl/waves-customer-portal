@@ -64,7 +64,7 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(notes).toMatch(/Fall adults and bigger mole crickets go to Dylox 6\.2 G/);
     expect(notes).not.toMatch(/Mole cricket nymphs, July and August/);
     const safety = v13Recipe[grass].safety_rules.join('\n');
-    expect(safety).toMatch(/Bifenthrin \(LESCO Crosscheck Plus\): delay watering 24 hours\.(\n|$)/);
+    expect(safety).toMatch(/Bifenthrin \(LESCO Crosscheck Plus\): delay watering 24 hours; at least 25 ft from water\.(\n|$)/);
     expect(safety).not.toMatch(/waters it in right after application with the hose/);
     expect(safety).toMatch(/Advion Insect Granule \(mole cricket bait, indoxacarb, label EPA Reg\. No\. 100-1483\)/);
     expect(safety).toMatch(/A spot is baited once a year, at 3 lb; label yearly maximum 4\.6 lb per 1,000 sq ft/);

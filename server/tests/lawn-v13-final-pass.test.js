@@ -69,29 +69,8 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
   test('V13_COUNT_CAPS keeps exactly the four names that pushed migrations 20261007175000 and 20261007177000 read when they run', () => {
     expect(caps.V13_COUNT_CAPS.map((e) => e.name)).toEqual(['Celsius WG', 'Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide']);
     expect(caps.V13_COUNT_CAPS.every((e) => e.cap === 2)).toBe(true);
-    expect(caps.V13_LIMITS.map((e) => e.name)).toEqual([...caps.V13_COUNT_CAPS.map((e) => e.name), 'Velista', 'Artavia 2 SC (Azoxy)', 'Tetrino Insecticide', 'Advion Insect Granule', 'LESCO Crosscheck Plus']);
+    expect(caps.V13_LIMITS.map((e) => e.name)).toEqual([...caps.V13_COUNT_CAPS.map((e) => e.name), 'Velista', 'Artavia 2 SC (Azoxy)', 'Tetrino Insecticide', 'Advion Insect Granule']);
     expect(Object.isFrozen(caps.V13_COUNT_CAPS) && Object.isFrozen(caps.V13_MORE_LIMITS) && Object.isFrozen(caps.V13_LIMITS)).toBe(true);
-  });
-
-  test('LESCO Crosscheck Plus: 1 fl oz per 1,000 sq ft a year on turf (label: 44 fl oz per acre, lawn rates up to 1), lawn applications only', () => {
-    const cross = entry('LESCO Crosscheck Plus');
-    expect([cross.cap, cross.minIntervalDays]).toEqual([undefined, undefined]);
-    expect(cross.annualAmount).toMatchObject({ cap: 1, unit: 'fl oz/1000sf/year', fallbackRate: 1, historyServiceLine: 'lawn' });
-    expect(cross.annualAmount.description).toContain('EPA 10404-120');
-    // 44 fl oz per acre over 43.56 thousand sq ft is 1.01; the label's lawn table stops at 1 fl oz a pass, and the cap is that 1 (the
-    // safety rule's figure), so neither the year nor one pass can go past the label. Two passes at the 0.5 catalog rate fit; a third does not.
-    expect(cross.annualAmount.cap).toBeLessThanOrEqual(44 / 43.56);
-    expect(cross.annualAmount.cap).toBe(1);
-    expect(0.5 * 2).toBeLessThanOrEqual(cross.annualAmount.cap);
-    expect(0.5 * 3).toBeGreaterThan(cross.annualAmount.cap);
-    // The synthetic row names the service line, so the engine counts lawn applications only (the bottle is also the pest bifenthrin).
-    const row = caps.syntheticAmountLimit(cross, 'p1');
-    expect(row).toMatchObject({ match_type: caps.V13_AMOUNT, limit_type: 'annual_max_rate', limit_value: 1, severity: 'hard_block', history_service_line: 'lawn' });
-    expect(row.history_epa_reg_number).toBeUndefined();
-    expect(caps.syntheticAmountLimit(entry('Tetrino Insecticide'), 'p2').history_service_line).toBeUndefined();
-    for (const track of TRACKS) {
-      expect(v13[track].safety_rules).toContain('LESCO Crosscheck Plus on turf: no more than 1 fl oz per 1,000 sq ft a year, all lawn applications added up (label: 44 fl oz per acre in a single application or per year).');
-    }
   });
 
   test('Blindside: program rate 0.149 oz (label warm-season rate), count 2 kept for frozen migrations, yearly amount 0.23 oz holds it to one pass', () => {
