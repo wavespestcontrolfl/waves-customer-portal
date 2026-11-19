@@ -21,9 +21,10 @@
  *        - that stop is not the vehicle's home base (its usual first start of the day), not inside a business,
  *          personal or supplier geo-fence, and not inside the radius of another customer's visit the same
  *          technician completed that day (the truck was parked for the neighbour);
- *        - these two are not BOTH true: the truck also parked at the pin that day (too briefly to count as a
- *          stop), and that closest stop stands inside the radius of another customer's saved pin. Together they
- *          mean the technician came to the pin, then went to the other customer's (clearStopsAtOtherCustomers);
+ *        - these two are not BOTH true: the truck also parked at the pin on the ET day of that closest stop (too
+ *          briefly to count as a stop), and the closest stop stands inside the radius of another customer's saved
+ *          pin. Together they mean the technician did come to the pin and the long stop was the other customer's
+ *          (clearStopsAtOtherCustomers);
  *        - the stop is a pin verify_pin would accept (inside the service-area box);
  *        - staff have not dismissed a suggestion for this same pin.
  *   4. ONE open suggestion per customer (customer-pin-suggestions.js); a re-run never duplicates. A later visit
@@ -63,7 +64,6 @@ const NEIGHBOUR_LIMIT = 2000;
 // MIN_STOP_MINUTES) is never a stop: it cannot settle a pin and cannot be suggested. It is read only as "the truck
 // came to the pin" (clearStopsAtOtherCustomers).
 const BRIEF_STOP_MIN_MINUTES = 1;
-const OTHER_PIN_LIMIT = 500;
 
 // ---------- reads ----------
 
@@ -130,6 +130,9 @@ const nearestPinDistance = (pins, stop) => {
   return measured.length ? Math.min(...measured) : null;
 };
 
+/** The ET day a stop began. */
+const stopDay = (stop) => etDateString(new Date(stop.startMs));
+
 /** Why a stop is not this job's stop: home base, a fence, or the neighbour's visit. Null when it could be. */
 function excludedStopReason(stop, { radius, home, fences, neighbours }) {
   if (within(home, stop, radius)) return 'home_base';
@@ -168,9 +171,10 @@ function judgeVisit({ visit, stops, briefStops = [], radius, context }) {
     distanceM: Math.round(closest.metres),
     stopMinutes: Math.round(closest.stop.minutes),
     stopStartedAt: new Date(closest.stop.startMs),
-    // The truck also parked at the pin that day, too briefly to be a stop there. Not proof the pin works (a
-    // technician who follows the map to a wrong pin parks there too), so it only feeds clearStopsAtOtherCustomers.
-    briefAtPin: briefStops.some((stop) => isWithin(nearestPinDistance(pins, stop), radius)),
+    // The truck also parked at the pin on the ET day of this stop, too briefly to be a stop there. Not proof the
+    // pin works (a technician who follows the map to a wrong pin parks there too), so it only feeds
+    // clearStopsAtOtherCustomers. Before or after the long stop: both are "the truck did come to the pin that day".
+    briefAtPin: briefStops.some((stop) => stopDay(stop) === stopDay(closest.stop) && isWithin(nearestPinDistance(pins, stop), radius)),
   };
 }
 
@@ -454,7 +458,7 @@ function judgeVisits(visits, vehicles, { radius, fences, now, pool = visits }) {
     const required = requiredDays(visit, now);
     if (required.unloadable) return { visit, verdict: { flag: false, reason: 'days_not_loaded', unknown: true } };
     if (!vehicle) return { visit, verdict: { flag: false, reason: 'stops_unreadable', unknown: true } };
-    const parked = vehicle.stops.filter((stop) => required.days.includes(etDateString(new Date(stop.startMs))));
+    const parked = vehicle.stops.filter((stop) => required.days.includes(stopDay(stop)));
     // The stop rules see the same stops as before; a shorter parked gap is passed apart and can only clear a flag.
     const isStop = (stop) => stop.minutes >= truckStops.MIN_STOP_MINUTES;
     const context = { home: vehicle.home, fences, neighbours: neighbourPins(visit, pool) };
@@ -462,32 +466,40 @@ function judgeVisits(visits, vehicles, { radius, fences, now, pool = visits }) {
   });
 }
 
+// The distance from a row's pin to a point, in metres, as distanceMeters measures it (same sphere). The column names
+// are fixed text from this file; the point and the radius are bindings.
+const withinSql = (lat, lng) => `2 * 6371000 * asin(least(1, sqrt(`
+  + `power(sin(radians(${lat}::float8 - ?) / 2), 2)`
+  + ` + cos(radians(?)) * cos(radians(${lat}::float8)) * power(sin(radians(${lng}::float8 - ?) / 2), 2)))) <= ?`;
+
 /**
  * Is another customer's saved pin inside `radius` of this point? The customer row's coordinates and every active
- * property's count (a rental, a second home), as generous as the neighbour rule. A box narrows each read; the
- * measured distance decides.
+ * property's count (a rental, a second home), as generous as the neighbour rule. The query itself measures the
+ * distance, so one matching row answers it however many pins stand around the point; the box only spares the
+ * arithmetic for rows that are far away.
  */
 async function otherCustomerPinNear(conn, customerId, point, radius) {
-  const latPad = radius / 110000;
-  const lngPad = radius / (110000 * Math.cos((point.lat * Math.PI) / 180));
-  const inBox = (query, lat, lng) => query
+  const latPad = (radius * 1.05) / 110000;
+  const lngPad = (radius * 1.05) / (110000 * Math.cos((point.lat * Math.PI) / 180));
+  const near = (query, lat, lng) => query
     .whereBetween(lat, [point.lat - latPad, point.lat + latPad])
     .whereBetween(lng, [point.lng - lngPad, point.lng + lngPad])
-    .limit(OTHER_PIN_LIMIT);
-  const [customers, properties] = await Promise.all([
-    inBox(conn('customers as c').whereNull('c.deleted_at').whereNot('c.id', customerId), 'c.latitude', 'c.longitude')
-      .select('c.latitude', 'c.longitude'),
-    inBox(conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
-      .whereNull('c.deleted_at').whereNot('c.id', customerId).where('p.active', true), 'p.latitude', 'p.longitude')
-      .select('p.latitude', 'p.longitude'),
+    .whereRaw(withinSql(lat, lng), [point.lat, point.lat, point.lng, radius])
+    .first('c.id');
+  const [customer, property] = await Promise.all([
+    near(conn('customers as c').whereNull('c.deleted_at').whereNot('c.id', customerId), 'c.latitude', 'c.longitude'),
+    near(conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
+      .whereNull('c.deleted_at').whereNot('c.id', customerId).where('p.active', true), 'p.latitude', 'p.longitude'),
   ]);
-  return [...customers, ...properties].some((row) => within(usablePin(row.latitude, row.longitude), point, radius));
+  return Boolean(customer || property);
 }
 
 /**
- * A flagged visit is not a wrong pin when BOTH hold: the truck also parked at this customer's pin that day, too
- * briefly to be a stop (verdict.briefAtPin), and the long stop stands inside the arrival radius of ANOTHER
- * customer's saved pin. The technician came to the pin, then went to the other customer's. Seen on 2026-11-16:
+ * A flagged visit is not a wrong pin when BOTH hold: the truck also parked at this customer's pin on the day of the
+ * long stop, too briefly to be a stop (verdict.briefAtPin), and the long stop stands inside the arrival radius of
+ * ANOTHER customer's saved pin. The technician did come to the pin; the long stop was the other customer's. The
+ * order of the two does not matter (the other customer's job first, then nobody home here, is the same day seen
+ * from the other end). Seen on 2026-11-16:
  * nobody was home, the truck left after 3 minutes and stood 29 minutes at a customer 310 m away who had no
  * completed visit that day, so the neighbour rule did not see them, and the bell offered to move a correct pin
  * to the other customer's house.
@@ -517,35 +529,50 @@ async function clearStopsAtOtherCustomers(conn, judged, radius) {
  *   ok    some visit had a stop inside the arrival radius, so the pin works: close any open suggestion, create none
  *   skip  no such stop, but a truck's data could not be read, so the pin cannot be judged today
  *   flag  none had a stop at the pin and at least one qualifies: suggest from the NEWEST qualifying visit
- *   retract  none qualifies and at least one was cleared as another customer's stop: a suggestion an earlier run
- *            made from that very visit (before its short stop at the pin was read) no longer stands
  *   none  nothing to say
+ * Whatever is decided, `clearedVisitIds` names the visits cleared as another customer's stop: a suggestion an earlier
+ * run made from one of them (before its short stop at the pin was read) no longer stands, also when another visit
+ * still qualifies or cannot be judged today (applyDecision retires it first).
  */
 function decideCustomer(judged) {
+  const decision = decideFromVerdicts(judged);
+  const clearedVisitIds = judged.filter((j) => j.verdict.reason === 'other_customer_stop').map((j) => String(j.visit.id));
+  return clearedVisitIds.length ? { ...decision, clearedVisitIds } : decision;
+}
+
+function decideFromVerdicts(judged) {
   if (judged.some((j) => j.verdict.reason === 'stop_at_pin')) return { action: 'ok' };
   if (judged.some((j) => j.verdict.unknown)) return { action: 'skip' };
   const flagged = judged.filter((j) => j.verdict.flag)
     .sort((a, b) => new Date(b.visit.completed_at) - new Date(a.visit.completed_at));
-  if (flagged.length) return { action: 'flag', visit: flagged[0].visit, verdict: flagged[0].verdict };
-  const cleared = judged.filter((j) => j.verdict.reason === 'other_customer_stop').map((j) => String(j.visit.id));
-  return cleared.length ? { action: 'retract', visitIds: cleared } : { action: 'none' };
+  return flagged.length ? { action: 'flag', visit: flagged[0].visit, verdict: flagged[0].verdict } : { action: 'none' };
 }
+
+/** Is this open suggestion one an earlier run made from a visit that is now cleared as another customer's stop? */
+const madeFromClearedVisit = (open, decision) => Boolean(open)
+  && (decision.clearedVisitIds || []).includes(String(open.scheduled_service_id));
 
 async function applyDecision(conn, customerId, decision, openByCustomer, tally) {
   const open = openByCustomer.get(String(customerId));
-  if (decision.action === 'ok' && open) {
+  if (decision.action === 'ok') {
+    if (!open) return;
     const closed = await store.closeSuggestion(open.id, 'superseded', {
       reason: 'stop_at_pin', resolution: 'Closed: the truck stopped at the pin', conn,
     });
     if (closed) tally.closed += 1;
-  } else if (decision.action === 'flag') {
-    const result = await recordSuggestion(conn, decision.visit, decision.verdict);
-    if (result.created) tally.created += 1;
-  } else if (decision.action === 'retract' && open && decision.visitIds.includes(String(open.scheduled_service_id))) {
+    return;
+  }
+  // Retired BEFORE a newer visit's suggestion is recorded: insertSuggestion keeps an open suggestion for the same
+  // pin ("already_open"), which would leave the cleared visit's truck spot on offer.
+  if (madeFromClearedVisit(open, decision)) {
     const closed = await store.closeSuggestion(open.id, 'superseded', {
-      reason: 'other_customer_stop', resolution: "Closed: the truck came to the pin, then parked at another customer's", conn,
+      reason: 'other_customer_stop', resolution: "Closed: the truck also came to the pin that day; the long stop was at another customer's", conn,
     });
     if (closed) tally.closed += 1;
+  }
+  if (decision.action === 'flag') {
+    const result = await recordSuggestion(conn, decision.visit, decision.verdict);
+    if (result.created) tally.created += 1;
   }
 }
 
@@ -592,7 +619,7 @@ module.exports = {
   _private: {
     judgeVisit, destinationOf, homeBaseFrom, visitDays, etDayBounds, oneRowPerVisit, excludedStopReason, alertSpec,
     alertDetail, settledReason, visitUnchanged, homeSince, loadNeighbourVisits, usablePin, isWithin, nearestPinDistance, retireAllOpen, requiredDays, judgeVisits, loadVehicles, neighbourPins, effectivePinColumns, decideCustomer, notifyOne, recordSuggestion, closeSettledSuggestions, postPendingNotifications, loadCompletedVisits,
-    clearStopsAtOtherCustomers, otherCustomerPinNear, applyDecision, BRIEF_STOP_MIN_MINUTES,
+    clearStopsAtOtherCustomers, otherCustomerPinNear, applyDecision, withinSql, BRIEF_STOP_MIN_MINUTES,
     REPORT_MIN_STOP_MINUTES, MAX_STOP_DISTANCE_M,
   },
 };

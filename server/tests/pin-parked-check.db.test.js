@@ -297,14 +297,18 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
   // 2026-11-16, the first live bell: nobody was home, the truck left the (correct) pin after 3 minutes and stood 29
   // minutes at a customer 310 m away who had no completed visit that day, so the neighbour rule did not see them.
   describe("a short stop at the pin, then the long stop at another customer's", () => {
-    const minute = (n) => new Date(Date.parse('2026-10-08T14:20:00Z') + n * 60000).toISOString();
-    // In at 10:20 ET, 3 minutes 19 m from the pin, a 2 minute drive, 29 minutes 310 m north, then away.
-    async function shortThenLong({ arrivalReceivedAt = minute(60) } = {}) {
+    // In at 10:20 ET (default Oct 8), 3 minutes 19 m from the pin, a 2 minute drive, 29 minutes 310 m north, then away.
+    async function shortThenLong({ at = '2026-10-08T14:20:00Z', arrivalReceivedAt = null } = {}) {
+      const minute = (n) => new Date(Date.parse(at) + n * 60000).toISOString();
       const away = north(4000);
-      await tripData(`trip-a-${randomUUID()}`, [[minute(-20), away], [minute(0), north(19)]], { receivedAt: arrivalReceivedAt });
+      await tripData(`trip-a-${randomUUID()}`, [[minute(-20), away], [minute(0), north(19)]], { receivedAt: arrivalReceivedAt || minute(60) });
       await tripData(`trip-b-${randomUUID()}`, [[minute(3), north(19)], [minute(5), north(310)]], { receivedAt: minute(60) });
       await tripData(`trip-c-${randomUUID()}`, [[minute(34), north(310)], [minute(44), away]], { receivedAt: minute(60) });
     }
+    const bellFor = async (row) => (await mockPg('notifications').insert({
+      recipient_type: 'admin', category: 'customer', title: 'Customers — check the map pin for Fixture', body: 'Truck parked away from the pin.',
+      metadata: JSON.stringify({ dedupeKey: `pin-suggestion:${row.id}` }),
+    }).returning('*'))[0];
     async function ourVisit() {
       const techId = await technician();
       const customerId = await customer();
@@ -334,13 +338,37 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect(await run()).toMatchObject({ created: 0, other_customer_stop: 1 });
     });
 
-    test('with no other customer there the suggestion is still made: the map can lead a technician to a wrong pin first', async () => {
+    test('with no other customer inside the radius the suggestion is still made: the map can lead a technician to a wrong pin first', async () => {
       const { customerId } = await ourVisit();
-      await customer(north(310 + 200)); // another customer, but outside the radius of the long stop
+      await customer(north(310 + 180)); // another customer, 5 m outside the radius of the long stop
       await shortThenLong();
       expect(await run()).toMatchObject({ visits: 1, created: 1 });
       const [row] = await open(customerId);
       expect(row).toMatchObject({ distance_m: 310, stop_minutes: 29 });
+    });
+
+    test('the distance decides, not the box around the stop and not how many pins stand in it', async () => {
+      const { customerId } = await ourVisit();
+      // Inside the box (170 m north and 170 m east of the long stop) but 240 m from it: not at the stop.
+      const corner = { lat: north(310 + 170).lat, lng: east(170).lng };
+      for (let i = 0; i < 6; i += 1) await customer(corner, { phone: `+1202556${1000 + i}` });
+      await shortThenLong();
+      expect(await pin.otherCustomerPinNear(mockPg, customerId, north(310), 175)).toBe(false);
+      await customer(north(310 + 170)); // 5 m inside the radius, added after the six in the corner
+      expect(await pin.otherCustomerPinNear(mockPg, customerId, north(310), 175)).toBe(true);
+      expect(await run()).toMatchObject({ visits: 1, created: 0, other_customer_stop: 1 });
+      expect(await all(customerId)).toHaveLength(0);
+    });
+
+    test("the customer's own second property next to the long stop is not another customer's", async () => {
+      const { customerId } = await ourVisit();
+      await mockPg('customer_properties').insert({
+        customer_id: customerId, address_line1: '9 Rental Way', city: 'Fixture City', state: 'FL', zip: '34201',
+        is_primary: false, active: true, latitude: north(338).lat, longitude: north(338).lng,
+      });
+      await shortThenLong();
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      expect(await open(customerId)).toHaveLength(1);
     });
 
     test("another customer's pin alone does not clear it: without the short stop at the pin the suggestion is made", async () => {
@@ -358,16 +386,49 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect(await run()).toMatchObject({ created: 1 });
       const [row] = await open(customerId);
       expect(row.scheduled_service_id).toBe(visitId);
-      const [bell] = await mockPg('notifications').insert({
-        recipient_type: 'admin', category: 'customer', title: 'Customers — check the map pin for Fixture', body: 'Truck parked 310 m from the pin.',
-        metadata: JSON.stringify({ dedupeKey: `pin-suggestion:${row.id}` }),
-      }).returning('*');
+      const bell = await bellFor(row);
       const later = () => runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
       expect(await later()).toMatchObject({ created: 0, closed: 1, other_customer_stop: 1 });
       expect((await all(customerId)).map((r) => r.status)).toEqual(['superseded']);
       expect((await bellNow(bell.id)).done_at).not.toBeNull();
       expect(await later()).toMatchObject({ created: 0, closed: 0 });
       expect(await all(customerId)).toHaveLength(1);
+    });
+
+    test('when a newer visit still qualifies, the cleared visit\'s suggestion is retired first and the newer one is recorded', async () => {
+      // Visit A on Oct 7: its suggestion is made on Oct 8, before the trip that ended at the pin was received.
+      const techId = await technician();
+      const customerId = await customer();
+      await customer(north(338));
+      const visitA = await completedVisit(customerId, techId, { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-07T15:30:00Z') });
+      await shortThenLong({ at: '2026-10-07T14:20:00Z', arrivalReceivedAt: '2026-10-08T13:00:00Z' });
+      expect(await runPinParkedCheck({ now: new Date('2026-10-08T12:00:00Z'), conn: mockPg })).toMatchObject({ created: 1 });
+      const [first] = await open(customerId);
+      expect(first).toMatchObject({ scheduled_service_id: visitA, distance_m: 310 });
+      const bell = await bellFor(first);
+      // Visit B on Oct 8: a 30 minute stop 540 m from the same pin, no short stop at the pin, no other customer there.
+      const visitB = await completedVisit(customerId, techId);
+      await truckStopsAt(north(540), 30);
+      expect(await run()).toMatchObject({ visits: 2, created: 1, closed: 1, other_customer_stop: 1 });
+      const byVisit = Object.fromEntries((await all(customerId)).map((r) => [r.scheduled_service_id, r]));
+      expect(Object.keys(byVisit)).toHaveLength(2);
+      expect(byVisit[visitA].status).toBe('superseded');
+      expect(byVisit[visitB]).toMatchObject({ status: 'open', distance_m: 540, stop_minutes: 30 });
+      expect((await bellNow(bell.id)).done_at).not.toBeNull();
+    });
+
+    test('a short stop at the pin on another day does not clear the long stop', async () => {
+      // The visit was started Oct 7 (a 3 minute stop at the pin) and done Oct 8 (29 minutes at the other customer's).
+      const techId = await technician();
+      const customerId = await customer();
+      await customer(north(338));
+      await completedVisit(customerId, techId, { arrived_at: new Date('2026-10-07T14:21:00Z') });
+      const away = north(4000);
+      await tripData(`trip-a-${randomUUID()}`, [['2026-10-07T14:00:00Z', away], ['2026-10-07T14:20:00Z', north(19)]]);
+      await tripData(`trip-b-${randomUUID()}`, [['2026-10-07T14:23:00Z', north(19)], ['2026-10-07T14:40:00Z', away]]);
+      await truckStopsAt(north(310), 29);
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      expect(await open(customerId)).toHaveLength(1);
     });
   });
 

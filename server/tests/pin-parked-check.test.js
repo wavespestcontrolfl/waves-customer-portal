@@ -330,11 +330,15 @@ describe('one decision per customer', () => {
   test('nothing qualifying means nothing to do', () => {
     expect(p.decideCustomer([judged({ flag: false, reason: 'stop_too_short' })]).action).toBe('none');
   });
-  test("a visit cleared as another customer's stop retracts only its own earlier suggestion, and never beats a flag", () => {
+  test("a visit cleared as another customer's stop is named on the decision, whatever else is decided", () => {
     const cleared = judged({ flag: false, reason: 'other_customer_stop' });
-    expect(p.decideCustomer([cleared])).toEqual({ action: 'retract', visitIds: ['visit-1'] });
-    expect(p.decideCustomer([cleared, flagged(540)]).action).toBe('flag');
+    const unknown = judged({ flag: false, reason: 'stops_unreadable', unknown: true });
+    expect(p.decideCustomer([cleared])).toEqual({ action: 'none', clearedVisitIds: ['visit-1'] });
+    expect(p.decideCustomer([cleared, flagged(540)])).toMatchObject({ action: 'flag', verdict: { distanceM: 540 }, clearedVisitIds: ['visit-1'] });
+    expect(p.decideCustomer([cleared, unknown])).toEqual({ action: 'skip', clearedVisitIds: ['visit-1'] });
     expect(p.decideCustomer([cleared, atPin()]).action).toBe('ok');
+    // nothing cleared: the decision is exactly what it was
+    expect(p.decideCustomer([flagged(540)])).not.toHaveProperty('clearedVisitIds');
   });
 });
 
@@ -342,28 +346,32 @@ describe('one decision per customer', () => {
 // minutes at a customer 310 m away who had no completed visit that day. The bell offered to move the pin there.
 describe("a short stop at the pin, then the long stop at another customer's", () => {
   const NOW = new Date('2026-10-08T20:00:00Z');
-  const OTHER = at(310); // the other customer's saved pin
   const parkedShort = (north, minutes) => ({ ...stop(north, minutes), startMs: Date.parse('2026-10-08T14:20:00Z') });
   const vehicles = (stops) => new Map([['imei-1', { stops, home: null }]]);
   const judgeDay = (stops) => p.judgeVisits([visit()], vehicles(stops), { radius: RADIUS, fences: [], now: NOW });
-  // A stand-in for knex: answers the customers read and the properties read, or fails both.
+  // A stand-in for knex: answers "is there a row" for the customers read and the properties read, or fails both. The
+  // distance is decided inside the query (PostgreSQL suite); here the rows are what that query would return.
   function pinsConn({ customers = [], properties = [], fail = false } = {}) {
-    const tables = [];
+    const calls = [];
     const conn = (table) => {
-      tables.push(table);
+      const call = { table, steps: [] };
+      calls.push(call);
       const rows = String(table).startsWith('customer_properties') ? properties : customers;
       const b = {};
-      for (const name of ['join', 'where', 'whereNull', 'whereNot', 'whereBetween', 'limit']) b[name] = () => b;
-      b.select = async () => { if (fail) throw Object.assign(new Error('db down'), { code: 'XX000' }); return rows; };
+      for (const name of ['join', 'where', 'whereNull', 'whereNot', 'whereBetween', 'whereRaw', 'limit']) {
+        b[name] = (...args) => { call.steps.push([name, ...args]); return b; };
+      }
+      b.first = async () => { if (fail) throw Object.assign(new Error('db down'), { code: 'XX000' }); return rows[0]; };
       return b;
     };
-    conn.tables = tables;
+    conn.calls = calls;
     return conn;
   }
-  const row = (point) => ({ latitude: String(point.lat), longitude: String(point.lng) });
+  const FOUND = [{ id: 'customer-2' }];
+  const briefThenLong = () => judgeDay([parkedShort(19, 3), stop(310, 29)]);
 
   test('a parked gap under the 5 minute stop floor never settles the pin; the flag only notes it', () => {
-    const [{ verdict }] = judgeDay([parkedShort(19, 3), stop(310, 29)]);
+    const [{ verdict }] = briefThenLong();
     expect(verdict).toMatchObject({ flag: true, distanceM: 310, stopMinutes: 29, briefAtPin: true });
     // at the floor it is a stop at the pin, as before
     expect(judgeDay([parkedShort(19, 5), stop(310, 29)])[0].verdict).toEqual({ flag: false, reason: 'stop_at_pin' });
@@ -376,43 +384,79 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
     expect(judgeDay([parkedShort(900, 3), stop(310, 29)])[0].verdict.briefAtPin).toBe(false);
   });
 
+  test('the short stop counts before or after the long stop, but only on the ET day of the long stop', () => {
+    const after = { ...stop(19, 3), startMs: Date.parse('2026-10-08T16:10:00Z') };
+    expect(judgeDay([stop(310, 29), after])[0].verdict.briefAtPin).toBe(true);
+    // A visit worked on two days: the short stop at the pin was on Oct 7, the long stop on Oct 8.
+    const twoDays = visit({ arrived_at: new Date('2026-10-07T15:00:00Z') });
+    const dayBefore = { ...stop(19, 3), startMs: Date.parse('2026-10-07T14:20:00Z') };
+    const [{ verdict }] = p.judgeVisits([twoDays], vehicles([dayBefore, stop(310, 29)]), { radius: RADIUS, fences: [], now: NOW });
+    expect(verdict).toMatchObject({ flag: true, distanceM: 310, briefAtPin: false });
+    // 23:30 ET on Oct 7 is Oct 8 in UTC: the ET day decides
+    const lateEvening = { ...stop(19, 3), startMs: Date.parse('2026-10-08T03:30:00Z') };
+    expect(p.judgeVisits([twoDays], vehicles([lateEvening, stop(310, 29)]), { radius: RADIUS, fences: [], now: NOW })[0].verdict.briefAtPin).toBe(false);
+  });
+
   test("both facts together clear the flag: the stop is the other customer's (customer row or an active property)", async () => {
-    for (const pins of [{ customers: [row(at(338))] }, { properties: [row(at(282))] }]) {
-      const judged = await p.clearStopsAtOtherCustomers(pinsConn(pins), judgeDay([parkedShort(19, 3), stop(310, 29)]), RADIUS);
+    for (const pins of [{ customers: FOUND }, { properties: FOUND }]) {
+      const judged = await p.clearStopsAtOtherCustomers(pinsConn(pins), briefThenLong(), RADIUS);
       expect(judged[0].verdict).toEqual({ flag: false, reason: 'other_customer_stop' });
     }
   });
 
   test('a brief stop at the pin alone still flags: the map can lead a technician to a wrong pin first', async () => {
-    const far = pinsConn({ customers: [row(at(310 + RADIUS + 5))], properties: [{ latitude: null, longitude: null }] });
-    const judged = await p.clearStopsAtOtherCustomers(far, judgeDay([parkedShort(19, 3), stop(310, 29)]), RADIUS);
+    const conn = pinsConn();
+    const judged = await p.clearStopsAtOtherCustomers(conn, briefThenLong(), RADIUS);
     expect(judged[0].verdict.flag).toBe(true);
+    expect(conn.calls.map((call) => call.table)).toEqual(['customers as c', 'customer_properties as p']);
   });
 
   test("another customer's pin alone still flags, and other customers are not even read", async () => {
-    const conn = pinsConn({ customers: [row(OTHER)] });
+    const conn = pinsConn({ customers: FOUND });
     const judged = await p.clearStopsAtOtherCustomers(conn, judgeDay([stop(310, 29)]), RADIUS);
     expect(judged[0].verdict.flag).toBe(true);
-    expect(conn.tables).toEqual([]);
+    expect(conn.calls).toEqual([]);
+  });
+
+  test('the query measures the distance itself, so no row limit can hide a pin that is inside the radius', async () => {
+    const conn = pinsConn();
+    await p.clearStopsAtOtherCustomers(conn, briefThenLong(), RADIUS);
+    for (const [call, lat, lng] of [[conn.calls[0], 'c.latitude', 'c.longitude'], [conn.calls[1], 'p.latitude', 'p.longitude']]) {
+      const raw = call.steps.find(([name]) => name === 'whereRaw');
+      expect(raw[1]).toBe(p.withinSql(lat, lng));
+      expect(raw[2]).toEqual([at(310).lat, at(310).lat, at(310).lng, RADIUS]); // the long stop, then the radius
+      expect(call.steps.some(([name]) => name === 'limit')).toBe(false);
+      expect(call.steps).toContainEqual(['whereNot', 'c.id', 'customer-1']); // never this customer's own pin or property
+      expect(call.steps).toContainEqual(['whereNull', 'c.deleted_at']);
+    }
+    expect(conn.calls[1].steps).toContainEqual(['where', 'p.active', true]);
+    expect(p.withinSql('c.latitude', 'c.longitude')).toMatch(/^2 \* 6371000 \* asin\(.*<= \?$/);
   });
 
   test('a read that fails leaves the visit unknown: no suggestion, nothing closed', async () => {
-    const judged = await p.clearStopsAtOtherCustomers(pinsConn({ fail: true }), judgeDay([parkedShort(19, 3), stop(310, 29)]), RADIUS);
+    const judged = await p.clearStopsAtOtherCustomers(pinsConn({ fail: true }), briefThenLong(), RADIUS);
     expect(judged[0].verdict).toEqual({ flag: false, reason: 'other_pins_unreadable', unknown: true });
     expect(p.decideCustomer(judged).action).toBe('skip');
   });
 
-  test('the retraction closes the open suggestion of that visit only', async () => {
+  test('the open suggestion of a cleared visit is retired, whatever else is decided; another visit\'s suggestion stays', async () => {
     const store = require('../services/customer-pin-suggestions');
     const close = jest.spyOn(store, 'closeSuggestion').mockResolvedValue({ id: 's-1' });
     try {
       const tally = { created: 0, closed: 0 };
-      const decision = { action: 'retract', visitIds: ['visit-1'] };
-      await p.applyDecision({}, 'customer-1', decision, new Map([['customer-1', { id: 's-1', scheduled_service_id: 'visit-9' }]]), tally);
+      const openFrom = (visitId) => new Map([['customer-1', { id: 's-1', scheduled_service_id: visitId }]]);
+      for (const action of ['none', 'skip']) {
+        const decision = { action, clearedVisitIds: ['visit-1'] };
+        await p.applyDecision({}, 'customer-1', decision, openFrom('visit-9'), tally);
+        expect(close).not.toHaveBeenCalled();
+        await p.applyDecision({}, 'customer-1', decision, openFrom('visit-1'), tally);
+        expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({ reason: 'other_customer_stop' }));
+        close.mockClear();
+      }
+      expect(tally.closed).toBe(2);
+      // no cleared visit: nothing is closed for a customer with nothing to say
+      await p.applyDecision({}, 'customer-1', { action: 'none' }, openFrom('visit-1'), tally);
       expect(close).not.toHaveBeenCalled();
-      await p.applyDecision({}, 'customer-1', decision, new Map([['customer-1', { id: 's-1', scheduled_service_id: 'visit-1' }]]), tally);
-      expect(close).toHaveBeenCalledWith('s-1', 'superseded', expect.objectContaining({ reason: 'other_customer_stop' }));
-      expect(tally.closed).toBe(1);
     } finally { close.mockRestore(); }
   });
 
