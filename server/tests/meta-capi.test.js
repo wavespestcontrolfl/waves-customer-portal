@@ -28,6 +28,8 @@ const mockCollect = jest.fn();
 jest.mock('../services/ads/data-manager', () => ({
   _private: {
     collectCandidates: (...a) => mockCollect(...a),
+    // Same rule as data-manager.exclusionReason (pinned in data-manager.test.js).
+    exclusionReason: (c) => (c.internalTest ? 'internal_test' : c.leadClosed ? 'lead_closed' : null),
     sha256Hex: (s) => `h:${s}`,
     normalizeEmail: (e) => (e && String(e).includes('@') ? String(e).trim().toLowerCase() : null),
     normalizePhone: (p) => {
@@ -40,7 +42,7 @@ jest.mock('../services/ads/data-manager', () => ({
 }));
 
 const MetaCapi = require('../services/ads/meta-data-manager');
-const { buildUserData, buildEvent, skipReason, resolveMode } = MetaCapi._private;
+const { buildUserData, buildEvent, skipReason, resolveMode, conversionTypeEnabled } = MetaCapi._private;
 
 const env = process.env;
 beforeEach(() => {
@@ -250,5 +252,64 @@ describe('extra match keys (name / location / external_id)', () => {
   });
   test('match-key summary records presence only', () => {
     expect(MetaCapi._private.matchKeySummary(base)).toMatchObject({ email: true, name: true, zip: true, city: true, state: true, externalId: true });
+  });
+});
+
+describe('test records, junk leads and the NewCustomer event (owner 2026-11-19)', () => {
+  const newCustomer = (over = {}) => lead({
+    conversionType: 'new_customer', transactionId: 'waves_new_customer:C1', conversionValue: 3500, ...over,
+  });
+
+  test('internal test record and closed lead are skipped with their own reasons, before anything else', () => {
+    expect(skipReason(lead({ internalTest: true }))).toBe('internal_test');
+    expect(skipReason(lead({ leadClosed: true }))).toBe('lead_closed');
+    expect(skipReason(lead({ internalTest: true, leadClosed: true, email: null, phone: null, fbp: null }))).toBe('internal_test');
+  });
+
+  test('NewCustomer is a custom event with value + currency and the same action_source and match keys', () => {
+    const e = buildEvent(newCustomer());
+    expect(e).toMatchObject({
+      event_name: 'NewCustomer',
+      event_id: 'waves_new_customer:C1',
+      action_source: 'system_generated',
+      custom_data: { value: 3500, currency: 'USD' },
+    });
+    expect(e.user_data.em).toEqual(['h:a@b.com']);
+    expect(e.user_data.fbp).toBe('fb.1.1.99');
+    expect(skipReason(newCustomer())).toBeNull();
+  });
+
+  test('a NewCustomer event older than the 7-day window is dropped like the other types', () => {
+    expect(skipReason(newCustomer({ eventTimestamp: new Date(Date.now() - 10 * 86400000).toISOString() }))).toBe('event_too_old');
+  });
+
+  test('NewCustomer has its own switch, ON unless set false; other types ignore it', () => {
+    delete process.env.META_CAPI_NEW_CUSTOMER_ENABLED;
+    expect(conversionTypeEnabled('new_customer')).toBe(true);
+    process.env.META_CAPI_NEW_CUSTOMER_ENABLED = 'false';
+    expect(conversionTypeEnabled('new_customer')).toBe(false);
+    expect(conversionTypeEnabled('qualified_lead')).toBe(true);
+  });
+
+  test('upload with the switch off is skipped before collecting anything', async () => {
+    process.env.META_CAPI_NEW_CUSTOMER_ENABLED = 'false';
+    const r = await MetaCapi.uploadConversions({ conversionType: 'new_customer' });
+    expect(r).toMatchObject({ configured: true, skipped: true, reason: 'disabled' });
+    expect(mockCollect).not.toHaveBeenCalled();
+  });
+
+  test('upload skips test records and reports the reason; real ones go out as NewCustomer', async () => {
+    process.env.META_CAPI_ALLOW_UPLOADS = 'true';
+    mockCollect.mockResolvedValue([
+      newCustomer({ transactionId: 'waves_new_customer:T1', internalTest: true }),
+      newCustomer(),
+    ]);
+    global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ events_received: 1 }) }));
+    const r = await MetaCapi.uploadConversions({ conversionType: 'new_customer', validateOnly: false });
+    expect(r.skipped).toEqual([{ event_id: 'waves_new_customer:T1', reason: 'internal_test' }]);
+    expect(r.sent).toBe(1);
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].event_name).toBe('NewCustomer');
   });
 });

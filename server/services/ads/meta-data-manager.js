@@ -20,7 +20,7 @@ const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const {
-  collectCandidates, sha256Hex, normalizeEmail, normalizePhone,
+  collectCandidates, sha256Hex, normalizeEmail, normalizePhone, exclusionReason,
 } = require('./data-manager')._private;
 const matchFields = require('./ad-match-fields');
 
@@ -31,7 +31,17 @@ const MAX_LIMIT = 500;
 const SENT = 'sent';
 const VALIDATED = 'validated';
 
-const EVENT_NAMES = { qualified_lead: 'Lead', completed_job_revenue: 'Purchase' };
+// new_customer is a Meta CUSTOM event (value + currency, same action_source and
+// match keys as Lead). It has its own kill switch, ON by default like the other
+// types (META_CAPI_NEW_CUSTOMER_ENABLED=false turns it off without a deploy).
+const EVENT_NAMES = { qualified_lead: 'Lead', completed_job_revenue: 'Purchase', new_customer: 'NewCustomer' };
+
+function conversionTypeEnabled(conversionType) {
+  if (conversionType !== 'new_customer') return true;
+  const raw = process.env.META_CAPI_NEW_CUSTOMER_ENABLED;
+  if (raw == null || String(raw).trim() === '') return true;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
 
 function apiVersion() {
   // Keep META_CAPI_API_VERSION / META_ADS_API_VERSION on a currently-supported
@@ -125,6 +135,9 @@ function buildEvent(candidate) {
 }
 
 function skipReason(candidate) {
+  // Test records and junk leads never go out (shared rule with the Google lane).
+  const excluded = exclusionReason(candidate);
+  if (excluded) return excluded;
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
   // consentSuppressed candidates arrive from collectCandidates with email/phone
   // already nulled (marketing opt-out); one that still carries fbc/fbp/fbclid
@@ -233,6 +246,7 @@ function resolveMode(validateOnly) {
 async function uploadConversions({ conversionType = 'completed_job_revenue', periodDays = 7, limit = 200, validateOnly = false, force = false, fetchImpl } = {}) {
   if (!EVENT_NAMES[conversionType]) throw new Error(`Unsupported conversion type: ${conversionType}`);
   if (!isConfigured()) return { configured: false, conversionType, error: 'Meta CAPI not configured (META_CAPI_PIXEL_ID + META_CAPI_ACCESS_TOKEN).' };
+  if (!conversionTypeEnabled(conversionType)) return { configured: true, conversionType, skipped: true, reason: 'disabled', note: 'META_CAPI_NEW_CUSTOMER_ENABLED is off.' };
 
   const mode = resolveMode(validateOnly);
   if (!mode.canSend) {
@@ -293,13 +307,15 @@ async function buildReadiness({ periodDays = 7, limit = 50 } = {}) {
   for (const conversionType of Object.keys(EVENT_NAMES)) {
     try {
       const candidates = await collectCandidates(conversionType, { ...range, limit });
-      const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0, consentSuppressed: 0 };
+      const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0, consentSuppressed: 0, internalTest: 0, leadClosed: 0 };
       for (const c of candidates) {
         const r = skipReason(c);
         if (!r) counts.eligible += 1;
         else if (r === 'missing_match_keys') counts.missingMatchKeys += 1;
         else if (r === 'missing_conversion_value') counts.missingConversionValue += 1;
         else if (r === 'consent_suppressed') counts.consentSuppressed += 1;
+        else if (r === 'internal_test') counts.internalTest += 1;
+        else if (r === 'lead_closed') counts.leadClosed += 1;
       }
       conversions[conversionType] = { eventName: EVENT_NAMES[conversionType], candidates: counts };
     } catch (err) {
@@ -321,6 +337,6 @@ module.exports = {
   uploadConversions,
   buildReadiness,
   _private: {
-    apiVersion, pixelId, buildUserData, buildEvent, skipReason, matchKeySummary, resolveMode, toUnixSeconds, EVENT_NAMES,
+    apiVersion, pixelId, buildUserData, buildEvent, skipReason, matchKeySummary, resolveMode, toUnixSeconds, EVENT_NAMES, conversionTypeEnabled,
   },
 };

@@ -16,6 +16,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { runExclusive } = require('../../utils/cron-lock');
 const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 const matchFields = require('./ad-match-fields');
+const { isInternalTestContact } = require('../internal-test-customers');
 
 let _googleapis;
 function getGoogle() {
@@ -51,7 +52,26 @@ const CONVERSIONS = {
     destinationEnv: 'GOOGLE_ADS_DM_COMPLETED_JOB_CONVERSION_ACTION_ID',
     legacyDestinationEnv: 'GOOGLE_ADS_DATA_MANAGER_COMPLETED_JOB_CONVERSION_ACTION_ID',
   },
+  // One event per NEW customer (report-only: it tells the platforms which
+  // clicks brought brand-new business, never an existing customer's add-on).
+  new_customer: {
+    label: 'New Customer',
+    sourceTable: 'leads',
+    eventNameEnv: 'GOOGLE_ADS_DM_NEW_CUSTOMER_EVENT_NAME',
+    defaultEventName: 'Waves - New Customer',
+    destinationEnv: 'GOOGLE_ADS_DM_NEW_CUSTOMER_CONVERSION_ACTION_ID',
+  },
 };
+
+// Lead statuses that are never a real conversion: a lead later marked one of
+// these must not go out even though is_qualified is sticky.
+const JUNK_LEAD_STATUSES = ['disqualified', 'duplicate', 'spam'];
+// Lifetime value of a new customer, the same basis as the $3,500 call value.
+const DEFAULT_NEW_CUSTOMER_VALUE = 3500;
+// A new customer's lead may be first contacted a few days before the customer
+// row was stamped; the customer is "existing" only if it had history older than
+// this slack before the lead's first contact.
+const NEW_CUSTOMER_SLACK_DAYS = 3;
 
 function boolEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -148,6 +168,13 @@ function conversionValueForQualifiedLead() {
   return value > 0 ? value : null;
 }
 
+function conversionValueForNewCustomer() {
+  const raw = process.env.AD_NEW_CUSTOMER_VALUE;
+  if (raw == null || String(raw).trim() === '') return DEFAULT_NEW_CUSTOMER_VALUE;
+  const value = number(raw);
+  return value > 0 ? value : DEFAULT_NEW_CUSTOMER_VALUE;
+}
+
 function destinationIdFor(conversionType) {
   const config = CONVERSIONS[conversionType];
   return cleanNumericId(process.env[config.destinationEnv] || process.env[config.legacyDestinationEnv]);
@@ -240,7 +267,18 @@ function candidateHasUserData(candidate) {
   return !!(normalizeEmail(candidate.email) || normalizePhone(candidate.phone));
 }
 
+// Candidates that must never reach an ad platform, whatever else is true of
+// them. Computed from the source row BEFORE consent stripping, so the flags
+// survive. Shared with the Meta lane.
+function exclusionReason(candidate) {
+  if (candidate.internalTest) return 'internal_test';
+  if (candidate.leadClosed) return 'lead_closed';
+  return null;
+}
+
 function skipReason(candidate) {
+  const excluded = exclusionReason(candidate);
+  if (excluded) return excluded;
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
   if (!candidateHasClickId(candidate) && !candidateHasUserData(candidate)) {
     // Distinguish "we stripped the identifiers for consent" from "the source
@@ -348,6 +386,13 @@ function mergeClickKeys(into, from) {
   return out;
 }
 
+function mergeExclusions(winner, a, b) {
+  const internalTest = !!(a.internalTest || b.internalTest);
+  const leadClosed = !!(a.leadClosed || b.leadClosed);
+  if (!!winner.internalTest === internalTest && !!winner.leadClosed === leadClosed) return winner;
+  return { ...winner, internalTest, leadClosed };
+}
+
 function dedupeCandidatesByTransaction(candidates = []) {
   const byTransaction = new Map();
   const order = [];
@@ -366,11 +411,12 @@ function dedupeCandidatesByTransaction(candidates = []) {
     }
 
     const existing = byTransaction.get(transactionId);
-    if (candidateMatchScore(candidate) > candidateMatchScore(existing)) {
-      byTransaction.set(transactionId, mergeClickKeys(candidate, existing));
-    } else {
-      byTransaction.set(transactionId, mergeClickKeys(existing, candidate));
-    }
+    const winner = candidateMatchScore(candidate) > candidateMatchScore(existing)
+      ? mergeClickKeys(candidate, existing)
+      : mergeClickKeys(existing, candidate);
+    // An exclusion on ANY sibling excludes the transaction: siblings are one
+    // person's conversion seen through different join rows.
+    byTransaction.set(transactionId, mergeExclusions(winner, existing, candidate));
   }
 
   return order.map((entry) => (
@@ -392,10 +438,28 @@ function leadIdentity(row) {
   return matchFields.identityForContact({ email: row.email, phone: row.phone }, ...leadIdentitySources(row));
 }
 
+function leadIsInternalTest(row) {
+  return isInternalTestContact({
+    customerId: row.customer_id, firstName: row.first_name, lastName: row.last_name, email: row.email, phone: row.phone,
+  }) || isInternalTestContact({
+    customerId: row.customer_id,
+    firstName: row.customer_first_name,
+    lastName: row.customer_last_name,
+    email: row.customer_email,
+    phone: row.customer_phone,
+  });
+}
+
+function leadIsJunk(row) {
+  return JUNK_LEAD_STATUSES.includes(String(row.status || '').trim().toLowerCase());
+}
+
 function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
     ...leadIdentity(row),
+    internalTest: leadIsInternalTest(row),
+    leadClosed: leadIsJunk(row),
     // Both name/address sources, so consent cleaning can re-pick the identity
     // if it swaps a phone. Stripped before upload; never sent.
     identitySources: leadIdentitySources(row),
@@ -442,6 +506,16 @@ function estimateLeadId(estimateData) {
   return parsed.lead_id ? String(parsed.lead_id) : null;
 }
 
+// Test records never go out. Lead status is NOT checked for a completed job: a
+// paid job is real revenue even if its lead was later merged as a duplicate.
+function jobIsInternalTest(row) {
+  return isInternalTestContact({
+    customerId: row.customer_id, firstName: row.customer_first_name, lastName: row.customer_last_name, email: row.customer_email, phone: row.customer_phone,
+  }) || isInternalTestContact({
+    firstName: row.lead_first_name, lastName: row.lead_last_name, email: row.lead_email, phone: row.lead_phone,
+  });
+}
+
 function mapCompletedJobCandidate(row) {
   const invoiceTotal = number(row.invoice_total);
   const eventTimestamp = toRfc3339(row.service_date || row.completed_at || row.updated_at || row.created_at);
@@ -455,6 +529,8 @@ function mapCompletedJobCandidate(row) {
     { email: leadEmail, phone: leadPhone, firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
   ];
   return {
+    internalTest: jobIsInternalTest(row),
+    leadClosed: false,
     // The customer record is canonical for a completed job and the lead the
     // fallback, but only a source that is the same person as the uploaded
     // email/phone below may supply the name/address.
@@ -505,6 +581,38 @@ function mapCompletedJobCandidate(row) {
   };
 }
 
+const LEAD_SELECT_COLUMNS = [
+  'l.id',
+  'l.estimate_id',
+  'l.customer_id',
+  'l.first_contact_at',
+  'l.converted_at',
+  'l.created_at',
+  'l.status',
+  'l.email',
+  'l.phone',
+  'l.first_name',
+  'l.last_name',
+  'l.city',
+  'l.zip',
+  'l.gclid',
+  'l.wbraid',
+  'l.gbraid',
+  'l.fbclid',
+  'l.fbc',
+  'l.fbp',
+  'c.email as customer_email',
+  'c.phone as customer_phone',
+  'c.first_name as customer_first_name',
+  'c.last_name as customer_last_name',
+  'c.city as customer_city',
+  'c.state as customer_state',
+  'c.zip as customer_zip',
+  'ls.name as source_name',
+  'ls.source_type',
+  'ls.channel',
+];
+
 async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMIT } = {}) {
   const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
   const eventTimestampSql = 'COALESCE(l.converted_at, l.first_contact_at, l.created_at)';
@@ -521,41 +629,104 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       q.where('l.is_qualified', true)
         .orWhereRaw("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
     })
-    .select(
-      'l.id',
-      'l.estimate_id',
-      'l.customer_id',
-      'l.first_contact_at',
-      'l.converted_at',
-      'l.created_at',
-      'l.status',
-      'l.email',
-      'l.phone',
-      'l.first_name',
-      'l.last_name',
-      'l.city',
-      'l.zip',
-      'l.gclid',
-      'l.wbraid',
-      'l.gbraid',
-      'l.fbclid',
-      'l.fbc',
-      'l.fbp',
-      'c.email as customer_email',
-      'c.phone as customer_phone',
-      'c.first_name as customer_first_name',
-      'c.last_name as customer_last_name',
-      'c.city as customer_city',
-      'c.state as customer_state',
-      'c.zip as customer_zip',
-      'ls.name as source_name',
-      'ls.source_type',
-      'ls.channel',
-    )
+    // is_qualified is sticky, so a lead later marked disqualified/duplicate/spam
+    // still matches above; those rows stay in the list as candidates and are
+    // skipped with reason 'lead_closed' (see exclusionReason).
+    .select(...LEAD_SELECT_COLUMNS)
     .orderByRaw(`${eventTimestampSql} DESC NULLS LAST`)
     .limit(cap);
 
   return applyMarketingConsent('qualified_lead', rows.map(mapLeadCandidate));
+}
+
+// New business only. A lead reaches won/converted and its linked customer had
+// no completed visit and no member_since from before the lead's first contact
+// (minus a few days of slack). A current customer's add-on ask, or a former
+// customer coming back, fails that test and is not a new customer.
+function mapNewCustomerCandidate(row) {
+  const base = mapLeadCandidate(row);
+  return {
+    ...base,
+    conversionType: 'new_customer',
+    sourceTable: 'leads',
+    eventName: eventNameFor('new_customer'),
+    eventTimestamp: toRfc3339(row.event_at),
+    // One per customer, ever: the id carries the customer, not the lead.
+    transactionId: `waves_new_customer:${row.customer_id}`,
+    conversionValue: conversionValueForNewCustomer(),
+    currency: DEFAULT_CURRENCY,
+    metadata: { ...base.metadata, valueSource: 'new_customer_ltv' },
+  };
+}
+
+// Every lead linked to a customer is the same person for this customer-scoped
+// event, including leads the collector does not return (open, lost, junk or
+// deleted). All of them join the opt-out check, deleted ones too: an opt-out
+// never expires with the lead that carried it. Live ones also join the
+// test-record check. None of them ever supplies an uploaded identifier.
+async function linkedLeadContacts(customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean).map(String))];
+  const byCustomer = new Map();
+  if (!ids.length) return byCustomer;
+  const rows = await db('leads').whereIn('customer_id', ids)
+    .select('customer_id', 'email', 'phone', 'first_name', 'last_name', 'deleted_at');
+  for (const r of rows) {
+    const key = String(r.customer_id);
+    if (!byCustomer.has(key)) byCustomer.set(key, []);
+    byCustomer.get(key).push(r);
+  }
+  return byCustomer;
+}
+
+async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT } = {}) {
+  const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
+  const eventTimestampSql = "COALESCE(l.converted_at, ((c.member_since + time '12:00') AT TIME ZONE 'America/New_York'), l.created_at)";
+  const firstContactDateSql = "((COALESCE(l.first_contact_at, l.created_at)) AT TIME ZONE 'America/New_York')::date";
+  // since / endDate are Eastern calendar dates, so each bound is Eastern midnight.
+  const etMidnightSql = "((?::date)::timestamp AT TIME ZONE 'America/New_York')";
+  const eligibleLeads = () => db('leads as l')
+    .join('customers as c', 'l.customer_id', 'c.id')
+    .whereNull('l.deleted_at')
+    .whereNull('c.deleted_at')
+    .whereRaw(`${eventTimestampSql} >= ${etMidnightSql}`, [since])
+    .whereRaw(`${eventTimestampSql} < ${etMidnightSql}`, [addDateStringDays(endDate, 1)])
+    // The win must be current: a lead marked lost (or junk) after its win keeps
+    // converted_at, so the status decides, never converted_at alone.
+    .whereRaw("LOWER(COALESCE(l.status, '')) IN ('won', 'converted')")
+    .whereRaw(`(c.member_since IS NULL OR c.member_since >= ${firstContactDateSql} - ?::int)`, [NEW_CUSTOMER_SLACK_DAYS])
+    .whereNotExists(function hadEarlierVisit() {
+      this.select(db.raw('1')).from('service_records as sr')
+        .whereRaw('sr.customer_id = c.id')
+        .where('sr.status', 'completed')
+        .whereRaw(`sr.service_date < ${firstContactDateSql} - ?::int`, [NEW_CUSTOMER_SLACK_DAYS]);
+    });
+  // The limit counts customers, not lead rows: a customer is one event, so its
+  // other won leads take no slot. The scan holds the newest `cap` customers in
+  // the window (500 on both crons); the upload history skips those already sent.
+  const newestCustomers = eligibleLeads()
+    .groupBy('l.customer_id')
+    .select('l.customer_id')
+    .orderByRaw(`MAX(${eventTimestampSql}) DESC, l.customer_id`)
+    .limit(cap);
+  const rows = await eligibleLeads()
+    .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+    .whereIn('l.customer_id', newestCustomers)
+    .select(...LEAD_SELECT_COLUMNS, db.raw(`${eventTimestampSql} as event_at`))
+    .orderByRaw(`${eventTimestampSql} DESC NULLS LAST`);
+
+  const linked = await linkedLeadContacts(rows.map((r) => r.customer_id));
+  const candidates = rows.map((row) => {
+    const candidate = mapNewCustomerCandidate(row);
+    const siblings = linked.get(String(row.customer_id)) || [];
+    return {
+      ...candidate,
+      internalTest: candidate.internalTest || siblings.some((s) => !s.deleted_at && isInternalTestContact({
+        firstName: s.first_name, lastName: s.last_name, email: s.email, phone: s.phone,
+      })),
+      suppressionIdentifiers: siblings.map((s) => ({ email: s.email || null, phone: s.phone || null })),
+    };
+  });
+  return applyMarketingConsent('new_customer', candidates);
 }
 
 function invoiceRollupSubquery() {
@@ -660,10 +831,11 @@ async function applyMarketingConsent(conversionType, candidates) {
   // Person-level check: the collapsed email/phone pick PLUS every linked
   // identifier the mapper carried (consentIdentifiers) — an opt-out on the
   // customer's current email opts the person out even when a stale lead
-  // email won the collapsed pick.
+  // email won the collapsed pick. suppressionIdentifiers (a new customer's
+  // other leads) count here only: never promoted below, never uploaded.
   const personSuppressed = (candidate) => sup.isSuppressed(candidate)
-    || (Array.isArray(candidate.consentIdentifiers)
-      && candidate.consentIdentifiers.some((id) => sup.isSuppressed(id)));
+    || [candidate.consentIdentifiers, candidate.suppressionIdentifiers]
+      .some((ids) => Array.isArray(ids) && ids.some((id) => sup.isSuppressed(id)));
   // ...and the opt-out propagates across TRANSACTION SIBLINGS: duplicate join
   // rows of one transaction are the same person seen through different links
   // (lead vs customer). If ANY sibling matches an opt-out, every sibling's
@@ -706,7 +878,7 @@ async function applyMarketingConsent(conversionType, candidates) {
       return { ...candidate, phone: promoted, ...reIdentity };
     }
     return candidate;
-  }).map(({ identitySources, ...rest }) => rest); // raw sources never leave this step
+  }).map(({ identitySources, suppressionIdentifiers, ...rest }) => rest); // raw sources never leave this step
   if (suppressed || strippedPhones) {
     logger.info(`[ad-consent] ${conversionType} conversions: stripped identifiers from ${suppressed} opted-out contacts, ${strippedPhones} invalid phones`);
   }
@@ -729,6 +901,9 @@ async function collectCandidates(conversionType, options = {}) {
   }
   if (conversionType === 'completed_job_revenue') {
     return dedupeCandidatesByTransaction(await collectCompletedJobCandidates(options));
+  }
+  if (conversionType === 'new_customer') {
+    return dedupeCandidatesByTransaction(await collectNewCustomerCandidates(options));
   }
   throw new Error(`Unsupported conversion type: ${conversionType}`);
 }
@@ -755,6 +930,8 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     missingConversionValue: 0,
     missingEventTimestamp: 0,
     consentSuppressed: 0,
+    internalTest: 0,
+    leadClosed: 0,
     skipped: 0,
   };
   const rows = candidates.map((candidate) => {
@@ -767,6 +944,8 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     if (reason === 'missing_match_keys') counts.missingMatchKeys += 1;
     if (reason === 'missing_conversion_value') counts.missingConversionValue += 1;
     if (reason === 'missing_event_timestamp') counts.missingEventTimestamp += 1;
+    if (reason === 'internal_test') counts.internalTest += 1;
+    if (reason === 'lead_closed') counts.leadClosed += 1;
     if (!reason && !priorReason) counts.eligible += 1;
     if (reason || priorReason) counts.skipped += 1;
     return {
@@ -1161,6 +1340,10 @@ module.exports = {
     configurationFor,
     dedupeCandidatesByTransaction,
     destinationFor,
+    exclusionReason,
+    conversionValueForNewCustomer,
+    mapNewCustomerCandidate,
+    JUNK_LEAD_STATUSES,
     googleAddressParts,
     hashedUserData,
     mapCompletedJobCandidate,

@@ -8597,8 +8597,9 @@ function initScheduledJobs() {
       // full ~90-day Google import window so a lead first contacted up to 90 days
       // ago but qualified only now is still uploaded (anything older is outside
       // Google's window anyway). Per-transaction dedupe makes the overlap a no-op.
-      const PERIOD_DAYS = { qualified_lead: 90, completed_job_revenue: 30 };
-      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+      // new_customer is dated by converted_at, so a 30-day scan is plenty.
+      const PERIOD_DAYS = { qualified_lead: 90, completed_job_revenue: 30, new_customer: 30 };
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue', 'new_customer']) {
         const r = await DataManager.uploadConversions({
           conversionType, periodDays: PERIOD_DAYS[conversionType], limit: 500, validateOnly: false,
         });
@@ -8625,7 +8626,7 @@ function initScheduledJobs() {
     logger.info('Running: Meta Conversions API upload');
     try {
       const MetaCapi = require('./ads/meta-data-manager');
-      for (const conversionType of ['qualified_lead', 'completed_job_revenue']) {
+      for (const conversionType of ['qualified_lead', 'completed_job_revenue', 'new_customer']) {
         const r = await MetaCapi.uploadConversions({
           conversionType, periodDays: 7, limit: 500, validateOnly: false,
         });

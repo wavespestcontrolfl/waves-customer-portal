@@ -24,6 +24,7 @@ jest.mock('../services/ads/ad-audience-consent', () => ({
 }));
 
 const crypto = require('crypto');
+const dbMock = require('../models/db');
 const DataManager = require('../services/ads/data-manager');
 
 const {
@@ -33,6 +34,10 @@ const {
   configurationFor,
   dedupeCandidatesByTransaction,
   destinationFor,
+  exclusionReason,
+  conversionValueForNewCustomer,
+  mapNewCustomerCandidate,
+  collectCandidates,
   hashedUserData,
   mapCompletedJobCandidate,
   mapLeadCandidate,
@@ -423,6 +428,27 @@ describe('conversion-lane marketing-consent suppression', () => {
     expect(cleaned.consentSuppressed).toBeUndefined();
   });
 
+  test("a new customer's other leads (suppressionIdentifiers) count for the opt-out only", async () => {
+    mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['old-address@example.com'] }));
+    const [optedOut] = await applyMarketingConsent('new_customer', [{
+      transactionId: 'waves_new_customer:c1', email: 'pat@example.com', phone: '+19415550100',
+      consentIdentifiers: [{ email: 'pat@example.com', phone: '+19415550100' }],
+      suppressionIdentifiers: [{ email: 'old-address@example.com', phone: null }],
+    }]);
+    expect(optedOut).toMatchObject({ email: null, phone: null, consentSuppressed: true });
+    expect(optedOut).not.toHaveProperty('suppressionIdentifiers');
+
+    // A wrong number is never swapped for another lead's phone (a deleted lead's included).
+    mockLoadSuppression.mockResolvedValue(snapshot({ invalid: ['9415550111'] }));
+    const [wrongNumber] = await applyMarketingConsent('new_customer', [{
+      transactionId: 'waves_new_customer:c2', email: 'sam@example.com', phone: '+19415550111',
+      consentIdentifiers: [{ email: 'sam@example.com', phone: '+19415550111' }, { email: null, phone: null }],
+      suppressionIdentifiers: [{ email: null, phone: '+19415550122' }],
+    }]);
+    expect(wrongNumber).toMatchObject({ email: 'sam@example.com', phone: null });
+    expect(wrongNumber).not.toHaveProperty('suppressionIdentifiers');
+  });
+
   test('duplicate completed-job rows: consent strips BEFORE dedupe so a click-ID sibling wins', async () => {
     mockLoadSuppression.mockResolvedValue(snapshot({ emails: ['optout@example.com'] }));
     // Pre-consent, the opted-out row outscores the click-ID row (email+phone+
@@ -697,5 +723,162 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     const summary = redactedEventSummary(c, ev);
     expect(summary.matchKeys).toMatchObject({ email: true, address: true, userIdentifiers: 2 });
     expect(JSON.stringify(summary)).not.toContain('34221');
+  });
+});
+
+describe('test records, junk leads and the new_customer conversion (owner 2026-11-19)', () => {
+  // A fictional owner cell: the rule reads ADAM_PHONE, never a number in code.
+  const OWNER_CELL = '+19415550177';
+  const savedOwnerPhone = process.env.ADAM_PHONE;
+  beforeEach(() => { process.env.ADAM_PHONE = OWNER_CELL; });
+  afterAll(() => {
+    if (savedOwnerPhone === undefined) delete process.env.ADAM_PHONE; else process.env.ADAM_PHONE = savedOwnerPhone;
+  });
+  const baseLead = {
+    id: 'l1', created_at: '2026-11-18T12:00:00Z', email: 'pat@example.com', phone: '9415550100',
+    first_name: 'Pat', last_name: 'Sample', status: 'qualified',
+  };
+
+  test('a qualified lead later marked disqualified / duplicate / spam is skipped as lead_closed', () => {
+    for (const status of ['disqualified', 'DUPLICATE', ' spam ']) {
+      const c = mapLeadCandidate({ ...baseLead, status });
+      expect(exclusionReason(c)).toBe('lead_closed');
+      expect(skipReason(c)).toBe('lead_closed');
+    }
+    expect(skipReason(mapLeadCandidate({ ...baseLead, status: 'won' }))).toBeNull();
+    expect(skipReason(mapLeadCandidate({ ...baseLead, status: 'qualified' }))).toBeNull();
+  });
+
+  test('an internal test record is skipped as internal_test (owner cell, test name, linked test customer)', () => {
+    expect(skipReason(mapLeadCandidate({ ...baseLead, phone: OWNER_CELL }))).toBe('internal_test');
+    expect(skipReason(mapLeadCandidate({ ...baseLead, first_name: 'Adam', last_name: 'Martinez' }))).toBe('internal_test');
+    expect(skipReason(mapLeadCandidate({
+      ...baseLead, customer_id: 'c1', customer_first_name: 'Shakedown', customer_last_name: 'Test (internal)',
+    }))).toBe('internal_test');
+  });
+
+  test('completed-job revenue skips test records but not a merged lead (real paid work stays)', () => {
+    const job = { id: 'ea1', service_date: '2026-11-17', invoice_total: 100, lead_email: 'pat@example.com', lead_phone: '9415550100' };
+    expect(skipReason(mapCompletedJobCandidate({ ...job, customer_phone: '(941) 555-0177' }))).toBe('internal_test');
+    expect(skipReason(mapCompletedJobCandidate(job))).toBeNull();
+  });
+
+  test('summarizeCandidates counts the two new reasons and skips them', () => {
+    const { counts, rows } = summarizeCandidates([
+      mapLeadCandidate({ ...baseLead, status: 'spam' }),
+      mapLeadCandidate({ ...baseLead, id: 'l2', phone: '9415550177' }),
+      mapLeadCandidate({ ...baseLead, id: 'l3' }),
+    ]);
+    expect(counts).toMatchObject({ leadClosed: 1, internalTest: 1, eligible: 1, skipped: 2 });
+    expect(rows.map((r) => r.skipReason)).toEqual(['lead_closed', 'internal_test', null]);
+  });
+
+  test('dedupe: an exclusion on any sibling of a transaction excludes it', () => {
+    const [kept] = dedupeCandidatesByTransaction([
+      { transactionId: 't', email: 'a@x.com', phone: '9415550100', eventTimestamp: 'x' },
+      { transactionId: 't', internalTest: true },
+    ]);
+    expect(kept.internalTest).toBe(true);
+  });
+
+  describe('new_customer', () => {
+    const row = { ...baseLead, status: 'won', customer_id: 'cust-1', converted_at: '2026-11-18T15:00:00Z', event_at: '2026-11-18T15:00:00Z' };
+    const savedValue = process.env.AD_NEW_CUSTOMER_VALUE;
+    afterEach(() => {
+      if (savedValue === undefined) delete process.env.AD_NEW_CUSTOMER_VALUE; else process.env.AD_NEW_CUSTOMER_VALUE = savedValue;
+      delete process.env.GOOGLE_ADS_DM_NEW_CUSTOMER_CONVERSION_ACTION_ID;
+    });
+
+    test('one id per customer, converted time as the event time, $3,500 by default', () => {
+      delete process.env.AD_NEW_CUSTOMER_VALUE;
+      const c = mapNewCustomerCandidate(row);
+      expect(c).toMatchObject({
+        conversionType: 'new_customer',
+        transactionId: 'waves_new_customer:cust-1',
+        eventTimestamp: '2026-11-18T15:00:00.000Z',
+        conversionValue: 3500,
+        currency: 'USD',
+        eventName: 'Waves - New Customer',
+        customerId: 'cust-1',
+        leadId: 'l1',
+        externalId: 'lead:l1',
+      });
+      expect(skipReason(c)).toBeNull();
+      expect(buildEvent(c)).toMatchObject({ transactionId: 'waves_new_customer:cust-1', conversionValue: 3500, currency: 'USD' });
+    });
+
+    test('value comes from AD_NEW_CUSTOMER_VALUE; a bad value falls back to 3500', () => {
+      process.env.AD_NEW_CUSTOMER_VALUE = '4200';
+      expect(conversionValueForNewCustomer()).toBe(4200);
+      process.env.AD_NEW_CUSTOMER_VALUE = 'abc';
+      expect(conversionValueForNewCustomer()).toBe(3500);
+      process.env.AD_NEW_CUSTOMER_VALUE = '0';
+      expect(conversionValueForNewCustomer()).toBe(3500);
+    });
+
+    test('two won leads of one customer collapse to one transaction', () => {
+      const out = dedupeCandidatesByTransaction([
+        mapNewCustomerCandidate(row),
+        mapNewCustomerCandidate({ ...row, id: 'l2' }),
+      ]);
+      expect(out).toHaveLength(1);
+    });
+
+    test('a test record or a disqualified lead never counts as a new customer', () => {
+      expect(skipReason(mapNewCustomerCandidate({ ...row, phone: '9415550177' }))).toBe('internal_test');
+      expect(skipReason(mapNewCustomerCandidate({ ...row, status: 'disqualified', converted_at: row.converted_at }))).toBe('lead_closed');
+    });
+
+    test('missing action-id env: not configured and reported, like the other types', async () => {
+      const config = configurationFor('new_customer');
+      expect(config.conversionActionIdConfigured).toBe(false);
+      expect(config.configured).toBe(false);
+      expect(config.missing).toContain('GOOGLE_ADS_DM_NEW_CUSTOMER_CONVERSION_ACTION_ID');
+      expect(destinationFor('new_customer')).toBeNull();
+    });
+
+    test('action-id env set: a destination exists', () => {
+      process.env.GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID = '3393936713';
+      process.env.GOOGLE_ADS_DM_NEW_CUSTOMER_CONVERSION_ACTION_ID = 'customers/1/conversionActions/998877';
+      try {
+        expect(destinationFor('new_customer')).toMatchObject({ productDestinationId: '998877' });
+      } finally {
+        delete process.env.GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID;
+      }
+    });
+
+    test('collectCandidates runs the new-customer collector over the leads/customers join', async () => {
+      mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
+      const chain = {};
+      const sqls = [];
+      // Like knex, a callback argument (grouped where, whereNotExists subquery)
+      // runs against the builder, so its SQL is recorded too.
+      const methods = ['leftJoin', 'join', 'from', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'where', 'whereIn', 'whereRaw', 'whereNotExists', 'groupBy', 'orderByRaw', 'limit'];
+      for (const m of methods) {
+        chain[m] = jest.fn((...args) => {
+          if (typeof args[0] === 'function') args[0].call(chain, chain);
+          else if (typeof args[0] === 'string') sqls.push(args[0]);
+          return chain;
+        });
+      }
+      chain.select = jest.fn(() => chain);
+      chain.then = (resolve) => resolve([row]);
+      dbMock.mockImplementation(() => chain);
+      dbMock.raw = jest.fn((sql) => sql);
+      const out = await collectCandidates('new_customer', { since: '2026-11-01', endDate: '2026-11-18' });
+      expect(out).toHaveLength(1);
+      expect(out[0].transactionId).toBe('waves_new_customer:cust-1');
+      const text = sqls.join(' ');
+      expect(text).toContain("IN ('won', 'converted')");
+      expect(text).toContain('c.member_since');
+      expect(text).toContain('c.deleted_at');
+      expect(text).toContain("::timestamp AT TIME ZONE 'America/New_York'");
+      // A completed visit before first contact (minus the slack) makes it an existing customer.
+      expect(text).toContain('sr.service_date <');
+      // The limit counts customers: the newest customers are picked first, then their leads load.
+      expect(chain.groupBy).toHaveBeenCalledWith('l.customer_id');
+      expect(chain.limit).toHaveBeenCalledWith(500);
+      expect(chain.whereIn).toHaveBeenCalledWith('l.customer_id', chain);
+    });
   });
 });
