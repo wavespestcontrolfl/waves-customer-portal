@@ -54,7 +54,7 @@ jest.mock('../services/payment-lifecycle-email', () => ({
 }));
 jest.mock('../services/customer-credit', () => ({
   round2: (v) => Math.round((Number(v) || 0) * 100) / 100,
-  getBalance: jest.fn(async () => 500),
+  accountCreditSnapshotForInvoice: jest.fn(async () => ({ spendable: 500 })),
   spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => balance),
   postCreditMovement: jest.fn(async () => ({ balanceAfter: 400 })),
 }));
@@ -262,32 +262,6 @@ describe('active payment plans auto-complete when the invoice settles', () => {
   test('apply-credit leaves another invoice\'s unposted saved-card allocation reserved', async () => {
     const CustomerCredit = require('../services/customer-credit');
     trxCustomers.first.mockResolvedValue({ id: INVOICE.customer_id, account_credits: 100 });
-    CustomerCredit.spendableAccountCreditForInvoice
-      .mockResolvedValueOnce(500)
-      .mockResolvedValueOnce(75);
-
-    await withServer(async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toEqual({
-        error: 'Insufficient account credit. $75.00 is available for this invoice, which needs $100.00.',
-      });
-      expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenNthCalledWith(2, {
-        customerId: INVOICE.customer_id,
-        invoiceId: INVOICE.id,
-        balance: 100,
-      }, trx);
-      expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
-      expect(trxInvoices.update).not.toHaveBeenCalled();
-    });
-  });
-
-  test('apply-credit checks available credit before retiring a payment session', async () => {
-    const CustomerCredit = require('../services/customer-credit');
     CustomerCredit.spendableAccountCreditForInvoice.mockResolvedValueOnce(75);
 
     await withServer(async (baseUrl) => {
@@ -303,10 +277,44 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenCalledWith({
         customerId: INVOICE.customer_id,
         invoiceId: INVOICE.id,
-        balance: 500,
+        balance: 100,
+      }, trx);
+      expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('apply-credit checks available credit before retiring a payment session', async () => {
+    const CustomerCredit = require('../services/customer-credit');
+    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({ spendable: 75 });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({
+        error: 'Insufficient account credit. $75.00 is available for this invoice, which needs $100.00.',
+      });
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
+        customerId: INVOICE.customer_id,
+        invoiceId: INVOICE.id,
       }, db);
       expect(db.transaction).not.toHaveBeenCalled();
       expect(CustomerCredit.postCreditMovement).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the staff credit preview shows the $75 that can be applied to this invoice', async () => {
+    const CustomerCredit = require('../services/customer-credit');
+    CustomerCredit.accountCreditSnapshotForInvoice.mockResolvedValueOnce({ balance: 100, reserved: 25, spendable: 75 });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/admin/invoices/inv-1/credit-context`);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ balance: 75, amount_due: 100 });
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({ customerId: INVOICE.customer_id, invoiceId: INVOICE.id }, db);
     });
   });
 });

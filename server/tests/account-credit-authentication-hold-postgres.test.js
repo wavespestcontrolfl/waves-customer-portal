@@ -12,6 +12,7 @@ jest.mock('../services/collections/collection-hold', () => ({
 
 const CustomerCredit = require('../services/customer-credit');
 const { recordAuthenticationCancellation } = require('../services/invoice-payment-authentication');
+const { invoiceCreditWouldFullyCover } = require('../services/pay-combined');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -506,6 +507,8 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       created_at: new Date(),
     });
 
+    const checkoutInvoice = await app('invoices').where({ id: checkoutInvoiceId }).first();
+    const readFullCoverage = () => invoiceCreditWouldFullyCover(checkoutInvoice, { database: app });
     const settlement = await app.transaction();
     try {
       await settlement('customers').where({ id: customerId }).update({ account_credits: 75 });
@@ -524,6 +527,7 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
         spendable: 75,
         autoApplyEnabled: true,
       });
+      await expect(readFullCoverage()).resolves.toBe(false);
       await settlement.commit();
     } catch (err) {
       await settlement.rollback();
@@ -539,6 +543,8 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
       spendable: 75,
       autoApplyEnabled: true,
     });
+    await expect(readFullCoverage()).resolves.toBe(false);
+    await expect(invoiceCreditWouldFullyCover({ ...checkoutInvoice, total: 75 }, { database: app })).resolves.toBe(true);
   });
 
   test('checkout projection and invoice lock complete while Terminal holds invoice then customer', async () => {
@@ -576,12 +582,11 @@ postgres('account credit authentication hold (PostgreSQL)', () => {
 
       await expect(app.transaction(async (checkout) => {
         await checkout.raw("SET LOCAL lock_timeout = '250ms'");
-        const snapshot = await CustomerCredit.accountCreditSnapshotForInvoice({
+        await checkout('invoices').where({ id: checkoutInvoiceId }).forUpdate().first('id');
+        return CustomerCredit.accountCreditSnapshotForInvoice({
           customerId,
           invoiceId: checkoutInvoiceId,
         }, checkout);
-        await checkout('invoices').where({ id: checkoutInvoiceId }).forUpdate().first('id');
-        return snapshot;
       })).resolves.toMatchObject({
         balance: 100,
         reserved: 25,

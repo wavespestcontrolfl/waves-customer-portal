@@ -2171,26 +2171,24 @@ const StripeService = {
     // be the gross total, or the confirmed quote and the charge disagree
     // and the charge rejects it as stale.
     const {
-      getBalance,
+      accountCreditSnapshotForInvoice,
       computeApplication,
-      customerAutoApplyEnabled,
-      spendableAccountCreditForInvoice,
     } = require('./customer-credit');
-    if (require('../config/feature-gates').gates.autoApplyAccountCredit
-      && await customerAutoApplyEnabled(invoice.customer_id)) {
-      const balance = await getBalance(invoice.customer_id);
-      const spendableBalance = await spendableAccountCreditForInvoice({
+    if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+      const creditSnapshot = await accountCreditSnapshotForInvoice({
         customerId: invoice.customer_id,
         invoiceId,
-        balance,
+        balanceAdjustment: 0,
       }, db);
-      const projection = computeApplication({
-        total: invoice.total,
-        creditApplied: projectedCreditApplied,
-        amountPaid: invoice.amount_paid,
-        balance: spendableBalance,
-      });
-      projectedCreditApplied = projection.newCreditApplied;
+      if (creditSnapshot.autoApplyEnabled) {
+        const projection = computeApplication({
+          total: invoice.total,
+          creditApplied: projectedCreditApplied,
+          amountPaid: invoice.amount_paid,
+          balance: creditSnapshot.spendable,
+        });
+        projectedCreditApplied = projection.newCreditApplied;
+      }
     }
     const projectedAmountDue = Math.max(0, Math.round(
       ((Number(invoice.total) || 0) - projectedCreditApplied - (Number(invoice.amount_paid) || 0)) * 100,
@@ -4134,20 +4132,6 @@ const StripeService = {
           }
           if (setupCreditEnabled) setupCreditCustomerId = ownerId;
         }
-        // One statement reads the opt-in, balance and sibling reservations.
-        // Do not row-lock the customer for this coverage-only projection:
-        // Terminal owns invoice -> customer, so customer -> invoice here can
-        // deadlock. The actual credit draw revalidates under its own locks.
-        if (setupCreditCustomerId) {
-          setupPromoPending = opts.holdCoverageForCapture || !setupCreditGates.payPromoCode
-            ? 0
-            : await require('./invoice-promo-code').pendingPromoCredit(invoice, trx);
-          setupCreditSnapshot = await require('./customer-credit').accountCreditSnapshotForInvoice({
-            customerId: setupCreditCustomerId,
-            invoiceId,
-            balanceAdjustment: setupPromoPending,
-          }, trx);
-        }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
@@ -4197,6 +4181,27 @@ const StripeService = {
         // receipt that lands afterward; the early-return and allocation
         // branches below take the retained ledger lock at their last seam.
         await require('./estimate-deposits').assertInvoiceDepositSettlementReady(trx, lockedInvoice, { lock: false });
+
+        // Read a promo only after its invoice lock: an entry that committed
+        // while setup waited for this row must price this payment too. The
+        // account snapshot is one unlocked statement (opt-in + balance +
+        // sibling reservations) against the locked invoice's live owner. Do
+        // not row-lock the customer here — Terminal owns invoice -> customer,
+        // and the eventual draw repeats this calculation under write locks.
+        const setupCreditAllowed = !!lockedCustomerId
+          && !lockedInvoice.payer_id
+          && (setupCreditGates.autoApplyAccountCredit
+            || (!opts.holdCoverageForCapture && setupCreditGates.payPromoCode));
+        if (setupCreditAllowed) {
+          setupPromoPending = opts.holdCoverageForCapture || !setupCreditGates.payPromoCode
+            ? 0
+            : await require('./invoice-promo-code').pendingPromoCredit(lockedInvoice, trx);
+          setupCreditSnapshot = await require('./customer-credit').accountCreditSnapshotForInvoice({
+            customerId: lockedCustomerId,
+            invoiceId,
+            balanceAdjustment: setupPromoPending,
+          }, trx);
+        }
 
         // Auto-apply only does anything when the customer actually has account
         // credit. Resolve the available balance once up front and gate BOTH the

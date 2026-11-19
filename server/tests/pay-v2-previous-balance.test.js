@@ -64,7 +64,7 @@ const payRouter = require('../routes/pay-v2');
 
 function chain({ first } = {}) {
   const q = {};
-  ['where', 'whereIn', 'select', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNot', 'whereNotNull', 'join', 'crossJoin', 'sum', 'as', 'select', 'orderBy', 'limit'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   return q;
 }
@@ -215,7 +215,7 @@ describe('GET /pay/:token previous-balance itemization', () => {
 // the same selection — and nothing at all with the gate off.
 async function getInvoicePdf(data, { customer = null } = {}) {
   InvoiceService.getByToken.mockResolvedValue(data);
-  db.mockImplementation((table) => chain({ first: table === 'customers' ? customer : null }));
+  db.mockImplementation((table) => chain({ first: table.split(' ')[0] === 'customers' ? customer : null }));
   const layer = payRouter.stack.find((l) => l.route?.path === '/:token/invoice.pdf' && l.route.methods.get);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   let error = null;

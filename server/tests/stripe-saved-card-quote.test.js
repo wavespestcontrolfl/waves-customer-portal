@@ -165,7 +165,6 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
       id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
       stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit',
     };
-    const customer = { account_credits: '100.00', auto_apply_account_credit: true };
     const query = (row) => {
       const chain = {
         where: jest.fn(() => chain),
@@ -176,10 +175,14 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     const db = jest.fn((table) => {
       if (table === 'invoices') return query(invoice);
       if (table === 'payment_methods') return query(card);
-      if (table === 'customers') return query(customer);
       throw new Error(`Unexpected table: ${table}`);
     });
-    const spendableAccountCreditForInvoice = jest.fn(async () => 75);
+    const accountCreditSnapshotForInvoice = jest.fn(async () => ({
+      balance: 100,
+      reserved: 25,
+      spendable: 75,
+      autoApplyEnabled: true,
+    }));
 
     jest.doMock('../models/db', () => db);
     jest.doMock('stripe', () => jest.fn(() => ({})));
@@ -189,17 +192,17 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../services/customer-credit', () => ({
       ...jest.requireActual('../services/customer-credit'),
-      spendableAccountCreditForInvoice,
+      accountCreditSnapshotForInvoice,
     }));
 
     try {
       const StripeService = require('../services/stripe');
       const quote = await StripeService.quoteInvoiceSavedCardCharge('inv-1', 'pm-1');
 
-      expect(spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+      expect(accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
         customerId: 'cust-1',
         invoiceId: 'inv-1',
-        balance: 100,
+        balanceAdjustment: 0,
       }, db);
       expect(quote).toMatchObject({
         base: 25,

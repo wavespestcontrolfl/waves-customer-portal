@@ -274,18 +274,15 @@ async function invoiceProjectedCreditApplied(invoice, { database = db } = {}) {
   const promo = await require('../services/invoice-promo-code').pendingPromoCredit(invoice, database);
   const autoApplyEnabled = require('../config/feature-gates').gates.autoApplyAccountCredit;
   if (!autoApplyEnabled && !(promo > 0)) return 0;
-  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  const optedIn = autoApplyEnabled && row?.auto_apply_account_credit === true;
-  if (!optedIn && !(promo > 0)) return 0;
-  const postPromoSpendable = await require('../services/customer-credit').spendableAccountCreditForInvoice({
+  const snapshot = await require('../services/customer-credit').accountCreditSnapshotForInvoice({
     customerId: invoice.customer_id,
     invoiceId: invoice.id,
-    balance: (Number(row?.account_credits) || 0) + promo,
+    balanceAdjustment: promo,
   }, database);
   // A promo posts before its capped draw. If older saved-card reservations
   // exceed today's balance, only the post-promo remainder is actually
   // spendable. Opted-out customers still draw no more than this promo.
-  const credit = optedIn ? postPromoSpendable : Math.min(promo, postPromoSpendable);
+  const credit = autoApplyEnabled && snapshot.autoApplyEnabled ? snapshot.spendable : Math.min(promo, snapshot.spendable);
   if (!(credit > 0)) return 0;
   return cappedAtDue(credit);
 }

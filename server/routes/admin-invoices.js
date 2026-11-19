@@ -3114,14 +3114,17 @@ router.get('/:id/credit-context', async (req, res, next) => {
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     const total = CustomerCredit.round2(invoice.total || 0);
     const amountDue = invoiceAmountDue(invoice);
-    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
+    const { spendable } = await CustomerCredit.accountCreditSnapshotForInvoice({
+      customerId: invoice.customer_id,
+      invoiceId: invoice.id,
+    }, db);
     res.json({
       customer_id: invoice.customer_id,
       invoice_number: invoice.invoice_number,
       total,
       credit_applied: CustomerCredit.round2(invoice.credit_applied || 0),
       amount_due: amountDue,
-      balance,
+      balance: spendable,
     });
   } catch (err) { next(err); }
 });
@@ -3184,11 +3187,9 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     if (amountDue <= 0) {
       return res.status(400).json({ error: 'Invoice is already fully covered by credit' });
     }
-    const balance = (await CustomerCredit.getBalance(invoice.customer_id)) || 0;
-    const spendableBalance = await CustomerCredit.spendableAccountCreditForInvoice({
+    const { spendable: spendableBalance } = await CustomerCredit.accountCreditSnapshotForInvoice({
       customerId: invoice.customer_id,
       invoiceId: id,
-      balance,
     }, db);
     const insufficientCreditMessage = (available, due) =>
       `Insufficient account credit. $${available.toFixed(2)} is available for this invoice, which needs $${due.toFixed(2)}.`;

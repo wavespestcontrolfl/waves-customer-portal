@@ -817,6 +817,42 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       expect(result.paymentIntentId).toBe('pi_after_promo');
     });
 
+    test('a promo committed before the invoice lock is read from the locked invoice and lowers the payment', async () => {
+      customerAccountCredits = '0.00';
+      invoiceRow.stripe_payment_intent_id = null;
+      const lockedInvoice = { ...invoiceRow, promo_committed: true };
+      lockedInvoiceQuery.first.mockResolvedValue(lockedInvoice);
+      stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+        id: 'pi_after_racing_promo',
+        status: 'requires_payment_method',
+        client_secret: 'pi_after_racing_promo_secret',
+      });
+      const promo = {
+        pendingPromoCredit: jest.fn(async row => (row.promo_committed ? 25 : 0)),
+        redeemAndApplyPromoCode: jest.fn(async (_trx, row) => {
+          row.credit_applied = '25.00';
+          return 25;
+        }),
+      };
+      jest.doMock('../services/invoice-promo-code', () => promo);
+
+      const CustomerCredit = require('../services/customer-credit');
+      const StripeService = require('../services/stripe');
+      const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(promo.pendingPromoCredit).toHaveBeenCalledWith(lockedInvoice, trxMock);
+      expect(lockedInvoiceQuery.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(promo.pendingPromoCredit.mock.invocationCallOrder[0]);
+      expect(CustomerCredit.accountCreditSnapshotForInvoice).toHaveBeenCalledWith({
+        customerId: lockedInvoice.customer_id,
+        invoiceId: lockedInvoice.id,
+        balanceAdjustment: 25,
+      }, trxMock);
+      expect(promo.redeemAndApplyPromoCode).toHaveBeenCalledWith(trxMock, lockedInvoice);
+      expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(5000);
+      expect(result.paymentIntentId).toBe('pi_after_racing_promo');
+    });
+
     test('with automatic credit on, the code is redeemed first and the customer\'s own balance is then drawn as before', async () => {
       customerAccountCredits = '15.00';
       const promo = withPromoWaiting(25);

@@ -125,14 +125,11 @@ async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
   // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
   // it must read as zero here too — otherwise the capture step / combined
   // preview would show a coverage the setup path will never apply.
-  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return false;
-  const credit = await require('./customer-credit').spendableAccountCreditForInvoice({
+  const { autoApplyEnabled, spendable } = await require('./customer-credit').accountCreditSnapshotForInvoice({
     customerId: invoice.customer_id,
     invoiceId: invoice.id,
-    balance: row.account_credits,
   }, database);
-  return credit > 0 && credit >= invoiceAmountDue(invoice);
+  return autoApplyEnabled === true && spendable > 0 && spendable >= invoiceAmountDue(invoice);
 }
 
 // Why combinedEligibleSiblings returned null (the optional onDegrade
