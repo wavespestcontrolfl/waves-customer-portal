@@ -6343,10 +6343,13 @@ ordinary reserve would delete it. The refusal is `409 { error: 'another time is 
 'OTHER_LIVE_HOLD' }`. The page then releases only its own expired hold and reloads. Whenever such a reload (after
 this refusal, or after a re-hold that failed for another reason) finds `GET /data` offering a live hold as
 `existing_appointment` with `isHold`, the page follows it: it returns to its normal step and shows that hold (the card
-says the time is held, in the standard and the website layout alike), and a notice says a different time is held from
-another window or device. If the reload finds no live hold, the plain expiry copy shows with the picker back. A reserve without the field keeps the supersede-on-reselect semantics above. When a signed offer has
+says the time is held, in the standard and the website layout alike), and a notice says why. The notice names another
+window or device only when the hold's date or start time differs from the customer's pick; a hold at the picked time
+(the page's own re-hold can commit with its answer lost) gets a neutral "held for you again". If the reload finds no
+live hold, the plain expiry copy shows with the picker back. A reserve without the field keeps the supersede-on-reselect semantics above. When a signed offer has
 lapsed, the page reads the picked day (`GET /available-slots?date=`) for a fresh signed id for the same time and
-reserves that once. The re-hold never says the time was taken: `/reserve` gives the same `slot no longer available` for
+reserves that once; on success the page keeps that fresh id (and the slot's details) as its selection, so a later
+reserve (Go back, then a payment choice) sends an offer the server accepts. The re-hold never says the time was taken: `/reserve` gives the same `slot no longer available` for
 a taken time, a lapsed offer, a closed notice window, a blackout or a technician check, and a day list that does not
 name the time is no proof either (it is ranked and capped). Every such case gets the plain expiry recovery.
 

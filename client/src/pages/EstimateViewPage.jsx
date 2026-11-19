@@ -50,7 +50,7 @@ import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import PromoCodeSection from '../components/estimate/PromoCodeSection';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
 import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
-import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
+import { approveSlotLabel, firstVisitDayAndWindow, glassSlotMeta } from '../lib/estimate-glass-slots';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker, { isContactReview } from '../components/estimate/SlotPicker';
@@ -4799,8 +4799,10 @@ export function EstimateErrorBanner({ error }) {
 // A signed time offer lapses 45 minutes after its list was built, and reserve then
 // refuses even a free time. So read the picked day for a fresh signed offer
 // (freshOfferForSameTime) and hold it once more with its new id. A day list without the
-// time (it is ranked and capped) or an unreadable one is { failed }. The page keeps its
-// own id: accept finds the hold by date, time and technician, not by the signature.
+// time (it is ranked and capped) or an unreadable one is { failed }. A hold under the fresh
+// offer answers { held, freshSlot }: the page takes the fresh id and that slot's details,
+// because a later reserve (Go back, then a payment choice) re-sends the page's id, and the
+// lapsed signature would be refused.
 export async function holdSameTimeAgain(args) {
   const { token, slotId } = args || {};
   if (!token || !slotId) return { failed: true };
@@ -4808,10 +4810,11 @@ export async function holdSameTimeAgain(args) {
     const first = await reserveForRehold(args, slotId);
     if (!first.lapsedOrTaken) return first.answer;
     const fresh = await freshOfferForSameTime(args);
-    if (!fresh.slotId) return fresh.answer;
+    if (!fresh.slot) return fresh.answer;
     // One retry only. A second "no longer available" is still no proof the time is gone.
-    const second = await reserveForRehold(args, fresh.slotId);
-    return second.lapsedOrTaken ? { failed: true } : second.answer;
+    const second = await reserveForRehold(args, fresh.slot.slotId);
+    if (second.lapsedOrTaken) return { failed: true };
+    return second.answer.held ? { ...second.answer, freshSlot: fresh.slot } : second.answer;
   } catch {
     return { failed: true };
   }
@@ -4847,7 +4850,7 @@ async function reserveForRehold({ token, serviceMode, selectedFrequency, service
 
 // A fresh signed offer for the same time, read from the picked day with the slot
 // picker's own query: that list carries the customer filters (the refusal's own list
-// does not, so it is never used). Answers { slotId }, or { answer } for
+// does not, so it is never used). Answers { slot } (the fresh slot), or { answer } for
 // holdSameTimeAgain: { review } or { noBooking } when the day read says the estimate
 // stopped booking online meanwhile, { failed } when the day cannot be read or does not
 // list the time (a ranked, capped list can leave out a free time). A thrown read is
@@ -4867,10 +4870,10 @@ async function freshOfferForSameTime({ token, slotId, serviceMode, selectedFrequ
   if (isNoBookingRefusal(body)) return { answer: { noBooking: true } };
   if (!r.ok || !body || (!Array.isArray(body.primary) && !Array.isArray(body.expander))) return { answer: { failed: true } };
   const fresh = sameTimeOnFreshList(body, slotId);
-  return fresh ? { slotId: fresh } : { answer: { failed: true } };
+  return fresh ? { slot: fresh } : { answer: { failed: true } };
 }
 
-// The same time on a fresh signed list, or null. A slot id is date, start time and
+// The same time's slot on a fresh signed list, or null. A slot id is date, start time and
 // technician, then the offer's signature segments after the first '.'.
 function sameTimeOnFreshList(list, slotId) {
   const base = String(slotId).split('.')[0];
@@ -4879,7 +4882,24 @@ function sameTimeOnFreshList(list, slotId) {
     ...(Array.isArray(list?.expander) ? list.expander : []),
   ];
   const same = slots.find((s) => typeof s?.slotId === 'string' && s.slotId !== slotId && s.slotId.split('.')[0] === base);
-  return same ? same.slotId : null;
+  return same || null;
+}
+
+// The date and start time a slot id names ("2026-07-15_09-00_tech-1.<signature>": 2026-07-15 at 09:00), or null.
+function slotIdDateAndStart(slotId) {
+  const m = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})_/.exec(String(slotId || ''));
+  return m ? { date: m[1], windowStart: `${m[2]}:${m[3]}` } : null;
+}
+
+// The banner for a live hold a recovery's reload found. This page's own re-hold can commit with its answer lost, so
+// the hold is called another window's or device's only when its date or start time differs from the customer's pick;
+// the same time, or a pick the page no longer knows, gets the neutral 'held_again'.
+function recoveredHoldNotice(appointment, picked) {
+  const start = (value) => String(value || '').slice(0, 5);
+  const otherDay = Boolean(picked?.date && appointment?.scheduledDate) && appointment.scheduledDate !== picked.date;
+  const otherStart = Boolean(picked?.windowStart && appointment?.windowStart)
+    && start(appointment.windowStart) !== start(picked.windowStart);
+  return otherDay || otherStart ? 'other_hold' : 'held_again';
 }
 
 export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
@@ -4895,6 +4915,9 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   // 'other_hold': the hold ran out, and another window or device holds a different time for this
   // estimate (the server kept it). The page shows that hold below; nothing is booked yet.
   const otherHold = kind === 'other_hold';
+  // 'held_again': the hold ran out, and a recovery found a live hold at the time the customer picked (this page's own
+  // re-hold whose answer was lost, or another window's hold for the same time). Neutral: it never names a device.
+  const heldAgain = kind === 'held_again';
   // 'reheld': the 15-minute hold ran out while the customer was confirming and
   // the same time was still free, so it was held again. Nothing is booked yet,
   // and the banner has to say so (a customer once left believing she was done).
@@ -4922,13 +4945,18 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
             <strong>Your time ran out, and a different time is held for you.</strong>{' '}
             It was picked in another window or on another device. Nothing is booked yet. Check the time below, then confirm.
           </>
+        ) : heldAgain ? (
+          <>
+            <strong>Your time ran out, and it is held for you again.</strong>{' '}
+            Nothing is booked yet. Check the time below, then confirm.
+          </>
         ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
             ? 'Your held time ran out and nothing was booked. Pick a time below to finish signing up.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
-      {onRetry && !reheld && !otherHold ? (
+      {onRetry && !reheld && !otherHold && !heldAgain ? (
         <button
           type="button"
           onClick={onRetry}
@@ -6539,6 +6567,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The hold a recovery could not finish releasing/refreshing — the banner's
   // Retry re-runs that recovery instead of only re-fetching slots.
   const pendingRecoveryHoldRef = useRef(null);
+  // The date and start time the customer had picked when a recovery began, kept until it completes (a retry runs
+  // with the selection already cleared). The reload compares a hold it finds with it (recoveredHoldNotice).
+  const pendingRecoveryPickRef = useRef(null);
+  const selectedPickRef = useRef(null);
+  // The picked date and start time: the slot's details when they belong to the picked id, else what the id names.
+  useEffect(() => {
+    selectedPickRef.current = selectedSlotMeta?.date && selectedSlotMeta.slotId === selectedSlotId
+      ? { date: selectedSlotMeta.date, windowStart: selectedSlotMeta.windowStart || null }
+      : slotIdDateAndStart(selectedSlotId);
+  }, [selectedSlotId, selectedSlotMeta]);
   // Rendered state for the same fact: a ref cannot drive the banner, and a
   // no_booking recovery lands on 'configure', which has no slot banner — so
   // a failed release left the stale contract in place with nothing to tap
@@ -7258,6 +7296,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // recovers while that latch is still set.
     if (inlineConfirmBusyRef.current) return;
     setOtherHoldNotice(false);
+    if (selectedPickRef.current) pendingRecoveryPickRef.current = selectedPickRef.current;
     // Captured before the reset: an accept-time SLOT_UNAVAILABLE rolls its
     // transaction back and leaves the hold row LIVE (codex r3 P1), so a bare
     // refresh would hand that same row straight back as
@@ -7318,10 +7357,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // recovery, the page follows the server: the normal step adopts that hold, and the notice says why. Without
           // this, an expiry phase would say "Pick a time below" over a picker the held appointment hides.
           const refreshed = body?.estimate?.acceptance;
+          const picked = pendingRecoveryPickRef.current;
+          pendingRecoveryPickRef.current = null;
           if (refreshed?.mode === 'existing_appointment' && refreshed.appointment?.isHold) {
             setCtaPhase('configure');
             setDeadHoldNote(null);
-            setOtherHoldNotice(true);
+            setOtherHoldNotice(recoveredHoldNotice(refreshed.appointment, picked));
           }
         });
       })
@@ -8154,6 +8195,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (!selectedSlotId || existingAppointment) return false;
     const again = await holdSameTimeAgain({ token, slotId: selectedSlotId, serviceMode, selectedFrequency, serviceCadences });
     if (again.held) {
+      // Held under a fresh signed offer: the page takes its id and details together (the picker keeps an off-list
+      // selection only while the details carry the same id), so a later reserve sends an offer the server accepts.
+      if (again.freshSlot) {
+        setSelectedSlotId(again.freshSlot.slotId);
+        setSelectedSlotMeta((meta) => glassSlotMeta(again.freshSlot) || (meta ? { ...meta, slotId: again.freshSlot.slotId } : meta));
+      }
       // The review-entry effect scrolls the review anchor, which holds the notice, into view.
       setReservation({ scheduledServiceId: again.held.scheduledServiceId, expiresAt: again.held.expiresAt, reheld: true });
       setCtaPhase('review');
@@ -10941,9 +10988,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       }}
     />
   ) : otherHoldNotice && ctaPhase === 'configure' ? (
-    // After a recovery found another window's hold: the reloaded page shows it (the held-time card below), and this
-    // says why. If that hold is gone too, the plain expiry copy (the picker is back).
-    <SlotIssueBanner kind={existingAppointment?.isHold ? 'other_hold' : 'expired'} />
+    // After a recovery found a live hold: the reloaded page shows it (the held-time card below), and this says why
+    // (recoveredHoldNotice picks the copy). If that hold is gone too, the plain expiry copy (the picker is back).
+    <SlotIssueBanner kind={existingAppointment?.isHold ? otherHoldNotice : 'expired'} />
   ) : null;
 
   // The configure step's held-time card, shared by both layouts: the website checkout shows the replacement time too.

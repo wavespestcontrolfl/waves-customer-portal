@@ -142,14 +142,16 @@ async function pickTimeAndConfirm() {
 const REHELD = /Your time ran out, so we held it again/;
 
 // /data after another window or device took a hold for this estimate: a reload lands on that live hold.
-const heldElsewhereFrom = (base) => () => {
+const heldElsewhereFrom = (base, at = {}) => () => {
   const payload = base();
   payload.estimate = { ...payload.estimate, acceptance: { mode: 'existing_appointment', appointment: {
     id: 'ss-other-tab', scheduledDate: '2026-07-16', windowStart: '13:00', windowEnd: '15:00', windowDisplay: '1:00 PM - 3:00 PM',
-    serviceType: 'Pest Control', status: 'pending', isHold: true, reservationExpiresAt: inFifteenMinutes(),
+    serviceType: 'Pest Control', status: 'pending', isHold: true, reservationExpiresAt: inFifteenMinutes(), ...at,
   } } };
   return payload;
 };
+// The picked time (the first slot, 2026-07-15 at 9:00), held: what a reload finds after the page's own re-hold commits.
+const PICKED_TIME_HOLD = { id: 'ss-own-rehold', scheduledDate: '2026-07-15', windowStart: '09:00', windowEnd: '11:00', windowDisplay: '9:00 AM - 11:00 AM' };
 
 // Real slot ids (date_start_technician, then the signed-offer segments): the re-hold reads the picked day from them.
 const OLD_ID = '2026-07-15_09-00_tech-1.1767210000000.90.oldsig';
@@ -229,6 +231,27 @@ describe('the accept says the hold expired', () => {
     expect(await screen.findByText(REHELD, {}, SLOW)).toBeInTheDocument();
     expect(reserveCalls(fetchMock).map(([, init]) => JSON.parse(init.body).slotId)).toEqual([OLD_ID, OLD_ID, FRESH_ID]);
     expect(screen.queryByText(/just taken/i)).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  // The page takes the fresh id with the hold: Go back, then a payment choice, re-sends the page's id, and the lapsed
+  // signature would be refused.
+  it('after a re-hold under a fresh offer, Go back and a payment choice reserve with the fresh id', async () => {
+    stubLocalStorage();
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => (n === 2 ? LAPSED_409() : jsonResponse({ scheduledServiceId: `ss-${n}`, expiresAt: inFifteenMinutes() })),
+      acceptImpl: (n) => (n === 1 ? EXPIRED_409() : jsonResponse({ success: true })),
+      slotsImpl: pickerThenDay(() => jsonResponse({ primary: [slotAt(FRESH_ID)], expander: [] })),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+    expect(await screen.findByText(REHELD, {}, SLOW)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go back' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Pay per application/i }, SLOW));
+    await waitFor(() => expect(reserveCalls(fetchMock)).toHaveLength(4));
+    expect(reserveCalls(fetchMock).map(([, init]) => JSON.parse(init.body).slotId)).toEqual([OLD_ID, OLD_ID, FRESH_ID, FRESH_ID]);
   }, TEST_TIMEOUT_MS);
 
   it('a fresh offer refused too still gets the plain expiry copy (a refusal is no proof the time is gone), and the time list reopens', async () => {
@@ -328,6 +351,32 @@ describe('the accept says the hold expired', () => {
     expect(screen.queryByText(/Your held time ran out and nothing was booked/)).toBeNull();
     expect(screen.queryByText(/Pick a time below/)).toBeNull();
     expect(screen.queryByText(/just taken/i)).toBeNull();
+  }, TEST_TIMEOUT_MS);
+
+  // The re-hold can commit on the server while its answer is lost: the reload then finds a hold at the very time the
+  // customer picked. That is no proof of another device, so the notice is neutral.
+  it('a re-hold whose answer is lost: a hold at the picked time is "held for you again", never another device', async () => {
+    stubLocalStorage();
+    let reheldOnServer = false;
+    const fetchMock = makeFetchMock({
+      reserveImpl: (n) => {
+        if (n === 1) return jsonResponse({ scheduledServiceId: 'ss-1', expiresAt: inFifteenMinutes() });
+        reheldOnServer = true;
+        throw new TypeError('Failed to fetch');
+      },
+      acceptImpl: () => EXPIRED_409(),
+      data: () => (reheldOnServer ? heldElsewhereFrom(recurringPayload, PICKED_TIME_HOLD)() : recurringPayload()),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<EstimateViewPage />);
+
+    await pickTimeAndConfirm();
+
+    expect(await screen.findByText(/Your time ran out, and it is held for you again/, {}, SLOW)).toBeInTheDocument();
+    expect(await screen.findByText('Time held for you', {}, SLOW)).toBeInTheDocument();
+    expect(screen.queryByText(/a different time is held for you/)).toBeNull();
+    expect(screen.queryByText(/another window or on another device/)).toBeNull();
+    expect(screen.queryByText(/Your held time ran out and nothing was booked/)).toBeNull();
   }, TEST_TIMEOUT_MS);
 
   it('the website checkout shows another tab\'s hold, and the notice, in its booking step', async () => {
@@ -492,7 +541,8 @@ describe('holdSameTimeAgain', () => {
     const fetchMock = routed({ reserve: () => reserves.shift()(), day: () => jsonResponse({ primary: [], expander: [{ slotId: FRESH }] }) });
     vi.stubGlobal('fetch', fetchMock);
     const out = await holdSameTimeAgain({ ...base, slotId: OLD, selectedFrequency: 'quarterly' });
-    expect(out).toEqual({ held: { scheduledServiceId: 'ss-4', expiresAt: 'soon' } });
+    // The fresh slot rides along: the page takes its id for any later reserve.
+    expect(out).toEqual({ held: { scheduledServiceId: 'ss-4', expiresAt: 'soon' }, freshSlot: { slotId: FRESH } });
     const [dayUrl] = fetchMock.mock.calls.find(([url]) => String(url).includes('/available-slots'));
     const query = new URL(String(dayUrl), 'http://x').searchParams;
     expect(query.get('date')).toBe('2026-07-15');
