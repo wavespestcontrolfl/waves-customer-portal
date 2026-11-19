@@ -50,6 +50,18 @@ function matchingCancellation(intent, database, lockInvoice = false) {
   return { query, evidence };
 }
 
+async function findSettlingAuthenticationAttempt(intent, invoice, database, { lock = false } = {}) {
+  if (intent.status !== 'succeeded' || !invoice || intent.metadata?.waves_invoice_id !== invoice.id
+    || intent.metadata?.waves_customer_id !== invoice.customer_id) return null;
+  const match = matchingSavedCardIntent(intent, database);
+  if (!match) return null;
+  const { query, methodId } = match;
+  if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
+  if (lock) query.forUpdate();
+  return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts')
+    .first('id', 'amount', 'credit_applied_delta', 'credit_applied_total');
+}
+
 // A webhook can arrive before the worker records the decline. Without a
 // method, its candidate clears the hold only if the worker binds the same PI.
 async function recordAuthenticationCancellation(intent, database) {
@@ -65,7 +77,7 @@ async function recordAuthenticationSettlement(intent, trx) {
   if (!match) return;
   const { query, methodId } = match;
   if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
-  await query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
+  return query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at')
     .whereExists(trx('payments').select('id').where({
       customer_id: intent.metadata.waves_customer_id, stripe_payment_intent_id: intent.id, status: 'paid',
     }))
@@ -100,4 +112,7 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
   return { attemptId, intentId, result: execute ? 'cancellation_recorded' : 'cancellation_verified' };
 }
 
-module.exports = { whereAwaitingAuthentication, recordAuthenticationCancellation, recordAuthenticationSettlement, verifySavedCardCancellation };
+module.exports = {
+  whereAwaitingAuthentication, findSettlingAuthenticationAttempt, recordAuthenticationCancellation,
+  recordAuthenticationSettlement, verifySavedCardCancellation,
+};
