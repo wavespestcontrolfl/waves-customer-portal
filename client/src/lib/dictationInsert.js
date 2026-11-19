@@ -71,16 +71,24 @@ function nativeSet(el, value) {
  * does the same job for React.
  * Returns { ok: true } or { ok: false, reason: "gone" | "locked" | "full" }.
  */
+// Where dictated words go in the box now: the selection they replace, the space put before them,
+// and the characters the box still takes there.
+function placement(el, selection) {
+  const { start, end } = clampSelection(el.value, currentSelection(el, selection));
+  const lead = start > 0 && !/\s/.test(el.value[start - 1]) ? " " : "";
+  return { start, end, lead, room: roomFor(el, end - start) };
+}
+
 /**
  * Why a box cannot take dictated words now: "gone" (left the page), "locked" (disabled or
- * read-only) or "full" (no room at the caret); null when it can. The one check for the insert
- * below and for FocusedBoxMic's resend question.
+ * read-only) or "full" (no room at the caret for a word after the space put before it); null
+ * when it can. The one check for the insert below and for FocusedBoxMic's resend question.
  */
 export function dictationRefusal(el, selection) {
   if (!el || !el.isConnected) return "gone";
   if (el.disabled || el.readOnly) return "locked";
-  const { start, end } = clampSelection(el.value, currentSelection(el, selection));
-  return roomFor(el, end - start) <= 0 ? "full" : null;
+  const { lead, room } = placement(el, selection);
+  return room <= lead.length ? "full" : null;
 }
 
 export function insertDictatedText(el, text, selection) {
@@ -90,8 +98,7 @@ export function insertDictatedText(el, text, selection) {
   if (!words) return { ok: true };
   if (refusal === "full") return { ok: false, reason: "full" };
   const before = el.value;
-  const { start, end } = clampSelection(before, currentSelection(el, selection));
-  const lead = start > 0 && !/\s/.test(before[start - 1]) ? " " : "";
+  const { start, end, lead, room } = placement(el, selection);
   let payload = lead + words;
   try {
     el.focus({ preventScroll: true });
@@ -101,7 +108,7 @@ export function insertDictatedText(el, text, selection) {
   }
   if (browserInsert(payload) && el.value !== before) return { ok: true };
   // The browser declined (or has no execCommand): set the value ourselves.
-  payload = payload.slice(0, roomFor(el, end - start));
+  payload = payload.slice(0, room);
   nativeSet(el, before.slice(0, start) + payload + before.slice(end));
   const caret = start + payload.length;
   try {

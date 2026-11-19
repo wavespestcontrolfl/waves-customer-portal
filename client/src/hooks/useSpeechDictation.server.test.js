@@ -388,6 +388,22 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(postsTo(fetchMock)).toHaveLength(1);
   });
 
+  it("the login changed while recording: the clip is not sent with the new login and no words land", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    localStorage.setItem("waves_admin_token", "other-staff-jwt");
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(false));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(postsTo(fetchMock)).toHaveLength(0);
+    expect(onTranscript).not.toHaveBeenCalled();
+    expect(result.current.uploading).toBe(false);
+  });
+
   it("the login changed while a send was in flight: its words are not put in the box", async () => {
     const onTranscript = vi.fn();
     const fetchMock = stubServer();

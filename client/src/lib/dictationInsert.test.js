@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { boxFits, insertDictatedText, isEligibleBox, readSelection } from "./dictationInsert";
+import { boxFits, dictationRefusal, insertDictatedText, isEligibleBox, readSelection } from "./dictationInsert";
 
 // FocusedBoxMic (GATE_DICTATION_EVERY_BOX): which boxes get the shared mic, and
 // how dictated words land in a box the mic does not own.
@@ -120,6 +120,16 @@ describe("insertDictatedText", () => {
     insertDictatedText(el, "world", { start: 5, end: 5 });
     expect(el.value).toBe("Hello wor");
     expect(insertDictatedText(el, "more", { start: 9, end: 9 })).toEqual({ ok: false, reason: "full" });
+  });
+
+  it("room for only the space before the words is a full box: no lone space goes in", () => {
+    const el = box('<textarea maxlength="6">Hello</textarea>');
+    expect(dictationRefusal(el, { start: 5, end: 5 })).toBe("full");
+    expect(insertDictatedText(el, "world", { start: 5, end: 5 })).toEqual({ ok: false, reason: "full" });
+    expect(el.value).toBe("Hello");
+    // after a space, the same one character takes the first letter
+    const spaced = box('<textarea maxlength="7">Hello </textarea>');
+    expect(dictationRefusal(spaced, { start: 6, end: 6 })).toBe(null);
   });
 
   it("drops the words when the box left the page or is locked now", () => {
