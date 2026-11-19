@@ -32,6 +32,9 @@ const CHOICE_SCAN_LIMIT = 50;
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
 // The call reader's cancel flag (triage_flags) takes it back the same way, whatever service_intent says.
 const CANCEL_FLAG = 'cancellation_request';
+// The call reader's flag for a caller who is explicitly a third party with no authority on the account
+// (prompts/call-extraction-v1.js; call-triage-flags.js derives and filters it).
+const UNAUTHORIZED_FLAG = 'caller_not_authorized';
 
 // How long a call can still be read for the first time or retried after its row last changed: the processor reads a
 // call within minutes, its retries come 10 minutes apart, and a call with no recording is recovered from its live text
@@ -90,20 +93,25 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   return turn ? String(turn.raw || '').replace(/\s+/g, ' ').trim() : null;
 }
 
-// One call's word (row: WORD_COLUMNS, one read): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a
-// billing choice with the caller's words ({ choice, callLogId, at, quote }; quote from callerWordsOf, null without
-// words), or null (no word, not a two-party conversation, or not read: only a 'processed' row's
-// extraction is its last read, as a failed re-read keeps the old one).
+// One call's word (row: WORD_COLUMNS, one read): an unauthorized caller's word ({ unauthorized: true, callLogId, at }),
+// a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing choice with the caller's words
+// ({ choice, callLogId, at, quote }; quote from callerWordsOf, null without words), or null (no word, not a two-party
+// conversation, or not read: only a 'processed' row's extraction is its last read, as a failed re-read keeps the old
+// one).
 function wordOfCall(row) {
   if (row.processing_status !== 'processed' || row.v2_extraction_status !== 'valid') return null;
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   const extraction = parseExtraction(row.ai_extraction_enriched);
   if (!extraction || !isRealConversation(row, extraction)) return null;
-  // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
-  const cancelFlag = Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes(CANCEL_FLAG);
-  if (cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: callStartedAt(row) };
+  const flags = Array.isArray(extraction.triage_flags) ? extraction.triage_flags : [];
+  const contrary = flags.includes(CANCEL_FLAG) || CONTRARY_INTENTS.has(extraction.service_request?.service_intent);
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
-  if (!choice) return null;
+  if (!contrary && !choice) return null;
+  // A third party with no authority speaks for no one: their word is the latest word, so an older yes never shows
+  // through it, but it is never the customer's yes, choice or cancellation.
+  if (flags.includes(UNAUTHORIZED_FLAG)) return { unauthorized: true, callLogId: row.id, at: callStartedAt(row) };
+  // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
+  if (contrary) return { contrary: true, callLogId: row.id, at: callStartedAt(row) };
   // Only the recording's transcript is evidence (the processor's recordedFallbackOf). The voice agent's own text and
   // the live-text backup are not: their writers (voice-agent/relay-transcript.js, live-call-transcription.js) cut a
   // long turn at 4,000 characters with no mark, so a cut turn can look whole. A call the agent handed to staff is read
@@ -176,10 +184,11 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
 
 // The customer's word since `since`, as the cards read it: a reason for no card ({ skip: 'took_back' |
 // 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
-// 'yes_without_words' }). A yes is the call reader's pay-per-application choice WITH the caller's own words
-// ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
+// 'yes_without_words' | 'caller_not_authorized' }). A yes is the call reader's pay-per-application choice WITH the
+// caller's own words ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
 async function callerWord(conn, { customerId, since }) {
   const word = await latestBillingChoice(conn, { customerId, since });
+  if (word?.unauthorized) return { yes: null, noYes: 'caller_not_authorized' };
   if (word?.contrary) return { skip: 'took_back' };
   if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
   if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };

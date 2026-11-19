@@ -166,6 +166,20 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
     // A call with no recording keeps its live text, which can cut a turn with no mark: never the caller's words.
     ['the words are only in the live-text backup', [['per_application', { transcription_provider: 'twilio_realtime' }]], { yes: null, noYes: 'yes_without_words' }],
+    // A third party with no authority (the call reader's caller_not_authorized) speaks for no one, and their word
+    // still hides an older yes.
+    ['the caller on the yes call is not authorized', [['per_application', {
+      ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
+    }]], { yes: null, noYes: 'caller_not_authorized' }],
+    ['an unauthorized caller after a yes', [['per_application', { created_at: hoursAgo(5) }], ['per_application', {
+      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
+    }]], { yes: null, noYes: 'caller_not_authorized' }],
+    ["an unauthorized caller's cancel closes nothing", [['per_application', { created_at: hoursAgo(5) }], [null, {
+      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith(null, 'cancellation_request'), triage_flags: ['caller_not_authorized'] }),
+    }]], { yes: null, noYes: 'caller_not_authorized' }],
+    ['an unauthorized call with no word is no word', [['per_application', { created_at: hoursAgo(5) }], [null, {
+      created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith(null), triage_flags: ['caller_not_authorized'] }),
+    }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
   ])('%s', async (_name, calls, expected) => {
     const customerId = await customer();
     for (const [choice, over, intent] of calls) await call(customerId, choice, over, intent);
