@@ -98,6 +98,10 @@ describe('EstimateViewPage accept consent attestation', () => {
     expect(src).toMatch(/if \(isNoBookingRefusal\(body\)\) \{[\s\S]{0,400}return 'no_booking';/);
     // The generic no-booking predicate (shared by extend, accept and the re-hold) covers reviewBeforeBooking.
     expect(src).toMatch(/export function isNoBookingRefusal\(body\) \{[\s\S]{0,300}body\.reviewBeforeBooking/);
+    // The re-hold's picked-day read (freshOfferForSameTime) is the page's one slot read: it hands the review shape to the
+    // ONE transition, before the generic no-booking branch.
+    expect(count(src, /\/public\/estimates\/\$\{token\}\/available-slots\?/g)).toBe(1);
+    expect(src).toMatch(/if \(isContactReview\(body\)\) return \{ answer: \{ review: body \} \};\s*if \(isNoBookingRefusal\(body\)\)/);
     // The slot reads live in SlotPicker (3 fetches: default window, AI find, picked date), each hands the review shape up.
     expect(count(slotPicker, /\/public\/estimates\/\$\{token\}\/(?:available-slots|find-slots)/g)).toBe(3);
     expect(count(slotPicker, /isContactReview\(body\)/g)).toBe(3);

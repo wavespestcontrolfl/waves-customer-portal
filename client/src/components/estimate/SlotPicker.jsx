@@ -125,7 +125,7 @@ function NoTimeSoonNote({ blocked, searching, answer, slots }) {
 }
 
 // The review shape the slot reads answer for an estimate parked for the office (B18).
-const isContactReview = (body) => body?.reviewBeforeBooking === true && body?.reason === 'contact_review';
+export const isContactReview = (body) => body?.reviewBeforeBooking === true && body?.reason === 'contact_review';
 
 export default function SlotPicker({
   website = false,
