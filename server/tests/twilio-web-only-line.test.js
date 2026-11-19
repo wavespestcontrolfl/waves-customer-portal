@@ -6,7 +6,7 @@
  * call resolves to, on production and on a fresh database alike.
  */
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { sharedLineNumbers, websiteOnlyLineNumbers } = require('../config/shared-phone-lines');
+const { sharedLineNumbers, websiteOnlyLines } = require('../config/shared-phone-lines');
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 
 const { recordAuditEvent } = require('../services/audit-log');
@@ -37,7 +37,7 @@ describe('website-only line in the Twilio registry', () => {
   });
 
   test('is a website-only line; shared lines and the AI toll-free line are not', () => {
-    const websiteOnly = websiteOnlyLineNumbers(TWILIO_NUMBERS);
+    const websiteOnly = websiteOnlyLines(TWILIO_NUMBERS).map((line) => line.number);
     expect(websiteOnly).toContain(WEB_LINE);
     expect(websiteOnly).toContain('+19412402066');
     for (const shared of sharedLineNumbers(TWILIO_NUMBERS)) expect(websiteOnly).not.toContain(shared);

@@ -12,7 +12,7 @@ const { findAiAssistant, hostnameOf } = require('./ai-referral-sources');
 const { SPOKE_SITES } = require('./content-astro/spoke-sites');
 const { findGbpLocationByUtmContent } = require('../config/locations');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { websiteOnlyLineNumbers } = require('../config/shared-phone-lines');
+const { websiteOnlyLines } = require('../config/shared-phone-lines');
 
 const EVIDENCE_KINDS = new Set([
   'google_ads', 'google_business', 'meta_ads', 'organic_search',
@@ -136,21 +136,22 @@ const nationalNumber = (value) => {
 };
 // Read on use, not at load: many suites mock config/twilio-numbers with only
 // the fields they need.
-const websiteOnlyNationalNumbers = () => websiteOnlyLineNumbers(TWILIO_NUMBERS).map(nationalNumber);
+const websiteOnlyNationalNumbers = () => websiteOnlyLines(TWILIO_NUMBERS).map((line) => nationalNumber(line.number));
 
 /**
- * A call lead on a website-type source proves a website visit only when the
- * call that created it dialed a registered website-only line
- * (config/shared-phone-lines). The main line and the office lines are shared
- * with Google Business Profile, citations, texts and invoices; any other or
- * missing number proves nothing either. `call_dialed_phone` is the to_phone of
- * the lead's initiating call (call_log joined on twilio_call_sid). The call's
- * own record decides, not the source row: a later quote can fill an empty
- * lead_source_id with a website row.
+ * The name (label, else domain) of the registered website-only line
+ * (config/shared-phone-lines) that a call lead's initiating call dialed, or
+ * null. A call to one proves a website visit, and the line names the site. The main line and the office lines are
+ * shared with Google Business Profile, citations, texts and invoices; any
+ * other or missing number proves nothing. `call_dialed_phone` is the to_phone
+ * of the lead's initiating call (call_log joined on twilio_call_sid). The
+ * call's own record decides, not the source row: a later quote can fill an
+ * empty lead_source_id with another website's row.
  */
-function isWebsiteOnlyLineCall(lead = {}) {
+function dialedWebsiteLineName(lead = {}) {
   const dialed = nationalNumber(lead.call_dialed_phone);
-  return dialed !== null && websiteOnlyNationalNumbers().includes(dialed);
+  const line = dialed === null ? null : websiteOnlyLines(TWILIO_NUMBERS).find((entry) => nationalNumber(entry.number) === dialed);
+  return line ? line.label || line.domain : null;
 }
 
 function attributionParts(attribution = {}) {
@@ -356,7 +357,14 @@ function sourceEvidenceForLead(lead = {}) {
     return evidence('google_business', 'Google Business Profile', sourceName || null, 'The recorded lead source is a Google Business Profile.');
   }
   const websiteSource = type === 'main_site' || type === 'spoke_site' || channel === 'website_organic';
-  if (websiteSource && callOrigin && !isWebsiteOnlyLineCall(lead)) {
+  // A call to a website-only line names the site when the recorded source is
+  // a website or there is none. Any other recorded source (an office edit
+  // such as Referral) keeps its label below.
+  const websiteLineName = callOrigin && (websiteSource || !(type || channel)) ? dialedWebsiteLineName(lead) : null;
+  if (websiteLineName) {
+    return evidence('website', 'Website', websiteLineName, 'The caller dialed a phone line that only a Waves website shows.');
+  }
+  if (websiteSource && callOrigin) {
     return evidence('unknown', 'Source unknown', 'Shared phone line', 'The historical source record names a shared website phone line and does not prove how the caller found Waves.');
   }
   if (websiteSource) {
@@ -422,14 +430,17 @@ function sourceEvidenceLabelSql(db) {
     AND NULLIF(BTRIM(leads.twilio_call_sid), '') IS NOT NULL
     AND LOWER(BTRIM(COALESCE(lead_sources.source_type, ''))) = 'facebook'
     AND LOWER(BTRIM(COALESCE(lead_sources.channel, ''))) = 'paid')`;
-  // SQL twin of isWebsiteOnlyLineCall: the national number the initiating
+  // SQL twin of dialedWebsiteLineName: the national number the initiating
   // call dialed against the website-only lines. No call, or a number that is
   // not 10 digits (or 11 starting with 1), never matches, as in the JS.
   const dialedDigitsSql = "regexp_replace(COALESCE(lead_call.to_phone, ''), '[^0-9]', '', 'g')";
   const dialedNationalSql = `(CASE WHEN LENGTH(${dialedDigitsSql}) = 10 THEN ${dialedDigitsSql}
     WHEN LENGTH(${dialedDigitsSql}) = 11 AND LEFT(${dialedDigitsSql}, 1) = '1' THEN RIGHT(${dialedDigitsSql}, 10) END)`;
-  const websiteOnlyLines = websiteOnlyNationalNumbers();
-  const websiteOnlyCallSql = `COALESCE(${dialedNationalSql} IN (${websiteOnlyLines.map(() => '?').join(', ')}), FALSE)`;
+  const websiteOnlyNumbers = websiteOnlyNationalNumbers();
+  const websiteOnlyCallSql = `COALESCE(${dialedNationalSql} IN (${websiteOnlyNumbers.map(() => '?').join(', ')}), FALSE)`;
+  const websiteSourceSql = "(lead_sources.source_type IN ('main_site', 'spoke_site') OR lead_sources.channel = 'website_organic')";
+  // No joined row, or one with neither a source type nor a channel.
+  const noRecordedSourceSql = "(COALESCE(BTRIM(lead_sources.source_type), '') = '' AND COALESCE(BTRIM(lead_sources.channel), '') = '')";
   return db.raw(`LOWER(CASE
     WHEN (leads.extracted_data->'source_evidence'->>'kind') IN (${[...EVIDENCE_KINDS].map(() => '?').join(', ')})
       AND NULLIF(BTRIM(leads.extracted_data->'source_evidence'->>'label'), '') IS NOT NULL
@@ -442,10 +453,10 @@ function sourceEvidenceLabelSql(db) {
     WHEN lead_sources.source_type = 'google_ads' THEN 'Google Ads'
     WHEN lead_sources.source_type = 'gbp'
       OR (lead_sources.source_type = 'website_organic' AND lead_sources.name ILIKE '%Google Business%') THEN 'Google Business Profile'
-    WHEN (lead_sources.source_type IN ('main_site', 'spoke_site') OR lead_sources.channel = 'website_organic')
-      AND ${callOriginSql}
-      AND NOT ${websiteOnlyCallSql} THEN 'Source unknown'
-    WHEN lead_sources.source_type IN ('main_site', 'spoke_site') OR lead_sources.channel = 'website_organic' THEN 'Website'
+    WHEN ${callOriginSql} AND ${websiteOnlyCallSql}
+      AND (${websiteSourceSql} OR ${noRecordedSourceSql}) THEN 'Website'
+    WHEN ${websiteSourceSql} AND ${callOriginSql} THEN 'Source unknown'
+    WHEN ${websiteSourceSql} THEN 'Website'
     WHEN lead_sources.source_type = 'referral' THEN 'Referral'
     WHEN lead_sources.source_type = 'email' THEN 'Email inquiry'
     WHEN lead_sources.source_type IN ('vehicle', 'walk_in') OR lead_sources.channel = 'offline' THEN COALESCE(NULLIF(lead_sources.name, ''), 'Offline')
@@ -456,7 +467,7 @@ function sourceEvidenceLabelSql(db) {
     WHEN leads.first_contact_channel = 'email' THEN 'Email inquiry'
     WHEN leads.first_contact_channel IN ('manual', 'phone', 'call', 'inbound_call') THEN 'Source unknown'
     ELSE 'Source unknown'
-  END)`, [...EVIDENCE_KINDS, ...websiteOnlyLines]);
+  END)`, [...EVIDENCE_KINDS, ...websiteOnlyNumbers]);
 }
 
 function attributionWithSourceEvidence(attribution) {

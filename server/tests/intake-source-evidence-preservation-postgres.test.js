@@ -235,6 +235,13 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
       lead_type: 'inbound_call', first_contact_channel: 'call',
       source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'Office-made website row', call_dialed_phone: '+18559260203',
     }],
+    ['call lead with no source row that dialed a website-only line', {
+      lead_type: 'inbound_call', first_contact_channel: 'call', call_dialed_phone: '+19412535279',
+    }],
+    ['call lead with an office-set referral source that dialed a website-only line', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'referral', source_name: 'Neighbor referral', call_dialed_phone: '+19412542617',
+    }],
     ['website-line source row whose call dialed the main line', {
       lead_type: 'inbound_call', first_contact_channel: 'call',
       source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'Spoke line', call_dialed_phone: '+19412975749',

@@ -22,11 +22,10 @@ function sharedLineNumbers(registry) {
   return [registry.mainLine.number, ...Object.values(registry.locations).map((line) => line.number)];
 }
 
-function websiteOnlyLineNumbers(registry) {
+// The registry entries ({ number, domain, label?, ... }) of the website-only lines.
+function websiteOnlyLines(registry) {
   const shared = new Set(sharedLineNumbers(registry));
-  return [...registry.domainTracking, ...registry.lawnDomainTracking]
-    .map((line) => line.number)
-    .filter((number) => !shared.has(number));
+  return [...registry.domainTracking, ...registry.lawnDomainTracking].filter((line) => !shared.has(line.number));
 }
 
-module.exports = { sharedLineNumbers, websiteOnlyLineNumbers };
+module.exports = { sharedLineNumbers, websiteOnlyLines };
