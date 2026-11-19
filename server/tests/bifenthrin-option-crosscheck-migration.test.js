@@ -281,6 +281,26 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    // A price written without a recalculation (pre-push audit 12): job costing reads the catalog best_price directly, so the catalog
+    // is recalculated, with no vendor write or price history, and down() leaves it.
+    test('a SiteOne row already at 30.90 beside a catalog still on 58.42: the recalculation alone runs, and down() leaves it', async () => {
+      const corrected = vendorRow({
+        price: '30.90', price_amount: '30.9000', landed_cost: '30.90', price_per_oz: '0.2414', normalized_unit_price: '0.2414', landed_unit_price: '0.2414',
+      });
+      const db = world({ vendors: [corrected] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expectRecalculated(knex);
+      expect(db.vendor_pricing[0]).toEqual({ ...corrected, is_best_price: true });
+      expect(db.price_history).toEqual([]);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, best_vendor_pricing_id: 'v1', needs_pricing: false, best_price_status: 'current' });
+      expect(auditKeys(db)).toEqual(['onetime_preslab', 'onetime_trenching']);
+      expect(warn).not.toHaveBeenCalled();
+      await migration.down(knex);
+      expectRecalculated(knex);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, needs_pricing: false });
+    });
+
     test.each([['45.00'], ['30.50']])('a price an admin edited (%s) is left alone with a warning; both rows are still rewritten', async (price) => {
       const db = world({
         vendors: [vendorRow({ price })],
@@ -784,6 +804,26 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(db.price_history).toEqual([]);
       expect(db.pricing_config_audit).toEqual([]);
       expect(db.pricing_changelog).toEqual([]);
+    });
+
+    // up()'s recalculation clears a mark the row held before; down() restores the vendor row and recalculates, and the mark comes
+    // back only when the winner up() saw returns (pre-push audit 12).
+    test('a catalog row marked stale before up() is marked again by down() when its old winner returns', async () => {
+      const stale = { needs_pricing: true, best_price_status: 'stale' };
+      const db = world({ catalog: [catalogRow(stale)] });
+      const knex = fakeKnex(db);
+      await migration.up(knex);
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 30.9, needs_pricing: false, best_price_status: 'current' });
+      await migration.down(knex);
+      expect(db.vendor_pricing[0]).toMatchObject({ price: '58.42', price_amount: '58.4200' });
+      expect(db.products_catalog[0]).toMatchObject({ best_price: 58.42, best_vendor_pricing_id: 'v1', ...stale });
+      // A cheaper row entered since wins the recalculation: that winner is current, and the old mark stays off.
+      const moved = world({ catalog: [catalogRow(stale)] });
+      const movedKnex = fakeKnex(moved);
+      await migration.up(movedKnex);
+      moved.vendor_pricing.push(vendorRow({ id: 'v3', vendor_id: 'ven3', vendor_sku: 'AMZ1', price: '25.00', price_amount: '25.0000', is_best_price: false }));
+      await migration.down(movedKnex);
+      expect(moved.products_catalog[0]).toMatchObject({ best_price: 25, best_vendor_pricing_id: 'v3', needs_pricing: false, best_price_status: 'current' });
     });
 
     test('with one key rewritten and the other an admin edit, down() restores only the rewritten key', async () => {

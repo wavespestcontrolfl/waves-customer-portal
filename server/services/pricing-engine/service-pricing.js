@@ -7122,12 +7122,12 @@ function priceTrenching(property = {}, options = {}, replay) {
       ? product.productOzPerFinishedGallonAtHighRate
       : product.productOzPerFinishedGallonAtStandardRate,
   );
-  // A label that allows its high-rate dilution only at a reduced volume (highRateReducesVolume: the bifenthrin bottles) gets the
-  // finished volume cut in proportion, so the active ingredient per foot stays the standard-rate amount (0.12% at half the 0.06%
-  // volume). A custom dilution is a manual override (sent to review) and keeps the labeled volume.
-  const reducesVolume = rateResolution.applicationRate === 'high' && product.highRateReducesVolume
-    && !hasValue(options.customProductOzPerFinishedGallon);
-  const volumeFactor = reducesVolume ? Math.min(1, product.productOzPerFinishedGallonAtStandardRate / productOzPerFinishedGallon) : 1;
+  // A label that allows a stronger dilution only at a reduced volume (highRateReducesVolume: the bifenthrin bottles) gets the
+  // finished volume cut in proportion for the dilution in use, the high rate's or a custom one (a manual override, sent to review),
+  // so the active ingredient per foot stays the standard-rate amount (0.12% at half the 0.06% volume).
+  const volumeFactor = product.highRateReducesVolume
+    ? Math.min(1, product.productOzPerFinishedGallonAtStandardRate / productOzPerFinishedGallon)
+    : 1;
   const containerCost = optionPositiveNumber(options, 'customProductCost', product.containerCost);
   const containerOz = optionPositiveNumber(options, 'customContainerOz', product.containerOz);
   const trenchDepthFt = optionPositiveNumber(options, 'trenchDepthFt', cfg.defaultTrenchDepthFt || 1);
@@ -7149,10 +7149,10 @@ function priceTrenching(property = {}, options = {}, replay) {
     ...rateResolution.warnings,
     ...warrantyResolution.warnings,
   ];
-  if (rateResolution.applicationRate === 'high') {
-    warningList.push(volumeFactor < 1
-      ? 'High/problem-soil rate: the stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). Requires label confirmation.'
-      : 'High/problem-soil rate increases chemical usage and requires label confirmation.');
+  if (volumeFactor < 1) {
+    warningList.push('Stronger dilution at a reduced finished volume, the same active ingredient per foot (label volume adjustment). Requires label confirmation.');
+  } else if (rateResolution.applicationRate === 'high') {
+    warningList.push('High/problem-soil rate increases chemical usage and requires label confirmation.');
   }
   if (product.chemistryType === 'repellent_pyrethroid') {
     warningList.push('Repellent pyrethroid barrier; not equivalent to non-repellent fipronil.');

@@ -266,9 +266,15 @@ describe('termite measurement overrides and safeguards', () => {
     const taurus = priceTrenching({}, { measurements, productKey: 'taurus_sc', applicationRate: 'high', labelConfirmed: true });
     expect(taurus).toMatchObject({ finishedGallons: 80, productOz: 128 });
     expect(taurus.warnings).toContain('High/problem-soil rate increases chemical usage and requires label confirmation.');
-    // A custom dilution is a manual override (sent to review): it keeps the labeled volume.
+    // A custom dilution is a manual override (sent to review), and the label's volume rule follows it too: the high rate's own
+    // dilution typed in prices what the high rate does (pre-push audit 12), and a stronger one keeps the same product per foot.
     expect(trench({ applicationRate: 'high', customProductOzPerFinishedGallon: 2 }))
-      .toMatchObject({ finishedGallons: 80, productOz: 160, requiresManualReview: true });
+      .toMatchObject({ finishedGallons: 40, productOz: 80, requiresManualReview: true });
+    expect(trench({ customProductOzPerFinishedGallon: 4 }))
+      .toMatchObject({ finishedGallons: 20, productOz: 80, requiresManualReview: true });
+    // A weaker one keeps the labeled volume: the rule never adds finished gallons.
+    expect(trench({ customProductOzPerFinishedGallon: 0.5 }))
+      .toMatchObject({ finishedGallons: 80, productOz: 40, requiresManualReview: true });
   });
 
   test('trenching high rate and warranty restrictions surface review and quote gates', () => {
@@ -1194,9 +1200,9 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
 
   // A replay re-prices the stored inputs, custom ones included, and each custom input still takes the rest of its cost basis from
   // config (a custom cost divides by the configured container oz): the swap moves them too (pre-push audit 8: a custom rate of 4 oz a
-  // finished gallon, 336 oz).
+  // finished gallon, at the quarter volume the label's rule gives it).
   test.each([
-    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 }, { sent: 4573, fresh: 4480, productOz: 336, productSurcharge: 173 }],
+    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 }, { sent: 4415, fresh: 4400, productOz: 84, productSurcharge: 15 }],
     ['a custom product cost', { customProductCost: 41.57 }, { sent: 4943, fresh: 4930, productOz: 84, productSurcharge: 15 }],
     ['a custom container size', { customContainerOz: 96 }, { sent: 4943, fresh: 4930, productOz: 84, productSurcharge: 15 }],
   ])('a quote with %s keeps its sent surcharge on replay', (_label, extra, want) => {
@@ -1245,6 +1251,10 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
     expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4996);
     expect(priced({}, { ...pin, productOz: 336 }).price).toBe(4928); // any other oz is another quote: it prices fresh
+    // A custom rate priced the full volume then too: 336 oz at 4 oz a finished gallon keeps its sent $4,573.
+    const custom = { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 };
+    expect(trenchLine(sentQuote(custom, { highRateReducesVolume: false }))).toMatchObject({ price: 4573, productOz: 336, productSurcharge: 173 });
+    expect(priced(custom, { ...pin, applicationRate: 'standard', productOz: 336, productSurcharge: 173 }).price).toBe(4573);
   });
 
   test('both replay paths keep the sent price; a posted save and a planted copy price the new bottle', async () => {

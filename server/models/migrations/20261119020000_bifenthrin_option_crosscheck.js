@@ -29,7 +29,9 @@
  * looks exactly as read on 2026-11-18, its price_amount (what costing reads first), its own pack (1 gal, priced per oz: the handler
  * derives the unit cost from it), an open quote (no expires_at passed: the inventory price rules skip an expired row) and its landed
  * and per-oz figures (the stale price's own: the price sync can store freight in landed_unit_price) included; a row that differs
- * (an edit, shipping or tax: its landed cost would need them) is left alone with a warning.
+ * (an edit, shipping or tax: its landed cost would need them) is left alone with a warning. A SiteOne row that already reads
+ * $30.90 beside a catalog still on the stale price (a price written without a recalculation) gets the recalculation alone: no
+ * vendor write, no price history.
  * server/data/pricing.csv, the sheet the admin pricing import reads first, lists the same gallon at $30.90, so a re-import keeps it.
  *
  * Stale mark: a catalog row named LESCO Crosscheck Plus that still holds the stale $58.42 for 128 oz after Step P (Step P had to
@@ -52,7 +54,8 @@
  * (down() could not find its writes). down() restores a product only when this migration's audit row for its row exists AND the
  * product still deep-equals what up() wrote (an admin edit since then is kept); it restores the catalog price only when its audit
  * row exists AND the vendor row still holds exactly what up() wrote, and then runs the recalculation again, so the catalog follows
- * the restored row; it lifts the stale mark only from a row that
+ * the restored row (a mark up()'s recalculation cleared comes back when the winner up() saw returns); it lifts the stale mark only
+ * from a row that
  * still holds the mark and the prices up() saw; it restores the pest breakdown only when its audit row exists AND the row still
  * deep-equals what up() wrote; then it deletes this migration's price_history row, audit rows and changelog row.
  *
@@ -160,6 +163,8 @@ const VENDOR_COLUMNS = ['previous_price', 'price', 'price_amount', 'landed_cost'
 // The catalog prices a recalculation rewrites (the stale mark's own columns aside): the stale mark keeps them as it saw them, so
 // down() can tell no price was entered since.
 const CATALOG_SEEN_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_price_updated_at', 'best_vendor_pricing_id', 'unit_size_oz'];
+// The catalog's winner, which down() compares to what up() saw before it restores a mark up()'s recalculation cleared.
+const WINNER_COLUMNS = ['best_price', 'best_price_amount_cached', 'best_vendor_pricing_id', 'unit_size_oz'];
 const REQUIRED_VENDOR_COLUMNS = ['product_id', 'vendor_id', 'vendor_sku', 'is_active', 'approval_status', 'price', 'quantity'];
 const REQUIRED_CATALOG_COLUMNS = ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'];
 // What recalcBestPriceLocked writes when it keeps a catalog price it cannot trust (routes/admin-inventory.js).
@@ -268,7 +273,15 @@ async function fixProductPrice(knex, productId) {
   const siteOne = [];
   for (const row of rows) if (await isSiteOneRow(knex, row)) siteOne.push(row);
   const [row] = siteOne;
-  if (siteOne.length === 1 && same(row.price, NEW_PRICE)) return false; // already corrected (a re-run)
+  if (siteOne.length === 1 && same(row.price, NEW_PRICE)) {
+    // Already $30.90 (a re-run, or a price written without a recalculation): a catalog still on the stale price is recalculated,
+    // with no vendor write or price history, and down() leaves it (it follows the vendor rows).
+    if (!holdsStalePrice(await knex('products_catalog').where({ id: productId }).forUpdate().first())) return false;
+    await recalcBestPrice(knex, productId);
+    console.info(`${LOG} ${CATALOG_NAME} (${productId}): the SiteOne row already reads $${NEW_PRICE.toFixed(2)}; the inventory `
+      + 'recalculation replaced the stale catalog price');
+    return true;
+  }
   const now = new Date();
   const blocker = (await missingColumns(knex))
     || (siteOne.length === 1 ? vendorRowBlocker(row, now) : `it does not have exactly one SiteOne ${STALE_SKU} vendor row`);
@@ -370,7 +383,8 @@ async function restoreCatalogPrice(knex) {
 }
 
 // The SiteOne row back to what up() saw and its price_history row removed, then the recalculation again: the catalog follows the
-// restored row. Only while the row still holds what up() wrote: a price entered since is kept.
+// restored row, and a mark up()'s recalculation cleared (stale, or needing a price) comes back when the winner up() saw returns.
+// Only while the row still holds what up() wrote: a price entered since is kept.
 async function restoreProductPrice(knex, before, written) {
   if (!before || !written || !before.vendor_pricing || !written.vendor_pricing) return;
   await lockProduct(knex, before.product_id);
@@ -384,6 +398,11 @@ async function restoreProductPrice(knex, before, written) {
     await knex('price_history').where({ id: before.price_history_id }).del();
   }
   await recalcBestPrice(knex, before.product_id);
+  const after = await knex('products_catalog').where({ id: before.product_id }).first();
+  const mark = pickColumns(before.catalog_seen || {}, await existingColumns(knex, 'products_catalog', Object.keys(STALE_MARK)));
+  if (after && before.catalog_seen && sameColumns(after, pickColumns(before.catalog_seen, WINNER_COLUMNS)) && !sameColumns(after, mark)) {
+    await knex('products_catalog').where({ id: before.product_id }).update(mark);
+  }
 }
 
 // ── pricing_config rows ──────────────────────────────────────────────────────
