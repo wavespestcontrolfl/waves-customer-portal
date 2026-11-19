@@ -55,12 +55,16 @@ describe('the reviewed post list', () => {
   // line is copied from it exactly.
   const SITE_REPO = path.join(os.homedir(), 'wavespestcontrol-astro');
   const siteRepoHere = fs.existsSync(path.join(SITE_REPO, '.git'));
+  // Inside a git hook (the pre-push audit) GIT_DIR and friends name the
+  // portal repo, and they win over `git -C`: drop every GIT_* variable so
+  // git finds the website repo (pre-push r2).
+  const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
   (siteRepoHere ? test : test.skip)('every states line is copied exactly from its post on the website repo (when it is on this machine)', () => {
     const problems = [];
     for (const [id, post] of Object.entries(POSTS)) {
       let source;
       try {
-        source = execFileSync('git', ['-C', SITE_REPO, 'show', `origin/main:${post.file}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        source = execFileSync('git', ['-C', SITE_REPO, 'show', `origin/main:${post.file}`], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'ignore'] });
       } catch {
         problems.push(`${id}: ${post.file} is not on the website repo's origin/main (fetch it?)`);
         continue;

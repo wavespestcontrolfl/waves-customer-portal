@@ -76,7 +76,7 @@ const { buildIssue } = require('../../server/services/pest-insider');
 const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
-const { POSTS, checkLivePosts } = require('../../server/services/pest-insider/posts');
+const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
 
 // An impossible day (2027-02-30) is refused here too, before any file is written.
 for (const d of dates) {
@@ -93,7 +93,9 @@ function saveIssue(sendDate, issue) {
 
 async function main() {
   const livePostFactIds = assumeLive ? Object.keys(POSTS) : await checkLivePosts();
-  console.log(`blog posts: ${livePostFactIds.length} of ${Object.keys(POSTS).length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}`);
+  // Facts can share a post (D02 and D03), so posts and facts are counted apart.
+  const livePosts = new Set(livePostFactIds.map(postUrl)).size;
+  console.log(`blog posts: ${livePosts} of ${POST_URLS.length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}; ${livePostFactIds.length} of ${Object.keys(POSTS).length} linked facts can lead`);
   fs.mkdirSync(outDir, { recursive: true });
   const recent = { factIds: [], speciesSlugs: [] };
   let failed = 0;
