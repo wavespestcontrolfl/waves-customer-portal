@@ -22,7 +22,7 @@ function whereProvenInvoiceOwner(query, { invoiceAlias, invoiceId, metadataCusto
         SELECT loser_customer_id, winner_customer_id FROM customer_merge_journal
          WHERE undone_at IS NULL
            AND repointed_ids ->> 'version' = '1'
-           AND (repointed_ids -> 'tables' -> 'invoices.customer_id') @> jsonb_build_array(?::text)
+           AND (repointed_ids -> 'tables' -> 'invoices.customer_id') @> jsonb_build_array((?::uuid)::text)
       ), ownership_chain(customer_id, path) AS (
         SELECT ?::uuid, ARRAY[?::uuid]
         UNION ALL
@@ -119,7 +119,8 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
     throw new Error('Supply a saved-card attempt UUID and a Stripe PaymentIntent ID.');
   }
   const intent = await stripe.paymentIntents.retrieve(intentId);
-  if (intent?.id !== intentId || intent.metadata?.saved_card_attempt_id !== attemptId.toLowerCase()) {
+  const returnedAttempt = intent?.metadata?.saved_card_attempt_id;
+  if (intent?.id !== intentId || !isUuid(returnedAttempt) || returnedAttempt.toLowerCase() !== attemptId.toLowerCase()) {
     throw new Error('Stripe did not return the requested PaymentIntent for this saved-card attempt.');
   }
   const identity = cancellationIdentity(intent);

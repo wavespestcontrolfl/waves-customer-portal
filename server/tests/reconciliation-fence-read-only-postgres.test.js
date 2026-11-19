@@ -236,11 +236,15 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
   });
 
-  test('an operator can preview and execute a cancellation after its invoice was merged', async () => {
+  test('an operator can preview and record a merged invoice cancellation with uppercase UUIDs in Stripe metadata', async () => {
     const oldOwner = randomUUID();
     const { invoiceId, attemptId, intent } = await authenticationFixture(app, oldOwner);
     await recordInvoiceMerge(app, { invoiceId, loserId: oldOwner, winnerId: randomUUID() });
-    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
+    const stripeIntent = { ...intent, metadata: { ...intent.metadata,
+      waves_invoice_id: invoiceId.toUpperCase(),
+      saved_card_attempt_id: attemptId.toUpperCase(),
+    } };
+    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(stripeIntent) } };
     const options = { stripe, attemptId, intentId: intent.id };
 
     await expect(inReadOnly((database) => verifySavedCardCancellation({ ...options, database })))
