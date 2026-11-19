@@ -2183,6 +2183,44 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
     expect(undecided.poolCageReview).toBeUndefined();
   });
 
+  // The flag follows the same evidence as the size: a current lookup decides it, and a
+  // seed's own flag travels only with a size the seed supplied.
+  const seedWith = (seedFeatures) => ({
+    homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: seedFeatures,
+  });
+
+  test('gate on: a current lookup-backed Medium cage removes a stale seeded flag, and the offer is priced', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const seed = seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true });
+    const f = await features({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }, seed);
+    expect(f).toMatchObject({ poolCage: true, poolCageSize: 'medium' });
+    expect(f.poolCageReview).toBeUndefined();
+    const offer = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lookupWith({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-hold-seed' }),
+      propertySeed: seed,
+    });
+    expect(offer.options[0].manualReview).toBe(false);
+  });
+
+  test('gate on: a lookup-backed held cage sets the flag whether or not the seed carried one', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const held = { poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' };
+    expect((await features(held, seedWith({ poolCage: true, poolCageSize: 'large' }))).poolCageReview).toBe(true);
+    expect((await features(held, seedWith({ poolCage: true, poolCageSize: 'medium', poolCageReview: true }))).poolCageReview).toBe(true);
+  });
+
+  test('a seed-backed size keeps the seed\'s own flag (the lookup did not decide the size)', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const undecided = { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM', pool: 'NO' };
+    const kept = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true }));
+    expect(kept).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+    const noFlag = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large' }));
+    expect(noFlag.poolCageReview).toBeUndefined();
+  });
+
   test('gate on: the flag reaches the pest option as manual review', async () => {
     process.env[TWO_SIZES] = 'true';
     const run = (cage) => buildCustomerPricingResponse({

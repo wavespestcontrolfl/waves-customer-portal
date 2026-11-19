@@ -1199,13 +1199,17 @@ const POOL_CAGE_SIZE_OPTIONS = [
   { value: "OVERSIZED", label: "Oversized (+$18)" },
 ];
 
-// GATE_CAGE_TWO_SIZES: when the lookup said meta.poolCageTwoSizes the box offers
-// Medium and Large only. A saved Small or Oversized (an old estimate) stays
-// listed, so it is never silently changed. Absent = all four, as before.
-function poolCageSizeOptions(current, twoSizes) {
+// GATE_CAGE_TWO_SIZES: with two sizes the box offers Medium and Large. A Small or Oversized
+// that was LOADED from an existing estimate stays listed (even after the operator moves away,
+// so they can return to the saved value); a fresh pick of either is coerced by the tool.
+// Gate off or unknown = all four, as before.
+function poolCageSizeOptions(twoSizes, loadedSize) {
   if (!twoSizes) return POOL_CAGE_SIZE_OPTIONS;
-  return POOL_CAGE_SIZE_OPTIONS.filter((o) => o.value === "MEDIUM" || o.value === "LARGE" || o.value === current);
+  return POOL_CAGE_SIZE_OPTIONS.filter((o) => o.value === "MEDIUM" || o.value === "LARGE" || o.value === loadedSize);
 }
+
+// A legacy size read as two sizes (the server module's fourToTwo; the client cannot import it).
+const POOL_CAGE_TWO_SIZE_OF = { SMALL: "MEDIUM", OVERSIZED: "LARGE" };
 
 function SelectV2({ k, options, id = `estimate-${k}`, ...rest }) {
   const { form, set } = useContext(FormCtx);
@@ -2475,6 +2479,7 @@ export default function EstimateToolViewV2({
         // edit source so the Good / Better / Best checkbox shows on a reopen.
         // The edit source's LIVE gate value for the Pool Cage Size box (never the stored result's).
         setCageTwoSizes(d.poolCageTwoSizes === true);
+        setLoadedCageSize(String(seeded.poolCageSize || "").toUpperCase());
         setEstimate(d.result && !stale
           ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
           : null);
@@ -2582,6 +2587,7 @@ export default function EstimateToolViewV2({
     draftIdRef.current = null;
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
+    setLoadedCageSize("");
     setEnrichedProfile(null);
     forgetScopeAnswer();
     setSatelliteData(null);
@@ -3186,6 +3192,9 @@ export default function EstimateToolViewV2({
   // sizes once ANY server response says so (lookup, calculate, reopen) and the latest
   // response replaces it. Never cleared with the estimate, the lookup or an address change.
   const [cageTwoSizes, setCageTwoSizes] = useState(false);
+  // The cage size an existing estimate was opened with (SMALL or OVERSIZED stays listed, see
+  // poolCageSizeOptions). Set at the reopen sites, reset when a new estimate starts.
+  const [loadedCageSize, setLoadedCageSize] = useState("");
   // Business-identity scope question (GATE_LOOKUP_BUSINESS_IDENTITY): the
   // CSR's answer for ONE address, re-sent on every lookup of it; a server 409
   // can raise the question on its own.
@@ -3558,6 +3567,9 @@ export default function EstimateToolViewV2({
         if (!r.ok) return;
         const row = await r.json();
         if (active) {
+          // The same row carries the pest cage gate (GATE_CAGE_TWO_SIZES): only ever sets true here;
+          // the lookup, calculate and reopen responses keep setting the exact value.
+          if (row?.poolCageTwoSizes === true) setCageTwoSizes(true);
           setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
           setAreaAddOnCatalog(readAreaAddOnCatalog(row));
           setBahiaOffered(row?.subFeaturesAvailable?.bahiaOffered !== false);
@@ -3573,6 +3585,14 @@ export default function EstimateToolViewV2({
       active = false;
     };
   }, []);
+  // GATE_CAGE_TWO_SIZES: a Small or Oversized that was not loaded from an existing estimate (a pick
+  // made before the gate was known, or a stale draft) moves to its two-size reading, visibly.
+  useEffect(() => {
+    if (!cageTwoSizes) return;
+    const size = String(form.poolCageSize || "").toUpperCase();
+    const reading = POOL_CAGE_TWO_SIZE_OF[size];
+    if (reading && size !== loadedCageSize) set("poolCageSize", reading);
+  }, [cageTwoSizes, form.poolCageSize, loadedCageSize, set]);
   useEffect(() => {
     (async () => {
       try {
@@ -5319,6 +5339,7 @@ export default function EstimateToolViewV2({
       // Same as the edit loader: the stored result carries no tier-availability
       // flag, so the Good / Better / Best checkbox survives the post-send refresh.
       setCageTwoSizes(source.poolCageTwoSizes === true);
+      setLoadedCageSize(String(seeded.poolCageSize || "").toUpperCase());
       setEstimate(source.result && !stale
         ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
         : null);
@@ -6674,7 +6695,7 @@ export default function EstimateToolViewV2({
                 <Field label="Pool Cage Size" id="estimate-poolCageSize" className="mb-4">
                   <SelectV2
                     k="poolCageSize"
-                    options={poolCageSizeOptions(form.poolCageSize, cageTwoSizes)}
+                    options={poolCageSizeOptions(cageTwoSizes, loadedCageSize)}
                   />
                 </Field>
               )}

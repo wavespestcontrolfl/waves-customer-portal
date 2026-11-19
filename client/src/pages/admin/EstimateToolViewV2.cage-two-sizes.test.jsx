@@ -2,9 +2,12 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, configure, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import EstimateToolViewV2 from './EstimateToolViewV2';
+
+// The estimator is a very large component; a busy machine can pass the 1 s default.
+configure({ asyncUtilTimeout: 15000 });
 
 vi.mock('../../components/admin/EstimateSendDialog', () => ({ useEstimateSend: () => vi.fn() }));
 
@@ -36,13 +39,22 @@ function jsonResponse(body) {
 let fetchMock;
 let editSource;
 let calculateResult;
+// The estimator's startup read of the lawn_pricing_v2 row (also carries the pest cage gate).
+// A test can hold it back (gateRead) to model the window before the gate is known.
+let startupRow;
+let gateRead;
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(window, 'alert').mockImplementation(() => {});
   calculateResult = resultWith();
+  startupRow = {};
+  gateRead = null;
   fetchMock = vi.fn((url) => {
     const path = String(url);
+    if (path.includes('/pricing-config/lawn_pricing_v2')) {
+      return gateRead ? gateRead.then(() => jsonResponse(startupRow)) : Promise.resolve(jsonResponse(startupRow));
+    }
     if (path.endsWith('/calculate-estimate')) return Promise.resolve(jsonResponse(structuredClone(calculateResult)));
     if (path.endsWith('/edit-source')) return Promise.resolve(jsonResponse(structuredClone(editSource)));
     if (path.includes('/discounts')) return Promise.resolve(jsonResponse([]));
@@ -90,9 +102,10 @@ describe('Pool Cage Size box on a reopened estimate', () => {
     fireEvent.change(screen.getByLabelText('Home Sq Ft'), { target: { value: '2600' } });
     await waitFor(() => expect(screen.getByLabelText('Home Sq Ft')).toHaveValue(2600));
     expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
+    // Moving to Large keeps the saved Oversized listed, so the operator can return to it.
     fireEvent.change(screen.getByLabelText('Pool Cage Size'), { target: { value: 'LARGE' } });
     await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE'));
-    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
   });
 
   it('shows four sizes when the edit source has no flag, even if the stored result carries a stale true', async () => {
@@ -109,5 +122,55 @@ describe('Pool Cage Size box on a calculate result with no property lookup', () 
     fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/calculate-estimate'))).toHaveLength(1));
     await waitFor(async () => expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']));
+  });
+});
+
+// The editor learns the gate at startup from the lawn_pricing_v2 read it already makes.
+describe('Pool Cage Size box on a fresh editor', () => {
+  const openFresh = () => {
+    render(<MemoryRouter><EstimateToolViewV2 /></MemoryRouter>);
+    fireEvent.change(screen.getByLabelText('Pool Cage'), { target: { value: 'YES' } });
+  };
+
+  it('shows two options before any lookup or calculate when the startup read says two sizes', async () => {
+    startupRow = { poolCageTwoSizes: true };
+    openFresh();
+    await waitFor(async () => expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']));
+  });
+
+  it('shows four options when the startup read has no flag (gate off)', async () => {
+    openFresh();
+    expect(await sizeValues()).toEqual(['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED']);
+  });
+
+  it('moves a Small or Oversized picked before the gate was known to Medium or Large', async () => {
+    let release;
+    gateRead = new Promise((resolve) => { release = resolve; });
+    startupRow = { poolCageTwoSizes: true };
+    openFresh();
+    fireEvent.change(await screen.findByLabelText('Pool Cage Size'), { target: { value: 'SMALL' } });
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('SMALL');
+    release();
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM'));
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+    fireEvent.change(screen.getByLabelText('Pool Cage Size'), { target: { value: 'LARGE' } });
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+  });
+
+  it('a reopened Oversized stays listed and selected when the startup read also says two sizes', async () => {
+    startupRow = { poolCageTwoSizes: true };
+    reopen('OVERSIZED', { poolCageTwoSizes: true });
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/pricing-config/lawn_pricing_v2'))).toBe(true));
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('OVERSIZED');
+  });
+
+  it('a reopened Small stays listed and selected; a reopened Medium shows only two', async () => {
+    reopen('SMALL', { poolCageTwoSizes: true });
+    expect(await sizeValues()).toEqual(['SMALL', 'MEDIUM', 'LARGE']);
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('SMALL');
+    cleanup();
+    reopen('MEDIUM', { poolCageTwoSizes: true });
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
   });
 });

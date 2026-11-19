@@ -942,11 +942,15 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   }
 
   // GATE_CAGE_TWO_SIZES: keep today's manual-quote hold. The engine adds
-  // large_pool_cage for poolCageReview. It holds only when the priced size is
-  // the lookup's own two-size answer; a seed's saved four-size value prices as before.
-  if (lookupCageHoldSize && lookupFeatureKeys.has('poolCageSize')
-    && String(features.poolCageSize || '').toLowerCase() === lookupCageHoldSize) {
-    features = { ...features, poolCageReview: true };
+  // large_pool_cage for poolCageReview. The flag follows the SAME evidence as the size:
+  // when the lookup decided the size it decides the flag too (true by the current rule,
+  // else any seeded flag, such as a stale website-quote one, is removed); when the seed
+  // supplied the size, the seed's own flag travels with it.
+  if (lookupFeatureKeys.has('poolCageSize')) {
+    const { poolCageReview: _seededFlag, ...lookupBacked } = features;
+    features = lookupCageHoldSize && String(lookupBacked.poolCageSize || '').toLowerCase() === lookupCageHoldSize
+      ? { ...lookupBacked, poolCageReview: true }
+      : lookupBacked;
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);

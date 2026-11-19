@@ -160,17 +160,19 @@ describe('lookup cage size prefill', () => {
     expect(await pricedProfile()).toMatchObject({ poolCage: 'YES', poolCageSize: 'LARGE' });
   });
 
-  it('two sizes: a saved Oversized or Small value stays listed and is not changed', async () => {
+  // A reopened estimate keeps its saved Small or Oversized listed (cage-two-sizes.test.jsx). A size a
+  // lookup fills is NOT saved: with two sizes on, a stale Small or Oversized reads as Medium or Large.
+  it('two sizes: a lookup-filled Small or Oversized (a lookup from before the flip) reads Medium or Large', async () => {
     lookupMeta = { poolCageTwoSizes: true };
-    for (const [saved, expected] of [['OVERSIZED', ['MEDIUM', 'LARGE', 'OVERSIZED']], ['SMALL', ['SMALL', 'MEDIUM', 'LARGE']]]) {
-      cageSize = saved;
+    for (const [filled, expected] of [['OVERSIZED', 'LARGE'], ['SMALL', 'MEDIUM']]) {
+      cageSize = filled;
       render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
       fireEvent.click(screen.getByRole('checkbox', { name: 'Pest Control', exact: true }));
       await lookUp();
       const sizeBox = screen.getByLabelText('Pool Cage Size');
-      expect(sizeBox).toHaveValue(saved);
-      expect([...sizeBox.options].map((o) => o.value)).toEqual(expected);
-      expect(await pricedProfile()).toMatchObject({ poolCageSize: saved });
+      await waitFor(() => expect(sizeBox).toHaveValue(expected));
+      expect([...sizeBox.options].map((o) => o.value)).toEqual(['MEDIUM', 'LARGE']);
+      expect(await pricedProfile()).toMatchObject({ poolCageSize: expected });
       cleanup();
     }
   });
