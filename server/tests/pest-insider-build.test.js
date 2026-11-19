@@ -13,7 +13,7 @@ const planOf = (leadFact, idItem = WFA) => jest.fn(() => ({ leadFact, idItem }))
 describe('buildIssue', () => {
   test("builds the issue from the fact's reviewed lead, title and species entry", () => {
     const plan = planOf(A01);
-    const r = buildIssue({ sendDate: '2026-12-03', plan, blogUrl: 'https://www.wavespestcontrol.com/blog/white-footed-ants/' });
+    const r = buildIssue({ sendDate: '2026-12-03', plan });
     expect(r.ok).toBe(true);
     expect(plan).toHaveBeenCalledWith({ sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [] });
     expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
@@ -23,8 +23,7 @@ describe('buildIssue', () => {
       expect(r.issue.text_body).toContain(line);
     }
     expect(r.issue.text_body).toContain(WFA.fact);
-    expect(r.issue.html_body).toContain('Read the full story');
-    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', problems: [], fallbacks: [] });
+    expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', problems: [] });
   });
 
   test('recent picks are passed to the plan', () => {
@@ -65,32 +64,10 @@ describe('buildIssue', () => {
     expect(buildIssue({ sendDate: '2026-12-03', recent: { factIds: used } })).toMatchObject({ ok: false, reason: 'no_fact_for_month', issue: null });
   });
 
-  test('optional blocks reach the renderer', () => {
-    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Sample area line.' });
-    expect(r.issue.html_body).toContain('Sample area line.');
-  });
-
-  test('caller text that fails the customer-copy screen is left out and reported', () => {
-    const area = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Gate code 4512 at the side yard.' });
-    expect(area.ok).toBe(true);
-    expect(area.issue.text_body).not.toContain('4512');
-    expect(area.diagnostics.fallbacks).toEqual(['area_line_dropped']);
-    const clean = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Sample area line.' });
-    expect(clean.diagnostics.fallbacks).toEqual([]);
-  });
-
   test('an impossible send date is refused before any plan is made', () => {
     const plan = jest.fn();
     expect(() => buildIssue({ sendDate: '2027-02-30', plan })).toThrow(/not a real calendar date/);
     expect(plan).not.toHaveBeenCalled();
-  });
-
-  test('a tool with an affiliate link is dropped and reported', () => {
-    const tool = { name: 'Sample nozzle', why: 'Sample reason.', url: 'https://amzn.to/abc123' };
-    const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), tool });
-    expect(r.ok).toBe(true);
-    expect(r.issue.html_body).not.toContain('amzn.to');
-    expect(r.diagnostics.fallbacks).toContain('tool_dropped_affiliate');
   });
 });
 

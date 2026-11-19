@@ -6,20 +6,21 @@
  * adds the Waves chrome and unsubscribe footer at send time. It carries the
  * dm-* hooks the dark-mode stylesheet keys on, so bodyIsDarkAware() is true.
  *
- * Every piece of text is escaped. Links are absolute https URLs on
- * www.wavespestcontrol.com (a blogUrl or tool url that is not https, that
- * carries a {{...}} merge tag, or a blog link off that host, is dropped); the
- * tool link is the one allowed off-site https link.
- *
  * The body is one email for every subscriber, and the public archive serves
- * it as stored, so it holds no household's details. "Your home" (a
- * customer's own visits) is rendered per recipient at delivery, in PR 4
- * (pre-push round 8).
+ * it as stored. So it holds only reviewed copy (the fact's lead and title,
+ * the species entry) and links the renderer builds itself from a species
+ * slug. It takes no caller text and no caller link: every round of the
+ * pre-push audit (5 to 10) found another way such input could carry a code,
+ * a name, an email or a merge tag into a shared email. The optional blocks
+ * come back in later PRs as structured data: the blog link (PR 2), "Active
+ * near you" from area counts (PR 2), "A tool we'd use" from a reviewed
+ * product list (PR 3), and "Your home", rendered per recipient (PR 4).
+ *
+ * Every piece of text is escaped.
  */
 'use strict';
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
-const { containsAffiliateMaterial } = require('../content/content-guardrails');
 
 const SITE = 'https://www.wavespestcontrol.com';
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
@@ -29,22 +30,6 @@ const escapeHtml = (text) => String(text ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-// The sender fills {{...}} merge tags per recipient, in both parts
-// (newsletter-draft.js), so caller text or a link that carries one could put
-// a subscriber's own value, such as an unsubscribe link, into the copy or
-// into a link to another site (pre-push round 8). Such input is left out.
-const MERGE_TAG = /\{\{|\}\}|%7b%7b|%7d%7d/i;
-
-function httpsUrl(url, { host } = {}) {
-  if (MERGE_TAG.test(String(url))) return null;
-  try {
-    const u = new URL(String(url));
-    if (u.protocol !== 'https:' || (host && u.hostname !== host)) return null;
-    return u.toString();
-  } catch { return null; }
-}
-
-const siteUrl = (url) => httpsUrl(url, { host: 'www.wavespestcontrol.com' });
 const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_URL}${slug}/` : null);
 
 function headingHtml(index, label) {
@@ -58,17 +43,14 @@ const link = (href, label) => `<a class="dm-link" href="${escapeHtml(href)}" sty
 const box = (inner) => `<div class="dm-box" style="margin:0 0 14px 0;padding:14px 18px;background:${newsletterPalette().cardBg};border-radius:10px;font-size:15px;line-height:1.6;">${inner}</div>`;
 const small = (html) => `<p class="dm-muted" style="margin:0 0 14px 0;font-size:14px;line-height:1.5;color:${newsletterPalette().muted};">${html}</p>`;
 
-// Each block returns { html, text } or null (omitted cleanly).
-function leadBlock({ lead, blogUrl }) {
+function leadBlock({ lead }) {
   const body = lead.sentences.map((s) => s.text).join(' ');
-  const url = siteUrl(blogUrl);
   const html = [
     headingHtml(0, 'Today I learned'),
     `<h3 class="dm-ink" style="margin:0 0 8px 0;font-size:17px;line-height:1.4;">${escapeHtml(lead.headline)}</h3>`,
     paragraph(escapeHtml(body)),
-    url ? paragraph(link(url, 'Read the full story')) : '',
   ].join('\n');
-  const text = ['TODAY I LEARNED', lead.headline, '', body, ...(url ? ['', `Read the full story: ${url}`] : [])].join('\n');
+  const text = ['TODAY I LEARNED', lead.headline, '', body].join('\n');
   return { html, text };
 }
 
@@ -87,87 +69,13 @@ function identifierBlock({ idItem }) {
   return { html, text };
 }
 
-// Caller-supplied text (the area line, a tool's words) is not reviewed copy,
-// so before it renders it must pass every check, and text that fails one is
-// left out (pre-push rounds 5 to 9):
-// - the checks the reviewed copy passes (claim-check bannedReason: banned
-//   words, pesticide and brand names, DIY ingredients, the tripwires and the
-//   shared fact register);
-// - the complete customer-copy screen (AGENTS.md customerCopyViolations);
-// - the content PII check (an email, a phone, a street address, a name);
-// - no code-shaped number. The report screen lets a device name next to
-//   digits pass, so that report prose like "120 linear feet around the
-//   garage" stays legal; a forwardable mass email leaves out "Side gate
-//   #1234", "gate 4417" and "1-2-3-4". One- and two-digit counts ("12 homes
-//   near you") stay.
-// The checks load heavier modules, so they are required only when such text
-// is given.
-const CODE_SHAPED_NUMBER = /#\s*\d|\d{3}|\b\d(?:[\s-]+\d){2,}\b/;
-
-function screenedText(value) {
-  if (typeof value !== 'string') return '';
-  const text = value.replace(/\s+/g, ' ').trim();
-  if (!text || CODE_SHAPED_NUMBER.test(text) || MERGE_TAG.test(text)) return '';
-  const { bannedReason } = require('./claim-check');
-  const { customerCopyViolations } = require('../service-report/technician-report-copy');
-  const { redact } = require('../content/pii-redactor');
-  if (bannedReason(text) || customerCopyViolations(text).length || redact(text).findings.length) return '';
-  return text;
-}
-
-const given = (value) => value != null && String(value).trim() !== '';
-
-function areaBlock({ areaLine }) {
-  const line = screenedText(areaLine);
-  if (!line) return null;
-  return { html: [headingHtml(0, 'Active near you'), paragraph(escapeHtml(line))].join('\n'), text: `ACTIVE NEAR YOU\n${line}` };
-}
-
-// The newsletter send validator blocks affiliate material in every email
-// (newsletter-validator.js, AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL), so a tool
-// whose url or text carries any is left out here, never rendered into a draft
-// the validator would then refuse. PR 3 owns the Amazon path.
-function toolAllowed(tool) {
-  if (!tool || typeof tool !== 'object') return false;
-  return ![tool.url, tool.name, tool.why, tool.disclosure].some((v) => v && containsAffiliateMaterial(String(v)));
-}
-
-// tool: { name, why, url, disclosure? }; name, why and an https url are required.
-const toolTextPasses = (tool) => [tool.name, tool.why, tool.disclosure].every((v) => !given(v) || screenedText(v));
-
-function toolBlock({ tool }) {
-  if (!toolAllowed(tool) || !toolTextPasses(tool)) return null;
-  const url = httpsUrl(tool.url);
-  const name = screenedText(tool.name);
-  const why = screenedText(tool.why);
-  if (!url || !name || !why) return null;
-  const disclosure = screenedText(tool.disclosure);
-  const html = [
-    headingHtml(1, "A tool we'd use"),
-    box(`<strong>${escapeHtml(name)}</strong><br/>${escapeHtml(why)}<br/>${link(url, `See ${name}`)}`),
-    disclosure ? small(escapeHtml(disclosure)) : '',
-  ].join('\n');
-  const text = ["A TOOL WE'D USE", name, why, url, ...(disclosure ? ['', disclosure] : [])].join('\n');
-  return { html, text };
-}
-
-// What renderIssue leaves out of the optional inputs a caller gave it, as
-// fallback names for the build's diagnostics.
-function droppedBlocks({ areaLine, tool }) {
-  return [
-    given(areaLine) && !screenedText(areaLine) && 'area_line_dropped',
-    tool && !toolAllowed(tool) && 'tool_dropped_affiliate',
-    tool && toolAllowed(tool) && !toolTextPasses(tool) && 'tool_dropped_copy',
-  ].filter(Boolean);
-}
-
 /**
  * @param {{ subject: string, preview: string, lead: { headline: string, sentences: {text:string}[] },
- *   idItem: { text: string, species: { slug: string, name: string } },
- *   blogUrl?: string|null, areaLine?: string|null, tool?: object|null }} issue
+ *   idItem: { text: string, species: { slug: string, name: string } } }} issue
+ *   Any other field is ignored: the shared body takes no caller text.
  */
 function renderIssue(issue) {
-  const blocks = [leadBlock(issue), identifierBlock(issue), areaBlock(issue), toolBlock(issue)].filter(Boolean);
+  const blocks = [leadBlock(issue), identifierBlock(issue)];
   const html = [
     ...blocks.map((b) => `<div class="dm-text">\n${b.html}\n</div>`),
     `<p class="dm-muted" style="margin:18px 0 0 0;font-size:14px;line-height:1.5;text-align:center;color:${newsletterPalette().muted};">${escapeHtml(FORWARD_LINE)}</p>`,
@@ -192,4 +100,4 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, toolAllowed, droppedBlocks, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
+module.exports = { renderIssue, wrapIssueHtml, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };

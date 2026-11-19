@@ -7,11 +7,10 @@
  * the process before any portal module loads. The build itself calls no
  * model: every lead sentence is the fact bank's reviewed copy.
  *
- *   node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--demo-blocks]
+ *   node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...]
  *
  *     <outDir>        where the files go (created if missing)
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
- *     --demo-blocks   fill the optional blocks (area line, tool) with synthetic text
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
  * next one, the way the real schedule will. No recheck is recorded here, so a
@@ -32,10 +31,9 @@ const flags = new Set(args.filter((a) => a.startsWith('--')));
 const positional = args.filter((a) => !a.startsWith('--'));
 const [outDir, ...dateArgs] = positional;
 const dates = dateArgs.length ? dateArgs : ['2026-12-03', '2026-12-17'];
-const unknown = [...flags].filter((f) => f !== '--demo-blocks');
 
-if (!outDir || unknown.length || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) {
-  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...] [--demo-blocks]');
+if (!outDir || flags.size || dates.some((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d))) {
+  console.error('usage: node ops/agents/pest-insider-sample.js <outDir> [YYYY-MM-DD ...]');
   process.exit(2);
 }
 
@@ -63,12 +61,6 @@ const { buildIssue } = require('../../server/services/pest-insider');
 const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 
-// Synthetic text only: no real customer, address or product.
-const DEMO = {
-  areaLine: 'Sample line: crews are seeing more of this near the canals this week.',
-  tool: { name: 'Sample garden hose nozzle', why: 'Sample line explaining why a crew keeps one in the truck.', url: 'https://www.example.com/sample-tool', disclosure: 'Sample disclosure line.' },
-};
-
 function saveIssue(sendDate, issue) {
   const base = path.join(outDir, `pest-insider-${sendDate}`);
   const html = wrapIssueHtml(issue, { unsubscribeUrl: '{{unsubscribe_url}}' });
@@ -84,7 +76,6 @@ for (const sendDate of dates) {
   const result = buildIssue({
     sendDate,
     recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) },
-    ...(flags.has('--demo-blocks') ? DEMO : {}),
   });
   const d = result.diagnostics;
   console.log(`\n== ${sendDate}  fact ${d.factId}  species ${d.speciesSlug}`);
@@ -99,6 +90,5 @@ for (const sendDate of dates) {
     console.log(`   NOT BUILT: ${result.reason}`);
   }
   for (const p of d.problems) console.log(`   PROBLEM (${p.part}): ${p.reason}${p.text ? ` | ${p.text}` : ''}`);
-  if (d.fallbacks.length) console.log(`   fallbacks used: ${d.fallbacks.join(', ')}`);
 }
 process.exit(failed ? 1 : 0);

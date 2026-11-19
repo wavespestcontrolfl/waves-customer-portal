@@ -2,12 +2,11 @@
  * Pest Insider issue builder: plan -> copy check -> render -> send-gate check.
  *
  * Content core only. Nothing here sends, schedules, calls a model or touches
- * the database; the caller supplies recent picks and the optional blocks (blog
- * link, area line, tool). Every word of the lead
- * and of "What's this?" is fixed, reviewed copy: the fact bank's `lead`
- * sentences and title, and the identifier species entry's fact. A fact
- * marked recheck_before_send leads only when the caller names it in
- * `recheckedFactIds` (a person re-read its source for this send).
+ * the database; the caller supplies the send date and recent picks. Every
+ * word of the lead and of "What's this?" is fixed, reviewed copy: the fact
+ * bank's `lead` sentences and title, and the identifier species entry's
+ * fact. A fact marked recheck_before_send leads only when the caller names
+ * it in `recheckedFactIds` (a person re-read its source for this send).
  * Returns { ok, reason, issue, diagnostics } where `issue` is
  * { subject, preview, html_body, text_body } when ok.
  */
@@ -15,7 +14,7 @@
 
 const { planIssue } = require('./plan');
 const { checkIssueCopy } = require('./claim-check');
-const { renderIssue, droppedBlocks } = require('./render');
+const { renderIssue } = require('./render');
 const { sendDateET } = require('./facts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 
@@ -41,14 +40,13 @@ function sendGateErrors(issue) {
 
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
- *   recheckedFactIds?: string[], blogUrl?: string|null, areaLine?: string|null, tool?: object|null,
- *   plan?: Function }} input   `plan` is the planner (injectable for tests). The issue is one
- *   email for every subscriber, so it takes no household's details ("Your home" is PR 4's,
- *   rendered per recipient at delivery).
+ *   recheckedFactIds?: string[], plan?: Function }} input   `plan` is the planner (injectable
+ *   for tests). The issue is one email for every subscriber and takes no caller text
+ *   (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, areaLine, tool, plan = planIssue }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], plan = planIssue }) {
   const dateET = sendDateET(sendDate);
-  const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [], fallbacks: [] };
+  const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [] };
 
   const { leadFact, idItem, reason } = plan({
     sendDate: dateET,
@@ -67,15 +65,11 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, are
   diagnostics.problems = copy.problems;
   if (!copy.ok) return { ok: false, reason: copyFailReason(copy), issue: null, diagnostics };
 
-  diagnostics.fallbacks.push(...droppedBlocks({ areaLine, tool }));
   const issue = renderIssue({
     subject: copy.subject,
     preview: copy.preview,
     lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })) },
     idItem: { text: copy.idText, species: idItem },
-    blogUrl,
-    areaLine,
-    tool,
   });
 
   const errors = sendGateErrors(issue);
