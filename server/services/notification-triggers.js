@@ -1554,6 +1554,9 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     let activeAdmins = [];
+    // Set when the recipient lookup or the push dispatch THREW, so a caller that must tell a failed push from a disabled one
+    // (estimate-call-today-push.js) can: both leave `push: null`. Additive field on the returned stats; no other caller reads it.
+    let pushFailed = null;
     try {
       let recipientQuery = db('technicians').where({ active: true });
       // Delivery follows the same fail-closed model as the persisted feed
@@ -1593,6 +1596,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
+      pushFailed = 'recipient_lookup';
       if (dedupeKey) return { bellWritten: false, push: null, retryable: true };
     }
 
@@ -1733,6 +1737,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     const stats = { bellWritten, push: null,
       ...(dedupeKey ? { retryable: anyBellEnabled && !bellWritten && !bellSuppressed } : {}),
     };
+    if (pushFailed) stats.pushFailed = pushFailed;
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (dedupedNoPush) return { ...stats, deduped: true };
@@ -1878,6 +1883,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
+      stats.pushFailed = 'push_dispatch';
       // A resumed event owns its retry: a failure before any handoff (the
       // subscription lookup) must not read as a delivered push.
       if (dedupeKey) { stats.push = null; stats.retryable = true; stats.error = e.message; }

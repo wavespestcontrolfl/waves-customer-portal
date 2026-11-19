@@ -78,11 +78,14 @@ async function claimDay(day) {
   return (claim?.rows || []).length > 0;
 }
 
+// True when the claim row is gone. A failed delete leaves the row, which blocks a same-day retry, so the caller must say so.
 async function releaseDay(day) {
   try {
     await db('sms_send_claims').where({ claim_key: `${CLAIM_PREFIX}${day}` }).del();
+    return true;
   } catch (err) {
     logger.error(`[estimate-call-today] claim release failed for ${day} (${err?.code || 'no code'})`);
+    return false;
   }
 }
 
@@ -90,7 +93,9 @@ async function releaseDay(day) {
 // off (push null) or a RECOGNIZED nothing-to-send-to result (no device, expired devices, a policy skip: sent 0 with no
 // failure counted) is a skip: the claim is released so a later run may try. Anything else (a device failed, a retry is
 // pending, or a result shape we do not recognize, such as missing counters) is uncertain: the claim stays, so there is
-// never a second banner that day. The log lines are fixed text.
+// never a second banner that day. The dispatcher's own `pushFailed` marker (its recipient lookup or push dispatch
+// threw, which also leaves push null) is a failure, not a disabled push: the claim stays and the run reports an error.
+// A claim release that fails is reported as claim_release_failed, never as a released claim. The log lines are fixed text.
 function isRecognizedNoDelivery(push) {
   if (push === null) return true;
   if (!push || typeof push !== 'object' || push.sent !== 0) return false;
@@ -102,16 +107,23 @@ function isRecognizedNoDelivery(push) {
 async function settle(day, count, result) {
   const push = result?.push;
   if (!result || result.error || result.prefsUnavailable) {
-    await releaseDay(day);
-    logger.error(`[estimate-call-today] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})`);
-    return { count, sent: false, error: 'dispatch_failed' };
+    const released = await releaseDay(day);
+    logger.error(`[estimate-call-today] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})${released ? '' : '; claim release failed'}`);
+    return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
+  }
+  if (result.pushFailed) {
+    logger.error(`[estimate-call-today] ${day}: push dispatch failed (${String(result.pushFailed)}); claim kept`);
+    return { count, sent: false, error: 'push_dispatch_failed' };
   }
   if (push && Number(push.sent) > 0) {
     logger.info(`[estimate-call-today] ${day}: ${count} on the list, banner sent`);
     return { count, sent: true, result };
   }
   if (isRecognizedNoDelivery(push)) {
-    await releaseDay(day);
+    if (!(await releaseDay(day))) {
+      logger.error(`[estimate-call-today] ${day}: banner skipped (push off or no device to send to) but the claim release failed; claim kept`);
+      return { count, sent: false, error: 'claim_release_failed' };
+    }
     logger.warn(`[estimate-call-today] ${day}: banner skipped (push off or no device to send to); claim released`);
     return { count, sent: false, skipped: 'no_push_delivered' };
   }
@@ -137,9 +149,9 @@ async function claimAndSend(day, count) {
     const result = await triggerNotification('estimate_call_today', { count, day }, { pushOnly: true });
     return settle(day, count, result);
   } catch (err) {
-    await releaseDay(day);
-    logger.error(`[estimate-call-today] ${day}: banner failed (${err?.code || 'no code'})`);
-    return { count, sent: false, error: 'dispatch_failed' };
+    const released = await releaseDay(day);
+    logger.error(`[estimate-call-today] ${day}: banner failed (${err?.code || 'no code'})${released ? '' : '; claim release failed'}`);
+    return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
   }
 }
 

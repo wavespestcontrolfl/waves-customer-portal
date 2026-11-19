@@ -85,7 +85,7 @@ test('a failed run is logged, never thrown out of the tick', async () => {
 
 // Job health (cron-lock runExclusive) records a resolved callback as a success and a thrown one as a failure.
 test('a count, claim or delivery failure reported by the worker is thrown inside the runExclusive callback', async () => {
-  for (const error of ['count_failed', 'claim_failed', 'dispatch_failed', 'delivery_uncertain']) {
+  for (const error of ['count_failed', 'claim_failed', 'dispatch_failed', 'delivery_uncertain', 'push_dispatch_failed', 'claim_release_failed']) {
     jest.clearAllMocks();
     runEstimateCallTodayPush.mockResolvedValueOnce({ count: 1, sent: false, error });
     let thrown;

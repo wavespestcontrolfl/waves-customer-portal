@@ -38,11 +38,13 @@ let estimateRows;
 let clickRows;
 let claimed;
 let estimateCalls; // the list query's method calls, in order
+let releaseFails; // the claim row's delete throws
 beforeEach(() => {
   jest.clearAllMocks();
   estimateRows = [];
   clickRows = [];
   estimateCalls = [];
+  releaseFails = false;
   claimed = new Set();
   mockLastCalled.mockResolvedValue(new Map());
   mockDb.raw.mockImplementation(async (_sql, [key]) => {
@@ -68,7 +70,7 @@ beforeEach(() => {
   mockDb.mockImplementation((table) => {
     if (table === 'estimates') return listQuery();
     if (table === 'short_codes') return chain(clickRows);
-    if (table === 'sms_send_claims') return { where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return 1; } }) };
+    if (table === 'sms_send_claims') return { where: ({ claim_key: key }) => ({ del: async () => { if (releaseFails) throw Object.assign(new Error('delete from sms_send_claims'), { code: '57P01' }); claimed.delete(key); return 1; } }) };
     throw new Error(`unexpected table ${table}`);
   });
   mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
@@ -272,6 +274,41 @@ describe('the banner', () => {
       mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' } });
       await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });
       expect([...claimed]).toEqual([]);
+    });
+
+    test('the dispatcher says its recipient lookup or push dispatch threw (pushFailed): an error, the claim stays, a rerun does not dispatch', async () => {
+      for (const marker of ['recipient_lookup', 'push_dispatch']) {
+        claimed.clear();
+        mockTrigger.mockClear();
+        mockTrigger.mockResolvedValue({ bellWritten: false, push: null, pushFailed: marker });
+        await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_dispatch_failed' });
+        expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+        expect(logger.error).toHaveBeenCalledWith(`[estimate-call-today] 2026-11-19: push dispatch failed (${marker}); claim kept`);
+        await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
+        expect(mockTrigger).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    test('a skip whose claim release fails is claim_release_failed, and the log says the release failed', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: null });
+      releaseFails = true;
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'claim_release_failed' });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']); // the row stays and blocks a same-day retry
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] claim release failed for 2026-11-19 (57P01)');
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: banner skipped (push off or no device to send to) but the claim release failed; claim kept');
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('claim released'));
+      expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/delete from/);
+    });
+
+    test('a dispatch error or throw whose claim release fails is claim_release_failed too', async () => {
+      releaseFails = true;
+      mockTrigger.mockResolvedValue({ error: 'x' });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'claim_release_failed' });
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: banner not sent (dispatch error); claim release failed');
+      claimed.clear();
+      mockTrigger.mockRejectedValue(Object.assign(new Error('boom'), { code: 'E1' }));
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'claim_release_failed' });
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: banner failed (E1); claim release failed');
     });
 
     test('one device took it and another failed: sent', async () => {
