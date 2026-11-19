@@ -361,35 +361,39 @@ describe('a visit the call agent held', () => {
     }
   });
 
-  test('a confirmed opt-out on a finished pass rings fast, says why, and never asks for a call', () => {
-    const optOut = extraction({ consent: { do_not_contact_request: true } });
-    const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null, ai_extraction_enriched: optOut })], [], { now: NOW });
-    expect(miss.holdReason).toBe('the caller asked not to be contacted');
-    const text = bookItAlert(miss, false);
-    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked not to be contacted.');
-    expect(text.detail).toContain('Review it in dispatch before booking, and do not call or text the caller.');
-    expect(text.detail).not.toContain('call back');
-    // A pass that can still be retried waits GRACE_MINUTES, but its bell still never asks for a call.
-    const retryable = call({ processing_status: 'extraction_failed', ai_validation: null, ai_extraction_enriched: optOut });
-    expect(computeBookingMisses([{ ...retryable, created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }], [], { now: NOW })).toHaveLength(0);
-    const [late] = computeBookingMisses([retryable], [], { now: NOW });
-    expect(late.holdReason).toBeNull();
-    expect(bookItAlert(late, false).detail).toContain('do not call or text the caller');
+  // Pre-push P1s (2026-11-18): either extractor's opt-out bars contact, and an opt-out alone
+  // never proves a hold (in shadow mode V2 does not decide the booking; in enforce mode the
+  // processor's hard-veto exit stores no decision).
+  test('an opt-out from either extractor never asks for a call, and alone it does not shorten the wait', () => {
+    const optOuts = {
+      V2: { ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) },
+      V1: { ai_extraction: { do_not_contact_request: true } },
+    };
+    for (const [label, over] of Object.entries(optOuts)) {
+      expect([label, computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: null, ...over })], [], { now: NOW })]).toEqual([label, []]);
+      const [miss] = computeBookingMisses([call({ ai_validation: null, ...over })], [], { now: NOW });
+      expect(miss.holdReason).toBeNull();
+      const text = bookItAlert(miss, false);
+      expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
+      expect([label, text.detail]).toEqual([label, expect.stringContaining('Review it in dispatch before booking, and do not call or text the caller.')]);
+      expect(text.detail).not.toContain('call back');
+    }
   });
 
-  // Pre-push P1 (2026-11-18): a withheld caller ID is not a number to call back, and a caller
-  // with no line on the row may still have given a callback number (the router's own rule).
-  test('the number shown and the callback step follow the router\'s reach rule', () => {
-    const detailOf = (over) => bookItAlert(computeBookingMisses([call(over)], [], { now: NOW })[0], false).detail;
+  // Pre-push P1s (2026-11-18): the bell shows, and offers a callback on, the processor's own
+  // contact number. Our own line is never one (the fixtures' from_phone stands in for it, so the
+  // cases below leave it out: the test env has no list of our numbers).
+  test('the number shown and the callback step follow the processor\'s contact number', () => {
+    const detailOf = (over) => bookItAlert(computeBookingMisses([call({ from_phone: null, ...over })], [], { now: NOW })[0], false).detail;
     const withheld = detailOf({ to_phone: 'anonymous' });
     expect(withheld).toMatch(/^Pat Sample \(no number\) confirmed /);
     expect(withheld).toContain('Book it in dispatch; the call left no number to call back.');
-    const spoken = detailOf({ to_phone: null, ai_extraction_enriched: extraction({ caller: { name_full: 'Pat Sample', phone_e164: '+19415550123' } }) });
+    const spoken = detailOf({ to_phone: null, ai_extraction: { phone: '+19415550123' } });
     expect(spoken).toMatch(/^Pat Sample \(\+19415550123\) confirmed /);
     expect(spoken).toContain('Book it in dispatch or call back to reset expectations.');
-    // The call's own line wins when it is dialable.
-    expect(detailOf({ ai_extraction_enriched: extraction({ caller: { name_full: 'Pat Sample', phone_e164: '+19415550123' } }) }))
-      .toMatch(/^Pat Sample \(\+19415550111\) confirmed /);
+    // A form-callback bridge dials staff first: the lead's number is the customer's, not the staff leg.
+    const bridge = detailOf({ source: 'lead-webhook-auto-bridge', to_phone: '+19415550177', metadata: { type: 'lead_auto_bridge', leadPhone: '+19415550188' } });
+    expect(bridge).toMatch(/^Pat Sample \(\+19415550188\) confirmed /);
   });
 
   // Pre-push P1 (2026-11-18): the date check follows the same contact rule as "book it".
@@ -402,8 +406,10 @@ describe('a visit the call agent held', () => {
     expect(optedOut).toMatch(/Move it to the agreed day or keep the booked day, then tap Done; do not call or text the caller\.$/);
     expect(optedOut).not.toContain('confirm the new day with the customer');
     expect(check(call(), 'the caller asked not to be contacted')).toContain('do not call or text the caller');
-    expect(check(call({ to_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
-    expect(check(call({ to_phone: 'anonymous' }))).toMatch(/the call left no number to confirm a new day\.$/);
+    // Our own line (the fixture's from_phone) is never a number to reach the caller on.
+    expect(check(call({ to_phone: null, from_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
+    expect(check(call({ to_phone: 'anonymous', from_phone: null }))).toMatch(/the call left no number to confirm a new day\.$/);
+    expect(check(call({ ai_extraction: { do_not_contact_request: true } }))).toContain('do not call or text the caller');
     expect(check(call(), 'the call has no callback number')).toMatch(/the call left no number to confirm a new day\.$/);
   });
 

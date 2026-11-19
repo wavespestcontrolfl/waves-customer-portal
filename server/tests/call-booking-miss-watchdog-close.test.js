@@ -387,7 +387,7 @@ describe('close pass', () => {
     mockState.open = [open('d1', '40', { mismatch_visit_id: 'visit-9', mismatch_date: '2026-10-28', mismatch_time: '16:00' })];
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     await planOpenBookingMissBells({ now: NOW });
-    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['ai_validation', 'processing_status', 'processing_started_at']));
+    expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining(['ai_validation', 'processing_status', 'processing_started_at', 'source', 'metadata', 'ai_extraction']));
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 1 });
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
