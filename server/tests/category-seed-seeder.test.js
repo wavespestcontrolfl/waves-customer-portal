@@ -670,6 +670,17 @@ describe('customer-question manifest 2026-11-18', () => {
     expect(waves).not.toMatch(/inspect/i);
   });
 
+  // The topic-ownership check reads a new post's title, slug, keywords and
+  // headings, and two live posts own "Norway" there, so CQ05 names Norway
+  // rats in body prose only (pre-push audit).
+  test('CQ05 keeps Norway rats out of the fields the topic check reads', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ05');
+    const labels = b.outline.map((item) => item.slice(0, item.indexOf(':')));
+    expect(labels).toContain('Which rats you may see');
+    expect([b.working_title, b.slug, b.primary_kw, ...b.secondary_kws, ...labels].join(' ')).not.toMatch(/norway/i);
+    expect(b.verify_notes.join(' ')).toContain('Keep the words Norway rats out of the title, the meta description, every heading and the keywords');
+  });
+
   // MedlinePlus encyclopedia pages are A.D.A.M. content. Their terms bar
   // automated extraction and any AI use without written consent, and
   // editorial review sends each source's text to a model (pre-push audit).
