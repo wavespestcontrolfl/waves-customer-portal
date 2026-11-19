@@ -83,10 +83,18 @@ function identifierBlock({ idItem }) {
 // (AGENTS.md) before it renders, and text that fails is left out
 // (pre-push rounds 5 and 6). The screen loads the report-copy modules, so it
 // is required only when such text is given.
+// A forwardable mass email also holds that text to a stricter bar than a
+// report: a number shaped like a code ("Side gate #1234", "gate 4417",
+// "1-2-3-4") is left out, though the shared screen lets a device name next
+// to digits pass so that report prose like "120 linear feet around the
+// garage" stays legal (pre-push round 7). One- and two-digit counts
+// ("12 homes near you") stay.
+const CODE_SHAPED_NUMBER = /#\s*\d|\d{3}|\b\d(?:[\s-]+\d){2,}\b/;
+
 function screenedText(value) {
   if (typeof value !== 'string') return '';
   const text = value.replace(/\s+/g, ' ').trim();
-  if (!text) return '';
+  if (!text || CODE_SHAPED_NUMBER.test(text)) return '';
   const { customerCopyViolations } = require('../service-report/technician-report-copy');
   return customerCopyViolations(text).length ? '' : text;
 }

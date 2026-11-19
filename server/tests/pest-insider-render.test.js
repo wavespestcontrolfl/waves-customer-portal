@@ -62,6 +62,10 @@ describe('renderIssue', () => {
     expect(r.html_body).not.toContain('Active near you');
     expect(r.html_body).not.toContain('A tool we&#39;d use');
     expect(r.text_body).not.toMatch(/4512|pet-safe/);
+    // a code-shaped number never reaches the mass email, even where the shared screen allows it (pre-push round 7)
+    for (const areaLine of ['Side gate #1234.', 'Gate 4417 sticks.', 'Gate code is 1-2-3-4.']) {
+      expect(renderIssue({ ...BASE, areaLine }).html_body).not.toContain('Active near you');
+    }
     // a count is not an access code
     expect(renderIssue({ ...BASE, areaLine: '12 homes near you reported ants this month.' }).text_body).toContain('ACTIVE NEAR YOU\n12 homes near you reported ants this month.');
     expect(droppedBlocks({ ...bad, home: DEMO.home })).toEqual(['area_line_dropped', 'tool_dropped_copy']);

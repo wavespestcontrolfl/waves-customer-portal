@@ -63,7 +63,7 @@ const BANNED_RULES = [
 const WAVES_RE = /\bwaves\b/i;
 
 // Words a sentence opens with that are not part of a name that follows them ("The CDC says ...").
-const OPENERS = new Set(['the', 'a', 'an', 'this', 'that', 'these', 'those', 'in', 'on', 'at', 'by', 'for', 'from', 'with', 'when', 'while', 'if', 'it', 'they', 'we', 'our', 'your', 'here', 'there', 'some', 'many', 'most', 'each', 'every', 'after', 'before', 'during', 'unlike', 'like', 'as', 'so', 'but', 'and', 'or', 'now', 'according']);
+const OPENERS = new Set(['the', 'a', 'an', 'this', 'that', 'these', 'those', 'in', 'on', 'at', 'by', 'for', 'from', 'with', 'when', 'while', 'if', 'it', 'they', 'we', 'our', 'your', 'here', 'there', 'some', 'many', 'most', 'each', 'every', 'after', 'before', 'during', 'unlike', 'like', 'as', 'so', 'but', 'and', 'or', 'now', 'according', 'why', 'how', 'never']);
 
 const tidy = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const norm = (s) => String(s || '').replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
@@ -183,7 +183,8 @@ function nameCandidates(sentence) {
   flush();
   return phrases
     .map((p) => p.filter((w) => !ALLOWED_NAMES.has(w.word.toLowerCase()) && !(w.first && OPENERS.has(w.word.toLowerCase()))))
-    // a lone sentence-opening word is just a capital letter
+    // a lone sentence-opening word is just a capital letter (openerProblem
+    // checks the first word of a printed line)
     .filter((p) => p.length && !(p.length === 1 && p[0].first))
     .map((p) => p.map((w) => w.word).join(' '));
 }
@@ -332,7 +333,9 @@ const factSource = (fact) => ({
   units: sourceUnits(fact.statement, attributedQuotes(fact)),
   labels: [...new Set([...fact.sources.map(sourceLabel), ...Object.keys(LABEL_ALIASES)])],
   facts: [fact.statement, ...fact.quotes].join(' '),
-  names: [fact.title, fact.statement, ...fact.quotes, ...fact.sources.map((s) => `${s.publisher} ${s.title}`)].join(' '),
+  // The fact's own title is not evidence: a name it adds must be in the
+  // statement, a quote or a source's publisher or title (pre-push round 7).
+  names: [fact.statement, ...fact.quotes, ...fact.sources.map((s) => `${s.publisher} ${s.title}`)].join(' '),
 });
 
 const speciesSource = (species) => ({
@@ -342,20 +345,32 @@ const speciesSource = (species) => ({
   names: [species.name, species.category, species.fact, species.note].join(' '),
 });
 
+// A lone capitalized word that opens a printed line may be an ordinary word
+// or a name ("Tampa mosquito eggs ..."), and nameCandidates cannot tell
+// them apart, so the line passes only when that word is a plain opener or
+// its source has the word in any case (pre-push round 7).
+function openerProblem(text, source) {
+  const first = norm(text).split(' ').find((w) => /[A-Za-z]/.test(w)) || '';
+  const word = first.replace(/^[("']+|[)"',.;:!?]+$/g, '').replace(/'s$/, '');
+  const lower = word.toLowerCase();
+  if (!/^[A-Z]/.test(word) || OPENERS.has(lower) || ALLOWED_NAMES.has(lower)) return null;
+  return hasWord(norm(source.names).toLowerCase(), word) ? null : `name not in the source: ${word}`;
+}
+
 // The subject is the fact's reviewed title behind its service emoji.
 const SERVICE_EMOJI = { pest: '🐜', lawn: '🌱', tree_shrub: '🌴', mosquito: '🦟', termite: '🪵', rodent: '🐀' };
 
 function leadLineProblem(text, fact, source) {
   if (!text) return 'empty sentence';
   if (WAVES_RE.test(text)) return 'a lead sentence restates the source; it does not speak for Waves';
-  return sentenceProblem(text, source) || creditProblem(text, fact);
+  return sentenceProblem(text, source) || openerProblem(text, source) || creditProblem(text, fact);
 }
 
 // A title is a reviewed summary of the whole fact, not a copy of one quote,
 // so it gets the pooled checks (numbers with their units, months, names,
 // credit) without the word-for-word rule, plus the subject format.
 function titleProblem(title, subject, fact, source) {
-  return subjectFormatProblem(subject) || sentenceProblem(title, { ...source, units: null }) || creditProblem(title, fact);
+  return subjectFormatProblem(subject) || sentenceProblem(title, { ...source, units: null }) || openerProblem(title, source) || creditProblem(title, fact);
 }
 
 // "What's this?" is the species entry's own fact, checked a sentence at a time.

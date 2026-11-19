@@ -192,6 +192,14 @@ describe('checkIssueCopy', () => {
     expect(titleProblems('Mosquito eggs can wait 10 months dry')[0].reason).toMatch(/number and unit not in the source: 10 month/);
     expect(titleProblems('Eggs that cost $5')[0].reason).toBe('dollar sign');
     expect(titleProblems('Mosquito eggs '.repeat(8))).toHaveLength(1);
+    // the title is never its own evidence for a name, at the start of the line or inside it (pre-push round 7)
+    expect(titleProblems('Mosquito eggs can wait up to 8 months dry in Tampa')[0].reason).toBe('name not in the source: Tampa');
+    expect(titleProblems('Tampa mosquito eggs can wait up to 8 months dry')[0].reason).toBe('name not in the source: Tampa');
+  });
+
+  test('a lead line may not open with a name its source lacks', () => {
+    const r = checkIssueCopy({ leadFact: withLead(['Tampa yards hold mosquito eggs.', ...FACT.lead.slice(1)]), species: SPECIES_ENTRY });
+    expect(r.problems).toEqual([{ part: 'lead', text: 'Tampa yards hold mosquito eggs.', reason: 'name not in the source: Tampa' }]);
   });
 
   test("\"What's this?\" prints the species entry's own fact; a banned word in it fails the issue", () => {
@@ -236,7 +244,7 @@ describe('the fact bank copy, as every issue will print it', () => {
       const quotesOnly = {
         units: null,
         facts: f.quotes.join(' '),
-        names: [f.title, ...f.quotes, ...f.sources.map((s) => `${s.publisher} ${s.title}`)].join(' '),
+        names: [...f.quotes, ...f.sources.map((s) => `${s.publisher} ${s.title}`)].join(' '),
       };
       const problem = sentenceProblem(f.statement, quotesOnly);
       if (problem) found[f.id] = problem;
