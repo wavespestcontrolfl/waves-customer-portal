@@ -8,7 +8,7 @@ const { excludeHoldDeferralPlaceholders } = require('./collections/collection-ho
 const StripeService = require('./stripe');
 const logger = require('./logger');
 const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
-const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, neverRanVisitStatus } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
 
@@ -118,6 +118,19 @@ async function recoveryInvoiceAvailableNow(customerId, invoice, database) {
     const verdict = await require('./pay-combined').memberCollectionPending(invoice, { database, customerId });
     if (!verdict?.row) return null;
     const current = verdict.row;
+    // Resolve through service_record_id as well as a direct visit link. That
+    // same current visit owns both the live payer verdict and the never-ran
+    // settlement guard, so a late payer assignment or cancel/skip fails closed.
+    const linkedVisitId = await require('./invoice').linkedScheduledServiceId(current, database);
+    if (linkedVisitId) {
+      const visit = await database('scheduled_services').where({ id: linkedVisitId }).first('status');
+      if (neverRanVisitStatus(visit?.status)) return null;
+    }
+    const payerOwnership = await require('./invoice-payer-ownership').invoicePayerOwnership(
+      linkedVisitId ? { ...current, scheduled_service_id: linkedVisitId } : current,
+      database,
+    );
+    if (payerOwnership !== null) return null;
     // A packet invoice's representative visit is not enough: any billed
     // member can move the whole packet to a third-party payer.
     if (current.visit_completion_packet_id

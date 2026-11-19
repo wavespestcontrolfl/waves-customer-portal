@@ -5,6 +5,7 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/invoice-payer-ownership', () => ({
   liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })),
+  invoicePayerOwnership: jest.fn(async () => null),
 }));
 jest.mock('../services/pay-combined', () => ({
   memberCollectionPending: jest.fn(async (invoice) => ({ row: invoice })),
@@ -12,11 +13,15 @@ jest.mock('../services/pay-combined', () => ({
 jest.mock('../services/visit-completion-packets', () => ({
   invoicePayerOwnedNow: jest.fn(async () => false),
 }));
+jest.mock('../services/invoice', () => ({
+  linkedScheduledServiceId: jest.fn(async () => null),
+}));
 
 const { recoveryInvoiceIndexFor } = require('../services/portal-payment-history');
-const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
+const { liveInvoiceOwnership, invoicePayerOwnership } = require('../services/invoice-payer-ownership');
 const { memberCollectionPending } = require('../services/pay-combined');
 const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
+const { linkedScheduledServiceId } = require('../services/invoice');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
 const INV_B = '22222222-2222-4222-8222-222222222222';
@@ -44,11 +49,13 @@ function invoice(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   liveInvoiceOwnership.mockResolvedValue({ ownedIds: new Set(), unverifiable: false });
+  invoicePayerOwnership.mockResolvedValue(null);
   memberCollectionPending.mockImplementation(async (current) => ({ row: current }));
   invoicePayerOwnedNow.mockResolvedValue(false);
+  linkedScheduledServiceId.mockResolvedValue(null);
 });
 
-function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptError = null } = {}) {
+function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptError = null, visitStatus = null } = {}) {
   let invoiceReads = 0;
   return jest.fn((table) => {
     const query = {};
@@ -68,6 +75,7 @@ function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptE
       invoiceReads += 1;
       return invoiceReads === 1 ? rows : supplementalRows;
     };
+    query.first = async () => (table === 'scheduled_services' ? { status: visitStatus } : null);
     return query;
   });
 }
@@ -313,6 +321,40 @@ test('the current-row verifier withholds an invoice reassigned to another custom
     database, customerId: 'cust-1',
   });
 });
+
+test.each(['payer_owned', 'payer_unverifiable'])(
+  'fresh service-record-linked ownership %s withholds the recovery link',
+  async (ownership) => {
+    linkedScheduledServiceId.mockResolvedValueOnce('visit-1');
+    invoicePayerOwnership.mockResolvedValueOnce(ownership);
+    const current = invoice({ scheduled_service_id: null, service_record_id: 'record-1' });
+    memberCollectionPending.mockResolvedValueOnce({ row: current });
+    const database = reader([current], [], [current], { visitStatus: 'completed' });
+    const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+      id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+    }], database);
+
+    expect(recovery.has('pay-a')).toBe(false);
+    expect(invoicePayerOwnership).toHaveBeenCalledWith(expect.objectContaining({
+      id: INV_A, scheduled_service_id: 'visit-1', service_record_id: 'record-1',
+    }), database);
+  },
+);
+
+test.each(['cancelled', 'skipped'])(
+  'a fresh %s linked visit cannot produce a recovery link',
+  async (status) => {
+    linkedScheduledServiceId.mockResolvedValueOnce('visit-1');
+    const current = invoice({ service_record_id: 'record-1' });
+    memberCollectionPending.mockResolvedValueOnce({ row: current });
+    const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+      id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+    }], reader([current], [], [current], { visitStatus: status }));
+
+    expect(recovery.has('pay-a')).toBe(false);
+    expect(invoicePayerOwnership).not.toHaveBeenCalled();
+  },
+);
 
 test('the recovery link and amount come from the verified current invoice row', async () => {
   memberCollectionPending.mockResolvedValueOnce({ row: invoice({
