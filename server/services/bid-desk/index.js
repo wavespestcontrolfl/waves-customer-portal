@@ -103,19 +103,21 @@ const REPEAT_JOINS_DECIDED = new Set(['mfmp']);
 // Templates whose due date is a day with no hour (see autoConfirmsDate and patchInput).
 const DAY_ONLY_TEMPLATES = new Set(['mfmp']);
 const MFMP_SENDER_DOMAIN = 'dms.myflorida.com';
-const LEGACY_SCAN_LIMIT = 50;
 
 // A bid filed from an MFMP notice before the template existed has no key. The first repeat finds it by reading its
 // own linked notices with today's parser and sender check (a forged notice never verifies), and the caller gives it
-// the key (`!existing.group_key && parsed.group_key`).
+// the key (`!existing.group_key && parsed.group_key`). No row cap: a verified MFMP notice now always files with a key,
+// so this set is the few bids filed before the template (plus any filed while the template no longer parses).
+// Among matches, the same order as a keyed lookup: the oldest open bid, else the newest decided one.
 async function legacyMfmpBid(trx, groupKey) {
   const rows = await trx('bid_opportunities as b')
     .join('bid_opportunity_emails as l', 'l.bid_id', 'b.id').join('emails as e', 'e.id', 'l.email_id')
     .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%@${MFMP_SENDER_DOMAIN}`])
-    .orderBy('b.created_at').limit(LEGACY_SCAN_LIMIT)
-    .select('b.id as bid_id', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
-  const hit = rows.find((row) => domainOf(row.from_address) === MFMP_SENDER_DOMAIN
+    .orderBy('b.created_at')
+    .select('b.id as bid_id', 'b.status', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
+  const matches = rows.filter((row) => domainOf(row.from_address) === MFMP_SENDER_DOMAIN
     && parseBidEmail(withProviderCheck(row)).group_key === groupKey);
+  const hit = matches.find((row) => OPEN_STATUSES.includes(row.status)) || matches[matches.length - 1];
   return hit ? trx('bid_opportunities').where({ id: hit.bid_id }).first() : null;
 }
 

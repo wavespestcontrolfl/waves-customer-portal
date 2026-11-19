@@ -540,6 +540,32 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('new')).toHaveLength(0);
     });
 
+    test('of two keyless legacy copies of one advertisement, a repeat joins the open one before the declined one', async () => {
+      const body = (number) => [
+        ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ' Advertisement Type: Invitation to Bid',
+        ' Title: Sample Canal Weed Control', ' Close Date: Oct 29, 2026',
+      ].join('\n');
+      const legacyNotice = (threadId, number = 'ITB-17500') => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: `Advertisement Posted - ${number}`, body_text: body(number),
+      });
+      const blank = { group_key: null, gc_or_agency: null, project_title: null, solicitation_number: null, due_at: null, due_source_line: null };
+      // Two rows the subject-only rule filed for one advertisement before this template: the older declined, the newer
+      // open. (The newer is filed under another number first, then its stored notice is set to this advertisement.)
+      const older = await service.ingestEmail(await legacyNotice('t-mfmp-dup-1'));
+      await mockPg('bid_opportunities').where({ id: older.bidId }).update({ ...blank, status: 'no_bid' });
+      const newerEmail = await legacyNotice('t-mfmp-dup-2', 'ITB-17599');
+      const newer = await service.ingestEmail(newerEmail);
+      expect(newer.created).toBe(true);
+      await mockPg('emails').where({ id: newerEmail.id }).update({ subject: 'Advertisement Posted - ITB-17500', body_text: body('ITB-17500') });
+      await mockPg('bid_opportunities').where({ id: newer.bidId }).update(blank);
+      const repeat = await service.ingestEmail(await legacyNotice('t-mfmp-dup-3'));
+      expect(repeat).toMatchObject({ created: false, bidId: newer.bidId });
+      expect(await bidRow(newer.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17500' });
+      expect(await bidRow(older.bidId)).toMatchObject({ status: 'no_bid', group_key: null });
+    });
+
     test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {
       const bare = BC_BODY().replace(': Pest Control', '');
       const decided = await service.ingestEmail(await storeEmail({ body_text: bare }));
