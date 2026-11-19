@@ -1296,6 +1296,39 @@ const TwilioService = {
             }
           }
         };
+        const runWebsiteLineGate = async () => {
+          // A website-only line texts only someone who already called or
+          // texted it (website-line-contact.js). The send routes, the queue
+          // and the scheduled dispatcher refuse earlier with their own
+          // message; this is the seam every SMS crosses, so a path that
+          // keeps a thread's line (a dashboard reply that falls back to the
+          // customer's current phone, an applicant reply, an approved agent
+          // draft) cannot give the line to a number that never contacted it.
+          // Any other line returns at once, with no read. Read on the
+          // caller's handoff transaction when there is one. Fails CLOSED: an
+          // unreadable check refuses, and the send may be tried again. It
+          // does not repeat after the attempt marker below: a contact is
+          // never taken back, so a pass here cannot turn into a refusal.
+          const { websiteLineRefusal } = require('./website-line-contact');
+          let refusal;
+          try {
+            refusal = await websiteLineRefusal(fromNumber, to, { database: trx || db });
+          } catch (checkErr) {
+            const err = new Error('The website-only line could not be checked before the send');
+            err.code = 'WEBSITE_LINE_UNVERIFIED';
+            err.retryable = true;
+            err.providerPreSendCheckFailed = true;
+            err.cause = checkErr;
+            throw err;
+          }
+          if (refusal) {
+            const err = new Error(refusal);
+            err.code = 'WEBSITE_LINE_FIRST_CONTACT';
+            err.retryable = false;
+            err.providerPreSendCheckFailed = true;
+            throw err;
+          }
+        };
         // The caller-owned provider-boundary predicate runs FIRST (Codex #5334 P1 reverses the round-43 placement: it used to
         // sit after the disclaimed-number hold; the hold is a suppression gate and now closes the window instead).
         if (typeof options.providerPreSendCheck === 'function') {
@@ -1325,6 +1358,7 @@ const TwilioService = {
         }
         await runAnnualGate();
         await runDisclaimedGate();
+        await runWebsiteLineGate();
         // Pre-push audit P1 (round 5): the guard above just awaited its own
         // DB reads — real time the send-window boundary re-check (the
         // caller's own preSendCheck, run once, earlier, before this

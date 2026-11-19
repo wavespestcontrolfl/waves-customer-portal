@@ -43,7 +43,11 @@ describe('the LinkedIn article card', () => {
   const BLOG = 'https://www.wavespestcontrol.com/pest-control/fixture-guide/';
   const WEB_LINE_CARD = 'Questions? Call (941) 254-2617.';
   const ENV = { SOCIAL_AUTOMATION_ENABLED: 'true', SOCIAL_LINKEDIN_ENABLED: 'true', SOCIAL_DRY_RUN: 'true' };
-  const refusedForPhone = expect.objectContaining({ success: false, error: expect.stringMatching(/^Validation: Unknown phone number: \(941\) 254-2617/) });
+  // The stored result masks the number: it may be a customer's.
+  const refusedForPhone = expect.objectContaining({
+    success: false, error: expect.stringMatching(/^Validation: Unknown phone number: \[phone\]/),
+    validationIssues: expect.not.arrayContaining([expect.stringContaining('254-2617')]),
+  });
   beforeEach(() => { Object.assign(process.env, ENV); });
   afterEach(() => { for (const key of Object.keys(ENV)) delete process.env[key]; });
 

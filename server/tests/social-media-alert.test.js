@@ -19,6 +19,23 @@ const ig = (ok, err) => ({ platform: 'instagram', success: ok, ...(err ? { error
 const gbp = (loc, ok, err) => ({ platform: 'gbp', location: loc, success: ok, ...(err ? { error: err } : {}) });
 
 describe('buildSocialFailureAlert (pure detection)', () => {
+  const li = (ok, err) => ({ platform: 'linkedin', success: ok, ...(err ? { error: err } : {}) });
+  const REFUSED = 'Validation: Unknown phone number: [phone] — may be hallucinated';
+  // Stored before the publish paths masked the number.
+  const REFUSED_OLD = 'Validation: Unknown phone number: (941) 555-0100 — may be hallucinated';
+
+  test('posts the content check refused never reached the platform: three of them raise no alert', () => {
+    const r = buildSocialFailureAlert([post(li(false, REFUSED)), post(li(false, REFUSED_OLD)), post(li(false, REFUSED))]);
+    expect(r).toEqual({ active: false, platforms: [] });
+  });
+
+  test('a refused post neither breaks nor joins a streak of real failures, and never becomes the latest error', () => {
+    const rows = [post(li(false, REFUSED_OLD)), post(li(false, 'token expired')), post(li(false, REFUSED)), post(li(false, 'token expired')), post(li(false, 'token expired'))];
+    const r = buildSocialFailureAlert(rows);
+    expect(r.platforms).toEqual([expect.objectContaining({ platform: 'linkedin', consecutive_failures: 3, latest_error: 'token expired' })]);
+    expect(r.message).not.toContain('555-0100');
+  });
+
   test('Instagram failing while Facebook + GBP succeed RAISES an IG alert (the masked regression)', () => {
     const rows = [
       post(fb(true), gbp('bradenton', true), ig(false, '(#10) Application does not have permission for this action')),
