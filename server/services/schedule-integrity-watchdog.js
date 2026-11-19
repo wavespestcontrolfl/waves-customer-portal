@@ -930,25 +930,35 @@ async function standingBellDays(prefix) {
   return days;
 }
 
-// The late class's alerts in order, with real rings up to `budget`. Past the
-// budget, under episodes, a standing bell still gets its quiet update, so it
-// never points at a visit already fixed: the bell rebuilt from only the days it
-// already carried (`forDays`: why, detail, link, visits and itemKeys), never
-// ringing, so a new day is not shown yet and rings on a later run. A standing
-// bell none of whose days is still a finding closes (that episode is over; its
-// new days ring as a new one later). A finding with no standing bell, or an
-// auto-cleared one (a delivery would reopen it), waits. Killed, the rest wait.
-// Returns the real rings and the bells closed.
+// The late class's alerts, with real rings up to `budget`. Under episodes the
+// standing bells are read first, and the alerts that would ring go in order of
+// their earliest day the bell does not carry yet: a day the office already
+// knows never takes the last ring from a new pair tomorrow (the finder leaves
+// today out, so tomorrow's pair is gone by the next run). Past the budget a
+// standing bell still gets its quiet update, so it never points at a visit
+// already fixed: the bell rebuilt from only the days it already carried
+// (`forDays`: why, detail, link, visits and itemKeys), never ringing, so a new
+// day is not shown yet and rings on a later run. A standing bell none of whose
+// days is still a finding closes (that episode is over; its new days ring as a
+// new one later). A finding with no standing bell, or an auto-cleared one (a
+// delivery would reopen it), waits. Killed: the given order, and past the
+// budget the rest wait. Returns the real rings and the bells closed.
 async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
   let rang = 0;
   let held = 0;
-  let standing = null;
   const over = [];
-  for (const alert of alerts) {
+  const standing = episodes && alerts.length ? await standingBellDays(prefix) : new Map();
+  const firstNewDay = (alert) => {
+    const carried = standing.get(alert[0]) || [];
+    return (alert[3].itemKeys || []).filter((day) => !carried.includes(day))[0] || '9999-12-31';
+  };
+  const ranked = alerts.map((alert) => ({ alert, day: firstNewDay(alert) }));
+  // A stable sort: equal days keep the class's own order (earliest first day first).
+  const ordered = episodes ? ranked.sort((a, b) => (a.day < b.day ? -1 : (a.day > b.day ? 1 : 0))).map((r) => r.alert) : alerts;
+  for (const alert of ordered) {
     let delivery = alert;
     if (rang >= budget) {
       if (!episodes) { held += 1; break; }
-      standing ??= await standingBellDays(prefix);
       const carried = standing.get(alert[0]);
       held += 1;
       if (!carried) continue;
