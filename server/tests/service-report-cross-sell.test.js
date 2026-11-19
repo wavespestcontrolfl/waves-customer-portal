@@ -246,7 +246,7 @@ describe('buildReportCrossSell', () => {
     const cageLookup = (legacy) => async () => ({
       enriched: {
         homeSqFt: 2400, lotSqFt: 8000, stories: 1,
-        pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: 750,
+        pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: legacy === 'LARGE' ? 750 : 500,
         poolCageSize: 'MEDIUM', poolCageLegacySize: legacy,
       },
       propertyRecord: {},

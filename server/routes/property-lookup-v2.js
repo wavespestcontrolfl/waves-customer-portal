@@ -4318,20 +4318,13 @@ function poolRecordContext(propertyRecord) {
 // feature-gates mock without the reader reads as off. The engine still reads
 // all four sizes (saved estimates keep their price).
 const cageTwoSizesLive = () => require('../config/feature-gates').cageTwoSizesLive?.() === true;
-const CAGE_TWO_SIZES_MEDIUM_MAX_SQFT = 1000;
-
-function classifyPoolCageSizeFourBands(sqft) {
-  if (!Number.isFinite(sqft) || sqft <= 0) return null;
-  if (sqft < 300) return 'SMALL';
-  if (sqft <= 600) return 'MEDIUM';
-  if (sqft <= 900) return 'LARGE';
-  return 'OVERSIZED';
-}
+// The size policy lives in one module (property-lookup/cage-sizes.js).
+const {
+  fourBandCageSize, twoSizeFromArea, fourToTwo,
+} = require('../services/property-lookup/cage-sizes');
 
 function classifyPoolCageSize(sqft) {
-  if (!cageTwoSizesLive()) return classifyPoolCageSizeFourBands(sqft);
-  if (!Number.isFinite(sqft) || sqft <= 0) return null;
-  return sqft <= CAGE_TWO_SIZES_MEDIUM_MAX_SQFT ? 'MEDIUM' : 'LARGE';
+  return cageTwoSizesLive() ? twoSizeFromArea(sqft) : fourBandCageSize(sqft);
 }
 
 function normalizePoolCageSizeFourSizes(value, poolCage) {
@@ -4346,9 +4339,7 @@ function normalizePoolCageSizeFourSizes(value, poolCage) {
 // rebuilt on a cache hit.
 function normalizePoolCageSize(value, poolCage) {
   const size = normalizePoolCageSizeFourSizes(value, poolCage);
-  if (!cageTwoSizesLive()) return size;
-  if (size === 'NONE') return size;
-  return size === 'OVERSIZED' ? 'LARGE' : 'MEDIUM';
+  return cageTwoSizesLive() ? (fourToTwo(size) || size) : size;
 }
 
 // Two sizes on only: the four-size answer today's rule gives, so the website
@@ -4356,7 +4347,7 @@ function normalizePoolCageSize(value, poolCage) {
 // Undefined with the gate off (the key is then absent from the profile).
 function poolCageLegacySize(rc, ai) {
   if (!cageTwoSizesLive()) return undefined;
-  return classifyPoolCageSizeFourBands(rc?.poolCageSqft)
+  return fourBandCageSize(rc?.poolCageSqft)
     || normalizePoolCageSizeFourSizes(ai?.poolCageSize, ai?.poolCage);
 }
 

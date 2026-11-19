@@ -241,31 +241,65 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
 
 // Pool and pool-cage features for the website quote. GATE_CAGE_TWO_SIZES (owner
 // 2026-11-19, "hold"): a cage that today's four sizes call Large or Oversized keeps
-// its manual-quote hold. All gate reads are lazy, per request, and read as off
-// when a whole-module mock lacks the reader.
-//  - Size priced: gate on, the profile's own size (the lookup's two-size answer). Gate
-//    off, the four-size answer poolCageLegacySize when the profile carries one (a
-//    two-size profile from before a rollback), else the profile's size.
-//  - Hold: poolCageReview (the engine adds large_pool_cage), from the client's profile
-//    or the server's own cache-only re-read (a public API caller can send a partial one).
-//  - A client that OMITS poolCage while the re-read confirms a held cage still gets
-//    the cage and the hold; an explicit NO keeps today's no-cage answer.
+// its manual-quote hold. One invariant: the cage size and the hold come from the best
+// evidence under THIS request's gate state (the gate is read lazily, per request; a
+// whole-module mock without the reader reads as off). The size policy is
+// property-lookup/cage-sizes.js. `trusted` is the server's own cache-only re-read when
+// it decided the cage (YES or NO); it beats the client's profile, which only an API
+// caller can hand-build (the website forms echo the lookup unchanged).
+//  - Gate on: price the two-size answer; hold the four-size answer's Large and
+//    Oversized. A client that OMITS poolCage takes the re-read's cage only when it
+//    is held; an explicit client answer stands.
+//  - Gate off: a profile with its own poolCageLegacySize key (a two-size profile from
+//    before a rollback) prices its four-size answer, the re-read first. Any other
+//    profile is today's code exactly.
 function websiteCageFeatures(ep, trustedTurf) {
-  const { customerCageHold } = require('../services/property-lookup/office-cage-start');
   const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
-  const sizes = ['small', 'medium', 'large', 'oversized'];
-  const lower = (v) => String(v || '').toLowerCase();
-  const legacy = lower(ep.poolCageLegacySize);
-  const sizeSource = !twoSizesOn && sizes.includes(legacy) ? legacy : ep.poolCageSize;
-  const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
-  const trustedHeldCage = cageOmitted && lower(trustedTurf?.poolCage) === 'yes' && customerCageHold(trustedTurf);
-  const held = customerCageHold(ep) || customerCageHold(trustedTurf);
+  const clientCage = ep.poolCage === 'YES' || ep.poolCage === true;
+  const pool = ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES';
+  return twoSizesOn
+    ? twoSizeCageFeatures(ep, decidedCage(trustedTurf), { pool, clientCage })
+    : fourSizeCageFeatures(ep, decidedCage(trustedTurf), { pool, clientCage });
+}
+
+// Gate off. A profile with its own poolCageLegacySize key is a two-size profile from
+// before a rollback: price its four-size answer, the re-read first. Any other profile
+// is today's code exactly.
+function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
+  const { fourSizeOf } = require('../services/property-lookup/cage-sizes');
+  if (Object.prototype.hasOwnProperty.call(ep, 'poolCageLegacySize')) {
+    const four = fourSizeOf(trusted) || fourSizeOf(ep);
+    return { pool, poolCage: clientCage, poolCageSize: four ? four.toLowerCase() : undefined };
+  }
+  const own = String(ep.poolCageSize || '').toLowerCase();
   return {
-    pool: ep.pool === 'YES' || ep.pool === true || ep.poolCage === 'YES' || trustedHeldCage,
-    poolCage: ep.poolCage === 'YES' || ep.poolCage === true || trustedHeldCage,
-    poolCageSize: sizes.includes(lower(sizeSource)) ? lower(sizeSource) : undefined,
-    ...(held ? { poolCageReview: true } : {}),
+    pool,
+    poolCage: clientCage,
+    poolCageSize: ['small', 'medium', 'large', 'oversized'].includes(own) ? String(ep.poolCageSize).toLowerCase() : undefined,
   };
+}
+
+// Gate on: price the two-size answer, hold the four-size answer's Large and
+// Oversized. A client that OMITS poolCage takes the re-read's cage only when it is
+// held; an explicit client answer stands.
+function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
+  const { fourSizeOf, twoSizeOf, isHeldFourSize } = require('../services/property-lookup/cage-sizes');
+  const four = fourSizeOf(trusted) || fourSizeOf(ep);
+  const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
+  const trustedHeldCage = cageOmitted && String(trusted?.poolCage).toUpperCase() === 'YES' && isHeldFourSize(four);
+  const poolCage = clientCage || trustedHeldCage;
+  const size = twoSizeOf(trusted) ?? twoSizeOf(ep);
+  return {
+    pool: pool || trustedHeldCage,
+    poolCage,
+    poolCageSize: size ? size.toLowerCase() : undefined,
+    ...(poolCage && isHeldFourSize(four) ? { poolCageReview: true } : {}),
+  };
+}
+
+// The server's re-read, only when it decided the cage (YES or NO).
+function decidedCage(trustedTurf) {
+  return ['YES', 'NO'].includes(String(trustedTurf?.poolCage).toUpperCase()) ? trustedTurf : null;
 }
 
 function isPublicCommercialQuote(body = {}, enriched = {}) {

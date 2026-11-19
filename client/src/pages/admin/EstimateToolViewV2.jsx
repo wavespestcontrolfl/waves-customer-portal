@@ -2473,10 +2473,10 @@ export default function EstimateToolViewV2({
         // The stored result does not carry the server's tier-availability flag
         // (it is stamped on fresh calculate responses): restore it from the
         // edit source so the Good / Better / Best checkbox shows on a reopen.
-        // poolCageTwoSizes is the edit source's LIVE gate value, an explicit
-        // override so a stale stored true never survives a rollback.
+        // The edit source's LIVE gate value for the Pool Cage Size box (never the stored result's).
+        setCageTwoSizes(d.poolCageTwoSizes === true);
         setEstimate(d.result && !stale
-          ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}), poolCageTwoSizes: d.poolCageTwoSizes === true }
+          ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
           : null);
         setSavedId(stale ? null : d.id);
         setReopenNotice(notice);
@@ -3182,6 +3182,10 @@ export default function EstimateToolViewV2({
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   const [lookupMeta, setLookupMeta] = useState(null);
+  // GATE_CAGE_TWO_SIZES is global, not per property: the Pool Cage Size box offers two
+  // sizes once ANY server response says so (lookup, calculate, reopen) and the latest
+  // response replaces it. Never cleared with the estimate, the lookup or an address change.
+  const [cageTwoSizes, setCageTwoSizes] = useState(false);
   // Business-identity scope question (GATE_LOOKUP_BUSINESS_IDENTITY): the
   // CSR's answer for ONE address, re-sent on every lookup of it; a server 409
   // can raise the question on its own.
@@ -3941,9 +3945,8 @@ export default function EstimateToolViewV2({
         businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
         addressStatus: data.meta?.addressStatus || null,
         campusParcel: data.meta?.campusParcel || null,
-        // GATE_CAGE_TWO_SIZES: the lookup sizes a cage Medium or Large only.
-        poolCageTwoSizes: data.meta?.poolCageTwoSizes === true,
       });
+      setCageTwoSizes(data.meta?.poolCageTwoSizes === true);
       setVerifySaveState({});
       unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
 
@@ -4828,6 +4831,8 @@ export default function EstimateToolViewV2({
         setLookupStatus((s) => ({ ...s, type: "err", msg: result.error }));
         return null;
       }
+      // The route stamps poolCageTwoSizes whenever the gate is on, so absence means off.
+      setCageTwoSizes(result.poolCageTwoSizes === true);
 
       // Stale rental gate (codex P1, round 2): the availability probe runs
       // once at mount, so GATE_TERMITE_STATION_RENTAL flipped OFF mid-session
@@ -5313,8 +5318,9 @@ export default function EstimateToolViewV2({
       if (!source.editable) setEditLoadError(source.blockReason);
       // Same as the edit loader: the stored result carries no tier-availability
       // flag, so the Good / Better / Best checkbox survives the post-send refresh.
+      setCageTwoSizes(source.poolCageTwoSizes === true);
       setEstimate(source.result && !stale
-        ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}), poolCageTwoSizes: source.poolCageTwoSizes === true }
+        ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
         : null);
 
     } catch (err) {
@@ -6668,7 +6674,7 @@ export default function EstimateToolViewV2({
                 <Field label="Pool Cage Size" id="estimate-poolCageSize" className="mb-4">
                   <SelectV2
                     k="poolCageSize"
-                    options={poolCageSizeOptions(form.poolCageSize, lookupMeta?.poolCageTwoSizes === true || estimate?.poolCageTwoSizes === true)}
+                    options={poolCageSizeOptions(form.poolCageSize, cageTwoSizes)}
                   />
                 </Field>
               )}

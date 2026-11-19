@@ -241,7 +241,7 @@ describe('customerCageHold (automatic customer prices keep today\'s manual-quote
 
   test('on: not held for Medium or Small, an absent field, or no profile', () => {
     process.env[TWO_SIZES] = 'true';
-    for (const profile of [legacy('MEDIUM'), legacy('SMALL'), legacy('NONE'), { poolCageSize: 'LARGE' }, {}, null, undefined]) {
+    for (const profile of [legacy('MEDIUM'), legacy('SMALL'), legacy('NONE'), { poolCageSize: 'MEDIUM' }, {}, null, undefined]) {
       expect(customerCageHold(profile)).toBe(false);
     }
   });
@@ -252,6 +252,17 @@ describe('customerCageHold (automatic customer prices keep today\'s manual-quote
       expect(customerCageHold(legacy('LARGE'))).toBe(false);
       expect(customerCageHold(legacy('OVERSIZED'))).toBe(false);
     }
+  });
+
+  test('on: the county area comes first, then the four-size answer, then a four-size profile\'s own size', () => {
+    process.env[TWO_SIZES] = 'true';
+    // 750 sq ft is Large in four sizes, whatever the size words say.
+    expect(customerCageHold({ poolCageSqft: 750, poolCageSize: 'MEDIUM' })).toBe(true);
+    expect(customerCageHold({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+    expect(customerCageHold({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' })).toBe(false);
+    // A profile with no legacy key is a four-size profile: its Large is held; a two-size profile's Large is not a four-size word.
+    expect(customerCageHold({ poolCageSize: 'LARGE' })).toBe(true);
+    expect(customerCageHold({ poolCageSize: 'LARGE', poolCageLegacySize: 'MEDIUM' })).toBe(false);
   });
 
   test('the start gate does not matter: two sizes alone holds', () => {

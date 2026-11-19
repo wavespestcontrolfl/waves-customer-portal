@@ -205,4 +205,55 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
     });
   });
+
+  // One invariant: the cage size and the hold come from the best evidence under THIS
+  // request's gate state; the server's re-read beats the client's hand-built profile.
+  describe('best evidence per request', () => {
+    const serverSays = (cage) => {
+      mockServerLookup = { enriched: { pool: 'YES', poolCage: 'YES', ...cage }, propertyRecord: {} };
+    };
+    const priced = async (cage) => {
+      const answer = await quote(cage);
+      expect(answer.quote_required).toBeUndefined();
+      return answer.monthly_total;
+    };
+
+    test('gate on: the server area 750 beats a client claiming Small: held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      serverSays({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+      expect(await held({ poolCageSize: 'SMALL' })).toBe(true);
+    });
+
+    test('gate on: the server area prices Medium, not the client\'s Small', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const medium = await priced({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+      serverSays({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+      expect(await priced({ poolCageSize: 'SMALL' })).toBe(medium);
+    });
+
+    test('gate on: a re-read miss with a client area of 750 and no legacy key is held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect(await held({ poolCageSqft: 750, poolCageSize: 'MEDIUM' })).toBe(true);
+    });
+
+    test('gate on: a re-read miss with client legacy Small and no area prices Medium', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const medium = await priced({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+      expect(await priced({ poolCageSize: 'SMALL', poolCageLegacySize: 'SMALL' })).toBe(medium);
+      // The fixture can tell the two apart: with the gate off a Small cage prices Small.
+      delete process.env[TWO_SIZES];
+      expect(await priced({ poolCageSize: 'SMALL' })).not.toBe(medium);
+    });
+
+    test('gate off: a two-size client (legacy key) is held when the server re-read says Large, even with client legacy Medium', async () => {
+      serverSays({ poolCageSqft: 750, poolCageSize: 'LARGE' });
+      expect(await held({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+    });
+
+    test('gate off: a profile with no legacy key is today\'s code (the client size, the re-read ignored)', async () => {
+      serverSays({ poolCageSqft: 750, poolCageSize: 'LARGE' });
+      expect(await held({ poolCageSize: 'MEDIUM' })).toBe(false);
+      expect(await held({ poolCageSize: 'LARGE' })).toBe(true);
+    });
+  });
 });

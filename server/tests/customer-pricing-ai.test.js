@@ -2131,7 +2131,7 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
   const lookupWith = (cage) => async () => ({
     enriched: {
       homeSqFt: 2200, lotSqFt: 8000, stories: 1,
-      pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: 750,
+      pool: 'YES', poolSource: 'county', poolCage: 'YES',
       ...cage,
     },
     propertyRecord: {},
@@ -2147,6 +2147,9 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
     process.env[TWO_SIZES] = 'true';
     const f = await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
     expect(f).toMatchObject({ poolCage: true, poolCageSize: 'medium', poolCageReview: true });
+    // The county area is the first evidence: 750 sq ft is Large in four sizes.
+    const byArea = await features({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+    expect(byArea.poolCageReview).toBe(true);
     const oversized = await features({ poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED' });
     expect(oversized).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
   });

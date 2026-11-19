@@ -43,6 +43,8 @@ const gateLive = () => require('../../config/feature-gates').cageStartMediumLive
 
 const twoSizesLive = () => require('../../config/feature-gates').cageTwoSizesLive?.() === true;
 
+const { fourSizeOf, isHeldFourSize } = require('./cage-sizes');
+
 const up = (value) => String(value || '').toUpperCase();
 
 // 'MEDIUM' when the office tools start this cage at Medium, else null (the
@@ -55,11 +57,12 @@ function officeCageStartSize(enriched) {
 }
 
 // True when an AUTOMATIC customer price must still hold this cage for a person
-// to quote: GATE_CAGE_TWO_SIZES is on and the profile's four-size answer
-// (poolCageLegacySize) is Large or Oversized. False with the gate off, and for
-// a profile with no such field (the key is absent while the gate is off).
+// to quote: GATE_CAGE_TWO_SIZES is on and the profile's four-size answer is
+// Large or Oversized. That answer comes from the best evidence (cage-sizes.js
+// fourSizeOf): the county area first, then poolCageLegacySize, then a four-size
+// profile's own size. False with the gate off.
 function customerCageHold(enriched) {
-  return twoSizesLive() && ['LARGE', 'OVERSIZED'].includes(up(enriched?.poolCageLegacySize));
+  return twoSizesLive() && isHeldFourSize(fourSizeOf(enriched));
 }
 
 // The lookup profile as the call-agent draft prices it. Gate off, or nothing

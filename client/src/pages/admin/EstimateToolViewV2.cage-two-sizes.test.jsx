@@ -83,6 +83,18 @@ describe('Pool Cage Size box on a reopened estimate', () => {
     expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
   });
 
+  it('keeps two sizes plus the saved value after an edit clears the calculated estimate', async () => {
+    reopen('OVERSIZED', { poolCageTwoSizes: true });
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
+    // A pricing edit clears the estimate (setEstimate(null)); the gate value is editor state.
+    fireEvent.change(screen.getByLabelText('Home Sq Ft'), { target: { value: '2600' } });
+    await waitFor(() => expect(screen.getByLabelText('Home Sq Ft')).toHaveValue(2600));
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
+    fireEvent.change(screen.getByLabelText('Pool Cage Size'), { target: { value: 'LARGE' } });
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('LARGE'));
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+  });
+
   it('shows four sizes when the edit source has no flag, even if the stored result carries a stale true', async () => {
     reopen('MEDIUM', {}, resultWith({ poolCageTwoSizes: true }));
     expect(await sizeValues()).toEqual(['SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED']);
