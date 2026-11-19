@@ -57,6 +57,7 @@ const {
   callEndFor,
   conversationSeconds,
   managedLineForCall,
+  bookingTextLine,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
@@ -332,6 +333,38 @@ describe('managedLineForCall', () => {
     delete process.env.INTERNAL_ALERT_CALLER_ID;
     expect(TWILIO_NUMBERS.internalAlertLine()).toBeNull(); // falls back to main line — no distinct alert line to exclude
     expect(managedLineForCall({ direction: 'inbound', to_phone: PARRISH })).toBe(PARRISH);
+  });
+});
+
+// ── bookingTextLine — a website-only line only for someone who dialed it ──
+describe('bookingTextLine', () => {
+  const WEB_LINE = '+19412542617';
+  const PERSON = '+19415550100';
+  beforeEach(() => { websiteLineRefusal.mockClear(); });
+  // An unused once-answer must not leak into a later test.
+  afterEach(() => { websiteLineRefusal.mockReset(); websiteLineRefusal.mockResolvedValue(null); });
+
+  test('an inbound call from the destination to the line keeps it, with no contact read', async () => {
+    expect(await bookingTextLine({ direction: 'inbound', from_phone: PERSON, to_phone: WEB_LINE }, '9415550100')).toBe(WEB_LINE);
+    expect(websiteLineRefusal).not.toHaveBeenCalled();
+  });
+
+  test('an outbound call from the line proves no contact: the person called gets the check', async () => {
+    websiteLineRefusal.mockResolvedValueOnce('refused');
+    expect(await bookingTextLine({ direction: 'outbound-api', from_phone: WEB_LINE, to_phone: PERSON }, PERSON)).toBeNull();
+    expect(websiteLineRefusal).toHaveBeenCalledWith(WEB_LINE, PERSON);
+  });
+
+  test('a call whose line is the bridge caller ID, not the dialed line, gets the check', async () => {
+    websiteLineRefusal.mockResolvedValueOnce('refused');
+    const bridged = { direction: 'inbound', from_phone: PERSON, to_phone: '+19415550999', metadata: { bridgeCallerId: WEB_LINE } };
+    expect(await bookingTextLine(bridged, PERSON)).toBeNull();
+    expect(websiteLineRefusal).toHaveBeenCalledWith(WEB_LINE, PERSON);
+  });
+
+  test('an outbound call keeps its office line when the check passes it', async () => {
+    const PARRISH = '+19412972817';
+    expect(await bookingTextLine({ direction: 'outbound-api', from_phone: PARRISH, to_phone: PERSON }, PERSON)).toBe(PARRISH);
   });
 });
 
@@ -2542,6 +2575,7 @@ describe('dispatchClaimedCall', () => {
     const toWebLine = { ...CALL, to_phone: WEB_LINE };
     const spokenCall = { ...toWebLine, ai_extraction_enriched: { ...CALL.ai_extraction_enriched, caller: { ...CALL.ai_extraction_enriched.caller, phone_e164: SPOKEN } } };
     const sentFrom = () => sendCustomerMessage.mock.calls[0][0].metadata.fromNumber;
+    afterEach(() => { websiteLineRefusal.mockReset(); websiteLineRefusal.mockResolvedValue(null); });
     const sendToSpoken = async () => {
       buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://wavespest.co/l/abcd', line: 'Pick a time...\n\n', phone: SPOKEN });
       const result = await dispatchClaimedCall(makeDb({ lead: { ...OPEN_LEAD, phone: SPOKEN } }), spokenCall, NOW);

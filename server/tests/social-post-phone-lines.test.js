@@ -16,6 +16,7 @@ jest.mock('../services/social-compliance-judge', () => ({
 }));
 
 const social = require('../services/social-media');
+const logger = require('../services/logger');
 const { validateContent } = social;
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { websiteOnlyLines } = require('../config/shared-phone-lines');
@@ -53,7 +54,8 @@ describe('the LinkedIn article card', () => {
     expect(await post({ title: 'Fixture guide', description: `Call ${TWILIO_NUMBERS.mainLine.formatted}.` })).toMatchObject({ dryRun: true });
   });
 
-  test('a publish to all channels refuses it on LinkedIn too', async () => {
+  test('a publish to all channels refuses it on LinkedIn too, and its log masks the number', async () => {
+    logger.warn.mockClear();
     const publish = (description) => social.publishToAll({
       title: 'Fixture guide', description, link: BLOG, source: 'manual',
       customContent: { linkedin: 'A clean caption.' }, channels: ['linkedin'], noAiImage: true,
@@ -61,6 +63,10 @@ describe('the LinkedIn article card', () => {
     const refused = (await publish(WEB_LINE_CARD)).platforms;
     expect(refused).toEqual([refusedForPhone]);
     expect(refused[0].platform).toBe('linkedin');
+    // The number may be a customer's: the log line names the issue, never the number.
+    const logged = logger.warn.mock.calls.map(([line]) => String(line)).join('\n');
+    expect(logged).toContain('Content validation failed for linkedin: Unknown phone number: [phone]');
+    expect(logged).not.toMatch(/254\D?2617/);
     expect((await publish('Fixture guide for homeowners.')).platforms).toEqual([expect.objectContaining({ platform: 'linkedin', dryRun: true })]);
   });
 });

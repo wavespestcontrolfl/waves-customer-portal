@@ -716,6 +716,10 @@ function unknownPhoneIssues(text) {
   });
 }
 
+// A validation issue names the phone number it found, and that may be a
+// customer's: logs get the issues with every phone number masked.
+const issuesForLog = (issues) => issues.join('; ').replace(PHONE_PATTERN, '[phone]');
+
 // LinkedIn also shows the title and description on the article card, so a
 // phone number there gets the same check as the post text.
 const linkedinCardIssues = (platform, title, description) => (
@@ -2438,7 +2442,7 @@ const SocialMediaService = {
 
         const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, title, description)];
         if (issues.length) {
-          logger.warn(`[social] Content validation failed for ${p.key}: ${issues.join('; ')}`);
+          logger.warn(`[social] Content validation failed for ${p.key}: ${issuesForLog(issues)}`);
           platformResults.push({ platform: p.key, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues });
           continue;
         }
@@ -2633,7 +2637,7 @@ const SocialMediaService = {
 
         const gbpValidation = validateContent(gbpContent, 'gbp');
         if (!gbpValidation.valid) {
-          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${gbpValidation.issues.join('; ')}`);
+          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${issuesForLog(gbpValidation.issues)}`);
           platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
           continue;
         }

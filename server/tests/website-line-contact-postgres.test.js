@@ -4,7 +4,8 @@
  * that copy the production column types, the sms_log direction CHECK and the
  * last-10 expression index of migration 20260927000006. Each test runs in one
  * transaction that is rolled back. The TEMP tables shadow the migrated ones,
- * so nothing real is read or written.
+ * so nothing real is read or written. CI runs it in the server-db job, which
+ * selects every suite with the `const SKIP` line below.
  */
 const SKIP = !process.env.DATABASE_URL;
 

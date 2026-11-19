@@ -648,16 +648,19 @@ function managedLineForCall(call) {
 
 // The line the booking text rides to destinationPhone. A website-only line
 // texts only someone who already called or texted it (website-line-contact.js):
-// a later call from anyone else would read as a website lead. The person on
-// this call reached Waves on the line. A spoken second number keeps the line
-// only after its own contact; otherwise, and when that read fails, null, so
-// deriveOutboundNumber picks a shared line.
+// a later call from anyone else would read as a website lead. This call is
+// that contact only when the destination dialed the line: an inbound call from
+// it to the line. An outbound call proves no contact, and a spoken second
+// number may have none, so both need the contact check. A refusal, or a failed
+// read, gives null, so deriveOutboundNumber picks a shared line.
 async function bookingTextLine(call, destinationPhone) {
   const line = managedLineForCall(call);
   if (!line) return null;
-  const { resolveCallContactPhone } = require('./call-recording-processor');
-  const contactPhone = resolveCallContactPhone(call, null);
-  if (contactPhone && phoneIdentityKey(contactPhone) === phoneIdentityKey(destinationPhone)) return line;
+  const destination = phoneIdentityKey(destinationPhone);
+  const dialedByDestination = !String(call?.direction || '').startsWith('outbound')
+    && destination && phoneIdentityKey(call.from_phone) === destination
+    && phoneIdentityKey(call.to_phone) === phoneIdentityKey(line);
+  if (dialedByDestination) return line;
   try {
     return (await websiteLineRefusal(line, destinationPhone)) ? null : line;
   } catch (err) {
@@ -2647,6 +2650,7 @@ module.exports = {
   callEndFor,
   conversationSeconds,
   managedLineForCall,
+  bookingTextLine,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
