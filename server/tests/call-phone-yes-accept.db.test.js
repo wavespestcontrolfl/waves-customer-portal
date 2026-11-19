@@ -300,6 +300,17 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'visit_payer', auto_message: REASONS.visit_payer });
   });
 
+  test('a yes on a visit held for the office to confirm its street address: auto would accept no, visit_address_hold', async () => {
+    const { visitId, bookingCallId } = await phoneYes({ visitOver: { customer_confirmed: false } });
+    await trx('triage_items').insert({
+      id: randomUUID(), call_log_id: bookingCallId, category: 'service_unknown', reason_code: 'outbound_booking_review', status: 'open',
+      payload: JSON.stringify({ street_level_address: true, scheduled_service_id: visitId }),
+    });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'visit_address_hold', auto_message: REASONS.visit_address_hold });
+  });
+
   test('a yes on a visit that already has an invoice (a pre-minted one): auto would accept no, visit_invoiced', async () => {
     const { customerId, visitId, bookingCallId } = await phoneYes();
     await invoiceOn(customerId, visitId);
@@ -319,6 +330,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the visit carries an appointment discount', { visitOver: { discount_type: 'fixed_amount', discount_amount: 10, discount_dollars: 10 } }, 'visit_priced'],
     // A billing party on this visit alone: the plan's next visits would bill the account's own party.
     ['the visit is set to self-pay', { visitOver: { self_pay_override: true } }, 'visit_payer'],
+    // Visit types completion never bills, by the label or the catalog key: a plan from one would bill $0.
+    ['the visit is a re-service by its label', { visitOver: { service_type: 'Pest Control Re-Service' } }, 'visit_free_type'],
+    ['the visit is a re-service by its catalog key', { visitOver: { service_key_snapshot: 'pest_re_service' } }, 'visit_free_type'],
     ['the visit date has passed', { visitOver: { scheduled_date: inDays(-5) } }, 'visit_in_past'],
     ['the customer is already a WaveGuard member', { customerOver: { waveguard_tier: 'Silver' } }, 'existing_plan'],
     ['the estimate is a commercial proposal', { estimateOver: { estimate_data: JSON.stringify(planData({ proposal: { enabled: true } })) } }, 'commercial_estimate'],
@@ -1218,6 +1232,19 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         expect(await statusOf('estimates', est.id)).toBe('sent');
         expect((await trx('scheduled_services').where({ id: card.related_scheduled_service_id }).first('source_estimate_id')).source_estimate_id).toBeNull();
       } finally { spy.mockRestore(); }
+    });
+
+    test('a WaveGuard membership fee the office bills by hand is shown before the tap and again after the accept', async () => {
+      const withFee = planData({ setupFeeQuote: { amount: 99, waived: false }, result: { ...planData().result, oneTime: { items: [], membershipFee: 99 } } });
+      // The fee is the estimate's whole one-time total (the evaluation refuses any other one-time charge).
+      const { est, card } = await filed({ estimateOver: { estimate_data: JSON.stringify(withFee), onetime_total: 99 } });
+      const label = 'Invoice the WaveGuard membership fee ($99.00) by hand after the accept. This accept does not bill it.';
+      const row = await listed(card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: true, by_hand: [{ name: 'WaveGuard membership fee', amount: 99, label }] });
+      const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: row.call_phone_yes.preview_token });
+      expect(out).toMatchObject({ status: 200, body: { ok: true, by_hand: [{ name: 'WaveGuard membership fee', amount: 99 }] } });
+      expect(out.body.warnings).toContain(label);
+      expect(await statusOf('estimates', est.id)).toBe('accepted');
     });
 
     test('an estimate the card does not name is never the one the tap accepts', async () => {

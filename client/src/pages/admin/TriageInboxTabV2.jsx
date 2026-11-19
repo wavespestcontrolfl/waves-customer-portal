@@ -527,6 +527,10 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
           <div className="mt-1 text-14 text-ink-secondary">
             {`${acceptsNth >= 0 ? `It accepts estimate ${acceptsNth + 1}. ` : ""}The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
           </div>
+          {/* What the office still bills by hand after the accept (the membership fee): shown before the tap. */}
+          {(Array.isArray(live.by_hand) ? live.by_hand : []).map((line) => (
+            <div key={line.name} className="mt-1 text-14 text-zinc-900">{line.label}</div>
+          ))}
           <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={() => onAcceptPhoneYes?.(live.preview_token || null)}
             title="Accepts the customer's estimate as pay per application, as Mark accepted does, and books the plan from the visit this call booked.">
             {busy ? "Accepting…" : "Accept as pay per application"}

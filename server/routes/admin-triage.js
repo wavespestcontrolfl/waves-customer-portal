@@ -2186,7 +2186,7 @@ router.post('/:id/accept-call-phone-yes', requireAdmin, async (req, res) => {
     logger.info(`[admin-triage] accept-call-phone-yes card=${item.id} call=${item.call_log_id} estimate=${out.estimateId} plan_visits=${out.seriesIds.length} card_open_min=${openMinutes}`);
     return res.json({
       ok: true, id: item.id, status: 'resolved', estimate_id: out.estimateId, visit_id: out.visitId,
-      plan_visits: out.seriesIds.length, amount: out.amount, warnings: out.warnings,
+      plan_visits: out.seriesIds.length, amount: out.amount, by_hand: out.byHand, warnings: out.warnings,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });

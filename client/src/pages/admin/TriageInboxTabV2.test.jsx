@@ -1531,6 +1531,13 @@ describe('call_phone_yes card tap', () => {
     expect(screen.queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();
   });
 
+  it('a fee the office bills by hand is shown before the tap', () => {
+    const label = 'Invoice the WaveGuard membership fee ($99.00) by hand after the accept. This accept does not bill it.';
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={{ ...canAccept, by_hand: [{ name: 'WaveGuard membership fee', amount: 99, label }] }} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Accept as pay per application' })).toBeInTheDocument();
+  });
+
   it('a non-admin gets no button, only the note; a closed card offers nothing', () => {
     render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={canAccept} isOpenView isAdmin={false} onAcceptPhoneYes={() => {}} />);
     expect(screen.queryByRole('button', { name: /Accept as pay per application/ })).toBeNull();

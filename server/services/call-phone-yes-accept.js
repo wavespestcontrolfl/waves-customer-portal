@@ -100,6 +100,8 @@ const REASONS = {
   visit_priced: 'The booked visit has a price or a discount that is not the plan price.',
   visit_invoiced: 'The booked visit already has an invoice.',
   visit_payer: "The booked visit has its own billing party (a payer, or self-pay). The plan's next visits would not.",
+  visit_free_type: 'The booked visit is a visit type that is never billed (a re-service, a follow-up or an appointment).',
+  visit_address_hold: 'The booked visit waits for the office to confirm its address.',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
@@ -270,6 +272,14 @@ async function visitProblem(conn, visit, estimate, now) {
   if (visit.is_recurring || visit.recurring_parent_id || visit.reservation_expires_at) return 'visit_not_one_off';
   const { isAssessmentVisit } = require('./assessment-booking');
   if (visit.is_callback === true || isAssessmentVisit(visit)) return 'not_a_plan_visit';
+  // A visit type completion never bills (a re-service, a follow-up, an appointment), by its label or its catalog row:
+  // the converter could give it a paid cadence's identity and keep the label, and every visit of the plan would bill $0.
+  const withRow = await withCatalog(conn, visit);
+  const { isReServiceCatalogRow } = require('./call-booking-catalog');
+  if (require('./no-cost-visit-types').isAlwaysFreeServiceType(visit.service_type)
+    || [withRow.catalog_service_key, visit.service_key_snapshot].some((key) => isReServiceCatalogRow({ service_key: key }))) {
+    return 'visit_free_type';
+  }
   // A past visit may be done but not closed out: the office decides how to bill it.
   const { etDateString, dateOnlyString } = require('../utils/datetime-et');
   if (dateOnlyString(visit.scheduled_date) < etDateString(now)) return 'visit_in_past';
@@ -282,9 +292,11 @@ async function visitProblem(conn, visit, estimate, now) {
   // A billing party set on this visit alone (a third-party payer, or a self-pay override): the converter's next visits
   // do not carry it, so the plan's first visit and the rest would bill different parties.
   if (visit.payer_id != null || visit.self_pay_override === true) return 'visit_payer';
+  // A street-level address hold: the office still confirms the address, and the plan's next visits would not wait.
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(visit.id, conn)) return 'visit_address_hold';
   const { estimateFamilyKeysForAdoption, appointmentMatchesEstimateFamily } = require('../routes/estimate-public');
   const families = estimateFamilyKeysForAdoption(estimate, parseJson(estimate.estimate_data), { serviceMode: 'recurring' });
-  if (!families.size || !appointmentMatchesEstimateFamily(await withCatalog(conn, visit), families)) return 'service_mismatch';
+  if (!families.size || !appointmentMatchesEstimateFamily(withRow, families)) return 'service_mismatch';
   if (!require('./completion-pricing').propertyMatches(visit, estimate)) return 'property_mismatch';
   if (Number(visit.pending_setup_fee) > 0) return 'setup_fee_stamped';
   if (Number(visit.prepaid_amount) > 0 || visit.prepaid_method || visit.annual_prepay_term_id) return 'visit_prepaid';
@@ -730,6 +742,7 @@ const TAP_UNAVAILABLE = {
   word_changed: "The caller's word changed since the card loaded. Reload and look again.",
   word_not_current: "The caller's words on the card are not the latest word about this estimate. Reload in 10 minutes, or accept it from the estimate.",
   catalog_busy: 'The service catalog is being updated. Try again in a minute.',
+  one_time_by_hand: 'The estimate has one-time lines the office must schedule or adjust by hand. Accept it from the estimate.',
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -797,7 +810,25 @@ async function tapCheck(shown, { now }) {
   // The card must show what the sweep would show now (cardState: nothing to rewrite or close): the caller's word, the
   // estimate links and the accepted state as they stand. A tap never acts on words the card no longer holds.
   if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
-  return { ok: true, evaluation, customerId };
+  const byHand = await byHandLinesOf(evaluation.estimate);
+  if (!byHand) return { ok: false, reason: 'one_time_by_hand', note: note(TAP_UNAVAILABLE.one_time_by_hand) };
+  return { ok: true, evaluation, customerId, byHand };
+}
+
+// What the office still bills by hand after the accept, shown before the tap and again after it: the WaveGuard
+// membership fee (the standard accept invoices no setup fee). Read with the accept's own one-time line rules
+// (estimate-accept-effects.js oneTimeLineEffects). Anything but a fee to add by hand (work to schedule, a discount to
+// take off, lines the rules cannot read) returns null: the estimate page handles it.
+async function byHandLinesOf(estimate) {
+  const { loadTaxabilityMap } = require('./estimate-proposal-generate');
+  const { lines, refusal } = require('./estimate-accept-effects').oneTimeLineEffects(estimate, require('./estimate-converter'), {
+    billingTerm: 'standard', taxabilityMap: await loadTaxabilityMap(db),
+  });
+  if (refusal || lines.some((l) => l.consequence !== 'invoice_by_hand')) return null;
+  const money = (n) => Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+  return lines.map((l) => ({
+    name: l.name, amount: l.amount, label: `Invoice the ${l.name} (${money(l.amount)}) by hand after the accept. This accept does not bill it.`,
+  }));
 }
 
 /**
@@ -817,6 +848,7 @@ async function tapStateOf(card, { now = new Date() } = {}) {
     estimate_id: String(evaluation.estimate.id),
     visit_id: String(evaluation.visit.id),
     visit_date: dateOnlyString(evaluation.visit.scheduled_date),
+    by_hand: check.byHand,
     message: null,
   };
 }
@@ -1017,7 +1049,9 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
   if (result?.alreadyAccepted) return tapRefusal('already_accepted');
   return {
     ok: true, estimateId: String(estimate.id), visitId: String(visit.id), seriesIds: seen.seriesIds || [], amount: seen.amount ?? null,
-    warnings: Array.isArray(result?.warnings) ? result.warnings : [],
+    byHand: check.byHand,
+    // The by-hand billing step again, once the accept is done.
+    warnings: [...(Array.isArray(result?.warnings) ? result.warnings : []), ...check.byHand.map((l) => l.label)],
   };
 }
 
