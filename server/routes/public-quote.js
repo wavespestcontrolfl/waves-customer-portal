@@ -269,7 +269,8 @@ function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
   const { fourSizeOf } = require('../services/property-lookup/cage-sizes');
   if (Object.prototype.hasOwnProperty.call(ep, 'poolCageLegacySize')) {
     const four = fourSizeOf(trusted) || fourSizeOf(ep);
-    return { pool, poolCage: clientCage, poolCageSize: four ? four.toLowerCase() : undefined };
+    // No cage, no size: the engine reads a Large size as a hold even without a cage.
+    return { pool, poolCage: clientCage, poolCageSize: clientCage && four ? four.toLowerCase() : undefined };
   }
   const own = String(ep.poolCageSize || '').toLowerCase();
   return {
@@ -293,7 +294,8 @@ function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
   return {
     pool: pool || trustedCage,
     poolCage,
-    poolCageSize: size ? size.toLowerCase() : undefined,
+    // No cage, no size: the engine reads a Large size as a hold even without a cage.
+    poolCageSize: poolCage && size ? size.toLowerCase() : undefined,
     ...(poolCage && isHeldFourSize(four) ? { poolCageReview: true } : {}),
   };
 }

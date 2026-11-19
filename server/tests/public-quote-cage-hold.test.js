@@ -213,6 +213,19 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       expect(await held({ poolCage: false, poolCageSize: 'NONE' })).toBe(false);
     });
 
+    test('an explicit NO is never held, even when the re-read has a cage over 1,000 sq ft', async () => {
+      mockServerLookup = {
+        enriched: { pool: 'YES', poolCage: 'YES', poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED', poolCageSqft: 1200 },
+        propertyRecord: {},
+      };
+      process.env[TWO_SIZES] = 'true';
+      expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
+      expect(await held({ poolCage: false })).toBe(false);
+      // Gate off, a two-size profile from before a rollback (it carries the legacy key).
+      delete process.env[TWO_SIZES];
+      expect(await held({ poolCage: 'NO', poolCageSize: 'NONE', poolCageLegacySize: 'NONE' })).toBe(false);
+    });
+
     test('gate off: both cases are as today (a cage the client omits is not priced, not held)', async () => {
       trustedHeldCage();
       expect(await held({ poolCage: undefined, poolCageSize: 'MEDIUM' })).toBe(false);
