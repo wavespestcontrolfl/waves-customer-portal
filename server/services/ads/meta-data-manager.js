@@ -318,7 +318,7 @@ async function buildReadiness({ periodDays = 7, limit = 50 } = {}) {
   for (const conversionType of Object.keys(EVENT_NAMES)) {
     try {
       const candidates = await collectCandidates(conversionType, { ...range, limit });
-      const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0, consentSuppressed: 0, internalTest: 0, leadClosed: 0 };
+      const counts = { total: candidates.length, eligible: 0, missingMatchKeys: 0, missingConversionValue: 0, consentSuppressed: 0, internalTest: 0 };
       for (const c of candidates) {
         const r = skipReason(c);
         if (!r) counts.eligible += 1;
@@ -326,7 +326,6 @@ async function buildReadiness({ periodDays = 7, limit = 50 } = {}) {
         else if (r === 'missing_conversion_value') counts.missingConversionValue += 1;
         else if (r === 'consent_suppressed') counts.consentSuppressed += 1;
         else if (r === 'internal_test') counts.internalTest += 1;
-        else if (r === 'lead_closed') counts.leadClosed += 1;
       }
       conversions[conversionType] = { eventName: EVENT_NAMES[conversionType], candidates: counts };
     } catch (err) {

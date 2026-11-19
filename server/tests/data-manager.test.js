@@ -34,7 +34,7 @@ const {
   configurationFor,
   dedupeCandidatesByTransaction,
   destinationFor,
-  exclusionReason,
+  JUNK_LEAD_STATUSES,
   conversionValueForNewCustomer,
   mapNewCustomerCandidate,
   collectCandidates,
@@ -739,15 +739,28 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
     first_name: 'Pat', last_name: 'Sample', status: 'qualified',
   };
 
-  test('a qualified lead later marked junk or non-engaged is skipped as lead_closed', () => {
-    // The shared non-engaged set (cancelled, spam, duplicate, handled) plus disqualified.
-    for (const status of ['disqualified', 'DUPLICATE', ' spam ', 'cancelled', 'handled']) {
-      const c = mapLeadCandidate({ ...baseLead, status });
-      expect(exclusionReason(c)).toBe('lead_closed');
-      expect(skipReason(c)).toBe('lead_closed');
+  test('qualified leads: a lead later marked junk or non-engaged is dropped in SQL, before the limit', async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
+    const chain = {};
+    const raws = [];
+    for (const m of ['leftJoin', 'whereNull', 'where', 'orWhereRaw', 'orderByRaw', 'limit']) {
+      chain[m] = jest.fn((...args) => {
+        if (typeof args[0] === 'function') args[0].call(chain, chain);
+        return chain;
+      });
     }
-    expect(skipReason(mapLeadCandidate({ ...baseLead, status: 'won' }))).toBeNull();
-    expect(skipReason(mapLeadCandidate({ ...baseLead, status: 'qualified' }))).toBeNull();
+    chain.whereRaw = jest.fn((sql, bindings) => { raws.push({ sql, bindings }); return chain; });
+    chain.select = jest.fn(() => chain);
+    chain.then = (resolve) => resolve([]);
+    dbMock.mockImplementation(() => chain);
+    await collectCandidates('qualified_lead', { since: '2026-11-01', endDate: '2026-11-18' });
+    // The shared non-engaged set (cancelled, spam, duplicate, handled) plus disqualified.
+    expect(JUNK_LEAD_STATUSES).toEqual(['cancelled', 'spam', 'duplicate', 'handled', 'disqualified']);
+    const junk = raws.find((r) => r.sql.includes('NOT IN'));
+    expect(junk.sql).toBe("LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (?, ?, ?, ?, ?)");
+    expect(junk.bindings).toEqual(JUNK_LEAD_STATUSES);
+    // ...before the limit: the filter is part of the same query the limit caps.
+    expect(chain.whereRaw.mock.invocationCallOrder[raws.indexOf(junk)]).toBeLessThan(chain.limit.mock.invocationCallOrder[0]);
   });
 
   test('an internal test record is skipped as internal_test (owner cell, test name, linked test customer)', () => {
@@ -764,14 +777,13 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
     expect(skipReason(mapCompletedJobCandidate(job))).toBeNull();
   });
 
-  test('summarizeCandidates counts the two new reasons and skips them', () => {
+  test('summarizeCandidates counts internal_test and skips it', () => {
     const { counts, rows } = summarizeCandidates([
-      mapLeadCandidate({ ...baseLead, status: 'spam' }),
       mapLeadCandidate({ ...baseLead, id: 'l2', phone: '9415550177' }),
       mapLeadCandidate({ ...baseLead, id: 'l3' }),
     ]);
-    expect(counts).toMatchObject({ leadClosed: 1, internalTest: 1, eligible: 1, skipped: 2 });
-    expect(rows.map((r) => r.skipReason)).toEqual(['lead_closed', 'internal_test', null]);
+    expect(counts).toMatchObject({ internalTest: 1, eligible: 1, skipped: 1 });
+    expect(rows.map((r) => r.skipReason)).toEqual(['internal_test', null]);
   });
 
   test('dedupe: an exclusion on any sibling of a transaction excludes it', () => {
@@ -825,9 +837,8 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
       expect(out).toHaveLength(1);
     });
 
-    test('a test record or a disqualified lead never counts as a new customer', () => {
+    test('a test record never counts as a new customer', () => {
       expect(skipReason(mapNewCustomerCandidate({ ...row, phone: '9415550177' }))).toBe('internal_test');
-      expect(skipReason(mapNewCustomerCandidate({ ...row, status: 'disqualified', converted_at: row.converted_at }))).toBe('lead_closed');
     });
 
     test('missing action-id env: not configured and reported, like the other types', async () => {

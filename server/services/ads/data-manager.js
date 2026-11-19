@@ -275,7 +275,6 @@ function candidateHasUserData(candidate) {
 // survive. Shared with the Meta lane.
 function exclusionReason(candidate) {
   if (candidate.internalTest) return 'internal_test';
-  if (candidate.leadClosed) return 'lead_closed';
   return null;
 }
 
@@ -391,9 +390,7 @@ function mergeClickKeys(into, from) {
 
 function mergeExclusions(winner, a, b) {
   const internalTest = !!(a.internalTest || b.internalTest);
-  const leadClosed = !!(a.leadClosed || b.leadClosed);
-  if (!!winner.internalTest === internalTest && !!winner.leadClosed === leadClosed) return winner;
-  return { ...winner, internalTest, leadClosed };
+  return !!winner.internalTest === internalTest ? winner : { ...winner, internalTest };
 }
 
 function dedupeCandidatesByTransaction(candidates = []) {
@@ -453,16 +450,11 @@ function leadIsInternalTest(row) {
   });
 }
 
-function leadIsJunk(row) {
-  return JUNK_LEAD_STATUSES.includes(String(row.status || '').trim().toLowerCase());
-}
-
 function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
     ...leadIdentity(row),
     internalTest: leadIsInternalTest(row),
-    leadClosed: leadIsJunk(row),
     // Both name/address sources, so consent cleaning can re-pick the identity
     // if it swaps a phone. Stripped before upload; never sent.
     identitySources: leadIdentitySources(row),
@@ -533,7 +525,6 @@ function mapCompletedJobCandidate(row) {
   ];
   return {
     internalTest: jobIsInternalTest(row),
-    leadClosed: false,
     // The customer record is canonical for a completed job and the lead the
     // fallback, but only a source that is the same person as the uploaded
     // email/phone below may supply the name/address.
@@ -632,9 +623,10 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       q.where('l.is_qualified', true)
         .orWhereRaw("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
     })
-    // is_qualified is sticky, so a lead later marked disqualified/duplicate/spam
-    // still matches above; those rows stay in the list as candidates and are
-    // skipped with reason 'lead_closed' (see exclusionReason).
+    // is_qualified is sticky, so a lead later marked junk or non-engaged still
+    // matches above. It is dropped here, before the limit, so junk never takes
+    // an upload slot from an older real lead.
+    .whereRaw(`LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (${JUNK_LEAD_STATUSES.map(() => '?').join(', ')})`, JUNK_LEAD_STATUSES)
     .select(...LEAD_SELECT_COLUMNS)
     .orderByRaw(`${eventTimestampSql} DESC NULLS LAST`)
     .limit(cap);
@@ -711,10 +703,14 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     // there) or a completed booking (completed_at, else its visit date, as an ET
     // date). A free Waves Assessment is a consultation, not a sale, so it is not one.
     .whereNotExists(function hadEarlierVisit() {
-      this.select(db.raw('1')).from('service_records as sr')
+      // A record has no service of its own: its booking's catalog entry decides,
+      // else its service_type (excludeAssessmentBookings' catalog-wins rule).
+      excludeAssessmentBookings(this.select(db.raw('1')).from('service_records as sr')
+        .leftJoin('scheduled_services as srb', 'srb.id', 'sr.scheduled_service_id')
+        .leftJoin('services as srv', 'srv.id', 'srb.service_id')
         .whereRaw('sr.customer_id = c.id')
         .where('sr.status', 'completed')
-        .whereRaw(`sr.service_date < ${ownContactDateSql} - ?::int`, [NEW_CUSTOMER_SLACK_DAYS]);
+        .whereRaw(`sr.service_date < ${ownContactDateSql} - ?::int`, [NEW_CUSTOMER_SLACK_DAYS]), 'sr', 'srv');
     })
     .whereNotExists(function hadEarlierCompletedBooking() {
       excludeAssessmentBookings(this.select(db.raw('1')).from('scheduled_services as ss')
@@ -726,6 +722,9 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     .select('l.id')
     .orderBy('l.customer_id')
     .orderByRaw(`${eventTimestampSql} ASC, l.id`);
+  // An upload run reads full pages whatever its limit, so a small limit does
+  // not turn into one query per customer.
+  const pageSize = sendableTransactionIds ? MAX_LIMIT : cap;
   const page = (offset) => db('leads as l')
     .join('customers as c', 'l.customer_id', 'c.id')
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
@@ -734,18 +733,18 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     .whereRaw(`${eventTimestampSql} < ${etMidnightSql}`, [addDateStringDays(endDate, 1)])
     .select(...LEAD_SELECT_COLUMNS, db.raw(`${eventTimestampSql} as event_at`))
     .orderByRaw(`${eventTimestampSql} DESC, l.customer_id`)
-    .limit(cap)
+    .limit(pageSize)
     .offset(offset);
 
   // One row per customer, newest first. Readiness reads one page. An upload run
   // passes sendableTransactionIds (what its destination would send now: no skip
   // reason, not on its history) and pages on until `cap` customers are
   // sendable or the window ends, so no customer ages out behind ones already
-  // sent or unsendable. Those come back too (reported as skipped); at most
-  // `cap` sendable ones do.
+  // sent or unsendable. Those before the cap-th sendable one come back too
+  // (reported as skipped); nothing after it does.
   const out = [];
   let room = cap;
-  for (let offset = 0; ; offset += cap) {
+  for (let offset = 0; ; offset += pageSize) {
     const rows = await page(offset);
     const linked = await linkedLeadContacts(rows.map((r) => r.customer_id));
     const candidates = await applyMarketingConsent('new_customer', rows.map((row) => {
@@ -762,10 +761,11 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     if (!sendableTransactionIds) return candidates;
     const sendable = await sendableTransactionIds(candidates);
     for (const c of candidates) {
-      if (!sendable.has(c.transactionId)) out.push(c);
-      else if (room > 0) { out.push(c); room -= 1; }
+      if (room === 0) break;
+      out.push(c);
+      if (sendable.has(c.transactionId)) room -= 1;
     }
-    if (room === 0 || rows.length < cap) return out;
+    if (room === 0 || rows.length < pageSize) return out;
   }
 }
 
@@ -971,7 +971,6 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     missingEventTimestamp: 0,
     consentSuppressed: 0,
     internalTest: 0,
-    leadClosed: 0,
     skipped: 0,
   };
   const rows = candidates.map((candidate) => {
@@ -985,7 +984,6 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     if (reason === 'missing_conversion_value') counts.missingConversionValue += 1;
     if (reason === 'missing_event_timestamp') counts.missingEventTimestamp += 1;
     if (reason === 'internal_test') counts.internalTest += 1;
-    if (reason === 'lead_closed') counts.leadClosed += 1;
     if (!reason && !priorReason) counts.eligible += 1;
     if (reason || priorReason) counts.skipped += 1;
     return {

@@ -236,6 +236,11 @@ jest.setTimeout(30000);
     expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0]]) }))).toEqual([ids[0], ids[1]]);
     expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0], ids[1]]) }))).toEqual(ids);
     expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent(ids) }))).toEqual(ids);
+    // The database page is a full page whatever the limit: one read, not one per customer.
+    const pages = [];
+    const all = async (batch) => { pages.push(batch.length); return new Set(batch.map((x) => x.transactionId)); };
+    expect(tx(await collect({ limit: 1, sendableTransactionIds: all }))).toEqual([ids[0]]);
+    expect(pages).toEqual([3]);
   });
 
   test('a newest test record takes no slot from an older sendable customer', async () => {
@@ -266,6 +271,45 @@ jest.setTimeout(30000);
     await lead(assessed);
     const out = await collect();
     expect(out.map((x) => x.transactionId)).toEqual([`waves_new_customer:${assessed.id}`]);
+  });
+
+  test("a free assessment's booking and service record together are not a prior visit; a paid record is", async () => {
+    // Snapshot path: no catalog link, judged by service_type.
+    const bySnapshot = await customer({ member_since: null });
+    const visit1 = randomUUID();
+    await database('scheduled_services').insert({
+      id: visit1, customer_id: bySnapshot.id, status: 'completed', service_type: 'Waves Assessment',
+      scheduled_date: '2026-10-20', completed_at: new Date('2026-10-20T15:00:00Z'),
+    });
+    await database('service_records').insert({
+      id: randomUUID(), customer_id: bySnapshot.id, status: 'completed', service_date: '2026-10-20',
+      service_type: 'Waves Assessment', scheduled_service_id: visit1,
+    });
+    await lead(bySnapshot);
+    // Catalog path: the booking's service is the assessment, whatever the snapshots say.
+    const byCatalog = await customer({ member_since: null });
+    const serviceId = randomUUID();
+    await database('services').insert({ id: serviceId, service_key: 'lawn_inspection', name: 'Waves Assessment' });
+    const visit2 = randomUUID();
+    await database('scheduled_services').insert({
+      id: visit2, customer_id: byCatalog.id, service_id: serviceId, status: 'completed', service_type: 'Lawn check',
+      scheduled_date: '2026-10-21', completed_at: new Date('2026-10-21T15:00:00Z'),
+    });
+    await database('service_records').insert({
+      id: randomUUID(), customer_id: byCatalog.id, status: 'completed', service_date: '2026-10-21',
+      service_type: 'Lawn check', scheduled_service_id: visit2,
+    });
+    await lead(byCatalog);
+    // A paid visit's record (imported history, no booking) is a prior visit.
+    const paid = await customer({ member_since: null });
+    await database('service_records').insert({
+      id: randomUUID(), customer_id: paid.id, status: 'completed', service_date: '2026-10-22', service_type: 'General Pest Control',
+    });
+    await lead(paid);
+    const out = await collect();
+    expect(out.map((x) => x.transactionId).sort()).toEqual(
+      [`waves_new_customer:${bySnapshot.id}`, `waves_new_customer:${byCatalog.id}`].sort(),
+    );
   });
 
   test('a later lead with no converted_at never takes a time before it existed', async () => {
