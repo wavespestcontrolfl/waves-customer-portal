@@ -430,12 +430,13 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onRefused
   );
 }
 
-function NoteField({ id, label, value, onChange }) {
+function NoteField({ id, label, value, onChange, disabled }) {
   return (
     <div style={{ marginTop: 12 }}>
       <label htmlFor={id} style={LABEL_STYLE}>{label}</label>
       <textarea
         id={id}
+        disabled={disabled}
         rows={3}
         maxLength={NOTE_MAX}
         value={value}
@@ -469,8 +470,12 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
       if (lost && !res.ok && res.status !== 404 && res.status !== 409) {
         // Refused before the offer was checked (a 429, a 400): the lost send
         // may still land. Keep it the only action, and read in case it has.
+        // A 400 refuses the same payload as invalid, so the lost send was
+        // refused too or ended long ago (a date that passed at midnight): an
+        // open read then frees the fields for a new value.
         setError(res.body?.error || '');
-        await onReload();
+        const after = await onReload();
+        if (res.status === 400 && after === 'open') setLost(null);
         return;
       }
       setLost(null); // a definite answer
@@ -500,7 +505,9 @@ function useOfferAction({ token, onApplied, onRefused, onReload, onInvalid, onUn
   }, [busy, lost, token, onApplied, onRefused, onReload, onInvalid, onUnknown]);
 
   const retry = useCallback(() => (lost ? run(lost.suffix, lost.payload) : undefined), [lost, run]);
-  return { busy, error, setError, run, lost: Boolean(lost), retry };
+  // frozen: the send's own fields are fixed while it is in flight or lost, so
+  // a resend sends what the applicant sees.
+  return { busy, error, setError, run, lost: Boolean(lost), retry, frozen: busy || Boolean(lost) };
 }
 
 function LostBanner({ action }) {
@@ -517,7 +524,7 @@ function LostBanner({ action }) {
   );
 }
 
-function DateRequestPanel({ onSubmit, onCancel, busy, locked, error }) {
+function DateRequestPanel({ onSubmit, onCancel, busy, frozen, locked, error }) {
   const [date, setDate] = useState('');
   const [note, setNote] = useState('');
   const [touched, setTouched] = useState(false);
@@ -528,13 +535,14 @@ function DateRequestPanel({ onSubmit, onCancel, busy, locked, error }) {
       <input
         id="offer-new-date"
         type="date"
+        disabled={frozen}
         min={tomorrowET()}
         value={date}
         onChange={(e) => { setDate(e.target.value); setTouched(true); }}
         style={FIELD_STYLE}
       />
       {touched && problem && <div style={{ ...ERROR_BANNER_STYLE, marginTop: 8 }} role="alert">{problem}</div>}
-      <NoteField id="offer-date-note" label="Note (optional)" value={note} onChange={setNote} />
+      <NoteField id="offer-date-note" label="Note (optional)" value={note} onChange={setNote} disabled={frozen} />
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
       <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
         <BrandButton variant="secondary" disabled={locked} onClick={onCancel}>Cancel</BrandButton>
@@ -549,12 +557,12 @@ function DateRequestPanel({ onSubmit, onCancel, busy, locked, error }) {
   );
 }
 
-function DeclinePanel({ onSubmit, onCancel, busy, locked, error }) {
+function DeclinePanel({ onSubmit, onCancel, busy, frozen, locked, error }) {
   const [reason, setReason] = useState('');
   return (
     <div role="group" aria-label="Decline this offer" style={{ marginTop: 16, padding: 14, border: '1px solid var(--border-strong, #C7D7E2)', borderRadius: 'var(--radius-md, 10px)' }}>
       <p style={BODY_STYLE}>Are you sure you want to decline this offer?</p>
-      <NoteField id="offer-decline-reason" label="Reason (optional)" value={reason} onChange={setReason} />
+      <NoteField id="offer-decline-reason" label="Reason (optional)" value={reason} onChange={setReason} disabled={frozen} />
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
       <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
         <BrandButton variant="secondary" disabled={locked} onClick={onCancel}>Cancel</BrandButton>
@@ -566,7 +574,7 @@ function DeclinePanel({ onSubmit, onCancel, busy, locked, error }) {
   );
 }
 
-function SignBlock({ name, onName, onAccept, busy, saving }) {
+function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
   const valid = signedNameValid(name);
   return (
     <div style={{ marginTop: 18 }}>
@@ -574,6 +582,7 @@ function SignBlock({ name, onName, onAccept, busy, saving }) {
       <input
         id="offer-sign-name"
         type="text"
+        disabled={frozen}
         autoComplete="name"
         maxLength={120}
         value={name}
@@ -607,7 +616,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
   };
   // Locks every action and the text box: a send in flight, a send whose reply
   // was lost, or a refusal whose refresh failed.
-  const blocked = accept.busy || dateReq.busy || decline.busy || accept.lost || dateReq.lost || decline.lost || unknown;
+  const blocked = accept.frozen || dateReq.frozen || decline.frozen || unknown;
   const anyBusy = blocked || consentPending;
 
   return (
@@ -630,6 +639,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
           onName={setName}
           busy={anyBusy}
           saving={accept.busy}
+          frozen={accept.frozen}
           onAccept={() => accept.run('/accept', { signedName: name.trim() })}
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
@@ -657,6 +667,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
         {panel === 'date' && (
           <DateRequestPanel
             busy={dateReq.busy}
+            frozen={dateReq.frozen}
             locked={anyBusy}
             error={dateReq.error}
             onCancel={() => setPanel('none')}
@@ -667,6 +678,7 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
         {panel === 'decline' && (
           <DeclinePanel
             busy={decline.busy}
+            frozen={decline.frozen}
             locked={anyBusy}
             error={decline.error}
             onCancel={() => setPanel('none')}

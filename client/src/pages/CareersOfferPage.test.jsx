@@ -391,6 +391,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Ask for another start date' })).toBeDisabled();
     expect(screen.getByLabelText('Text me about this offer')).toBeDisabled();
+    expect(screen.getByLabelText('Type your full name to sign')).toBeDisabled(); // a resend sends what is shown
     expect(screen.queryByText(/Could not save that/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/You signed this offer\. Welcome to Waves\./)).toBeInTheDocument();
@@ -411,6 +412,7 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
     expect(await screen.findByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
+    expect(screen.getByLabelText('Reason (optional)')).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
     expect(fetchMock.mock.calls[3][0]).toMatch(/\/decline$/);
@@ -438,6 +440,31 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/You signed this offer\. Welcome to Waves\./)).toBeInTheDocument();
     expect(bodyOf(fetchMock, 5)).toEqual({ signedName: 'Jordan Rivera' });
+  });
+
+  it('frees the date for a new value when the resend of a lost date request is refused as invalid and the offer reads open', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // date request: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ error: 'Pick a start date after today.' }, 400)) // the resend, after midnight
+      .mockResolvedValueOnce(jsonResponse(openPayload())) // the read: still open
+      .mockResolvedValueOnce(jsonResponse({ state: 'date_requested' })); // the new date
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask for another start date' }));
+    fireEvent.change(screen.getByLabelText(/Another start date/), { target: { value: '2027-01-11' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send this date' }));
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Another start date/)).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Pick a start date after today.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText(/Another start date/)).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    fireEvent.change(screen.getByLabelText(/Another start date/), { target: { value: '2027-01-12' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send this date' }));
+    expect(await screen.findByText('You asked to start on Tue, Jan 12, 2027.')).toBeInTheDocument();
+    expect(bodyOf(fetchMock, 5)).toEqual({ requestedStartDate: '2027-01-12' });
   });
 
   it('keeps a text choice locked when its resend after a lost reply is refused, until a save settles it', async () => {
