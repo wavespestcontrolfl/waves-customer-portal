@@ -6,7 +6,6 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
- *   GATE_PORTAL_PLAN_START=true (owner 2026-11-19, "BUILD": a signed-in customer with no recurring plan who taps "Add ... to my plan" on the portal pricing card gets a server-priced estimate for that option and books a first visit through the normal estimate accept flow (pick a time, save a card, confirm), instead of a request that waits for the office. It has a gate because it shows a bookable price and leads to card capture and booking. Off = the card files the same request as today and the pricing answer carries no planStart hint. Kill = unset)
  *   GATE_TECH_ESTIMATES=true (owner 2026-11-09, "GO, FOR ALL": a technician prices and, in later steps, sends an estimate from the phone. It has a gate because the later steps text and email customers and because the price preview runs the paid property lookup. Off, every /api/tech/estimates route answers 404 {enabled:false} before any customer read. On, a route also needs the technician's own Can create estimates switch (technicians.can_create_estimates, off by default); an admin login always passes. Steps 1 and 2a price and save a draft estimate (sold by = the creator) and read his own; nothing is sent. Pest lines only (general pest, mosquito, rodent, termite), each open to a technician only when his job type for it is Qualified. Strict `=== 'true'`, read at call time via techEstimatesLive(); dark by default. Kill: unset.)
  *   GATE_LIVE_CALL_TRANSCRIPTION=true (owner 2026-11-16 "ok build all", live-call suite PR 1: when a staff member presses 1 to take an inbound call, Twilio Real-Time Transcription starts on the caller's call, both sides, and each final utterance is saved card-number scrubbed in call_live_utterances through POST /api/webhooks/twilio/live-transcription. It collects text only; the features that read it come later. Read via isEnabled('liveCallTranscription') at boot, strict 'true', dark by default; off = no transcription starts and the press-1 TwiML is unchanged. Spends money when on (Twilio, $0.027 a call minute): owner flip only. Kill: delete the variable.)
  *   GATE_LIVE_CALL_UPSET_ALERT=true (owner 2026-11-16 "ok build all", live-call suite: while a call is live, when the caller sounds upset and the owner is not the one on the call, one bell row and one phone banner tell him so he can step in. After a caller utterance is saved, a Claude Haiku 5.5 read of the last two minutes runs when the caller has 3 or more new utterances, at most once per 45 seconds and 8 times per call; mood upset or angry raises one alert per call. Needs GATE_LIVE_CALL_TRANSCRIPTION data. Read via isEnabled('liveCallUpsetAlert') at boot, strict 'true', dark by default; off = no model call, no new read, behavior byte-identical. Spends money when on (a Haiku call per check): owner flip only. Kill: delete the variable.)
@@ -207,6 +206,7 @@
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; also requires GATE_CANCEL_FLOW_V2 for online nonrenewal; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
+ *   GATE_PORTAL_PLAN_START=true (owner 2026-11-19, "BUILD": a signed-in customer with no recurring plan who taps "Add ... to my plan" on the portal pricing card gets a server-priced estimate for that option and books a first visit through the normal estimate accept flow (pick a time, save a card, confirm), instead of a request that waits for the office. It has a gate because it shows a bookable price and leads to card capture and booking. Off = the card files the same request as today and the pricing answer carries no planStart hint. Kill = unset)
  *   GATE_SIGNUP_SINGLE_EMAIL=true (ONE email at recurring signup: the accepted-onboarding email also carries the property and the plan (no payment section: the "Auto Pay is set up" email stays its own email, owner 2026-09-30), and the separate membership.started / welcome emails are skipped ONLY when that combined email was accepted for sending — each still sends if it was not; same-day later acceptances get a short per-property email; the welcome TEXT is unchanged; strict === 'true', read at call time; dark in dev AND prod)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
@@ -2561,6 +2561,9 @@ const gates = {
   // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
   // unset. Owner flips with the C1 portal flow.
   cancelFlowV2: gateEnvValue('GATE_CANCEL_FLOW_V2'),
+  // GATE_PORTAL_PLAN_START: read at CALL time via portalPlanStartLive(); this entry is for logGateStatus, so the boot log
+  // shows the flip.
+  portalPlanStart: process.env.GATE_PORTAL_PLAN_START === 'true',
   // Boot diagnostics show the effective conjunction; selection reads it at call time.
   termiteAnnualPlan: termiteAnnualPlanSelectionEnabled(),
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
@@ -5375,9 +5378,6 @@ const gates = {
   // GATE_DAY_ONLY_PROMISE: read at CALL time via dayOnlyPromiseLive(); this entry is for logGateStatus, so the boot log
   // shows the flip.
   dayOnlyPromise: process.env.GATE_DAY_ONLY_PROMISE === 'true',
-  // GATE_PORTAL_PLAN_START: read at CALL time via portalPlanStartLive(); this entry is for logGateStatus, so the boot log
-  // shows the flip.
-  portalPlanStart: process.env.GATE_PORTAL_PLAN_START === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -6912,6 +6912,13 @@ function territoryReadoutLive() {
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
   return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN') && gateEnvValue('GATE_CANCEL_FLOW_V2');
+}
+
+// GATE_PORTAL_PLAN_START read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because it shows
+// a bookable price and leads to card capture and booking. Off = POST /api/requests/start-plan answers 404 and the
+// pricing answer carries no planStart hint. Kill = unset.
+function portalPlanStartLive() {
+  return process.env.GATE_PORTAL_PLAN_START === 'true';
 }
 
 // Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
@@ -8449,6 +8456,8 @@ function movingFlowLive() {
 }
 // GATE_MOVING_FLOW reader, on its own line so gate PRs never conflict.
 module.exports.movingFlowLive = movingFlowLive;
+// GATE_PORTAL_PLAN_START reader, on its own line so gate PRs never conflict.
+module.exports.portalPlanStartLive = portalPlanStartLive;
 // GATE_MOVING_ESTIMATE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-02, moving PR B1). On (with
 // GATE_MOVING_FLOW), the Moving card's new-home estimate, its server-stamped setup-fee waiver and the accept-time move guards
 // work (services/customer-moves.js). Off = no estimate action, no waiver, no guard. Kill = unset.
@@ -9617,12 +9626,3 @@ function techEstimatesLive() {
 }
 // GATE_TECH_ESTIMATES reader, on its own line so gate PRs never conflict.
 module.exports.techEstimatesLive = techEstimatesLive;
-
-// GATE_PORTAL_PLAN_START read at CALL time, strict `=== 'true'`, dark (owner 2026-11-19). It has a gate because it shows
-// a bookable price and leads to card capture and booking. Off = POST /api/requests/start-plan answers 404 and the
-// pricing answer carries no planStart hint. Kill = unset.
-function portalPlanStartLive() {
-  return process.env.GATE_PORTAL_PLAN_START === 'true';
-}
-// GATE_PORTAL_PLAN_START reader, on its own line so gate PRs never conflict.
-module.exports.portalPlanStartLive = portalPlanStartLive;

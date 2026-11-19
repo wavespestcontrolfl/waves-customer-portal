@@ -2934,6 +2934,24 @@ async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
 // editable — the whole point is fixing a quote the customer already has.
 const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
 
+// Customer self-serve mint sources a staff revise refuses, with the refusal shown.
+// - plan_restart (codex GH r17 P1 on #3671): the scope is fixed by the
+//   cancellation attempt and the price is always today's mint (owner ruling —
+//   one honorable price). An edited copy either bricked acceptance (planRestart
+//   dropped wholesale) or, preserved, let a changed composition restart work
+//   outside the cancellation scope; blocking is the only shape that keeps both
+//   invariants.
+// - plan_start (GATE_PORTAL_PLAN_START) shares the restart mint core and its
+//   rules: the customer's next card tap archives every unaccepted plan_start
+//   row, and the accept re-check reads the mint's planStart block, which the
+//   rewrite drops (it keeps only REVISE_PRESERVED_ESTIMATE_DATA_KEYS). An edited
+//   copy would either die on that tap or never accept, so a different offer is
+//   a new estimate.
+const REVISE_REFUSED_MINT_SOURCES = new Map([
+  ['plan_restart', 'This is a customer plan-restart quote — its scope is fixed by the cancellation and it always prices at the current mint. It cannot be edited in place; the customer re-taps "Restart my plan" for a fresh quote.'],
+  ['plan_start', 'This is a customer portal plan quote — it always prices at the current mint. It cannot be edited in place; create a new estimate for a different offer.'],
+]);
+
 // Single source of truth for "can this estimate be edited in place?" —
 // consumed by the revise write below and by GET /:id/edit-source so the
 // builder can explain a non-editable row instead of failing on save.
@@ -2968,24 +2986,10 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   if (estimate?.price_locked_at) {
     return { message: 'This estimate is price-locked (accepted) and can no longer be edited.', statusCode: 409 };
   }
-  // Customer plan-restart quotes are never revised in place (codex GH r17
-  // P1 on #3671): their scope is fixed by the cancellation attempt and
-  // their price is always today's mint (owner ruling — one honorable
-  // price). An edited copy either bricked acceptance (planRestart dropped
-  // wholesale) or, preserved, let a changed composition restart work
-  // outside the cancellation scope; blocking is the only shape that keeps
-  // both invariants.
-  if (String(estimate?.source || '') === 'plan_restart') {
-    return { message: 'This is a customer plan-restart quote — its scope is fixed by the cancellation and it always prices at the current mint. It cannot be edited in place; the customer re-taps "Restart my plan" for a fresh quote.', statusCode: 409 };
-  }
-  // Portal plan-start quotes (GATE_PORTAL_PLAN_START) share the restart mint
-  // core and its rules: the customer's next card tap archives every
-  // unaccepted plan_start row, and the accept re-check reads the mint's
-  // planStart block, which this rewrite drops (it keeps only
-  // REVISE_PRESERVED_ESTIMATE_DATA_KEYS). An edited copy would either die on
-  // that tap or never accept, so a different offer is a new estimate.
-  if (String(estimate?.source || '') === 'plan_start') {
-    return { message: 'This is a customer portal plan quote — it always prices at the current mint. It cannot be edited in place; create a new estimate for a different offer.', statusCode: 409 };
+  // Customer self-serve mints are never revised in place (REVISE_REFUSED_MINT_SOURCES).
+  const mintRefusal = REVISE_REFUSED_MINT_SOURCES.get(String(estimate?.source || ''));
+  if (mintRefusal) {
+    return { message: mintRefusal, statusCode: 409 };
   }
   const status = String(estimate?.status || '');
   if (status === 'sending') {

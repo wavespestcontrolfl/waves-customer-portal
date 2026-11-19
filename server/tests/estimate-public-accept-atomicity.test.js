@@ -4739,7 +4739,9 @@ describe('accept — lawn limits attestation (GATE_ESTIMATE_LAWN_LIMITS)', () =>
 describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside the accept txn', () => {
   // A plan_start estimate (the portal pricing card's first-plan quote) accepts through the SAME public path;
   // the revalidation re-checks under the estimate row lock that the account is still active, not cancelled,
-  // and owns no live recurring service. Refusal shapes are pinned in plan-start.test.js; this pins the WIRING.
+  // and owns no live recurring service. Refusal shapes are pinned in plan-start.test.js (its fake resolves the
+  // residual read's 'scheduled_services as s' alias, which this suite's fake cannot); this pins the WIRING:
+  // a refusal is a 409 that rolls back, a pass commits.
   const planStartEstimate = (overrides = {}) => recurringPestEstimate({
     id: 'est-plan-start-1',
     token: 'tok-plan-start-1-x012345',
@@ -4769,17 +4771,6 @@ describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside 
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
-  });
-
-  test('a plan started some other way after the mint refuses the accept (a live row owns the family)', async () => {
-    resetStore(planStartEstimate({ id: 'est-plan-start-2', token: 'tok-plan-start-2-x012345' }));
-    db.__state.tables.customers = [leadCustomer()];
-    db.__state.tables.scheduled_services = [
-      { id: 'live-1', customer_id: 'cust-9', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Quarterly Pest Control' },
-    ];
-    const res = await putAccept('tok-plan-start-2-x012345');
-    expect(res.status).toBe(409);
-    expect(storedEstimate().status).toBe('sent');
   });
 
   test('a still-plain account passes the revalidation and the accept commits', async () => {

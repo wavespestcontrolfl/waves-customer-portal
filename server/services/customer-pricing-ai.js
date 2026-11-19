@@ -1405,15 +1405,17 @@ async function buildCustomerPricingResponse({
     // account with no current or owned recurring service that is not cancelled. The
     // start-plan route re-decides under its locks; absent when the gate is off or the
     // account does not qualify, so every other response stays byte-identical.
-    ...(planStartHint(customer, currentServiceKeys, ownedServiceKeys) ? { planStart: { available: true } } : {}),
+    ...planStartHint(customer, currentServiceKeys, ownedServiceKeys),
   };
 }
 
+// The pricing answer's plan-start fields: { planStart: { available: true } }, or none.
 function planStartHint(customer, currentServiceKeys, ownedServiceKeys) {
   // Optional call: hundreds of suites mock feature-gates whole; a bare mock reads as off.
-  if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return false;
-  if (customer.active === false || customer.pipeline_stage === 'churned') return false;
-  return currentServiceKeys.length === 0 && ownedServiceKeys.length === 0;
+  if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
+  if (customer.active === false || customer.pipeline_stage === 'churned') return {};
+  if (currentServiceKeys.length || ownedServiceKeys.length) return {};
+  return { planStart: { available: true } };
 }
 
 function summarizeProperty(context) {

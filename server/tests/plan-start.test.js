@@ -216,13 +216,15 @@ function fakeTrx(ops = null, tableFactory = builder) {
   const t = (table) => {
     const b = tableFactory(table);
     if (ops) {
+      // Log the base table: the residual read aliases it ('scheduled_services as s').
+      const name = String(table).split(' as ')[0];
       let locked = false;
       const origForUpdate = b.forUpdate;
       b.forUpdate = () => { locked = true; return origForUpdate(); };
       const origFirst = b.first;
-      b.first = (...args) => { ops.push(`read:${table}${locked ? ':forUpdate' : ''}`); return origFirst(...args); };
+      b.first = (...args) => { ops.push(`read:${name}${locked ? ':forUpdate' : ''}`); return origFirst(...args); };
       const origThen = b.then;
-      b.then = (resolve, reject) => { ops.push(`read:${table}`); return origThen(resolve, reject); };
+      b.then = (resolve, reject) => { ops.push(`read:${name}`); return origThen(resolve, reject); };
     }
     return b;
   };
@@ -421,7 +423,8 @@ describe('mintPlanStartEstimate', () => {
 
     test('an unreadable ownership lookup fails closed', async () => {
       const failingDb = { transaction: async (fn) => fn(fakeTrx(null, (table) => {
-        if (table === 'scheduled_services') throw new Error('pg down');
+        // The residual read aliases the table ('scheduled_services as s').
+        if (String(table).split(' as ')[0] === 'scheduled_services') throw new Error('pg down');
         return builder(table);
       })) };
       await refused('pricing_unavailable', {}, { db: failingDb });

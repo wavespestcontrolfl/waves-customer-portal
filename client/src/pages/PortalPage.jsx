@@ -10977,6 +10977,25 @@ const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 // Hidden badge types (engagement-tracking ones we don't show)
 const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downloader', 'responsive', 'early_adopter', 'feedback_hero', 'portal_explorer', 'feedback_champion'];
 
+// The pricing card's primary action: today's "Request This", or "See my price and book" when the
+// server offers a first plan (GATE_PORTAL_PLAN_START). One button, so both look and behave alike.
+function PricingActionButton({ onClick, busy, label, busyLabel, compact, primaryButton }) {
+  return (
+    <button type="button" onClick={onClick} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
+      ...primaryButton,
+      width: compact ? '100%' : 'fit-content',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      opacity: busy ? 0.65 : 1,
+      cursor: busy ? 'wait' : 'pointer',
+    }}>
+      <Icon name="plus" size={15} strokeWidth={2} />
+      {busy ? busyLabel : label}
+    </button>
+  );
+}
+
 function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secondaryButton, onExploreTiers }) {
   const [prompt, setPrompt] = useState("I'm interested in adding lawn care");
   const [result, setResult] = useState(null);
@@ -10995,7 +11014,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const selected = options.find((option) => option.id === selectedId) || options[0] || null;
   // GATE_PORTAL_PLAN_START: a customer with no recurring plan books through a real estimate instead of
   // filing a request. The server hint only offers it; the start-plan route decides.
-  const canStartPlan = result?.planStart?.available === true && Number(selected?.monthly) > 0 && selected?.manualReview !== true;
+  const canStartPlan = result?.planStart?.available === true && Number(selected?.monthly) > 0 && selected.manualReview !== true;
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();
@@ -11270,35 +11289,13 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </span>
                   ) : canStartPlan ? (
                     <div style={{ display: 'grid', gap: 6 }}>
-                      <button type="button" onClick={startPlan} disabled={requesting || startingPlan} data-glass-accent="" data-glass-size="primary" style={{
-                        ...primaryButton,
-                        width: compact ? '100%' : 'fit-content',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        opacity: requesting || startingPlan ? 0.65 : 1,
-                        cursor: requesting || startingPlan ? 'wait' : 'pointer',
-                      }}>
-                        <Icon name="plus" size={15} strokeWidth={2} />
-                        {requesting || startingPlan ? 'Opening...' : 'See my price and book'}
-                      </button>
+                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
                       <div style={{ color: '#475569', fontSize: 14, lineHeight: 1.45 }}>
                         Your estimate shows the full price and open times. Pick a time to book.
                       </div>
                     </div>
                   ) : (
-                    <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" data-glass-size="primary" style={{
-                      ...primaryButton,
-                      width: compact ? '100%' : 'fit-content',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      opacity: requesting ? 0.65 : 1,
-                      cursor: requesting ? 'wait' : 'pointer',
-                    }}>
-                      <Icon name="plus" size={15} strokeWidth={2} />
-                      {requesting ? 'Sending...' : 'Request This'}
-                    </button>
+                    <PricingActionButton onClick={submitRequest} busy={requesting} label="Request This" busyLabel="Sending..." compact={compact} primaryButton={primaryButton} />
                   )}
                 </div>
               )}
