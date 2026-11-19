@@ -40,6 +40,22 @@ const defaultCatalog = [{
   base_price: 73,
   default_duration_minutes: 60,
 }];
+const quarterlyCatalog = [{
+  id: 'svc-quarterly',
+  service_key: 'pest_control_quarterly',
+  name: 'Quarterly Pest Control',
+  billing_type: 'recurring',
+  frequency: 'quarterly',
+  base_price: 100,
+  default_duration_minutes: 30,
+}];
+const phoneVisit = {
+  id: 'phone-visit-1',
+  serviceType: 'Commercial Rodent Bait Stations',
+  scheduledDate: futureDate(),
+  windowStart: '09:00',
+  status: 'confirmed',
+};
 
 function futureDate(days = 30) {
   const date = new Date();
@@ -174,6 +190,128 @@ it('stops a stale choice without writing, then obtains fresh review after staff 
     commercialSetupDecision: { ...freshSetupFeeReview, resolution: 'covered' },
   });
   await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'appointment-fresh' })), { timeout: 3000 });
+});
+
+it('stops before any retry POST when a pending review group changed cadence and no longer has the reviewed key', async () => {
+  let resolveFirst;
+  const firstReply = new Promise((resolve) => { resolveFirst = resolve; });
+  const { posts } = mount({
+    catalog: quarterlyCatalog,
+    scheduleReply: ({ count }) => count === 1 ? firstReply : json({ id: 'must-not-post' }),
+  });
+  fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Quarterly' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Quarterly Pest Control/ }));
+  const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+  await waitFor(() => expect(submit).toBeEnabled());
+  fireEvent.click(submit);
+  await waitFor(() => expect(posts).toHaveLength(1));
+
+  const cadence = screen.getByLabelText('Repeats for Quarterly Pest Control');
+  expect(cadence).toHaveValue('quarterly');
+  fireEvent.change(cadence, { target: { value: 'monthly' } });
+  await act(async () => {
+    resolveFirst(json({
+      code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+      error: 'Choose which setup this prepayment covers.',
+      setupFeeReview,
+    }, { ok: false, status: 409 }));
+  });
+  await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument());
+  expect(posts).toHaveLength(1);
+  expect(screen.getByText('The appointment changed. Review the updated booking and save again.')).toBeInTheDocument();
+});
+
+it('preserves the exact approved phone-booking ids through setup review for the same group', async () => {
+  const { posts } = mount({
+    scheduleReply: ({ count }) => {
+      if (count === 1) {
+        return json({
+          code: 'duplicate_call_booking',
+          error: 'The phone agent already booked this visit for this customer.',
+          existingVisits: [phoneVisit],
+        }, { ok: false, status: 409 });
+      }
+      if (count === 2) {
+        return json({
+          code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+          error: 'Choose which setup this prepayment covers.',
+          setupFeeReview,
+        }, { ok: false, status: 409 });
+      }
+      return json({ id: 'appointment-with-both-approvals' });
+    },
+  });
+  fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Commercial Rodent' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Commercial Rodent Bait Stations/i }));
+  const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+  await waitFor(() => expect(submit).toBeEnabled());
+  fireEvent.click(submit);
+  fireEvent.click(await screen.findByRole('button', { name: 'Book another anyway' }));
+
+  await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  expect(posts).toHaveLength(2);
+  expect(posts[1]).toMatchObject({
+    allowCallBookingDuplicate: true,
+    callBookingReviewedIds: ['phone-visit-1'],
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+
+  await waitFor(() => expect(posts).toHaveLength(3));
+  expect(posts[2]).toEqual({
+    ...posts[1],
+    commercialSetupDecision: { ...setupFeeReview, resolution: 'covered' },
+  });
+  expect(screen.queryByText('The appointment changed. Review the updated booking and save again.')).not.toBeInTheDocument();
+});
+
+it('keeps only the reviewed phone ids on setup retry so a newly found conflict prompts again', async () => {
+  const newPhoneVisit = {
+    id: 'phone-visit-2',
+    serviceType: 'New Mosquito Visit',
+    scheduledDate: futureDate(31),
+    windowStart: '10:00',
+    status: 'confirmed',
+  };
+  const { posts } = mount({
+    scheduleReply: ({ count }) => {
+      if (count === 1) {
+        return json({
+          code: 'duplicate_call_booking',
+          error: 'The phone agent already booked this visit for this customer.',
+          existingVisits: [phoneVisit],
+        }, { ok: false, status: 409 });
+      }
+      if (count === 2) {
+        return json({
+          code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+          error: 'Choose which setup this prepayment covers.',
+          setupFeeReview,
+        }, { ok: false, status: 409 });
+      }
+      return json({
+        code: 'duplicate_call_booking',
+        error: 'A new phone-agent booking appeared.',
+        existingVisits: [phoneVisit, newPhoneVisit],
+      }, { ok: false, status: 409 });
+    },
+  });
+  fireEvent.change(screen.getByPlaceholderText('Search services'), { target: { value: 'Commercial Rodent' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Commercial Rodent Bait Stations/i }));
+  const submit = screen.getByRole('button', { name: 'Schedule appointment' });
+  await waitFor(() => expect(submit).toBeEnabled());
+  fireEvent.click(submit);
+  fireEvent.click(await screen.findByRole('button', { name: 'Book another anyway' }));
+  await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+
+  await waitFor(() => expect(posts).toHaveLength(3));
+  expect(posts[2].callBookingReviewedIds).toEqual(['phone-visit-1']);
+  expect(posts[2].commercialSetupDecision).toEqual({ ...setupFeeReview, resolution: 'covered' });
+  expect(await screen.findByText(/New Mosquito Visit/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Book another anyway' })).toBeInTheDocument();
 });
 
 it('names groups already booked and scopes stopping to the remaining split booking', async () => {

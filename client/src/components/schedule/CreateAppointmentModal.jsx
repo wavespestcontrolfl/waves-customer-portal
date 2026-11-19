@@ -4308,6 +4308,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         return;
       }
       const groups = groupServicesForAppointmentSubmit(services);
+      // A setup review belongs to the group that was next to write when the
+      // server returned it. Cadence/service edits can change that group's key
+      // while the first request is in flight. Refuse before ANY group POST if
+      // the first still-uncommitted group is no longer the reviewed one; the
+      // per-group payload comparison below then verifies every remaining field
+      // before the reviewed request itself is allowed through.
+      if (commercialSetupRetry) {
+        const nextUncommittedGroup = groups.find((candidate) => (
+          !createdGroupKeysRef.current.has(groupKey(candidate)) && !groupAlreadyCommitted(candidate)
+        ));
+        if (!nextUncommittedGroup || groupKey(nextUncommittedGroup) !== commercialSetupRetry.key) {
+          setCommercialSetupReview(null);
+          setToast(COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE);
+          return false;
+        }
+      }
       let firstError = null;
       let setupReviewPending = false;
       // Annual-prepay-on-book rides exactly ONE recurring group's POST — if a
@@ -4391,6 +4407,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // naturally stays pinned to the ORIGINAL committed group across a
           // retry, never a freshly (and wrongly) re-resolved one.
           carriesAppointmentDiscount = appointmentDiscountGroup?.key === key;
+          // "Book another anyway" is a one-submit override, so it has already
+          // been consumed when that submit returns setup review. Reconstruct
+          // the comparison body with the exact visit ids that reviewed request
+          // carried, and only for the same group. The validated retry still
+          // sends setupRetryForGroup.body below, so the server receives those
+          // exact ids and will reject any newly appeared phone-agent visit.
+          const setupReviewedCallBookingIds = commercialSetupRetry?.key === key
+            && commercialSetupRetry.body?.allowCallBookingDuplicate === true
+            && Array.isArray(commercialSetupRetry.body?.callBookingReviewedIds)
+            ? commercialSetupRetry.body.callBookingReviewedIds
+            : null;
           const body = {
             ...appointmentGroupRequestBody({
               separateProgram, key, separateProgramReason,
@@ -4416,7 +4443,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               customerNotes,
               internalNotes,
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
-              callBookingReviewedIds: callBookingOverrides.get(key),
+              callBookingReviewedIds: callBookingOverrides.get(key) ?? setupReviewedCallBookingIds,
             }),
             // GATE_DAY_ONLY_PROMISE: the office ticked "Customer asked for this time" (a set time). Absent unless true.
             ...askedTimeCreateFields(dayOnlyPromiseOn, customerAskedTime),
