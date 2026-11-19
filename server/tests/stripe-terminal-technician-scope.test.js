@@ -7,6 +7,7 @@ const mockChargeFence = jest.fn();
 const mockAutoApplyCredit = jest.fn();
 const mockPostCoverage = jest.fn();
 const mockJwtSign = jest.fn(() => 'signed-handoff');
+let mockTechRole = 'technician';
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -17,7 +18,7 @@ jest.mock('stripe', () => jest.fn(() => ({ paymentIntents: {} })));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = 'tech-1';
-    req.techRole = 'technician';
+    req.techRole = mockTechRole;
     req.staffToken = { mfa: false, tokenVersion: 1 };
     next();
   },
@@ -57,6 +58,7 @@ const { _test } = router;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockTechRole = 'technician';
   mockServices.mockResolvedValue(false);
   mockChargeFence.mockResolvedValue(undefined);
   mockAutoApplyCredit.mockResolvedValue({ applied: 0, fullyCovered: false });
@@ -84,13 +86,15 @@ function setupHandoffDb({ assigned = true, transactionState = null } = {}) {
     credit_applied: '0.00', stripe_payment_intent_id: null,
   };
   const tableReads = [];
+  const rowLocks = [];
   const tokenInserts = [];
   const queryFor = (table, row) => {
     tableReads.push(table);
     const query = {};
-    for (const method of ['where', 'whereNotIn', 'whereIn', 'whereNull', 'forUpdate']) {
+    for (const method of ['where', 'whereNotIn', 'whereIn', 'whereNull']) {
       query[method] = () => query;
     }
+    query.forUpdate = () => { rowLocks.push(table); return query; };
     query.first = async () => row;
     query.insert = async (value) => { tokenInserts.push(value); return 1; };
     return query;
@@ -111,7 +115,7 @@ function setupHandoffDb({ assigned = true, transactionState = null } = {}) {
       throw err;
     }
   });
-  return { invoice, tableReads, tokenInserts };
+  return { invoice, tableReads, rowLocks, tokenInserts };
 }
 
 async function postHandoff() {
@@ -243,6 +247,38 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
     expect(transactionState.attemptStatus).toBe('ambiguous');
     expect(mockAutoApplyCredit).not.toHaveBeenCalled();
+    expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+    expect(state.tokenInserts).toEqual([]);
+    expect(mockJwtSign).not.toHaveBeenCalled();
+    expect(Stripe).not.toHaveBeenCalled();
+  });
+
+  test.each(['admin', 'technician'])('rechecks the locked fence in the %s token-insert transaction', async (role) => {
+    const transactionState = { attemptStatus: 'claimed' };
+    const state = setupHandoffDb({ transactionState });
+    mockTechRole = role;
+    mockServices.mockResolvedValue(true);
+    mockChargeFence
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(async () => {
+        expect(state.rowLocks.filter((table) => table === 'invoices')).toHaveLength(2);
+        transactionState.attemptStatus = 'ambiguous';
+        throw Object.assign(new Error('submitted outcome became unresolved at mint'), {
+          code: 'STRIPE_AMBIGUOUS_OUTCOME',
+          reconciliationRequired: true,
+        });
+      });
+
+    const { status, body } = await postHandoff();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
+    expect(transactionState.attemptStatus).toBe('ambiguous');
+    expect(mockChargeFence).toHaveBeenCalledTimes(2);
+    expect(mockChargeFence.mock.calls).toEqual([
+      ['inv-1', db, { checkout: true }],
+      ['inv-1', db, { checkout: true }],
+    ]);
     expect(state.tableReads).not.toContain('terminal_handoff_tokens');
     expect(state.tokenInserts).toEqual([]);
     expect(mockJwtSign).not.toHaveBeenCalled();

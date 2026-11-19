@@ -506,6 +506,42 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       .rejects.toMatchObject({ code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: retry.attemptId });
   }, 15000);
 
+  test('a saved-card retry commits a locked stale-submitted promotion before returning its conflict', async () => {
+    const invoiceId = randomUUID();
+    const customerId = randomUUID();
+    const staleAttemptId = randomUUID();
+    const retryAttemptId = randomUUID();
+    const staleAt = new Date(Date.now() - 10 * 60 * 1000);
+    await app('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'sent', invoice_number: invoiceId, total: 25,
+    });
+    await app('stripe_invoice_charge_attempts').insert({
+      id: staleAttemptId,
+      invoice_id: invoiceId,
+      status: 'claimed',
+      submitted_at: staleAt,
+      created_at: staleAt,
+      updated_at: staleAt,
+      idempotency_key: `inv_card_on_file_${invoiceId}_${staleAttemptId}`,
+    });
+
+    await expect(StripeService.claimInvoiceSavedCardCharge({
+      invoiceId,
+      paymentMethodId: randomUUID(),
+      stripePaymentMethodId: 'pm_retry',
+      attemptId: retryAttemptId,
+      database: app,
+    })).rejects.toMatchObject({
+      code: 'STRIPE_AMBIGUOUS_OUTCOME',
+      chargeAttemptId: staleAttemptId,
+      reconciliationRequired: true,
+    });
+
+    expect(await app('stripe_invoice_charge_attempts').where({ id: staleAttemptId }).first())
+      .toMatchObject({ status: 'ambiguous', resolved_at: null });
+    expect(await app('stripe_invoice_charge_attempts').where({ id: retryAttemptId }).first()).toBeUndefined();
+  });
+
   test('stale SUBMITTED claim: ambiguous verdict, no write, transaction stays usable', async () => {
     const f = await staleClaim({ submitted: true });
     const err = await inReadOnly((trx) => verdict(f.invoiceId, trx, { readOnly: true }));

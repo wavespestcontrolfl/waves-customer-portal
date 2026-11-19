@@ -359,17 +359,30 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     let mintedJti = null;
     let mintedExpiresAt = null;
     let ownershipLostAtMint = false;
+    let mintChargeRefusal = null;
 
     await db.transaction(async (trx) => {
-      // Locked re-validation of the technician's assignment BEFORE anything
-      // else in the mint (no token row, no rate-limit write on a miss), in
-      // the billing lock order invoice → customer → visit (pre-push P1).
+      // Every role takes the invoice lock in the transaction that actually
+      // inserts the handoff. The earlier credit transaction has committed, so
+      // a saved-card owner could otherwise claim this invoice in that seam.
+      // For technicians, continue through the billing lock order invoice →
+      // customer → visit before any rate-limit or token work.
+      await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
       if (req.techRole === 'technician') {
-        await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
         if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       }
       if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) {
         ownershipLostAtMint = true;
+        return;
+      }
+      try {
+        await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { checkout: true });
+      } catch (err) {
+        if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
+        // A stale submitted claim may have been promoted to ambiguous here.
+        // Return from the callback so that promotion commits, then throw the
+        // established conflict after the transaction closes.
+        mintChargeRefusal = err;
         return;
       }
 
@@ -441,6 +454,8 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedJti = jti;
       mintedExpiresAt = expires_at;
     });
+
+    if (mintChargeRefusal) throw mintChargeRefusal;
 
     if (ownershipLostAtMint) {
       // Same refusal as the pre-check above. Reverse the credit this seam

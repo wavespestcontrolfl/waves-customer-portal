@@ -315,7 +315,7 @@ async function claimInvoiceSavedCardCharge({
 }) {
   const idempotencyKey = `inv_card_on_file_${invoiceId}_${attemptId}`;
   try {
-    return await database.transaction(async (claimTrx) => {
+    const claimResult = await database.transaction(async (claimTrx) => {
       // Public server-side confirm takes this same invoice lock for its final
       // fence check. Whichever path wins serializes the decision: a committed
       // claim blocks confirm, while a confirm already sent to Stripe leaves an
@@ -327,7 +327,15 @@ async function claimInvoiceSavedCardCharge({
       if (!lockedInvoice) throw new Error('Invoice not found');
       // A previous charge can move from a claim to an authentication decline
       // between preflight and this lock. It can still settle in either state.
-      await assertNoInvoiceChargeReconciliationPending(invoiceId, claimTrx, { checkout: true });
+      try {
+        await assertNoInvoiceChargeReconciliationPending(invoiceId, claimTrx, { checkout: true });
+      } catch (conflict) {
+        if (!savedCardChargeSuppressesAlternateCollection(conflict)) throw conflict;
+        // The guard may have promoted a stale submitted claim to ambiguous.
+        // Return that known refusal so its update commits with this transaction;
+        // throwing here would roll the promotion back to an unsafe stale claim.
+        return { conflict };
+      }
 
       const [attempt] = await claimTrx('stripe_invoice_charge_attempts')
         .insert({
@@ -339,8 +347,10 @@ async function claimInvoiceSavedCardCharge({
           status: 'claimed',
         })
         .returning('*');
-      return attempt;
+      return { attempt };
     });
+    if (claimResult.conflict) throw claimResult.conflict;
+    return claimResult.attempt;
   } catch (err) {
     if (err.code !== '23505') throw err;
     const blocking = await database('stripe_invoice_charge_attempts')
