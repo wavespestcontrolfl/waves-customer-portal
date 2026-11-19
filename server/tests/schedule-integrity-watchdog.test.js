@@ -1165,7 +1165,7 @@ describe('same-start visits (class 5)', () => {
   const pairAlert = (customerId) => [
     `same-start-visits:${customerId}`,
     "Schedule — split Pat Example's visits at the same time",
-    '2 visits start at 11 AM on Aug 10; split them so they run back to back, one hour each.',
+    '2 visits start at 11 AM on Aug 10; split them so they run back to back.',
     { customer_id: customerId, itemKeys: ['2026-08-10'] },
     { link: `/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-${customerId}`, detail: 'Aug 10 at 11 AM: Lawn and Pest.',
       refreshOnDedupe: true, ringOnRefresh: () => false },
@@ -1192,7 +1192,7 @@ describe('same-start visits (class 5)', () => {
     const [category, title, body, opts] = calls[2];
     expect(category).toBe('alert');
     expect(title).toBe("Schedule — split Pat Example's visits at the same time");
-    expect(body).toBe('2 visits start at 11 AM on Aug 10; split them so they run back to back, one hour each.');
+    expect(body).toBe('2 visits start at 11 AM on Aug 10; split them so they run back to back.');
     expect(opts).toMatchObject({
       link: '/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-cust-pair-1', detail: 'Aug 10 at 11 AM: Lawn and Pest.',
       bell: true, dedupeKey: 'same-start-visits:cust-pair-1', refreshOnDedupe: true,

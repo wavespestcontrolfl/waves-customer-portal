@@ -82,6 +82,13 @@ postgres('same-start visits check on Postgres', () => {
       ...(await pair(live, { scheduled_date: '2040-01-24', technician_id: techA })),
       ...(await pair(live, { scheduled_date: '2040-01-24', technician_id: techB })),
     ];
+    // One visit each for two technicians plus one unassigned at one start: the finder
+    // returns all three (each has a partner), but the unassigned visit's partner is
+    // not known until it gets a technician, so they make no group and no day.
+    const foundNoGroup = [
+      ...(await pair(live, { scheduled_date: '2040-01-28', technician_id: techA }, { technician_id: techB })),
+      await visit(live, { scheduled_date: '2040-01-28', service_type: 'Mosquito Service', technician_id: null }),
+    ];
     await pair(live, { scheduled_date: '2040-01-17', technician_id: techA }, { technician_id: techB }); // two people working at once
     await pair(live, { scheduled_date: '2040-01-18' }, { status: 'cancelled' });
     await pair(live, { scheduled_date: '2040-01-19' }, { status: 'completed' });
@@ -99,7 +106,7 @@ postgres('same-start visits check on Postgres', () => {
 
     const mine = new Set([live, inactive, deleted]);
     const rows = (await _findSameStartVisits(TODAY)).filter((r) => mine.has(String(r.customer_id)));
-    expect(ids(rows)).toEqual(ids(counted));
+    expect(ids(rows)).toEqual(ids([...counted, ...foundNoGroup]));
 
     // The pg DATE and TIME values read back as the calendar day and the wall-clock start.
     const { alerts, failed } = await sameStartVisitAlerts(TODAY);
@@ -131,7 +138,7 @@ postgres('same-start visits check on Postgres', () => {
     const [raised, ...extra] = await bells();
     expect(extra).toHaveLength(0);
     expect(raised.title).toBe("Schedule — split Synthetic Fixture's visits at the same time");
-    expect(raised.body).toBe('2 visits start at 10 AM on Jan 15; split them so they run back to back, one hour each.');
+    expect(raised.body).toBe('2 visits start at 10 AM on Jan 15; split them so they run back to back.');
     expect(raised.detail).toBe('Jan 15 at 10 AM: Lawn Care Service and Pest Control Service.');
     expect(raised.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-15&appointment=${jan15Pest.id}`);
     expect(raised.read_at).toBeNull();
@@ -158,7 +165,7 @@ postgres('same-start visits check on Postgres', () => {
     await runInner({ now });
     const [quiet] = await bells();
     expect(quiet.id).toBe(raised.id);
-    expect(quiet.body).toBe('2 visits start at 11 AM on Jan 22; split them so they run back to back, one hour each.');
+    expect(quiet.body).toBe('2 visits start at 11 AM on Jan 22; split them so they run back to back.');
     expect(quiet.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-22&appointment=${jan22Pest.id}`);
     expect(new Date(quiet.read_at).toISOString()).toBe(readAt.toISOString());
     expect(quiet.metadata.rungAt).toBe(rang.metadata.rungAt);

@@ -6,7 +6,8 @@
  * Why: on 2026-11-19 the owner saw by eye that one customer's two services were
  * booked in one slot. A sweep then found eight more such days for two other
  * customers, and the owner had every one split so the services run back to
- * back, one hour each ("split all"; a visit is one hour, owner 2026-11-19).
+ * back ("split all"; a visit is one hour unless set otherwise, owner
+ * 2026-11-19).
  * Nothing had told the office about any of them. New pairs can still appear: a
  * plan's later visits copy the hour of the plan's first visit (the nightly
  * top-up and the series build), and a booking still gives a customer's second
@@ -23,15 +24,21 @@
  * visit with no arrival time is the no-window notice's (auto-dispatch/audit.js),
  * and a deleted or inactive customer's work is not checked here.
  *
- * GROUPS: the visits at one start are one group when one of them is
- * unassigned (each conflicts through it), else one group per technician with
- * two or more of them. A day is a calendar day: two groups on one date (two
- * starts, or two technicians' pairs at one start) are one day with two groups.
+ * GROUPS: the visits at one start are one group per technician with two or
+ * more of them there. An unassigned visit joins the one technician at its
+ * start, or the other unassigned visits when no technician is there. Where two
+ * or more technicians have visits at that start, its partner is not known yet:
+ * it waits for a technician (unassigned-timed-visits-check.js, under
+ * GATE_UNASSIGNED_VISIT_GUARD, names it from three days out), and the check then
+ * judges it with that technician's visits.
+ * A day is a calendar day: two groups on one date (two starts, or two
+ * technicians' pairs at one start) are one day with two groups.
  *
  * ALERT: one needs-you Schedule bell per customer (docs/admin-notifications.md),
  * raised by the schedule-integrity watchdog's daily 6:40 ET run, under its gate,
  * its shared ring budget (this class rings after every other one, the
- * combined-booking check included) and its alert episodes. The bell names the
+ * combined-booking check included, earliest first day first) and its alert
+ * episodes. The bell names the
  * first day and the number of days, links to the first day's schedule, and
  * lists the days and their groups in its detail. Its itemKeys are every day,
  * listed in the detail or not, so a day that joins a standing bell rings it
@@ -90,17 +97,19 @@ function findSameStartVisits(todayET) {
 const byText = (a, b) => (a < b ? -1 : (a > b ? 1 : 0));
 const byService = (a, b) => byText(a.serviceType, b.serviceType) || byText(a.id, b.id);
 
-// One start's visits as groups that must be split: with an unassigned visit
-// every visit there conflicts through it (one group); otherwise one group per
-// technician with two or more visits there.
+// One start's visits as groups that must be split: one group per technician
+// with two or more visits there. An unassigned visit joins the one technician
+// there (or the other unassigned visits); with two or more technicians there
+// its partner is not known yet, so it joins no group (GROUPS above).
 function startGroups(slot) {
   const byTechnician = new Map();
+  const unassigned = [];
   for (const visit of slot.visits) {
-    const technician = visit.technicianId || '';
-    if (!byTechnician.has(technician)) byTechnician.set(technician, []);
-    byTechnician.get(technician).push(visit);
+    if (!visit.technicianId) { unassigned.push(visit); continue; }
+    if (!byTechnician.has(visit.technicianId)) byTechnician.set(visit.technicianId, []);
+    byTechnician.get(visit.technicianId).push(visit);
   }
-  const groups = byTechnician.has('') ? [slot.visits] : [...byTechnician.values()];
+  const groups = byTechnician.size > 1 ? [...byTechnician.values()] : [[...[...byTechnician.values()].flat(), ...unassigned]];
   return groups.filter((visits) => visits.length > 1).map((visits) => ({ start: slot.start, visits: [...visits].sort(byService) }));
 }
 
@@ -119,7 +128,10 @@ function daysOf(slots) {
     .map((day) => ({ ...day, groups: day.groups.sort((a, b) => byText(a.start, b.start) || byService(a.visits[0], b.visits[0])) }));
 }
 
-// The finder's rows as one finding per customer, with its days (daysOf).
+// The finder's rows as one finding per customer, with its days (daysOf). The
+// findings come earliest first day first (then its first start), so a capped
+// run spends its rings on the nearest days: tomorrow's pair is today's on the
+// next run, and the finder leaves today out.
 function groupByCustomer(rows) {
   const { fullName } = require('./admin-alert-names');
   const customers = new Map();
@@ -136,9 +148,11 @@ function groupByCustomer(rows) {
       id: String(row.id), serviceType: String(row.service_type || 'Service'), technicianId: row.technician_id ? String(row.technician_id) : null,
     });
   }
+  const firstOf = (finding) => `${finding.days[0].date} ${finding.days[0].groups[0].start}`;
   return [...customers.values()]
     .map(({ slots, ...finding }) => ({ ...finding, days: daysOf([...slots.values()]) }))
-    .filter((finding) => finding.days.length);
+    .filter((finding) => finding.days.length)
+    .sort((a, b) => byText(firstOf(a), firstOf(b)) || byText(a.customerId, b.customerId));
 }
 
 // "11 AM", "10:30 AM", "12 PM" from 'HH:MM'.
@@ -188,7 +202,7 @@ function sameStartCopy(finding, todayET) {
   const visitCount = first.groups.reduce((n, group) => n + group.visits.length, 0);
   let why = `${finding.days.length} days have visits at the same time, first ${day} at ${timeWords(firstGroup.start)}; split each so they run back to back.`;
   if (finding.days.length === 1 && first.groups.length === 1) {
-    why = `${visitCount} visits start at ${timeWords(firstGroup.start)} on ${day}; split them so they run back to back, one hour each.`;
+    why = `${visitCount} visits start at ${timeWords(firstGroup.start)} on ${day}; split them so they run back to back.`;
   } else if (finding.days.length === 1) {
     why = `${visitCount} visits on ${day} share a start time with another visit; split them so they run back to back.`;
   }
