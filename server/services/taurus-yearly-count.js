@@ -6,18 +6,20 @@
  * The close-out surfaces leave Taurus out of the house mix once a home is at
  * the limit; this answers "how many times this year" for ONE visit.
  *
- * A home is scheduled_services.property_id. A visit with no property_id falls
- * back to the customer (every record of that customer). A visit WITH a
- * property_id counts that property's records plus the customer's records whose
- * visit carries no property_id (older rows): an unattributed record may be this
- * home's, and over-counting only leaves Taurus off the mix, never over the
- * label.
+ * A home is the property recorded when the Taurus was applied: the frozen
+ * property_application_history.property_id of the product row (an address
+ * correction on a historical visit never moves it), else the visit's
+ * scheduled_services.property_id. A visit with no property_id falls back to the
+ * customer (every record of that customer). A visit WITH a property_id counts
+ * that property's applications plus the customer's applications with no recorded
+ * property (older rows): an unattributed application may be this home's, and
+ * over-counting only leaves Taurus off the mix, never over the label.
  *
- * Count = distinct service dates of non-cancelled service_records in the
- * current ET calendar year that carry a Taurus SC product row (the active
- * catalog row named exactly "Taurus SC" by product_id, or an older row by
- * product_name), leaving out the record of the visit being completed. Read
- * only, one query, no row locks.
+ * Count = distinct visits (the scheduled visit, else the service record) with a
+ * Taurus SC product row on a non-cancelled service_record in the calendar year
+ * (the active catalog row named exactly "Taurus SC" by product_id, or an older
+ * row by product_name), leaving out the visit being completed. Two visits on
+ * one day are two applications. Read only, one query, no row locks.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -27,9 +29,11 @@ const TAURUS_YEARLY_LIMIT = 4;
 const TAURUS_PRODUCT_NAME = 'Taurus SC';
 
 const COUNT_SQL = `
-  SELECT COUNT(DISTINCT sr.service_date)::int AS count
-  FROM service_records sr
+  SELECT COUNT(DISTINCT COALESCE(sr.scheduled_service_id, sr.id))::int AS count
+  FROM service_products sp
+  JOIN service_records sr ON sr.id = sp.service_record_id
   LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+  LEFT JOIN property_application_history pah ON pah.service_product_id = sp.id
   WHERE sr.customer_id = :customerId
     AND sr.service_date >= CAST(:yearStart AS date)
     AND sr.service_date < CAST(:nextYearStart AS date)
@@ -37,19 +41,15 @@ const COUNT_SQL = `
     AND sr.scheduled_service_id IS DISTINCT FROM CAST(:visitId AS uuid)
     AND (
       CAST(:propertyId AS uuid) IS NULL
-      OR ss.property_id = CAST(:propertyId AS uuid)
-      OR ss.property_id IS NULL
+      OR COALESCE(pah.property_id, ss.property_id) = CAST(:propertyId AS uuid)
+      OR COALESCE(pah.property_id, ss.property_id) IS NULL
     )
-    AND EXISTS (
-      SELECT 1 FROM service_products sp
-      WHERE sp.service_record_id = sr.id
-        AND (
-          sp.product_name = :productName
-          OR sp.product_id IN (
-            SELECT pc.id FROM products_catalog pc
-            WHERE pc.name = :productName AND pc.active = true
-          )
-        )
+    AND (
+      sp.product_name = :productName
+      OR sp.product_id IN (
+        SELECT pc.id FROM products_catalog pc
+        WHERE pc.name = :productName AND pc.active = true
+      )
     )
 `;
 

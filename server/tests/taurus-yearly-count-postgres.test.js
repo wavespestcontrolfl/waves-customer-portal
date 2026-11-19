@@ -29,15 +29,17 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
   const propA = randomUUID();
   const propB = randomUUID();
 
-  async function visit({ property = null, cust = customer, date = '2026-03-10', taurus = 'id', status = 'completed', record = true } = {}) {
+  async function visit({ property = null, cust = customer, date = '2026-03-10', taurus = 'id', status = 'completed', record = true, ledgerProperty = null } = {}) {
     const ssId = randomUUID();
     await db('scheduled_services').insert({ id: ssId, customer_id: cust, property_id: property });
     if (!record) return { ssId };
     const srId = randomUUID();
     await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: ssId, service_date: date, status });
-    if (taurus === 'id') await db('service_products').insert({ service_record_id: srId, product_name: 'Taurus SC (renamed)', product_id: taurusId });
-    if (taurus === 'name') await db('service_products').insert({ service_record_id: srId, product_name: 'Taurus SC', product_id: null });
-    if (taurus === 'none') await db('service_products').insert({ service_record_id: srId, product_name: 'LESCO Crosscheck Plus', product_id: otherId });
+    const product = { id: randomUUID(), service_record_id: srId };
+    if (taurus === 'id') await db('service_products').insert({ ...product, product_name: 'Taurus SC (renamed)', product_id: taurusId });
+    if (taurus === 'name') await db('service_products').insert({ ...product, product_name: 'Taurus SC', product_id: null });
+    if (taurus === 'none') await db('service_products').insert({ ...product, product_name: 'LESCO Crosscheck Plus', product_id: otherId });
+    if (ledgerProperty) await db('property_application_history').insert({ service_product_id: product.id, property_id: ledgerProperty });
     return { ssId, srId };
   }
 
@@ -53,6 +55,7 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await db.raw('CREATE TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid, property_id uuid)');
     await db.raw('CREATE TABLE service_records (id uuid PRIMARY KEY, customer_id uuid, scheduled_service_id uuid, service_date date NOT NULL, status text)');
     await db.raw('CREATE TABLE service_products (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), service_record_id uuid, product_name text, product_id uuid)');
+    await db.raw('CREATE TABLE property_application_history (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), service_product_id uuid, property_id uuid)');
     [taurusId] = (await db('products_catalog').insert({ name: 'Taurus SC' }).returning('id')).map((r) => r.id);
     [otherId] = (await db('products_catalog').insert({ name: 'LESCO Crosscheck Plus' }).returning('id')).map((r) => r.id);
   });
@@ -66,7 +69,6 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
   it('counts distinct service dates of Taurus records at the home this ET year', async () => {
     await visit({ property: propA, date: '2026-02-01' });
     await visit({ property: propA, date: '2026-05-01', taurus: 'name' }); // older row, by name
-    await visit({ property: propA, date: '2026-05-01' }); // same date again: one
     await visit({ property: propA, date: '2026-08-01', taurus: 'none' }); // no Taurus
     await visit({ property: propA, date: '2026-09-01', status: 'cancelled' });
     await visit({ property: propB, date: '2026-06-01' }); // another home
@@ -74,8 +76,30 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await visit({ property: propA, date: '2027-01-01' }); // next year
     const current = await visit({ property: propA, date: '2026-11-19' });
     const out = await taurusYearlyCount({ id: current.ssId, customer_id: customer, property_id: propA }, { knex: db, now: NOW });
-    // 02-01, 05-01 (two records, one date), and the current visit's own record is left out.
+    // 02-01 and 05-01; the current visit's own record is left out.
     expect(out).toEqual({ count: 2, limit: 4, year: 2026 });
+  });
+
+  it('counts two visits on the same day as two applications, and two records of one visit as one', async () => {
+    const cust = randomUUID();
+    await visit({ cust, property: propA, date: '2026-05-01' });
+    await visit({ cust, property: propA, date: '2026-05-01' });
+    const twice = await visit({ cust, property: propA, date: '2026-06-01' });
+    // A second record (a re-save) of the same scheduled visit, also with Taurus.
+    const srId = randomUUID();
+    await db('service_records').insert({ id: srId, customer_id: cust, scheduled_service_id: twice.ssId, service_date: '2026-06-01', status: 'completed' });
+    await db('service_products').insert({ service_record_id: srId, product_name: 'Taurus SC' });
+    const probe = { id: randomUUID(), customer_id: cust, property_id: propA };
+    expect((await taurusYearlyCount(probe, { knex: db, now: NOW })).count).toBe(3);
+  });
+
+  it('places an application at the property frozen on the ledger, not at the visit as corrected later', async () => {
+    const cust = randomUUID();
+    // The visit now says propB (an address correction), the ledger froze propA at completion.
+    await visit({ cust, property: propB, ledgerProperty: propA, date: '2026-02-02' });
+    await visit({ cust, property: propA, ledgerProperty: propB, date: '2026-03-03' });
+    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: propA }, { knex: db, now: NOW })).count).toBe(1);
+    expect((await taurusYearlyCount({ id: randomUUID(), customer_id: cust, property_id: propB }, { knex: db, now: NOW })).count).toBe(1);
   });
 
   it('leaves out only the record of the visit being completed', async () => {
@@ -107,6 +131,9 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     // 1 AM ET Jan 1 2027: the 2027 year.
     expect((await taurusYearlyCount(probe, { knex: db, now: new Date('2027-01-01T06:00:00Z') })).count).toBe(1);
     expect((await taurusYearlyCount(probe, { knex: db, now: new Date('2027-06-01T12:00:00Z') })).year).toBe(2027);
+    // A December visit closed out in January counts toward December's year.
+    const december = { ...probe, scheduled_date: '2026-12-30' };
+    expect(await taurusYearlyCount(december, { knex: db, now: new Date('2027-01-03T15:00:00Z') })).toMatchObject({ count: 1, year: 2026 });
   });
 
   it('records with no scheduled visit still count for the customer', async () => {
