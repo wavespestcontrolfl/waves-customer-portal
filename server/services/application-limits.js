@@ -125,10 +125,24 @@ function familyConvert(amount, unit, capUnit) {
 }
 
 // The history rows a v13 yearly amount cap counts: the product's own, or, when the cap says the label's maximum is shared (Advion Insect
-// Granule and the pest-control Advion WDG Granular are one granule, EPA 100-1483), every catalog row with that EPA number.
+// Granule and the pest-control Advion WDG Granular are one granule, EPA 100-1483), every catalog row with that EPA number. A cap for one
+// service line's applications (history_service_line) also reads each row's visit type and add-on key, for countsForServiceLine.
 function amountHistoryProducts(query, database, product, limit) {
+  if (limit.history_service_line) {
+    query.leftJoin('service_records as amount_sr', 'pah.service_record_id', 'amount_sr.id')
+      .select('amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key');
+  }
   if (!limit.history_epa_reg_number) return query.where('pah.product_id', product.id);
   return query.whereIn('pah.product_id', database('products_catalog').where({ epa_reg_number: limit.history_epa_reg_number }).select('id'));
+}
+
+// Whether a history row counts toward a cap for one service line's applications (history_service_line; LESCO Crosscheck Plus: lawn, as
+// its label limit is for turf and the same bottle is the pest, mosquito and termite bifenthrin). A row counts unless its visit is known
+// to be another line: an area add-on row counts (the closeout audits add-on rows as lawn work), and so does a row with no visit.
+function countsForServiceLine(row, limit) {
+  if (!limit.history_service_line || row.history_area_addon_key || !row.history_service_type) return true;
+  const { detectServiceLine } = require('./service-report/service-line-configs');
+  return detectServiceLine(row.history_service_type) === limit.history_service_line;
 }
 
 // One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
@@ -761,8 +775,10 @@ class ApplicationLimitChecker {
   // The v13 yearly amount of already-loaded history rows, as a share of the cap, per lawn: with a treated
   // property the rows are already that property's (summed); a caller with none (the compliance page, the
   // legacy check-limits route) is judged on the busiest property of the customer, never the sum across
-  // properties. Rows that cannot be sized count at the cap row's fallback rate.
-  async lawnAmountShare(database, rows, limit, { propertyId } = {}) {
+  // properties. Rows that cannot be sized count at the cap row's fallback rate. A cap for one service
+  // line's applications counts only that line's rows (countsForServiceLine).
+  async lawnAmountShare(database, allRows, limit, { propertyId } = {}) {
+    const rows = allRows.filter((row) => countsForServiceLine(row, limit));
     const sized = rows.map((row) => v13AmountShare(row, limit));
     const estimated = sized.filter((entry) => entry.estimated).length;
     if (propertyId || rows.length < 2) return { share: sized.reduce((sum, entry) => sum + entry.share, 0), estimated };
@@ -892,3 +908,4 @@ module.exports.bermudaRowRate = bermudaRowRate;
 module.exports.measureFamily = (unit) => unitFamily(String(unit || '').replace(/\s*\/\s*1000\s*(sf|sq\.?\s*ft)?$/i, '').replace(/_/g, ' '));
 module.exports.assertRollingIsCountOnly = assertRollingIsCountOnly;
 module.exports.scopeHistoryToTreatment = scopeHistoryToTreatment;
+module.exports.amountHistoryProducts = amountHistoryProducts;

@@ -198,11 +198,12 @@ const FACTS = [
     tags: ['products', 'bifenthrin', 'talak', 'label'],
     sourceUrls: ['https://atticusllc.com/wp-content/uploads/2020/08/Talak-7.9-F-Specimen.pdf'],
     quote: '"Bifenthrin* ... 7.9%"; "EPA Reg. No.: 91234-145". "Applying this product in calm weather when rain is not predicted for the next 24 hours will help to ensure that wind or rain does not blow or wash pesticide off the treatment area." "Do not make applications during rain." "Do not permit humans or pets to contact treated surfaces until the spray has dried." Lawns: "For best results, postpone watering (irrigation) or mowing for 24 hours after application." "This product is highly toxic to bees exposed to direct treatment or residues on blooming crops or weeds."',
-    content: 'Talak 7.9% F (bifenthrin 7.9%, EPA Reg. No. 91234-145) is the bifenthrin Waves applies. Its label asks for application in calm weather when rain is not predicted for the next 24 hours, prohibits application during rain, says humans and pets must not contact treated surfaces until the spray has dried, and for lawns says to postpone watering or mowing for 24 hours after application. It says the product is highly toxic to bees exposed to direct treatment or to residues on blooming crops or weeds, so copy must never make a bee-safety claim for it. The label states no residual duration for any pest, so copy must not state a number of days, weeks or months of residual control.',
+    content: 'Talak 7.9% F (bifenthrin 7.9%, EPA Reg. No. 91234-145) is the bifenthrin on the visit records that name it; since November 2026 Waves applies LESCO Crosscheck Plus instead. Its label asks for application in calm weather when rain is not predicted for the next 24 hours, prohibits application during rain, says humans and pets must not contact treated surfaces until the spray has dried, and for lawns says to postpone watering or mowing for 24 hours after application. It says the product is highly toxic to bees exposed to direct treatment or to residues on blooming crops or weeds, so copy must never make a bee-safety claim for it. The label states no residual duration for any pest, so copy must not state a number of days, weeks or months of residual control.',
   },
   {
-    // Owner ruling 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin now; the Talak fact above stays for old records.
+    // Owner ruling 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin now; the Talak fact above stays for the visits that record Talak.
     slug: 'fact-bifenthrin-crosscheck-label',
+    verifiedOn: '2026-11-18',
     title: 'Bifenthrin (LESCO Crosscheck Plus 7.9%) label: rain, re-entry, bees — and residual stated only for house flies and fleas',
     tags: ['products', 'bifenthrin', 'crosscheck', 'label'],
     sourceUrls: ['https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/d00001542-label/d00001542-label.pdf'],

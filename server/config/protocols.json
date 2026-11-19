@@ -98,7 +98,7 @@
           "visit": 6,
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow → micros only\nHigh Mn Combo ($1.33)",
-          "secondary": "★ CHINCH FLOAT TEST #1: threshold ≥20/sq ft\nTalstar P curative if threshold met ($3.82)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce 20%",
+          "secondary": "★ CHINCH FLOAT TEST #1: threshold ≥20/sq ft\nLESCO Crosscheck Plus curative if threshold met ($3.82)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce 20%",
           "material_cost": "6.63",
           "labor_cost": "26.96",
           "tiers": {
@@ -114,7 +114,7 @@
           "visit": 7,
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nGreen Flo Phyte Plus 0-0-26 ($4.45)",
-          "secondary": "Moisture Manager ($7.45)\n★ Chinch re-check ≥20/sq ft threshold\n★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)",
+          "secondary": "Moisture Manager ($7.45)\n★ Chinch re-check ≥20/sq ft threshold\n★ If LESCO Crosscheck Plus failed Jun: Arena 50 WDG (Group 4A) ($5.20)",
           "material_cost": "10.96",
           "labor_cost": "26.96",
           "tiers": {
@@ -123,7 +123,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius app 2/3. ★ Chinch MOA rotation: Talstar (3A) → Arena (4A) if no knockdown 7d. Mole cricket nymph spots: Advion Insect Granule bait, 3 lb per 1,000 sq ft by hand shaker, on new tunnel areas not baited in June (once per spot per year). Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. Fall adults: Dylox.",
+          "notes": "Celsius app 2/3. ★ Chinch MOA rotation: LESCO Crosscheck Plus (3A) → Arena (4A) if no knockdown 7d. Mole cricket nymph spots: Advion Insect Granule bait, 3 lb per 1,000 sq ft by hand shaker, on new tunnel areas not baited in June (once per spot per year). Water the spot lightly first if the soil is dry, apply to dry grass, then no irrigation for 3 days. Fall adults: Dylox.",
           "conditional_cost": "1.75"
         },
         {
@@ -314,7 +314,7 @@
           "visit": 6,
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → micros only\nPrimo Maxx PGR ($1.91)",
-          "secondary": "★ ARMYWORM SOAP FLUSH — threshold ≥3/sq ft\n★ If threshold met: Bifen I/T curative (Group 3A) ($3.50)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce",
+          "secondary": "★ ARMYWORM SOAP FLUSH — threshold ≥3/sq ft\n★ If threshold met: LESCO Crosscheck Plus curative (Group 3A) ($3.50)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce",
           "material_cost": "14.05",
           "labor_cost": "26.96",
           "tiers": {

@@ -35,7 +35,9 @@ describe('labelAnimalWarnings: which lines each kind gets', () => {
     expect(w.kind).toBe('fish_pond');
     expect(w.lines).toHaveLength(1);
     expect(w.lines[0]).toContain('Toxic to fish: Dimension, Talstar P, Talak, LESCO Crosscheck Plus, Advion, Topchoice, Dylox, Artavia, Heritage G, Heritage WDG, Headway, Headway G, Velista.');
-    expect(w.lines[0]).toContain('Topchoice 15 ft (fresh water) or 60 ft (estuarine water), Tetrino 25 ft.');
+    expect(w.lines[0]).toContain('Topchoice 15 ft (fresh water) or 60 ft (estuarine water), Tetrino 25 ft, LESCO Crosscheck Plus 25 ft');
+    // LESCO Crosscheck Plus label page 7: no ground application within 25 feet of these waters, and never into fish pools or ponds.
+    expect(w.lines[0]).toContain('LESCO Crosscheck Plus 25 ft (lakes, reservoirs, rivers, permanent streams, marshes, natural ponds, estuaries and commercial fish farm ponds; never spray it into fish pools, ponds, streams or lakes).');
     expect(w.lines[0]).toContain('Talstar P and LESCO Crosscheck Plus: avoid fish and reptile pets in ornamental ponds.');
   });
 

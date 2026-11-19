@@ -181,3 +181,39 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
     expect(completion).toContain('excludeScheduledServiceId: svc.id, addOnRows,');
   });
 });
+
+// A v13 yearly amount cap for one service line's applications (history_service_line). LESCO Crosscheck Plus: its label limit is for
+// turf, and the same bottle is the pest, mosquito and termite bifenthrin, so only lawn applications count (owner 2026-11-18).
+describe('a v13 yearly amount cap for one service line', () => {
+  const LIMIT = { limit_value: 1.01, limit_unit: 'fl oz/1000sf/year', fallback_rate: 1, history_service_line: 'lawn' };
+  const row = (serviceType, extra = {}) => ({ application_rate: '0.5', rate_unit: 'fl oz', history_service_type: serviceType, ...extra });
+  const ROWS = [
+    row('Every 6 Weeks Lawn Care Service'),
+    row('Quarterly Pest Control Service'),
+    row('Mosquito Treatment - Essential Barrier'),
+    row('Slab Pre-Treat Termite Service'),
+    row('Quarterly Pest Control Service', { history_area_addon_key: 'fixture_addon' }), // an add-on row is audited as lawn work
+    row(null), // no visit on record: counted
+  ];
+
+  test('counts lawn visits, area add-on rows and rows with no visit; leaves out pest, mosquito and termite visits', async () => {
+    const { share } = await applicationLimits.lawnAmountShare(null, ROWS, LIMIT, { propertyId: 'prop-1' });
+    expect(share).toBeCloseTo((0.5 * 3) / 1.01, 6);
+  });
+
+  test('a cap that names no service line counts every row, as before', async () => {
+    const { share } = await applicationLimits.lawnAmountShare(null, ROWS, { ...LIMIT, history_service_line: undefined }, { propertyId: 'prop-1' });
+    expect(share).toBeCloseTo((0.5 * 6) / 1.01, 6);
+  });
+
+  test('the history query reads the visit type and the add-on key only for a cap that names a service line', () => {
+    const scoped = chain();
+    applicationLimits.amountHistoryProducts(scoped, null, { id: 'prod-1' }, LIMIT);
+    expect(scoped.calls).toContainEqual(['leftJoin', 'service_records as amount_sr', 'pah.service_record_id', 'amount_sr.id']);
+    expect(scoped.calls).toContainEqual(['select', 'amount_sr.service_type as history_service_type', 'pah.area_addon_key as history_area_addon_key']);
+    expect(scoped.calls).toContainEqual(['where', 'pah.product_id', 'prod-1']);
+    const plain = chain();
+    applicationLimits.amountHistoryProducts(plain, null, { id: 'prod-1' }, { ...LIMIT, history_service_line: undefined });
+    expect(plain.calls).toEqual([['where', 'pah.product_id', 'prod-1']]);
+  });
+});

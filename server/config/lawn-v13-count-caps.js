@@ -38,6 +38,9 @@
  *   Artavia 2 SC (Azoxy)          yearly amount 7.1 fl oz per 1,000 sq ft (label: 9.6 quarts per acre per year).
  *   Tetrino Insecticide           yearly amount 1.47 fl oz per 1,000 sq ft (label: 64 fl oz per acre; at most 2 maximum-rate passes of
  *                                 0.735) and 28 days between applications (label: 4 weeks). Owner 2026-10-22.
+ *   LESCO Crosscheck Plus         yearly amount 1.01 fl oz per 1,000 sq ft (label: 44 fl oz per acre "in a single application or per
+ *                                 year on turf and lawn applications"), lawn applications only (historyServiceLine): the same bottle
+ *                                 is the pest, mosquito and termite bifenthrin. The house bifenthrin since owner 2026-11-18.
  *
  * V13_COUNT_CAPS keeps its four entries and nothing else: migrations 20261007175000 and 20261007177000
  * (pushed, frozen) read its names when they RUN, and a fifth name would make them stamp annualMaxApps 2 on
@@ -55,6 +58,7 @@
 const LABEL = 'owner 2026-10-06';
 const FINAL_PASS = 'v13 final pass 2026-10-09';
 const CHINCH_PASS = 'owner 2026-10-22';
+const HOUSE_BIFENTHRIN = 'owner 2026-11-18';
 
 const V13_COUNT_CAPS = Object.freeze([
   { name: 'Celsius WG', cap: 2, yearWindow: 'rolling365', description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` }, // label: 0.17 oz per 1,000 sq ft "per year (365 days)"
@@ -160,6 +164,22 @@ const V13_MORE_LIMITS = Object.freeze([
       // active-ingredient caps count prodiamine across formulations (owner 2026-10-23).
       sharedEpaRegNumber: '100-1483',
       description: 'Advion Insect Granule: no more than 4.6 lb per 1,000 sq ft a year under the v13 lawn program, all applications at one spot added up, so one 3 lb pass per spot a year (label EPA 100-1483). An earlier application with no readable rate counts as 3 lb, the program rate.',
+    },
+  },
+  {
+    name: 'LESCO Crosscheck Plus',
+    // LESCO Crosscheck Plus label (EPA 10404-120; SiteOne item D00001542, page 5): "Do not apply more than 0.23 lb. ai/acre (44 fl. oz. of
+    // LESCO Crosscheck Plus Multi-Insecticide) in a single application or per year on turf and lawn applications." 44 fl oz per acre is
+    // 1.01 fl oz per 1,000 sq ft, and the label's lawn table (page 40) goes up to 1 fl oz per 1,000 sq ft a pass, so one maximum-rate pass
+    // fits the year. The limit is for turf, and the same bottle is the house pest, mosquito and termite bifenthrin (owner 2026-11-18), so
+    // only lawn applications count (historyServiceLine; application-limits countsForServiceLine). Atticus Talak 7.9 F is another product
+    // with its own label and is not counted. An earlier lawn application the ledger cannot size counts at 1 fl oz, the label's lawn maximum.
+    annualAmount: {
+      cap: 1.01,
+      unit: 'fl oz/1000sf/year',
+      fallbackRate: 1,
+      historyServiceLine: 'lawn',
+      description: `LESCO Crosscheck Plus: no more than 1.01 fl oz per 1,000 sq ft (44 fl oz per acre) a year on the lawn under the v13 lawn program, all lawn applications added up (label EPA 10404-120: "in a single application or per year on turf and lawn applications"). Pest, mosquito and termite sprays are not turf and do not count. An earlier lawn application with no readable rate counts as 1 fl oz, the label's lawn maximum. ${HOUSE_BIFENTHRIN}.`,
     },
   },
 ]);
@@ -324,6 +344,7 @@ function syntheticAmountLimit(entry, productId = null) {
     description: amount.description,
     fallback_rate: amount.fallbackRate,
     ...(amount.sharedEpaRegNumber ? { history_epa_reg_number: amount.sharedEpaRegNumber } : {}),
+    ...(amount.historyServiceLine ? { history_service_line: amount.historyServiceLine } : {}),
     synthetic: true,
   };
 }
