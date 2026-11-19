@@ -715,6 +715,7 @@ const cents = (n) => Math.round(Number(n) * 100);
 const TAP_UNAVAILABLE = {
   changed_since_check: 'The estimate, the visit or the call changed since the card loaded. Reload and look again.',
   series_not_booked: 'The plan could not be booked from the visit. Accept it from the estimate instead.',
+  series_incomplete: "The plan's next visits could not all be booked. Accept it from the estimate instead.",
   price_unresolved: "The plan's per-visit price could not be set. Accept it from the estimate instead.",
   customer_changed: 'The call no longer belongs to this customer.',
   no_booked_visit: 'The visits the call booked are off the calendar.',
@@ -823,6 +824,19 @@ async function tapStateOf(card, { now = new Date() } = {}) {
 // Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
 // (the card, the call and the caller's word, the booked visit and the call's other visits, the estimate's links, the
 // customer's other open estimates and plan), then link the visit to the estimate.
+// The customer's estimates, locked FOR SHARE to the commit: a send claim (an UPDATE of a row to `sending`) either landed
+// before, and the reads after this see it, or waits for this accept's commit. A claim in flight right now refuses at
+// once (NOWAIT): the step never waits on an estimate row while it holds the accept's locks. The accepted estimate is
+// this transaction's own lock already.
+async function lockCustomerEstimates(trx, customerId) {
+  try {
+    await trx('estimates').where({ customer_id: customerId }).whereNull('archived_at').orderBy('id').forShare().noWait().select('id');
+  } catch (err) {
+    if (err.code === '55P03') throw stop('estimate_being_sent');
+    throw err;
+  }
+}
+
 function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdatedAt, word }) {
   const Manual = require('./estimate-manual-acceptance');
   const pin = Manual.bookedVisitsPinOf([visit]);
@@ -853,7 +867,9 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
     if (await Word.unreadCallSince(trx, { customerId, since: word.since })) throw stop('call_still_processing');
     const heard = await Word.callerWord(trx, { customerId, since: word.since, until: word.until });
     if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
-    // A send that started since the check: which estimates are open is known only once it settles.
+    // A send that started since the check: which estimates are open is known only once it settles. The customer's
+    // estimates are locked first, so a send claim cannot land between this read and the commit.
+    await lockCustomerEstimates(trx, customerId);
     if (await estimateBeingSent(trx, customerId, new Date())) throw stop('estimate_being_sent');
     // The catalog SHARE lock before any scheduled_services row lock (scheduling/catalog-lock.js): the converter takes
     // it for a capacity-certified conversion after this step, and catalog migrations lock services first and then
@@ -887,6 +903,8 @@ function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdat
 // customer-level fee carries), never a guess. The label stays as booked (the converter never relabels service_type).
 function priceSeriesStep({ customerId, visit, seen }) {
   return async (trx, { estimate, conversion }) => {
+    // The converter's own check of the plan it booked: every application the estimate sells is on the calendar.
+    if (conversion?.recurringScheduleCheck?.ok !== true) throw stop('series_incomplete');
     const amount = Number(conversion?.membershipEmail?.perApplicationAmount);
     const customer = await trx('customers').where({ id: customerId, billing_mode: 'per_application' }).first('per_application_fee');
     if (!(amount > 0) || cents(customer?.per_application_fee) !== cents(amount)) throw stop('price_unresolved');
@@ -970,7 +988,11 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
       estimateId: estimate.id,
       // Checked inside the accept's transaction before the claim: the estimate row and the booked visit as read, with
       // no add-on line. A change since refuses (preview_changed) before anything is written.
-      expected: { ...Manual.estimateRowPin(estimate), bookedVisits: { ids: [visit.id], pin: Manual.bookedVisitsPinOf([visit]), noAddons: true } },
+      // `ungrouped`: the estimate is still in no group, read on the locked row (a group can form without a version bump).
+      expected: {
+        ...Manual.estimateRowPin(estimate), ungrouped: true,
+        bookedVisits: { ids: [visit.id], pin: Manual.bookedVisitsPinOf([visit]), noAddons: true },
+      },
       beforeConvert: linkVisitStep({
         visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word,
       }),
@@ -1018,5 +1040,6 @@ module.exports = {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
     // The tap's two steps inside the accept, driven directly.
     linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, wordStillStepForTest: wordStillStep, tapWordOfForTest: tapWordOf,
+    lockCustomerEstimatesForTest: lockCustomerEstimates,
   },
 };

@@ -1197,6 +1197,29 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect(updated.call_phone_yes).toMatchObject({ can_accept: true, estimate_id: String(estB.id) });
     });
 
+    test('an estimate that joins a group after the tap\'s check (with no version bump) is refused on the locked row; nothing is accepted', async () => {
+      const { est, card } = await filed();
+      const row = await listed(card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: true });
+      const real = acceptance.markEstimateManuallyAccepted;
+      let passed = null;
+      const spy = jest.spyOn(acceptance, 'markEstimateManuallyAccepted').mockImplementation(async (args) => {
+        passed = args.expected;
+        // A group forms between the tap's own check and the accept's row lock, and the row keeps its version.
+        const { updated_at: version } = await trx('estimates').where({ id: est.id }).first('updated_at');
+        await trx('estimates').where({ id: est.id }).update({ estimate_group_id: randomUUID(), updated_at: version });
+        expect((await trx('estimates').where({ id: est.id }).first('updated_at')).updated_at).toEqual(version);
+        return real(args);
+      });
+      try {
+        const out = await post(`${card.id}/accept-call-phone-yes`, { expected_updated_at: card.updated_at, preview_token: row.call_phone_yes.preview_token });
+        expect(out).toMatchObject({ status: 409, body: { code: 'changed_since_check' } });
+        expect(passed).toMatchObject({ ungrouped: true });
+        expect(await statusOf('estimates', est.id)).toBe('sent');
+        expect((await trx('scheduled_services').where({ id: card.related_scheduled_service_id }).first('source_estimate_id')).source_estimate_id).toBeNull();
+      } finally { spy.mockRestore(); }
+    });
+
     test('an estimate the card does not name is never the one the tap accepts', async () => {
       const ctx = await filed();
       // The card's estimate lapses, and another estimate sent before the call is open (it reopened).
@@ -1328,15 +1351,19 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
     });
 
-    test('the price step refuses a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
+    test('the price step refuses a short schedule, a price it cannot resolve, a series the converter did not book, and a price decision on the series', async () => {
       const { customerId, est, visitId } = await phoneYes();
       const visitRow = await trx('scheduled_services').where({ id: visitId }).first();
       const run = (conversion) => trx.transaction((t) => PhoneYesPrivate.priceSeriesStepForTest({ customerId, visit: visitRow, seen: {} })(t, { estimate: est, conversion }));
-      const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT } };
+      const conversion = { membershipEmail: { perApplicationAmount: PER_VISIT }, recurringScheduleCheck: { ok: true, gaps: [] } };
+      // The converter's own check found the plan short of visits (or could not run): nothing is priced.
+      await expect(run({ ...conversion, recurringScheduleCheck: { ok: false, gaps: [{ kind: 'missing_application' }] } }))
+        .rejects.toMatchObject({ phoneYesRefusal: 'series_incomplete' });
+      await expect(run({ membershipEmail: conversion.membershipEmail })).rejects.toMatchObject({ phoneYesRefusal: 'series_incomplete' });
       // The customer-level fee was not stamped at the conversion's amount.
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
       await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', per_application_fee: PER_VISIT });
-      await expect(run({ membershipEmail: { perApplicationAmount: null } })).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
+      await expect(run({ ...conversion, membershipEmail: { perApplicationAmount: null } })).rejects.toMatchObject({ phoneYesRefusal: 'price_unresolved' });
       // The visit is still a one-off: no series was booked from it.
       await expect(run(conversion)).rejects.toMatchObject({ phoneYesRefusal: 'series_not_booked' });
       expect((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price).toBeNull();
@@ -1380,6 +1407,39 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         await pool('call_log').where({ customer_id: customerId }).del();
         await pool('estimates').where({ customer_id: customerId }).del();
         await pool('customers').where({ id: customerId }).del();
+      });
+
+      test("a send claim on another of the customer's estimates: in flight, the tap's lock refuses at once; after the lock, the claim waits for the commit", async () => {
+        const perTest = trx;
+        let draft;
+        try {
+          trx = pool;
+          mockConn = pool;
+          const customerId = await customer();
+          made = { customerId };
+          await estimate(customerId);
+          draft = await estimate(customerId, { status: 'draft', sent_at: null });
+        } finally {
+          trx = perTest;
+          mockConn = perTest;
+        }
+        const lock = (conn) => PhoneYesPrivate.lockCustomerEstimatesForTest(conn, made.customerId);
+        // A claim in flight on another connection (the row written to sending, not committed): the lock refuses at once.
+        const claim = await pool.transaction();
+        await claim('estimates').where({ id: draft.id }).update({ status: 'sending' });
+        let accept = await pool.transaction();
+        await expect(lock(accept)).rejects.toMatchObject({ phoneYesRefusal: 'estimate_being_sent' });
+        await accept.rollback();
+        await claim.rollback();
+        // The tap's lock first: a claim after it waits for the accept's commit.
+        accept = await pool.transaction();
+        await lock(accept);
+        await expect(pool.transaction(async (later) => {
+          await later.raw("SET LOCAL lock_timeout = '300ms'");
+          await later('estimates').where({ id: draft.id }).update({ status: 'sending' });
+        })).rejects.toMatchObject({ code: '55P03' });
+        await accept.commit();
+        await expect(pool('estimates').where({ id: draft.id }).update({ status: 'sending' })).resolves.toBe(1);
       });
 
       test("a re-read of a call the word is read from: in flight, it refuses at once; committed first, it refuses; after, it waits for the accept's commit", async () => {
