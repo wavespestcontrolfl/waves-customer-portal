@@ -73,6 +73,13 @@ describe("the caller's words", () => {
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: 'Agent: Hi.\n[tool]\nCaller: Just bill me each time.' })).toBeNull();
   });
 
+  test('nothing before a truncation notice is grounded (the cut may be mid-turn); a recorded segment after it is', () => {
+    const cut = '[AI segment]\nAgent: Thanks for calling Waves.\nCaller: Just bill me each time\n[AI transcript truncated]';
+    expect(callerWordsOf(evidence(choice('Just bill me each time')), { transcript: cut })).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time')), { transcript: `${cut}\n\n[Staff segment]\nAgent: This is Sam.\nCaller: Okay, just bill me each time.` }))
+      .toBe('Okay, just bill me each time.');
+  });
+
   test('a quote across two sentences is found', () => {
     expect(callerWordsOf(evidence(choice('the quarterly. Bill me each time')), talk("Let's do the quarterly. Bill me each time, please.")))
       .toBe("Let's do the quarterly. Bill me each time, please.");
@@ -86,10 +93,18 @@ describe("the caller's words", () => {
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), {})).toBeNull();
   });
 
-  test('an outbound call with swapped labels is read the way the triage flags read it', () => {
+  test('an outbound call is read only when its roles are known: staff, and only staff, introduce themselves', () => {
     const swapped = { transcript: 'Caller: Hi, this is Sam with Waves, calling about your quote.\nAgent: Just bill me each time.\nCaller: Will do.', outbound: true };
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), swapped)).toBe('Just bill me each time.');
     expect(callerWordsOf(evidence(choice('Just bill me each time.')), { ...swapped, outbound: false })).toBeNull();
+    const labeled = { transcript: 'Agent: Hi, this is Sam with Waves, calling about your quote.\nCaller: Just bill me each time.\nAgent: Will do.', outbound: true };
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), labeled)).toBe('Just bill me each time.');
+    // No introduction, or both sides introduce themselves: the labels may be swapped, so nothing is grounded.
+    const unknown = { transcript: 'Agent: Hello?\nCaller: Hi, about your quote.\nAgent: Okay.\nCaller: Just bill me each time.', outbound: true };
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), unknown)).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { ...unknown, outbound: false })).toBe('Just bill me each time.');
+    const both = { transcript: 'Agent: Hi, this is Sam with Waves.\nCaller: Hi, this is Lee from Waves.\nCaller: Just bill me each time.', outbound: true };
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), both)).toBeNull();
   });
 
   test('none: null', () => {
