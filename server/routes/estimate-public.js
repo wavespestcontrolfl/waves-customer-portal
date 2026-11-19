@@ -6431,7 +6431,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // case and hide the prepay option instead of advertising ~$0 savings.
   // Only a plan with exactly one recurring unit can prepay: accept and the
   // converter refuse any other count (prepayUnitCountClosed, the same count the /data bundle uses).
-  // A termite annual plan is the exception: it is prepay-only and keeps its offer.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
     && !prepayUnitCountClosed(estData, estimate)
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
@@ -28378,29 +28377,16 @@ function recurringDataAsAccepted(estData, estimate) {
     : supplemented;
 }
 
-// A termite annual plan is prepay-only: the converter refuses any other billing term for an estimate that selects one
-// (TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY, on this same selectedTermiteAnnualPlanRows test), and accept parks the plan for
-// the annual agreement's signature before any conversion, so the multi-service refusal never applies to it. Closing its
-// prepay would leave the estimate no way to be accepted: a termite annual plan bundled with pest is two units and still
-// prepays. A check that throws leaves the decision to the unit count.
-function termiteAnnualPlanSelected(estData) {
-  try {
-    return require('../services/estimate-termite-program-rows').selectedTermiteAnnualPlanRows(estData || {}).length > 0;
-  } catch (err) {
-    logger.warn(`[estimate-public] termite annual plan check failed (${err?.name || 'Error'}); the unit count decides`);
-    return false;
-  }
-}
-
 // True when the plan cannot prepay: the data accept persists does not hold exactly one recurring unit
-// (annualPrepayRecurringUnitCount; the manual accept and optOutPrepayOffered use the same `=== 1` rule). A termite
-// annual plan is the exception: it is prepay-only (termiteAnnualPlanSelected), so its offer stays as built. More than
-// one unit is a multi-service plan the converter refuses. Zero units is no plan: a priced one-time pest choice keeps
+// (annualPrepayRecurringUnitCount; the manual accept and optOutPrepayOffered use the same `=== 1` rule). More than
+// one unit is a multi-service plan the converter refuses. A termite annual plan is no exception: accept parks it for the
+// annual agreement's signature, but activation runs the same conversion and refuses two units, so a termite annual plan
+// bundled with another service gets no prepay and never parks for a signature it could not activate (a solo plan is one
+// unit and keeps its offer). Zero units is no plan: a priced one-time pest choice keeps
 // only the pest rows (withPestOnlyRecurringChoice), so lawn-only rows leave nothing to prepay. A count that fails is
 // unknown, not one unit, so prepay closes too: the page never offers a prepay, or its setup-fee waiver, that accept
 // may refuse.
 function prepayUnitCountClosed(estData, estimate) {
-  if (termiteAnnualPlanSelected(estData)) return false;
   try {
     return require('../services/estimate-converter')
       .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate)) !== 1;

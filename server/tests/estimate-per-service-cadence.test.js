@@ -1410,24 +1410,19 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
     });
 
-    // A termite annual plan is prepay-only: the converter refuses any other billing term for it, and accept parks it for
-    // the annual agreement's signature before any conversion. Closing its prepay would leave the estimate no way to be
-    // accepted (the CI postgres suite's bundled termite park answered 400 when this rule closed it).
-    test('a termite annual plan bundled with pest is prepay-only: its offer stays as built', () => {
+    // A termite annual plan parks for the annual agreement's signature, but activation runs the same conversion and
+    // refuses a multi-service prepay. So a plan bundled with pest gets no prepay (it must never park for a signature it
+    // cannot activate), and a solo plan, one unit, keeps its offer.
+    test('a termite annual plan bundled with pest closes prepay; a solo termite annual plan keeps it', () => {
       const termiteRow = { service: 'termite_bait', name: 'Termite Bait Stations', annual: 250 };
-      const plan = (termitePlan) => ({
-        result: {
-          lineItems: [{ service: 'termite_bait', plan: termitePlan, annual: 250 }],
-          recurring: { services: [termiteRow, pestRow] },
-        },
+      const plan = (services) => ({
+        result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }], recurring: { services } },
       });
-      const shown = bundle({ firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }] });
-      expect(withMultiServicePrepayClosed(shown, plan('annual_protection'), NO_CHOICE)).toBe(shown);
-      // Control: the same two rows on a program that is not the annual plan are a multi-service plan, and prepay closes.
-      const out = withMultiServicePrepayClosed(shown, plan('quarterly_monitoring'), NO_CHOICE);
+      const shown = bundle();
+      expect(withMultiServicePrepayClosed(shown, plan([termiteRow]), NO_CHOICE)).toBe(shown);
+      const out = withMultiServicePrepayClosed(shown, plan([termiteRow, pestRow]), NO_CHOICE);
       expect(out.annualPrepayEligible).toBe(false);
       expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
-      expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
     });
 
     test('a split plan showing a setup fee: prepay closes everywhere, the fee row stays, its waiver line goes', () => {

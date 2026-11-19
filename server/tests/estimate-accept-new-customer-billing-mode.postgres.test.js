@@ -361,22 +361,19 @@ suite('public accept — billing lane of the customer the accept creates', () =>
     });
   });
 
-  describe('termite-annual sign-before-pay park (bundled estimate)', () => {
-    const TERMITE_BUNDLE = {
+  describe('termite-annual sign-before-pay park', () => {
+    // A solo plan: one recurring unit, the only shape annual prepay (and so the park) accepts. The row still quotes a
+    // monthly total (monthly: 15 below), the figure a minted customer must NOT take as its monthly_rate.
+    const TERMITE_PLAN_ROW = { name: 'Termite Bait Stations', service: 'termite_bait', annual: 250 };
+    const termitePlan = (services) => ({
       commercialEstimatedPricing: true, // bypasses the slot requirement so the accept reaches the park
       result: {
         lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }],
-        recurring: {
-          discount: 0,
-          monthlyTotal: 15,
-          services: [
-            { name: 'Termite Bait Stations', service: 'termite_bait', annual: 250 },
-            { name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: PEST_PER_VISIT },
-          ],
-        },
+        recurring: { discount: 0, monthlyTotal: 15, services },
         oneTime: { items: [], membershipFee: 0 },
       },
-    };
+    });
+    const TERMITE_BUNDLE = termitePlan([TERMITE_PLAN_ROW]);
     const gates = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
     const savedGates = {};
     beforeAll(() => { gates.forEach((g) => { savedGates[g] = process.env[g]; process.env[g] = 'true'; }); });
@@ -413,6 +410,26 @@ suite('public accept — billing lane of the customer the accept creates', () =>
       expect(after.id).toBe(minted.id);
       expect(after.billing_mode).toBe('per_application');
       expect(Number(after.per_application_fee)).toBe(PEST_PER_VISIT);
+    });
+
+    // Bundled with pest it is two recurring units. Activation (convertEstimate with activationRun) refuses a
+    // multi-service prepay, so the plan must be refused here, before a park asks the customer to sign a plan that could
+    // never activate: no prepay offer, a 400 at accept, no stamp and no minted customer.
+    test('a termite annual plan bundled with pest is refused before it parks', async () => {
+      const bundled = await estimateFixture(mockTransaction, {
+        estimateData: termitePlan([
+          TERMITE_PLAN_ROW,
+          { name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: PEST_PER_VISIT },
+        ]),
+        monthly: 15,
+        annual: 430,
+      });
+      const res = await putAccept(bundled.token, { paymentMethodPreference: 'prepay_annual' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('annual prepay is not available for this estimate');
+      const row = await mockTransaction('estimates').where({ id: bundled.estimateId }).first();
+      expect(row.annual_plan_activation_status == null).toBe(true);
+      expect(row.customer_id == null).toBe(true);
     });
   });
 });
