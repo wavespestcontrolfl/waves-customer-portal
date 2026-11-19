@@ -769,13 +769,24 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(closed).toHaveBeenCalledTimes(1);
     });
 
+    test('checkoutTender whose invoice already holds a receipt job (deduped enqueue): reported as a manual receipt, no drain', async () => {
+      settle();
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      ReceiptDeliveryQueue.enqueueReceiptDelivery.mockResolvedValueOnce({ enqueued: false, deduped: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(out.receipt).toEqual({ manual: true });
+      expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).not.toHaveBeenCalled();
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
     test('checkoutTender on a part-paid invoice: the payment is recorded and no receipt goes out (it would name the whole bill)', async () => {
       // 117.00 with 25.00 paid earlier: the sheet showed and took the 92.00 still owed.
       const calls = settle({ pre: card({ amount_paid: '25.00' }), locked: card({ amount_paid: '25.00' }) });
       jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
       const out = await recordManualPayment('inv-1', { method: 'cash', sendReceipt: true, checkoutTender: true, amountCents: 9200, owedCentsSeen: 9200, recordedByTechnicianId: 'staff-1' });
       expect(calls.paymentsInsert).toHaveBeenCalledTimes(1);
-      expect(out.receipt).toBeNull();
+      // The sheet tells the technician to send it from the Invoices page.
+      expect(out.receipt).toEqual({ manual: true });
       expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
       expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).not.toHaveBeenCalled();
       // Nor the operator send in its place.

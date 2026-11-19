@@ -38,4 +38,21 @@ describe('checkout Cash and Check sheets mark the payment as a checkout tender',
     // totalSeen: the amount this sheet showed, so the server refuses a balance that moved since.
     expect(JSON.parse(options.body)).toEqual(expect.objectContaining({ method, sendReceipt: false, checkoutTender: true, totalSeen: 125 }));
   });
+
+  it.each([
+    ['Check', MobileCheckTenderSheet, 'Record Payment'],
+    ['Cash', MobileCashTenderSheet, 'Tender'],
+  ])('%s says so when the payment was recorded with no receipt, and closes on Done', async (_name, Sheet, button) => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn(() => 'test-token') });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, invoice: { id: 'inv-1', status: 'paid' }, receipt: { manual: true } }) })));
+    const onRecorded = vi.fn();
+    const onClose = vi.fn();
+    render(<Sheet desktopVisible invoiceId="inv-1" amount={125} onRecorded={onRecorded} onClose={onClose} />);
+    fireEvent.click(screen.getByText(button));
+    expect(await screen.findByText('Payment recorded. No receipt went out: send it from the Invoices page.')).toBeInTheDocument();
+    expect(onRecorded).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Done'));
+    expect(onRecorded).toHaveBeenCalledWith(expect.objectContaining({ invoice: { id: 'inv-1', status: 'paid' } }));
+    expect(onClose).toHaveBeenCalled();
+  });
 });

@@ -19,6 +19,10 @@ export default function MobileCheckTenderSheet({
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Set when the server recorded the payment but sent no receipt ({ receipt: { manual: true } }: a part-paid invoice, whose
+  // receipt would name the whole bill). The sheet then says so and closes on Done.
+  const [recorded, setRecorded] = useState(null);
+  const finish = () => { onRecorded?.(recorded); onClose?.(); };
 
   const amountText = `$${Number(amount || 0).toFixed(2)}`;
 
@@ -53,7 +57,13 @@ export default function MobileCheckTenderSheet({
         throw new Error(d.error || 'Failed to record payment');
       }
       const data = await r.json();
-      onRecorded?.({ amount: Number(amount || 0), method: 'check', note, invoice: data.invoice });
+      const payload = { amount: Number(amount || 0), method: 'check', note, invoice: data.invoice };
+      if (data.receipt?.manual) {
+        setRecorded(payload);
+        setSaving(false);
+        return;
+      }
+      onRecorded?.(payload);
       onClose?.();
     } catch (e) {
       setError(e.message || 'Failed to record payment');
@@ -70,7 +80,7 @@ export default function MobileCheckTenderSheet({
       >
         <button
           type="button"
-          onClick={onClose}
+          onClick={recorded ? finish : onClose}
           aria-label="Back"
           className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900"
         >
@@ -101,7 +111,7 @@ export default function MobileCheckTenderSheet({
 
         <button
           type="button"
-          onClick={handleRecord}
+          onClick={recorded ? finish : handleRecord}
           disabled={saving}
           className="w-full u-focus-ring"
           style={{
@@ -115,8 +125,13 @@ export default function MobileCheckTenderSheet({
             opacity: saving ? 0.6 : 1,
           }}
         >
-          {saving ? 'Recording…' : 'Record Payment'}
+          {recorded ? 'Done' : saving ? 'Recording…' : 'Record Payment'}
         </button>
+        {recorded && (
+          <div className="text-zinc-900" style={{ fontSize: 15, marginTop: 12, textAlign: 'center' }}>
+            Payment recorded. No receipt went out: send it from the Invoices page.
+          </div>
+        )}
         {error && (
           <div className="text-alert-fg" style={{ fontSize: 13, marginTop: 10, textAlign: 'center' }}>
             {error}
