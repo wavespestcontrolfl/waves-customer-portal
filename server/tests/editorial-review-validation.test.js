@@ -76,6 +76,7 @@ describe('editorial review coverage validation', () => {
     '**Last updated:** November 2026. Most homes have roaches.',
     'Homes need a MERV-13 filter.',
     'Look for larvae that hatch in 3 days.',
+    'Remove 2 ounces of bait from each station.',
     'Check 3 days later for new droppings.',
     'Check 2 traps, since 40% of roaches hide there.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {

@@ -48,23 +48,41 @@ function domainContextFromDocument(document) {
 // same URL (markdown/parenthetical wrapping, e.g. "(see https://a.org/x)"
 // or the closing paren of a markdown link), so a balanced pair that is part
 // of the URL itself (e.g. ".../report_(2026)") is preserved.
-// `prose`: the URL was read from article text, where a trailing colon is the
-// sentence's ("[article](https://a.org/x/): the indoor ..." on a live post,
-// 2026-11-19, fetched ".../x/):" and got a 404). Only a colon that comes after
-// everything else is dropped, never one inside a link destination
-// ("[source](https://a.org/r?id=ABC:)") or a structured source list.
-function trimTrailingUrlNoise(url, { prose = false } = {}) {
+function trimTrailingUrlNoise(url) {
   let out = url;
-  let insideLink = false;
   for (;;) {
-    if (/[.,;]$/.test(out) || (prose && !insideLink && out.endsWith(':'))) { out = out.slice(0, -1); continue; }
+    if (/[.,;]$/.test(out)) { out = out.slice(0, -1); continue; }
     if (out.endsWith(')')) {
       const opens = (out.match(/\(/g) || []).length;
       const closes = (out.match(/\)/g) || []).length;
-      if (closes > opens) { out = out.slice(0, -1); insideLink = true; continue; }
+      if (closes > opens) { out = out.slice(0, -1); continue; }
     }
     break;
   }
+  return out;
+}
+
+// A URL read from article text. A Markdown link destination ("](https://...)")
+// or an autolink ("<https://...>") is delimited, so it is read exactly as
+// written, up to the destination's own closing ")" (a title after a space is
+// already outside the match). A bare URL also drops a trailing colon, which
+// is the sentence's ("See https://a.org/x: it lists ..."). Live post
+// 2026-11-19: "[article](https://a.org/x/): the indoor ..." was fetched as
+// ".../x/):" and answered 404.
+function bodyUrl(body, match) {
+  const raw = match[0];
+  const before = body.slice(Math.max(0, match.index - 2), match.index);
+  if (before.endsWith('<')) return raw;
+  if (before === '](') {
+    let depth = 0;
+    for (let i = 0; i < raw.length; i += 1) {
+      if (raw[i] === '(') depth += 1;
+      else if (raw[i] === ')') { if (depth === 0) return raw.slice(0, i); depth -= 1; }
+    }
+    return raw;
+  }
+  let out = raw;
+  for (let prev = null; out !== prev;) { prev = out; out = trimTrailingUrlNoise(out).replace(/:$/, ''); }
   return out;
 }
 
@@ -99,8 +117,7 @@ function sourceUrls(document, brief = {}, evidenceUrls = []) {
   const body = fm.parse(document).content;
   const structured = `${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
   return [...new Set([
-    // An autolink ("<https://a.org/r?id=ABC:>") is delimited, so its colon is the URL's.
-    ...[...body.matchAll(URL_RE)].map((m) => trimTrailingUrlNoise(m[0], { prose: body[m.index + m[0].length] !== '>' })),
+    ...[...body.matchAll(URL_RE)].map((m) => bodyUrl(body, m)),
     ...(structured.match(URL_RE) || []).map((url) => trimTrailingUrlNoise(url)),
   ]
     .filter((url) => {

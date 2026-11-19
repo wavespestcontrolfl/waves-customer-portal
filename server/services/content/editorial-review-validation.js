@@ -63,14 +63,15 @@ function exactQuotedPhrases(passage) {
   return phrases;
 }
 
-// An instruction whose only number counts the reader's own action ("Check 2 containers by the door").
-// A number later in the sentence, or one that is a time or a size ("Look for larvae that hatch in 3 days",
-// "Check 3 days later"), states a fact and needs a source.
-const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?!(?:days?|weeks?|hours?|minutes?|months?|years?|inch(?:es)?|feet|foot|percent)\b)[a-z]/i;
+// An instruction whose only number counts things the reader handles ("Check 2 containers by the door"):
+// the number sits right after the verb and counts one of a closed list of objects, never a time, a size
+// or an amount ("Look for larvae that hatch in 3 days", "Remove 2 ounces of bait"), and no other figure
+// follows in the sentence. Anything else states a fact and needs a source.
+const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?:containers?|traps?|stations?|spots?|areas?|corners?|rooms?|doors?|windows?|sides?|bins?|pots?|saucers?|buckets?|drains?|vents?|bags?|boxes?|piles?|plants?|cans?|gutters?)\b/i;
 function isTrivialNumericInstruction(passage) {
   const text = String(passage || '').trim();
   const match = text.match(COUNT_INSTRUCTION_RE);
-  return Boolean(match) && !FIGURE_RE.test(text.slice(match[0].length - 1).replace(DOCUMENT_CODE_RE, ' '));
+  return Boolean(match) && !FIGURE_RE.test(text.slice(match[0].length).replace(DOCUMENT_CODE_RE, ' '));
 }
 
 // A non_external passage may carry a number only where the number makes no outside claim: a trivial

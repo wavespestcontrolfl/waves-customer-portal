@@ -434,6 +434,10 @@ test('source extraction keeps a colon inside a link destination or a structured 
     .toEqual(['https://example.org/record?id=ABC:']);
   expect(evidence.sourceUrls('The record <https://example.org/record?id=ABC:> lists it.'))
     .toEqual(['https://example.org/record?id=ABC:']);
+  expect(evidence.sourceUrls('The [record](https://example.org/record?id=ABC: "Record") lists it.'))
+    .toEqual(['https://example.org/record?id=ABC:']);
+  expect(evidence.sourceUrls('The [report](https://example.org/report_(2026)): it is long.'))
+    .toEqual(['https://example.org/report_(2026)']);
   expect(evidence.sourceUrls('Body.', { required_sources: ['https://example.org/record?id=ABC:'] }))
     .toEqual(['https://example.org/record?id=ABC:']);
 });
