@@ -46,7 +46,6 @@ const { samePlace } = require('./auto-dispatch/current-conflict');
 const { effectivePremise, currentOrder, effectiveWindowRange } = require('./route-reorder-window-fit');
 const { timeFallbackOrder } = require('./scheduling/route-order-time-fallback');
 const { daysBetween } = require('./auto-dispatch/route-tiers');
-const { FLEX_TIER_RADIUS_DAYS } = require('./auto-dispatch/flex-tier');
 const { NIGHT_TRIGGERS, FINISHED_STATUSES } = require('./auto-dispatch/catch-up');
 const { NONTERMINAL_SCHEDULED_SERVICE_STATUSES } = require('./scheduled-service-statuses');
 const {
@@ -86,7 +85,7 @@ const HOLD_WORDS = {
   NO_ROAD_DRIVE_SAVING: 'real roads showed too little saving',
   PERSON_PLACED: 'staff picked the day',
   PERSON_PLACED_UNKNOWN: 'staff may have picked the day',
-  REMINDER_SENT_FROZEN: 'customer already told the time',
+  REMINDER_SENT_FROZEN: 'a reminder or a promise froze it',
   CUSTOMER_CONFIRMED: 'customer confirmed',
   MOVE_LIMIT_REACHED: "already at the night run's move limit",
   REMINDER_24H_OFF: '24-hour reminder off',
@@ -124,7 +123,7 @@ const REPLAN_HOLD_WORDS = {
   customer_confirmed: 'customer confirmed',
   first_or_one_time: 'first or one-time visit',
   person_placed: 'staff picked the time',
-  time_told: 'customer already told the time',
+  time_told: 'customer may already know the time',
   pref_unknown: "customer's wishes unreadable",
 };
 
@@ -203,83 +202,96 @@ function toVisit(row) {
 }
 
 const hasStreet = (premise) => !!premise?.service_address_line1;
-// What an address says beyond its street line and unit: its zip and its city.
-const detailOf = (premise) => Number(!!premise.service_address_zip) + Number(!!premise.service_address_city);
 
-// How surely a row names its home, under the app's same-place rule (route-reorder-
-// window-fit.js effectivePremise: the visit's stamp, else the customer's): 0 a linked
-// property; 1, 2 or 3 an address with both, one or neither of its zip and city; 4
-// only a map pin.
-function homeTier(row) {
-  if (row.property_id) return 0;
-  const premise = effectivePremise(row);
-  return hasStreet(premise) ? 3 - detailOf(premise) : 4;
+// Whether two rows of one customer are one place under the app's own same-place
+// rule (auto-dispatch/current-conflict.js samePlace, on route-reorder-window-fit.js
+// effectivePremise: the visit's stamp, else the customer's): two street lines match
+// by address, unit included, a missing zip or city counting as unknown, so two known
+// addresses that differ are two places even at one map pin (two units of one
+// building). When either row has no street line, the map pin decides (16 ft).
+function onePlace(x, y) {
+  if (hasStreet(x.premise) && hasStreet(y.premise)) return samePlace(x.row, y.row);
+  return !!(x.geo && y.geo) && haversine(x.geo.lat, x.geo.lng, y.geo.lat, y.geo.lng) <= SAME_PLACE_MILES;
 }
 
-// A home's address: the street line and unit of its rows, with every zip and city
-// they agree on, so each later row is checked against all the home knows.
-function withAddress(address, premise) {
-  if (!hasStreet(premise)) return address;
-  if (!address) return { ...premise };
-  if (!samePlace(address, premise)) return address; // a linked row stamped elsewhere adds nothing
-  return {
-    ...address,
-    service_address_zip: address.service_address_zip || premise.service_address_zip || null,
-    service_address_city: address.service_address_city || premise.service_address_city || null,
-  };
+const allOnePlace = (group) => group.every((x) => group.every((y) => x === y || onePlace(x, y)));
+
+// One customer's homes, judged on all its rows at once, so the order the rows come
+// in never changes them. Linked rows are one home per property. An unlinked row
+// joins the one property all of whose rows it agrees with. The other unlinked rows
+// group with every row they agree with, when those rows all agree with each other
+// too. A row that fits two properties, that agrees with two rows that differ (a
+// street line with no zip beside two zips, a pin-only visit beside two units), or
+// that joins a property beside a row it differs from, cannot be placed: it stays a
+// stop on its route but is never paired.
+function customerHomes(entries) {
+  const properties = new Map();
+  const loose = [];
+  for (const e of entries) {
+    if (!e.row.property_id) loose.push(e);
+    else {
+      const id = String(e.row.property_id);
+      if (!properties.has(id)) properties.set(id, []);
+      properties.get(id).push(e);
+    }
+  }
+  const linked = [...properties.values()].map((rows) => ({ rows, joiners: [] }));
+  const free = [];
+  const unplaced = [];
+  for (const e of loose) {
+    const fits = linked.filter((home) => home.rows.every((x) => onePlace(e, x)));
+    if (fits.length === 1) fits[0].joiners.push(e);
+    else (fits.length ? unplaced : free).push(e);
+  }
+  const homes = linked.map(({ rows, joiners }) => {
+    const clash = joiners.filter((e) => !allOnePlace([e, ...joiners]));
+    unplaced.push(...clash);
+    return [...rows, ...joiners.filter((e) => !clash.includes(e))];
+  });
+  const agrees = new Map(free.map((e) => [e, free.filter((o) => o === e || onePlace(e, o))]));
+  const placed = free.filter((e) => allOnePlace(agrees.get(e)));
+  unplaced.push(...free.filter((e) => !placed.includes(e)));
+  const seen = new Set();
+  for (const e of placed) {
+    if (seen.has(e)) continue;
+    const home = agrees.get(e).filter((o) => placed.includes(o));
+    home.forEach((o) => seen.add(o));
+    homes.push(home);
+  }
+  return { homes, unplaced };
 }
 
-// Whether `row` belongs to `home` under the app's own same-place rule
-// (auto-dispatch/current-conflict.js samePlace). A linked row belongs only to its
-// own property's home. A row with an address belongs to a home whose address agrees,
-// unit included, with no zip or city in conflict; two known addresses that differ are
-// two homes even at one map pin (two units of one building). Only when the row or the
-// home has no street line does the map pin decide.
-function belongsTo(home, row, geo) {
-  if (row.property_id) return home.propertyIds.has(String(row.property_id));
-  if (hasStreet(home.address) && hasStreet(effectivePremise(row))) return samePlace(home.address, row);
-  return !!(home.geo && geo) && haversine(home.geo.lat, home.geo.lng, geo.lat, geo.lng) <= SAME_PLACE_MILES;
-}
-
-// Every row's home, pinned or not. Linked rows go first (one home per property),
-// then addresses with the most detail (zip and city, then one of them, then neither),
-// then rows with only a map pin, so a vaguer row never decides how sharper ones
-// group. Each row joins the one home it belongs to; a row that belongs to none
-// starts its own, and one that belongs to more than one (a street line with no zip
-// for two zips, or one pin for two homes) cannot be placed: it stays a stop on its
-// route but is never paired. Only a placed home with a pin can be paired.
+// Every row's home, pinned or not (customerHomes). A home's pin, name and city come
+// from its earliest visit; only a placed home with a pin can be paired.
 function buildPlaces(rows) {
-  const places = [];
   const byCustomer = new Map();
-  const tiered = rows.map((row) => ({ row, tier: homeTier(row) })).sort((x, y) => x.tier - y.tier); // stable
-  for (const { row: raw } of tiered) {
+  for (const raw of rows) {
     const geo = resolveGeo(raw);
     // The app's guarded pin (scheduling/day-stops.js guardedCoordSelects), as the route helpers read it.
     const row = { ...raw, lat: geo ? geo.lat : null, lng: geo ? geo.lng : null };
     const customerId = String(row.customer_id);
     if (!byCustomer.has(customerId)) byCustomer.set(customerId, []);
-    const own = byCustomer.get(customerId);
-    const matches = own.filter((home) => belongsTo(home, row, geo));
-    let place = matches.length === 1 ? matches[0] : null;
-    if (!place) {
-      place = {
-        key: `home-${places.length + 1}`,
-        customerId,
-        geo,
-        address: null,
-        propertyIds: new Set(),
-        unplaced: matches.length > 1,
-        name: shortName(row),
-        city: row.service_address_city || row.customer_city || null,
-        visits: [],
-      };
-      places.push(place);
-      own.push(place);
-    }
-    place.address = withAddress(place.address, effectivePremise(row));
-    if (row.property_id) place.propertyIds.add(String(row.property_id));
-    if (!place.geo && geo) place.geo = geo;
-    place.visits.push({ ...toVisit(row), home: place.key, placeName: place.name, city: place.city });
+    byCustomer.get(customerId).push({ row, geo, premise: effectivePremise(row), visit: toVisit(row) });
+  }
+  const places = [];
+  const addPlace = (entries, unplaced) => {
+    const ordered = [...entries].sort((x, y) => visitOrder(x.visit, y.visit));
+    const first = ordered[0].row;
+    const place = {
+      key: `home-${places.length + 1}`,
+      customerId: String(first.customer_id),
+      geo: ordered.find((e) => e.geo)?.geo || null,
+      unplaced,
+      name: shortName(first),
+      city: first.service_address_city || first.customer_city || null,
+    };
+    place.visits = ordered.map((e) => ({ ...e.visit, home: place.key, placeName: place.name, city: place.city }));
+    places.push(place);
+  };
+  for (const entries of byCustomer.values()) {
+    const { homes, unplaced } = customerHomes(entries);
+    homes.forEach((home) => addPlace(home, false));
+    unplaced.forEach((e) => addPlace([e], true));
   }
   return places;
 }
@@ -499,8 +511,7 @@ function replanHoldFor(visit, replan) {
 function splitLabel(p) {
   if (p.twoTechs) return 'same day, two technicians';
   if (p.between != null) return `same day, ${plural(p.between, 'stop')} between`;
-  const reach = p.gap > FLEX_TIER_RADIUS_DAYS ? `, past the night run's ${FLEX_TIER_RADIUS_DAYS}-day reach` : '';
-  return `${plural(p.gap, 'day')} apart${reach}`;
+  return `${plural(p.gap, 'day')} apart`;
 }
 
 // Each visit's time, with what holds it there: on one day the re-plan's reason for

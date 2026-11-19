@@ -140,7 +140,7 @@ describe('part 1: next-door stops booked apart', () => {
     expect(pairs[0]).toMatchObject({ sameCustomer: false, between: 1 });
     const replan = new Map([['2027-03-01|tech-1', new Map([[pairs[0].first.id, 'time_told']])]]);
     const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan, weekStart: '2027-03-01' });
-    expect(detail).toMatch(/- Avery S\. and Blake E\. \(Lakewood Ranch\), about 260 ft apart: Mon, Mar 1 9:00\sAM \(customer already told the time\) and 11:00\sAM \(no lock listed in the last re-plan\), same day, 1 stop between\./);
+    expect(detail).toMatch(/- Avery S\. and Blake E\. \(Lakewood Ranch\), about 260 ft apart: Mon, Mar 1 9:00\sAM \(customer may already know the time\) and 11:00\sAM \(no lock listed in the last re-plan\), same day, 1 stop between\./);
   });
 
   test("two technicians on one day: each visit reads its own technician's re-plan", () => {
@@ -155,7 +155,7 @@ describe('part 1: next-door stops booked apart', () => {
       ['2027-03-01|tech-2', new Map([[pairs[0].second.id, 'staff_lock']])],
     ]);
     const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan, weekStart: '2027-03-01' });
-    expect(detail).toMatch(/Mon, Mar 1 9:00\sAM \(customer already told the time\) and 11:00\sAM \(locked by staff\), same day, two technicians\./);
+    expect(detail).toMatch(/Mon, Mar 1 9:00\sAM \(customer may already know the time\) and 11:00\sAM \(locked by staff\), same day, two technicians\./);
   });
 
   test('a combined visit next door pairs the same way whatever order its rows come in', () => {
@@ -257,7 +257,8 @@ describe('part 1: next-door stops booked apart', () => {
     expect(pairs[0]).toMatchObject({ gap: 7 });
     expect([pairs[0].first.date, pairs[0].second.date]).toEqual(['2027-05-03', '2027-05-10']);
     const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), weekStart: '2027-03-01' });
-    expect(detail).toContain("7 days apart, past the night run's 5-day reach.");
+    expect(detail).toContain('7 days apart.');
+    expect(detail).not.toContain('reach');
   });
 
   test('a combined visit together with its neighbor is one stop: a later visit next door is no split', () => {
@@ -478,6 +479,23 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows).map((p) => [p.first.id, p.second.id])).toEqual([[rows[1].id, rows[2].id]]);
   });
 
+  test('homes come out the same in every row order: a city-only visit beside two zips pairs with neither', () => {
+    const row = (date, zip, city) => stop({ customer: 'c-a', at: HOME_A, date, street: '100 Sample Way', zip, city, plan: true });
+    const zipA = row('2027-03-01', '34202', null);
+    const cityOnly = row('2027-03-14', null, 'Lakewood Ranch');
+    const zipB = row('2027-03-15', '34211', null);
+    for (const rows of [[cityOnly, zipA, zipB], [zipA, cityOnly, zipB], [zipB, zipA, cityOnly], [zipA, zipB, cityOnly]]) {
+      expect(findApartPairs(rows).map((p) => [p.first.id, p.second.id])).toEqual([[zipA.id, zipB.id]]);
+    }
+  });
+
+  test('two unlinked visits that both fit one property but differ from each other pair with neither', () => {
+    const row = (date, zip, property) => stop({ customer: 'c-a', at: HOME_A, date, street: '100 Sample Way', zip, property, plan: true });
+    const rows = [row('2027-03-01', null, 'prop-1'), row('2027-03-08', '34202', null), row('2027-03-15', '34211', null)];
+    expect(buildPlaces(rows).filter((p) => !p.unplaced).map((p) => p.visits.map((v) => v.id))).toEqual([[rows[0].id]]);
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
   test('on a day with no route numbers, an unassigned legacy visit runs at its window start', () => {
     const rows = [
       stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }),
@@ -517,7 +535,7 @@ describe('what holds each visit, in plain words', () => {
 
   test("the night run's own reason for the visit", () => {
     const log = new Map([['svc-9', { reason_code: 'REMINDER_SENT_FROZEN', action: 'no_change' }]]);
-    expect(holdFor(planVisit, log)).toBe('customer already told the time');
+    expect(holdFor(planVisit, log)).toBe('a reminder or a promise froze it');
   });
 
   test("the night run's reason is for the day it judged: a visit moved since then says so", () => {
@@ -526,7 +544,7 @@ describe('what holds each visit, in plain words', () => {
     expect(holdFor(at('2027-03-08'), moved)).toBe('the night run moved it there');
     expect(holdFor(at('2027-03-10'), moved)).toBe('moved after the last night run');
     const kept = new Map([['svc-9', { action: 'no_change', reason_code: 'REMINDER_SENT_FROZEN', old_scheduled_date: '2027-03-05' }]]);
-    expect(holdFor(at('2027-03-05'), kept)).toBe('customer already told the time');
+    expect(holdFor(at('2027-03-05'), kept)).toBe('a reminder or a promise froze it');
     expect(holdFor(at('2027-03-06'), kept)).toBe('moved after the last night run');
     // A dry run moves nothing: its reason is for the day the visit still has.
     const dry = new Map([['svc-9', { action: 'recommended', reason_code: 'DRY_RUN_RECOMMENDATION', old_scheduled_date: '2027-03-05', new_scheduled_date: '2027-03-07', dry_run: true }]]);
