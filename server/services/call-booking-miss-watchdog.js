@@ -12,7 +12,8 @@
  * nothing on it.
  *
  * What counts as a miss: a fully-processed call in the lookback window, past
- * the grace period, whose stored V2 extraction (v2_extraction_status =
+ * the grace period (GRACE_MINUTES; HELD_GRACE_MINUTES when the call agent
+ * itself held the visit, and the bell then names why), whose stored V2 extraction (v2_extraction_status =
  * 'valid') says scheduling.status === 'confirmed' with a parseable
  * confirmed_start_at — and no scheduled_services row CLEARS it. A row clears
  * the miss only with call-linked evidence, mirroring the processor's
@@ -84,6 +85,27 @@ const LOOKBACK_HOURS = 96;
 // extraction → booking can take a while, and the office may be booking it
 // by hand right now.
 const GRACE_MINUTES = 90;
+// A call the call agent itself held is not in flight: its stored routing decision
+// (enforce mode) blocked the booking, processing is done, and only a person will book
+// it. It waits this long, for the office booking it by hand right after the call, then
+// rings (owner 2026-11-18, option A of the call booking holds scope: a visit held that
+// day on the address check would have waited 1 hour 42 minutes for its first alert).
+const HELD_GRACE_MINUTES = 10;
+// Why the call agent held it, for the bell's why: the first appointment-blocking flag
+// in this order (the flags seen on held confirmed calls, 90 days to 2026-11-18), else
+// the fallback. Each phrase fits the why's 110 characters behind the longest prefix and
+// slot ("Still unbooked: confirmed Wed Sep 30 at 12:00 PM on a call; held because ").
+const HOLD_REASONS = [
+  ['commercial_requires_quote', 'a commercial job needs a quote first'],
+  ['caller_not_authorized', 'the caller is not the account holder'],
+  ['missing_service_address', 'the call gave no service address'],
+  ['address_unverified', 'Google could not confirm the address'],
+  ['address_unverifiable', 'the address could not be checked'],
+  ['low_confidence_address', 'the address was hard to hear'],
+  ['ambiguous_pest_or_service', 'the service is not clear'],
+  ['low_extraction_confidence', 'the call was hard to read'],
+];
+const HOLD_REASON_FALLBACK = 'the call needs a review';
 // A first enable scans the whole window; cap the bells per run so a backlog
 // rings loudly but not unreadably. Dedupe keys make the remainder ring on
 // subsequent ticks.
@@ -182,6 +204,17 @@ function extractConfirmedSlot(extractionRaw) {
   };
 }
 
+// Did the call agent hold the booking? Its stored V2 validation (call_log.ai_validation)
+// says so when the routing decision, made in enforce mode (the mode that decides
+// bookings), was not allowed. Returns the HOLD_REASONS phrase, or null when it did not.
+function agentHoldReason(validation) {
+  const routing = validation && validation.mode === 'enforce' ? validation.routing : null;
+  if (!routing || routing.allowed !== false) return null;
+  const flags = new Set(Array.isArray(routing.appointment_blocking_flags) ? routing.appointment_blocking_flags : []);
+  const hit = HOLD_REASONS.find(([flag]) => flags.has(flag));
+  return hit ? hit[1] : HOLD_REASON_FALLBACK;
+}
+
 function windowStartMinutes(windowStart) {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
   if (!m) return null;
@@ -268,7 +301,9 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
-// ai_extraction_enriched }); `bookedRows` are scheduled_services rows
+// ai_extraction_enriched, ai_validation }); a call the call agent held
+// (agentHoldReason) waits HELD_GRACE_MINUTES instead of GRACE_MINUTES, and its
+// miss carries `holdReason`. `bookedRows` are scheduled_services rows
 // ({ customer_id, status, sched_date ('YYYY-MM-DD' via to_char — never a JS
 // Date round-trip), window_start, created_at, source_call_log_id, notes }),
 // ANY status: cancelled/rescheduled rows clear only on call provenance
@@ -278,15 +313,18 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // the same first and last name (see loadNamesakeAccounts); their rows clear
 // only through namesakeRowClearsSlot.
 function computeBookingMisses(calls, bookedRows, { now = new Date(), namesakes = new Map() } = {}) {
-  const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
+  const cutoff = (minutes) => new Date(now.getTime() - minutes * 60 * 1000);
+  const graceCutoff = cutoff(GRACE_MINUTES);
+  const heldGraceCutoff = cutoff(HELD_GRACE_MINUTES);
   const misses = [];
   for (const call of calls) {
     const createdAt = call.created_at ? new Date(call.created_at) : null;
-    if (!createdAt || createdAt > graceCutoff) continue;
+    const holdReason = agentHoldReason(call.ai_validation);
+    if (!createdAt || createdAt > (holdReason ? heldGraceCutoff : graceCutoff)) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
     if (clearingRow(call, slot, bookedRows, namesakes.get(call.id))) continue;
-    misses.push({ call, slot, serviceDateET: slot.dateET });
+    misses.push({ call, slot, serviceDateET: slot.dateET, holdReason });
   }
   return misses;
 }
@@ -610,17 +648,20 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
   };
 }
 
-// The "book it" text: the call confirmed a slot and nothing is on the calendar.
+// The "book it" text: the call confirmed a slot and nothing is on the calendar. A
+// visit the call agent held says why instead (m.holdReason, owner 2026-11-18).
 // The full sentence (phone number, direction, call time) stays in `detail`.
 function bookItAlert(m, repeat) {
   const { callAtET, contactPhone, direction } = callFacts(m.call);
+  const confirmed = `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call`;
   return {
     action: `book ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - 'Schedule — book '.length)}`,
-    why: `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call; nothing is on the calendar.`,
+    why: m.holdReason ? `${confirmed}; held because ${m.holdReason}.` : `${confirmed}; nothing is on the calendar.`,
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
     detail: `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${m.slot.dateET} ${clockOf(m.slot.minutes)} ET ` +
       `on a ${direction} call at ${callAtET} ET, but the schedule has no matching appointment ` +
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
+      (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
       'Book it in dispatch or call back to reset expectations.' +
       (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
@@ -786,7 +827,7 @@ async function runInner({ now }) {
     .where({ v2_extraction_status: 'valid' })
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
-    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
@@ -992,6 +1033,8 @@ module.exports = {
   closeResolvedBookingMissBells,
   closeBookingMissBellsForCall,
   dateCheckAlert,
+  bookItAlert,
+  agentHoldReason,
   extractConfirmedSlot,
   confirmedWallClockET,
   rowClearsSlot,
@@ -1001,6 +1044,9 @@ module.exports = {
   likelyAccountSentence,
   LOOKBACK_HOURS,
   GRACE_MINUTES,
+  HELD_GRACE_MINUTES,
+  HOLD_REASONS,
+  HOLD_REASON_FALLBACK,
   MAX_ALERTS_PER_RUN,
   WINDOW_MATCH_TOLERANCE_MINUTES,
   REPEAT_INTERVAL_MINUTES,

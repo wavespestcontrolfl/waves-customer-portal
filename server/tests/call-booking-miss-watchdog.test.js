@@ -4,8 +4,9 @@
 // guard parked it into a 1,700-item open triage backlog, and nobody was
 // scheduled. These tests pin the pure diff — confirmed-slot parsing (object
 // AND string-era extractions), the v2IsoToEtWallClock wall-clock contract,
-// call-linked clearing evidence, grace filter, unlinked-call handling — and
-// the gate-off no-op. All fixture identities are synthetic.
+// call-linked clearing evidence, grace filter (shorter for a visit the call
+// agent held, whose bell names why), unlinked-call handling — and the gate-off
+// no-op. All fixture identities are synthetic.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
@@ -16,8 +17,14 @@ const {
   extractConfirmedSlot,
   confirmedWallClockET,
   rowClearsSlot,
+  bookItAlert,
+  agentHoldReason,
   GRACE_MINUTES,
+  HELD_GRACE_MINUTES,
+  HOLD_REASONS,
+  HOLD_REASON_FALLBACK,
 } = require('../services/call-booking-miss-watchdog');
+const { composeAdminAlert } = require('../services/admin-alert-compose');
 
 const NOW = new Date('2026-07-30T16:00:00Z');
 const OLD_ENOUGH = new Date(NOW.getTime() - (GRACE_MINUTES + 30) * 60 * 1000).toISOString();
@@ -221,6 +228,67 @@ describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
       call({ id: 'no-extraction', ai_extraction_enriched: null }),
     ];
     expect(computeBookingMisses(rows, [], { now: NOW })).toHaveLength(0);
+  });
+});
+
+// Owner 2026-11-18 (option A of the call booking holds scope): a visit the call agent
+// itself held waited 90 minutes for its first bell, and the bell never said why. It now
+// rings after HELD_GRACE_MINUTES and names the reason.
+describe('a visit the call agent held', () => {
+  const held = (flags = ['address_unverified'], over = {}) => ({
+    mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: flags }, ...over,
+  });
+  const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+
+  test('rings after HELD_GRACE_MINUTES with its reason; an unheld call of the same age still waits GRACE_MINUTES', () => {
+    const misses = computeBookingMisses([
+      call({ id: 'held', created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held() }),
+      call({ id: 'unheld', created_at: minutesAgo(HELD_GRACE_MINUTES + 1) }),
+      call({ id: 'held-too-recent', created_at: minutesAgo(HELD_GRACE_MINUTES - 1), ai_validation: held() }),
+    ], [], { now: NOW });
+    expect(misses.map((m) => [m.call.id, m.holdReason])).toEqual([['held', 'Google could not confirm the address']]);
+    // A booking still clears a held call.
+    const booked = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held() })],
+      [bookedRow({ source_call_log_id: 'call-1' })], { now: NOW });
+    expect(booked).toHaveLength(0);
+  });
+
+  test('only an enforce-mode routing decision that blocked the booking counts as held', () => {
+    expect(agentHoldReason(held())).toBe('Google could not confirm the address');
+    expect(agentHoldReason(held(['address_unverified'], { mode: 'shadow' }))).toBeNull();
+    expect(agentHoldReason({ mode: 'enforce', routing: { allowed: true, appointment_blocking_flags: [] } })).toBeNull();
+    expect(agentHoldReason({ mode: 'enforce', routing: null })).toBeNull();
+    expect(agentHoldReason(null)).toBeNull();
+  });
+
+  test('the reason is the first blocking flag in HOLD_REASONS order, else the fallback', () => {
+    expect(agentHoldReason(held(['address_unverified', 'commercial_requires_quote']))).toBe('a commercial job needs a quote first');
+    expect(agentHoldReason(held(['address_unverifiable', 'address_unverified']))).toBe('Google could not confirm the address');
+    expect(agentHoldReason(held(['a_flag_with_no_phrase']))).toBe(HOLD_REASON_FALLBACK);
+    expect(agentHoldReason(held([]))).toBe(HOLD_REASON_FALLBACK);
+  });
+
+  test('the bell says why it was held; an unheld miss keeps "nothing is on the calendar"', () => {
+    const [miss] = computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held() })], [], { now: NOW });
+    const text = bookItAlert(miss, false);
+    expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because Google could not confirm the address.');
+    expect(text.detail).toContain('The call agent held this visit and did not book it, because Google could not confirm the address.');
+    const [plain] = computeBookingMisses([call()], [], { now: NOW });
+    expect(bookItAlert(plain, false).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
+    expect(bookItAlert(plain, false).detail).not.toContain('The call agent held');
+  });
+
+  test('every reason fits the why rules behind the longest prefix and slot', () => {
+    const slot = { dateET: '2026-09-30', minutes: 12 * 60, name: 'Pat Sample', service: 'Waves Assessment' };
+    for (const holdReason of [...HOLD_REASONS.map(([, phrase]) => phrase), HOLD_REASON_FALLBACK]) {
+      for (const repeat of [false, true]) {
+        const text = bookItAlert({ call: call(), slot, holdReason }, repeat);
+        expect(() => composeAdminAlert({
+          area: 'Schedule', action: text.action, why: text.why, severity: 'needs-you', link: text.link,
+          subject: { type: 'call', id: 'call-1' }, doneWhen: 'visit_booked', who: 'person',
+        })).not.toThrow();
+      }
+    }
   });
 });
 

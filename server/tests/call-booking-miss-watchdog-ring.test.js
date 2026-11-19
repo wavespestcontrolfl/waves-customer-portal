@@ -11,7 +11,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [], open: [] };
+const mockState = { calls: [], booked: [], triage: [], customers: [], alertedKeys: new Set(), rung: [], open: [], callLogSelects: [] };
 
 // Minimal chainable stand-in for the knex builder: resolves rows per table.
 jest.mock('../models/db', () => {
@@ -35,7 +35,8 @@ jest.mock('../models/db', () => {
       whereNotIn: () => b,
       groupByRaw: () => b,
       orderBy: () => b,
-      select: () => b,
+      // The columns each call_log read asks for (the held-call test checks the scan reads ai_validation).
+      select: (...cols) => { if (table === 'call_log') mockState.callLogSelects.push(cols); return b; },
       first: () => Promise.resolve(
         table === 'notifications' && ctx.rawArgs.some((k) => mockState.alertedKeys.has(k)) ? { id: 'n-old' } : undefined,
       ),
@@ -83,6 +84,7 @@ beforeEach(() => {
   mockState.alertedKeys = new Set();
   mockState.rung = [];
   mockState.open = [];
+  mockState.callLogSelects = [];
   NotificationService.notifyAdmin.mockReset();
   require('../config/feature-gates').alertRingOnceLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-new', deduped: false });
@@ -119,6 +121,31 @@ describe('first bell', () => {
 
   test('a booked call-linked row clears the miss: nothing rings', async () => {
     mockState.booked = [{ customer_id: 'cust-9', sched_date: '2026-10-04', window_start: '11:00:00', source_call_log_id: CALL_ID, notes: null }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result.misses).toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+// Owner 2026-11-18 (option A of the call booking holds scope): a visit the call agent
+// held rang 1.5 to 2.5 hours after the call and never said why.
+describe('a visit the call agent held', () => {
+  const HELD = { mode: 'enforce', routing: { allowed: false, reason: 'triage_flags', appointment_blocking_flags: ['address_unverified'] } };
+  const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
+
+  test('rings 15 minutes after the call and names why; the scan reads ai_validation', async () => {
+    mockState.calls = [missCall({ created_at: minutesAgo(15), ai_validation: HELD })];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 1 });
+    const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toBe("Schedule — book Robin Example's Wasp Nest Removal");
+    expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because Google could not confirm the address.');
+    expect(opts.bell).toBe(true);
+    expect(mockState.callLogSelects.some((cols) => cols.includes('ai_validation'))).toBe(true);
+  });
+
+  test('an unheld call of the same age still waits out GRACE_MINUTES', async () => {
+    mockState.calls = [missCall({ created_at: minutesAgo(15) })];
     const result = await runCallBookingMissWatchdog({ now: NOW });
     expect(result.misses).toBe(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
