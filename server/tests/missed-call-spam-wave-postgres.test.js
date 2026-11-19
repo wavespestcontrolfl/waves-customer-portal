@@ -47,7 +47,13 @@ jest.setTimeout(30000);
   beforeAll(async () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
-    for (const table of tables) await database.raw('CREATE TABLE ??.?? AS SELECT * FROM public.?? WITH NO DATA', [schema, table, table]);
+    // call_log keeps its column defaults: the repeat rule's silent shape must
+    // pass a row the database fills in, so a column added later with a
+    // non-NULL default fails the positive cases here (pre-push audit r10).
+    for (const table of tables) {
+      if (table === 'call_log') await database.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING DEFAULTS)', [schema, table, table]);
+      else await database.raw('CREATE TABLE ??.?? AS SELECT * FROM public.?? WITH NO DATA', [schema, table, table]);
+    }
     mockConn = database;
   });
   beforeEach(() => {
@@ -771,6 +777,20 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(true);
       // Staff called the number back before the bell was checked; it rang out.
       await database('call_log').insert(call(GBP_LINE, 6, { direction: 'outbound', to_phone: CALLER, answered_by: null, status: 'no-answer' }));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    // The bell read the call as missed; a late write changed it before the check (pre-push audit r10).
+    test.each([
+      ['answered by staff', { answered_by: 'human' }],
+      ['handled by Sandy', { call_outcome: 'ai_handled' }],
+      ['back in progress', { answered_by: null, status: 'in-progress' }],
+    ])('a judged call %s after the bell read it is never quieted', async (label, late) => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      await database('call_log').where({ id: row.id }).update(late);
       expect(await repeat(row)).toBe(false);
     });
 

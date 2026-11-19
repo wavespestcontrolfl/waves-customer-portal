@@ -350,32 +350,39 @@ const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_lo
   + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(call_log.metadata) = 'object' THEN call_log.metadata ELSE '{}'::jsonb END) mk"
   + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)})))`;
 
-// A settled silent hang-up: inbound, nobody (no person, no AI) answered, over
-// and past the voicemail grace at check time (a recording may still land
-// before then), with the silent shape. Built per call: the status lists are
-// defined further down this file.
-function settledSilentSql(checkedAt) {
+// A silent call: inbound, nobody (no person, no AI) answered, over, with the
+// silent shape. Built per call: the status lists are defined further down.
+function silentCallSql() {
   const marks = (list) => [...list].map(() => '?').join(', ');
   return [
     "(call_log.direction = 'inbound'"
       + ` AND (call_log.answered_by IN (${marks(UNANSWERED)}) OR (call_log.answered_by IS NULL AND call_log.status IN (${marks(UNANSWERED_STATUSES)})))`
       + ` AND COALESCE(call_log.call_outcome, '') NOT IN (${marks(AI_OUTCOMES)})`
       + ` AND call_log.status IN (${marks(TERMINAL_STATUSES)})`
-      + ' AND COALESCE(call_log.updated_at, call_log.created_at) < ?'
       + ` AND ${SILENT_SHAPE_SQL})`,
-    [...UNANSWERED, ...UNANSWERED_STATUSES, ...AI_OUTCOMES, ...TERMINAL_STATUSES, new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)],
+    [...UNANSWERED, ...UNANSWERED_STATUSES, ...AI_OUTCOMES, ...TERMINAL_STATUSES],
   ];
 }
 
+// A settled silent hang-up: a silent call past the voicemail grace at check
+// time (a recording may still land before then).
+function settledSilentSql(checkedAt) {
+  const [sql, bindings] = silentCallSql();
+  return [`(${sql} AND COALESCE(call_log.updated_at, call_log.created_at) < ?)`, [...bindings, new Date(checkedAt.getTime() - VOICEMAIL_GRACE_MS)]];
+}
+
 // The number's record beside the counted history, read only once that matched
-// and bounded like it: the judged call has the silent shape; no other call
-// from or to the number, from the window start up to this check, is anything
-// but a settled silent hang-up (IS NOT TRUE: a NULL in the test blocks too);
-// no text from it. Up to the check, not to the judged call: a staff callback
-// can come between the call and its bell (pre-push audit r9).
+// and bounded like it: the judged call, read fresh, is still a silent call (a
+// late write can mark it answered after the bell read it; pre-push audit
+// r10), with no grace test, since the bell itself rings 5 minutes after the
+// terminal status; no other call from or to the number, from the window
+// start up to this check, is anything but a settled silent hang-up (IS NOT
+// TRUE: a NULL in the test blocks too); no text from it. Up to the check, not
+// to the judged call: a staff callback can come between the call and its
+// bell (pre-push audit r9).
 async function recordIsSilent(row, key, at, checkedAt) {
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
-  const judged = await db('call_log').where('id', row.id).whereRaw(SILENT_SHAPE_SQL)
+  const judged = await db('call_log').where('id', row.id).whereRaw(...silentCallSql())
     .timeout(EXCHANGE_TIMEOUT_MS, { cancel: true }).first('id');
   if (!judged) return false;
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
