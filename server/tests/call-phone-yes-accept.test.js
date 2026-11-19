@@ -54,6 +54,14 @@ describe('wiring', () => {
     }
   });
 
+  test('the sweep rewrites the card in place, so its Resolve and Dismiss carry the version; a new recording keeps it', () => {
+    expect(read('../routes/admin-triage.js')).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'call_phone_yes'/);
+    const { SUPERSEDE_KEPT_REASON_CODES, SUPERSEDE_KEPT_CARD_SQL } = require('../services/call-routing-gates');
+    expect(SUPERSEDE_KEPT_REASON_CODES).toContain('call_phone_yes');
+    // The implausible-transcript rejection reads only the SQL.
+    expect(SUPERSEDE_KEPT_CARD_SQL).toContain("OR reason_code = 'call_phone_yes' OR");
+  });
+
   test('the card is admin only and never closed by a call verdict', () => {
     const triage = read('../routes/admin-triage.js');
     expect(triage).toMatch(/const ADMIN_ONLY_REASONS = \[[^\]]*'call_phone_yes'/);
@@ -66,6 +74,12 @@ describe('wiring', () => {
 });
 
 describe('the card text', () => {
+  test('while the call with the yes is read again, the headline says so and claims no yes', () => {
+    expect(cardSummary({ yes: null, rechecking: true })).toBe(
+      'A call booked a pest visit while an estimate is open. The call with the yes is being read again. The estimate is not accepted yet.',
+    );
+  });
+
   test('two states: a yes the call reader recorded, or no yes heard', () => {
     expect(cardSummary({ yes: { callLogId: 'call-1', at: new Date(), quote: null } }))
       .toBe('Caller said yes to pay per application on the call. The estimate is not accepted yet.');
@@ -87,14 +101,23 @@ describe("the caller's words", () => {
   const choice = (quote, speaker = 'caller', fieldPath = '/service_request/billing_choice') => ({ field_path: fieldPath, quote, speaker, transcript_offset_ms: 100 });
   const talk = (callerLine, agentLine = 'You are all set.') => ({ transcript: `Agent: Thanks for calling Waves.\nCaller: ${callerLine}\nAgent: ${agentLine}` });
 
-  test("the caller's own quote for the plan choice, found in a caller turn; never staff's, never another field's", () => {
+  test("the caller's whole sentence that holds the quote, from a caller turn; never staff's, never another field's", () => {
     const transcript = talk('Okay. Just bill me each time, that works.');
     expect(callerWordsOf(evidence(
       choice('We bill after each visit.', 'agent'),
       choice('Bill me each time.', 'caller', '/scheduling/status'),
       choice('  Just   bill me\neach time  '),
-    ), transcript)).toBe('Just bill me each time');
-    expect(callerWordsOf(evidence(choice('just bill me each time', 'caller', 'service_request.billing_choice')), transcript)).toBe('just bill me each time');
+    ), transcript)).toBe('Just bill me each time, that works.');
+    expect(callerWordsOf(evidence(choice('just bill me each time', 'caller', 'service_request.billing_choice')), transcript))
+      .toBe('Just bill me each time, that works.');
+  });
+
+  test.each([
+    ['a negated sentence', "Please don't bill me each time."],
+    ['a hedge', 'Maybe just bill me each time.'],
+    ['a question', 'Can you just bill me each time?'],
+  ])('a quote inside %s is no yes', (_name, line) => {
+    expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toBeNull();
   });
 
   test('a quote the transcript does not hold in a caller turn is no words', () => {
@@ -118,7 +141,7 @@ describe("the caller's words", () => {
     expect(callerWordsOf({ evidence: 'not a list' }, talk('x'))).toBeNull();
   });
 
-  test('a long quote is cut to 200 characters', () => {
+  test('a long sentence is cut to 200 characters', () => {
     const long = `${'word '.repeat(80)}done`;
     const words = callerWordsOf(evidence(choice(long)), talk(long));
     expect(words).toHaveLength(200);

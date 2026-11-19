@@ -468,7 +468,8 @@ export function PhoneYesEvidence({ payload }) {
   const saidAt = p.yes_at
     ? `${new Date(p.yes_at).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`
     : null;
-  const heard = p.yes_heard === true ? ["Caller said yes to pay per application", saidAt].filter(Boolean).join(" · ") : "No yes heard";
+  const heard = p.yes_heard === true ? ["Caller said yes to pay per application", saidAt].filter(Boolean).join(" · ")
+    : p.yes_rechecking === true ? "The call with the yes is being read again" : "No yes heard";
   const rows = [
     ["On the call", heard],
     ["Caller's words", p.yes_heard === true && p.caller_words ? `\u201c${p.caller_words}\u201d` : null],

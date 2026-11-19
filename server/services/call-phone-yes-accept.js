@@ -51,19 +51,25 @@ const BILLING_CHOICE_PATHS = new Set(['/service_request/billing_choice', 'servic
 const CALLER_WORDS_CHARS = 200;
 const PEST_FAMILY = new Set(['pest_control']);
 
-// A call the pipeline still owes a read, by the processor's own rules (pendingCandidatesQuery, with the shared retry
-// budget in config/call-extraction-retry): not started or queued with a recording to read, being read, or a failed
-// transcription or extraction it will retry. A call with nothing to read (no recording) is never waited on.
+// A call the pipeline still owes a read: a pass holds it now, or the processor's sweep will (re)read it, by the
+// processor's own rules (pendingCandidatesQuery without its 10-minute settle gates; the retry budget in
+// config/call-extraction-retry): a recording over 10 seconds that is not started, queued, waiting for its transcript,
+// or failed with retries left; or a masked transcript (card-number quarantine) not started, queued or failed with
+// retries left. A row the processor will not read again is never waited on. The DB test holds this to
+// pendingCandidatesQuery row for row. Never NULL, so NOT owed is the read calls exactly.
 function owedReadSql(t) {
   const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
   const underCap = `COALESCE(${t}.extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
-  const readable = `((COALESCE(${t}.recording_url, '') <> '' AND COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) > 10)`
-    + ` OR (${t}.transcription_metadata ->> 'pan_detected') = 'true')`;
-  return `(${t}.processing_status = 'processing'`
-    + ` OR ((${t}.processing_status IS NULL OR ${t}.processing_status = 'pending') AND ${readable})`
-    + ` OR (${t}.processing_status = 'no_transcription' AND ${underCap})`
-    + ` OR (${t}.processing_status = 'extraction_failed' AND ${underCap}`
-    + ` AND ${t}.created_at > now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`;
+  const failedRetry = `(${t}.processing_status = 'extraction_failed' AND ${underCap}`
+    + ` AND ${t}.created_at > now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')`;
+  const masked = `(${t}.transcription_metadata::jsonb ->> 'pan_detected') = 'true'`;
+  const unstarted = `(${t}.processing_status IS NULL OR ${t}.processing_status = 'pending')`;
+  const recorded = `(COALESCE(${t}.recording_url, '') <> ''`
+    + ` AND (COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) > 10 OR ${masked})`
+    + ` AND (${unstarted} OR (${t}.transcription_status = 'pending' AND ${t}.transcription IS NULL)`
+    + ` OR (${t}.processing_status = 'no_transcription' AND ${underCap}) OR ${failedRetry}))`;
+  const quarantined = `(${masked} AND ${t}.transcription IS NOT NULL AND (${unstarted} OR ${failedRetry}))`;
+  return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
 }
 
 // `?.() === true`: a test's whole-module gate mock without this reader reads as off (the #7910 pattern).
@@ -123,54 +129,92 @@ async function openEstimatesOf(conn, customerId, now) {
     .select('*');
 }
 
-// The caller's own sentence choosing the plan: an evidence quote for billing_choice labeled as the caller's AND found
+// The whole sentences of a turn that hold the quote, as said (a fragment is read with its "don't"), or null.
+function sentencesHolding(turnText, quote) {
+  const norm = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+  const sentences = String(turnText || '').match(/[^.!?]+[.!?]*/g) || [];
+  const words = sentences.map(norm);
+  const flat = words.flat();
+  const q = norm(quote);
+  if (!q.length) return null;
+  for (let i = 0; i + q.length <= flat.length; i += 1) {
+    if (!q.every((w, k) => flat[i + k] === w)) continue;
+    let at = 0;
+    const held = sentences.filter((_x, n) => {
+      const from = at;
+      at += words[n].length;
+      return from < i + q.length && at > i;
+    });
+    return held.map((x) => x.trim()).join(' ');
+  }
+  return null;
+}
+
+// The caller's own words choosing the plan: an evidence quote for billing_choice labeled as the caller's AND found
 // word for word in a caller turn of the transcript (outbound labels oriented the way the triage flags read them),
-// cut to fit; null when none is. An unlabeled or one-speaker transcript grounds nothing.
+// given as the whole sentences that hold it, which must be a plain statement (no negation, hedge, condition or
+// question: quoteIsPlainStatement); cut to fit. Null when no quote is. An unlabeled or one-speaker transcript grounds
+// nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
   if (!quotes.length) return null;
   const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
-  const { orientTranscriptForOutbound } = require('./call-triage-flags');
+  const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
   const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  const hit = quotes.find((e) => turnsHolding(turns, e.quote, 'caller').length > 0);
-  if (!hit) return null;
-  const words = hit.quote.replace(/\s+/g, ' ').trim();
-  return words.length > CALLER_WORDS_CHARS ? `${words.slice(0, CALLER_WORDS_CHARS - 1).trimEnd()}…` : words;
+  for (const e of quotes) {
+    for (const turn of turnsHolding(turns, e.quote, 'caller')) {
+      const said = sentencesHolding(turn.raw, e.quote);
+      if (!said || !quoteIsPlainStatement(said)) continue;
+      const words = said.replace(/\s+/g, ' ').trim();
+      return words.length > CALLER_WORDS_CHARS ? `${words.slice(0, CALLER_WORDS_CHARS - 1).trimEnd()}…` : words;
+    }
+  }
+  return null;
 }
 
 // A later call with one of these intents takes back an earlier yes: the customer asked to cancel, or for a one-time
 // visit instead of the plan (service_request.service_intent). It is the latest word even with no billing choice.
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
+// The billing choices a call can name (call-prepay-choice.js BILLING_CHOICES).
+const WORD_CHOICES = new Set(['annual_prepay', 'per_application']);
 
-// The customer's latest word on a call since `since`, from the newest read, valid, two-party call that has one: a
-// billing choice ({ choice, callLogId, at, quote }; quote = callerWordsOf, read from the call's transcript), a
-// cancellation or one-time ask ({ contrary: true, callLogId, at }), or null when no call has either.
-async function latestBillingChoice(conn, { customerId, since }) {
+// One call's word: a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing choice with the
+// caller's own words ({ choice, callLogId, at, quote }; quote = callerWordsOf, from the call's transcript), or null.
+async function wordOfCall(conn, row) {
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
+  const extraction = parseExtraction(row.ai_extraction_enriched);
+  if (!extraction || !isRealConversation(row, extraction)) return null;
+  // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
+  if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
+  const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
+  if (!choice) return null;
+  const { transcription } = (await conn('call_log').where({ id: row.id }).first('transcription')) || {};
+  const quote = callerWordsOf(extraction, { transcript: transcription, outbound: String(row.direction || '').startsWith('outbound') });
+  return { choice, callLogId: row.id, at: row.created_at, quote };
+}
+
+// The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
+// billing choice or a cancellation or one-time ask (filtered in SQL before the row limit, so calls without a word
+// never push the last one out), as wordOfCall gives it, or null.
+async function latestBillingChoice(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  const { billingChoiceOf } = require('./call-prepay-choice');
   const rows = await conn('call_log')
     .where({ customer_id: customerId, v2_extraction_status: 'valid' })
     .where('created_at', '>=', since)
     .whereNotNull('processing_status')
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
-    .whereNotNull('ai_extraction_enriched')
+    .where((qb) => qb
+      .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...WORD_CHOICES]])
+      .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]]))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderBy('created_at', 'desc')
     .limit(CHOICE_SCAN_LIMIT)
     .select(CALL_COLUMNS);
   for (const row of rows) {
-    const extraction = parseExtraction(row.ai_extraction_enriched);
-    if (!extraction || !isRealConversation(row, extraction)) continue;
-    // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
-    if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
-    const choice = billingChoiceOf(extraction);
-    if (!choice) continue;
-    const { transcription } = (await conn('call_log').where({ id: row.id }).first('transcription')) || {};
-    const quote = callerWordsOf(extraction, { transcript: transcription, outbound: row.direction === 'outbound' });
-    return { choice, callLogId: row.id, at: row.created_at, quote };
+    const word = await wordOfCall(conn, row);
+    if (word) return word;
   }
   return null;
 }
@@ -340,23 +384,40 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   };
 }
 
-// The card's headline, by state. Only a yes the call reader recorded is called a yes.
-function cardSummary({ yes }) {
-  return yes
-    ? 'Caller said yes to pay per application on the call. The estimate is not accepted yet.'
-    : 'A call booked a pest visit while an estimate is open. No yes heard on the call. The estimate is not accepted yet.';
+// The card's headline, by state. Only a yes the call reader recorded is called a yes; while the call that gave it is
+// read again, the card says so instead of showing words it cannot check.
+function cardSummary({ yes, rechecking = false }) {
+  if (yes) return 'Caller said yes to pay per application on the call. The estimate is not accepted yet.';
+  if (rechecking) return 'A call booked a pest visit while an estimate is open. The call with the yes is being read again. The estimate is not accepted yet.';
+  return 'A call booked a pest visit while an estimate is open. No yes heard on the call. The estimate is not accepted yet.';
 }
 
-// The card's yes fields: the caller's pay-per-application choice with their own words, or none. The sweep keeps them
-// current (cardState); the shadow verdict stays as filed.
-function heardFields(yes) {
+// The card's yes fields: the caller's pay-per-application choice with their own words, none, or (rechecking) the call
+// that gave the yes while it is read again, with no words. The sweep keeps them current (cardState); the shadow
+// verdict stays as filed.
+function heardFields(yes, { recheckingCallId = null } = {}) {
   return {
     yes_heard: !!yes,
+    yes_rechecking: !yes && !!recheckingCallId,
     billing_choice: yes ? 'per_application' : null,
-    yes_call_log_id: yes ? String(yes.callLogId) : null,
+    yes_call_log_id: yes ? String(yes.callLogId) : (recheckingCallId ? String(recheckingCallId) : null),
     yes_at: yes?.at ? new Date(yes.at).toISOString() : null,
     caller_words: yes?.quote || null,
   };
+}
+
+// The call a card's yes came from, read again: 'gone' (no longer this customer's), 'owed' (being read again),
+// 'changed' (its words no longer hold), 'read' (a re-read finished; the full pass decides), 'same', or 'none' (the card
+// shows no yes).
+async function yesCallState(payload, customerId) {
+  if (!payload.yes_call_log_id || (payload.yes_heard !== true && payload.yes_rechecking !== true)) return 'none';
+  const row = await db('call_log').where({ id: payload.yes_call_log_id, customer_id: customerId })
+    .first([...CALL_COLUMNS, db.raw(`${owedReadSql('call_log')} AS owed_read`)]);
+  if (!row) return 'gone';
+  if (row.owed_read) return 'owed';
+  if (payload.yes_rechecking === true) return 'read';
+  const word = await wordOfCall(db, row);
+  return word?.choice === 'per_application' && word.quote && word.quote === payload.caller_words ? 'same' : 'changed';
 }
 
 // The one card for a call. Idempotent: ANY row for (call, reason), open or closed, means it was filed.
@@ -419,8 +480,8 @@ function cardEstimateIds(card) {
   return Array.isArray(ids) ? ids.map(String) : [];
 }
 
-// Why an open card closes ({ close: note }), its yes fields when they changed ({ refresh: yes }), or null to keep it
-// as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
+// Why an open card closes ({ close: note }), its yes fields when they changed ({ refresh: yes, rechecking? }), or null
+// to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
 // still open or lapsed: an expiry alone never closes it, and neither does another estimate's accept (the card may
 // still be about the one left open). While a call in its window still owes a read, the card waits as it is.
 async function cardState(card) {
@@ -442,13 +503,18 @@ async function cardState(card) {
   const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status));
   if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
   const since = earliestSentAnchor(kept);
+  // The yes the card shows, checked first, also while other calls are read: never words that no longer hold.
+  const p = parseJson(card.payload);
+  const yesCall = await yesCallState(p, customerId);
+  if (yesCall === 'owed') return p.yes_rechecking === true ? null : { refresh: null, rechecking: p.yes_call_log_id };
+  if (yesCall === 'gone' || yesCall === 'changed') return { refresh: null };
   if (await unreadCallSince(db, { customerId, since })) return null;
   const heard = await callerWord(db, { customerId, since });
   if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
-  // The yes the card shows must still be the customer's latest word, from the same call with the same words.
-  const p = parseJson(card.payload);
+  // The yes the card shows must be the customer's latest word, from the same call with the same words.
   const now = heardFields(heard.yes);
-  const same = now.yes_call_log_id === (p.yes_call_log_id ?? null) && now.caller_words === (p.caller_words ?? null) && now.yes_heard === (p.yes_heard === true);
+  const same = ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words']
+    .every((k) => now[k] === (typeof now[k] === 'boolean' ? p[k] === true : (p[k] ?? null)));
   return same ? null : { refresh: heard.yes };
 }
 
@@ -469,8 +535,8 @@ async function applyCardState(card, state) {
       return true;
     }
     await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-      payload: JSON.stringify({ ...parseJson(row.payload), ...heardFields(state.refresh) }),
-      summary: cardSummary({ yes: state.refresh }),
+      payload: JSON.stringify({ ...parseJson(row.payload), ...heardFields(state.refresh, { recheckingCallId: state.rechecking }) }),
+      summary: cardSummary({ yes: state.refresh, rechecking: !!state.rechecking }),
       updated_at: stamp,
     });
     return false;
@@ -563,6 +629,7 @@ module.exports = {
   MEMBERSHIP_FEE_LINE_NAME,
   evaluatePhoneYes,
   latestBillingChoice,
+  owedReadSql,
   callerWordsOf,
   runCallPhoneYesSweep,
   closeMootCards,

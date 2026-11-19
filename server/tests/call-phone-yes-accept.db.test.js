@@ -32,7 +32,7 @@ const acceptance = require('../services/estimate-manual-acceptance');
 const { sendMembershipStarted } = require('../services/account-membership-email');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { notifyAdmin } = require('../services/notification-service');
-const { runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS } = require('../services/call-phone-yes-accept');
+const { runCallPhoneYesSweep, evaluatePhoneYes, owedReadSql, REASON_CODE, REASONS } = require('../services/call-phone-yes-accept');
 
 const GATE = 'GATE_CALL_PHONE_YES_ACCEPT';
 const describeDb = SKIP ? describe.skip : describe;
@@ -196,6 +196,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ["a caller quote the transcript does not hold", { transcription: 'Agent: Thanks for calling Waves.\nCaller: I need someone out for the bugs.\nAgent: You are all set.' }],
     ['a caller quote said only by staff', { transcription: `Agent: ${WORDS}\nCaller: Okay.\nAgent: You are all set.` }],
     ['an unlabeled transcript', { transcription: `Thanks for calling. ${WORDS} You are all set.` }],
+    ['a fragment of a negated caller sentence', {
+      ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), evidence: [{ field_path: '/service_request/billing_choice', quote: 'bill me each time', speaker: 'caller' }] }),
+      transcription: "Agent: Thanks for calling Waves.\nCaller: Please don't bill me each time you come out.\nAgent: Okay.",
+    }],
   ])("a pay-per-application choice without the caller's own words (%s) is no yes the card shows", async (_name, change) => {
     const { yesCallId, bookingCallId } = await phoneYes();
     await trx('call_log').where({ id: yesCallId }).update(change);
@@ -223,8 +227,9 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the estimate lapsed', { estimateOver: { expires_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
     ['the estimate was first sent after the booking call', { estimateOver: { sent_at: new Date(Date.now() - 3600000), created_at: new Date(Date.now() - 3600000) } },
       'no_open_estimate'],
-    ['the booking call still has an extraction retry left', { bookingOver: { processing_status: 'extraction_failed', v2_extraction_status: 'failed', extraction_attempts: 1 } },
-      'call_still_processing'],
+    ['the booking call still has an extraction retry left', {
+      bookingOver: { processing_status: 'extraction_failed', v2_extraction_status: 'failed', extraction_attempts: 1, ...RECORDED },
+    }, 'call_still_processing'],
   ])('no card when %s', async (_name, setup, reason) => {
     const { customerId, bookingCallId } = await phoneYes(setup);
     await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason });
@@ -297,8 +302,12 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['being read, after the yes', { hoursAgo: 1, processing_status: 'processing' }, {}, 'newer_call'],
     ['queued, with a recording, after the yes', { hoursAgo: 1, processing_status: 'pending', ...RECORDED }, {}, 'newer_call'],
     ['not started, with a recording, after the yes', { hoursAgo: 1, processing_status: null, ...RECORDED }, {}, 'newer_call'],
-    ['with a transcription retry left, after the yes', { hoursAgo: 1, processing_status: 'no_transcription', extraction_attempts: 1 }, {}, 'newer_call'],
-    ['with an extraction retry left, after the yes', { hoursAgo: 1, processing_status: 'extraction_failed', extraction_attempts: 2 }, {}, 'newer_call'],
+    ['with a transcription retry left, after the yes', { hoursAgo: 1, processing_status: 'no_transcription', extraction_attempts: 1, ...RECORDED }, {}, 'newer_call'],
+    ['with an extraction retry left, after the yes', { hoursAgo: 1, processing_status: 'extraction_failed', extraction_attempts: 2, ...RECORDED }, {}, 'newer_call'],
+    ['waiting for its transcript, after the yes', { hoursAgo: 1, transcription_status: 'pending', transcription: null, ...RECORDED }, {}, 'newer_call'],
+    ['with a masked transcript not read yet, after the yes', {
+      hoursAgo: 1, processing_status: null, transcription_metadata: JSON.stringify({ pan_detected: true }),
+    }, {}, 'newer_call'],
     ['being read, between the send and the booking, with no yes yet', { hoursAgo: 5, processing_status: 'processing' }, { yesChoice: null }, 'no_yes_heard'],
     ['being read, after a booking call that could not be read', { hoursAgo: 1, processing_status: 'processing' }, {}, 'booking_call_unread', true],
   ])('a call from the customer %s waits; once read, the card files', async (_name, unread, setup, reason, bookingUnread = false) => {
@@ -309,7 +318,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(evaluatePhoneYes({ callLogId: fixture.bookingCallId, customerId: fixture.customerId }))
       .resolves.toEqual({ card: false, reason: 'call_still_processing' });
     await expect(sweep()).resolves.toMatchObject({ filed: 0 });
-    await trx('call_log').where({ id: unreadCallId }).update({ processing_status: 'processed' });
+    await trx('call_log').where({ id: unreadCallId })
+      .update({ processing_status: 'processed', transcription_status: 'completed', transcription: transcriptWith(null) });
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
     const [card] = await cards(fixture.bookingCallId);
     expect(payloadOf(card).auto_reason).toBe(reason);
@@ -317,13 +327,80 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
 
   test.each([
     ['a call with no recording', { processing_status: null }],
-    ['a failed extraction at the retry cap', { processing_status: 'extraction_failed', extraction_attempts: 3 }],
-    ['a failed transcription at the retry cap', { processing_status: 'no_transcription', extraction_attempts: 3 }],
-    ['a failed extraction older than the retry window', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: new Date(Date.now() - 8 * DAY) }],
+    ['a failed transcription with retries left but no recording', { processing_status: 'no_transcription', extraction_attempts: 1 }],
+    ['a recording under 10 seconds', { processing_status: null, ...RECORDED, recording_duration_seconds: 8 }],
+    ['a failed extraction at the retry cap', { processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED }],
+    ['a failed transcription at the retry cap', { processing_status: 'no_transcription', extraction_attempts: 3, ...RECORDED }],
+    ['a failed extraction older than the retry window', {
+      processing_status: 'extraction_failed', extraction_attempts: 1, created_at: new Date(Date.now() - 8 * DAY), ...RECORDED,
+    }],
   ])('%s owes no read: the card files at once', async (_name, state) => {
     const fixture = await phoneYes({ estimateOver: { sent_at: new Date(Date.now() - 10 * DAY) } });
     await call(fixture.customerId, null, { created_at: new Date(Date.now() - 3600000), ...state });
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+  });
+
+  test("the wait follows the processor's own read rules: owed is exactly what its sweep would read again", async () => {
+    const processor = require('../services/call-recording-processor');
+    const customerId = await customer();
+    const settled = new Date(Date.now() - 20 * 60000); // past the processor's 10-minute settle window
+    const masked = { transcription_metadata: JSON.stringify({ pan_detected: true }) };
+    const states = [
+      { processing_status: null, ...RECORDED }, { processing_status: null }, { processing_status: null, ...RECORDED, recording_duration_seconds: 8 },
+      { processing_status: 'pending', ...RECORDED }, { processing_status: 'processed', ...RECORDED },
+      { processing_status: 'processed', transcription_status: 'pending', transcription: null, ...RECORDED },
+      { processing_status: 'no_transcription', extraction_attempts: 1, ...RECORDED }, { processing_status: 'no_transcription', extraction_attempts: 1 },
+      { processing_status: 'no_transcription', extraction_attempts: 3, ...RECORDED },
+      { processing_status: 'extraction_failed', extraction_attempts: 1, ...RECORDED }, { processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED },
+      { processing_status: 'extraction_failed', extraction_attempts: 1, ...RECORDED, created_at: new Date(Date.now() - 8 * DAY) },
+      { processing_status: null, ...masked }, { processing_status: 'pending', ...masked }, { processing_status: null, ...masked, transcription: null },
+      { processing_status: 'extraction_failed', extraction_attempts: 1, ...masked }, { processing_status: 'no_transcription', extraction_attempts: 1, ...masked },
+      { processing_status: 'processed', ...masked },
+    ];
+    const ids = [];
+    for (const state of states) ids.push(await call(customerId, null, { created_at: settled, updated_at: settled, ...state }));
+    const owed = await trx('call_log').whereIn('id', ids).whereRaw(owedReadSql('call_log')).pluck('id');
+    const read = await trx('call_log').whereIn('id', ids).whereRaw(`NOT ${owedReadSql('call_log')}`).pluck('id');
+    const candidates = await processor.pendingCandidatesQuery().whereIn('id', ids).pluck('id');
+    expect(candidates.length).toBeGreaterThan(5);
+    expect([...owed].sort()).toEqual([...candidates].sort());
+    expect(owed.length + read.length).toBe(states.length);
+  });
+
+  test("the latest word is found past fifty calls with none: a cancellation before them takes the yes back", async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await call(customerId, null, { created_at: new Date(Date.now() - 90 * 60000) }, 'cancellation_request');
+    for (let n = 0; n < 55; n += 1) await call(customerId, null, { created_at: new Date(Date.now() - 3600000 + n * 1000) });
+    await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason: 'took_back' });
+  });
+
+  test('while the call with the yes is read again, the card shows no words and says so; after the read, the yes is back', async () => {
+    const { yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('call_log').where({ id: yesCallId }).update({ processing_status: 'processing' });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(card.summary).toBe('A call booked a pest visit while an estimate is open. The call with the yes is being read again. The estimate is not accepted yet.');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, yes_rechecking: true, yes_call_log_id: yesCallId, caller_words: null, auto_would_accept: true });
+    const stamp = card.updated_at;
+    await sweep();
+    [card] = await cards(bookingCallId);
+    expect(card.updated_at).toEqual(stamp);
+    await trx('call_log').where({ id: yesCallId }).update({ processing_status: 'processed' });
+    await sweep();
+    [card] = await cards(bookingCallId);
+    expect(card.summary).toBe('Caller said yes to pay per application on the call. The estimate is not accepted yet.');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_rechecking: false, yes_call_log_id: yesCallId, caller_words: WORDS });
+  });
+
+  test('a yes call read again without the yes: the card shows no yes', async () => {
+    const { yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: JSON.stringify(extractionWith(null)), transcription: transcriptWith(null) });
+    await sweep();
+    const [card] = await cards(bookingCallId);
+    expect(card.summary).toMatch(/No yes heard/);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, yes_rechecking: false, yes_call_log_id: null, caller_words: null });
   });
 
   test('an estimate sent after the booking call is not what the card is about, but it still makes two', async () => {

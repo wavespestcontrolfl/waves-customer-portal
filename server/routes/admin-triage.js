@@ -25,11 +25,12 @@ const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candid
 // addresses, and a family-account suggestion lists customers and the caller's number for the office to
 // link. Hidden from the tech list and counts, and refused on every shared transition.
 // Cards whose transitions must carry the version (expected_updated_at) the operator saw: a reprocess
-// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
+// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion; the
+// phone-yes sweep rewrites its card's yes).
 const VERSION_BOUND_REASONS = [
   'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
   'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs', 'family_account_candidates', 'name_spelling_differs',
-  'call_prepay_choice',
+  'call_prepay_choice', 'call_phone_yes',
 ];
 // call_prepay_choice (GATE_CALL_PREPAY_CHOICE): the card carries the customer's estimate amount, and its one tap leads to an invoice: admin only.
 // call_phone_yes (GATE_CALL_PHONE_YES_ACCEPT): the card asks the office to accept an estimate (a billing decision): admin only.

@@ -152,7 +152,7 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(branch.slice(0, 600)).toContain('isAdmin ? (');
   });
   test('Resolve / Dismiss bind to the version the operator saw (expected_updated_at), via the version-bound reason set', () => {
-    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',(?:\s*'name_spelling_differs',)?(?:\s*'call_prepay_choice',)?\s*\];/);
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',(?:\s*'name_spelling_differs',)?(?:\s*'call_prepay_choice',)?(?:\s*'call_phone_yes',)?\s*\];/);
     expect(triage).toContain('if (VERSION_BOUND_REASONS.includes(item.reason_code)');
     expect(triage).toContain('|| emailReviewCard');
     expect(triage).toContain("return { outcome: 'stale_version' };");

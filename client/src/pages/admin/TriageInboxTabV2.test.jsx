@@ -1390,4 +1390,16 @@ describe('call_phone_yes card', () => {
     expect(within(el).queryByText(/stale words/)).toBeNull();
     expect(within(el).getByText(/No\. No yes was heard on the call\./)).toBeInTheDocument();
   });
+
+  it('a yes call being read again: says so, with no words', async () => {
+    load(card({
+      yes_heard: false, yes_rechecking: true, yes_call_log_id: 'call-10', caller_words: null, estimate_id: 'est-7',
+      auto_would_accept: true, auto_reason: null, auto_message: null,
+    }));
+    render(<TriageInboxTabV2 isAdmin />);
+    const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
+    expect(within(el).getByText('The call with the yes is being read again')).toBeInTheDocument();
+    expect(within(el).queryByText(/Caller said yes/)).toBeNull();
+    expect(within(el).queryByText('No yes heard')).toBeNull();
+  });
 });
