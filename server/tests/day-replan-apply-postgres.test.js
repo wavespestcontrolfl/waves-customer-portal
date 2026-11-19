@@ -247,7 +247,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     });
   });
 
-  test('capacity measurement ignores another technician but keeps unassigned work fixed', async () => {
+  test('capacity measurement reruns exact office work and reserves the full unassigned promise', async () => {
     const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
     const date = '2097-06-11';
     const booked = visits[1];
@@ -258,14 +258,21 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
       technician_id: otherTech, reservation_expires_at: null, route_order: 1, lat: HQ.lat, lng: HQ.lng,
     });
     const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00',
-      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], workMinutes: 60 } };
+      // Quarterly route planning can certify 35 minutes; the office target
+      // below still reruns this order at its exact 60-minute scored duration.
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], workMinutes: 35 } };
     const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
 
     await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
       await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW }))
         .resolves.toEqual([expect.objectContaining({ slot, finishMin: 660 })]);
-      await mockConn('scheduled_services').where({ id: booked.id }).update({ technician_id: null });
+      await mockConn('scheduled_services').where({ id: booked.id }).update({
+        technician_id: null, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+        reservation_expires_at: '2001-01-01T00:00:00Z',
+      });
       await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toEqual([]);
+      const eleven = { ...slot, windowStart: '11:00', windowEnd: '12:00' };
+      await expect(assessOfferedHours(mockConn, [eleven], target, { now: NOW })).resolves.toEqual([]);
     });
   });
 

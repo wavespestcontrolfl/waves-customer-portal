@@ -254,6 +254,14 @@ test('booking fit scores an overlapping capacity card only from its certified li
   occupancy.listOccupiedWindows.mockClear();
   await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: shortProof }],
     { ...target, estimated_duration_minutes: 45 }, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ finishMin: 675 })]);
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: shortProof }],
+    target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ finishMin: 690 })]);
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: shortProof }],
+    { ...target, estimated_duration_minutes: 420 }, { now: NOW, calendar: calendar() }))
     .resolves.toEqual([]);
 
   // The nominally identical fixed-hour card remains blocked by the existing 10 AM row.
@@ -261,7 +269,7 @@ test('booking fit scores an overlapping capacity card only from its certified li
   await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: undefined }], target,
     { now: NOW, calendar: calendar() })).resolves.toEqual([]);
 
-  // A route mutation or duration mismatch invalidates the old certificate.
+  // A route mutation still invalidates the old certificate.
   for (const proof of [
     { routeMode: 'arrival_windows', order: ['missing', '__candidate__'], workMinutes: 60 },
   ]) {
@@ -353,6 +361,7 @@ test('a certified rival hold stays in the capacity route exactly once', async ()
 test('capacity replay ignores other-technician visits but keeps unassigned work fixed', async () => {
   const occupancy = require('../services/scheduling/occupancy');
   const { CAPACITY_PLACEMENT, _internals: { assessOfferedHours } } = require('../services/day-replan/booking-fit');
+  const { capacityFixedIntervals } = require('../services/scheduling/arrival-route');
   const RouteOptimizer = require('../services/route-optimizer');
   const date = '2026-11-20';
   const tech = 'tech-1';
@@ -378,6 +387,22 @@ test('capacity replay ignores other-technician visits but keeps unassigned work 
   await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar(unassigned) }))
     .resolves.toEqual([]);
 
+  // The writer reserves an unassigned visit from the start of its arrival
+  // promise through the promise end plus its work: 09:00 + two hours + 60
+  // minutes occupies through noon, even with an expired hold stamp on this
+  // claimed customer visit. Noon itself remains a valid handoff.
+  const promised = { ...unassigned, window_start: '09:00', window_end: '10:00',
+    estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01' };
+  expect(capacityFixedIntervals([promised])).toEqual([
+    expect.objectContaining({ id: promised.id, window_start: '09:00', endMin: 720 }),
+  ]);
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([promised]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar(promised) }))
+    .resolves.toEqual([]);
+  const eleven = { ...slot, windowStart: '11:00', windowEnd: '12:00' };
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([promised]);
+  await expect(assessOfferedHours(jest.fn(), [eleven], target, { now: NOW, calendar: calendar(promised) }))
+    .resolves.toEqual([]);
   // The ordinary hour path retains its existing tech-blind rule.
   occupancy.listOccupiedWindows.mockResolvedValueOnce([blocker]);
   await expect(assessOfferedHours(jest.fn(), [{ ...slot, [CAPACITY_PLACEMENT]: undefined }], target,

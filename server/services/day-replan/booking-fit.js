@@ -5,7 +5,7 @@ const { coVisitGroups, simulate, promisesKept } = require('./app-sim');
 const { openTime, fitOfferedHour, serviceBlocks } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
-const { groupRouteStops } = require('../scheduling/arrival-route');
+const { groupRouteStops, capacityFixedIntervals, capacityRouteHitsFixed } = require('../scheduling/arrival-route');
 const {
   DEFAULT_EXCLUDE_STATUSES, findInterviewConflicts, listOccupiedWindows, occupiedRows, techScopedConfirmActive,
 } = require('../scheduling/occupancy');
@@ -118,7 +118,7 @@ function certifiedSequence(slot, groups, proposed) {
   const actualDuration = Number(proposed.estimated_duration_minutes);
   if (!Array.isArray(groups) || proof?.routeMode !== 'arrival_windows' || !Array.isArray(proof.order)
       || proof.order.length !== groups.length + 1 || !(actualDuration > 0)
-      || !(Number(proof.workMinutes) >= actualDuration)) return null;
+      || !(Number(proof.workMinutes) > 0)) return null;
   const byMember = new Map();
   for (const group of groups) {
     const id = String(group.id);
@@ -148,6 +148,12 @@ function certifiedSequence(slot, groups, proposed) {
 // certified sequence and real work lengths, not from fixed-hour vacancy.
 // Re-simulate that order against the current rows and exact blocks before
 // using it as advisory ranking evidence.
+function capacitySimulationInvalid(sim, input, seq) {
+  return !sim || capacityRouteHitsFixed(sim, input.capacityFixedIntervals || [], input.bounds.departureMin)
+    || !promisesKept(sim, seq, input.marginMin)
+    || (input.requireClose && sim.serviceFinishMin > input.bounds.closeMin);
+}
+
 function fitCertifiedCapacity(input, slot, proposed) {
   const startMin = minute(slot.windowStart);
   const offeredEndMin = minute(slot.windowEnd);
@@ -160,9 +166,10 @@ function fitCertifiedCapacity(input, slot, proposed) {
   // handoffs; the simulation below separately catches delayed actual work.
   const nominalGuards = [...(input.interviewBlocks || []), ...(input.makeRoomBlocks || [])];
   if (nominalGuards.some(block => startMin < block.endMin && offeredEndMin > block.startMin)) return null;
-  // The public card's end is its reserved/display width. The scoring target
-  // carries the catalog's actual expected work; a certified longer placement
-  // may safely be re-simulated at that shorter duration, but never vice versa.
+  // The public card's end is its reserved/display width. The proof anchors
+  // the picker's chosen order; the fresh replay below uses the office
+  // target's exact expected work, whether longer or shorter than the picker
+  // planned, and accepts it only when that complete order still fits.
   const actual = { ...proposed, window_end: hhmm(startMin + Number(proposed.estimated_duration_minutes)) };
   const seq = certifiedSequence(slot, input.capacityGroups, actual);
   if (!seq) return null;
@@ -171,8 +178,7 @@ function fitCertifiedCapacity(input, slot, proposed) {
     departureMin: input.bounds.departureMin,
     blockedIntervals: serviceBlocks(input.capacityBlocks || input.blocks),
   });
-  if (!sim || !promisesKept(sim, seq, input.marginMin)
-      || (input.requireClose && sim.serviceFinishMin > input.bounds.closeMin)) return null;
+  if (capacitySimulationInvalid(sim, input, seq)) return null;
   const figures = openTime(sim, input.bounds);
   const arrival = sim.arrivals.find(row => String(row.id) === String(actual.id));
   if (!figures || !arrival) return null;
@@ -249,9 +255,14 @@ async function technicianProof({ conn, date, techId, day, read, replan, homes, d
   const blockedHours = occupiedBlockedHours(blocked);
   const occupancyBlocks = blocked.map(({ startMin, endMin }) => ({ startMin, endMin }));
   const routeBlocks = [...blocks, ...day.interviewBlocks, ...occupancyBlocks];
-  const capacityFixed = capacityScopedOccupancy(day.occupancyRows, techId, techBlind);
-  const capacityOccupancyBlocks = capacityFixed.map(({ startMin, endMin }) => ({ startMin, endMin }));
-  const makeRoomBlocks = capacityFixed.filter(row => row.conflict_reason === 'make_room_destination')
+  const capacityDestinations = capacityScopedOccupancy(day.occupancyRows, techId, techBlind)
+    .filter(row => row.conflict_reason === 'make_room_destination');
+  // Synthetic make-room destinations stay exact. Ordinary unassigned work
+  // uses the capacity writer's wider promise-end-plus-work reservation.
+  const fixedIntervals = capacityFixedIntervals(day.occupancyRows
+    .filter(row => row.conflict_reason !== 'make_room_destination'));
+  const capacityOccupancyBlocks = capacityDestinations.map(({ startMin, endMin }) => ({ startMin, endMin }));
+  const makeRoomBlocks = capacityDestinations
     .map(({ startMin, endMin }) => ({ startMin, endMin }));
   const capacityBlocks = [...blocks, ...day.interviewBlocks, ...capacityOccupancyBlocks];
   const unavailable = [...routeBlocks, ...blockedHours.map(hour => ({ startMin: hour * 60, endMin: hour * 60 + 60 }))];
@@ -259,7 +270,7 @@ async function technicianProof({ conn, date, techId, day, read, replan, homes, d
   const before = simulate(ordered, { origin, departureMin });
   const bounds = { openMin: dayOpen, closeMin: dayClose, departureMin, unavailable, driveBlocks: routeBlocks };
   const rowHours = row => routeRowHours(row, day.occupiedById, replan.rowHours);
-  return { before, groups, capacityGroups, pref, origin, bounds, routeBlocks, capacityBlocks, makeRoomBlocks,
+  return { before, groups, capacityGroups, pref, origin, bounds, routeBlocks, capacityBlocks, fixedIntervals, makeRoomBlocks,
     interviewBlocks: day.interviewBlocks, blockedHours, rowHours };
 }
 
@@ -270,7 +281,7 @@ function fitOneOfferedSlot(slot, target, techId, proof) {
   const input = { groups: proof.groups, capacityGroups: proof.capacityGroups, group, leaderId: proposed.id,
     pref: proof.pref, origin: proof.origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds: proof.bounds,
     blocks: proof.routeBlocks, capacityBlocks: proof.capacityBlocks, interviewBlocks: proof.interviewBlocks,
-    makeRoomBlocks: proof.makeRoomBlocks,
+    makeRoomBlocks: proof.makeRoomBlocks, capacityFixedIntervals: proof.fixedIntervals,
     blockedHours: proof.blockedHours, rowHours: proof.rowHours, requireClose: true };
   const capacityFit = fitCertifiedCapacity(input, slot, proposed);
   const fit = capacityFit || (slot?.[CAPACITY_PLACEMENT] ? null : (proof.before && fitOfferedHour(
