@@ -6,7 +6,9 @@ import {
   formatDay,
   formatIssued,
   formatTimelineTime,
+  isStaleWrite,
   isStartWeekday,
+  isValidDay,
   maskEmail,
   maskPhone,
   offerErrorMessage,
@@ -47,12 +49,25 @@ describe('offer helpers', () => {
   });
 
   it('turns each 409 code into a plain sentence', () => {
-    for (const code of ['TERMS_NOT_ISSUED', 'DRAFT_CHANGED', 'OFFER_CHANGED', 'DRAFT_HASH_REQUIRED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED']) {
+    for (const code of ['TERMS_NOT_ISSUED', 'DRAFT_CHANGED', 'OFFER_CHANGED', 'DRAFT_HASH_REQUIRED', 'OFFER_NOT_DRAFT', 'NO_CONTACT', 'APPLICATION_CLOSED', 'ROLE_NOT_SUPPORTED', 'OFFER_NOT_WITHDRAWABLE', 'OFFER_NOT_REVISABLE']) {
       const text = offerErrorMessage({ message: 'HTTP 409', body: { code } });
       expect(text).not.toBe('HTTP 409');
       expect(text).not.toContain(code);
     }
     expect(offerErrorMessage({ message: 'Start date must be in the future' })).toBe('Start date must be in the future');
+  });
+
+  it('treats every refusal that means "this changed meanwhile" as a stale write to re-read', () => {
+    for (const code of ['DRAFT_CHANGED', 'OFFER_CHANGED', 'OFFER_NOT_DRAFT', 'OFFER_NOT_WITHDRAWABLE', 'OFFER_NOT_REVISABLE', 'DRAFT_EXISTS', 'OFFER_ALREADY_OPEN', 'APPLICATION_CLOSED']) {
+      expect(isStaleWrite({ body: { code } })).toBe(true);
+    }
+    for (const code of ['TERMS_NOT_ISSUED', 'NO_CONTACT', 'OWNER_ONLY', undefined]) expect(isStaleWrite({ body: { code } })).toBe(false);
+  });
+
+  it('accepts real calendar dates only', () => {
+    expect(isValidDay('2027-01-04')).toBe(true);
+    expect(isValidDay('2028-02-29')).toBe(true);
+    for (const bad of ['2026-02-30', '2027-02-29', '2027-1-4', '10000-01-03', '', null, 20270104]) expect(isValidDay(bad)).toBe(false);
   });
 
   it('describes a send plainly: every channel out, queued, unsure or failed', () => {
@@ -68,7 +83,7 @@ describe('offer helpers', () => {
     expect(describeSend({ sms: { outcome: 'blocked' }, email: { outcome: 'skipped' } }, 'Jordan').lines).toEqual([
       'The text did not go out.',
       'The email did not go out.',
-      'Check his phone and email, then use Revise to send a new link.',
+      'Check the phone and email on file, then use Revise to send a new link.',
     ]);
     // Only the channel that was tried is described.
     expect(describeSend({ email: { outcome: 'sent' } }, 'Jordan').headline).toBe('Offer sent to Jordan.');
@@ -77,8 +92,23 @@ describe('offer helpers', () => {
     expect(describeSend({ sms: { outcome: 'sent' }, email: { outcome: 'not_requested' } }, 'Jordan')).toEqual({ headline: 'Offer sent to Jordan.', lines: [] });
     expect(describeSend({ sms: { outcome: 'skipped', code: 'no_phone' }, email: { outcome: 'failed' } }, 'Jordan').lines).toEqual([
       'The email did not go out.',
-      'Check his phone and email, then use Revise to send a new link.',
+      'Check the phone and email on file, then use Revise to send a new link.',
     ]);
+  });
+
+  it('reads the offer status of the send answer: closed during the send, or already answered', () => {
+    const failed = { sms: { outcome: 'failed' }, email: { outcome: 'failed' } };
+    for (const status of ['withdrawn', 'superseded']) {
+      expect(describeSend(failed, 'Jordan', status)).toEqual({
+        headline: 'This offer is no longer open.',
+        lines: ['The text did not go out.', 'The email did not go out.', 'It was withdrawn or replaced while it was being sent. The offer card shows where it stands.'],
+      });
+    }
+    expect(describeSend({ sms: { outcome: 'sent' } }, 'Jordan', 'accepted')).toEqual({
+      headline: 'Offer sent to Jordan.',
+      lines: ['Jordan has already answered it. The offer card shows the answer.'],
+    });
+    expect(describeSend({ sms: { outcome: 'sent' } }, 'Jordan', 'sent')).toEqual({ headline: 'Offer sent to Jordan.', lines: [] });
   });
 
   it('reads a sent offer past its expiry as expired', () => {

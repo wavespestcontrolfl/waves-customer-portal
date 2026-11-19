@@ -226,16 +226,32 @@ function formView({ edits, pinned, data, contact, busy, locked }) {
   };
 }
 
-function ReadOnlyNotice({ changed, locked, hasLatest, onAdopt, onRetry }) {
+// message: the server's sentence when a write was refused as stale; else the
+// form saw a newer version in a background read.
+// The form's read-only state. A background read that differs from the pinned draft,
+// or a refused stale write (`conflict`), makes it "changed": read-only, with the
+// owner's edits still on screen, until they load the newer version (`newer`; after a
+// refused first save, the open draft another admin made). It is also read-only until
+// a read has succeeded and holds the draft this form is about.
+function formLock({ data, draftId, pinned, needRead, conflict }) {
+  const latest = reviewedDraft(data, draftId);
+  const newer = latest || (conflict && !draftId ? openDraft(data) : null);
+  const changed = !needRead && (conflict || (Boolean(pinned) && (!latest || latest.draftHash !== pinned.draftHash)));
+  return { newer, changed, locked: needRead || changed || Boolean(draftId && !pinned) };
+}
+
+function ReadOnlyNotice({ changed, locked, message, hasNewer, onAdopt, onRetry }) {
   if (changed) {
     return (
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <ActionFeedback error className="flex-1">
-          This draft changed. Review the new version.
+          {message || (hasNewer ? "This draft changed. Review the new version." : "This draft is no longer open. Close this form to see the offer.")}
         </ActionFeedback>
-        <Button size="sm" variant="secondary" onClick={onAdopt}>
-          {hasLatest ? "Show the new version" : "Close"}
-        </Button>
+        {hasNewer && (
+          <Button size="sm" variant="secondary" onClick={onAdopt}>
+            Show the new version
+          </Button>
+        )}
       </div>
     );
   }
@@ -260,6 +276,9 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   const [draftId, setDraftId] = useState(() => initialDraftId(draft, data));
   const [pinned, setPinned] = useState(() => reviewedDraft(data, initialDraftId(draft, data)));
   const [needRead, setNeedRead] = useState(false);
+  // Set when the server refused a write as stale. The form stays read-only, with the owner's
+  // edits on screen, until they load the new version or close the form.
+  const [conflict, setConflict] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
@@ -269,12 +288,9 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     onBusyChange(busy);
     return () => onBusyChange(false);
   }, [busy, onBusyChange]);
-  // A background read that differs from the pinned draft puts the form in a
-  // read-only "changed" state until the owner loads the new version.
-  const latest = reviewedDraft(data, draftId);
-  const changed = Boolean(pinned) && !needRead && (!latest || latest.draftHash !== pinned.draftHash);
-  // Read-only until a read has succeeded and holds the draft this form is about.
-  const locked = needRead || changed || Boolean(draftId && !pinned);
+  const { newer, changed, locked } = formLock({ data, draftId, pinned, needRead, conflict });
+  // A refused write's sentence shows once, in the read-only notice (after the re-read).
+  const notice = conflict ? error : null;
   const { base, fields, firstName, sendTo, startError, fieldsOk, dirty, canSend } = formView({ edits, pinned, data, contact, busy, locked });
   const ownerActions = data.viewer?.ownerActions === true;
   const sends = sendChannels(contact);
@@ -310,28 +326,36 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     return next;
   };
 
-  // Re-read. If the read shows the draft is gone (another admin sent or discarded
-  // it), close the form: the card shows the offer's current state.
+  // Try again after a failed read. After a save it pins the saved draft; if the read shows
+  // that draft is gone (another admin sent or discarded it), the form closes and the card
+  // shows the offer's state. After a refused write it only re-reads: the owner still picks.
   const reread = async () => {
+    if (conflict) {
+      if (await onChanged()) setNeedRead(false);
+      return;
+    }
     const expected = pinned?.id || draftId;
     const next = await refresh(expected);
     if (next && expected && !reviewedDraft(next, expected)) onClose();
   };
   const retryRead = () => run(reread);
 
-  // The server refused a write because the draft or offer moved on: nothing was
-  // written. Say so, re-read, and never re-base the owner's edits silently.
+  // The server refused a write because the draft, the offer or the application moved on:
+  // nothing was written. Re-read, keep the owner's edits on screen, and wait for them.
   const staleWrite = async () => {
     setConfirming(false);
+    setConflict(true);
     setNeedRead(true);
-    await reread();
+    if (await onChanged()) setNeedRead(false);
   };
 
   const adoptLatest = () => {
-    if (!latest) return onClose();
-    setPinned(latest);
-    setDraftId(latest.id);
+    if (!newer) return onClose();
+    setPinned(newer);
+    setDraftId(newer.id);
     setEdits({});
+    setConflict(false);
+    setError(null);
   };
 
   const save = async () => {
@@ -357,7 +381,8 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     setError(null);
     try {
       const out = await sendOffer(applicationId, pinned.id, pinned.draftHash);
-      setResult(out.comms || {});
+      // The answer's offer row is read after delivery: it can already be withdrawn or replaced.
+      setResult({ comms: out.comms || {}, offerStatus: out.offer?.status });
       await onSent();
       setConfirming(false);
     } catch (err) {
@@ -369,7 +394,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
   };
 
   if (result) {
-    const sent = describeSend(result, firstName);
+    const sent = describeSend(result.comms, firstName, result.offerStatus);
     return (
       <>
         <DialogBody>
@@ -394,7 +419,14 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
       <DialogBody>
         <div className="flex flex-col gap-4">
           {!busy && (
-            <ReadOnlyNotice changed={changed} locked={locked} hasLatest={Boolean(latest)} onAdopt={adoptLatest} onRetry={retryRead} />
+            <ReadOnlyNotice
+              changed={changed}
+              locked={locked}
+              message={notice}
+              hasNewer={Boolean(newer)}
+              onAdopt={adoptLatest}
+              onRetry={retryRead}
+            />
           )}
           <OfferFields fields={fields} onChange={onChange} startError={startError} sendTo={sendTo} disabled={busy || locked} />
           <Row label="Shared terms attached">
@@ -408,7 +440,7 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
           <div className="text-14 text-zinc-500">
             {sendNote(ownerActions, sends, firstName)}
           </div>
-          {error && !confirming && <ActionFeedback error>{error}</ActionFeedback>}
+          {error && !confirming && !notice && <ActionFeedback error>{error}</ActionFeedback>}
         </div>
       </DialogBody>
       <DialogFooter>

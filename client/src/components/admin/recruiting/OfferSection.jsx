@@ -4,15 +4,14 @@ import { fetchSignedCopy } from "./offerApi";
 import OfferTimeline, { History, SignedCopyView } from "./OfferTimeline";
 import { offerErrorMessage, shownOffer } from "./offerLogic";
 
-// The offer part of the application detail. Nothing renders while the
-// offer flow is off for this application (today's status-only behavior).
 // The offer part of the application detail. Renders nothing while the flow is
 // off (today's status-only behavior); a failed read shows an error with Retry
-// and no Offer move.
+// and no Offer move. onChanged re-reads the offer and the application after
+// any card action, a refused one included: a signature or a close moves the stage.
 const REOFFER_STATES = ["withdrawn", "expired"];
 
-export default function OfferSection({ detail, offerFlow }) {
-  const { enabled, data, openForm, reload, error: readError, refreshError, ownerActions, retry } = offerFlow;
+export default function OfferSection({ detail, offerFlow, onChanged }) {
+  const { enabled, data, openForm, error: readError, refreshError, ownerActions, retry } = offerFlow;
   const [signed, setSigned] = useState(null);
   const [error, setError] = useState(null);
   if (detail.role !== "technician") return null;
@@ -51,7 +50,7 @@ export default function OfferSection({ detail, offerFlow }) {
         history={history}
         canMakeOffer={canMakeOffer}
         onMakeOffer={() => openForm(null, detail.id)}
-        onChanged={reload}
+        onChanged={onChanged}
         onOpenDraft={(draft) => openForm(draft, detail.id)}
         onEdit={() => openForm(data.current, detail.id)}
       />

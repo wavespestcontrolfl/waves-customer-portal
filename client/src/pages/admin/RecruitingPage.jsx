@@ -830,7 +830,7 @@ const CLOSED_STATUSES = ["hired", "rejected", "withdrawn"];
 // The Offer button opens the Offer form while the offer flow is on for a
 // technician application, and is today's status-only move only when the
 // server said the flow is off (or for a non-technician).
-function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOpenStageDialog, onOpenApplication, onClose }) {
+function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOfferChanged, onOpenStageDialog, onOpenApplication, onClose }) {
   const contact = detail?.contact_snapshot || {};
   const technician = detail.role === "technician";
   // A closed application cannot take an offer: Offer is the plain status move there.
@@ -922,7 +922,7 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
 
         <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} />
 
-        <OfferSection detail={detail} offerFlow={offerFlow} />
+        <OfferSection detail={detail} offerFlow={offerFlow} onChanged={onOfferChanged} />
 
         <StatusHistoryList history={detail.status_history} />
 
@@ -1038,6 +1038,20 @@ export default function RecruitingPage() {
     // the outer one must not leave the inner one open over a null detail.
     stageWorkflow.closeStageDialog();
   }, [stageWorkflow]);
+
+  // After any offer write, or one the server refused because something moved
+  // on: re-read the offer, then the open application and the list in place. A
+  // signature or a close moves the stage, so the detail must follow. A switch
+  // to another applicant meanwhile stays untouched. Returns the offer read.
+  const refreshAfterOffer = async () => {
+    const forId = detail?.id;
+    const next = await offerFlow.reload();
+    if (forId) {
+      await openDetail(forId, { refresh: true });
+      load(tab);
+    }
+    return next;
+  };
 
   // Bell deep link: consume ?application=<id> and clear it. Reacts to the
   // param (not mount-only): clicking a second notification while already on
@@ -1191,6 +1205,7 @@ export default function RecruitingPage() {
             replyMedia={replyMedia}
             samePhone={samePhone}
             offerFlow={offerFlow}
+            onOfferChanged={refreshAfterOffer}
             onOpenStageDialog={stageWorkflow.openStageDialog}
             onOpenApplication={openDetail}
             onClose={closeDetail}
@@ -1205,14 +1220,8 @@ export default function RecruitingPage() {
         data={offerFlow.data}
         draft={offerFlow.form?.draft}
         onClose={offerFlow.closeForm}
-        onChanged={offerFlow.reload}
-        onSent={async () => {
-          // Refresh in place: a switch to another applicant stays untouched.
-          const sentFor = detail.id;
-          await offerFlow.reload();
-          await openDetail(sentFor, { refresh: true });
-          load(tab);
-        }}
+        onChanged={refreshAfterOffer}
+        onSent={refreshAfterOffer}
       />
 
       <StageChangeDialog

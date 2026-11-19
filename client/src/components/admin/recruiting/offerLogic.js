@@ -4,34 +4,25 @@
  * offer API's 409 codes.
  */
 
-import { etDateString, formatETDate, formatETDateTime } from "../../../lib/timezone";
+import { addETDays, etDateString, etParts, formatETDate, formatETDateOnly, formatETDateTime } from "../../../lib/timezone";
 
-const DAY_MS = 86400000;
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// Calendar dates ("YYYY-MM-DD") go through the shared Eastern helpers in
+// lib/timezone.js. Each day is anchored at noon UTC, which is the same Eastern
+// calendar day all year, so no zone can move it. Only the offer's own rules
+// live here: Monday-to-Thursday starts and the Monday pay step after day 90.
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const anchorOf = (value) => new Date(`${value}T12:00:00Z`);
+const weekdayOf = (value) => etParts(anchorOf(value)).dayOfWeek; // 0 Sunday .. 6 Saturday
 
-const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-// "YYYY-MM-DD" -> Date at UTC midnight, or null. Calendar math only: no zone.
-function parseDay(value) {
-  const m = DATE_RE.exec(String(value || ""));
-  if (!m) return null;
-  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  // Round-trip: rejects Feb 30 and years 0000-0099 that Date.UTC would wrap.
-  return Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== value ? null : d;
-}
-
+// A real calendar date: Feb 30 and 5-digit years are not.
 export function isValidDay(value) {
-  return parseDay(value) !== null;
-}
-
-function dayString(d) {
-  return d.toISOString().slice(0, 10);
+  if (typeof value !== "string" || !DATE_RE.test(value)) return false;
+  const at = anchorOf(value);
+  return !Number.isNaN(at.getTime()) && etDateString(at) === value;
 }
 
 export function addDays(value, days) {
-  const d = parseDay(value);
-  return d ? dayString(new Date(d.getTime() + days * DAY_MS)) : "";
+  return isValidDay(value) ? etDateString(addETDays(anchorOf(value), days)) : "";
 }
 
 // Today's calendar date in Eastern, "YYYY-MM-DD".
@@ -41,30 +32,28 @@ export function todayET(now = new Date()) {
 
 // Monday to Thursday only (the offer's start days).
 export function isStartWeekday(value) {
-  const d = parseDay(value);
-  if (!d) return false;
-  const dow = d.getUTCDay();
+  if (!isValidDay(value)) return false;
+  const dow = weekdayOf(value);
   return dow >= 1 && dow <= 4;
 }
 
 /**
  * Pay step date: the first Monday strictly after day 90, day 1 = the start
- * date (so day 90 = start + 89 days). Start Mon 2027-01-04 -> 2027-04-05.
+ * date (so day 90 = start + 89 days, and the step is the first Monday on or
+ * after start + 90 days). Start Mon 2027-01-04 -> 2027-04-05. Past year 9999
+ * there is no 4-digit date: no step date, never a wrapped one.
  */
 export function stepDateFor(startDate) {
-  const start = parseDay(startDate);
-  if (!start) return "";
-  const day91 = new Date(start.getTime() + 90 * DAY_MS);
-  const step = new Date(day91.getTime() + ((8 - day91.getUTCDay()) % 7) * DAY_MS);
-  // Past year 9999 there is no 4-digit date: no step date, never a wrapped one.
-  return step.getUTCFullYear() > 9999 ? "" : dayString(step);
+  const after90 = addDays(startDate, 90);
+  if (!isValidDay(after90)) return "";
+  const step = addDays(after90, (8 - weekdayOf(after90)) % 7);
+  return isValidDay(step) ? step : "";
 }
 
 // "Mon, Jan 4, 2027" from a calendar date (no time zone shift).
 export function formatDay(value) {
-  const d = parseDay(String(value || "").slice(0, 10));
-  if (!d) return "";
-  return `${WEEKDAYS[d.getUTCDay()]}, ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  const day = String(value || "").slice(0, 10);
+  return isValidDay(day) ? formatETDateOnly(day, { weekday: "short", month: "short", day: "numeric", year: "numeric" }) : "";
 }
 
 // "Fri, Dec 18, 2026" for the day the offer lapses: send day + 7 days (ET).
@@ -106,9 +95,19 @@ export function sendChannels(contact) {
   return email ? "one email" : null;
 }
 
-// A write the server refused because the offer or draft is no longer what the
-// owner was looking at. Nothing was written: re-read and show the message.
-export const STALE_CODES = ["DRAFT_CHANGED", "OFFER_CHANGED", "OFFER_NOT_DRAFT"];
+// A write the server refused because the offer, its draft or the application is no
+// longer what the owner was looking at (another admin acted, the applicant answered,
+// or the offer expired). Nothing was written: re-read and show the message.
+export const STALE_CODES = [
+  "DRAFT_CHANGED",
+  "OFFER_CHANGED",
+  "OFFER_NOT_DRAFT",
+  "OFFER_NOT_WITHDRAWABLE",
+  "OFFER_NOT_REVISABLE",
+  "DRAFT_EXISTS",
+  "OFFER_ALREADY_OPEN",
+  "APPLICATION_CLOSED",
+];
 
 export function isStaleWrite(err) {
   return STALE_CODES.includes(err?.body?.code);
@@ -127,6 +126,8 @@ const ERROR_TEXT = {
   ROLE_NOT_SUPPORTED: "Offers are for technician applications only.",
   DRAFT_CHANGED: "This draft changed after you opened it. Review the new preview, then send.",
   OFFER_CHANGED: "This offer changed after you opened it. Review it again.",
+  OFFER_NOT_WITHDRAWABLE: "This offer expired before you withdrew it. Nothing was changed.",
+  OFFER_NOT_REVISABLE: "This offer expired before you revised it. Make a new offer instead.",
   DRAFT_HASH_REQUIRED: "The draft could not be checked. Reload the offer, review the preview, then send.",
 };
 
@@ -161,19 +162,30 @@ const STATE_TEXT = {
   failed: "did not go out",
 };
 
+// Offer statuses that mean the applicant already answered, so the link reached them.
+const ANSWERED = ["accepted", "declined", "date_requested"];
+
 /**
  * The result of a send that answered 200: { headline, lines }.
- * comms = { sms: {outcome, code}, email: {outcome, code} }. "Offer sent to X."
- * only when every channel that was tried went out; otherwise "The offer is
- * open." and one short line per channel.
+ * comms = { sms: {outcome, code}, email: {outcome, code} }; offerStatus = the
+ * status of the offer row in the same answer, read after delivery.
+ * "Offer sent to X." only when the offer is still out and every channel that
+ * was tried went out; otherwise "The offer is open." and one short line per
+ * channel. An offer withdrawn or replaced during the send says so, with no Revise.
  */
-export function describeSend(comms, firstName) {
+export function describeSend(comms, firstName, offerStatus = "sent") {
   const channels = [["text", comms?.sms], ["email", comms?.email]].filter(([, c]) => c && wasTried(c));
   const states = channels.map(([label, c]) => [label, channelState(c)]);
-  if (states.length && states.every(([, st]) => st === "out")) return { headline: `Offer sent to ${firstName}.`, lines: [] };
   const lines = states.map(([label, st]) => `The ${label} ${STATE_TEXT[st]}.`);
+  if (ANSWERED.includes(offerStatus)) {
+    return { headline: `Offer sent to ${firstName}.`, lines: [`${firstName} has already answered it. The offer card shows the answer.`] };
+  }
+  if (offerStatus !== "sent") {
+    return { headline: "This offer is no longer open.", lines: [...lines, "It was withdrawn or replaced while it was being sent. The offer card shows where it stands."] };
+  }
+  if (states.length && states.every(([, st]) => st === "out")) return { headline: `Offer sent to ${firstName}.`, lines: [] };
   if (states.length && states.every(([, st]) => st === "failed")) {
-    lines.push("Check his phone and email, then use Revise to send a new link.");
+    lines.push("Check the phone and email on file, then use Revise to send a new link.");
   }
   return { headline: "The offer is open.", lines };
 }

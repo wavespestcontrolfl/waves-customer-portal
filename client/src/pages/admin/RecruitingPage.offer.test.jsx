@@ -269,7 +269,7 @@ describe('RecruitingPage offer flow: form', () => {
     expect(screen.getByText(/issued Nov 10, 2026/)).toBeInTheDocument();
   });
 
-  it('on DRAFT_CHANGED it reloads the draft, shows the new preview and sends nothing more', async () => {
+  it('on DRAFT_CHANGED it keeps the form until the owner shows the new version, then needs a new send', async () => {
     let current = offerRecord({ draftHash: 'old' });
     const { calls } = setupFetch(
       {
@@ -285,6 +285,11 @@ describe('RecruitingPage offer flow: form', () => {
     const confirmDialog = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Send offer' }));
     expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    // Nothing replaces the form by itself: it is read-only, with no Send, until the owner loads the new version.
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Send offer' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
     await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
     expect(screen.getByText('Rate 24')).toBeInTheDocument();
     expect(calls.filter((c) => c.path.endsWith('/send'))).toHaveLength(1);
@@ -715,7 +720,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(post.body).toMatchObject({ startDate: '2027-01-11', draftId: 'offer-1', draftHash: 'hash-1' });
   });
 
-  it('DRAFT_CHANGED on save shows the message and the other admin version', async () => {
+  it('DRAFT_CHANGED on save keeps the typed edits on screen until the owner shows the other admin version', async () => {
     let current = offerRecord({ draftHash: 'old' });
     await openDraftForm(
       { 'POST /admin/careers/app-1/offer': () => { current = offerRecord({ draftHash: 'new', hourlyRate: 24 }); return res(409, { error: 'x', code: 'DRAFT_CHANGED' }); } },
@@ -724,8 +729,15 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
     expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    // What the owner typed stays visible, read-only, until they choose to load the newer version.
+    expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
+    expect(screen.getByLabelText('Hours')).toBeDisabled();
+    expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(23);
+    fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
     await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
     expect(screen.getByLabelText('Hours')).toHaveValue(DEFAULTS.hoursLine);
+    expect(screen.getByLabelText('Hours')).not.toBeDisabled();
+    expect(screen.queryByText('This draft changed after you opened it. Review the new preview, then send.')).toBeNull();
   });
 
   it('Escape does not close the dialog while a save runs', async () => {
@@ -743,7 +755,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
   });
 
   it.each([
-    [{ sms: { outcome: 'failed' }, email: { outcome: 'blocked' } }, 'The offer is open.', ['The text did not go out.', 'The email did not go out.', 'Check his phone and email, then use Revise to send a new link.']],
+    [{ sms: { outcome: 'failed' }, email: { outcome: 'blocked' } }, 'The offer is open.', ['The text did not go out.', 'The email did not go out.', 'Check the phone and email on file, then use Revise to send a new link.']],
     [{ sms: { outcome: 'deferred' }, email: { outcome: 'failed' } }, 'The offer is open.', ['The text is queued.', 'The email did not go out.']],
     [{ sms: { outcome: 'uncertain' }, email: { outcome: 'sent' } }, 'The offer is open.', ['The text may not have gone out.', 'The email went out.']],
     [{ sms: { outcome: 'sent' }, email: { outcome: 'sent' } }, 'Offer sent to Jordan.', []],
@@ -757,7 +769,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     if (!lines.length) expect(screen.queryByText(/did not go out|is queued|may not/)).toBeNull();
   });
 
-  it('DRAFT_CHANGED on a first save adopts the draft the other admin created, then saves against it', async () => {
+  it('DRAFT_CHANGED on a first save keeps the edits until the owner loads the other admin draft, then saves against it', async () => {
     let other = null;
     const calls = [];
     const theirs = offerRecord({ id: 'offer-9', draftHash: 'their-hash', hourlyRate: 24 });
@@ -783,6 +795,9 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.change(await screen.findByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
     expect(await screen.findByText('This draft changed after you opened it. Review the new preview, then send.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
+    expect(screen.getByLabelText('Hours')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Show the new version' }));
     await waitFor(() => expect(screen.getByLabelText('Hourly rate ($)')).toHaveValue(24));
     expect(calls[0].draftId).toBeUndefined();
     fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
@@ -791,7 +806,7 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(calls[1]).toMatchObject({ draftId: 'offer-9', draftHash: 'their-hash' });
   });
 
-  it('OFFER_NOT_DRAFT on send closes the confirm and the form, re-reads, and the card shows the sent offer', async () => {
+  it('OFFER_NOT_DRAFT on send closes the confirm, keeps the form read-only with the reason, and Close shows the sent offer', async () => {
     let current = offerRecord();
     await openDraftForm(
       { 'POST /admin/careers/app-1/offer/offer-1/send': () => { current = offerRecord({ status: 'sent', timeline: [{ at: '2026-12-11T15:20:00Z', kind: 'sent', label: 'Offer sent by someone else' }] }); return res(409, { error: 'x', code: 'OFFER_NOT_DRAFT' }); } },
@@ -800,12 +815,17 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
-    expect(await screen.findByText('Offer sent by someone else')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull();
+    expect(await screen.findByText('This offer is no longer a draft. Close this form and check its state.')).toBeInTheDocument();
     expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
+    expect(screen.getByLabelText('Hourly rate ($)')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Show the new version' })).toBeNull();
+    expect(await screen.findByText('Offer sent by someone else')).toBeInTheDocument();
+    const form = screen.getByLabelText('Hourly rate ($)').closest('[role="dialog"]');
+    fireEvent.click(within(form).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByLabelText('Hourly rate ($)')).toBeNull());
   });
 
-  it('OFFER_NOT_DRAFT on save closes the form and shows the card state', async () => {
+  it('OFFER_NOT_DRAFT on save keeps the typed hours read-only with the reason, and Close shows the card state', async () => {
     let current = offerRecord();
     await openDraftForm(
       { 'POST /admin/careers/app-1/offer': () => { current = offerRecord({ status: 'withdrawn', timeline: [{ at: '2026-12-11T15:20:00Z', kind: 'withdrawn', label: 'Withdrawn by someone else' }] }); return res(409, { error: 'x', code: 'OFFER_NOT_DRAFT' }); } },
@@ -813,8 +833,13 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     );
     fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(await screen.findByText('This offer is no longer a draft. Close this form and check its state.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
+    expect(screen.getByLabelText('Hours')).toBeDisabled();
     expect(await screen.findByText('Withdrawn by someone else')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Hours')).toBeNull();
+    const form = screen.getByLabelText('Hours').closest('[role="dialog"]');
+    fireEvent.click(within(form).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByLabelText('Hours')).toBeNull());
   });
 
   it('a sent offer past its expiry shows as closed, with Make an offer and no Revise or Withdraw', async () => {
@@ -925,11 +950,19 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(calls.find((c) => c.path.endsWith('/offer-1/withdraw')).body).toEqual({ expectedStatus: 'sent' });
   });
 
-  it('OFFER_CHANGED on withdraw closes the confirm, shows the message and re-reads', async () => {
+  it('OFFER_CHANGED on withdraw closes the confirm, shows the message and re-reads the offer and the application', async () => {
     let current = offerRecord({ status: 'sent', timeline: [] });
+    const detail = detailFixture({ status: 'offer' });
     const { calls } = setupFetch(
-      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { current = offerRecord({ status: 'accepted', signedAt: '2026-12-12T13:15:00Z', timeline: [{ at: '2026-12-12T13:15:00Z', kind: 'signed', label: 'Signed just now' }] }); return res(409, { error: 'x', code: 'OFFER_CHANGED' }); } },
-      { offer: () => res(200, offerPayload({ current })), detail: detailFixture({ status: 'offer' }) },
+      {
+        'POST /admin/careers/app-1/offer/offer-1/withdraw': () => {
+          // The applicant signed meanwhile: the offer is accepted and the application moved to Hired.
+          current = offerRecord({ status: 'accepted', signedAt: '2026-12-12T13:15:00Z', timeline: [{ at: '2026-12-12T13:15:00Z', kind: 'signed', label: 'Signed just now' }] });
+          detail.status = 'hired';
+          return res(409, { error: 'x', code: 'OFFER_CHANGED' });
+        },
+      },
+      { offer: () => res(200, offerPayload({ current })), detail },
     );
     render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByText(CONTACT.name));
@@ -942,6 +975,41 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(screen.getByText('This offer changed after you opened it. Review it again.')).toBeInTheDocument();
     expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull();
     expect(calls.filter((c) => c.path === '/admin/careers/app-1/offer').length).toBeGreaterThanOrEqual(2);
+    // The detail follows the stage the signature moved it to, with no manual reload: no Hired move on a hired application.
+    const detailDialog = screen.getByRole('heading', { name: /Jordan Rivera — / }).closest('[role="dialog"]');
+    await waitFor(() => expect(within(detailDialog).queryByRole('button', { name: 'Hired' })).toBeNull());
+    expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('OFFER_NOT_WITHDRAWABLE (the offer expired meanwhile) closes the confirm, says so and shows the offer as closed', async () => {
+    let current = offerRecord({ status: 'sent', timeline: [] });
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { current = offerRecord({ status: 'expired', timeline: [] }); return res(409, { error: 'x', code: 'OFFER_NOT_WITHDRAWABLE', status: 'expired' }); } },
+      { offer: () => res(200, offerPayload({ current })), detail: detailFixture({ status: 'offer' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull());
+    expect(screen.getByText('This offer expired before you withdrew it. Nothing was changed.')).toBeInTheDocument();
+    const after = await screen.findByTestId('offer-card');
+    expect(within(after).getByText('Closed unsigned')).toBeInTheDocument();
+    expect(within(after).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+  });
+
+  it('a send answer whose offer was withdrawn during delivery says it is no longer open, with no Revise advice', async () => {
+    await openDraftForm({
+      'POST /admin/careers/app-1/offer/offer-1/send': () => res(200, { offer: offerRecord({ status: 'withdrawn' }), comms: { sms: { outcome: 'failed' }, email: { outcome: 'failed' } } }),
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
+    const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
+    expect(await screen.findByText('This offer is no longer open.')).toBeInTheDocument();
+    expect(screen.getByText('It was withdrawn or replaced while it was being sent. The offer card shows where it stands.')).toBeInTheDocument();
+    expect(screen.queryByText(/use Revise/)).toBeNull();
   });
 
   it('a background read with a different draft hash makes the form read-only until the owner loads it', async () => {
