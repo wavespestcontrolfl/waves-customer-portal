@@ -42,27 +42,44 @@ function owedReadSql(t) {
   return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
 }
 
-// Each place the quote is said in a turn, as the whole sentences that hold it (a fragment is read with its "don't").
-function sentencesHolding(turnText, quote) {
-  const norm = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
-  const sentences = String(turnText || '').match(/[^.!?]+[.!?]*/g) || [];
-  const starts = [];
-  let at = 0;
-  for (const sentence of sentences) { starts.push(at); at += norm(sentence).length; }
-  const flat = sentences.flatMap(norm);
-  const q = norm(quote);
+// A sentence break: end punctuation, then a space, then a capital letter. "$49.99" and "8 a.m. bill me" stay one
+// sentence, so a condition before them is screened with the quote (a longer sentence only fails closed).
+const SENTENCE_BREAK = /[.!?]+\s+(?=[A-Z])/g;
+const wordsOf = (text) => [...String(text || '').matchAll(/[a-z0-9]+/gi)].map((m) => ({ w: m[0].toLowerCase(), at: m.index, end: m.index + m[0].length }));
+
+// The words to show: the whole sentences, or, when they run past CALLER_WORDS_CHARS, a cut around the quote. The
+// quote's own words are never cut, so the office always sees what the caller chose.
+function excerptOf(text, [from, to], [qs, qe]) {
+  const tidy = (x) => x.replace(/\s+/g, ' ').trim();
+  if (tidy(text.slice(from, to)).length <= CALLER_WORDS_CHARS) return tidy(text.slice(from, to));
+  const room = Math.max(0, CALLER_WORDS_CHARS - 2 - (qe - qs));
+  const start = Math.max(from, qs - Math.floor(room / 2));
+  const end = Math.min(to, Math.max(qe, start + (qe - qs) + room));
+  return `${start > from ? '…' : ''}${tidy(text.slice(start, end))}${end < to ? '…' : ''}`;
+}
+
+// Each place the quote is said in a turn: the whole sentences that hold it (a fragment is read with its "don't"), and
+// the words to show.
+function placesOf(turnText, quote) {
+  const text = String(turnText || '');
+  const tokens = wordsOf(text);
+  const q = wordsOf(quote).map((t) => t.w);
+  const breaks = [...text.matchAll(SENTENCE_BREAK)].map((m) => m.index + m[0].length);
   const places = [];
-  for (let i = 0; q.length && i + q.length <= flat.length; i += 1) {
-    if (!q.every((w, k) => flat[i + k] === w)) continue;
-    places.push(sentences.filter((x, n) => starts[n] < i + q.length && starts[n] + norm(x).length > i).map((x) => x.trim()).join(' '));
+  for (let i = 0; q.length && i + q.length <= tokens.length; i += 1) {
+    if (!q.every((w, k) => tokens[i + k].w === w)) continue;
+    const span = [tokens[i].at, tokens[i + q.length - 1].end];
+    const from = Math.max(0, ...breaks.filter((b) => b <= span[0]));
+    const to = Math.min(text.length, ...breaks.filter((b) => b >= span[1]));
+    places.push({ said: text.slice(from, to).trim(), shown: excerptOf(text, [from, to], span) });
   }
   return places;
 }
 
 // The caller's own words choosing the plan: an evidence quote for billing_choice labeled as the caller's AND found
-// word for word in a caller turn of the transcript (outbound labels oriented the way the triage flags read them),
-// given as the whole sentences that hold it, which must be a plain statement; cut to fit. Null when no quote is. An
-// unlabeled or one-speaker transcript grounds nothing.
+// word for word in a caller turn of the transcript (outbound labels oriented the way the triage flags read them), in
+// whole sentences that are a plain statement; given as those sentences, cut around the quote to fit. Null when no
+// quote is. An unlabeled or one-speaker transcript grounds nothing.
 function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
@@ -73,10 +90,8 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
   for (const e of quotes) {
     for (const turn of turnsHolding(turns, e.quote, 'caller')) {
-      const said = sentencesHolding(turn.raw, e.quote).find((place) => quoteIsPlainStatement(place));
-      if (!said) continue;
-      const words = said.replace(/\s+/g, ' ').trim();
-      return words.length > CALLER_WORDS_CHARS ? `${words.slice(0, CALLER_WORDS_CHARS - 1).trimEnd()}…` : words;
+      const place = placesOf(turn.raw, e.quote).find((x) => quoteIsPlainStatement(x.said));
+      if (place) return place.shown;
     }
   }
   return null;
@@ -84,8 +99,10 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
 
 // One call's word (row: CALL_COLUMNS): a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing
 // choice with the caller's own words ({ choice, callLogId, at, quote }; quote = callerWordsOf, null without them), or
-// null (no word, or not a two-party conversation).
+// null (no word, not a two-party conversation, or not read: only a 'processed' row's extraction is its last read, as
+// a failed re-read keeps the old one).
 async function wordOfCall(conn, row) {
+  if (row.processing_status !== 'processed' || row.v2_extraction_status !== 'valid') return null;
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   const extraction = parseExtraction(row.ai_extraction_enriched);
   if (!extraction || !isRealConversation(row, extraction)) return null;
@@ -99,28 +116,30 @@ async function wordOfCall(conn, row) {
 }
 
 // The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
-// billing choice or a cancellation or one-time ask (filtered in SQL before the row limit, so calls without a word
-// never push the last one out), as wordOfCall gives it, or null. Sandbox calls do not count.
+// billing choice or a cancellation or one-time ask, as wordOfCall gives it, or null. SQL keeps only rows that name a
+// word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation, so voicemails never hide the last
+// word. Sandbox calls do not count.
 async function latestBillingChoice(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { BILLING_CHOICES } = require('./call-prepay-choice');
-  const rows = await conn('call_log')
-    .where({ customer_id: customerId, v2_extraction_status: 'valid' })
+  const query = conn('call_log')
+    .where({ customer_id: customerId, processing_status: 'processed', v2_extraction_status: 'valid' })
     .where('created_at', '>=', since)
-    .whereNotNull('processing_status')
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .where((qb) => qb
       .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...BILLING_CHOICES]])
       .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]]))
     .modify((qb) => whereNotSandboxCall(qb))
-    .orderBy('created_at', 'desc')
-    .limit(CHOICE_SCAN_LIMIT)
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .select(CALL_COLUMNS);
-  for (const row of rows) {
-    const word = await wordOfCall(conn, row);
-    if (word) return word;
+  for (let offset = 0; ; offset += CHOICE_SCAN_LIMIT) {
+    const rows = await query.clone().offset(offset).limit(CHOICE_SCAN_LIMIT);
+    for (const row of rows) {
+      const word = await wordOfCall(conn, row);
+      if (word) return word;
+    }
+    if (rows.length < CHOICE_SCAN_LIMIT) return null;
   }
-  return null;
 }
 
 // True when a call from the customer since `since` still owes a read (owedReadSql): it may hold the yes or take it
@@ -137,12 +156,13 @@ async function unreadCallSince(conn, { customerId, since }) {
 
 // What stands between the caller's word and the call that booked the visit (`booking`, a CALL_COLUMNS row), or null:
 //   yes_after_booking    the yes came on a later call than the booking (the visit was not booked for the plan);
-//   booking_call_unread  the booking call's words were not read (a failed or invalid extraction may hide a no);
+//   booking_call_unread  the booking call's last read did not finish (a failed re-read or an invalid extraction may
+//                        hide a no);
 //   newer_call           another call from the customer came since the yes (or, with no yes, since the booking).
 // Call it once every call in the window is read (unreadCallSince). Sandbox calls do not count.
 async function laterWordProblem(conn, { customerId, yes, booking }) {
   if (yes && new Date(yes.at) > new Date(booking.created_at)) return 'yes_after_booking';
-  if (booking.v2_extraction_status !== 'valid') return 'booking_call_unread';
+  if (booking.processing_status !== 'processed' || booking.v2_extraction_status !== 'valid') return 'booking_call_unread';
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const later = await conn('call_log')
     .where({ customer_id: customerId })

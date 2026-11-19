@@ -36,6 +36,8 @@ describe("the caller's words", () => {
     ['a negated sentence', "Please don't bill me each time."],
     ['a hedge', 'Maybe just bill me each time.'],
     ['a question', 'Can you just bill me each time?'],
+    ['a condition with a price', 'If the price is $49.99, bill me each time.'],
+    ['a condition with a time', 'If you come at 8 a.m. bill me each time.'],
   ])('a quote inside %s is no yes', (_name, line) => {
     expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toBeNull();
   });
@@ -43,6 +45,11 @@ describe("the caller's words", () => {
   test('a later plain sentence with the same words still counts', () => {
     const transcript = talk('Can you just bill me each time? Okay then. Yes, just bill me each time.');
     expect(callerWordsOf(evidence(choice('just bill me each time')), transcript)).toBe('Yes, just bill me each time.');
+  });
+
+  test('a price in an earlier sentence does not join it to the quote', () => {
+    expect(callerWordsOf(evidence(choice('just bill me each time')), talk("It's $49.99 a visit. Just bill me each time.")))
+      .toBe('Just bill me each time.');
   });
 
   test('a quote across two sentences is read with both', () => {
@@ -73,10 +80,17 @@ describe("the caller's words", () => {
     expect(callerWordsOf({ evidence: 'not a list' }, talk('x'))).toBeNull();
   });
 
-  test('a long sentence is cut to 200 characters', () => {
-    const long = `${'word '.repeat(80)}done`;
-    const words = callerWordsOf(evidence(choice(long)), talk(long));
-    expect(words).toHaveLength(200);
+  test('a long sentence is cut around the quote, so the choice always shows', () => {
+    const line = `${'so we talked about it and '.repeat(10)}just bill me each time${' and that is fine'.repeat(6)}.`;
+    const words = callerWordsOf(evidence(choice('just bill me each time')), talk(line));
+    expect(words).toContain('just bill me each time');
+    expect(words.length).toBeLessThanOrEqual(202);
+    expect(words.startsWith('…')).toBe(true);
     expect(words.endsWith('…')).toBe(true);
+  });
+
+  test('a quote longer than the cut is shown whole', () => {
+    const long = `${'word '.repeat(80)}done`;
+    expect(callerWordsOf(evidence(choice(long)), talk(long))).toBe(long);
   });
 });

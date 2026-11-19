@@ -142,6 +142,9 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ['the choice came before the send', [['per_application', { created_at: new Date(Date.now() - 3 * DAY) }]], { yes: null, noYes: 'no_yes_heard' }],
     ['the choice call is a voicemail', [['per_application', { answered_by: 'voicemail' }]], { yes: null, noYes: 'no_yes_heard' }],
     ['the choice call is still being read', [['per_application', { processing_status: 'processing' }]], { yes: null, noYes: 'no_yes_heard' }],
+    ['the last read of the choice call failed (it keeps the old extraction)', [['per_application', {
+      processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED,
+    }]], { yes: null, noYes: 'no_yes_heard' }],
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
   ])('%s', async (_name, calls, expected) => {
     const customerId = await customer();
@@ -156,11 +159,14 @@ describeDb("the caller's word (PostgreSQL)", () => {
     await expect(latestBillingChoice(trx, { customerId, since: since() })).resolves.toBeNull();
   });
 
-  test('the latest word is found past fifty calls with none', async () => {
+  test.each([
+    ['calls with no word', null, {}],
+    ['voicemails that name a choice', 'per_application', { answered_by: 'voicemail' }],
+  ])('the latest word is found past fifty-five %s', async (_name, choice, over) => {
     const customerId = await customer();
     await call(customerId, 'per_application', { created_at: hoursAgo(5) });
     await call(customerId, null, { created_at: hoursAgo(4) }, 'cancellation_request');
-    for (let n = 0; n < 55; n += 1) await call(customerId, null, { created_at: new Date(Date.now() - 3 * 3600000 + n * 1000) });
+    for (let n = 0; n < 55; n += 1) await call(customerId, choice, { created_at: new Date(Date.now() - 3 * 3600000 + n * 1000), ...over });
     await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
   });
 
@@ -177,6 +183,9 @@ describeDb("the caller's word (PostgreSQL)", () => {
   test.each([
     ['the yes came after the booking call', { yesHoursAgo: 1, bookingHoursAgo: 2 }, 'yes_after_booking'],
     ['the booking call could not be read', { bookingOver: { v2_extraction_status: 'failed' } }, 'booking_call_unread'],
+    ["the booking call's last read failed (it keeps the old extraction)", {
+      bookingOver: { processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED },
+    }, 'booking_call_unread'],
     ['the customer called again after the yes', { laterHoursAgo: 1 }, 'newer_call'],
     ['nothing came between', {}, null],
   ])('between the word and the booking: %s', async (_name, setup, expected) => {
