@@ -3,13 +3,24 @@ const { validate: isUuid } = require('uuid');
 // An off-session authentication decline closes the local claim, but its
 // PaymentIntent can still settle. Both checkout and Billing use this predicate.
 function whereAwaitingAuthentication(query, table) {
-  return query.where({
-    [`${table}.status`]: 'failed',
-    [`${table}.decline_code`]: 'authentication_required',
-  }).whereNotNull(`${table}.resolved_at`).where(function withoutMatchingCancellation() {
-    this.whereNull(`${table}.authentication_canceled_intent_id`)
-      .orWhereNull(`${table}.stripe_payment_intent_id`)
-      .orWhereColumn(`${table}.authentication_canceled_intent_id`, '<>', `${table}.stripe_payment_intent_id`);
+  return query.where(function awaitingOriginalIntent() {
+    this.where(function authenticationDecline() {
+      this.where({ [`${table}.status`]: 'failed', [`${table}.decline_code`]: 'authentication_required' })
+        .whereNotNull(`${table}.resolved_at`).where(function withoutMatchingCancellation() {
+          this.whereNull(`${table}.authentication_canceled_intent_id`)
+            .orWhereNull(`${table}.stripe_payment_intent_id`)
+            .orWhereNull(`${table}.worker_payment_intent_id`)
+            .orWhereColumn(`${table}.authentication_canceled_intent_id`, '<>', `${table}.stripe_payment_intent_id`)
+            .orWhereColumn(`${table}.authentication_canceled_intent_id`, '<>', `${table}.worker_payment_intent_id`);
+        });
+    }).orWhere(function conflictingIdentities() {
+      // A legacy failure handler can still change the general ID and decline
+      // code. Neither its new status nor a cancellation for that ID is proof.
+      this.whereRaw('?? IS NOT NULL AND ?? IS NOT NULL AND ?? <> ??', [
+        `${table}.worker_payment_intent_id`, `${table}.stripe_payment_intent_id`,
+        `${table}.worker_payment_intent_id`, `${table}.stripe_payment_intent_id`,
+      ]);
+    });
   });
 }
 
@@ -57,7 +68,6 @@ function cancellationIdentity(intent) {
     methodId,
     evidence: {
       authentication_canceled_intent_id: intent.id,
-      ...(methodId ? { stripe_payment_intent_id: intent.id } : {}),
     },
   };
 }
@@ -81,6 +91,9 @@ function matchingCancellation(identity, database) {
     .whereIn('invoice_id', invoice)
     .where(function relevantAttempt() {
       this.whereIn('status', ['claimed', 'ambiguous']).orWhere({ status: 'failed', decline_code: 'authentication_required' });
+    })
+    .where(function originalIntent() {
+      this.whereNull('worker_payment_intent_id').orWhere('worker_payment_intent_id', intent.id);
     })
     .where(function compatibleIntent() {
       this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', intent.id);
@@ -137,9 +150,9 @@ async function verifySavedCardCancellation({ attemptId, intentId, stripe, databa
     // Historical recovery is for a finished authentication decline only. The
     // UPDATE repeats every identity check, including any intervening binding.
     const match = matchingCancellation(identity, conn);
-    const { query, evidence } = match;
+    const { query } = match;
     query.where({ status: 'failed', decline_code: 'authentication_required' }).whereNotNull('resolved_at');
-    if (!evidence.stripe_payment_intent_id) query.where({ stripe_payment_intent_id: intentId });
+    query.where({ stripe_payment_intent_id: intentId, worker_payment_intent_id: intentId });
     return match;
   };
 

@@ -156,7 +156,7 @@ test('a saved-card cancellation records its exact attempt even when the invoice 
   const evidence = mockState.updates.filter((entry) => entry.table === 'stripe_invoice_charge_attempts');
   expect(evidence).toHaveLength(1);
   expect(evidence[0].wheres).toContainEqual({ id: metadata.saved_card_attempt_id, invoice_id: metadata.waves_invoice_id });
-  expect(evidence[0].patch).toEqual({ authentication_canceled_intent_id: 'pi_auth', stripe_payment_intent_id: 'pi_auth' });
+  expect(evidence[0].patch).toEqual({ authentication_canceled_intent_id: 'pi_auth' });
   expect(invoiceReverts()).toHaveLength(0);
   expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
@@ -235,7 +235,7 @@ test('saved-card PI canceled after processing: the attempt claim is released (cr
   expect(paymentUpdates()).toHaveLength(1);
 });
 
-test('saved-card PI whose attempt was already resolved falls through to the generic reopen', async () => {
+test('saved-card cancellation with an unresolved verdict preserves the stamped invoice and credit', async () => {
   mockState.stampedInvoices = [{ ...STAMPED }];
   mockState.attemptRow = { id: 'att-1', invoice_id: 'inv-1', status: 'claimed', resolved_at: null, stripe_payment_intent_id: 'pi_ach_1' };
   savedCardAttemptMatchesPaymentIntent.mockReturnValue(true);
@@ -243,7 +243,7 @@ test('saved-card PI whose attempt was already resolved falls through to the gene
 
   await handleCanceled({ id: 'pi_ach_1', metadata: { source: 'admin_card_on_file', saved_card_attempt_id: 'att-1' } });
 
-  expect(invoiceReverts()).toHaveLength(1);
+  expect(invoiceReverts()).toHaveLength(0);
 });
 
 // Billing audit 2026-10-30, finding 2: monthly dues have no invoice, and the canceled flip takes a
