@@ -6687,18 +6687,12 @@ function reservicePhotosLive() {
 function reserviceFoldLive() {
   return process.env.GATE_RESERVICE_FOLD === 'true';
 }
-// GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
-module.exports.reserviceFoldLive = reserviceFoldLive;
-
 // GATE_RESERVICE_FOLD_LINK read at CALL time, strict `=== 'true'`, dark (owner 2026-11-17). It has a gate because it texts a customer
 // (the one "visit moved" text) and moves a regular plan visit from a customer's own tap. Off = POST /api/public/reservice/:token is
 // as before, with no lookup. Independent of GATE_RESERVICE_FOLD (the office path). Kill = unset.
 function reserviceFoldLinkLive() {
   return process.env.GATE_RESERVICE_FOLD_LINK === 'true';
 }
-// GATE_RESERVICE_FOLD_LINK reader, on its own line so gate PRs never conflict.
-module.exports.reserviceFoldLinkLive = reserviceFoldLinkLive;
-
 // GATE_RESERVICE_RANK_AFTER_NEW read at CALL time — the one canonical
 // reader buildBookingAvailability's reservice rank-profile branch uses
 // (server/routes/booking.js). The `reserviceRankAfterNew` gates-map entry
@@ -7319,7 +7313,6 @@ function homeLineLive() {
 function liveCallUpsetAlertLive() {
   return process.env.GATE_LIVE_CALL_UPSET_ALERT === 'true';
 }
-module.exports.liveCallUpsetAlertLive = liveCallUpsetAlertLive;
 
 // GATE_IN_PERSON_CARD read at CALL time — strict `=== 'true'`, dark in every
 // environment. The canonical reader for the in-person card route and the
@@ -8423,6 +8416,14 @@ function callRingFactLive() {
 }
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+// Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
+// (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
+// GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
+module.exports.reserviceFoldLive = reserviceFoldLive;
+// GATE_RESERVICE_FOLD_LINK reader, on its own line so gate PRs never conflict.
+module.exports.reserviceFoldLinkLive = reserviceFoldLinkLive;
+// GATE_LIVE_CALL_UPSET_ALERT reader (bell-banners.js, kind live_call_upset), on its own line so gate PRs never conflict.
+module.exports.liveCallUpsetAlertLive = liveCallUpsetAlertLive;
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 // GATE_CALL_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.callHoldLive = callHoldLive;
