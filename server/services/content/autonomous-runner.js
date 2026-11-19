@@ -2061,7 +2061,7 @@ class AutonomousRunner {
     let streak = 0;
     // A Mac pass that died holding its claim leaves the row claimed, and the listing reads pending rows
     // only: recover stale claims first, as claimNext does (fail-soft; claimNext recovers again).
-    await this._recoverStaleClaimsSoft('runTerminalDrafts');
+    const recovered = (await this._recoverStaleClaimsSoft('runTerminalDrafts')) !== false;
     let terminalFirst;
     try {
       terminalFirst = await this._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true, throwOnError: true });
@@ -2089,6 +2089,10 @@ class AutonomousRunner {
       }
     }
     await this.settleTerminalWork(runs);
+    // Nothing taken after a failed recovery is not "nothing to take": a draft may sit on a stale claim.
+    if (!runs.length && !recovered) {
+      return { outcome: 'failed_stale_claim_recovery', reason: 'stale_claim_recovery_failed', count: 0, limit: batchLimit, failures: 1, runs };
+    }
     return {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
@@ -2487,11 +2491,14 @@ class AutonomousRunner {
    * like a taken draft's (settleTerminalWork).
    */
   // Stale-claim recovery that never stops its caller (claimNext recovers again).
+  // False when the recovery failed (logged); the caller goes on with the pending rows.
   async _recoverStaleClaimsSoft(label) {
     try {
       await getQueue()?.recoverStaleClaims?.();
+      return true;
     } catch (err) {
       logger.warn(`[autonomous-runner] ${label} stale-claim recovery failed (${err.message}); listing pending rows only`);
+      return false;
     }
   }
 
@@ -5474,7 +5481,8 @@ function macReviewOutage(err, run) {
 // waits) as a failure, so a model outage stops the pass and its run bell rings.
 function macPassFailure(run) {
   const tw = require('./terminal-writer');
-  return String(run.outcome).startsWith('failed') || [tw.PLAN_UNAVAILABLE, tw.REVIEW_UNAVAILABLE, tw.MAX_PLAN_MISSING].includes(run.skip_reason);
+  // UNREADABLE: GitHub failed on the draft the listing had just read; the draft stays for the next pass.
+  return String(run.outcome).startsWith('failed') || [tw.PLAN_UNAVAILABLE, tw.REVIEW_UNAVAILABLE, tw.MAX_PLAN_MISSING, tw.UNREADABLE].includes(run.skip_reason);
 }
 
 // The claim scope for the next batch slot (_terminalFirstIds lists): the

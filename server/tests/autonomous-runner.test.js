@@ -1953,12 +1953,16 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
         const { AutonomousRunner } = require('../services/content/autonomous-runner');
         runner.realRecover = AutonomousRunner.prototype._recoverStaleClaimsSoft.bind(new AutonomousRunner());
       });
-      await expect(runner.realRecover('runTerminalDrafts')).resolves.toBeUndefined();
+      await expect(runner.realRecover('runTerminalDrafts')).resolves.toBe(false);
       expect(recover).toHaveBeenCalledTimes(1);
       jest.dontMock('../services/content/opportunity-queue');
+      // A failed recovery and nothing taken: the pass fails (the job's bell rings), it is not "nothing to take".
+      const stuck = queueRunner(rows());
+      stuck.runner._recoverStaleClaimsSoft = jest.fn(async () => false);
+      await expect(stuck.runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'failed_stale_claim_recovery', count: 0, failures: 1 });
     });
 
-    test.each(['terminal_plan_review_unavailable', 'terminal_review_unavailable'])('a reviewer that could not run (%s) counts as a Mac pass failure: the outage stops the pass and shows in failures', async (skipReason) => {
+    test.each(['terminal_plan_review_unavailable', 'terminal_review_unavailable', 'terminal_draft_unreadable'])('a reviewer or draft read that could not run (%s) counts as a Mac pass failure: the outage stops the pass and shows in failures', async (skipReason) => {
       mac({ runner: 'mac' });
       const outage = ['u1', 'u2', 'u3'].map((id, i) => row(id, 90 - i, { skip_reason: skipReason }));
       const { runner, order } = queueRunner(outage, { written: ['u1', 'u2', 'u3'] });
