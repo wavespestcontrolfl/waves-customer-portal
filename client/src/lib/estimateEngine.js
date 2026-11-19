@@ -1525,6 +1525,9 @@ export function normalizeTrenchingProductKey(value, { fallback = 'taurus_sc' } =
     crosscheck: 'talstar_p',
     crosscheck_plus: 'talstar_p',
     lesco_crosscheck_plus: 'talstar_p',
+    cross_check: 'talstar_p',
+    cross_check_plus: 'talstar_p',
+    lesco_cross_check_plus: 'talstar_p',
   };
   return aliases[raw] || fallback;
 }
@@ -1577,6 +1580,9 @@ export function normalizePreSlabProductKey(value, { fallback = 'termidor_sc' } =
     crosscheck: 'talstar_p',
     crosscheck_plus: 'talstar_p',
     lesco_crosscheck_plus: 'talstar_p',
+    cross_check: 'talstar_p',
+    cross_check_plus: 'talstar_p',
+    lesco_cross_check_plus: 'talstar_p',
   };
   return aliases[raw] || fallback;
 }

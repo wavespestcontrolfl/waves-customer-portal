@@ -327,8 +327,7 @@ function mistingKnobSignalForReplay(estData = {}) {
 // revisit or accept. Same contract as the misting stamp: the stored pre-slab row keeps the product it quoted and the container
 // cost it priced with (the raw line's containerCost; the mapped item's fullContainerProductCost / containersRequired, cent-exact),
 // and they replay for that product. No stored row, or none with a finite cost basis: null (the live config prices it, like a
-// fresh quote). Trenching needs no pin for this swap: it prices per linear foot with Taurus chemistry included and charges a
-// product only for the cost above that, and both bifenthrin bottles cost less per finished gallon at either rate.
+// fresh quote).
 function preSlabRowContainerCost(row) {
   const direct = Number(row.containerCost);
   if (Number.isFinite(direct) && direct > 0) return direct;
@@ -351,10 +350,35 @@ function preSlabTermiticideKnobSignalForReplay(estData = {}) {
   return null;
 }
 
-// The pin as engine-input overrides: {} when the stored rows carry none, so Object.assign adds nothing.
-function preSlabTermiticideReplayOverrides(estData = {}) {
-  const knobs = preSlabTermiticideKnobSignalForReplay(estData);
-  return knobs ? { preSlabTermiticidePricingKnobs: knobs } : {};
+// Trench product surcharge (the same bottle swap). Trenching prices per linear foot with the included chemistry (Taurus) in the
+// install price and charges a product only for its cost above that: the surcharge. A bottle that costs more per finished gallon
+// than the included one (a lower configured Taurus cost, the high rate) carries one, so the swap can move it, and every replay
+// re-runs the engine under the LIVE costs. The stored trench row keeps the product, rate, product oz and the surcharge it priced;
+// they replay, and the engine keeps that surcharge when it prices the same product, rate and product oz. No stored row naming
+// all four: null (the live config prices it, like a fresh quote).
+function trenchingKnobSignalForReplay(estData = {}) {
+  const { storedTrenchingRows } = require('./estimate-result-container');
+  for (const row of storedTrenchingRows(estData)) {
+    const productKey = String(row.productKey || '').trim().toLowerCase();
+    const applicationRate = String(row.applicationRate || '').trim().toLowerCase();
+    const productOz = Number(row.productOz);
+    const productSurcharge = Number(row.productSurcharge);
+    if (productKey && applicationRate && Number.isFinite(productOz) && productOz > 0
+      && Number.isInteger(productSurcharge) && productSurcharge >= 0) {
+      return { productKey, applicationRate, productOz, productSurcharge };
+    }
+  }
+  return null;
+}
+
+// Both termiticide pins as engine-input overrides: only the ones the stored rows carry, so Object.assign adds nothing else.
+function termiticideReplayOverrides(estData = {}) {
+  const preSlab = preSlabTermiticideKnobSignalForReplay(estData);
+  const trenching = trenchingKnobSignalForReplay(estData);
+  return {
+    ...(preSlab ? { preSlabTermiticidePricingKnobs: preSlab } : {}),
+    ...(trenching ? { trenchingTermiticidePricingKnobs: trenching } : {}),
+  };
 }
 
 // Every install knob a stamped line carries replays verbatim (codex #4313
@@ -457,7 +481,8 @@ module.exports = {
   termiteKnobSignalForReplay,
   mistingKnobSignalForReplay,
   preSlabTermiticideKnobSignalForReplay,
-  preSlabTermiticideReplayOverrides,
+  trenchingKnobSignalForReplay,
+  termiticideReplayOverrides,
   PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,
   NEUTRAL_TREE_SHRUB_KNOBS,

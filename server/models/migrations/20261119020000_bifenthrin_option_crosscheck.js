@@ -18,7 +18,8 @@
  * Step P (first, same transaction): production holds a stale SiteOne price for LESCO Crosscheck Plus ($58.42 per 1 gal, entered
  * 2026-09-30; the owner pays $30.90). db-bridge's pre-slab link takes a catalog price within [0.5x, 2x] of the config, and 58.42 is
  * 1.89x of 30.90, so a pre-slab link to that row unfixed would RAISE slab quotes. For each catalog row named LESCO Crosscheck Plus,
- * Step P writes $30.90 on the product's one vendor row and the catalog best price exactly the way the inventory price handler does
+ * Step P writes $30.90 on the product's one vendor row, when it is SiteOne's (item D00001542 AND its vendors row named SiteOne:
+ * another vendor can list the same number), and the catalog best price exactly the way the inventory price handler does
  * for a manual entry with no shipping or tax (PUT /:productId/pricing + recalcBestPriceLocked: previous price, price, price_amount,
  * landed cost, per-oz figures, last_checked_at, a price_history row holding the OLD price, and the catalog best_price /
  * best_price_amount_cached / best_price_updated_at). It acts only when the rows still look exactly as read on 2026-11-18, the vendor
@@ -215,6 +216,15 @@ function vendorRowBlocker(row, now) {
   return null;
 }
 
+// SiteOne by the vendor row's own vendors row (the app's SiteOne lookup reads the same name), not by the item number alone:
+// another vendor can list the same number.
+const SITEONE_NAME = 'siteone';
+async function isSiteOneRow(knex, row) {
+  if (row.vendor_sku !== STALE_SKU || !(await knex.schema.hasTable('vendors'))) return false;
+  const vendor = await knex('vendors').where({ id: row.vendor_id }).first();
+  return !!vendor && String(vendor.name || '').trim().toLowerCase() === SITEONE_NAME;
+}
+
 async function missingColumns(knex) {
   const missing = [
     ...(await existingColumns(knex, 'vendor_pricing', REQUIRED_VENDOR_COLUMNS)).length === REQUIRED_VENDOR_COLUMNS.length ? [] : ['vendor_pricing columns'],
@@ -230,7 +240,7 @@ async function catalogBlocker(knex, product, rows, now = new Date()) {
   const missing = await missingColumns(knex);
   if (missing) return missing;
   if (product.active !== true) return 'the product is not active';
-  if (rows.length !== 1 || rows[0].vendor_sku !== STALE_SKU) return `it does not have exactly one vendor row with SKU ${STALE_SKU}`;
+  if (rows.length !== 1 || !(await isSiteOneRow(knex, rows[0]))) return `it does not have exactly one vendor row, SiteOne's ${STALE_SKU}`;
   const row = rows[0];
   const rowBlocker = vendorRowBlocker(row, now);
   if (rowBlocker) return rowBlocker;
@@ -251,8 +261,9 @@ async function insertPriceHistory(knex, productId, row) {
 }
 
 // The product's one SiteOne D00001542 row while it is still the stale entry (vendorRowBlocker), else null.
-function staleVendorRow(rows, now) {
-  const siteOne = rows.filter((row) => row.vendor_sku === STALE_SKU);
+async function staleVendorRow(knex, rows, now) {
+  const siteOne = [];
+  for (const row of rows) if (await isSiteOneRow(knex, row)) siteOne.push(row);
   return siteOne.length === 1 && !vendorRowBlocker(siteOne[0], now) ? siteOne[0] : null;
 }
 
@@ -281,7 +292,7 @@ async function fixProductPrice(knex, productId) {
   const blocker = await catalogBlocker(knex, product, rows, now);
   if (blocker === 'done') return false;
   let row = rows[0];
-  if (blocker) row = (await missingColumns(knex)) ? null : staleVendorRow(rows, now);
+  if (blocker) row = (await missingColumns(knex)) ? null : await staleVendorRow(knex, rows, now);
   if (blocker && !row) {
     console.warn(`${LOG} ${CATALOG_NAME} (${productId}) price left alone: ${blocker}`);
     return false;

@@ -101,6 +101,9 @@ const talakVendorRow = () => ({
   unit_normalized: 'oz', is_active: true, approval_status: 'approved',
 });
 
+// The vendors table: SiteOne backs the D00001542 row (production: one vendors row named SiteOne, code 1, read 2026-11-19).
+const VENDORS = [{ id: 'ven1', name: 'SiteOne', code: 1 }, { id: 'ven2', name: 'Other Supply', code: 2 }, { id: 'ven3', name: 'Amazon', code: 3 },
+  { id: 'ven9', name: 'Other Vendor', code: 9 }];
 const world = ({ preslab = preslabRow(), trench = trenchRow(), catalog = [catalogRow()], vendors = [vendorRow()], pest = null } = {}) => ({
   pricing_config: [
     { config_key: 'onetime_preslab', data: JSON.stringify(preslab) },
@@ -111,6 +114,7 @@ const world = ({ preslab = preslabRow(), trench = trenchRow(), catalog = [catalo
   pricing_changelog: [],
   products_catalog: catalog,
   vendor_pricing: vendors,
+  vendors: VENDORS.map((vendor) => ({ ...vendor })),
   price_history: [],
 });
 const rowOf = (db, key) => JSON.parse(db.pricing_config.find((r) => r.config_key === key).data);
@@ -289,6 +293,18 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
       expect(snapshot(db)).toBe(after); // a re-run is a no-op
     });
 
+    test('the same item number at another vendor too: only the SiteOne row is corrected; the other quote keeps its price', async () => {
+      const elsewhere = vendorRow({ id: 'v2', vendor_id: 'ven2', is_best_price: false });
+      const db = world({ vendors: [vendorRow(), elsewhere] });
+      await migration.up(fakeKnex(db));
+      expect(db.vendor_pricing.map((v) => v.price)).toEqual([30.9, '58.42']);
+      expect(db.vendor_pricing[1]).toEqual(elsewhere);
+      expect(db.price_history).toHaveLength(1);
+      expect(db.price_history[0]).toMatchObject({ vendor_id: 'ven1' });
+      expectMarked(db.products_catalog[0]);
+      bothRowsRewritten(db);
+    });
+
     test('two catalog rows named LESCO Crosscheck Plus: each is its own product; one is fixed, the other is marked', async () => {
       const db = world({ catalog: [catalogRow(), catalogRow({ id: 'p2', best_vendor_pricing_id: null })] });
       await migration.up(fakeKnex(db));
@@ -361,6 +377,8 @@ describe('bifenthrin option is Crosscheck Plus migration', () => {
     // row is marked. A 58.42 on a 96 oz row is outside the band: the links refuse it, and it is not the stale price for 128 oz.
     test.each([
       ['a different SKU', { vendors: [vendorRow({ vendor_sku: 'OTHER' })] }, true],
+      ['the same item number at another vendor', { vendors: [vendorRow({ vendor_id: 'ven2' })] }, true],
+      ['a vendor row whose vendor is not on file', { vendors: [vendorRow({ vendor_id: 'gone' })] }, true],
       ['an inactive vendor row', { vendors: [vendorRow({ is_active: false })] }, true],
       ['an unapproved vendor row', { vendors: [vendorRow({ approval_status: 'pending' })] }, true],
       ['an expired vendor quote', { vendors: [vendorRow({ expires_at: new Date('2026-11-01T00:00:00.000Z') })] }, true],

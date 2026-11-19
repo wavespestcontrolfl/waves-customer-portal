@@ -26,7 +26,8 @@ describe('LESCO Crosscheck Plus bifenthrin cost', () => {
   });
 
   test('Crosscheck aliases resolve to the talstar_p option', () => {
-    for (const alias of ['crosscheck', 'crosscheck_plus', 'lesco_crosscheck_plus', 'talak', 'atticus_talak']) {
+    // 'Cross Check Plus' is an inventory alias (migration 20261119010000); the resolvers normalize each spelling first.
+    for (const alias of ['crosscheck', 'crosscheck_plus', 'lesco_crosscheck_plus', 'talak', 'atticus_talak', 'Cross Check Plus', 'LESCO Cross Check Plus', 'cross check']) {
       expect(pricePreSlabTermiticide({ slabSqFt: 6832 }, { productKey: alias }).productKey).toBe('talstar_p');
       expect(trench(alias, 'standard', 100).productKey).toBe('talstar_p');
     }

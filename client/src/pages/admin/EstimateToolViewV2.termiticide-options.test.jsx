@@ -61,6 +61,8 @@ describe("label checks saved for the earlier bifenthrin bottle", () => {
       .toEqual({ preslabProductKey: "talstar_p", trenchingProductKey: "talstar_p", notes: "kept" });
     expect(canonicalTermiticideProducts({ preslabProductKey: "termidor", trenchingProductKey: "taurus" }))
       .toEqual({ preslabProductKey: "termidor_sc", trenchingProductKey: "taurus_sc" });
+    expect(canonicalTermiticideProducts({ preslabProductKey: "Cross Check Plus", trenchingProductKey: "LESCO Cross Check Plus" }))
+      .toEqual({ preslabProductKey: "talstar_p", trenchingProductKey: "talstar_p" });
     const keys = { preslabProductKey: "talstar_p", trenchingProductKey: "" };
     expect(canonicalTermiticideProducts(keys)).toBe(keys);
     const unknown = { preslabProductKey: "mystery bottle", trenchingProductKey: "bifen_it" };

@@ -1937,7 +1937,8 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control', { scopedOneTime: true })) {
-    const result = priceTrenching(property, serviceOptions(services.trenching));
+    // A replayed trench quote keeps its stored product surcharge (input.trenchingTermiticidePricingKnobs, server-owned).
+    const result = priceTrenching(property, serviceOptions(services.trenching), input.trenchingTermiticidePricingKnobs);
     lineItems.push(result);
   }
   if (services.germanRoach && !useCommercialManualQuote(services.germanRoach, 'pest_control')) {
