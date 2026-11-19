@@ -104,7 +104,7 @@ function certifiedSequence(slot, groups, proposed) {
   const actualDuration = Number(proposed.estimated_duration_minutes);
   if (!Array.isArray(groups) || proof?.routeMode !== 'arrival_windows' || !Array.isArray(proof.order)
       || proof.order.length !== groups.length + 1 || !(actualDuration > 0)
-      || !(Number(proof.durationMinutes) >= actualDuration)) return null;
+      || !(Number(proof.workMinutes) >= actualDuration)) return null;
   const byMember = new Map();
   for (const group of groups) {
     const id = String(group.id);
@@ -236,7 +236,12 @@ async function technicianProof({ conn, date, techId, day, read, replan, homes, d
   const occupancyBlocks = blocked.map(({ startMin, endMin }) => ({ startMin, endMin }));
   const routeBlocks = [...blocks, ...day.interviewBlocks, ...occupancyBlocks];
   const capacityOccupancyBlocks = blocked
-    .filter(row => !(sameTech(row, techId) && capacityRouteIds.has(String(row.id))))
+    // A live make-room destination deliberately shares its reservation id
+    // with the hold that remains in the certified route at the original
+    // interval. Remove that original interval from exact blocks (the route
+    // simulates it once), but retain the rival destination as unavailable.
+    .filter(row => row.conflict_reason === 'make_room_destination'
+      || !(sameTech(row, techId) && capacityRouteIds.has(String(row.id))))
     .map(({ startMin, endMin }) => ({ startMin, endMin }));
   const capacityBlocks = [...blocks, ...day.interviewBlocks, ...capacityOccupancyBlocks];
   const unavailable = [...routeBlocks, ...blockedHours.map(hour => ({ startMin: hour * 60, endMin: hour * 60 + 60 }))];

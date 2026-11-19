@@ -2124,6 +2124,16 @@ function signCustomerFacingSlots(slots, estimateId) {
   });
 }
 
+function capacityPlacementProof(slot, include) {
+  if (!include || slot.route_mode !== 'arrival_windows' || !Array.isArray(slot.route_arrivals)) return {};
+  const order = slot.route_arrivals.map(row => row?.id).filter(id => id != null);
+  const workMinutes = Number(slot[Symbol.for('waves.dispatch.certifiedWorkMinutes')]);
+  if (order.length !== slot.route_arrivals.length || !(workMinutes > 0)) return {};
+  return { [Symbol.for('waves.dispatch.certifiedCapacityPlacement')]: {
+    routeMode: slot.route_mode, order, workMinutes,
+  } };
+}
+
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes, { includeCapacityProof = false } = {}) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes
     && (!capacityEnabled() || slot.stops_that_day > 0);
@@ -2134,19 +2144,13 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
   // generate identical IDs — techId differentiates.
   const windowStart = roundUpToHour(slot.start_time);
   const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
-  const routeOrder = includeCapacityProof && Array.isArray(slot.route_arrivals)
-    ? slot.route_arrivals.map(row => row?.id).filter(id => id != null) : [];
-  const capacityProof = includeCapacityProof && slot.route_mode === 'arrival_windows' && routeOrder.length === slot.route_arrivals?.length
-    ? { [Symbol.for('waves.dispatch.certifiedCapacityPlacement')]: {
-      routeMode: slot.route_mode, order: routeOrder, durationMinutes: Number(durationMinutes),
-    } } : {};
   return {
     slotId: `${slot.date}_${windowStart.replace(':', '-')}_${slot.technician?.id || 'unassigned'}`,
     date: slot.date,
     windowStart,
     windowEnd,
     durationMinutes,
-    ...capacityProof,
+    ...capacityPlacementProof(slot, includeCapacityProof),
     ...(capacityEnabled() ? { routeMode: slot.route_mode } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,

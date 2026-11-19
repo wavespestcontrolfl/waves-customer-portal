@@ -259,6 +259,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     });
     const [hold] = await mockConn('scheduled_services').insert({ customer_id: null, technician_id: otherTech, scheduled_date: date,
       service_type: 'Quarterly Pest Control Service', status: 'pending', reservation_expires_at: date + 'T22:00Z',
+      lat: HQ.lat, lng: HQ.lng, estimated_duration_minutes: 60, route_order: 2,
       window_start: '14:00', window_end: '15:00', make_room_moves: {
         v: 1, date, techId: otherTech, moves: [{ id: visits[1].id, from: '12:00', to: '11:00', widthMin: 60 }],
       } }).returning('id');
@@ -272,6 +273,33 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
         await expect(assess()).resolves.toEqual([expect.objectContaining({ slot })]);
         await mockConn('scheduled_services').where({ id: hold.id }).update({ technician_id: null });
         await expect(assess()).resolves.toEqual([]); // unassigned destination blocks everyone
+      });
+
+      // Capacity replay includes the rival hold at its original 14:00
+      // interval and must independently retain its same-id destination. The
+      // earlier 90-minute visit delays the candidate to 10:30-11:30.
+      await mockConn('scheduled_services').where({ id: hold.id }).update({ technician_id: techId });
+      const capacitySlot = { ...slot,
+        [require('../services/day-replan/booking-fit').CAPACITY_PLACEMENT]: {
+          routeMode: 'arrival_windows', order: [earlier.id, '__candidate__', hold.id], workMinutes: 60,
+        } };
+      await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
+        const occupied = await require('../services/scheduling/occupancy').listOccupiedWindows({
+          db: mockConn, dateFrom: date, dateTo: date, includeClaimedBookings: true,
+        });
+        expect(occupied.filter(row => String(row.id) === String(hold.id))
+          .map(row => [String(row.window_start).slice(0, 5), String(row.window_end).slice(0, 5), row.conflict_reason || null])
+          .sort()).toEqual([
+          ['11:00', '12:00', 'make_room_destination'],
+          ['14:00', '15:00', null],
+        ]);
+        await expect(assessOfferedHours(mockConn, [capacitySlot], target, { now: NOW })).resolves.toEqual([]);
+
+        await mockConn('scheduled_services').where({ id: hold.id }).update({ make_room_moves: {
+          v: 1, date, techId, moves: [{ id: visits[1].id, from: '13:00', to: '12:00', widthMin: 60 }],
+        } });
+        await expect(assessOfferedHours(mockConn, [capacitySlot], target, { now: NOW }))
+          .resolves.toEqual([expect.objectContaining({ slot: capacitySlot, finishMin: 690 })]);
       });
     });
   });
@@ -327,7 +355,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
       reservation_service_mix: mix, route_order: index + 1,
     })));
     const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00',
-      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [ids[0], '__candidate__'], durationMinutes: 60 } };
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [ids[0], '__candidate__'], workMinutes: 60 } };
     const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
     await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
       const [fit] = await assessOfferedHours(mockConn, [slot], target, { now: NOW });

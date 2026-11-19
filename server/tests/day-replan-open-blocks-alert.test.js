@@ -236,7 +236,7 @@ test('booking fit scores an overlapping capacity card only from its certified li
   ]);
   const capacitySlot = {
     date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
-    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['existing', '__candidate__'], durationMinutes: 60 },
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['existing', '__candidate__'], workMinutes: 60 },
   };
 
   await expect(assessOfferedHours(jest.fn(), [capacitySlot], target, { now: NOW, calendar: calendar() }))
@@ -246,6 +246,16 @@ test('booking fit scores an overlapping capacity card only from its certified li
     { now: NOW, calendar: calendar() }))
     .resolves.toEqual([expect.objectContaining({ slot: capacitySlot, finishMin: 660 })]);
 
+  const shortProof = { routeMode: 'arrival_windows', order: ['existing', '__candidate__'], workMinutes: 35 };
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: shortProof }],
+    { ...target, estimated_duration_minutes: 30 }, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ finishMin: 660 })]);
+  occupancy.listOccupiedWindows.mockClear();
+  await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: shortProof }],
+    { ...target, estimated_duration_minutes: 45 }, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([]);
+
   // The nominally identical fixed-hour card remains blocked by the existing 10 AM row.
   occupancy.listOccupiedWindows.mockClear();
   await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: undefined }], target,
@@ -253,8 +263,7 @@ test('booking fit scores an overlapping capacity card only from its certified li
 
   // A route mutation or duration mismatch invalidates the old certificate.
   for (const proof of [
-    { routeMode: 'arrival_windows', order: ['missing', '__candidate__'], durationMinutes: 60 },
-    { routeMode: 'arrival_windows', order: ['existing', '__candidate__'], durationMinutes: 30 },
+    { routeMode: 'arrival_windows', order: ['missing', '__candidate__'], workMinutes: 60 },
   ]) {
     occupancy.listOccupiedWindows.mockClear();
     await expect(assessOfferedHours(jest.fn(), [{ ...capacitySlot, [CAPACITY_PLACEMENT]: proof }], target,
@@ -269,7 +278,7 @@ test('capacity cards reject nominal interview overlap but keep exact handoffs', 
   const date = '2026-11-20';
   const tech = 'tech-1';
   const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
-    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], durationMinutes: 60 } };
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], workMinutes: 60 } };
   const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
     planning_exempt: true, estimated_duration_minutes: 60 };
   const calendar = () => new Map([
@@ -295,7 +304,7 @@ test('a certified rival hold stays in the capacity route exactly once', async ()
   const tech = 'tech-1';
   const visit = {
     id: 'morning-visit', customer_id: 'customer-1', technician_id: tech, status: 'confirmed', scheduled_date: date,
-    window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
+    window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 75,
     lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 1,
   };
   const rival = {
@@ -304,21 +313,34 @@ test('a certified rival hold stays in the capacity route exactly once', async ()
     reservation_expires_at: '2097-01-01', source_estimate_id: 'estimate-rival',
     lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, route_order: 2,
   };
-  occupancy.listOccupiedWindows.mockResolvedValueOnce([{ ...rival, startMin: 900, endMin: 990 }]);
+  const original = { ...rival, startMin: 900, endMin: 990 };
+  const at = min => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+  const destination = (startMin, endMin) => ({ ...rival, startMin, endMin,
+    window_start: at(startMin), window_end: at(endMin), conflict_reason: 'make_room_destination' });
   const slot = {
-    date, techId: tech, windowStart: '11:00', windowEnd: '12:00',
+    date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
     [CAPACITY_PLACEMENT]: {
-      routeMode: 'arrival_windows', order: [visit.id, '__candidate__', rival.id], durationMinutes: 60,
+      routeMode: 'arrival_windows', order: [visit.id, '__candidate__', rival.id], workMinutes: 60,
     },
   };
   const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
     planning_exempt: true, estimated_duration_minutes: 60 };
-  const calendar = new Map([
+  const calendar = () => new Map([
     ['homes', new Map()], ['departure', 8 * 60], [date, [visit, rival]], [`${date}|${tech}`, []],
   ]);
 
-  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar }))
-    .resolves.toEqual([expect.objectContaining({ slot, startMin: 660 })]);
+  // The original hold remains in the route; its same-id destination remains
+  // an exact block. Earlier work delays the 10 AM candidate to 10:15; the
+  // rival's 10:45 destination postpones it rather than allowing a crossing.
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([original, destination(645, 705)]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ slot, startMin: 600, finishMin: 765 })]);
+
+  // Both intervals remain represented, and an exact destination handoff at
+  // the delayed candidate's 11:15 departure is still valid.
+  occupancy.listOccupiedWindows.mockResolvedValueOnce([original, destination(675, 735)]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ slot, startMin: 600, finishMin: 675 })]);
 });
 
 test.each(['visit_id', 'v2 allocation'])(
@@ -338,7 +360,7 @@ test.each(['visit_id', 'v2 allocation'])(
       ...(kind === 'visit_id' ? { visit_id: 'shared-visit' } : { reservation_service_mix: mix }),
     }));
     const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
-      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [ids[0], '__candidate__'], durationMinutes: 60 } };
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [ids[0], '__candidate__'], workMinutes: 60 } };
     const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
       planning_exempt: true, estimated_duration_minutes: 60 };
     const calendar = new Map([
@@ -362,12 +384,20 @@ test('slot classification preserves certified capacity order internally but not 
     date: '2026-11-20', start_time: '10:00', route_mode: 'arrival_windows', detour_minutes: 3,
     technician: { id: 'tech-1', name: 'Pat Tester' },
     route_arrivals: [{ id: 'existing' }, { id: '__candidate__' }], stops_that_day: 1,
+    [Symbol.for('waves.dispatch.certifiedWorkMinutes')]: 35,
   }, 20, 60, { includeCapacityProof: true });
 
   expect(classified[CAPACITY_PLACEMENT]).toEqual({
-    routeMode: 'arrival_windows', order: ['existing', '__candidate__'], durationMinutes: 60,
+    routeMode: 'arrival_windows', order: ['existing', '__candidate__'], workMinutes: 35,
   });
   expect(JSON.stringify(classified)).not.toContain('__candidate__');
+  expect(JSON.stringify(classified)).not.toContain('certifiedWorkMinutes');
+
+  const withoutDuration = slots.classifySlot({
+    date: '2026-11-20', start_time: '10:00', route_mode: 'arrival_windows', detour_minutes: 3,
+    technician: { id: 'tech-1', name: 'Pat Tester' }, route_arrivals: [{ id: '__candidate__' }], stops_that_day: 0,
+  }, 20, 60, { includeCapacityProof: true });
+  expect(withoutDuration[CAPACITY_PLACEMENT]).toBeUndefined();
 });
 
 test('booking fit blocks live make-room destinations from the writer reader with its technician scope', async () => {

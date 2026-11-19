@@ -40,7 +40,8 @@ jest.mock('../services/scheduling/arrival-route', () => ({
   evaluateArrivalPlacement: jest.fn((_context, options) => ({
     feasible: true, routeOrder: ['candidate'], detourMinutes: (Number(options.windowStart.slice(0, 2)) - 8) * 10,
     driveMinutes: 0, occupiedMinutes: 0, waitingMinutes: 0, estimatedArrival: null, arrivals: [{}],
-    finishMinute: 1000, travelSource: 'none', travelReasons: [],
+    finishMinute: 1000, arrivalDelayMinutes: 25, travelSource: 'none', travelReasons: [],
+    target: { id: 'candidate', estimated_duration_minutes: 35 },
   })),
 }));
 
@@ -91,6 +92,14 @@ describe('capacity mode (GATE_SCHEDULING_CAPACITY) customer-grid admission', () 
     const { slots } = await findAvailableSlots(BASE);
     const startTimes = slots.map((s) => s.start_time);
     expect(startTimes).toContain('08:00');
+  });
+
+  test('a delayed capacity placement retains its simulated work duration internally only', async () => {
+    const { slots } = await findAvailableSlots(BASE);
+    const certifiedWork = Symbol.for('waves.dispatch.certifiedWorkMinutes');
+    expect(slots[0]).toEqual(expect.objectContaining({ arrival_delay_minutes: 25 }));
+    expect(slots[0][certifiedWork]).toBe(35);
+    expect(JSON.stringify(slots[0])).not.toContain('certifiedWorkMinutes');
   });
 });
 
