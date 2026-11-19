@@ -23,6 +23,33 @@ describe('redactOfferLinks', () => {
     expect(redactOfferLinks(`<a href="https://x.test/careers/offer/${TOKEN}">a</a> and https://x.test/careers/offer/${TOKEN.toUpperCase()}`)).not.toMatch(/[0-9a-f]{64}/i);
   });
 
+  // A browser cleans the path before it opens it, so these spellings open the offer too.
+  test.each([
+    `https://portal.wavespestcontrol.com/careers/offer/./${TOKEN}`,
+    `https://portal.wavespestcontrol.com/careers/x/../offer/${TOKEN}`,
+    `https://portal.wavespestcontrol.com/careers/offer/%2e/${TOKEN}`,
+    `https://portal.wavespestcontrol.com\\careers\\offer\\${TOKEN}`,
+    `portal.wavespestcontrol.com/CAREERS//Offer/${TOKEN}?x=1#top`,
+    `<a href="https://x.test/careers/./offer/${TOKEN}">Read</a>`,
+  ])('hides the token in a spelling a browser cleans into the link: %s', (link) => {
+    const stored = redactOfferLinks(`Here it is: ${link} thanks`);
+    expect(stored).not.toContain(TOKEN);
+    expect(stored).toContain(OFFER_LINK_HIDDEN);
+    expect(stored.startsWith('Here it is: ')).toBe(true);
+    expect(stored.endsWith(' thanks')).toBe(true);
+  });
+
+  test('keeps the exact marker the deferred replay rebuilds from for the literal link', () => {
+    expect(redactOfferLinks(`x.test/careers/offer/${TOKEN}`)).toBe(`x.test/careers/offer/${OFFER_LINK_HIDDEN}`);
+    expect(redactOfferLinks(`x.test/careers/offer/./${TOKEN}`)).toBe(`x.test/careers/offer/./${OFFER_LINK_HIDDEN}`);
+  });
+
+  test('leaves other 64-hex links alone: the interview page, a visit link, a token with no offer route', () => {
+    for (const other of [`https://x.test/careers/interview/${TOKEN}`, `https://x.test/visit/${TOKEN}`, `ref ${TOKEN}`, `offer ${TOKEN} careers`]) {
+      expect(redactOfferLinks(other)).toBe(other);
+    }
+  });
+
   test('leaves every other text, link and non-string alone', () => {
     const interview = `https://x.test/careers/interview/${TOKEN}`;
     expect(redactOfferLinks(interview)).toBe(interview);

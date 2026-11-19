@@ -12,9 +12,20 @@
 const OFFER_LINK_TOKEN_RE = /(\/careers\/offer\/)[0-9a-f]{64}/gi;
 const HIDDEN = '[link hidden]';
 
+// A browser also opens spellings the literal pattern misses, because it cleans the path first: dot segments
+// (/careers/offer/./<token>, /careers/x/../offer/<token>, %2e), backslashes (\careers\offer\<token>). None of those steps
+// adds a letter, and the page refuses a path that still holds a percent sign, so every spelling that opens the offer
+// keeps "careers", "offer" (any case) and the token in one unbroken run of text. In such a run every 64-hex token is
+// hidden too. An /careers/interview/ link has no "offer" and is left alone. Out of reach of any pattern: a token a
+// person has to put back together (split by spaces or line breaks); it is not a link, and it is not covered here.
+const UNBROKEN_RUN_RE = /\S+/g;
+const TOKEN_RUN_RE = /(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])/gi;
+const hideTokensInOfferRun = (run) => (/careers/i.test(run) && /offer/i.test(run) ? run.replace(TOKEN_RUN_RE, HIDDEN) : run);
+
 function redactOfferLinks(text) {
   if (typeof text !== 'string' || !text) return text;
-  return text.replace(OFFER_LINK_TOKEN_RE, `$1${HIDDEN}`);
+  // The literal pass first: it keeps the /careers/offer/[link hidden] marker the deferred replay rebuilds from.
+  return text.replace(OFFER_LINK_TOKEN_RE, `$1${HIDDEN}`).replace(UNBROKEN_RUN_RE, hideTokensInOfferRun);
 }
 
 // The link tokens in `text`, in the order they appear (lowercase hex, as job_offers.token stores them).
