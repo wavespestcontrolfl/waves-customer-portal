@@ -41,7 +41,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
-const { SERVICE_PAIR_PATTERN } = require('./service-pair-terms');
+const { PAIR_REQUEST_PATTERN } = require('./service-pair-terms');
 
 // Tokens that unambiguously imply each branch.
 const PEST_KEYWORDS = [
@@ -67,22 +67,17 @@ const ONE_TIME_RE = /\b(one[\s-]?time|just once|one visit|single visit|one[\s-]?
 // pest control", "pest/lawn"): one request for both. The fast path takes
 // only a reply that IS the pair, with polite filler or a form reference
 // around it ("Residential pest & lawn care", "Pest and lawn as per form I
-// filled out"). A pair inside other words ("I already have pest and lawn
-// care. I only need mosquitoes.") goes to the model, which reads the
+// filled out"): PAIR_REQUEST_PATTERN (./service-pair-terms), which the
+// address-tail strips share. A pair inside other words ("I already have pest
+// and lawn care. I only need mosquitoes.") goes to the model, which reads the
 // context. So do "bugs in my yard", "chinch bugs in the lawn" and the
 // lawn-line "lawn pest control": they carry both keyword sets but ask for
 // one service.
-// The pair itself is SERVICE_PAIR_PATTERN (./service-pair-terms), which the
-// address-tail strips share. The reply is normalized first (normalizePairReply:
-// lowercase, and each run of other characters is one space), so each word
-// below has exactly one space on its side: no two parts can take the same
-// characters, and a long reply cannot make the match backtrack.
-const PAIR_LEAD = "(?:(?:residential|both|just|i'd like|i would like|i want|i need|need|want|looking for|interested in) )*";
-const PAIR_FORM = '(?:as per|per|like on|like|on|from) (?:the |my )?form(?: i (?:filled(?: out| in)?|sent|submitted))?';
-const PAIR_TAIL = `(?: (?:services?|please|pls|thanks|thank you|both|${PAIR_FORM}))*`;
-const SERVICE_PAIR_RE = new RegExp(`^${PAIR_LEAD}${SERVICE_PAIR_PATTERN}${PAIR_TAIL}$`);
-// "?" stays, so a question ("pest and lawn? how much") never matches.
-const normalizePairReply = (lower) => lower.replace(/[’‘]/g, "'").replace(/[^a-z0-9&+/'?]+/g, ' ').trim();
+const SERVICE_PAIR_RE = new RegExp(`^${PAIR_REQUEST_PATTERN}$`);
+// Spaces and plain punctuation become one space. Every other character stays
+// (a "?", an emoji, a word in another script: "不要 pest and lawn"), so that
+// reply does not match and goes to the model.
+const normalizePairReply = (lower) => lower.replace(/[\s.,!;:"“”()*~…–—-]+/g, ' ').trim();
 
 function tokenMatches(lower, tokens) {
   for (const t of tokens) {

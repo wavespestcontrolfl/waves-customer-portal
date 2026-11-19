@@ -336,6 +336,8 @@ describe('two-service reply (pest_lawn)', () => {
   test.each([
     'pest and lawn',
     'lawn fertilization and pest control',
+    'pest and lawn services',
+    'both pest and lawn, like on the form',
   ])('a combined reply "street, %s" saves the street without the pair and drafts both', async (pair) => {
     mockClassify.mockResolvedValue({ interest: 'pest_lawn', confidence: 0.8, method: 'ai' });
     mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly

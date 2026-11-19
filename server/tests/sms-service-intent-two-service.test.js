@@ -14,23 +14,28 @@ beforeEach(() => {
   mockDispatch.mockResolvedValue({ ok: true, json: { interest: 'unknown', confidence: 0.4 } });
 });
 
+// Replies that are a pair request: the classifier's fast path takes each one,
+// and the address tail drops each one whole (the last describe).
+const PAIR_REPLIES = [
+  'Residential pest & lawn care',
+  'Lawn and pest',
+  'Lawn fertilization and pest control',
+  'Pest and lawn, like on the form',
+  'pest control, and lawn care',
+  'Pest + lawn please',
+  'pest/lawn',
+  // Polite filler and a form reference around the pair.
+  'Pest and lawn as per form I filled out',
+  'Both pest and lawn',
+  "I'd like pest and lawn.",
+  'I’d like pest and lawn',
+  'pest&lawn',
+  'Pest , and lawn',
+  'Pest and lawn services, like on the form',
+];
+
 describe('a reply that is the pest + lawn pair classifies as both, with no model call', () => {
-  test.each([
-    'Residential pest & lawn care',
-    'Lawn and pest',
-    'Lawn fertilization and pest control',
-    'Pest and lawn, like on the form',
-    'pest control, and lawn care',
-    'Pest + lawn please',
-    'pest/lawn',
-    // Polite filler and a form reference around the pair.
-    'Pest and lawn as per form I filled out',
-    'Both pest and lawn',
-    "I'd like pest and lawn.",
-    'I’d like pest and lawn',
-    'pest&lawn',
-    'Pest , and lawn',
-  ])('%j => pest_lawn', async (body) => {
+  test.each(PAIR_REPLIES)('%j => pest_lawn', async (body) => {
     await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: 'pest_lawn', confidence: 0.9, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -41,8 +46,9 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     // The pair inside a longer reply: only the context tells the request.
     ['I already have pest and lawn care. I only need mosquitoes.', 'pest'],
     ['100 Palm Ave, pest and lawn', 'pest_lawn'],
-    // A question goes to the model too.
+    // A question goes to the model too, and so does an emoji (it can mean "no").
     ['pest and lawn? how much', 'pest_lawn'],
+    ['pest and lawn 👍', 'pest_lawn'],
     // One service, worded with words from both lists.
     ['I have got bugs in my yard', 'pest'],
     ['chinch bugs in the lawn', 'lawn'],
@@ -61,6 +67,11 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     const [, request] = mockDispatch.mock.calls[0];
     expect(request.jsonSchema.properties.interest.enum).toEqual(['pest', 'lawn', 'pest_lawn', 'one_time', 'unknown']);
     expect(request.text).toContain('"pest_lawn" — BOTH recurring pest control AND lawn care');
+  });
+
+  test('words in another script stay in the reply, so the model reads them (不要 = "don\'t want")', async () => {
+    await expect(classifyServiceIntent('不要 pest and lawn')).resolves.toEqual({ interest: null, confidence: 0.4, method: 'ai' });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
   test('"unknown" from the model is still no service', async () => {
@@ -94,7 +105,7 @@ describe('a long reply cannot stall the event loop', () => {
   });
 });
 
-describe('the shared address-tail pattern drops the whole pair, and single-service tails as before', () => {
+describe('the shared address-tail pattern drops the whole pair request, and single-service tails as before', () => {
   const strip = (address) => {
     let out = address;
     while (SERVICE_TAIL_RE.test(out)) out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
@@ -103,6 +114,9 @@ describe('the shared address-tail pattern drops the whole pair, and single-servi
   test.each([
     ['123 Main St, pest and lawn', '123 Main St'],
     ['123 Main St, lawn fertilization and pest control', '123 Main St'],
+    ['123 Main St, pest and lawn services', '123 Main St'],
+    ['123 Main St, both pest and lawn', '123 Main St'],
+    ['123 Main St, pest and lawn per the form', '123 Main St'],
     ['123 Main St, Sarasota, quarterly pest & lawn care', '123 Main St, Sarasota'],
     ['100 Palm Ave, Venice FL 34285, lawn/pest', '100 Palm Ave, Venice FL 34285'],
     ['123 Main St, pest control', '123 Main St'],
@@ -110,6 +124,19 @@ describe('the shared address-tail pattern drops the whole pair, and single-servi
     ['45 Lawn Ave', '45 Lawn Ave'],
   ])('%j => %j', (address, street) => {
     expect(strip(address)).toBe(street);
+  });
+
+  test.each(PAIR_REPLIES)('a street line, then the fast-path reply %j: the street line keeps none of the reply', (reply) => {
+    // Both address readers cut the text at its first clause end before the strip.
+    expect(strip(`123 Main St, ${reply}`.split(/[.;!?\n]/)[0])).toBe('123 Main St');
+  });
+
+  test('a long run of commas or spaces is tried once, not from each of its characters', () => {
+    // Before the lookbehind, 12,800 commas took about 4 s and 25,600 spaces about 1 s.
+    const startedAt = Date.now();
+    expect(strip(`1 Main St${', '.repeat(12800)}x`)).toMatch(/x$/);
+    expect(strip(`1 Main St, pest and lawn${' '.repeat(25600)}x`)).toMatch(/x$/);
+    expect(Date.now() - startedAt).toBeLessThan(250);
   });
 });
 

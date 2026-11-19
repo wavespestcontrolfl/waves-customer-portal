@@ -354,6 +354,8 @@ describe('handleClarifyReply', () => {
   test.each([
     'pest and lawn',
     'lawn fertilization and pest control',
+    'pest and lawn services',
+    'both pest and lawn, like on the form',
   ])('a combined reply ending in "%s" records the street without the pair, and the pair as the service', async (pair) => {
     mockState.existingDraft = AWAITING(['street_address', 'specific_service']);
     const result = await handleClarifyReply({ phone: '9415550142', body: `123 Main St, Sarasota, ${pair}` });
