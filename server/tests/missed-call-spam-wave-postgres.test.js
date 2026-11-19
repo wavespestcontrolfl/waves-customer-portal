@@ -702,8 +702,11 @@ jest.setTimeout(30000);
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(false);
-      // A silent recording of 3 s or less is no message.
-      await database('call_log').insert(prior(CALLER, 60, { to_phone: SECOND_GBP_LINE, recording_sid: 'RE6', recording_duration_seconds: 2 }));
+      // Even a 2-second recording on the other line may hold "call me back" (pre-push audit): it does not count.
+      await database('call_log').insert(prior(CALLER, 60, { to_phone: SECOND_GBP_LINE, recording_sid: 'RE6', recording_duration_seconds: 2, transcription: 'call me back' }));
+      expect(await repeat(row)).toBe(false);
+      // A hang-up on the other line with no recording at all does.
+      await database('call_log').insert(prior(CALLER, 90, { to_phone: SECOND_GBP_LINE }));
       expect(await repeat(row)).toBe(true);
     });
 

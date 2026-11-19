@@ -293,7 +293,9 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
 // spoofed earlier call that borrowed a real person's number must never silence
 // that person's own first missed call. A caller who pressed 1 at the screen is a
 // person (pre-push audit): such a call is never judged a repeat, and such history
-// never counts. Production back-test, 90 days to
+// never counts. History with any recording never counts either: the shared
+// silent-hang-up read accepts a recording of 3 s or less, but this rule takes a
+// push away, so it counts only calls that left no recording. Production back-test, 90 days to
 // 2026-11-19: 22 calls from 14 numbers, 13 pushed bells, 0 real callers (no
 // message, no later text, no later call that got through, no lead, no customer).
 const REPEAT_DAYS = 14;
@@ -314,6 +316,8 @@ async function isRepeatSilentCaller(row) {
     .whereRaw(`${CALLER_KEY} = ?`, [`1${raw.slice(-10)}`])
     .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
     .whereRaw("COALESCE(metadata->>'preconnect_screen', '') <> 'passed'")
+    // No recording at all: even a 2-second recording can hold "call me back".
+    .whereNull('recording_sid').whereNull('recording_url')
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
   return Boolean(found?.other_line) || Number(found?.n || 0) >= REPEAT_MIN_PRIOR;
