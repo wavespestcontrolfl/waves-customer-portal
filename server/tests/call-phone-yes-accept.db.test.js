@@ -285,6 +285,10 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         { service: 'pest_control', perApp: 45, annual: 180, visitsPerYear: 4 }, { service: 'pest_control', perApp: 60, annual: 240, visitsPerYear: 4 },
       ] } })) },
     }, 'not_pest_plan'],
+    // Each send was held back (the send path's deliveryState records no real handoff) and the customer never opened it.
+    ['the estimate was never delivered', {
+      estimateOver: { estimate_data: JSON.stringify({ ...planData(), deliveryState: { attemptedAt: new Date(Date.now() - 2 * DAY).toISOString(), sentChannels: [], failedChannels: ['sms'], channels: [] } }) },
+    }, 'estimate_not_delivered'],
     ['the estimate maps two pest rows', {
       estimateOver: { estimate_data: JSON.stringify(planData({ result: { ...planData().result, recurring: { ...planData().result.recurring, services: [
         ...planData().result.recurring.services, { name: 'Pest Control', service: 'pest_control', mo: 20, visitsPerYear: 4, perTreatment: 60 },
@@ -616,6 +620,46 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
     const [card] = await cards(bookingCallId);
     expect(payloadOf(card)).toMatchObject({ yes_heard: false, caller_words: null, auto_would_accept: false });
+  });
+
+  // A resend moves sent_at; the first real handoff (deliveryState.firstDeliveredAt) stays.
+  test('a newer estimate sent again keeps its first send as the bound: its calls between the sends are not this card\'s', async () => {
+    const { customerId, yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    const resend = new Date(Date.now() - 600000);
+    await estimate(customerId, {
+      sent_at: resend,
+      estimate_data: JSON.stringify({ ...planData(), deliveryState: {
+        firstDeliveredAt: new Date(Date.now() - 3600000).toISOString(), lastDeliveredAt: resend.toISOString(), sentChannels: ['sms'],
+      } }),
+    });
+    await call(customerId, 'per_application', { created_at: new Date(Date.now() - 1800000) });
+    await call(customerId, null, { created_at: new Date(Date.now() - 1200000) }, 'cancellation_request');
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: yesCallId });
+  });
+
+  test('another estimate open at the yes and sent again after it: the shadow line still says the yes may be about it', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await estimate(customerId, {
+      status: 'accepted', accepted_at: new Date(Date.now() - 12 * 3600000), sent_at: new Date(Date.now() - 20 * 3600000),
+      estimate_data: JSON.stringify({ ...planData(), deliveryState: { firstDeliveredAt: new Date(Date.now() - 30 * 3600000).toISOString(), sentChannels: ['sms'] } }),
+    });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: false, auto_reason: 'yes_maybe_other_estimate' });
+  });
+
+  test('an estimate whose sends were held back but which the customer opened counts as delivered', async () => {
+    const { bookingCallId } = await phoneYes({ estimateOver: {
+      status: 'viewed', viewed_at: new Date(Date.now() - 36 * 3600000),
+      estimate_data: JSON.stringify({ ...planData(), deliveryState: { sentChannels: [], failedChannels: ['sms'], channels: [] } }),
+    } });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: true });
   });
 
   // A resend claims 'sending', then restores the status: a sweep in between keeps the card and its link.

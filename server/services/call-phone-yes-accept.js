@@ -22,7 +22,8 @@
  * No card when the customer's latest word since the send is annual prepay (the prepay card owns it,
  * call-prepay-choice.js), a cancellation or a one-time visit; and none while a call since the send still owes a read
  * (call-phone-yes-word.js owedReadSql). Only an estimate already sent when the call began counts, and never an
- * archived one. The card stays open while an unlinked pest visit the call booked is on the calendar, also after the
+ * archived one. "Sent" is the estimate's first real handoff (deliveryState.firstDeliveredAt, which a resend never
+ * moves), else sent_at. The card stays open while an unlinked pest visit the call booked is on the calendar, also after the
  * estimate expires. It closes itself once none of its estimates is open or lapsed (each accepted, declined or
  * archived), no unlinked pest visit of the call is left on the calendar, the call moves to another customer, or a later
  * call takes the yes back.
@@ -89,6 +90,7 @@ const REASONS = {
   visit_priced: 'The booked visit has a price that is not the plan price.',
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
+  estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
 };
 
 const skip = (reason) => ({ card: false, reason });
@@ -99,9 +101,14 @@ const parseJson = (value) => {
   try { return JSON.parse(value); } catch { return {}; }
 };
 
-// The estimate's send time, the earliest moment a yes to it can count (a re-send moves it).
+// When the customer was sent an estimate: its FIRST real handoff when the send path recorded one
+// (deliveryState.firstDeliveredAt, kept across resends: call-commitments' FIRST_HANDOFF_SQL), else sent_at. A resend
+// moves sent_at, never this. Null for an estimate never sent. SQL over the unaliased `estimates` table.
+const handoffSql = () => `LEAST(${require('./call-commitments').FIRST_HANDOFF_SQL}, estimates.sent_at)`;
+
+// The estimate's send time, the earliest moment a yes to it can count (the loaders read handoffSql as handoff_at).
 function sentAnchorOf(estimate) {
-  const at = new Date(estimate.sent_at || estimate.created_at || 0);
+  const at = new Date(estimate.handoff_at || estimate.sent_at || estimate.created_at || 0);
   return Number.isNaN(at.getTime()) ? new Date(0) : at;
 }
 const earliestSentAnchor = (estimates) => new Date(Math.min(...estimates.map((e) => sentAnchorOf(e).getTime())));
@@ -115,8 +122,7 @@ async function otherEstimateOpenAt(conn, { customerId, cardIds, callLogId }) {
   return !!(await conn('estimates')
     .where({ customer_id: customerId })
     .whereNotIn('id', cardIds)
-    .whereNotNull('sent_at')
-    .whereRaw(`sent_at <= ${startOfCall}`, [callLogId])
+    .whereRaw(`${handoffSql()} <= ${startOfCall}`, [callLogId])
     .where(openThen('accepted_at'))
     .where(openThen('declined_at'))
     .where(openThen('archived_at'))
@@ -133,9 +139,8 @@ async function newerEstimateSentAt(conn, { customerId, cardIds, bookingCallId })
   const row = await conn('estimates')
     .where({ customer_id: customerId })
     .whereNotIn('id', cardIds)
-    .whereNotNull('sent_at')
-    .whereRaw(`sent_at > ${startOfBooking}`, [bookingCallId])
-    .first(conn.raw('min(sent_at)::text AS at'));
+    .whereRaw(`${handoffSql()} > ${startOfBooking}`, [bookingCallId])
+    .first(conn.raw(`min(${handoffSql()})::text AS at`));
   return row?.at || null;
 }
 
@@ -147,7 +152,7 @@ async function openEstimatesOf(conn, customerId, now) {
     .whereNull('archived_at')
     .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now))
     .orderBy('created_at', 'desc')
-    .select('*');
+    .select('*', conn.raw(`${handoffSql()} AS handoff_at`));
 }
 
 // The visit's catalog row joined in, so the family matchers classify it by what it IS (an unlinked visit by its label).
@@ -174,16 +179,10 @@ async function estimateProblem(conn, estimate) {
   // KNOWN residential only: category RESIDENTIAL, not commercial auto-priced, no authored commercial proposal.
   if (!require('./estimate-before-you-book').isKnownResidential(estimate, data.proposal)) return 'commercial_estimate';
   if (estimate.estimate_group_id) return 'group_estimate';
+  if (neverDelivered(estimate, data)) return 'estimate_not_delivered';
   if (!(Number(estimate.monthly_total) > 0)) return 'no_recurring_price';
   const EstimateConverter = require('./estimate-converter');
-  const lines = require('../routes/estimate-public').acceptanceServiceLists(data).recurringSvcList || [];
-  if (lines.length !== 1 || EstimateConverter.recurringServiceKey(lines[0]) !== 'pest_control') return 'not_pest_plan';
-  // Two separately priced pest lines coalesce into that one row. Each list that holds lines tells them apart: the
-  // engine's own lines (the duplicate rule acceptanceServiceLists applies with preserveDuplicates) and each mapped
-  // recurring list. Each list is counted on its own, so one row mirrored in two lists is still one line.
-  const source = data.result || data.engineResult || data;
-  const pestRows = (rows) => (Array.isArray(rows) ? rows : []).filter((row) => EstimateConverter.recurringServiceKey(row) === 'pest_control').length;
-  if ([source.lineItems, source.recurring?.services, source.results?.recurring?.services].some((rows) => pestRows(rows) > 1)) return 'not_pest_plan';
+  if (!onePestLine(data, EstimateConverter)) return 'not_pest_plan';
   const AcceptEffects = require('./estimate-accept-effects');
   const oneTime = AcceptEffects.oneTimeLineEffects(estimate, EstimateConverter, { billingTerm: 'standard' });
   if (oneTime.refusal || oneTime.lines.some((line) => line.name !== MEMBERSHIP_FEE_LINE_NAME)) return 'one_time_items';
@@ -192,6 +191,25 @@ async function estimateProblem(conn, estimate) {
   if (await Manual.estimateLinkedVisitsQuery(conn, estimate.id).first('id')) return 'estimate_has_visits';
   if (await acceptRefused(conn, estimate, data)) return 'accept_refused';
   return null;
+}
+
+// Every send the send path made was held back or failed (its deliveryState records no real handoff) and the customer
+// never opened the estimate: they may never have seen it. A row with no deliveryState (an older send) counts as delivered.
+function neverDelivered(estimate, data) {
+  const delivery = data.deliveryState;
+  return !!delivery && typeof delivery === 'object' && !Number.isFinite(Date.parse(delivery.firstDeliveredAt)) && !estimate.viewed_at;
+}
+
+// One recurring line, and it is pest control. Two separately priced pest lines coalesce into that one row; each list
+// that holds lines tells them apart: the engine's own lines (the duplicate rule acceptanceServiceLists applies with
+// preserveDuplicates) and each mapped recurring list. Each list is counted on its own, so one row mirrored in two lists
+// is still one line.
+function onePestLine(data, EstimateConverter) {
+  const lines = require('../routes/estimate-public').acceptanceServiceLists(data).recurringSvcList || [];
+  if (lines.length !== 1 || EstimateConverter.recurringServiceKey(lines[0]) !== 'pest_control') return false;
+  const source = data.result || data.engineResult || data;
+  const pestRows = (rows) => (Array.isArray(rows) ? rows : []).filter((row) => EstimateConverter.recurringServiceKey(row) === 'pest_control').length;
+  return ![source.lineItems, source.recurring?.services, source.results?.recurring?.services].some((rows) => pestRows(rows) > 1);
 }
 
 // True when the estimate's own manual accept refuses it, read as the Intelligence Bar's accept card reads it
@@ -413,7 +431,8 @@ async function cardState(card) {
   }
   const ids = cardEstimateIds(card);
   const estimates = ids.length
-    ? await db('estimates').whereIn('id', ids).where({ customer_id: customerId }).select('id', 'status', 'sent_at', 'created_at', 'archived_at')
+    ? await db('estimates').whereIn('id', ids).where({ customer_id: customerId })
+      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', db.raw(`${handoffSql()} AS handoff_at`))
     : [];
   const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status) && !e.archived_at);
   if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
@@ -562,7 +581,7 @@ async function sweepCandidates({ now, after, pageSize }) {
         .whereIn('estimates.status', OPEN_ESTIMATE_STATUSES)
         .whereNull('estimates.archived_at')
         // Sent by the time the call began (callStartedAtSql's default alias is this call_log row).
-        .whereRaw(`COALESCE(estimates.sent_at, estimates.created_at) <= ${require('./sms-pending-conversations').callStartedAtSql()}`)
+        .whereRaw(`COALESCE(${handoffSql()}, estimates.created_at) <= ${require('./sms-pending-conversations').callStartedAtSql()}`)
         .where((qb) => qb.whereNull('estimates.expires_at').orWhere('estimates.expires_at', '>', now));
     })
     .whereNotExists(function cardAlreadyFiled() {
