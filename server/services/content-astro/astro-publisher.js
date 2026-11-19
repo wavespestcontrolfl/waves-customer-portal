@@ -4063,8 +4063,12 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false, commit
   const finalBody = refreshImages.body;
   const markdown = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`);
   // Same owner-list chokepoint as the new-post lane: refreshes auto-merge
-  // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146).
-  await assertOwnerListForCommit({ draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved });
+  // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146). A service
+  // page's metaTitle is the live one (frozen above), so the check leaves it out.
+  await assertOwnerListForCommit({
+    draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved,
+    liveProtectedMetaTitle: refreshBlogTarget ? undefined : currentFrontmatter.metaTitle,
+  });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
     evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
