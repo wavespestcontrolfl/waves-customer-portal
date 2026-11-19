@@ -8,7 +8,11 @@ const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const db = require('../models/db');
-const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
+const {
+  VALID_PAYMENT_METHODS,
+  recordManualPayment,
+  retireLockedPaymentSessionsBeforeSettlement,
+} = require('../services/invoice-manual-payment');
 const { undoManualPayment, describeManualPaymentUndo } = require('../services/invoice-manual-payment-undo');
 const { undoManualPaymentLive, partialPaymentsLive, techCardOnFileLive, checkoutTenderReceiptLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
@@ -2654,16 +2658,10 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       throw fenceErr;
     }
 
-    // Retire an open pay-page session, the one mechanism apply-credit and
-    // manual payments use: a customer confirming it after coverage is removed
-    // would pay for coverage that no longer exists. Money already moving, or a
-    // session that cannot be verified, refuses. Only when there is a flag to
-    // remove; the PI id is re-checked under the invoice lock below.
+    // The open PI id is re-checked under the invoice lock below. Provider
+    // retirement also happens there: a saved-card claim can commit after this
+    // pool preflight, and must refuse before an unrelated checkout is canceled.
     const openPiId = invoice.stripe_payment_intent_id || null;
-    if (invoice.annual_prepay_term_id) {
-      const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'removing the annual prepay flag' });
-      if (openPi) return res.status(openPi.status).json({ error: openPi.error });
-    }
 
     // Visit invoices this term settled as coverage, which the cancel reopens.
     // Settlement stopped their reminders and the reopen skips the re-arm
@@ -2672,8 +2670,18 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const txResult = await db.transaction(async (trx) => {
       // Chokepoint B (pre-push lock order): the parent-decision gate for the
       // termite term this flag removal cancels is the FIRST lock — gate →
-      // customer → invoice → term, the charge path's own order.
+      // combined reservation → customer → invoice → term.
       await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
+      // Combined checkout reservation precedes customer/invoice row locks,
+      // matching /setup and the other collection rails. It is needed only
+      // when this request can retire a session.
+      if (invoice.annual_prepay_term_id) {
+        await require('../services/pay-combined').lockCombinedCustomerStable(
+          trx,
+          invoice.id,
+          invoice.customer_id,
+        );
+      }
       // Customer before invoice — the order reverse-prepaid and apply-credit
       // take, and the cancel below locks the customer too — then re-read the
       // invoice under its own lock: a payment landing on it waits for us.
@@ -2708,6 +2716,14 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           return { chargeReconciliationPending: `${fenceErr.message} — resolve it before removing the annual prepay flag` };
         }
         throw fenceErr;
+      }
+      if (locked.annual_prepay_term_id) {
+        const openPi = await retireLockedPaymentSessionsBeforeSettlement(
+          trx,
+          locked,
+          { action: 'removing the annual prepay flag' },
+        );
+        if (openPi) throw refuse(openPi.error);
       }
       const termId = locked.annual_prepay_term_id;
       // The invoice survives as an ordinary one: drop the triaged (now
@@ -3206,9 +3222,9 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: insufficientCreditMessage(spendableBalance, amountDue) });
     }
 
-    // ── Cancel any open collection session (pre-lock Stripe triage) ──
-    // openPiId is re-checked under the row lock below (a PI stamped between
-    // this triage and the lock means a concurrent /setup won the seam).
+    // ── Inspect any saved-card hold before entering the write transaction ──
+    // This is only a fast preflight. The authoritative fence and provider
+    // retirement both run under the standard locks below.
     async function paymentHold(connection) {
       try {
         await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(id, connection, { checkout: true });
@@ -3223,13 +3239,17 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       const hold = await paymentHold(db);
       if (hold) return res.status(409).json({ error: hold });
     }
-    const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'applying credit' });
-    if (openPi) return res.status(openPi.status).json({ error: openPi.error });
-
     // ── Atomic credit draw-down + prepaid transition ──
     let outcome;
     try {
       outcome = await db.transaction(async (trx) => {
+        // Serialize with combined /setup before taking customer/invoice rows;
+        // this advisory reservation stays held through the prepaid flip.
+        await require('../services/pay-combined').lockCombinedCustomerStable(
+          trx,
+          id,
+          invoice.customer_id,
+        );
         // Codex pre-push P2 (round 2 of the owner's audit): lock the
         // customer row before the invoice row — postCreditMovement below
         // also locks the customer, and this route's old invoice-then-
@@ -3284,12 +3304,10 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // outside, after commit.
         const hold = await paymentHold(trx);
         if (hold) return { chargeReconciliationPending: hold };
-        // A customer could have opened /pay/:token/setup between our pre-lock
-        // PI triage and this row lock, minting a NEW PaymentIntent (its own
-        // lock released by now). If the invoice's PI changed from the one we
-        // triaged/cancelled, refuse — the operator retries and the new PI gets
-        // triaged. Without this, we'd consume credit while a live client
-        // secret could still charge the card.
+        // A customer could have opened /pay/:token/setup between the pool read
+        // and this row lock, minting a NEW PaymentIntent. Refuse that changed
+        // snapshot before provider retirement; the operator retries and the
+        // newly observed session is handled under these same locks.
         if ((locked.stripe_payment_intent_id || null) !== (openPiId || null)) {
           const err = new Error('A new payment session started for this invoice — retry applying credit');
           err.statusCode = 409; err.isOperational = true; throw err;
@@ -3324,6 +3342,21 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           }
         }
 
+        // Last pre-mutation step: the durable hold was checked under the row
+        // lock, and every locked eligibility fact is now final. Only now may
+        // a standalone or combined customer checkout be retired.
+        const openPi = await retireLockedPaymentSessionsBeforeSettlement(
+          trx,
+          locked,
+          { action: 'applying credit' },
+        );
+        if (openPi) {
+          const err = new Error(openPi.error);
+          err.statusCode = openPi.status;
+          err.isOperational = true;
+          throw err;
+        }
+
         // Consume the credit (throws 400 on insufficient balance → rolls back).
         const { balanceAfter } = await CustomerCredit.postCreditMovement({
           customerId: locked.customer_id,
@@ -3340,6 +3373,11 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           prepaid_prev_status: locked.status,
           prepaid_at: trx.fn.now(),
           prepaid_by: recordedBy,
+          // The locked retirement above canceled the customer checkout. Drop
+          // its local identity with the off-gateway prepaid flip; combined
+          // siblings were cleared on this same transaction by the helper.
+          stripe_payment_intent_id: null,
+          processor: null,
           // Stamp paid_at so paid_at-keyed paths (AR dashboards, annual-prepay
           // activation) treat the prepaid invoice as closed. Status stays
           // 'prepaid' so collected-revenue stats (keyed on status='paid')

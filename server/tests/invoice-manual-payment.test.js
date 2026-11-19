@@ -6,8 +6,8 @@
  *   - every refusal throws with statusCode (400 / 404 / 409) + isOperational;
  *   - the lost-race 409 carries currentStatus (the route echoes it as
  *     current_status — the pre-extraction body);
- *   - the PI guard verdict is thrown with its own message BEFORE any
- *     transaction opens;
+ *   - the PI guard verdict keeps its own message after the invoice is locked
+ *     and the saved-card fence is clear;
  *   - errors without a statusCode (a sentinel from inside the transaction)
  *     are rethrown untouched, never wrapped;
  *   - the happy path returns { invoice, receipt } and only fires the receipt
@@ -32,6 +32,7 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/pay-combined', () => ({
   clearPaymentIntentStamps: jest.fn(async () => undefined),
+  lockCombinedCustomerStable: jest.fn(async (_trx, _invoiceId, customerId) => customerId),
   releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
 }));
 jest.mock('../services/invoice', () => ({ sendReceipt: jest.fn(async () => ({ sent: true })) }));
@@ -56,7 +57,11 @@ const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
 const { rowIsSelfPayDue } = require('../services/open-balance');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
-const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invoice-manual-payment');
+const {
+  recordManualPayment,
+  retireLockedPaymentSessionsBeforeSettlement,
+  VALID_PAYMENT_METHODS,
+} = require('../services/invoice-manual-payment');
 const ORIGINAL_PARTIAL_PAYMENTS_GATE = process.env.GATE_PARTIAL_PAYMENTS;
 
 function recorder({ first = null, returning = [] } = {}) {
@@ -95,8 +100,8 @@ async function refusalOf(promise) {
 }
 
 // Clear the ordinary part-payment checks so every tender reaches the same locked invoice.
-function heldManualPosting() {
-  const invoice = recorder({ first: openInvoice() });
+function heldManualPosting(overrides = {}) {
+  const invoice = recorder({ first: openInvoice(overrides) });
   const payments = recorder();
   db.schema = { hasTable: jest.fn(async () => false) };
   db.mockImplementation((table) => {
@@ -115,6 +120,37 @@ function heldManualPosting() {
 }
 
 describe('recordManualPayment — refusal contract', () => {
+  test('locked checkout retirement uses the caller transaction for combined sibling stamps', async () => {
+    const trx = jest.fn();
+    const invoice = openInvoice({ stripe_payment_intent_id: 'pi_combined' });
+    StripeService.retrievePaymentIntent.mockResolvedValueOnce({
+      id: 'pi_combined',
+      status: 'requires_payment_method',
+      metadata: { waves_combined_checkout: 'true' },
+    });
+
+    await expect(retireLockedPaymentSessionsBeforeSettlement(
+      trx,
+      invoice,
+      { action: 'recording a manual payment', finishCombinedCleanup: true },
+    )).resolves.toBeNull();
+
+    expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith(
+      'pi_combined',
+      { cancellation_reason: 'abandoned' },
+    );
+    expect(require('../services/pay-combined').clearPaymentIntentStamps).toHaveBeenCalledWith(
+      trx,
+      'pi_combined',
+      { keepInvoiceIds: ['inv-1'] },
+    );
+    expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).toHaveBeenCalledWith(
+      trx,
+      invoice,
+      { context: 'recording a manual payment' },
+    );
+  });
+
   test('unknown tender → 400 listing every accepted method, before any DB read', async () => {
     const err = await refusalOf(recordManualPayment('inv-1', { method: 'bitcoin' }));
     expect(err.statusCode).toBe(400);
@@ -154,13 +190,15 @@ describe('recordManualPayment — refusal contract', () => {
     }
   });
 
-  test('open PaymentIntent in flight → 409 with the guard message, before the transaction', async () => {
-    db.mockImplementation(() => recorder({ first: openInvoice({ stripe_payment_intent_id: 'pi_live' }) }));
+  test('open PaymentIntent in flight → 409 with the guard message after the invoice is locked', async () => {
+    const { invoice } = heldManualPosting({ stripe_payment_intent_id: 'pi_live' });
     StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_live', status: 'processing' });
     const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle' }));
     expect(err.statusCode).toBe(409);
     expect(err.message).toMatch(/already in flight \(processing\).*recording a manual payment/);
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(invoice.forUpdate).toHaveBeenCalled();
+    expect(invoice.update).not.toHaveBeenCalled();
   });
 
   test('lost race → 409 carrying the invoice\'s current status', async () => {
@@ -290,6 +328,38 @@ describe('recordManualPayment — refusal contract', () => {
     expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
     expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a saved-card claim that appears after the pool preflight refuses under the lock before the open checkout is retired', async () => {
+    const { invoice, payments, trx } = heldManualPosting({ stripe_payment_intent_id: 'pi_open' });
+    const pending = Object.assign(
+      new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'),
+      { code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-raced' },
+    );
+    StripeService.assertNoInvoiceChargeReconciliationPending
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(pending);
+
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash', sendReceipt: false }));
+
+    expect(err).toMatchObject({ statusCode: 409 });
+    expect(err.message).toMatch(/awaiting verification.*resolve it before recording another payment/i);
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending.mock.calls).toEqual([
+      ['inv-1', db, { checkout: true }],
+      ['inv-1', trx, { checkout: true }],
+    ]);
+    expect(require('../services/pay-combined').lockCombinedCustomerStable)
+      .toHaveBeenCalledWith(trx, 'inv-1', 'cust-1');
+    expect(require('../services/pay-combined').lockCombinedCustomerStable.mock.invocationCallOrder[0])
+      .toBeLessThan(invoice.forUpdate.mock.invocationCallOrder[0]);
+    expect(invoice.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(StripeService.assertNoInvoiceChargeReconciliationPending.mock.invocationCallOrder[1]);
+    expect(invoice.forUpdate).toHaveBeenCalled();
+    expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
+    expect(invoice.update).not.toHaveBeenCalled();
+    expect(payments.insert).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -606,7 +676,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
+  function settle({ pre = card(), locked = card(), onReserve = null, onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
     const calls = { update: null, updateArgs: null, paymentsInsert: null, paymentsQuery: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
@@ -642,7 +712,12 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       });
       trx.fn = { now: () => 'NOW()' };
       trx.schema = { hasTable: jest.fn(async () => hasTermTable) };
-      require('../services/pay-combined').releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(locked); });
+      const PayCombined = require('../services/pay-combined');
+      PayCombined.lockCombinedCustomerStable.mockReset().mockImplementation(async () => {
+        if (onReserve) onReserve(locked);
+        return locked.customer_id;
+      });
+      PayCombined.releaseCombinedSessionBeforeCollection.mockReset().mockImplementation(async () => { if (onRelease) onRelease(locked); });
       return fn(trx);
     });
     return calls;
@@ -703,8 +778,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       ['the service record', { service_record_id: 'sr-other' }],
       ['the amount', { total: '120.00' }],
       ['the credit applied', { credit_applied: '5.00' }],
-    ])('a change to %s that lands while the release waits is caught on the LOCKED row: nothing written (Codex r2)', async (_name, patch) => {
-      const calls = settle({ onRelease: (row) => Object.assign(row, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }) });
+    ])('a change to %s that lands while the combined reservation waits is caught on the LOCKED row: nothing written (Codex r2)', async (_name, patch) => {
+      const calls = settle({ onReserve: (row) => Object.assign(row, patch, { updated_at: new Date('2099-01-01T12:00:30Z') }) });
       const err = await refusalOf(recordManualPayment('inv-1', { method: 'check', sendReceipt: false, settlementFence: settlementFenceFor(pin()) }));
       expect(err).toMatchObject({ statusCode: 409, drift: true });
       expect(calls.update).not.toHaveBeenCalled();

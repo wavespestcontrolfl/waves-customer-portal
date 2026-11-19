@@ -33,6 +33,7 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/pay-combined', () => ({
+  lockCombinedCustomerStable: jest.fn(async (_trx, _invoiceId, customerId) => customerId),
   releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
   clearPaymentIntentStamps: jest.fn(async () => undefined),
 }));
@@ -238,6 +239,57 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
     } finally {
       lookup.mockRestore();
+    }
+  });
+
+  test('a saved-card claim that appears after apply-credit preflight refuses under the invoice lock before checkout retirement', async () => {
+    const stampedInvoice = { ...INVOICE, stripe_payment_intent_id: 'pi_stamped' };
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...stampedInvoice })) });
+      // Pool preflight is clear; the transaction fixture below sees the raced claim.
+      if (table === 'stripe_invoice_charge_attempts' || table === 'stripe_orphan_charges' || table === 'payments') return makeRecorder();
+      return original(table);
+    });
+    trxInvoices.first.mockResolvedValue({ ...stampedInvoice });
+    trxChargeAttempts.first.mockResolvedValueOnce({
+      id: 'attempt-raced',
+      status: 'failed',
+      decline_code: 'authentication_required',
+      resolved_at: new Date(),
+      stripe_payment_intent_id: 'pi_saved_card',
+    });
+    const stripe = require('../services/stripe');
+    const retrieve = jest.spyOn(stripe, 'retrievePaymentIntent');
+    const cancel = jest.spyOn(stripe, 'cancelPaymentIntent');
+    try {
+      await withServer(async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const body = await response.json();
+        expect({ status: response.status, error: body.error }).toEqual({
+          status: 409,
+          error: expect.stringMatching(/awaiting verification.*resolve it before applying credit/i),
+        });
+      });
+      expect(trxInvoices.forUpdate).toHaveBeenCalled();
+      expect(require('../services/pay-combined').lockCombinedCustomerStable)
+        .toHaveBeenCalledWith(trx, 'inv-1', 'cust-1');
+      expect(require('../services/pay-combined').lockCombinedCustomerStable.mock.invocationCallOrder[0])
+        .toBeLessThan(trxCustomers.forUpdate.mock.invocationCallOrder[0]);
+      expect(trxCustomers.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(trxInvoices.forUpdate.mock.invocationCallOrder[0]);
+      expect(trxInvoices.forUpdate.mock.invocationCallOrder[0])
+        .toBeLessThan(trxChargeAttempts.where.mock.invocationCallOrder[0]);
+      expect(retrieve).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(require('../services/pay-combined').releaseCombinedSessionBeforeCollection).not.toHaveBeenCalled();
+      expect(require('../services/customer-credit').postCreditMovement).not.toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+    } finally {
+      retrieve.mockRestore();
+      cancel.mockRestore();
     }
   });
 

@@ -285,6 +285,44 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     });
   });
 
+  test('a saved-card claim appearing after removal preflight returns 409 before the checkout is retired', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, {
+      status: 'sent',
+      annual_prepay_term_id: termId,
+      stripe_payment_intent_id: 'pi_checkout_kept',
+    });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+
+    const StripeService = require('../services/stripe');
+    const pending = Object.assign(
+      new Error('An earlier card payment is awaiting verification. Please contact us before trying again.'),
+      { code: 'STRIPE_CHARGE_IN_PROGRESS', chargeAttemptId: 'attempt-raced' },
+    );
+    const fence = jest.spyOn(StripeService, 'assertNoInvoiceChargeReconciliationPending')
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(pending);
+    try {
+      const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/awaiting verification.*resolve it before removing the annual prepay flag/i);
+      expect(fence).toHaveBeenNthCalledWith(1, prepayInvoiceId, expect.anything(), { checkout: true });
+      expect(fence).toHaveBeenNthCalledWith(2, prepayInvoiceId, expect.anything(), { checkout: true });
+      expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+      expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+      expect(await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id', 'stripe_payment_intent_id'))
+        .toEqual({ annual_prepay_term_id: termId, stripe_payment_intent_id: 'pi_checkout_kept' });
+      expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    } finally {
+      fence.mockRestore();
+    }
+  });
+
   test('exact cancellation of the authentication challenge releases annual-prepay removal', async () => {
     const { prepayInvoiceId, term } = await markedPaidPrepay();
     await trx('invoices').where({ id: prepayInvoiceId }).update({
