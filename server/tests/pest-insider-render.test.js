@@ -1,5 +1,5 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
-const { renderIssue, wrapIssueHtml, FORWARD_LINE } = require('../services/pest-insider/render');
+const { renderIssue, wrapIssueHtml } = require('../services/pest-insider/render');
 const { bodyIsDarkAware } = require('../services/email-template');
 
 const BASE = {
@@ -10,7 +10,7 @@ const BASE = {
 };
 
 describe('renderIssue', () => {
-  test('lead and identifier blocks render with absolute site links and the forward line', () => {
+  test('lead and identifier blocks render with absolute site links', () => {
     const r = renderIssue(BASE);
     expect(r.subject).toBe(BASE.subject);
     expect(r.preview).toBe(BASE.preview);
@@ -19,9 +19,9 @@ describe('renderIssue', () => {
     expect(r.html_body).toContain('The CDC says eggs survive 8 months. They stick to container walls.');
     expect(r.html_body).toContain('href="https://www.wavespestcontrol.com/pest-identifier/aedes-mosquito/"');
     expect(r.html_body).toContain('href="https://www.wavespestcontrol.com/pest-identifier/"');
-    expect(r.html_body).toContain(FORWARD_LINE);
     expect(r.text_body).toContain('https://www.wavespestcontrol.com/pest-identifier/aedes-mosquito/');
-    expect(r.text_body.trim().endsWith(FORWARD_LINE)).toBe(true);
+    // A forwarded copy would carry the subscriber's own unsubscribe link (pre-push round 11).
+    for (const part of [r.html_body, r.text_body]) expect(part).not.toMatch(/forward/i);
     const hrefs = [...r.html_body.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
     hrefs.forEach((h) => expect(h).toMatch(/^https:\/\/www\.wavespestcontrol\.com\/pest-identifier\//));
   });

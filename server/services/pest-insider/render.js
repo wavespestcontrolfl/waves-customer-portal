@@ -16,6 +16,11 @@
  * near you" from area counts (PR 2), "A tool we'd use" from a reviewed
  * product list (PR 3), and "Your home", rendered per recipient (PR 4).
  *
+ * No line asks the reader to forward the email: a forwarded copy carries
+ * the subscriber's own unsubscribe link, and its page shows their address
+ * (pre-push round 11). The plan's referral line comes in PR 4, linked to the
+ * issue's web page (the send's archive link).
+ *
  * Every piece of text is escaped.
  */
 'use strict';
@@ -24,7 +29,6 @@ const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAwa
 
 const SITE = 'https://www.wavespestcontrol.com';
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
-const FORWARD_LINE = 'Know a neighbor with a pest problem? Forward this email.';
 
 const escapeHtml = (text) => String(text ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -76,11 +80,8 @@ function identifierBlock({ idItem }) {
  */
 function renderIssue(issue) {
   const blocks = [leadBlock(issue), identifierBlock(issue)];
-  const html = [
-    ...blocks.map((b) => `<div class="dm-text">\n${b.html}\n</div>`),
-    `<p class="dm-muted" style="margin:18px 0 0 0;font-size:14px;line-height:1.5;text-align:center;color:${newsletterPalette().muted};">${escapeHtml(FORWARD_LINE)}</p>`,
-  ].join('\n');
-  const text = [...blocks.map((b) => b.text), FORWARD_LINE].join('\n\n');
+  const html = blocks.map((b) => `<div class="dm-text">\n${b.html}\n</div>`).join('\n');
+  const text = blocks.map((b) => b.text).join('\n\n');
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: `${text}\n` };
 }
 
@@ -100,4 +101,4 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
+module.exports = { renderIssue, wrapIssueHtml, escapeHtml, IDENTIFIER_URL };

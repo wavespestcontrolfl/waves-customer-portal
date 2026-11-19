@@ -228,15 +228,24 @@ describe('the fact bank copy, as every issue will print it', () => {
   // must not add a number, month or name that its quotes lack. Each entry
   // here was checked by hand against the quote; the parser misses an inch
   // mark, a hyphenated count, the season the quoted months fall in, or a
-  // plain-English name. Any new entry fails until it is reviewed.
+  // plain-English name. The check reports only a statement's first problem,
+  // so each entry pins the whole reviewed statement: any edit to it fails
+  // until it is reviewed again (pre-push round 11). Any new entry fails too.
   const REVIEWED_STATEMENTS = {
-    L05: 'number and unit not in the source: 3.5 inch', // quote: mowed at 3.5–4"
-    L12: 'name not in the source: Manatee', // quote: South Florida is south of State Road 60
-    M04: 'number not in the source: 1997', // the source's own date: published July 23, 1997
-    O04: 'number and unit not in the source: 1 day', // quotes: one-day-per-week; on days 1-30
-    P06: 'number and unit not in the source: 12 inch', // quote: 12"-18" from the base of trees
-    T03: 'month or season not in the source: winter', // quote: flights from early December
-    R01: 'name not in the source: Floridians', // quote: often called palmetto bugs
+    // quote: mowed at 3.5–4"
+    L05: ['Most St. Augustine should be cut at 3.5 to 4 inches, and never lose more than one-third of the blade at once.', 'number and unit not in the source: 3.5 inch'],
+    // quote: South Florida is south of State Road 60
+    L12: ["In South Florida, which includes Manatee, Sarasota and Charlotte counties, UF's rule of thumb is to apply pre-emergent by February 1, not in spring.", 'name not in the source: Manatee'],
+    // the source's own date: published July 23, 1997
+    M04: ['In a one-night test that UF/IFAS reported in 1997, a bug zapper killed about 10,000 insects, and only eight were mosquitoes.', 'number not in the source: 1997'],
+    // quotes: one-day-per-week; on days 1-30
+    O04: ['The Southwest Florida Water Management District limits lawn watering to one day a week through March 31, 2027, but new lawns may be watered any day for 30 days.', 'number and unit not in the source: 1 day'],
+    // quote: 12"-18" from the base of trees
+    P06: ['Mulch piled against a trunk holds extra moisture that can cause rot and insect infestations; keep mulch 12 to 18 inches back from trees.', 'number and unit not in the source: 12 inch'],
+    // quote: flights from early December
+    T03: ["Florida's native subterranean termites swarm in winter and spring, December through May; check the waist and antennae to rule out ants.", 'month or season not in the source: winter'],
+    // quote: often called palmetto bugs
+    R01: ['The big roaches Floridians call palmetto bugs are generally found outdoors and do not survive well inside, so a single one in the kitchen is usually a visitor.', 'name not in the source: Floridians'],
   };
   test('a statement adds no number, month or name its quotes lack, except the reviewed ones', () => {
     const found = {};
@@ -247,7 +256,7 @@ describe('the fact bank copy, as every issue will print it', () => {
         names: [...f.quotes, ...f.sources.map((s) => `${s.publisher} ${s.title}`)].join(' '),
       };
       const problem = sentenceProblem(f.statement, quotesOnly);
-      if (problem) found[f.id] = problem;
+      if (problem || REVIEWED_STATEMENTS[f.id]) found[f.id] = [f.statement, problem];
     }
     expect(found).toEqual(REVIEWED_STATEMENTS);
   });
