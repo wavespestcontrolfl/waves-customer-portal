@@ -94,7 +94,9 @@ async function planChoiceForInvoice(invoice) {
       { scheduledServiceId: invoice.scheduled_service_id }, db, { switchLane: true, payPageInvoiceId: invoice.id },
     );
     if (preview.httpStatus || !preview.eligible) return null;
-    const setupFee = cents(preview.setupFee?.amount);
+    // Only a fee the switch itself reports as waived with prepay is shown as
+    // waived (a carried, unwaived setup already withholds the choice).
+    const setupFee = preview.setupFee?.waivedWithPrepay ? cents(preview.setupFee.amount) : 0;
     const perApplicationYear = cents(preview.annualBase + setupFee);
     return {
       selected: false,
