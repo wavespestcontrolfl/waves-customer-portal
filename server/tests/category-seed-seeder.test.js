@@ -605,29 +605,50 @@ describe('customer-question manifest 2026-11-18', () => {
   });
 
   // The manifest notes tell the writer to use each outline label (the words
-  // before its first colon) and each FAQ question word for word as a heading.
-  // The live publish name check reads two capitalized words in a heading as a
-  // person and holds the draft, so a label it flags would hold every draft.
-  test('every outline label and FAQ question passes the live publish name check as a heading', () => {
+  // before its first colon) and each FAQ question word for word as a heading,
+  // and the outline text is the writer's binding direction. The live publish
+  // name check reads two capitalized words in a heading as a person and holds
+  // the draft; a phrase the publish guardrails block ("EPA approval", even
+  // negated) fails it. Either one in a brief would stop every draft that
+  // follows the brief.
+  test('every outline heading passes the live name check, and no heading or outline direction trips the publish guardrails', () => {
     const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const contentGuardrails = require('../services/content/content-guardrails');
     const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
     process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
     try {
       const failures = [];
-      const headingFails = (heading) => !checkRedactionPassedAllLanes({ body: `## ${heading}\n\nGuidance for homes in Sarasota and Bradenton.`, frontmatter: {} }).ok;
+      const asHeading = (heading) => `## ${heading}\n\nGuidance for homes in Sarasota and Bradenton.`;
+      const nameFails = (heading) => !checkRedactionPassedAllLanes({ body: asHeading(heading), frontmatter: {} }).ok;
+      const blocking = (body, service) => (contentGuardrails.evaluate({ body, frontmatter: {} }, { targetIsBlog: true, service }).findings || [])
+        .filter((f) => f.severity === 'P0' || f.severity === 'P1')
+        .map((f) => f.code);
       for (const brief of manifest.briefs) {
+        const { service } = composeSeedBrief(manifest, brief.id);
         for (const item of brief.outline) {
           const colon = item.indexOf(':');
           const label = (colon > 0 ? item.slice(0, colon) : item).trim();
-          const headings = /^faq$/i.test(label)
-            ? item.slice(colon + 1).split(';').map((q) => q.trim()).filter(Boolean).map((q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}?`)
+          const direction = colon > 0 ? item.slice(colon + 1) : '';
+          const isFaq = /^faq$/i.test(label);
+          const headings = isFaq
+            ? direction.split(';').map((q) => q.trim()).filter(Boolean).map((q) => `${q.charAt(0).toUpperCase()}${q.slice(1)}?`)
             : [label];
-          for (const heading of headings) if (headingFails(heading)) failures.push(`${brief.id}: ${heading}`);
+          for (const heading of headings) {
+            if (nameFails(heading)) failures.push(`${brief.id} name check: ${heading}`);
+            const codes = blocking(asHeading(heading), service);
+            if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${heading}`);
+          }
+          if (!isFaq && direction) {
+            const codes = blocking(direction.replace(/\(link [^)]*\)/g, ''), service);
+            if (codes.length) failures.push(`${brief.id} guardrails ${codes.join(',')}: ${label}`);
+          }
         }
       }
       expect(failures).toEqual([]);
-      // The check is live in this test: a name in a heading still holds the draft.
-      expect(headingFails('What John Smith found')).toBe(true);
+      // Both checks are live in this test: a name in a heading still holds
+      // the draft, and a banned phrase in a heading still fails it.
+      expect(nameFails('What John Smith found')).toBe(true);
+      expect(blocking(asHeading('Do plug-in repellers need EPA approval?'), 'pest')).toContain('REENTRY_SAFETY_CLAIM');
     } finally {
       if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
       else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
