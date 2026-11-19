@@ -2063,11 +2063,15 @@ and returns HTTP 422 `APPOINTMENT_OFFICE_REVIEW_REQUIRED`. The portal shows the 
 visit, price and office phone number. Closing the review or opening another offer preserves
 the office booking and its draft. Reopening the same service returns the existing purchase
 with `officeReviewRequired: true`, its frozen price and the original selected time when available.
-An explicit release can be retried after a database error. The physical hold still expires
-on its normal schedule.
+The hold expires on its usual schedule. While the distinct office visit still qualifies,
+confirm retries preserve the original quote and return the same 422 even if the hold
+has been removed. Returning from hosted card setup can display that quote after the
+draft expires. The customer can close this view and call the office.
+An explicit release can be retried after a database error.
 An en-route or on-site visit counts while it is in progress across Eastern midnight.
-When the selected hold has already expired, disappeared or been claimed, the customer can
-choose another time. A concurrent completed purchase returns its original frozen receipt.
+For a purchase without an active office review, the customer can choose another time
+if the selected hold expired, disappeared or was claimed. A concurrent completed purchase
+returns its original frozen receipt.
 
 An estimate can still show an hour after staff book its last opening. If the
 new reservation no longer fits, `/reserve` returns the existing 409

@@ -279,6 +279,25 @@ describe('one-tap purchase CTA gating', () => {
     expect(api.oneTapConfirm).not.toHaveBeenCalled();
   });
 
+  it('shows the original receipt when another confirmation finishes while the offer is reopening', async () => {
+    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+    api.oneTapInit.mockResolvedValue({
+      success: true, label: 'Lawn Care', perVisit: 73, emailQueued: false,
+      firstVisit: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+    });
+    renderDashboard();
+    fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
+
+    expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
+    expect(screen.getByText('Thursday, Aug 20, 8:00 AM–10:00 AM')).toBeInTheDocument();
+    expect(screen.getByText('$73.00 per application')).toBeInTheDocument();
+    expect(screen.queryByText('Agree and choose a time')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(api.oneTapReserve).not.toHaveBeenCalled();
+    expect(api.oneTapConfirm).not.toHaveBeenCalled();
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
+  });
+
   it('ordinary close still releases an incomplete purchase', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations());
     api.oneTapInit.mockResolvedValue({
@@ -390,6 +409,33 @@ describe('one-tap purchase CTA gating', () => {
       // the only automatic path back to the held purchase.
       expect(await screen.findByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
       expect(api.oneTapGet).toHaveBeenCalledWith('p-7');
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  it('returns from hosted card setup to office review after the original hold expires', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      api.getPropertyRecommendations.mockResolvedValue(recommendations({ cards: [] }));
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue({
+        purchaseId: 'p-7', estimateId: 'est-1', status: 'reserved', open: true,
+        serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 73,
+        hasCardOnFile: true, holdLive: false, officeReviewRequired: true,
+        officeReviewMessage: 'The office is reviewing your existing appointment.',
+        slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+      });
+
+      renderDashboard();
+      expect(await screen.findByText('The office is reviewing your existing appointment.')).toBeInTheDocument();
+      expect(screen.getByText('Thursday, Aug 20, 8:00 AM–10:00 AM')).toBeInTheDocument();
+      expect(screen.getAllByText('$73.00 per application').length).toBeGreaterThan(0);
+      expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByLabelText('Close purchase'));
+      expect(api.oneTapSlots).not.toHaveBeenCalled();
+      expect(api.oneTapReserve).not.toHaveBeenCalled();
+      expect(api.oneTapRelease).not.toHaveBeenCalled();
     } finally {
       window.history.replaceState({}, '', '/');
     }

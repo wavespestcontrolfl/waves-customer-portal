@@ -1465,7 +1465,11 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         return;
       }
       setInit(d);
-      if (d.officeReviewRequired) {
+      if (d.success === true) {
+        // Another confirmation completed while this offer was reopening.
+        setResult(d);
+        setStep('done');
+      } else if (d.officeReviewRequired) {
         setSelectedSlot(d.slot || null);
         keepForOfficeReview(d.officeReviewMessage);
       } else {

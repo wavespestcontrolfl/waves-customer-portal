@@ -357,6 +357,20 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       selectedHoldId: purchase.scheduled_service_id,
       bookedVisitIds: [competitorId],
     });
+    const originalPurchase = await trx('one_tap_purchases').where({ id: init.purchaseId })
+      .first('status', 'scheduled_service_id', 'slot_id', 'per_visit');
+    const originalDraftPrice = await trx('estimates').where({ id: init.estimateId })
+      .first('status', 'archived_at', 'price_locked_at', 'monthly_total', 'annual_total', 'waveguard_tier');
+    const originalCustomerPrice = await trx('customers').where({ id: ids.customer })
+      .first('billing_mode', 'waveguard_tier', 'monthly_rate');
+    const originalHostedState = await oneTap.getPurchaseState({
+      customerId: ids.customer, purchaseId: init.purchaseId,
+    });
+    const originalTime = {
+      date: originalHostedState.slot.date,
+      windowStart: originalHostedState.slot.windowStart,
+      windowEnd: originalHostedState.slot.windowEnd,
+    };
 
     const fixtureCounts = async () => {
       const draftIds = await trx('estimates')
@@ -400,11 +414,37 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     const afterCleanup = await initPurchaseFor('lawn_care');
     expectOriginalReview(afterCleanup);
     expect(await fixtureCounts()).toEqual(afterCleanupCounts);
+    await expect(oneTap.confirm({
+      customerId: ids.customer, purchaseId: init.purchaseId, termsAccepted: true,
+    })).rejects.toMatchObject({ status: 422, code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED' });
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId })
+      .first('status', 'scheduled_service_id', 'slot_id', 'per_visit')).toEqual(originalPurchase);
+    expect(await trx('estimates').where({ id: init.estimateId })
+      .first('status', 'archived_at', 'price_locked_at', 'monthly_total', 'annual_total', 'waveguard_tier'))
+      .toEqual(originalDraftPrice);
+    expect(await trx('customers').where({ id: ids.customer })
+      .first('billing_mode', 'waveguard_tier', 'monthly_rate')).toEqual(originalCustomerPrice);
+    expect(await trx('invoices').where({ customer_id: ids.customer })).toHaveLength(0);
     await expect(oneTap.release({ customerId: ids.customer, purchaseId: init.purchaseId }))
       .resolves.toEqual({ released: false, preservedForOfficeReview: true });
     await expect(oneTap.reserve({
       customerId: ids.customer, purchaseId: init.purchaseId, slotId: purchase.slot_id,
     })).rejects.toMatchObject({ status: 422, code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED' });
+
+    await trx('estimates').where({ id: init.estimateId })
+      .update({ expires_at: trx.raw("NOW() - INTERVAL '1 hour'") });
+    const expiredReview = await oneTap.getPurchaseState({
+      customerId: ids.customer, purchaseId: init.purchaseId,
+    });
+    expect(expiredReview).toMatchObject({
+      purchaseId: init.purchaseId,
+      status: 'reserved',
+      open: true,
+      officeReviewRequired: true,
+      perVisit: init.perVisit,
+      holdLive: false,
+      slot: { ...originalTime, holdExpiresAt: null },
+    });
 
     const next = await initPurchaseFor('tree_shrub');
     expect(next.purchaseId).not.toBe(init.purchaseId);
@@ -419,6 +459,17 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       .toEqual({ status: 'draft', archived_at: null });
 
     await trx('scheduled_services').where({ id: competitorId }).update({ status: 'cancelled' });
+    const resolvedExpired = await oneTap.getPurchaseState({
+      customerId: ids.customer, purchaseId: init.purchaseId,
+    });
+    expect(resolvedExpired).toMatchObject({
+      purchaseId: init.purchaseId,
+      status: 'reserved',
+      open: false,
+      perVisit: init.perVisit,
+      slot: { ...originalTime, holdExpiresAt: null },
+    });
+    expect(resolvedExpired.officeReviewRequired).toBeUndefined();
     await expect(oneTap.release({ customerId: ids.customer, purchaseId: init.purchaseId }))
       .resolves.toEqual({ released: true });
     expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status'))
