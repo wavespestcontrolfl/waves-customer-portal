@@ -358,8 +358,9 @@ async function runThreadDraft({
           threadKey: origin.threadKey,
           title: origin.strings.redTitle,
           body: `A text thread asked for a quote the estimator engine could not read (${context.error}). Review the conversation and send the estimate manually.`,
-          link: origin.bellLink || null,
-          senderIdentity: origin.senderIdentity || null,
+          // notify() defaults both to null when unset.
+          link: origin.bellLink,
+          senderIdentity: origin.senderIdentity,
         });
       }
       return result;
@@ -593,7 +594,7 @@ async function startSmsThreadDraft({
         body: `${sender.label} asked for a quote by text. The estimator is drafting it; if no draft comes, send one by hand.`,
         link: sender.link,
         placeholder: true,
-        senderIdentity: origin.senderIdentity || null,
+        senderIdentity: origin.senderIdentity,
       });
       if (!belled) {
         result.skipped = 'durable_bell_failed';
