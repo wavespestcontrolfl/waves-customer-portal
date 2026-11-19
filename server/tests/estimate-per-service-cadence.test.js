@@ -6,6 +6,7 @@ const {
   bundleSectionLadderForService,
   applySelectedMosquitoTierToEstimateData,
   buildPricingBundle,
+  renderPage,
 } = require('../routes/estimate-public');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
 const { setEstimatePricingCache } = require('../services/estimate-pricing-cache');
@@ -1176,5 +1177,83 @@ describe('pre-ladder lawn send snapshots recompute instead of fast-pathing (prod
     const bundle = await buildPricingBundle(estimate);
     expect(bundle.snapshotHit).toBe(true);
     expect(bundle.frequencies.map((f) => f.key)).toEqual(['enhanced', 'premium']);
+  });
+});
+
+describe('annual prepay on a multi-service plan: every page path agrees with accept (EST-7df56f0f)', () => {
+  // A synthetic new lead (no membership snapshot). The server-rendered page computes its own offer flag, so it needs
+  // the same unit count as /data: one service offers "pay the year", two must not.
+  const lead = () => ({
+    id: 'estimate-prepay-ssr-test',
+    status: 'sent',
+    customerName: 'Test Lead',
+    address: '100 Example St, Bradenton, FL 34201',
+    monthlyTotal: 62.78,
+    annualTotal: 753.36,
+    onetimeTotal: 0,
+    tier: 'Silver',
+  });
+  const data = (services) => ({
+    result: {
+      results: { lawn: [{ v: 9, recommended: true }] },
+      recurring: { discount: 0.10, annualBeforeDiscount: 837, annualAfterDiscount: 753.30, services },
+      oneTime: { items: [], membershipFee: 99 },
+    },
+  });
+  const LAWN = { name: 'Lawn Care', mo: 69.75 };
+  const PEST = { name: 'Pest Control', mo: 45 };
+
+  test('the server-rendered page offers it for one service and not for two', () => {
+    expect(renderPage('prepay-ssr-one', lead(), data([LAWN]), null)).toContain('data-payment-setup="prepay_annual"');
+    const html = renderPage('prepay-ssr-two', lead(), data([LAWN, PEST]), null);
+    expect(html).not.toContain('data-payment-setup="prepay_annual"');
+    expect(html).not.toContain('data-pay-pref="prepay_annual"');
+  });
+
+  // A legacy estimate keeps its mosquito ladder in result.recurring and a second service in the root recurring
+  // block. The mosquito tier stamp runs after the estimate-level check, and the page prefers a frequency's flag, so
+  // the multi-service veto must close the tier flags too.
+  const mosquitoEstimate = (tag, extra = {}) => ({
+    id: `estimate-prepay-legacy-mosquito-${tag}`,
+    estimate_data: {
+      result: {
+        results: {
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, pv: 110, recommended: true },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, pv: 95 },
+          ],
+          mqMeta: { pr: 1.2, ri: 0, treatableSqFt: 8250 },
+        },
+        recurring: {
+          monthlyTotal: 82.5,
+          annualAfterDiscount: 990,
+          services: [
+            { service: 'mosquito', name: 'Mosquito (Seasonal Mosquito Program)', mo: 82.5, perTreatment: 110, visitsPerYear: 9 },
+          ],
+        },
+        oneTime: {
+          total: 275,
+          items: [{ service: 'one_time_mosquito', name: 'One-Time Mosquito Treatment', price: 275, detail: 'Rain re-spray guarantee' }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+      ...extra,
+    },
+    monthly_total: 82.5,
+    annual_total: 990,
+    onetime_total: 275,
+    waveguard_tier: 'Bronze',
+    show_one_time_option: true,
+  });
+  const offersPrepay = (bundle) => JSON.stringify(bundle).includes('"annualPrepayEligible":true');
+
+  test('a mosquito ladder with a second service in the root recurring block offers no tier prepay', async () => {
+    // Control: solo mosquito reaches the tier stamp, and its monthly tier can prepay.
+    expect(offersPrepay(await buildPricingBundle(mosquitoEstimate('solo')))).toBe(true);
+    const legacy = await buildPricingBundle(mosquitoEstimate('with-root-pest', {
+      recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 }] },
+    }));
+    expect(offersPrepay(legacy)).toBe(false);
   });
 });

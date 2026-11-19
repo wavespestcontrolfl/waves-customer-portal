@@ -6429,7 +6429,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Sub-0.1% effective rates (e.g. a $3 headroom on a floor-priced $603/yr
   // lawn plan) are not a sellable incentive — treat them like the at-floor
   // case and hide the prepay option instead of advertising ~$0 savings.
+  // A plan with more than one recurring service cannot prepay: accept and the
+  // converter refuse it (withMultiServicePrepayClosed, same unit count).
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
+    && !(multiServicePrepayUnits(estData) > 1)
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -28357,19 +28360,29 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
 // drop the estimate-level flag for a multi-unit plan, so the page never offers
 // it and its setup-fee waiver line (tierAwareFee) follows. Counts units the way
 // accept does (supplemented rows); a count that cannot be read leaves the flag
-// alone. Changes what /data offers only, never an amount.
+// alone. Changes what the page offers only, never an amount. The per-frequency
+// flags close too, and the /data pass runs AFTER the mosquito tier stamp: a
+// legacy estimate can keep its mosquito ladder in result.recurring and a second
+// service in the root recurring block, and the page prefers a frequency's flag
+// over the estimate-level one. The server-rendered page applies the same count
+// (renderPage showAnnualPrepayOption).
+function multiServicePrepayUnits(estData) {
+  try {
+    return require('../services/estimate-converter')
+      .annualPrepayRecurringUnitCount(withSupplementedRecurringServices(estData || {}) || estData || {});
+  } catch { return 0; }
+}
+
 function withMultiServicePrepayClosed(payload, estData) {
   const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
-  let units = 0;
-  try {
-    units = require('../services/estimate-converter')
-      .annualPrepayRecurringUnitCount(withSupplementedRecurringServices(estData || {}) || estData || {});
-  } catch { units = 0; }
-  if (!combos.length && !(units > 1)) return payload;
+  const multi = multiServicePrepayUnits(estData) > 1;
+  if (!combos.length && !multi) return payload;
+  const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
   return {
     ...payload,
-    ...(units > 1 && payload.annualPrepayEligible === true ? { annualPrepayEligible: false } : {}),
-    ...(combos.length ? { serviceCadenceCombos: combos.map((combo) => ({ ...combo, annualPrepayEligible: false })) } : {}),
+    ...(multi && payload.annualPrepayEligible === true ? { annualPrepayEligible: false } : {}),
+    ...(multi && Array.isArray(payload.frequencies) ? { frequencies: payload.frequencies.map(closed) } : {}),
+    ...(combos.length ? { serviceCadenceCombos: combos.map(closed) } : {}),
   };
 }
 
@@ -28397,7 +28410,6 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
   }
-  withQuoteState = withMultiServicePrepayClosed(withQuoteState, estData);
   // Per-tier prepay eligibility for the mosquito ladder (codex r10 P1): the
   // estimate-level flag reflects the STORED default row, but seasonal9 can't
   // prepay while monthly12 can — stamp each mosquito frequency so the client
@@ -28439,6 +28451,8 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
           : combo));
     }
   }
+  // Last word on prepay for a multi-service plan: after the tier stamps above.
+  withQuoteState = withMultiServicePrepayClosed(withQuoteState, estData);
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
