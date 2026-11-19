@@ -31,6 +31,7 @@ const { applyAssignable, absentTechDays } = require('../technician-eligibility')
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
 const { INTERNAL_TEST_CUSTOMER_IDS } = require('../internal-test-customers');
+const { liveServiceOrHold } = require('../scheduling/reservation-occupancy');
 
 const KEY_PREFIX = 'open-blocks:';
 const DAYS = 7;
@@ -125,7 +126,9 @@ async function unplannedDays(conn, planned, elig) {
   // Untimed rows are read too: a day with one is left out (it is not empty), and they hold no hour.
   const rows = await conn('scheduled_services').whereBetween('scheduled_date', [elig.from, elig.to])
     .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-    .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
+    // A customer-linked appointment is committed even when an old estimate
+    // hold stamp remains. Only genuine unlinked holds expire.
+    .where(liveServiceOrHold)
     .select('id', 'technician_id', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"), 'window_start', 'window_end', 'estimated_duration_minutes');
   const blocks = await conn('tech_schedule_blocks').whereBetween('date', [elig.from, elig.to]).whereNot('block_type', 'available')
     .select('technician_id', conn.raw("to_char(date, 'YYYY-MM-DD') as day"), 'start_time', 'end_time');

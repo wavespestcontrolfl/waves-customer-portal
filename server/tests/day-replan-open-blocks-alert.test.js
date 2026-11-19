@@ -262,6 +262,65 @@ test('booking fit scores an overlapping capacity card only from its certified li
   }
 });
 
+test('capacity cards reject nominal interview overlap but keep exact handoffs', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours, CAPACITY_PLACEMENT } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
+    [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: ['__candidate__'], durationMinutes: 60 } };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
+    planning_exempt: true, estimated_duration_minutes: 60 };
+  const calendar = () => new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, []], [`${date}|${tech}`, []],
+  ]);
+  const run = (start, end) => {
+    occupancy.findInterviewConflicts.mockResolvedValueOnce([{
+      id: `interview-${start}`, window_start: start, window_end: end,
+    }]);
+    return assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() });
+  };
+
+  await expect(run('10:15', '10:45')).resolves.toEqual([]);
+  await expect(run('09:00', '10:00')).resolves.toEqual([expect.objectContaining({ slot })]);
+  await expect(run('11:00', '12:00')).resolves.toEqual([expect.objectContaining({ slot })]);
+});
+
+test.each(['visit_id', 'v2 allocation'])(
+  'capacity replay uses canonical %s grouping, summed work and a boundary handoff', async (kind) => {
+    const occupancy = require('../services/scheduling/occupancy');
+    const { assessOfferedHours, CAPACITY_PLACEMENT } = require('../services/day-replan/booking-fit');
+    const RouteOptimizer = require('../services/route-optimizer');
+    const date = '2026-11-20';
+    const tech = 'tech-1';
+    const ids = [`${kind}-leader`, `${kind}-member`];
+    const mix = { version: 2, allocatedServiceIds: ids };
+    const rows = ids.map((id, index) => ({
+      id, customer_id: kind === 'visit_id' ? `customer-${index}` : 'customer-one', technician_id: tech,
+      status: 'confirmed', scheduled_date: date, window_start: '09:00', window_end: null,
+      estimated_duration_minutes: index ? 45 : 30, lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
+      route_order: index + 1,
+      ...(kind === 'visit_id' ? { visit_id: 'shared-visit' } : { reservation_service_mix: mix }),
+    }));
+    const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00',
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [ids[0], '__candidate__'], durationMinutes: 60 } };
+    const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng,
+      planning_exempt: true, estimated_duration_minutes: 60 };
+    const calendar = new Map([
+      ['homes', new Map()], ['departure', 8 * 60], [date, rows], [`${date}|${tech}`, []],
+    ]);
+    // Existing grouped work ends 10:15; candidate work ends exactly as the
+    // interview begins. Strict boundaries are valid on both writer checks.
+    occupancy.findInterviewConflicts.mockResolvedValueOnce([{
+      id: 'interview-boundary', window_start: '11:15', window_end: '12:00',
+    }]);
+
+    await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar }))
+      .resolves.toEqual([expect.objectContaining({ slot, finishMin: 675 })]);
+  },
+);
+
 test('slot classification preserves certified capacity order internally but not in JSON', () => {
   const { CAPACITY_PLACEMENT } = require('../services/day-replan/booking-fit');
   const { _internals: slots } = require('../services/estimate-slot-availability');
@@ -611,6 +670,13 @@ describe('days the re-plan does not plan (no stop, or one): open hours by the bo
     const { conn } = fakeConn({ assignable: [{ id: TECH }], services: [{ id: 'u1', technician_id: TECH, day: '2026-11-19', window_start: null, window_end: null }] });
     const out = await _internals.unplannedDays(conn, new Set(), await _internals.eligibility(conn, NOW));
     expect(out.some((d) => d.day === '2026-11-19')).toBe(false);
+  });
+
+  test('unplanned-day occupancy uses the shared committed-service-or-live-hold predicate', async () => {
+    const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
+    const { conn, calls } = fakeConn({ assignable: [{ id: TECH }] });
+    await _internals.unplannedDays(conn, new Set(), await _internals.eligibility(conn, NOW));
+    expect(calls).toContainEqual(['scheduled_services', 'where', [liveServiceOrHold]]);
   });
 
   test('planned days follow the same rules: a blackout day, a day off and a technician who is not assignable are left out; a worked Sunday stays', async () => {

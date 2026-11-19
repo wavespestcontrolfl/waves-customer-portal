@@ -5,6 +5,7 @@ const { coVisitGroups, simulate, promisesKept } = require('./app-sim');
 const { openTime, preferredFit, fitOfferedHour, serviceBlocks } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
+const { groupRouteStops } = require('../scheduling/arrival-route');
 const {
   DEFAULT_EXCLUDE_STATUSES, findInterviewConflicts, listOccupiedWindows, occupiedRows, techScopedConfirmActive,
 } = require('../scheduling/occupancy');
@@ -93,22 +94,22 @@ function routeOrderFor(rows, allowStaleOrderFallback) {
 }
 
 // Rebuild one freshly loaded route in the capacity picker's certified order.
-// The only unknown id must be its prospective marker. Added/removed stops,
-// duplicate ids, or a grouping shape we cannot map exactly make the evidence
-// stale, so the advisory score is suppressed instead of inventing an order.
+// `groups` are groupRouteStops' canonical capacity rows: a visit_id or v2
+// allocation is represented by its leader and summed work, exactly as the
+// writer certified it. The only unknown id must be its prospective marker.
+// Added/removed leaders or duplicates make the evidence stale, so the
+// advisory score is suppressed instead of inventing an order.
 function certifiedSequence(slot, groups, proposed) {
   const proof = slot?.[CAPACITY_PLACEMENT];
   const actualDuration = Number(proposed.estimated_duration_minutes);
-  if (proof?.routeMode !== 'arrival_windows' || !Array.isArray(proof.order)
+  if (!Array.isArray(groups) || proof?.routeMode !== 'arrival_windows' || !Array.isArray(proof.order)
       || proof.order.length !== groups.length + 1 || !(actualDuration > 0)
       || !(Number(proof.durationMinutes) >= actualDuration)) return null;
   const byMember = new Map();
   for (const group of groups) {
-    for (const row of group) {
-      const id = String(row.id);
-      if (byMember.has(id)) return null;
-      byMember.set(id, group);
-    }
+    const id = String(group.id);
+    if (byMember.has(id)) return null;
+    byMember.set(id, group);
   }
   const seen = new Set();
   let candidate = 0;
@@ -117,7 +118,7 @@ function certifiedSequence(slot, groups, proposed) {
     const id = String(rawId);
     if (id === '__candidate__') {
       candidate += 1;
-      orderedGroups.push([proposed]);
+      orderedGroups.push(proposed);
       continue;
     }
     const group = byMember.get(id);
@@ -126,7 +127,7 @@ function certifiedSequence(slot, groups, proposed) {
     orderedGroups.push(group);
   }
   if (candidate !== 1 || seen.size !== groups.length) return null;
-  return orderedGroups.flat();
+  return orderedGroups;
 }
 
 // Capacity windows may overlap nominally: their safety comes from the
@@ -135,12 +136,20 @@ function certifiedSequence(slot, groups, proposed) {
 // using it as advisory ranking evidence.
 function fitCertifiedCapacity(input, slot, proposed) {
   const startMin = minute(slot.windowStart);
-  if (!Number.isFinite(startMin) || startMin < input.bounds.openMin || !prefOk(input.pref, startMin)) return null;
+  const offeredEndMin = minute(slot.windowEnd);
+  if (!Number.isFinite(startMin) || !Number.isFinite(offeredEndMin) || !(offeredEndMin > startMin)
+      || startMin < input.bounds.openMin || !prefOk(input.pref, startMin)) return null;
+  // reserveSlot's recruiting-interview guard applies to the complete offered
+  // interval before capacity routing. A route may otherwise wait until a
+  // mid-window interview ends and still keep the two-hour arrival promise,
+  // producing an advisory card the writer refuses. Boundaries remain valid
+  // handoffs; the simulation below separately catches delayed actual work.
+  if ((input.interviewBlocks || []).some(block => startMin < block.endMin && offeredEndMin > block.startMin)) return null;
   // The public card's end is its reserved/display width. The scoring target
   // carries the catalog's actual expected work; a certified longer placement
   // may safely be re-simulated at that shorter duration, but never vice versa.
   const actual = { ...proposed, window_end: hhmm(startMin + Number(proposed.estimated_duration_minutes)) };
-  const seq = certifiedSequence(slot, input.groups, actual);
+  const seq = certifiedSequence(slot, input.capacityGroups, actual);
   if (!seq) return null;
   const sim = simulate(seq, {
     origin: input.origin,
@@ -227,6 +236,7 @@ async function assessOfferedHours(conn, offered, target, {
       const { ordered } = routeOrderFor(own, mayRepairStaleOrder);
       if (!ordered) continue;
       const groups = coVisitGroups(ordered);
+      const capacityGroups = groupRouteStops(own);
       const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
       const routeIds = new Set(own.map(row => String(row.id)));
       const blocked = scopedOccupancy(occupancyRows, techId, techBlind, routeIds);
@@ -244,8 +254,9 @@ async function assessOfferedHours(conn, offered, target, {
       for (const slot of slots) {
         const proposed = { ...target, id: target.id || '__new_booking__', technician_id: techId, window_start: slot.windowStart, window_end: slot.windowEnd };
         const group = [proposed];
-        const input = { groups, group, leaderId: proposed.id, pref, origin,
-          marginMin: DEFAULT_OPTIONS.marginMin, bounds, blocks: routeBlocks, blockedHours, rowHours, requireClose: true };
+        const input = { groups, capacityGroups, group, leaderId: proposed.id, pref, origin,
+          marginMin: DEFAULT_OPTIONS.marginMin, bounds, blocks: routeBlocks, interviewBlocks,
+          blockedHours, rowHours, requireClose: true };
         const capacityFit = fitCertifiedCapacity(input, slot, proposed);
         const fit = capacityFit || (slot?.[CAPACITY_PLACEMENT] ? null : (before && fitOfferedHour(
           { ...input, groups: [...groups, group] }, minute(slot.windowStart) / 60)));

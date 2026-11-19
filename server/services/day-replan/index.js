@@ -134,6 +134,9 @@ async function loadDayStops(conn, dateStr) {
       ...CUSTOMER_PREMISE_ALIASES,
       'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
       'scheduled_services.reservation_expires_at', 'scheduled_services.source_estimate_id',
+      // Canonical capacity grouping: version-2 allocation members share one
+      // route stop even when visit grouping is disabled.
+      'scheduled_services.reservation_service_mix',
       'scheduled_services.route_order', 'scheduled_services.created_at',
       // Apply mode's version hash reads these (the shadow plan ignores them).
       'scheduled_services.scheduled_date', 'scheduled_services.customer_confirmed', 'scheduled_services.updated_at',

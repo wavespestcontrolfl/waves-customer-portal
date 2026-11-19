@@ -322,6 +322,60 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toEqual([]);
   });
 
+  test('capacity replay uses a v2 group’s summed work, accepts a boundary, and rejects nominal interview overlap', async () => {
+    const { assessOfferedHours, CAPACITY_PLACEMENT } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const ids = [randomUUID(), randomUUID()];
+    const mix = { version: 2, allocatedServiceIds: ids };
+    await mockConn('scheduled_services').insert(ids.map((id, index) => ({
+      id, customer_id: visits[0].customerId, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', lat: HQ.lat, lng: HQ.lng,
+      window_start: '09:00', window_end: null, estimated_duration_minutes: index ? 45 : 30,
+      reservation_service_mix: mix, route_order: index + 1,
+    })));
+    const slot = { date, techId, windowStart: '10:00', windowEnd: '11:00',
+      [CAPACITY_PLACEMENT]: { routeMode: 'arrival_windows', order: [ids[0], '__candidate__'], durationMinutes: 60 } };
+    const target = { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+    await withOfficeEnv('GATE_SCHEDULING_CAPACITY', 'true', async () => {
+      const [fit] = await assessOfferedHours(mockConn, [slot], target, { now: NOW });
+      expect(fit).toEqual(expect.objectContaining({ slot, finishMin: expect.any(Number) }));
+      // The live catalog floor can replace the raw 30/45-minute estimates;
+      // either way, summed member work delays the candidate past the 11:00
+      // finish a leader-only replay would report.
+      expect(fit.finishMin).toBeGreaterThan(660);
+      // Recruiting intervals are buffered 15 minutes before the saved start;
+      // place the buffered boundary exactly at the simulated finish.
+      const boundary = parseETDateTime(date + 'T' + hhmm(fit.finishMin + 15));
+      await mockConn('job_applications').insert({ status: 'interview', interview_at: boundary,
+        interview_end_at: new Date(boundary.getTime() + 30 * 60000) });
+      await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW }))
+        .resolves.toEqual([expect.objectContaining({ slot, finishMin: fit.finishMin })]);
+      const overlap = parseETDateTime(date + 'T10:15');
+      await mockConn('job_applications').insert({ status: 'interview', interview_at: overlap,
+        interview_end_at: new Date(overlap.getTime() + 30 * 60000) });
+      await expect(assessOfferedHours(mockConn, [slot], target, { now: NOW })).resolves.toEqual([]);
+    });
+  });
+
+  test('morning unplanned days keep stale-stamped booked work and expire only an unlinked hold', async () => {
+    const { unplannedDays } = require('../services/day-replan/open-blocks-alert')._internals;
+    const date = '2097-06-11';
+    await mockConn('scheduled_services').insert([{
+      customer_id: visits[0].customerId, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', window_start: '10:00', window_end: '11:00',
+      estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01T00:00:00Z',
+    }, {
+      customer_id: null, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', window_start: '12:00', window_end: '13:00',
+      estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01T00:00:00Z',
+    }]);
+    const elig = { from: date, to: date, blackout: new Set(), techIds: [techId], absent: new Set() };
+
+    const [day] = await unplannedDays(mockConn, new Set(), elig);
+    expect(day).toMatchObject({ day: date, technician_id: techId, stops: 1 });
+    expect(day.blocks.map(block => [block.start, block.min])).toEqual([[480, 120], [660, 360]]);
+  });
+
   test('the office notice shows the verified series and two feasible starts, and a live customer pick stays quiet', async () => {
     const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
     const compose = require('../services/admin-alert-compose');
