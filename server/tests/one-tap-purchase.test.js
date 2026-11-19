@@ -640,6 +640,28 @@ describe('reserve / release', () => {
     expect(purchase.scheduled_service_id).toBe('ss-1');
   });
 
+  test('a replacement pins the prior appointment for the transactional claim check', async () => {
+    db.__state.tables.one_tap_purchases[0].status = 'reserved';
+    db.__state.tables.one_tap_purchases[0].scheduled_service_id = 'ss-old';
+    db.__state.tables.scheduled_services = [
+      { id: 'ss-old', customer_id: null, reservation_expires_at: futureIso() },
+      { id: 'ss-1', customer_id: null, reservation_expires_at: futureIso() },
+    ];
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: futureIso() });
+
+    await oneTap.reserve({ customerId: 'cust-1', purchaseId: 'p-1', slotId: SLOT.slotId });
+
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith({
+      estimateId: 'est-1',
+      slotId: SLOT.slotId,
+      previousScheduledServiceId: 'ss-old',
+    });
+    expect(db.__state.tables.one_tap_purchases[0]).toMatchObject({
+      status: 'reserved',
+      scheduled_service_id: 'ss-1',
+    });
+  });
+
   test('a purchase whose option was retired between init and reserve is voided, never reserved (codex P1 pre-push 2026-09-24)', async () => {
     // initPurchase already refuses to OPEN a purchase for a retired option
     // (e.g. tree-light/4x-quarterly T&S) — this pins that reserve() closes

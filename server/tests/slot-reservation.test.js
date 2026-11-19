@@ -346,6 +346,63 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('a replacement refuses a prior appointment that staff claimed before the reservation write', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    try {
+      const estimateBuilder = makeEstimateBuilder({
+        id: 'estimate-456',
+        status: 'sent',
+        service_interest: 'Generic estimate service',
+      });
+      const claimedBuilder = {
+        where: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({
+          id: 'scheduled-old',
+          customer_id: 'customer-1',
+          source_estimate_id: 'estimate-456',
+          reservation_expires_at: '2027-05-20T13:15:00.000Z',
+        }),
+      };
+      const insertBuilder = makeInsertBuilder({
+        id: 'scheduled-new',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      });
+      const trx = makeTrx({
+        estimateBuilder,
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [
+          claimedBuilder,
+          makeLiveHoldsBuilder([]),
+          makeConflictBuilder(null),
+          makeGlobalProbeBuilder([]),
+          insertBuilder,
+        ],
+      });
+      db.transaction = jest.fn(async (callback) => callback(trx));
+
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({
+          estimateId: 'estimate-456',
+          date: '2027-05-20',
+          hhmm: '09:00',
+          techId: 'tech-1',
+          durationMinutes: 90,
+        }),
+        selectedFrequency: 'quarterly',
+        previousScheduledServiceId: 'scheduled-old',
+      })).rejects.toMatchObject({ code: 'RESERVATION_CLAIMED' });
+
+      expect(claimedBuilder.where).toHaveBeenCalledWith({ id: 'scheduled-old' });
+      expect(claimedBuilder.forUpdate).toHaveBeenCalled();
+      expect(insertBuilder.insert).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reserveSlot refuses a new-home estimate\'s slot before the move-in date, read under a lock in the hold transaction (moving PR B1)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

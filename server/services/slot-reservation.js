@@ -222,6 +222,29 @@ function addMinutesToTime(hhmmss, minutes) {
   return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}:00`;
 }
 
+// A caller that priced an unclaimed hold may adopt a row claimed meanwhile
+// only when it is still the exact appointment that caller offered. This is
+// deliberately stricter than ordinary commit replay: customer + estimate
+// bind the commercial identity, while date/start/technician/status bind the
+// appointment identity. A legacy reservation expiry stamp is not identity —
+// some staff claim paths left it behind on a real booking.
+function claimedReservationMatches(row, expected) {
+  if (!row || !expected || row.customer_id == null) return false;
+  return String(row.id) === String(expected.scheduledServiceId)
+    && String(row.customer_id) === String(expected.customerId)
+    && String(row.source_estimate_id || '') === String(expected.estimateId || '')
+    && dateOnly(row.scheduled_date) === dateOnly(expected.scheduledDate)
+    && String(row.window_start || '').slice(0, 5) === String(expected.windowStart || '').slice(0, 5)
+    && (row.technician_id || null) === (expected.technicianId || null)
+    && ['pending', 'confirmed'].includes(String(row.status || '').toLowerCase());
+}
+
+function reservationClaimed() {
+  const err = new Error('the held appointment changed before confirmation');
+  err.code = 'RESERVATION_CLAIMED';
+  return err;
+}
+
 function applyWindowOverlapFilter(query, windowStart, windowEnd) {
   return query.andWhereRaw(
     "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time",
@@ -728,7 +751,7 @@ async function prepareReservationCommit(scheduledServiceId, options = {}) {
  * (by another committed visit, or by a live reservation that hasn't
  * expired), throws SLOT_UNAVAILABLE.
  *
- * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency? }
+ * opts: { estimateId, slotId, holdMinutes?, durationMinutes?, serviceMode?, selectedFrequency?, previousScheduledServiceId? }
  * returns: { scheduledServiceId, expiresAt }
  */
 // Why a slot's date can't be reserved, or null. A past date never can; a
@@ -1097,6 +1120,10 @@ async function reserveSlot({
   serviceMode = 'recurring',
   selectedFrequency = '',
   serviceCadences = null,
+  // One-tap replacement pins the appointment its purchase currently names.
+  // Locking it in this transaction closes the staff-claim interleave between
+  // the caller's read and this reservation write.
+  previousScheduledServiceId = null,
   // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
   // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx, { date }) => null | { status, body }`
   // (may be async; `trx` is the reservation transaction, for reads that must be locked with it; `date` is the selected slot's day). The public /reserve route passes it so a state that appeared after its pre-transaction
@@ -1617,6 +1644,19 @@ async function reserveSlot({
       // (service profile / duration / day-end / signature were all resolved
       // and verified ABOVE, right after the estimate row's state checks.)
 
+      let previousReservation = null;
+      if (previousScheduledServiceId) {
+        previousReservation = await trx('scheduled_services')
+          .where({ id: previousScheduledServiceId })
+          .forUpdate()
+          .first('id', 'customer_id', 'source_estimate_id', 'reservation_expires_at');
+        if (previousReservation && (previousReservation.customer_id != null
+          || String(previousReservation.source_estimate_id || '') !== String(estimateId)
+          || !previousReservation.reservation_expires_at)) {
+          throw reservationClaimed();
+        }
+      }
+
       // Idempotent self-hold handling: the conflict checks below have no
       // self-exclusion, so this estimate's OWN live hold would 409 the
       // customer's retry (the client re-POSTs /reserve with the same slotId
@@ -1761,6 +1801,16 @@ async function reserveSlot({
       }
       if ((liveHolds || []).length) {
         await trx('scheduled_services').whereIn('id', liveHolds.map((hold) => hold.id)).del();
+      }
+      // An expired prior hold is absent from liveHolds. Remove this exact,
+      // still-unclaimed row while its lock is held so a delayed staff claim
+      // cannot revive the superseded appointment after the replacement wins.
+      if (previousReservation
+        && !(liveHolds || []).some((hold) => String(hold.id) === String(previousReservation.id))) {
+        await uncommittedHoldQuery(trx, {
+          scheduledServiceId: previousReservation.id,
+          estimateId,
+        }).del();
       }
 
       // Conflict check + insert in the same txn so a concurrent reserve that
@@ -1990,7 +2040,7 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, claimedReservationIdentity?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -2006,6 +2056,7 @@ async function commitReservation({
   preLockedDate = null,
   preLockedTechId = null,
   preparedCapacity = null,
+  claimedReservationIdentity = undefined,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2159,6 +2210,26 @@ async function commitReservation({
       const err = new Error('reservation moved to another date');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
+    }
+    // One-tap checkout priced an UNCLAIMED hold. If staff linked that exact
+    // row to the same customer while checkout was in flight, it is already
+    // the requested real booking: repair only the obsolete hold stamp and
+    // let conversion build the series from this row. Every ambiguous claim
+    // (other customer/estimate, moved time/tech, or changed/dead status)
+    // stays untouched and gets its own error so the caller preserves the
+    // appointment pointer instead of inviting a second booking.
+    if (claimedReservationIdentity !== undefined) {
+      if (row.customer_id != null) {
+        if (!claimedReservationMatches(row, claimedReservationIdentity)) throw reservationClaimed();
+        if (!row.reservation_expires_at) return row;
+        const [booked] = await client('scheduled_services').where({ id: row.id })
+          .update({ reservation_expires_at: null, updated_at: client.fn.now() })
+          .returning('*');
+        return booked;
+      }
+      // An unlinked row with no hold stamp is neither the hold checkout
+      // priced nor a proven booking. Never replay it as committed.
+      if (!row.reservation_expires_at) throw reservationClaimed();
     }
     if (!row.reservation_expires_at) {
       // Already committed. Idempotent — return the existing row rather
@@ -3148,6 +3219,7 @@ module.exports = {
   cadenceCatalogKeyForProfile,
   _internals: {
     parseSlotId,
+    claimedReservationMatches,
     addMinutesToTime,
     cappedServiceType,
     canonicalServiceTypeForProfile,

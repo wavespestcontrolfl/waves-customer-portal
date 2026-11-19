@@ -172,6 +172,37 @@ async function loadPurchaseForCustomer(customerId, purchaseId) {
   return row;
 }
 
+// The slot the customer actually authorized, decoded from the signed slot id
+// persisted with the purchase. commitReservation compares every field against
+// its locked row before adopting a staff claim; a missing/legacy slot id is
+// deliberately unprovable rather than guessed from mutable appointment data.
+function claimedReservationIdentity(purchase) {
+  if (!purchase?.scheduled_service_id) return null;
+  const parsed = slotReservation._internals?.parseSlotId?.(purchase.slot_id);
+  // Only the signed selection that reserveSlot authenticated can prove the
+  // appointment identity. Older unsigned ids remain parseable elsewhere for
+  // lookup compatibility, but cannot authorize adoption of a claimed row.
+  if (!parsed?.offerSig || !Number.isFinite(parsed.offerExp)) return null;
+  return {
+    scheduledServiceId: purchase.scheduled_service_id,
+    customerId: purchase.customer_id,
+    estimateId: purchase.estimate_id,
+    scheduledDate: parsed.date,
+    windowStart: parsed.windowStart,
+    technicianId: parsed.techId,
+  };
+}
+
+async function refuseRebookOverClaimedPointer(purchase) {
+  if (!purchase?.scheduled_service_id) return;
+  const pointed = await db('scheduled_services')
+    .where({ id: purchase.scheduled_service_id })
+    .first('customer_id');
+  if (pointed?.customer_id != null) {
+    throw httpError(409, OFFER_CHANGED, { code: 'RESERVATION_CLAIMED' });
+  }
+}
+
 function estimateExpired(estimate) {
   return !!(estimate?.expires_at && new Date(estimate.expires_at) < new Date());
 }
@@ -605,6 +636,7 @@ async function initPurchase({ customerId, clicked }) {
 async function reserve({ customerId, purchaseId, slotId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  await refuseRebookOverClaimedPointer(purchase);
   await rejectRetiredOneTapVariant(purchase);
   const estimate = await db('estimates')
     .where({ id: purchase.estimate_id })
@@ -624,6 +656,9 @@ async function reserve({ customerId, purchaseId, slotId }) {
     const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({
       estimateId: estimate.id,
       slotId,
+      ...(purchase.scheduled_service_id
+        ? { previousScheduledServiceId: purchase.scheduled_service_id }
+        : {}),
     });
     // CAS: still-open purchase (a concurrent re-init can void it — a blind
     // update would revive the voided row) AND the just-created hold must
@@ -655,6 +690,9 @@ async function reserve({ customerId, purchaseId, slotId }) {
     if (err.code === 'INVALID_SLOT_ID') throw httpError(400, 'invalid slotId format');
     if (err.code === 'SLOT_UNAVAILABLE') {
       throw httpError(409, 'That time was just taken — pick another slot.', { code: 'SLOT_UNAVAILABLE' });
+    }
+    if (err.code === 'RESERVATION_CLAIMED') {
+      throw httpError(409, OFFER_CHANGED, { code: 'RESERVATION_CLAIMED' });
     }
     if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) {
       throw httpError(409, OFFER_CHANGED);
@@ -724,12 +762,21 @@ async function getPurchaseState({ customerId, purchaseId }) {
 
   let slot = null;
   let holdLive = false;
+  let ambiguousClaim = false;
   if (purchase.scheduled_service_id) {
     const hold = await db('scheduled_services')
       .where({ id: purchase.scheduled_service_id })
-      .first('scheduled_date', 'window_start', 'reservation_expires_at');
+      .first('id', 'customer_id', 'source_estimate_id', 'scheduled_date', 'window_start',
+        'technician_id', 'status', 'reservation_expires_at');
     if (hold) {
-      holdLive = !!(hold.reservation_expires_at && new Date(hold.reservation_expires_at) > new Date());
+      const exactClaim = slotReservation._internals?.claimedReservationMatches?.(
+        hold,
+        claimedReservationIdentity(purchase),
+      ) || false;
+      ambiguousClaim = hold.customer_id != null && !exactClaim;
+      holdLive = exactClaim
+        || !!(hold.customer_id == null && hold.reservation_expires_at
+          && new Date(hold.reservation_expires_at) > new Date());
       slot = {
         date: dateOnly(hold.scheduled_date),
         windowStart: hhmm(hold.window_start),
@@ -750,7 +797,7 @@ async function getPurchaseState({ customerId, purchaseId }) {
     estimateId: purchase.estimate_id,
     status: purchase.status,
     open: ['initiated', 'reserved'].includes(purchase.status)
-      && estimate?.status === 'draft' && !estimateExpired(estimate),
+      && estimate?.status === 'draft' && !estimateExpired(estimate) && !ambiguousClaim,
     serviceKey: purchase.service_key,
     label: line?.name || String(purchase.service_key || 'service').replace(/_/g, ' '),
     perVisit: Number(purchase.per_visit),
@@ -806,6 +853,7 @@ async function sweepStaleOneTapDrafts() {
 async function slots({ customerId, purchaseId }) {
   const purchase = await loadPurchaseForCustomer(customerId, purchaseId);
   if (!['initiated', 'reserved'].includes(purchase.status)) throw httpError(409, OFFER_CHANGED);
+  await refuseRebookOverClaimedPointer(purchase);
   try {
     return await loadSlots(purchase.estimate_id);
   } catch (err) {
@@ -1186,6 +1234,10 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           preLockedDate,
           preLockedTechId,
           preparedCapacity: preparedReservationCapacity,
+          // Explicit null still enables the strict claim policy: a legacy or
+          // malformed slot id must never make an already-customer-linked row
+          // look like an idempotent commit.
+          claimedReservationIdentity: claimedReservationIdentity(purchase),
           trx,
         });
       } catch (commitErr) {
@@ -1198,6 +1250,9 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         }
         if (commitErr.code === 'SLOT_UNAVAILABLE') {
           throw httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE' });
+        }
+        if (commitErr.code === 'RESERVATION_CLAIMED') {
+          throw httpError(409, OFFER_CHANGED, { code: 'RESERVATION_CLAIMED' });
         }
         throw commitErr;
       }
