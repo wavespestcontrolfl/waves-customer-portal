@@ -601,6 +601,18 @@ self.addEventListener('activate', event => {
   event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
 });
 
+// A job-offer link page is never stored as the offline shell: a stored
+// response keeps its URL, and so the private link would sit in Cache Storage.
+// The page router matches each percent-decoded segment in any case, with any
+// trailing slashes, so this does too (as isCareersOfferPath on the server).
+function isPrivateLinkPage(pathname) {
+  let decoded = pathname;
+  try {
+    decoded = pathname.split('/').map(segment => decodeURIComponent(segment).replace(/\//g, '%2F')).join('/');
+  } catch { /* a malformed path is matched as written, as the router does */ }
+  return /^\/careers\/offer\/[^/]+\/*$/i.test(decoded);
+}
+
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
 
@@ -633,7 +645,11 @@ self.addEventListener('fetch', event => {
             if (!assets.length) return;
             advanceLiveBuild(buildIdOf(assets), navSeq);
           }).catch(() => {}));
-          event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}));
+          // A private link page still advances the live build above, like a
+          // navigation whose shell refresh failed; the last shell stays.
+          if (!isPrivateLinkPage(url.pathname)) {
+            event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}));
+          }
         }
         return response;
       } catch {

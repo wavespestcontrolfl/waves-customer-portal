@@ -383,6 +383,31 @@ describe('customer service-worker update contract', () => {
   });
 });
 
+describe('service-worker private link pages', () => {
+  // The offline shell is a stored copy of the last page loaded, and a stored
+  // response keeps its URL. A job-offer page must never become it: its URL is
+  // the applicant's private signing link.
+  it('never stores a job-offer page as the offline shell, so the previous shell stays', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    setFetch(serveBuild(['/assets/index-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    const before = await (await cache.match('/')).text();
+    expect(before).toContain('index-AAA');
+    setFetch(serveBuild(['/assets/index-BBB.js']));
+    const token = 'a'.repeat(64);
+    for (const offerPath of [`/careers/offer/${token}`, `/Careers/Offer/${token}/`, `/careers/%6Fffer/${token}`, `/careers/offer/${token}//`]) {
+      const { response } = await dispatchFetch(offerPath, { mode: 'navigate' });
+      expect(response.ok).toBe(true); // the page itself still loads from the network
+      expect(await (await cache.match('/')).text()).toBe(before);
+    }
+    expect([...cache.store.keys()].some(url => /careers/i.test(url))).toBe(false);
+    // Any other page still refreshes the shell.
+    await dispatchFetch('/careers/offers', { mode: 'navigate' });
+    expect(await (await cache.match('/')).text()).toContain('index-BBB');
+  });
+});
+
 describe('service-worker shell refresh keeps the asset cache bounded to two builds', () => {
   it('keeps the current and previous build, page chunks included, and prunes everything older', async () => {
     const cache = fakeCache();

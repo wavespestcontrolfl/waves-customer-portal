@@ -8610,10 +8610,12 @@ family before even the limiter runs, and `index.js` carves `/offer` out of the `
 sent offer keeps working if intake closes). The token is `job_offers.token`, 64 lowercase hex (32 random bytes set
 when the owner presses Send), format-gated via `router.param` before any database read; an unknown, malformed or
 draft token answers the same generic 404. Privacy headers (`noStore`) are mounted AHEAD of the gates and the global
-`/api` limiter so every answer, the dark 404 included, carries them; every SPA document the browser route
-`/careers/offer/:token` opens gets the same headers via `utils/sensitive-spa-headers.js`, matched as the router
-matches: each segment percent-decoded, any case, extra trailing slashes ignored, any token (a bad one shows the
-not-valid page). A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
+`/api` limiter so every answer, the dark 404 included, carries them; every SPA document the server sends for the
+browser route `/careers/offer/:token` gets the same headers via `utils/sensitive-spa-headers.js`, matched as the
+router matches: each segment percent-decoded, any case, extra trailing slashes ignored, any token (a bad one shows
+the not-valid page). A last segment that looks like a file name (`bad.pdf`) gets the plain missing-file 404, as on
+every SPA path, and never the page; no offer token has a dot. The service worker never stores an offer document as
+its offline shell (`client/public/sw.js` `isPrivateLinkPage`), because a stored response keeps its URL. A 30/10min per-IP limiter (prod only, `ipFallbackKey`) sits
 behind the gates. GET returns `{state:'open'|'signed'|'declined'|'date_requested', firstName, jobTitle, startDate,
 hourlyRate, stepRate, stepEffectiveOn, hoursLine, reportTo, payDayLine, owner:{name,title,sentOn}, expiresAt,
 textConsent, signedName, signedAt, requestedStartDate, terms:{title, markdown}}` — every value is read from the
