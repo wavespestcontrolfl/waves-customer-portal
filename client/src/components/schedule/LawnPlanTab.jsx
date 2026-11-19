@@ -90,7 +90,7 @@ function LawnFacts({ plan, onRefresh }) {
       <PlanCard
         icon={Leaf}
         title="Lawn facts"
-        right={<Button size="sm" variant="secondary" onClick={onRefresh}><RefreshCw size={14} /> Refresh</Button>}
+        right={<Button size="sm" variant="secondary" className="gap-2" onClick={onRefresh}><RefreshCw size={14} aria-hidden />Refresh</Button>}
       >
         <div className="grid grid-cols-2 gap-3">
           <Field label="Track" value={gate.trackName || gate.trackKey} />
@@ -136,6 +136,11 @@ export default function LawnPlanTab({ plan, loading, error, onRefresh, jobTab })
   if (!plan) {
     return <div className="p-6 text-14 text-ink-secondary text-center">{loading ? 'Loading plan…' : 'Plan unavailable right now.'}</div>;
   }
+  // The Job card's address rule (the server's `addressNotice`): at a non-primary address the plan on file is the primary
+  // home's, so neither its facts nor its lines show here.
+  if (plan.addressNotice) {
+    return <NoticeList title="Plan not shown" tone="alert" items={[plan.addressNotice]} />;
+  }
   const blocks = plan.propertyGate?.blocks || [];
   const warnings = plan.propertyGate?.warnings || [];
   const base = plan.protocol?.base || [];
@@ -144,12 +149,9 @@ export default function LawnPlanTab({ plan, loading, error, onRefresh, jobTab })
   return (
     <div className="space-y-4">
       <LawnFacts plan={plan} onRefresh={onRefresh} />
-      {(blocks.length > 0 || warnings.length > 0) && (
-        <div className="space-y-3">
-          <NoticeList title="Blocks" tone="alert" items={blocks} />
-          <NoticeList title="Warnings" tone="warning" items={warnings} />
-        </div>
-      )}
+      {/* A NoticeList with no items renders nothing. */}
+      <NoticeList title="Blocks" tone="alert" items={blocks} />
+      <NoticeList title="Warnings" tone="warning" items={warnings} />
       <PlanCard icon={ClipboardList} title="Protocol lines">
         <div className="text-14 text-ink-secondary leading-snug mb-3">{plan.protocol?.objectiveDescription || 'No protocol objective available.'}</div>
         <div className="space-y-2">

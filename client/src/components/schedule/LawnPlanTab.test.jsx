@@ -99,6 +99,16 @@ describe('LawnPlanTab', () => {
     expect(screen.queryByText(/Job tab/)).toBeNull();
   });
 
+  it('at a non-primary address shows the Job card\'s address block, and none of the primary home\'s facts or lines', () => {
+    const addressNotice = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
+    render(<LawnPlanTab plan={{ ...plan, addressNotice }} jobTab />);
+    expect(screen.getByText('Plan not shown')).toBeTruthy();
+    expect(screen.getByText(/the lawn plan on file is the primary home's/)).toBeTruthy();
+    for (const text of ['Fixture track', 'Fixture County', 'Fixture kelp line', 'Fixture blackout.', 'Protocol lines']) {
+      expect(screen.queryByText(text)).toBeNull();
+    }
+  });
+
   it('says so while loading, and when the plan cannot be read', () => {
     const { rerender } = render(<LawnPlanTab plan={null} loading error="" onRefresh={() => {}} />);
     expect(screen.getByText('Loading plan…')).toBeTruthy();

@@ -1,8 +1,10 @@
 jest.mock('../models/db', () => {
   const db = jest.fn(() => chain);
   const chain = { where: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
+    join: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(),
     modify: fn => { fn(chain); return chain; }, first: jest.fn() };
   db.chain = chain;
+  db.raw = jest.fn((sql) => sql);
   return db;
 });
 jest.mock('../middleware/admin-auth', () => ({
@@ -158,6 +160,27 @@ test.each([true, false])('a protocol line keeps its irrigation thresholds and lo
   expect(protocol.conditional[0].description).toContain('VWC >40% = reduce 20%');
   expect(protocol.conditional[1].description).toContain('Nonionic Surfactant');
   expect(protocol.conditional[1].description).not.toMatch(/0\.25|%/);
+});
+
+// The Plan tab's address rule is the Job card's own (its SQL, its block): at a non-primary address the plan on file is
+// the primary home's. The plan still comes back for the completion form; a failed check fails closed.
+test.each([true, false])('a visit at a non-primary address carries the Job card\'s address block; a failed check fails closed (technician=%s)', async tech => {
+  const { ALTERNATE_ADDRESS_BLOCK } = require('../services/job-card');
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [] } });
+  const answer = async (row) => {
+    // A technician's two visit-scope reads come first; the address read is the last read of the request.
+    if (tech) db.chain.first.mockResolvedValueOnce({ id: 'visit' }).mockResolvedValueOnce({ id: 'visit' });
+    if (row instanceof Error) db.chain.first.mockRejectedValueOnce(row);
+    else db.chain.first.mockResolvedValueOnce(row);
+    return (await run({ tech })).body.plan;
+  };
+  const elsewhere = await answer({ address_diverges: true });
+  expect(elsewhere.addressNotice).toEqual(ALTERNATE_ADDRESS_BLOCK);
+  expect(elsewhere.protocol).toBeDefined();
+  expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('ss.service_address_line1'));
+  expect(db.chain.where).toHaveBeenCalledWith('ss.id', 'visit');
+  expect(await answer({ address_diverges: false })).not.toHaveProperty('addressNotice');
+  expect((await answer(new Error('read failed'))).addressNotice).toMatchObject({ code: 'address_unchecked' });
 });
 
 // The Plan tab's notice text: a stock block names no planned quantity and an unmatched line is described, not raw.

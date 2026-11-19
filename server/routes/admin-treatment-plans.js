@@ -6,7 +6,8 @@ const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-d
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { stripKeysDeep, deepStripPriceTokens } = require('../services/protocol-reader');
 const db = require('../models/db');
-const { describeLine } = require('../services/job-card');
+const { describeLine, ALTERNATE_ADDRESS_BLOCK } = require('../services/job-card');
+const { stampedDivergesSql } = require('../services/stamped-address');
 const Joi = require('joi');
 
 router.use(adminAuthenticate);
@@ -63,13 +64,27 @@ const describeNotices = (notices) => (Array.isArray(notices)
   ? notices.map((notice) => (NOTICE_DESCRIPTIONS[notice?.code] ? { ...notice, description: NOTICE_DESCRIPTIONS[notice.code](notice) } : notice))
   : notices);
 
-function projectPlanResponse(plan, { technician = false } = {}) {
-  let projected = plan;
+// The Plan tab's address rule is the Job card's (its SQL, its block): at a non-primary address the lawn plan on file is
+// the primary home's, so the Plan tab shows `addressNotice` instead of the plan. The plan itself still comes back: the
+// completion form reads this route too and ignores the key. A failed check fails closed, with its own message.
+const ADDRESS_UNCHECKED = { code: 'address_unchecked', message: 'The visit address could not be checked, so the lawn plan is not shown.' };
+async function addressNotice(serviceId) {
+  try {
+    const row = await db('scheduled_services as ss').join('customers as c', 'ss.customer_id', 'c.id').where('ss.id', serviceId)
+      .select(db.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`)).first();
+    return row?.address_diverges ? ALTERNATE_ADDRESS_BLOCK : null;
+  } catch {
+    return ADDRESS_UNCHECKED;
+  }
+}
+
+function projectPlanResponse(plan, { technician = false, notice = null } = {}) {
+  let projected = notice ? { ...plan, addressNotice: notice } : plan;
   if (plan && typeof plan === 'object' && plan.propertyGate && typeof plan.propertyGate === 'object') {
     const { billingMode: _billingMode, ...gate } = plan.propertyGate;
     const propertyGate = { ...gate, blocks: describeNotices(gate.blocks), warnings: describeNotices(gate.warnings) };
     const stockAdvisory = require('../services/stock-advisory').isLawnTsStockAdvisoryCompletion({ service_type: propertyGate.service });
-    projected = { ...plan, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
+    projected = { ...projected, propertyGate, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
   }
   // The Plan tab shows each protocol line's `description` and the plan's `objectiveDescription` (the visit's notes):
   // the Job tab's own text rule (no rate, no price), for every viewer. `raw` and `objective` stay for other readers.
@@ -99,7 +114,7 @@ router.get('/:serviceId', async (req, res, next) => {
     const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req) }) });
+    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req), notice: await addressNotice(req.params.serviceId) }) });
   } catch (err) {
     next(err);
   }
@@ -111,7 +126,7 @@ router.post('/:serviceId/build', async (req, res, next) => {
     const plan = await buildPlanForService(req.params.serviceId, plannerOptions(req));
     if (!(await completionScopeAllowed(req))) return res.status(404).json({ error: 'Visit not found' });
     if (plan.completionDefaults) res.set('Cache-Control', 'private, no-store');
-    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req) }) });
+    res.json({ plan: projectPlanResponse(plan, { technician: isTechnicianRequest(req), notice: await addressNotice(req.params.serviceId) }) });
   } catch (err) {
     next(err);
   }

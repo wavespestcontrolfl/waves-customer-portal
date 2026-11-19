@@ -24,6 +24,7 @@ let hold = null;
 let jobCardOff = false;
 let jobCardDown = false;
 let jobCardEmpty = false;
+let protocolOn = false;
 let holdCard = null;
 const idsOf = (url) => (new URL(url, "http://x").searchParams.get("selectedConditionalProductIds") || "").split(",").filter(Boolean);
 
@@ -48,6 +49,8 @@ const cardFor = (url) => {
   const optionCard = (id, name, extra = {}) => ({ id, name, role: "conditional", planOption: true, conditional: !on.includes(id), verdict: "ok", planned: on.includes(id) ? { amount: 4, unit: "fl oz" } : null, line: `${name} line`, ...extra });
   return {
     enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, addons: [],
+    ...(protocolOn ? { protocol: { enabled: true, addons: [], procedure: { name: "Published fixture protocol", source: "Published protocol · version 3",
+      title: "September visit", objective: "Record current conditions.", visitNotes: [], steps: ["Inspect the marked area."], conditional: [], notes: [] } } } : {}),
     planBlocks: blocked ? [{ code: "nitrogen_blackout", message: "Fixture blackout." }] : [],
     sprayCheck: { window: "not_today" }, tank: { calibrated: true, rigs: [] },
     mixingOrder: [{ step: 1, productId: "base", productName: "Fixture potassium", instruction: "Add the potassium first." }],
@@ -91,6 +94,7 @@ beforeEach(() => {
   jobCardOff = false;
   jobCardDown = false;
   jobCardEmpty = false;
+  protocolOn = false;
   holdCard = null;
   vi.stubGlobal("fetch", vi.fn((url) => {
     const u = String(url);
@@ -247,6 +251,22 @@ describe("Use ticks on the Job tab", () => {
     await act(async () => { holdCard.release(); });
     await waitFor(() => expect(screen.queryByText("Checking the amounts…")).toBeNull());
     expect(screen.getByText(/2 fl oz/)).toBeInTheDocument();
+  });
+
+  it("while a tick is re-read the Protocol tab shows nothing from the old card", async () => {
+    protocolOn = true;
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Protocol", exact: true }));
+    expect(await screen.findByText("September visit")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Job" }));
+    hold = deferred();
+    fireEvent.click(await screen.findByLabelText("Use Fixture optional"));
+    await screen.findAllByText("Checking the amounts…");
+    fireEvent.click(screen.getByRole("button", { name: "Protocol", exact: true }));
+    expect(await screen.findByText("Checking the amounts…")).toBeInTheDocument();
+    expect(screen.queryByText("September visit")).toBeNull();
+    await act(async () => { hold.release(); });
+    expect(await screen.findByText("September visit")).toBeInTheDocument();
   });
 
   it("shows the mixing order from the job card", async () => {

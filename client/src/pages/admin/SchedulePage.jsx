@@ -7692,6 +7692,9 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
   // ask bar. A failed request is shown as a notice under the header instead.
   const jobCardEnabled = Boolean(jobCard?.enabled);
   const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
+  // The shown card was read with other ticks, or a Refresh is out: nothing that card says about amounts, blocks or
+  // mixes shows as current on the Job or Protocol tab until the new read lands.
+  const cardPending = Boolean(jobCard) && jobCardQuery !== selectedQuery;
   const wantedSection = initialSection === "lawn_plan" && !isLawn ? null : initialSection;
   const defaultSection = wantedSection || (jobCardEnabled
     ? "job_card"
@@ -8126,7 +8129,7 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
             lawn={isLawn ? {
               selectedIds: selectedConditionalIds,
               ticks: selectedConditionalIds.join(","),
-              pending: Boolean(jobCard) && jobCardQuery !== selectedQuery,
+              pending: cardPending,
               onSet: (productIds, wanted) => setUseTicks({
                 serviceId: service.id,
                 ids: wanted
@@ -8149,7 +8152,11 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
             }}
           />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
-          <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          cardPending ? (
+            <div style={{ padding: 40, textAlign: "center", color: D.muted, fontSize: 14 }}>Checking the amounts…</div>
+          ) : (
+            <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          )
         ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
