@@ -68,7 +68,9 @@ const LAWN_KEYWORDS = [
 ];
 
 // One-word spellings of the two service names ("lawncare", "pestcontrol")
-// read as the two words, so the keyword lists and the pair both see them.
+// read as the two words for the pair ("Pest control & lawncare"). Any other
+// reply with one goes to the model, as on main, which reads a refusal ("I
+// don't want lawncare"): the keyword lists never see the expanded words.
 const SERVICE_COMPOUNDS = [[/\blawncare\b/g, 'lawn care'], [/\bpestcontrol\b/g, 'pest control']];
 
 // "one time" / "one-time" / "just once" / "single visit"
@@ -114,7 +116,8 @@ function regexClassify(body) {
   if (!body || typeof body !== 'string') return null;
   // "chinch bug", "army worm" and "sod web worm" collapse to the turf word
   // (the photo pick's rule, codex #4810 r11/r14).
-  const lower = SERVICE_COMPOUNDS.reduce((text, [re, words]) => text.replace(re, words), normalizeLawnPests(body.toLowerCase()));
+  const lower = normalizeLawnPests(body.toLowerCase());
+  const expanded = SERVICE_COMPOUNDS.reduce((text, [re, words]) => text.replace(re, words), lower);
 
   const hasPest = tokenMatches(lower, PEST_KEYWORDS);
   const hasLawn = tokenMatches(lower, LAWN_KEYWORDS);
@@ -125,11 +128,11 @@ function regexClassify(body) {
   // no service signal is still one_time.
   if (hasOneTime) return { interest: 'one_time', confidence: 0.9, method: 'regex' };
 
-  if (SERVICE_PAIR_RE.test(normalizePairReply(lower))) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
+  if (SERVICE_PAIR_RE.test(normalizePairReply(expanded))) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
   // Both pest + lawn words but no explicit pair → ambiguous, let Claude decide.
-  // So does a turf insect (TURF_PEST_WORDS).
+  // So does a turf insect (TURF_PEST_WORDS) or a one-word service name.
   if (hasPest && hasLawn) return null;
-  if (tokenMatches(lower, TURF_PEST_WORDS)) return null;
+  if (expanded !== lower || tokenMatches(lower, TURF_PEST_WORDS)) return null;
   if (hasPest) return { interest: 'pest', confidence: 0.9, method: 'regex' };
   if (hasLawn) return { interest: 'lawn', confidence: 0.9, method: 'regex' };
 

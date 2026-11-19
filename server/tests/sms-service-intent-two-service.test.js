@@ -59,9 +59,14 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     ['Quarterly pest control and grub treatment', 'pest_lawn'],
     ['quarterly pest control and army worm treatment', 'pest_lawn'],
     ['roaches inside and armyworms in the grass', 'pest_lawn'],
+    // A one-word service name outside the exact pair goes to the model, as on main; so does a refusal.
+    ['lawncare please', 'lawn'],
+    ["I don't want lawncare", 'unknown'],
+    ['Pest control and lawncare for my mom', 'pest_lawn'],
   ])('%j => the model decides (%s)', async (body, modelInterest) => {
     mockDispatch.mockResolvedValue({ ok: true, json: { interest: modelInterest, confidence: 0.8 } });
-    await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: modelInterest, confidence: 0.8, method: 'ai' });
+    await expect(classifyServiceIntent(body)).resolves
+      .toEqual({ interest: modelInterest === 'unknown' ? null : modelInterest, confidence: 0.8, method: 'ai' });
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
@@ -93,8 +98,6 @@ describe('unchanged single-service and one-time answers', () => {
     ['one-time pest and lawn', 'one_time'],
     // "lawnmower" is not the lawn service, so this is not a pair.
     ['pest and lawnmower repair', 'pest'],
-    // Main sent this to the model (no keyword matched); the one-word spelling reads as lawn now.
-    ['lawncare please', 'lawn'],
   ])('%j => %s', async (body, interest) => {
     await expect(classifyServiceIntent(body)).resolves.toMatchObject({ interest, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();

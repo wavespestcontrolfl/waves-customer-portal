@@ -334,14 +334,14 @@ describe('two-service reply (pest_lawn)', () => {
   });
 
   test.each([
-    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'pest_lawn', PEST_LAWN_LABEL, '100 Palm Ave, Venice FL 34285, pest and'],
-    // What main's model can answer for the same reply today: the same street line.
-    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'lawn', 'Lawn Care', '100 Palm Ave, Venice FL 34285, pest and'],
-    ['100 Palm Ave, quarterly pest control and grub treatment', 'pest_lawn', PEST_LAWN_LABEL, '100 Palm Ave, quarterly pest control and grub treatment'],
-  ])('a combined reply %j read as %s: main\'s capture saves %j, and the draft is made', async (body, interest, label, line) => {
-    // Address capture is main's code, unchanged by this PR. It drops a known single-service tail ("lawn"
-    // here) and keeps other request words on the line for staff to clean at pricing time; dropping the
-    // line would strand the quote. A pair-aware strip is out of scope (PR body, "Not in this PR").
+    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'pest_lawn', PEST_LAWN_LABEL, '100 Palm Ave, Venice FL 34285'],
+    // What main's model can answer for the same reply today.
+    ['100 Palm Ave, Venice FL 34285, pest and lawn', 'lawn', 'Lawn Care', '100 Palm Ave, Venice FL 34285'],
+    ['100 Palm Ave, quarterly pest control and grub treatment', 'pest_lawn', PEST_LAWN_LABEL, '100 Palm Ave'],
+  ])('a combined reply %j read as %s keeps the street %j, and the draft carries the saved line', async (body, interest, label, street) => {
+    // Address capture is main's code, out of scope here (PR body, "Not in this PR"): request words after
+    // the street may stay on the line for staff to clean at pricing time. The test checks only what this
+    // PR owns: the street is kept, the draft is made under the label, and it carries the saved line.
     mockClassify.mockResolvedValue({ interest, confidence: 0.8, method: 'ai' });
     mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
       ? { started: false, skipped: 'scope_check_only' }
@@ -350,10 +350,11 @@ describe('two-service reply (pest_lawn)', () => {
     const result = await handleIntakeReply({ ...CUSTOMER(), address_line1: '' }, body);
 
     expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
-    expect(mockCustomerUpdates).toContainEqual({ address_line1: line });
+    const saved = mockCustomerUpdates.find((p) => p.address_line1)?.address_line1;
+    expect(saved.startsWith(street)).toBe(true);
     expect(mockCustomerUpdates).toContainEqual({ lead_service_interest: interest });
     expect(mockEstimateInserts).toHaveLength(1);
-    expect(mockEstimateInserts[0].address).toBe(line);
+    expect(mockEstimateInserts[0].address).toBe(saved);
     expect(mockEstimateInserts[0].service_interest).toBe(label);
   });
 });
