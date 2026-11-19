@@ -154,6 +154,8 @@ describe('extractDeadline', () => {
     // SiteOne's text part keeps the HTML entity.
     expect(extractDeadline('*Offer valid at participating locations November 1 &ndash; November 30, 2026.', received)).toBe('2026-11-30');
     expect(extractDeadline('Valid 11/1 - 11/30', received)).toBe('2026-11-30');
+    // "in" after a numeric date also means inches; after a same-month range start it is a word.
+    expect(extractDeadline('Offer valid 11/1 - 11/30 in stores', received)).toBe('2026-11-30');
     expect(extractDeadline('Promotion runs Monday, Nov 2 through Friday, Nov 6', received)).toBe('2026-11-06');
     expect(extractDeadline('Valid Nov 1-30, 2026', received)).toBe('2026-11-30');
     // The offer word can follow the range, as in a date-first subject.
@@ -184,6 +186,8 @@ describe('extractDeadline', () => {
     // HTML-to-text leaves a blank line between two <p> blocks; the time off one block up still counts.
     expect(extractDeadline('I’m out\n\n Nov 19 – Nov 24', received)).toBe('2026-11-19');
     expect(extractDeadline('Branch closed Nov 26-27 for Thanksgiving.', received)).toBe('2026-11-26');
+    // An abbreviation's period ends no sentence.
+    expect(extractDeadline('Branch closed Mon. Nov 2 - Wed. Nov 4', received)).toBe('2026-11-02');
     expect(extractDeadline('Order by Nov 20 – Nov 25 delivery', received)).toBe('2026-11-20');
     expect(extractDeadline('Nov 1 - 2 free cases with any order', received)).toBe('2026-11-01');
     expect(extractDeadline('Sale ends Nov 1 - 25-lb bags only', received)).toBe('2026-11-01');
@@ -193,6 +197,7 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Promo through Nov 1 - 10 bags', received)).toBe('2026-11-01');
     expect(extractDeadline('Promo through Nov 1 - 2 for $50', received)).toBe('2026-11-01');
     expect(extractDeadline('Special pickup Nov 2 - 3 PM', received)).toBe('2026-11-02');
+    expect(extractDeadline('Special pickup Nov 2 - 3:00 PM', received)).toBe('2026-11-02');
     expect(extractDeadline('Offer ends Nov 20 - order now', received)).toBe('2026-11-20');
   });
 
@@ -211,6 +216,8 @@ describe('extractDeadline', () => {
     expect(extractDeadline('Offer ends Apr 30', received)).toBeNull(); // 184 days out
     expect(extractDeadline('Offer ends Apr 25', received)).toBe('2027-04-25'); // 179 days out
     expect(extractDeadline('Mix 1/2 gal per acre', received)).toBeNull();
+    // A fraction range keeps its old reading: its second fraction ("3/4 in") is no range end.
+    expect(extractDeadline('Granules 1/2 - 3/4 in', received)).toBe('2027-01-02');
     expect(extractDeadline('Invalid date Feb 30', received)).toBeNull();
     expect(extractDeadline('', received)).toBeNull();
   });
