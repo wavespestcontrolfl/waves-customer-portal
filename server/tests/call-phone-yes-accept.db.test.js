@@ -463,6 +463,53 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(await cards(bookingCallId)).toHaveLength(1);
   });
 
+  // The send path stamps each real delivery's prices (sendSnapshot.priced); a change after it, or a delivery after the
+  // yes, means the caller may have heard other terms.
+  describe('terms the caller heard', () => {
+    const { pricedContent } = require('../services/estimate-updated-wording');
+    const stampOf = (over = {}) => pricedContent({ monthly_total: 15, annual_total: 180, onetime_total: 0, estimate_data: planData(), ...over });
+
+    test('prices changed after the last delivery: the shadow line says the terms may differ', async () => {
+      const { bookingCallId } = await phoneYes({ estimateOver: {
+        estimate_data: JSON.stringify({ ...planData(), sendSnapshot: { priced: stampOf({ monthly_total: 12, annual_total: 144 }) } }),
+      } });
+      await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+      const [card] = await cards(bookingCallId);
+      expect(payloadOf(card)).toMatchObject({ yes_heard: true, auto_would_accept: false, auto_reason: 'terms_may_differ' });
+    });
+
+    test('delivered again after the yes: the shadow line says the terms may differ', async () => {
+      const { bookingCallId } = await phoneYes({ estimateOver: {
+        estimate_data: JSON.stringify({ ...planData(), sendSnapshot: { priced: stampOf() }, deliveryState: {
+          firstDeliveredAt: new Date(Date.now() - 2 * DAY).toISOString(), lastDeliveredAt: new Date(Date.now() - 12 * 3600000).toISOString(), sentChannels: ['sms'],
+        } }),
+      } });
+      await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+      const [card] = await cards(bookingCallId);
+      expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'terms_may_differ' });
+    });
+
+    test('the delivered terms are the current ones and nothing was sent after the yes: auto would accept', async () => {
+      const { bookingCallId } = await phoneYes({ estimateOver: {
+        estimate_data: JSON.stringify({ ...planData(), sendSnapshot: { priced: stampOf() }, deliveryState: {
+          firstDeliveredAt: new Date(Date.now() - 2 * DAY).toISOString(), lastDeliveredAt: new Date(Date.now() - 2 * DAY).toISOString(), sentChannels: ['sms'],
+        } }),
+      } });
+      await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+      const [card] = await cards(bookingCallId);
+      expect(payloadOf(card)).toMatchObject({ auto_would_accept: true });
+    });
+  });
+
+  // A visit the call booked that is already on site or done still makes two (only the live one needs the card).
+  test('the call booked two visits and one is on site: the shadow line says more than one visit', async () => {
+    const { customerId, bookingCallId } = await phoneYes();
+    await visit(customerId, bookingCallId, { status: 'on_site' });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ auto_would_accept: false, auto_reason: 'more_than_one_visit' });
+  });
+
   // A yes given while another estimate was open too may be about that one (a lawn quote accepted before the booking).
   test('a yes given while another estimate was open: the shadow line says it may be about that one', async () => {
     const { customerId, bookingCallId } = await phoneYes();

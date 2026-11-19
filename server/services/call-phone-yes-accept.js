@@ -91,6 +91,7 @@ const REASONS = {
   visit_in_past: 'The booked visit date has passed. It may be done but not closed out.',
   existing_plan: 'The customer already has a live plan or a WaveGuard membership.',
   estimate_not_delivered: 'The estimate shows no delivery to the customer (each send was held back or failed), and they have not opened it.',
+  terms_may_differ: 'The estimate may not show the terms the caller heard: its prices changed after it was last sent, or it was sent again after the yes.',
 };
 
 const skip = (reason) => ({ card: false, reason });
@@ -117,6 +118,20 @@ function sentAnchorOf(estimate) {
   return Number.isNaN(at.getTime()) ? new Date(0) : at;
 }
 const earliestSentAnchor = (estimates) => new Date(Math.min(...estimates.map((e) => sentAnchorOf(e).getTime())));
+
+// True when the estimate may not show the terms the caller heard, by the send path's delivery stamp
+// (sendSnapshot.priced, moved only by a real handoff; estimate-updated-wording's pricedContent and canonicalJson): its
+// prices changed after its last delivery, or it was delivered again after the yes (only the last delivery's terms are
+// kept, so the yes may be about other ones). A row with no stamp (sent before the stamp existed) reads as unchanged, as
+// the shared offerChangedSinceDelivery reads it.
+function termsMayDiffer(estimate, yesAt) {
+  const UW = require('./estimate-updated-wording');
+  const data = parseJson(estimate.estimate_data);
+  const stamped = data.sendSnapshot?.priced;
+  if (stamped && typeof stamped === 'object' && UW.canonicalJson(stamped) !== UW.canonicalJson(UW.pricedContent(estimate))) return true;
+  const last = Date.parse(data.deliveryState?.lastDeliveredAt);
+  return Number.isFinite(last) && yesAt instanceof Date && last > yesAt.getTime();
+}
 
 // True when, as the call began, the customer had another estimate open: sent by then and not yet accepted, declined,
 // archived or expired (a lawn quote accepted later still counts: it was open then). A yes on that call may be about
@@ -302,21 +317,30 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   const heard = await Word.callerWord(conn, { customerId, since, until });
   if (heard.skip) return skip(heard.skip);
   const { yes } = heard;
-  const later = await Word.laterWordProblem(conn, { customerId, yes, booking: call });
-  const shared = yes && (await otherEstimateOpenAt(conn, { customerId, cardIds: answerable.map((e) => e.id), callLogId: yes.callLogId }))
-    ? 'yes_maybe_other_estimate' : null;
   const estimate = open.length === 1 ? open[0] : null;
-  const visit = visits.length === 1 ? visits[0] : null;
+  // One visit: the call booked no other one still on the calendar (one en route, on site or done counts too).
+  const visit = visits.length === 1 && (await callVisitsOnCalendar(conn, callLogId, customerId)).length === 1 ? visits[0] : null;
   const problem = await acceptProblem(conn, { estimate, visit, customerId, now });
+  const cardIds = answerable.map((e) => e.id);
   return {
     card: true,
     yes,
     estimate,
     visit,
-    estimateIds: answerable.map((e) => String(e.id)),
+    estimateIds: cardIds.map(String),
     acceptProblem: problem,
-    autoProblem: problem || later || shared || heard.noYes,
+    autoProblem: problem || (await yesProblem(conn, { customerId, yes, call, cardIds, estimate })) || heard.noYes,
   };
+}
+
+// What stands between the yes and an automatic accept beyond the accept's own checks: the yes came after the booking
+// call, the booking call is unread or a later call followed (laterWordProblem); another estimate was open when the
+// caller said yes; or the estimate may not show the terms the caller heard.
+async function yesProblem(conn, { customerId, yes, call, cardIds, estimate }) {
+  const later = await Word.laterWordProblem(conn, { customerId, yes, booking: call });
+  if (later || !yes) return later;
+  if (await otherEstimateOpenAt(conn, { customerId, cardIds, callLogId: yes.callLogId })) return 'yes_maybe_other_estimate';
+  return estimate && termsMayDiffer(estimate, yes.at) ? 'terms_may_differ' : null;
 }
 
 // The card's headline, by state. Only a yes the call reader recorded is called a yes; while the call that gave it is
@@ -344,10 +368,10 @@ function heardFields(yes, { recheckingCallId = null } = {}) {
 // The call a card's yes came from, read again: 'gone' (no longer this customer's), 'owed' (being read again),
 // 'changed' (its words no longer hold), 'read' (a re-read finished; the full pass decides), 'same', or 'none' (the card
 // shows no yes).
-async function yesCallState(payload, customerId) {
+async function yesCallState(payload, customerId, conn = db) {
   if (!payload.yes_call_log_id || (payload.yes_heard !== true && payload.yes_rechecking !== true)) return 'none';
-  const row = await db('call_log').where({ id: payload.yes_call_log_id, customer_id: customerId })
-    .first([...Word.WORD_COLUMNS, db.raw(`${Word.owedReadSql()} AS owed_read`)]);
+  const row = await conn('call_log').where({ id: payload.yes_call_log_id, customer_id: customerId })
+    .first([...Word.WORD_COLUMNS, conn.raw(`${Word.owedReadSql()} AS owed_read`)]);
   if (!row) return 'gone';
   if (row.owed_read) return 'owed';
   if (payload.yes_rechecking === true) return 'read';
@@ -422,22 +446,30 @@ function cardEstimateIds(card) {
 // when only its estimate links changed, estimateIds when they did), or null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
 // still open or lapsed: an expiry alone never closes it, and neither does another estimate's accept (the card may
 // still be about the one left open). While a call in its window still owes a read, the card waits as it is.
-async function cardState(card) {
-  const customerId = card.related_customer_id;
-  if (!(await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first('id'))) return { close: MOOT_NOTES.customer_changed };
-  const onCalendar = await db('scheduled_services')
-    .where({ source_call_log_id: card.call_log_id, customer_id: customerId })
+// Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
+// site or done), by the call's id and a source_action only a call writes.
+function callVisitsOnCalendar(conn, callLogId, customerId) {
+  return conn('scheduled_services')
+    .where({ source_call_log_id: callLogId, customer_id: customerId })
     .whereIn('source_action', require('./call-prepay-choice').callCreatedSourceActions())
     .whereIn('status', CALENDAR_VISIT_STATUSES)
     .select('*');
+}
+
+// `conn`: the global handle, or the close's own transaction when it reads the card again under the lock (a cron job
+// holds one pool connection for its lock, so a read inside the transaction must not take a third).
+async function cardState(card, conn = db) {
+  const customerId = card.related_customer_id;
+  if (!(await conn('call_log').where({ id: card.call_log_id, customer_id: customerId }).first('id'))) return { close: MOOT_NOTES.customer_changed };
+  const onCalendar = await callVisitsOnCalendar(conn, card.call_log_id, customerId);
   if (!onCalendar.length) return { close: MOOT_NOTES.no_booked_visit };
-  if (!(await anyPestVisit(db, onCalendar.filter((v) => !v.source_estimate_id)))) {
+  if (!(await anyPestVisit(conn, onCalendar.filter((v) => !v.source_estimate_id)))) {
     return { close: onCalendar.some((v) => v.source_estimate_id) ? MOOT_NOTES.visit_linked : MOOT_NOTES.no_pest_visit };
   }
   const ids = cardEstimateIds(card);
   const estimates = ids.length
-    ? await db('estimates').whereIn('id', ids).where({ customer_id: customerId })
-      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', db.raw(`${handoffSql()} AS handoff_at`))
+    ? await conn('estimates').whereIn('id', ids).where({ customer_id: customerId })
+      .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
     : [];
   const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status) && !e.archived_at);
   if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
@@ -446,22 +478,22 @@ async function cardState(card) {
   const keptSet = new Set(kept.map((e) => String(e.id)));
   const keptIds = ids.filter((id) => keptSet.has(id));
   const linksChanged = !card.related_estimate_id && keptIds.length !== ids.length;
-  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(kept) });
+  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(kept) }, conn);
   if (state?.close || !linksChanged) return state;
   return { ...(state || { keepYes: true }), estimateIds: keptIds };
 }
 
 // The card's yes fields, read again: { close: note }, { refresh: yes, rechecking? } when they changed, or null.
-async function yesState(card, { customerId, ids, since }) {
+async function yesState(card, { customerId, ids, since }, conn = db) {
   // The yes the card shows, checked first, also while other calls are read: never words that no longer hold.
   const p = parseJson(card.payload);
-  const yesCall = await yesCallState(p, customerId);
+  const yesCall = await yesCallState(p, customerId, conn);
   if (yesCall === 'owed') return p.yes_rechecking === true ? null : { refresh: null, rechecking: p.yes_call_log_id };
   // Words that no longer hold are cleared at once; the latest word is then read in the same pass when no call owes a read.
   const stale = yesCall === 'gone' || yesCall === 'changed';
-  if (await Word.unreadCallSince(db, { customerId, since })) return stale ? { refresh: null } : null;
-  const until = await newerEstimateSentAt(db, { customerId, cardIds: ids, bookingCallId: card.call_log_id });
-  const heard = await Word.callerWord(db, { customerId, since, until });
+  if (await Word.unreadCallSince(conn, { customerId, since })) return stale ? { refresh: null } : null;
+  const until = await newerEstimateSentAt(conn, { customerId, cardIds: ids, bookingCallId: card.call_log_id });
+  const heard = await Word.callerWord(conn, { customerId, since, until });
   if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
   // The yes the card shows must be the customer's latest word, from the same call with the same words.
   const now = heardFields(heard.yes);
@@ -481,7 +513,7 @@ async function applyCardState(card, state) {
     if (state.close) {
       // A dismissed card is never filed again, so the close is read again under the lock: evidence that changed since
       // the first read (a re-read that dropped a cancel, a visit put back) keeps the card, and the next run reads it.
-      const again = await cardState({ ...card, payload: row.payload });
+      const again = await cardState({ ...card, payload: row.payload }, trx);
       if (!again?.close) return false;
       await trx('triage_items').where({ id: card.id, status: 'open' }).update({
         status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: again.close,
