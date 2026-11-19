@@ -14,6 +14,14 @@ let mockBeforeLeg = null;
 // sender: a recheck before each leg, onDelivered for each device that has it.
 let mockLegs = null;
 let mockLegsSent = [];
+// What each device that got the push shows as its second line, in order.
+let mockLegBodies = [];
+// The notification one device gets: the sender's per-device form (a function
+// of the staff id and the device row) or one notification for every device.
+// A leg names its platform; the default is the staff app on an iPhone.
+const mockAsDevice = (id, notification, platform = 'ios') => (typeof notification === 'function'
+  ? notification(id, { platform })
+  : notification);
 // Runs after a leg's beforeHandoff passed, while that leg is "in flight".
 let mockAfterCheck = null;
 
@@ -33,14 +41,19 @@ jest.mock('../services/push-notifications', () => ({
           return { subscriptions: mockLegs.length, sent, superseded: true };
         }
         if (mockAfterCheck) await mockAfterCheck(leg);
-        if (leg.sent) { sent += 1; mockLegsSent.push(leg.id); if (opts.onDelivered) opts.onDelivered({ id: leg.id }); }
+        if (leg.sent) {
+          sent += 1;
+          mockLegsSent.push(leg.id);
+          mockLegBodies.push(mockAsDevice(id, notification, leg.platform).body);
+          if (opts.onDelivered) opts.onDelivered({ id: leg.id });
+        }
       }
       if (!sent) return { subscriptions: mockLegs.length, sent: 0, failed: mockLegs.length };
-      return mockSendToAdminUser(id, notification);
+      return mockSendToAdminUser(id, mockAsDevice(id, notification));
     }
     if (mockBeforeLeg) await mockBeforeLeg();
     if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
-    return mockSendToAdminUser(id, notification);
+    return mockSendToAdminUser(id, mockAsDevice(id, notification));
   },
 }));
 
@@ -772,6 +785,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     mockBeforeLeg = null;
     mockLegs = null;
     mockLegsSent = [];
+    mockLegBodies = [];
     mockAfterCheck = null;
     bundleLeaseCutoff = null;
     mockClearFailures = 0;
@@ -1065,6 +1079,45 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     Object.defineProperty(visitRows, 'v-2', { get() { throw new Error('db down'); }, configurable: true });
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a visit read that fails at a later handoff still reaches every device, as the first line only from there (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    mockBeforeLeg = async (leg) => {
+      if (leg.id === 'd2') Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });
+    };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockLegsSent).toEqual(['d1', 'd2']);
+    expect(mockLegBodies[0]).toMatch(/^Ana Ruiz · Pest Control · /);
+    expect(mockLegBodies[1]).toBe('');
+  });
+
+  test('a visit read that fails at the first handoff sends now, as the first line only, not on a later tick (pre-push audit P1)', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockBeforeLeg = async () => {
+      Object.defineProperty(visitRows, 'v-1', { get() { throw new Error('db down'); }, configurable: true });
+      mockBeforeLeg = null;
+    };
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a browser gets the first line only; the staff app gets the visit\'s details (pre-push audit P0: a shared browser)', async () => {
+    mockLegs = [{ id: 'phone', sent: true, platform: 'ios' }, { id: 'browser', sent: true, platform: null }];
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
+  });
+
+  test('a bundled push names its visits on the staff app only; a browser gets the count line', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'browser', sent: true, platform: 'web' }, { id: 'phone', sent: true, platform: 'ios' }];
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
+    expect(mockLegBodies).toEqual(['', [line, line].join('\n')]);
   });
 
   test('a single unverified visit gets its own first line only', async () => {

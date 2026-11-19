@@ -289,6 +289,17 @@ function pushDetail(parts) {
   return [parts.name, parts.service, slot, parts.street].filter(Boolean).join(' · ');
 }
 
+// The devices that may show a visit's details: a native app's device token,
+// which push_subscriptions holds in one row only (a unique index), re-pointed
+// whole to whoever signs in and released at sign-out. A browser's web-push
+// endpoint can stay active under two staff accounts on a shared browser, and
+// its service worker shows a push whoever is signed in, so a browser gets the
+// first line only. The sender asks per device (sendToAdminUsers' per-device
+// form); a native device gets `push` itself, so a recheck that clears its
+// second line still reaches that device.
+const NAMED_PLATFORMS = new Set(['ios', 'android']);
+const forDevice = (push) => (_adminUserId, sub) => (NAMED_PLATFORMS.has(sub && sub.platform) ? push : { ...push, body: '' });
+
 /**
  * Compose the card's headline / message / payload for one kind. Pure.
  * `previous` is { date, windowStart, windowEnd } for rescheduled;
@@ -588,7 +599,7 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       }
       return !stale;
     };
-    await PushService.sendToAdminUser(notice.technicianId, push, { beforeHandoff });
+    await PushService.sendToAdminUser(notice.technicianId, forDevice(push), { beforeHandoff });
     if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
@@ -1065,6 +1076,8 @@ function bundlePush(plan) {
 // What a device shows for a plan. Two plans that read the same are the same
 // push; an empty plan shows nothing.
 const pushCopy = (plan) => (plan.length ? JSON.stringify(bundlePush(plan)) : null);
+// The same visits with the same kinds: the same first line.
+const planSignature = (plan) => plan.map((notice) => `${notice.visitId}:${notice.kind}`).sort().join('|');
 
 // A held push to send again on the next tick, composed afresh.
 class BundleChanged extends Error {}
@@ -1122,7 +1135,8 @@ async function heldOutsideBundle(technicianId, ids) {
 // it only while the fresh plan still reads the same: the push names each
 // visit, so a changed copy would show a stale line, and a retry would push
 // the first device twice; the rest are skipped, as for a per-visit push. A
-// recheck ERROR sends, as the first line only (see pushCard).
+// recheck ERROR, or a visit read that fails, sends, as the first line only
+// (see pushCard).
 async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   const plan = await bundlePlan(technicianId, rows, db);
   if (!plan.length) return false;
@@ -1138,7 +1152,12 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
         lost = true;
         return false;
       }
-      const same = pushCopy(await bundlePlan(technicianId, rows, db)) === copy;
+      const fresh = await bundlePlan(technicianId, rows, db);
+      // A visit read failed (bundlePlan keeps the visit, unnamed): the push
+      // still goes, as its first line only. A push showing its first line
+      // only needs the same visits and kinds; one naming visits, the same words.
+      if (fresh.some((notice) => notice.unverified)) push.body = '';
+      const same = push.body ? pushCopy(fresh) === copy : planSignature(fresh) === planSignature(plan);
       if (delivered === 0 && (!same || (!pastLongestWait && await heldOutsideBundle(technicianId, ids)))) {
         changed = true;
         return false;
@@ -1151,7 +1170,7 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
     }
   };
   const PushService = require('./push-notifications');
-  const result = await PushService.sendToAdminUser(technicianId, push, {
+  const result = await PushService.sendToAdminUser(technicianId, forDevice(push), {
     beforeHandoff,
     onDelivered: () => { delivered += 1; },
   });

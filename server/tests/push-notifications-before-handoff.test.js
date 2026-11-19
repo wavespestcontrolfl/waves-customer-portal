@@ -91,3 +91,16 @@ test('each device\'s payload is read after its own check: a change made there re
   await Push.sendToAdminUser('tech-1', push, { beforeHandoff: jest.fn(async () => steps.shift()()) });
   expect(bodies).toEqual(['detail', '', '']);
 });
+
+test('the per-device form gets each device row, so a caller can word a push for each platform', async () => {
+  // tech-visit-notifications relies on this: a browser gets the first line only.
+  primeSubs([IOS('a'), { id: 'w', admin_user_id: 'tech-1', platform: null, device_token: null, subscription_data: '{}' }]);
+  const platforms = [];
+  const forDevice = jest.fn((_id, sub) => {
+    platforms.push(sub.platform);
+    return { title: 'x', body: sub.platform === 'ios' ? 'detail' : '' };
+  });
+  await Push.sendToAdminUser('tech-1', forDevice);
+  expect(platforms).toEqual(['ios', null]);
+  expect(mockApnsSend).toHaveBeenCalledWith('t-a', { title: 'x', body: 'detail' });
+});
