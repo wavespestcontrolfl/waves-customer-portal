@@ -750,6 +750,12 @@ visit's own record (`service_records` by the invoice's `service_record_id` and
 `customer_id`). A raw note, a combined-visit invoice (it keeps none) or a
 missing record returns null.
 
+The signed-in customer's `GET /api/billing/balance` uses the same payer
+ownership checks for failed-payment balances, upcoming charges, the next
+charge, and the failure banner. If invoice ownership cannot be read, the
+response omits those payment amounts and still reports the balance from
+eligible homeowner invoices.
+
 Part payments (billing audit 2026-10-30): `/api/pay/:token` returns
 `invoice.amountPaid`, the money the office already recorded on this
 still-open invoice (`invoices.amount_paid`, GATE_PARTIAL_PAYMENTS), beside

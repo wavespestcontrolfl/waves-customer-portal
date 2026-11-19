@@ -3,7 +3,7 @@ const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
 const { listPortalPayments } = require('../services/portal-payment-history');
-const { loadPayerLinkage, excludeDirectPayerPayments, invoiceIdOf } = require('../services/payer-linkage');
+const { loadPayerLinkage, excludeDirectPayerPayments } = require('../services/payer-linkage');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -653,8 +653,7 @@ router.get('/balance', async (req, res, next) => {
     // this customer's payer-billed invoice ids once so the failed-balance sum and
     // the "last payment failed" banner can exclude those rows (otherwise an AP
     // payment failure would show as the homeowner's own balance / failure).
-    const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(req.customerId, db);
-    const isPayerPayment = (payment) => payerInvoiceIds.has(invoiceIdOf(payment));
+    const { failed: payerLookupFailed, isPayerLinked } = await loadPayerLinkage(req.customerId, db);
 
     // Failed attempts whose retry later collected are superseded — the
     // money arrived on the retry's own paid row, so they must not count
@@ -687,15 +686,15 @@ router.get('/balance', async (req, res, next) => {
     // grounding balance reads the same code; Codex round-35 P1.)
     const failedFacts = await loadFailedPaymentFacts(req.customerId);
     const { failedInvoiceIds, balanceCarryingInvoiceIds } = failedFacts;
-    const failedTotal = standaloneFailedTotal(failedFacts, isPayerPayment);
+    const failedTotal = payerLookupFailed ? 0 : standaloneFailedTotal(failedFacts, isPayerLinked);
 
     // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
     // homeowner's upcomingCharges / nextCharge never show the payer's amount/date.
     const upcomingRows = await db('payments')
       .where({ customer_id: req.customerId, status: 'upcoming' })
       .orderBy('payment_date', 'asc')
-      .select('amount', 'payment_date', 'description', 'metadata');
-    const visibleUpcoming = upcomingRows.filter((p) => !isPayerPayment(p));
+      .select('amount', 'payment_date', 'description', 'metadata', 'payer_id', 'stripe_payment_intent_id', 'stripe_charge_id');
+    const visibleUpcoming = payerLookupFailed ? [] : upcomingRows.filter((p) => !isPayerLinked(p));
     const upcomingTotal = visibleUpcoming.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
     const nextPayment = visibleUpcoming[0] || null;
 

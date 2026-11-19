@@ -62,21 +62,17 @@ function excludeNeverAttemptedDeferrals(query, alias = 'payments') {
 // COMPLETE ledger, not the 5-row display window (Codex round-35 P1).
 // `strict` (the SMS grounding caller) = payer-aware and fail-closed: direct payer-owned rows (payments.payer_id) are filtered in
 // SQL and every column the shared payer-linkage predicate reads (payer_id, stripe_charge_id, description, PI, metadata) is
-// selected so `isPayerLinked` can exclude AP rows; and a failed non-draft-invoice lookup THROWS (an empty set would
-// double-count the invoice's debt) so the aggregator marks billing unavailable. The route (default) keeps its original
-// behavior exactly: no payer_id filter (it excludes payer rows by metadata) and a lookup error reads as "no carrying
-// invoices" (Codex round-36 P1/P2).
+// selected so `isPayerLinked` can exclude AP rows. A failed invoice lookup in strict mode propagates to the aggregator.
+// The portal also reads the ownership columns and tolerates malformed historical invoice references.
 async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['failed'], strict = false } = {}) {
-  // the default (route) query keeps its exact original shape
   const base = dbh('payments');
   let scoped = statuses.length === 1 && statuses[0] === 'failed'
     ? base.where({ customer_id: customerId, status: 'failed' })
     : base.where({ customer_id: customerId }).whereIn('status', statuses);
   scoped = scoped.whereNull('superseded_by_payment_id');
   if (strict) scoped = scoped.whereNull('payer_id');
-  const rows = await scoped.select(...(strict
-    ? ['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id', 'retry_count', 'next_retry_at']
-    : ['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at']));
+  const rows = await scoped.select('id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id',
+    'description', 'payer_id', 'retry_count', 'next_retry_at');
   const failedInvoiceIds = [...new Set(rows.map(metadataInvoiceId).filter(Boolean))];
   let carrying = [];
   if (failedInvoiceIds.length) {

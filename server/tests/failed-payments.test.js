@@ -25,13 +25,15 @@ function fakeDb({ payments = [], invoices = [], invoiceError = null } = {}) {
 const row = (over = {}) => ({ id: 'p1', amount: 50, metadata: null, stripe_payment_intent_id: 'pi_1', retry_count: 1, next_retry_at: null, ...over });
 const names = (dbh, table, method) => dbh.calls[table].filter(([m]) => m === method).map(([, a]) => a);
 
-describe('loadFailedPaymentFacts — default (the /balance route): query shape unchanged', () => {
-  test('failed only, no payer_id filter, original columns (+ id)', async () => {
+describe('loadFailedPaymentFacts for the portal balance', () => {
+  test('reads failed rows with the fields that identify their payer', async () => {
     const dbh = fakeDb({ payments: [row()] });
     await loadFailedPaymentFacts('c1', dbh);
     expect(names(dbh, 'payments', 'where')).toEqual([[{ customer_id: 'c1', status: 'failed' }]]);
     expect(names(dbh, 'payments', 'whereNull')).toEqual([['superseded_by_payment_id']]);
-    expect(names(dbh, 'payments', 'select')[0]).toEqual(['id', 'amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at']);
+    expect(names(dbh, 'payments', 'select')[0]).toEqual([
+      'id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description', 'payer_id', 'retry_count', 'next_retry_at',
+    ]);
   });
   test('a failing non-draft-invoice lookup still reads as "no carrying invoices" (the route swallowed it before)', async () => {
     const dbh = fakeDb({ payments: [row({ metadata: { invoice_id: 'inv-1' } })], invoiceError: new Error('boom') });

@@ -80,11 +80,12 @@ jest.mock('../models/db', () => {
       return tableResults.unpaidTotal;
     }
     if (table === 'payments') {
-      if (whereArg.status === 'failed') return tableResults.failedRows;
-      if (whereArg.status === 'upcoming') return tableResults.upcomingRows;
+      const project = (rows) => rows.map((row) => Object.fromEntries(q._selected.map((key) => [key, row[key]])));
+      if (whereArg.status === 'failed') return project(tableResults.failedRows);
+      if (whereArg.status === 'upcoming') return project(tableResults.upcomingRows);
       // recent-attempts scan (whereIn statuses)
       if (wantFirst) return tableResults.recentAttempts[0] || null;
-      return tableResults.recentAttempts.map((row) => Object.fromEntries(q._selected.map((key) => [key, row[key]])));
+      return project(tableResults.recentAttempts);
     }
     throw new Error(`Unexpected table ${table}`);
   }));
@@ -130,7 +131,13 @@ describe('GET /balance — phantom failed-row exclusion', () => {
       { id: 'linked', status: 'failed', stripe_charge_id: 'ch_payer' },
       { id: 'alias', status: 'failed', metadata: { waves_invoice_id: 'payer-invoice' } },
     ];
-    expect(await getBalance()).toMatchObject({ lastPaymentFailed: false, lastPaymentAttemptId: null });
+    const payerRows = tableResults.recentAttempts.map((row) => ({ ...row, amount: '99.00' }));
+    tableResults.failedRows = [...payerRows, { amount: '12.00' }];
+    tableResults.upcomingRows = [...payerRows, { amount: '17.00', payment_date: '2026-12-01' }];
+    expect(await getBalance()).toMatchObject({
+      lastPaymentFailed: false, lastPaymentAttemptId: null, currentBalance: 12,
+      upcomingCharges: 17, nextCharge: { amount: 17, date: '2026-12-01' },
+    });
     tableResults.recentAttempts.push({ id: 'own', status: 'failed' });
     expect(await getBalance()).toMatchObject({ lastPaymentFailed: true, lastPaymentAttemptId: 'own' });
   });
@@ -138,7 +145,12 @@ describe('GET /balance — phantom failed-row exclusion', () => {
   test('the failure banner withholds the attempt when payer ownership cannot be read', async () => {
     tableResults.payerInvoices = new Error('payer lookup unavailable');
     tableResults.recentAttempts = [{ id: 'unknown', status: 'failed' }];
-    expect(await getBalance()).toMatchObject({ lastPaymentFailed: false, lastPaymentAttemptId: null });
+    tableResults.failedRows = [{ amount: 44 }];
+    tableResults.upcomingRows = [{ amount: 55 }];
+    tableResults.unpaidTotal = '25.00';
+    expect(await getBalance()).toMatchObject({
+      lastPaymentFailed: false, lastPaymentAttemptId: null, currentBalance: 25, upcomingCharges: 0, nextCharge: null,
+    });
   });
 
   test('invoice-linked failed row does not double-count the open invoice', async () => {
