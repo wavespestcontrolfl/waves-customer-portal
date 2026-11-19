@@ -2187,3 +2187,19 @@ describe('ServiceReportDocument — re-service card (GATE_RESERVICE_REPORT_CARD)
     expect(dark.textContent).not.toMatch(/You told us|What we did/);
   });
 });
+
+// The server's PDF providers print only once the document root shows the
+// writer-rules state the render's key was computed under (server pdf.js
+// reportPdfReadySelector: `.service-report-v1[data-writer-rules="on"|"off"]`).
+describe('the PDF document root shows the payload writer-rules state', () => {
+  it.each(['on', 'off'])('matches the PDF ready selector for %s', (state) => {
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, writerRules: state }} token="tok" />);
+    expect(container.querySelector(`.service-report-v1[data-writer-rules="${state}"]`)).not.toBeNull();
+  });
+
+  it('carries no state when the payload names none', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok" />);
+    expect(container.querySelector('.service-report-v1')).not.toBeNull();
+    expect(container.querySelector('[data-writer-rules]')).toBeNull();
+  });
+});

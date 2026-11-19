@@ -18,7 +18,7 @@ const {
   applicatorRenderedPdfSignature,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
-const { summaryCopySignature } = require('./technician-report-copy');
+const { summaryCopySignature, reportDependsOnWriterRules } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
@@ -312,6 +312,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       pinnedLawnAssessmentId: effectivePin,
       pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
       pinnedLawnHistoryIdentity,
+      dependsOnWriterRules: reportDependsOnWriterRules(service),
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;

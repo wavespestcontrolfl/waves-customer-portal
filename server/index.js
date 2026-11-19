@@ -367,6 +367,17 @@ app.use('/api/public/bug-id-extension', (req, res, next) => {
   next();
 });
 
+// Job offer family (routes/public-careers-offer.js, GATE_JOB_OFFERS): privacy headers on EVERY answer, then the dark
+// gate — both ABOVE the global cors() (which would answer an OPTIONS preflight 204 on its own) and the global /api/
+// limiter (429), so while the gate is off every request, any method, is the generic 404 with no-store/noindex.
+app.use('/api/public/careers/offer', require('./middleware/no-store').noStore);
+app.use('/api/public/careers/offer', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('jobOffers')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -437,6 +448,8 @@ app.use('/api/public/careers', (req, res, next) => {
   // GATE_JOB_APPLICATIONS off stops new applications without killing the
   // bearer links applicants already hold (Codex r5 P0).
   if (req.path.startsWith('/interview')) return next();
+  // Sent job offers stay live when intake closes: /offer/* answers to GATE_JOB_OFFERS alone (next mount).
+  if (/^\/offer(\/|$)/.test(req.path)) return next();
   if (!require('./config/feature-gates').isEnabled('jobApplications')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -997,6 +1010,7 @@ app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
 app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
 app.use('/api/public/bug-id-extension', require('./routes/public-bug-id-extension'));
+app.use('/api/public/careers/offer', require('./routes/public-careers-offer'));
 app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));

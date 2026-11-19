@@ -149,30 +149,40 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     // only completion-time screening, the web report (which runs the same
     // technicianReportDrivesSummary) and this rule call the parse (Codex
     // #5522: the legacy public report and its PDF went through it directly).
+    // The readers of the technician's own note (reportNoteCustomerCopy, and
+    // visitReportCustomerCopy: the note, else the titled report) are held to
+    // a list too: no customer render calls them yet.
     const fs = require('fs');
     const path = require('path');
     const root = path.join(__dirname, '../..');
-    const callers = [];
+    const callers = { 'technicianReportCustomerCopy(': [], 'visitReportCustomerCopy(': [], 'reportNoteCustomerCopy(': [] };
     const walk = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (!['node_modules', 'tests'].includes(entry.name)) walk(full);
-        } else if (entry.name.endsWith('.js') && fs.readFileSync(full, 'utf8').includes('technicianReportCustomerCopy(')) {
-          callers.push(path.relative(root, full).split(path.sep).join('/'));
+        } else if (entry.name.endsWith('.js')) {
+          const source = fs.readFileSync(full, 'utf8');
+          for (const call of Object.keys(callers)) {
+            if (source.includes(call)) callers[call].push(path.relative(root, full).split(path.sep).join('/'));
+          }
         }
       }
     };
     walk(path.join(root, 'server'));
-    callers.sort();
-    expect(callers).toEqual([
-      'server/routes/admin-schedule.js',
-      'server/services/complete-scheduled-service.js',
-      'server/services/context-aggregator.js',
-      'server/services/service-report/report-data.js',
-      'server/services/service-report/report-reconciliation.js',
-      'server/services/service-report/technician-report-copy.js',
-    ]);
+    Object.values(callers).forEach((files) => files.sort());
+    expect(callers).toEqual({
+      'technicianReportCustomerCopy(': [
+        'server/routes/admin-schedule.js',
+        'server/services/complete-scheduled-service.js',
+        'server/services/context-aggregator.js',
+        'server/services/service-report/report-data.js',
+        'server/services/service-report/report-reconciliation.js',
+        'server/services/service-report/technician-report-copy.js',
+      ],
+      'visitReportCustomerCopy(': ['server/services/service-report/technician-report-copy.js'],
+      'reportNoteCustomerCopy(': ['server/services/service-report/technician-report-copy.js'],
+    });
   });
 
   test('a four-section report shows only while the writer rules are on, like the web report', () => {
@@ -188,6 +198,31 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     expect(customerSafeVisitNotes(record({ technician_notes: fourSection }))).toBe(
       'Ghost ants were trailing at the kitchen counter. We placed bait along the counter edge. You may see more ants for a few days. If ants are still trailing, let us know.',
     );
+  });
+
+  // The kill switch (activity-indicators withoutDarkFourSectionBody) holds
+  // here as on the web report: a frozen four-section card it drops accepts
+  // no body, and a reconcile confirmation frozen beside it approves none.
+  test('the four-section kill switch holds here as on the web report: a card it drops accepts no body', () => {
+    const fourSectionCard = (todaysResult = {}) => record({
+      service_data: {
+        typedReportSnapshot: {
+          type: 'one_time_pest', visitSequence: 1, values: {},
+          todaysResult: {
+            headline: 'Service completed.', body: 'x', bodySource: 'technician_report', bodyFormat: 'four_section', ...todaysResult,
+          },
+        },
+      },
+    });
+    const reviewed = 'Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.';
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(customerSafeVisitNotes(fourSectionCard())).toBe(reviewed);
+    expect(customerSafeVisitNotes(fourSectionCard({ reconcileConfirmed: true }))).toBe(reviewed);
+    process.env.GATE_REPORT_WRITER_RULES = 'false';
+    expect(customerSafeVisitNotes(fourSectionCard())).toBeNull();
+    expect(customerSafeVisitNotes(fourSectionCard({ reconcileConfirmed: true }))).toBeNull();
+    // A card in any other format keeps its acceptance with the switch off.
+    expect(customerSafeVisitNotes(fourSectionCard({ bodyFormat: undefined }))).toBe(reviewed);
   });
 });
 

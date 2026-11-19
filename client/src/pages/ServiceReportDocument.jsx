@@ -1028,7 +1028,10 @@ export default function ServiceReportDocument({ data, token }) {
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
-    <FieldDocument className="service-report-v1 service-report-document" sheetClassName="doc-page">
+    // data-writer-rules: the state the PDF payload was built in (mode=pdf
+    // only). The server's PDF renderer prints only once this root shows the
+    // state its key was computed under (server pdf.js reportPdfReadySelector).
+    <FieldDocument className="service-report-v1 service-report-document" sheetClassName="doc-page" data-writer-rules={data.writerRules}>
       <style>{`
         .service-report-document table { border-collapse: collapse; width: 100%; }
         @media print {

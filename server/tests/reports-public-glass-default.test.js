@@ -20,6 +20,8 @@ jest.mock('../config', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  // A PDF payload names the writer-rules state it was built in.
+  reportWriterRulesLive: jest.fn(() => false),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),

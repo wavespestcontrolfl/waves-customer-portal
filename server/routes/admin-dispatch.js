@@ -3646,7 +3646,7 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
     const scheduled = await technicianCurrentVisitFilter(req,
-      db('scheduled_services').where({ id: req.params.serviceId })).first('id', 'service_type');
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id', 'service_type', 'customer_id', 'property_id', 'scheduled_date');
     if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
@@ -3655,6 +3655,8 @@ router.get('/:serviceId/default-products', async (req, res, next) => {
     // before-and-after check as the Job Card route).
     const recheck = technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', req.params.serviceId));
     const includeFertilizer = ['tree_shrub', 'palm'].includes(detectServiceLine(scheduled.service_type));
+    // Taurus SC's yearly label limit at this home (from the compliance ledger) for the pest house mix: unknown (no key) leaves Taurus off it.
+    const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount(scheduled);
     const stillInScope = includeFertilizer
       ? await recheck.leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
         .first('scheduled_services.id', 'scheduled_services.scheduled_date', 'scheduled_services.service_address_line1',
@@ -3666,9 +3668,9 @@ router.get('/:serviceId/default-products', async (req, res, next) => {
       const { inferTreeShrubOrdinanceZone } = require('../services/tree-shrub-closeout');
       const { nutriRootPickerEvidence } = require('../services/tree-shrub-fertilizer-evidence');
       const zone = inferTreeShrubOrdinanceZone(stillInScope);
-      return res.json({ ...result, treeShrubFertilizer: { ordinanceZone: zone, ...nutriRootPickerEvidence({ zone, serviceDate: stillInScope.scheduled_date }) } });
+      return res.json({ ...result, ...(taurusYearly ? { taurusYearly } : {}), treeShrubFertilizer: { ordinanceZone: zone, ...nutriRootPickerEvidence({ zone, serviceDate: stillInScope.scheduled_date }) } });
     }
-    res.json(result);
+    res.json({ ...result, ...(taurusYearly ? { taurusYearly } : {}) });
   } catch (err) { next(err); }
 });
 
@@ -3961,8 +3963,15 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     // /complete takes a pest visit's stock below zero instead of refusing (the same rule), so the sheet lets a
     // 0-in-stock product through. The key exists only on a pest visit.
     const stockAdvisory = isPestStockAdvisoryCompletion({ service_type: ctx.service?.serviceType });
+    // Taurus SC's yearly label limit at this home (from the compliance ledger): whether another 0.03% application fits, so the house mix can leave it out.
+    // Unknown (no key) leaves Taurus off the house mix; the count never blocks the sheet.
+    const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount({
+      id: ctx.service?.id, customer_id: ctx.service?.customerId, property_id: ctx.service?.propertyId,
+      scheduled_date: ctx.service?.scheduledDate,
+    });
     res.json({
       ...ctx,
+      ...(taurusYearly ? { taurusYearly } : {}),
       // The pest Fast Complete sheet shows its Wrap-up section (a sheet from before the section was permanent still reads this key).
       wrapUp: true,
       ...(gates.oneTapReportLive()
