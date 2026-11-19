@@ -64,18 +64,81 @@ describe('judgeReach', () => {
     expect(result.get('2')).toBe(12);
     expect(result.get('3')).toBeNull();
   });
+
+  // Finding 2: a contact on a phone or email several leads share, or on another customer's contact
+  // row, is not proof that THIS lead was reached.
+  test('a shared phone or email does not credit any of the leads that share it', () => {
+    const a = lead(1, { phone: '+19415550100', email: 'shared.fixture@example.invalid' });
+    const b = lead(2, { phone: '+19415550100' });
+    const c = lead(3, { email: 'shared.fixture@example.invalid' });
+    const d = lead(4);
+    const owners = new Map([
+      ['phone:9415550100', new Set(['1', '2'])],
+      ['email:shared.fixture@example.invalid', new Set(['1', '3'])],
+    ]);
+    const result = judgeReach([a, b, c, d], {
+      ...none,
+      owners,
+      texts: [{ key: 'phone:9415550100', scope: 'phone', customerId: null, at: at(5) }, { key: phoneKey(d), scope: 'phone', customerId: null, at: at(6) }],
+      emails: [{ key: 'email:shared.fixture@example.invalid', scope: 'email', customerId: null, at: at(8) }],
+    });
+    expect(result.get('1')).toBeNull();
+    expect(result.get('2')).toBeNull();
+    expect(result.get('3')).toBeNull();
+    expect(result.get('4')).toBe(6); // an identity only this lead holds still counts
+  });
+
+  test('a contact row that belongs to a different customer does not count', () => {
+    const a = lead(1, { customer_id: 'cust-a' });
+    const b = lead(2, { customer_id: 'cust-b', phone: '+19415550102' });
+    const c = lead(3, { customer_id: null, phone: '+19415550103' });
+    const result = judgeReach([a, b, c], {
+      ...none,
+      texts: [
+        { key: phoneKey(a), scope: 'phone', customerId: 'cust-other', at: at(4) },
+        { key: phoneKey(b), scope: 'phone', customerId: 'cust-b', at: at(9) },
+        { key: phoneKey(c), scope: 'phone', customerId: null, at: at(11) },
+      ],
+    });
+    expect(result.get('1')).toBeNull();
+    expect(result.get('2')).toBe(9);
+    expect(result.get('3')).toBe(11);
+  });
+
+  // Finding 3: the originating call is found by its sid, not by the lead's current phone.
+  test('an answered originating call counts when the lead gave a different callback number', () => {
+    const a = lead(1, { twilio_call_sid: 'CA-origin', phone: '+19415550111' });
+    const b = lead(2, { twilio_call_sid: 'CA-origin-b', phone: '+19415550112' });
+    const result = judgeReach([a, b], {
+      ...none,
+      calls: [
+        // The caller rang from another line; a person answered, 1 minute before first contact was stamped.
+        { key: 'phone:9415550999', scope: 'phone', customerId: null, sid: 'CA-origin', at: at(-1) },
+        // A call with another sid on an unrelated line is nobody's evidence.
+        { key: 'phone:9415550998', scope: 'phone', customerId: null, sid: 'CA-stranger', at: at(2) },
+      ],
+    });
+    expect(result.get('1')).toBe(0);
+    expect(result.get('2')).toBeNull();
+  });
 });
 
 // A chainable stand-in for knex: every builder method returns the builder, awaiting it
 // yields the rows registered for the table, and each table's chain is counted.
+// A table's value may be a list of row lists: the first query on the table reads the first list, the
+// second reads the next (`leads` is read twice: the linked estimates, then the identity owners).
 function fakeConn(rowsByTable) {
   const calls = [];
+  const queues = {};
   const conn = (table) => {
     const name = String(table).split(' ')[0];
     calls.push(name);
+    const scripted = rowsByTable[name];
+    const rows = Array.isArray(scripted?.queue) ? (scripted.queue[(queues[name] = (queues[name] ?? -1) + 1)] || []) : (scripted || []);
     const builder = new Proxy({}, {
       get: (_t, prop) => {
-        if (prop === 'then') return (resolve, reject) => Promise.resolve(rowsByTable[name] || []).then(resolve, reject);
+        if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+        if (prop === 'whereRaw') return (sql) => { (conn.raws[name] = conn.raws[name] || []).push(String(sql)); return builder; };
         return () => builder;
       },
     });
@@ -83,6 +146,7 @@ function fakeConn(rowsByTable) {
   };
   conn.raw = (sql) => sql;
   conn.calls = calls;
+  conn.raws = {};
   return conn;
 }
 
@@ -93,13 +157,38 @@ describe('loadLeadReachStats', () => {
       sms_log: [{ peer: leads[0].phone.replace('+1', ''), at: new Date(at(6)) }],
       call_log: [{ peer: leads[1].phone.replace('+1', ''), sid: 'CA-x', at: new Date(at(90)) }],
       emails: [],
-      lead_activities: [],
-      leads: [{ lead_id: leads[2].id, at: new Date(at(4)) }], // the linked estimate's send time
+      // 1st read: the linked estimates' first real delivery; 2nd read: other open leads sharing identity.
+      leads: { queue: [[{ lead_id: leads[2].id, at: new Date(at(4)).toISOString() }], []] },
     });
     const stats = await loadLeadReachStats(leads, { conn });
     expect(stats).toEqual({ cohort: 4, reachedWithin: 2, reachedLater: 1, neverReached: 1, withinMinutes: 15 });
     // Batched: one query per kind for the whole cohort (the leads have no email, so none for email).
-    expect(conn.calls.sort()).toEqual(['call_log', 'lead_activities', 'leads', 'sms_log']);
+    expect(conn.calls.sort()).toEqual(['call_log', 'leads', 'leads', 'sms_log']);
+  });
+
+  // Finding 1: the estimate witness is the first REAL delivery. A suppressed send, a website
+  // self-service publication and the lead's 'estimate_sent' activity row (written even when every
+  // channel was suppressed) all leave deliveryState.firstDeliveredAt empty or are not read at all.
+  test('estimate evidence is the first real delivery by a person, not an activity row or sent_at', async () => {
+    const conn = fakeConn({ leads: { queue: [[], []] } });
+    await loadLeadReachStats([lead(1)], { conn });
+    expect(conn.calls).not.toContain('lead_activities');
+    const sql = conn.raws.leads.join(' | ');
+    expect(sql).toContain("deliveryState,firstDeliveredAt}' IS NOT NULL");
+    expect(sql).toContain("'automation'->'autoSend'->>'result'");
+    expect(sql).toContain("'automation'->'moveAutoSend'->>'result'");
+    expect(sql).not.toContain('sent_at');
+  });
+
+  test('a phone another open lead holds does not credit the cohort lead', async () => {
+    const mine = lead(1);
+    const conn = fakeConn({
+      sms_log: [{ peer: mine.phone.replace('+1', ''), customer_id: null, at: new Date(at(3)) }],
+      // The identity read finds a second open lead on the same phone.
+      leads: { queue: [[], [{ id: 'other-open', customer_id: null, email: null, peer: mine.phone.replace('+1', '') }]] },
+    });
+    const stats = await loadLeadReachStats([mine], { conn });
+    expect(stats).toMatchObject({ cohort: 1, reachedWithin: 0, reachedLater: 0, neverReached: 1 });
   });
 
   test('an empty cohort runs no query', async () => {
