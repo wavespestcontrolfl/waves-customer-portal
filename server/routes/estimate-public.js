@@ -28189,8 +28189,10 @@ function estimateDataRecurringServices(estData = {}) {
 
 function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const converter = require('../services/estimate-converter');
+  // The supplemented rows, as accept and the converter read them: a legacy estimate can keep a second service in
+  // the root recurring block, and that plan carries no setup fee (owner 2026-10-21: the fee is pest-only).
   const membershipFeeMixApplies = converter
-    .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
+    .recurringMixHasMembershipFeeService(estimateDataRecurringServices(withSupplementedRecurringServices(estData || {}) || estData || {}));
   // Operator-stated waiver strips the fee even when the mix carries it —
   // this finalize choke point is what removes it from snapshot/cached
   // bundles frozen before the waiver was applied.
@@ -28378,10 +28380,14 @@ function withMultiServicePrepayClosed(payload, estData) {
   const multi = multiServicePrepayUnits(estData) > 1;
   if (!combos.length && !multi) return payload;
   const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
+  // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
+  const noWaiver = (fee) => (fee && fee.waivedWithPrepay === true ? { ...fee, waivedWithPrepay: false } : fee);
   return {
     ...payload,
     ...(multi && payload.annualPrepayEligible === true ? { annualPrepayEligible: false } : {}),
     ...(multi && Array.isArray(payload.frequencies) ? { frequencies: payload.frequencies.map(closed) } : {}),
+    ...(multi && Array.isArray(payload.firstVisitFees) ? { firstVisitFees: payload.firstVisitFees.map(noWaiver) } : {}),
+    ...(multi && payload.setupFee ? { setupFee: noWaiver(payload.setupFee) } : {}),
     ...(combos.length ? { serviceCadenceCombos: combos.map(closed) } : {}),
   };
 }

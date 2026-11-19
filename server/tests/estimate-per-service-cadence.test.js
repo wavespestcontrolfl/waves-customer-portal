@@ -1249,11 +1249,16 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   const offersPrepay = (bundle) => JSON.stringify(bundle).includes('"annualPrepayEligible":true');
 
   test('a mosquito ladder with a second service in the root recurring block offers no tier prepay', async () => {
-    // Control: solo mosquito reaches the tier stamp, and its monthly tier can prepay.
-    expect(offersPrepay(await buildPricingBundle(mosquitoEstimate('solo')))).toBe(true);
+    // Control: solo mosquito reaches the tier stamp, its monthly tier can prepay, and it carries the setup fee.
+    const solo = await buildPricingBundle(mosquitoEstimate('solo'));
+    expect(offersPrepay(solo)).toBe(true);
+    expect(JSON.stringify(solo)).toContain('"waveguard_setup"');
     const legacy = await buildPricingBundle(mosquitoEstimate('with-root-pest', {
       recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 }] },
     }));
     expect(offersPrepay(legacy)).toBe(false);
+    // Two services carry no setup fee (accept reads the same supplemented rows), and nothing promises a prepay waiver.
+    expect(JSON.stringify(legacy)).not.toContain('"waveguard_setup"');
+    expect(JSON.stringify(legacy)).not.toContain('"waivedWithPrepay":true');
   });
 });
