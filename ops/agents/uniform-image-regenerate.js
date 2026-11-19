@@ -153,6 +153,9 @@ function planItem(t, publisher, audited) {
   if (!postFile) return { t, skip: 'post file not found' };
   const text = fs.readFileSync(postFile, 'utf8');
   const fm = fmParser.parse(text).data || {};
+  // The publisher never generates an in-article picture for an identification
+  // post (its body pictures are licensed photos), so this sweep must not either.
+  if (kind === 'body' && isIdentificationPost(fm)) return { t, skip: 'identification post: in-article pictures are licensed photos, never generated — replace by hand' };
   const { body } = splitPost(text);
   const imagePath = `/images/blog/${dir}/${file}${ext}`;
   const target = path.join(ASTRO, 'public/images/blog', dir, `${file}${ext}`);

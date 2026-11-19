@@ -344,6 +344,19 @@ describe('screenGeneratedImage', () => {
     expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).not.toMatch(/ALLOWED|1 OFF/);
   });
 
+  test('a drawn check mark or cross fails the screen with no readable text and no logo, once the drawn-marks exclusion is named (GATE_BLOG_IMAGE_MARKS_SCREEN)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "forbidden_scenes": [1]}' });
+    const r = await screenGeneratedImage({ buffer, avoidDepicting: [gen.DRAWN_MARKS_EXCLUSION] });
+    expect(r).toMatchObject({ ok: false, readableText: [], logos: [], forbidden: [gen.DRAWN_MARKS_EXCLUSION], violations: 1 });
+    expect(r.reasons).toEqual([`forbidden scene: ${gen.DRAWN_MARKS_EXCLUSION}`]);
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain(`1. "${gen.DRAWN_MARKS_EXCLUSION}"`);
+    // Not named (the gate is off): the same answer has nothing to fail on, and the prompt does not ask.
+    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, forbidden: [] });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).not.toContain('check mark');
+    // The exclusion is one list item: a semicolon would split the screen's numbered list.
+    expect(gen.DRAWN_MARKS_EXCLUSION).not.toMatch(/[;"]/);
+  });
+
   test('a brief exclusion the provider ignored fails the screen; only exclusions the caller named count (Codex r8 P2 on #3964)', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "forbidden_scenes": ["irrigation repair scenes", "a made-up item"]}' });
     const r = await screenGeneratedImage({ buffer, avoidDepicting: ['irrigation repair scenes'] });
