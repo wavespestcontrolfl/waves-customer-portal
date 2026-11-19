@@ -291,6 +291,49 @@ describe('open-shell branch still runs the scope check', () => {
   });
 });
 
+// Owner 2026-11-19 ("a"): a reply naming pest AND lawn drafts ONE estimate for both. Before, the
+// classifier returned no service, the intake stalled and the lead got no answer.
+describe('two-service reply (pest_lawn)', () => {
+  const PEST_LAWN_LABEL = 'Pest Control + Lawn Care';
+
+  test('open form shell ⇒ patched with both services, stage advances, the price alert names both', async () => {
+    mockShellRow = { id: 'shell-est-1', address: '', customer_phone: '+19415550123', customer_email: null };
+    mockClassify.mockResolvedValue({ interest: 'pest_lawn', confidence: 0.9, method: 'regex' });
+    mockStartSmsThreadDraft.mockResolvedValue({ started: false, skipped: 'scope_check_only' });
+
+    const result = await handleIntakeReply(CUSTOMER(), 'Lawn and pest');
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    expect(mockCustomerUpdates).toContainEqual({ lead_service_interest: 'pest_lawn' });
+    expect(mockEstimateInserts).toHaveLength(0);
+    expect(mockEstimateUpdates[0].service_interest).toBe(PEST_LAWN_LABEL);
+    expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(true);
+    expect(mockOwnerAlerts).toHaveLength(1);
+    const [kind, alert] = mockOwnerAlerts[0];
+    expect(kind).toBe('sms-lead');
+    expect(alert.why).toBe(`Texted for ${PEST_LAWN_LABEL}; the draft estimate needs a price.`);
+    expect(alert.text).toContain(`Service: ${PEST_LAWN_LABEL}.`);
+    expect(alert.link).toBe('/admin/estimates?estimateId=shell-est-1');
+  });
+
+  test('stored pest_lawn + an address reply ⇒ one new draft for both services', async () => {
+    mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
+      ? { started: false, skipped: 'scope_check_only' }
+      : { started: false, skipped: 'gate_off' }));
+    const customer = {
+      id: 'cust-1', phone: '+19415550123', address_line1: '', lead_service_interest: 'pest_lawn', lead_intake_status: 'awaiting_address',
+    };
+
+    const result = await handleIntakeReply(customer, '100 Palm Ave, Venice FL 34285');
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    expect(mockClassify).not.toHaveBeenCalled();
+    expect(mockEstimateInserts).toHaveLength(1);
+    expect(mockEstimateInserts[0].service_interest).toBe(PEST_LAWN_LABEL);
+    expect(mockOwnerAlerts[0][1].why).toBe(`Texted for ${PEST_LAWN_LABEL}; the draft estimate needs a price.`);
+  });
+});
+
 describe('successful handoff', () => {
   test('the engine owns the reply — no shell estimate, status advances', async () => {
     mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: Promise.resolve({}) });
