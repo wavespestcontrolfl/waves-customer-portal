@@ -150,12 +150,21 @@ test('Mark all read never reaches past now, and a technician scope reads only it
 });
 
 test("a technician's read checks its customers inside the write and inside each bell step, not from the id snapshot", async () => {
-  mockPluck = (compiled) => (compiled.sql.startsWith('select "id" from "messages" where "id" in') ? ['m-1'] : []);
+  mockPluck = (compiled) => {
+    if (compiled.sql.startsWith('select "id" from "messages" where "id" in')) return ['m-1'];
+    if (compiled.sql.startsWith('select "twilio_sid" from "messages"')) return ['SM-1'];
+    return [];
+  };
   mockDistinct = (compiled) => (compiled.sql.includes('"conversation_id"') ? [{ conversation_id: 'conv-1' }] : []);
   await markInboundSmsRead({ messageIds: ['m-1'], role: 'technician', customerIds: ['owned-customer'] });
   const owned = '"conversation_id" in (select "id" from "conversations" where "customer_id" in (?))';
   expect(mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?')).sql).toContain(owned);
   expect(mockQueries.find((q) => q.sql.includes('"conversations" as "cv"')).sql).toContain('"cv"."customer_id" in (?)');
+  // The legacy mirror write carries the technician's customers inside the statement.
+  const ownedSids = '"twilio_sid" in (select "twilio_sid" from "messages" where "twilio_sid" is not null and "conversation_id" in (select "id" from "conversations" where "customer_id" in (?)))';
+  expect(mockQueries.find((q) => q.method === 'update' && q.sql.startsWith('update "sms_log" set "is_read"')).sql).toContain(ownedSids);
+  // Bells use the SIDs still on its customers when reconciliation starts.
+  expect(mockQueries.some((q) => q.sql.startsWith('select "twilio_sid" from "messages" where "twilio_sid" in (?) and "conversation_id" in (select "id" from "conversations" where "customer_id" in (?))'))).toBe(true);
   // The backlog-marker strip's customer list.
   expect(mockQueries.find((q) => /^select distinct "customer_id".* from "conversations" where "id" in/.test(q.sql)).sql)
     .toContain('and "customer_id" in (?)');
@@ -168,4 +177,10 @@ test("a row's Mark read reads one sender's texts by the inbox's sender identity,
   expect(select.bindings).toContain('9415550100');
   expect(select.sql).not.toContain('"m"."message_type" not like ?');
   await expect(markAllInboundSmsRead({ readBefore: new Date(), role: 'admin', contactPhone: 'front desk' })).rejects.toThrow('contactPhone');
+});
+
+test("a technician's row read never selects a recruiting reply, even for one sender", async () => {
+  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'technician', contactPhone: '+19415550100', customerIds: ['owned-customer'] });
+  const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
+  expect(select.sql).toContain('("m"."message_type" is null or "m"."message_type" not like ?)');
 });

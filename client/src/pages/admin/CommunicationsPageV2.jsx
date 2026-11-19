@@ -1443,6 +1443,10 @@ export function SmsTab({
   const [smsPage, setSmsPage] = useState(1);
   // What the shown messages were loaded for: Mark all read waits for the whole list to load.
   const [smsLoadedScope, setSmsLoadedScope] = useState(null);
+  // List reads the server confirmed, numbered, so an inbox load that started
+  // before a confirmation cannot bring its dots back with stale rows.
+  const readCommitSeqRef = useRef(0);
+  const confirmedReadsRef = useRef([]);
   const [smsHasMore, setSmsHasMore] = useState(false);
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
@@ -1569,6 +1573,7 @@ export function SmsTab({
     smsRequestRef.current = controller;
     setSmsRefreshing(true);
     const requestSeq = ++smsLoadSeqRef.current;
+    const readSeqAtStart = readCommitSeqRef.current;
     const params = new URLSearchParams({
       limit: String(SMS_LOG_PAGE_SIZE),
       page: String(page),
@@ -1652,7 +1657,13 @@ export function SmsTab({
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
         const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
-        setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
+        // Reads confirmed after this load started still hold on its rows.
+        const laterReads = confirmedReadsRef.current.filter((read) => read.seq > readSeqAtStart);
+        confirmedReadsRef.current = laterReads;
+        const loaded = laterReads.length
+          ? logData.messages.map((m) => (!m.isRead && laterReads.some((read) => pendingReadCovers(read.pending, m)) ? { ...m, isRead: true } : m))
+          : logData.messages;
+        setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, loaded) : loaded);
         if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
           const openPhone = activeThreadRef.current?.contactPhone;
           const openKey = openPhone ? smsThreadKey(openPhone) : "";
@@ -1802,6 +1813,8 @@ export function SmsTab({
         });
       }
       const readAt = new Date().toISOString();
+      readCommitSeqRef.current += 1;
+      confirmedReadsRef.current = [...confirmedReadsRef.current, { seq: readCommitSeqRef.current, pending }];
       setMessages((prev) => prev.map((m) => (!m.isRead && pendingReadCovers(pending, m) ? { ...m, isRead: true, readAt } : m)));
       notifyUnreadChanged();
     } catch {

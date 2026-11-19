@@ -18,7 +18,7 @@ const db = require('../models/db');
 const { phoneIdentityKey } = require('../utils/phone');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
+const { excludeRecruitingSmsLog, hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
 const {
   inboundSmsReceiptProjectionSql, phoneIdentitySql, canonicalSmsAddressProjectionSql, canonicalSmsLegacyLinkSql,
 } = require('./sms-response-policy');
@@ -200,6 +200,7 @@ async function markInboundSmsRead({
   // so a route change after the caller's selection never reads another
   // technician's customer texts or reconciles their bells.
   const ownedConversations = () => db('conversations').select('id').whereIn('customer_id', customerIds);
+  const ownedSids = () => db('messages').select('twilio_sid').whereNotNull('twilio_sid').whereIn('conversation_id', ownedConversations());
   const ids = customerIds
     ? await db('messages').whereIn('id', messageIds.filter((id) => typeof id === 'string' && id.trim()))
       .whereIn('conversation_id', ownedConversations()).pluck('id')
@@ -242,7 +243,6 @@ async function markInboundSmsRead({
   // #4623): the display query hides them, so the write must too, or a
   // technician opening the customer part of a shared thread would clear the
   // owner's unread applicant reply.
-  const { hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
   const q = () => hideRecruitingThreadsFromNonAdmin(db('messages').where({ channel: 'sms', direction: 'inbound' }), { techRole: role }, 'message_type')
     .andWhere(function unreadOnly() { this.where({ is_read: false }).orWhereNull('is_read'); })
     .andWhere(scope);
@@ -255,17 +255,24 @@ async function markInboundSmsRead({
   try {
     await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
       .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+      // A technician's mirror write rechecks its customers inside the statement.
+      .modify((m) => { if (customerIds) m.whereIn('twilio_sid', ownedSids()); })
       .update({ is_read: true });
   } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
 
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
   //    existed at entry, through the notification service.
   let notificationsCleared = 0;
+  // A technician's bells: the SIDs still on its customers now, not the list
+  // read before the write.
+  const bellSids = customerIds && scopedSids.length
+    ? (await db('messages').whereIn('twilio_sid', scopedSids).whereIn('conversation_id', ownedConversations()).pluck('twilio_sid')).filter(Boolean)
+    : scopedSids;
   // Reconcile generic sender bells separately from customer-linked bells.
   let knownSids = [];
   try {
-    const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
-    knownSids = scopedSids.filter((sid) => !membership.unknownSenderSids.has(sid));
+    const membership = await resolveUnknownSenderPhoneMembership(bellSids);
+    knownSids = bellSids.filter((sid) => !membership.unknownSenderSids.has(sid));
     // Promoted SIDs can own both bell types. Clear only their customer
     // link here; the generic bell remains protected by the phone lock.
     for (const [customerId, twilioSids] of membership.promotedSids) {
@@ -342,7 +349,10 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
     // An inbox-wide read leaves recruiting replies for the Recruiting page; one
     // sender's row reads them as opening the thread does (the writer still
     // hides them from a technician).
-    .modify((q) => { if (!senderKey) excludeRecruitingSmsLog(q, 'm.message_type'); })
+    .modify((q) => {
+      if (!senderKey) excludeRecruitingSmsLog(q, 'm.message_type');
+      else hideRecruitingThreadsFromNonAdmin(q, { techRole: role }, 'm.message_type');
+    })
     .modify((q) => { if (senderKey) q.whereRaw(`${address.peerSql} = ?`, [senderKey]); })
     .modify((q) => {
       for (const phone of excludePhones) {

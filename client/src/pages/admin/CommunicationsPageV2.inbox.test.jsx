@@ -1339,3 +1339,22 @@ it("a row's Mark read leaves another sender's dot, and Undo brings the row's dot
   fireEvent.click(screen.getByRole("button", { name: "Undo" }));
   expect(screen.getAllByLabelText("Unread")).toHaveLength(2);
 });
+
+it("a background refresh that started before the read was confirmed does not bring the dot back", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  await tick(25000);
+  let release;
+  const okFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, init) => (String(url).includes("/communications/log?")
+    ? new Promise((resolve) => { release = () => resolve(okFetch(url, init)); })
+    : okFetch(url, init)));
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(4800);
+  expect(release).toBeDefined();
+  await tick(400);
+  expect(readPosts("/messages/read-all")).toHaveLength(1);
+  await act(async () => { release(); });
+  await tick(0);
+  expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
+});
