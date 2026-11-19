@@ -379,6 +379,27 @@ describe('fetchPage carryCookies (EDIS redirects through ask.ifas.ufl.edu)', () 
     }
   });
 
+  test('a lapsed cookie frees its slot, so a locale cookie still fits a full jar', async () => {
+    let clock = 1700000000000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      const seen = [];
+      const short = Array.from({ length: 20 }, (_, i) => `s${i}=v; Path=/; Max-Age=1`);
+      const fetchFn = async (url, opts) => {
+        seen.push(opts.headers.Cookie);
+        if (url === 'https://a.example.com/') return redir(302, '/two', short);
+        if (url === 'https://a.example.com/two') { clock += 2000; return redir(302, '/three', ['NEXT_LOCALE=en; Path=/']); }
+        return page('ok');
+      };
+      const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+      expect(r.status).toBe(200);
+      expect(seen[1].split('; ')).toHaveLength(20);
+      expect(seen[2]).toBe('NEXT_LOCALE=en');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('an oversized cookie is skipped, so a small locale cookie after it still goes out', async () => {
     const seen = [];
     const fetchFn = async (url, opts) => {

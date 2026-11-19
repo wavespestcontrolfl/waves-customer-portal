@@ -284,11 +284,12 @@ function parseSetCookie(line, url, now) {
 function storeCookies(jar, url, res) {
   if (!jar) return;
   const now = Date.now();
+  let cookies = jar.get(url.origin);
+  if (!cookies) { cookies = new Map(); jar.set(url.origin, cookies); }
+  for (const [key, c] of cookies) if (c.expiresAt !== null && c.expiresAt <= now) cookies.delete(key); // a lapsed cookie frees its slot
   for (const line of readSetCookies(res)) {
     const cookie = parseSetCookie(line, url, now);
     if (!cookie) continue;
-    let cookies = jar.get(url.origin);
-    if (!cookies) { cookies = new Map(); jar.set(url.origin, cookies); }
     const key = `${cookie.name}=${cookie.path}`; // a token name has no "="
     if (cookie.expiresAt !== null && cookie.expiresAt <= now) { cookies.delete(key); continue; }
     if (!cookies.has(key) && cookies.size >= MAX_COOKIES_PER_ORIGIN) continue;
