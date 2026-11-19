@@ -182,13 +182,14 @@ export default function usePortalRead(key, load) {
     });
   }, [cache, key]);
 
-  const invalidate = useCallback((message = 'Could not update this information.') => {
+  const invalidate = useCallback((message = 'Could not update this information.', { clearAll = false } = {}) => {
     // Scope/auth conflicts are stronger than an ordinary failed refresh: the
     // last verified payload is no longer safe to display or remount from the
     // provider cache. Advancing the sequence also denies every in-flight
     // completion that started before the invalidation.
     sequence.current += 1;
-    cache?.delete(key);
+    if (clearAll) cache?.clear();
+    else cache?.delete(key);
     setState({
       data: undefined,
       updatedAt: null,

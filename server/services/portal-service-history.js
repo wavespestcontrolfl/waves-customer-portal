@@ -11,6 +11,7 @@ const db = require('../models/db');
 // legacy inspection-fee scrub on top (owner ruling 2026-10-01; codex #2817).
 const { customerSafeVisitNotes } = require('./context-aggregator');
 const { applyPropertyPredicate } = require('./account-properties');
+const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { readReportIdentitySnapshot } = require('./service-report/report-identity-snapshot');
 const { formatAddress } = require('../utils/address-normalizer');
 
@@ -168,6 +169,7 @@ async function listPortalServiceHistory(customerId, {
     const notesRecord = isProjectCompletion
       ? { ...svc, technician_notes: projectReportUrl ? structuredNotes.projectTitle || null : null }
       : svc;
+    const notes = suppressCustomerArtifacts ? null : customerSafeVisitNotes(notesRecord, { projectLine: true });
     return {
       id: svc.id,
       ...(historyProperty ? { propertyAddress: historyAddress(svc, customerId) } : {}),
@@ -179,7 +181,7 @@ async function listPortalServiceHistory(customerId, {
       checkOutTime: svc.effective_check_out_time || null,
       // The reviewed report text only, never the tech's raw note
       // (context-aggregator.js customerSafeVisitNotes).
-      notes: suppressCustomerArtifacts ? null : customerSafeVisitNotes(notesRecord, { projectLine: true }),
+      notes: isProjectCompletion && notes && customerCopyViolations(notes).length ? null : notes,
       soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
       thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
       soilPh: svc.soil_ph ? parseFloat(svc.soil_ph) : null,

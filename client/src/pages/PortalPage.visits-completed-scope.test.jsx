@@ -18,7 +18,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { VisitsTab } from './PortalPage';
+import { ServicesTab, VisitsTab } from './PortalPage';
 import { PortalReadProvider, usePortalRefresh } from '../hooks/usePortalRead';
 
 const customer = { id: 'cust-1', firstName: 'Pat', lastName: 'Customer', tier: 'Silver', property: {} };
@@ -58,6 +58,15 @@ function RemountableCompleted({ visitsProps = {} }) {
   </PortalReadProvider>;
 }
 
+function SwitchableHistoryScope({ onSavedScopeUnavailable }) {
+  const [scope, setScope] = React.useState('all');
+  return <PortalReadProvider enabled>
+    <button type="button" onClick={() => setScope('all')}>Show all cached history</button>
+    <button type="button" onClick={() => setScope('pa')}>Show selected history</button>
+    <ServicesTab key={scope} historyProperty={scope} customerId={customer.id} onSavedScopeUnavailable={onSavedScopeUnavailable} />
+  </PortalReadProvider>;
+}
+
 describe('Completed visits by property', () => {
   it('opens the selected house, then shows retired and unassigned history in All properties', async () => {
     api.getServices.mockImplementation(async ({ historyProperty }) => ({
@@ -84,17 +93,22 @@ describe('Completed visits by property', () => {
     expect(screen.queryByText('Wrong house')).not.toBeInTheDocument();
   });
 
-  it('refreshes a 409 property conflict once and retains the safe error fallback when that refresh fails', async () => {
+  it('dedupes automatic picker refreshes but retries one after an explicit Try Again', async () => {
     const conflict = Object.assign(new Error('Your selected property changed.'), { status: 409 });
     const refreshProperties = vi.fn(() => Promise.reject(new Error('property list unavailable')));
     api.getServices.mockRejectedValue(conflict);
-    openCompleted({ onSavedScopeUnavailable: refreshProperties });
+    openCompletedWithCache({ onSavedScopeUnavailable: refreshProperties });
     expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
     await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh portal reads' }));
     await waitFor(() => expect(api.getServices).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
     expect(refreshProperties).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+    await waitFor(() => expect(api.getServices).toHaveBeenCalledTimes(3));
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(2));
   });
 
   it('refreshes the picker only for the distinct property-history 403 code', async () => {
@@ -114,6 +128,54 @@ describe('Completed visits by property', () => {
     openCompleted({ onSavedScopeUnavailable: refreshProperties });
     expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
     expect(refreshProperties).not.toHaveBeenCalled();
+  });
+
+  it('clears every provider cache key on the coded property-history 403', async () => {
+    const refreshProperties = vi.fn(() => Promise.reject(new Error('property list unavailable')));
+    api.getServices.mockImplementation(({ historyProperty }) => {
+      if (historyProperty === 'all') return Promise.resolve({
+        historyProperty: 'all', historyCustomerId: customer.id, total: 1,
+        services: [{ id: 'retired', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Cached retired house' }],
+      });
+      return Promise.reject(Object.assign(new Error('Property history is unavailable for this session.'), {
+        status: 403,
+        code: 'PROPERTY_HISTORY_UNAVAILABLE',
+      }));
+    });
+    render(<SwitchableHistoryScope onSavedScopeUnavailable={refreshProperties} />);
+    expect(await screen.findByText('Cached retired house')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show selected history' }));
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    await waitFor(() => expect(refreshProperties).toHaveBeenCalledTimes(1));
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    fireEvent.click(screen.getByRole('button', { name: 'Show all cached history' }));
+    expect(screen.queryByText('Cached retired house')).not.toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps other provider cache keys after a 409 invalidates only the active scope', async () => {
+    const refreshProperties = vi.fn(() => Promise.reject(new Error('property list unavailable')));
+    api.getServices.mockImplementation(({ historyProperty }) => {
+      if (historyProperty === 'all') return Promise.resolve({
+        historyProperty: 'all', historyCustomerId: customer.id, total: 1,
+        services: [{ id: 'retired', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'Cached retired house' }],
+      });
+      return Promise.reject(Object.assign(new Error('Your selected property changed.'), { status: 409 }));
+    });
+    render(<SwitchableHistoryScope onSavedScopeUnavailable={refreshProperties} />);
+    expect(await screen.findByText('Cached retired house')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show selected history' }));
+    expect(await screen.findByText('Could not load service history')).toBeInTheDocument();
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    fireEvent.click(screen.getByRole('button', { name: 'Show all cached history' }));
+
+    expect(screen.getByText('Cached retired house')).toBeInTheDocument();
+    expect(api.getServices).toHaveBeenCalledTimes(2);
   });
 
   it.each([

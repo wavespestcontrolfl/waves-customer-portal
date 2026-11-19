@@ -3797,7 +3797,9 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     } catch (error) {
       if (requestIsCurrent() && historyProperty
         && (error?.status === 409 || (error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE'))) {
-        invalidateHistoryScopeRef.current(requestedScopeKey, error?.message);
+        invalidateHistoryScopeRef.current(requestedScopeKey, error?.message, {
+          clearAll: error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE',
+        });
       }
       throw error;
     }
@@ -3835,7 +3837,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
 
-  invalidateHistoryScopeRef.current = (requestedScopeKey, message) => {
+  invalidateHistoryScopeRef.current = (requestedScopeKey, message, { clearAll = false } = {}) => {
     if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return;
     moreSequence.current += 1;
     setLoadingMore(false);
@@ -3843,8 +3845,15 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     setExpanded(null);
     setLightbox(null);
     closePreview();
-    historyRead.invalidate(message || 'Your property selection changed. Refresh it before reopening completed visits.');
+    historyRead.invalidate(message || 'Your property selection changed. Refresh it before reopening completed visits.', { clearAll });
     requestPropertyRefresh(requestedScopeKey);
+  };
+
+  const retryHistory = () => {
+    // A deliberate retry means the property-list refresh may have recovered.
+    // Lifecycle/provider refreshes keep the guard armed so they cannot loop.
+    scopeRefreshRequestedRef.current = null;
+    void historyRead.refresh();
   };
 
   const SERVICES_PAGE_SIZE = 100;
@@ -3950,7 +3959,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
         title="Could not load service history"
         message={loadError}
         actionLabel="Try Again"
-        onAction={historyRead.refresh}
+        onAction={retryHistory}
       />
     );
   }

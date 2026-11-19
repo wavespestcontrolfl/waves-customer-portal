@@ -111,7 +111,7 @@ test('history uses the address frozen on the report before later property data',
   expect(services[0].propertyAddress).toBe('300 Report Road, Sample');
 });
 
-test.each([['Door inspection', 'Door inspection'], [undefined, null]])('Completed history project notes use only the attached report title (%s)', async (projectTitle, expected) => {
+test.each([['Door inspection', 'Door inspection'], ['This treatment is completely safe', null], [undefined, null]])('Completed history project notes use only the attached report title (%s)', async (projectTitle, expected) => {
   const { customerSafeVisitNotes } = require('../services/context-aggregator');
   customerSafeVisitNotes.mockImplementationOnce((record) => record.technician_notes);
   wire({ service_records: [{
