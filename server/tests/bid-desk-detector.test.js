@@ -551,6 +551,13 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     expect(mfmpUnreadCloseLine(mfmpNotice())).toBeNull();
     expect(mfmpUnreadCloseLine(mfmpNotice({ body_text: MFMP_BODY().replace(/^ Close Date:.*\n/m, '') }))).toBeNull();
     expect(mfmpUnreadCloseLine(mfmpNotice({ provider_verified_strict: false }, { close: 'Dec 2, 2026 2:00 PM' }))).toBeNull();
+    // Two Close Date lines are never a date we trust: no date is read, and the line is flagged.
+    const two = MFMP_BODY({ close: 'Dec 7, 2026 2:00 PM' }).replace(' Agency Contact:', ' Close Date: Dec 3, 2026\n Agency Contact:');
+    expect(parseBidEmail(mfmpNotice({ body_text: two }))).toMatchObject({ due_at: null });
+    expect(mfmpUnreadCloseLine(mfmpNotice({ body_text: two }))).toBe('Close Date: Dec 7, 2026 2:00 PM');
+    // A notice missing its Organization or Title line still gives its Close Date.
+    const noTitle = MFMP_BODY().replace(/^ Title:.*\n/m, '');
+    expect(parseBidEmail(mfmpNotice({ body_text: noTitle })).due_at.toISOString()).toBe('2026-12-04T04:59:00.000Z');
   });
 
   test('only one plain address is read as the buyer email', () => {

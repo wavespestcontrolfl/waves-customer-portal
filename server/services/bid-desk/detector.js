@@ -501,18 +501,29 @@ function parseMfmp(lines) {
   return out;
 }
 
-// "Close Date: Dec 3, 2026" (no time, so 23:59 ET); only that whole shape is read. The Open Date line is never read.
-function mfmpDue(lines) {
-  if (!mfmpNotice(lines)) return null;
-  return firstDate(labelledValues(lines, 'Close Date').filter((match) => MFMP_CLOSE_DAY.test(match.value)), '23:59');
+// A notice names its solicitation when it carries the advertisement number and a solicitation type (the descriptive
+// Organization and Title lines are not needed for the date).
+function mfmpSolicitation(lines) {
+  const type = labelledValues(lines, 'Advertisement Type')[0]?.value;
+  return Boolean(labelledValues(lines, 'Advertisement Number')[0]?.value && type && MFMP_SOLICITATION.test(type));
 }
 
-// The Close Date line of a verified MFMP notice when it is there but not a date we read ("Dec 2, 2026 2:00 PM"), else
-// null. The caller flags the bid for the operator: the stored date stays, but it can no longer be trusted.
+// "Close Date: Dec 3, 2026" (no time, so 23:59 ET): read only when the notice names its solicitation and carries
+// exactly one Close Date line in that whole shape. The Open Date line is never read.
+function mfmpDue(lines) {
+  if (!mfmpSolicitation(lines)) return null;
+  const closes = labelledValues(lines, 'Close Date');
+  if (closes.length !== 1 || !MFMP_CLOSE_DAY.test(closes[0].value)) return null;
+  return firstDate(closes, '23:59');
+}
+
+// The Close Date line of a verified MFMP solicitation when one is there but not read (another shape such as
+// "Dec 2, 2026 2:00 PM", or two Close Date lines), else null. The caller flags the bid for the operator: the stored
+// date stays, but it can no longer be trusted.
 function mfmpUnreadCloseLine(email = {}) {
   if (senderKind(email) !== 'mfmp') return null;
   const lines = bodyLines(email);
-  if (!mfmpNotice(lines)) return null;
+  if (!mfmpSolicitation(lines)) return null;
   const closes = labelledValues(lines, 'Close Date');
   if (!closes.length || mfmpDue(lines)) return null;
   return closes[0].line;
