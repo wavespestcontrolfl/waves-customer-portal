@@ -85,8 +85,8 @@ const GRASS_CHOICES = [
 const TRENCHING_PRODUCT_OPTIONS = [
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
-  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
-  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
+  // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so it is listed once.
+  { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
 const TRENCHING_PRODUCT_META = {
@@ -99,25 +99,25 @@ const TRENCHING_PRODUCT_META = {
     config: "78 oz @ $95 | 0.8 oz / finished gal standard",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
-    config: "96 oz @ $41.57 | 1.0 oz / finished gal standard",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). 3-year warranty requires review; 5-year repair-and-retreat is quote-required by default.",
+    config: "128 oz @ $30.90 | 1.0 oz / finished gal standard",
   },
 };
 
 const PRE_SLAB_PRODUCT_OPTIONS = [
   { value: "termidor_sc", label: "Termidor SC - Fipronil, premium non-repellent" },
   { value: "taurus_sc", label: "Taurus SC - Fipronil, standard non-repellent" },
-  // bifen_it is the same Talak bottle (owner 2026-10-25), so Talak is listed once.
-  { value: "talstar_p", label: "Talak 7.9 F - Bifenthrin, repellent barrier" },
+  // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18), so it is listed once.
+  { value: "talstar_p", label: "Crosscheck Plus - Bifenthrin, repellent barrier" },
 ];
 
 // A saved estimate that still carries bifen_it keeps one matching entry, so the select shows the
-// product the estimate prices (Talak) instead of falling back to the first option.
-const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Talak 7.9 F - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
+// product the estimate prices (Crosscheck Plus) instead of falling back to the first option.
+const LEGACY_BIFEN_OPTION = { value: "bifen_it", label: "Crosscheck Plus - Bifenthrin, repellent barrier (saved as Bifen I/T)" };
 
 export function termiticideProductOptions(kind, selectedKey) {
   const options = kind === "trenching" ? TRENCHING_PRODUCT_OPTIONS : PRE_SLAB_PRODUCT_OPTIONS;
@@ -140,12 +140,12 @@ const PRE_SLAB_PRODUCT_META = {
     config: "78 oz @ $95.00 | 0.8 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   bifen_it: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
-    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $30.90 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
   talstar_p: {
-    warning: "Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145). Confirm the Talak label supports pre-construction subterranean termite treatment.",
-    config: "96 oz @ $41.57 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
+    warning: "Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120). Confirm the Crosscheck Plus label supports pre-construction subterranean termite treatment.",
+    config: "128 oz @ $30.90 (inventory price) | 1.0 oz / 10 sqft | 100 sqft usage steps + contextual minimum",
   },
 };
 

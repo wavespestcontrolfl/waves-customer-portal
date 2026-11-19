@@ -844,6 +844,9 @@ function normalizePreSlabTermiticideProduct(value, options = {}) {
     talstar_professional: 'talstar_p',
     talak: 'talstar_p',
     atticus_talak: 'talstar_p',
+    crosscheck: 'talstar_p',
+    crosscheck_plus: 'talstar_p',
+    lesco_crosscheck_plus: 'talstar_p',
   };
   if (options.legacyPayload || options.allowIngredientAliases) {
     aliases.fipronil = 'termidor_sc';
@@ -1460,8 +1463,8 @@ function normalizeMosquitoAddOnCount(value, key) {
 // Per-visit cost model shared by the footprint pricer and the bedroom-band
 // pricer — fully allocated (on-site + drive time + chemicals).
 function pestVisitCostModel({ roachType = 'none', frequency = 'quarterly', visitsPerYear = 4, annual = 0 } = {}) {
-  const chemCost = { talak: 1.30, taurus: 4.87, surfactant: 0.50 }; // per service
-  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.talak + chemCost.taurus + chemCost.surfactant);
+  const chemCost = { bifenthrin: 0.97, taurus: 4.87, surfactant: 0.50 }; // per service; bifenthrin = 4 fl oz of LESCO Crosscheck Plus @ $30.90/gal (owner 2026-11-18)
+  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.bifenthrin + chemCost.taurus + chemCost.surfactant);
   const onSiteMin = frequency === 'monthly' ? 20 : 25;
   const onSiteLaborCost = GLOBAL.LABOR_RATE * onSiteMin / 60;
   const driveLaborCost = GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60;
@@ -6930,6 +6933,9 @@ function normalizeTrenchingTermiticideProduct(value, options = {}) {
     talstar_professional: 'talstar_p',
     talak: 'talstar_p',
     atticus_talak: 'talstar_p',
+    crosscheck: 'talstar_p',
+    crosscheck_plus: 'talstar_p',
+    lesco_crosscheck_plus: 'talstar_p',
   };
   const productKey = aliases[raw];
   if (productKey && cfg.products?.[productKey]) {

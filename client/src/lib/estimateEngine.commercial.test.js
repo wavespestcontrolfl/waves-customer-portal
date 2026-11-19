@@ -223,12 +223,12 @@ describe("client estimate engine pre-slab small-slab minimums", () => {
     }));
   }
 
-  // bifen_it is the Talak 7.9 F bottle (owner 2026-10-25): 96 fl oz at $41.57.
-  it("does not apply the normal full-slab floor to 100 sqft bifen_it (Talak)", () => {
+  // bifen_it is the LESCO Crosscheck Plus bottle (owner 2026-10-25 Talak, 2026-11-18 Crosscheck): 128 fl oz at $30.90.
+  it("does not apply the normal full-slab floor to 100 sqft bifen_it (Crosscheck Plus)", () => {
     const standalone = preSlabEstimate({ preslabJobContext: "standalone" }).oneTime.items
       .find((item) => item.name === "Pre-Slab");
     expect(standalone.productOz).toBe(10);
-    expect(standalone.productCost).toBe(4.33);
+    expect(standalone.productCost).toBe(2.41);
     expect(standalone.contextualFloor).toBe(191);
     expect(standalone.price).toBe(191);
     expect(standalone.price).not.toBe(510);
@@ -236,13 +236,13 @@ describe("client estimate engine pre-slab small-slab minimums", () => {
     const builderBatch = preSlabEstimate({ preslabJobContext: "builderBatch" }).oneTime.items
       .find((item) => item.name === "Pre-Slab");
     expect(builderBatch.contextualFloor).toBe(128);
-    expect(builderBatch.price).toBe(150);
+    expect(builderBatch.price).toBe(146);
     expect(builderBatch.price).not.toBe(510);
 
     const sameTripAddOn = preSlabEstimate({ preslabJobContext: "sameTripAddOn" }).oneTime.items
       .find((item) => item.name === "Pre-Slab");
     expect(sameTripAddOn.contextualFloor).toBe(106);
-    expect(sameTripAddOn.price).toBe(150);
+    expect(sameTripAddOn.price).toBe(146);
     expect(sameTripAddOn.price).not.toBe(510);
   });
 });

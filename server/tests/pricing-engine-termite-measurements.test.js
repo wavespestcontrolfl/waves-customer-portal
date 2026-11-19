@@ -177,10 +177,10 @@ describe('termite measurement overrides and safeguards', () => {
     // SiteOne member prices read 2026-11-01: Termidor SC $174.72 and Taurus SC $95 per 78 oz, x 0.32 oz per LF.
     expect(priceTrenching({}, { ...base, productKey: 'termidor_sc' }).chemicalCostPerLF).toBeCloseTo(0.72, 2);
     expect(priceTrenching({}, { ...base, productKey: 'taurus_sc' }).chemicalCostPerLF).toBeCloseTo(0.39, 2);
-    // bifen_it is the same Talak bottle as talstar_p (owner 2026-10-25).
-    expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.17, 2);
-    // talstar_p is the Talak 7.9 F bottle: $41.57 / 96 fl oz x 0.4 oz per LF = $0.17.
-    expect(priceTrenching({}, { ...base, productKey: 'talstar_p' }).chemicalCostPerLF).toBeCloseTo(0.17, 2);
+    // bifen_it is the same bottle as talstar_p (owner 2026-10-25; LESCO Crosscheck Plus since 2026-11-18).
+    expect(priceTrenching({}, { ...base, productKey: 'bifen_it' }).chemicalCostPerLF).toBeCloseTo(0.1, 2);
+    // talstar_p is the LESCO Crosscheck Plus bottle: $30.90 / 128 fl oz x 0.4 oz per LF = $0.10.
+    expect(priceTrenching({}, { ...base, productKey: 'talstar_p' }).chemicalCostPerLF).toBeCloseTo(0.1, 2);
   });
 
   test('trenching Termidor premium surcharges while Bifen never discounts below LF model', () => {
@@ -437,21 +437,21 @@ describe('termite measurement overrides and safeguards', () => {
     expect(taurus.productCost).toBe(243.59);
     expect(taurus.price).toBe(701);
 
-    // bifen_it is the same Talak bottle as talstar_p (owner 2026-10-25): 96 fl oz at $41.57.
+    // bifen_it is the same bottle as talstar_p (owner 2026-10-25): LESCO Crosscheck Plus, 128 fl oz at $30.90 (2026-11-18).
     const bifen = pricePreSlabTermiticide(2500, { productKey: 'bifen_it', labelConfirmed: true });
     expect(bifen.productOz).toBe(250);
-    expect(bifen.units).toBe(3);
-    expect(bifen.productCost).toBe(108.26);
-    expect(bifen.rawPrice).toBe(445);
+    expect(bifen.units).toBe(2);
+    expect(bifen.productCost).toBe(60.35);
+    expect(bifen.rawPrice).toBe(355);
     expect(bifen.price).toBe(510);
 
-    // talstar_p is the Talak 7.9 F bottle: 96 fl oz at $41.57.
+    // talstar_p is the LESCO Crosscheck Plus bottle: 128 fl oz at $30.90.
     const talak = pricePreSlabTermiticide(2500, { productKey: 'talstar_p', labelConfirmed: true });
-    expect(talak.productLabel).toBe('Talak 7.9 F - Bifenthrin');
+    expect(talak.productLabel).toBe('Crosscheck Plus - Bifenthrin');
     expect(talak.productOz).toBe(250);
-    expect(talak.units).toBe(3);
-    expect(talak.productCost).toBe(108.26);
-    expect(talak.rawPrice).toBe(445);
+    expect(talak.units).toBe(2);
+    expect(talak.productCost).toBe(60.35);
+    expect(talak.rawPrice).toBe(355);
     expect(talak.price).toBe(510);
   });
 
@@ -462,7 +462,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(standalone.productOz).toBe(10);
-    expect(standalone.productCost).toBe(4.33);
+    expect(standalone.productCost).toBe(2.41);
     expect(standalone.contextualFloor).toBe(191);
     expect(standalone.price).toBe(191);
     expect(standalone.price).not.toBe(600);
@@ -473,7 +473,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(builderBatch.contextualFloor).toBe(128);
-    expect(builderBatch.price).toBe(150);
+    expect(builderBatch.price).toBe(146);
     expect(builderBatch.price).not.toBe(600);
 
     const sameTripAddOn = pricePreSlabTermiticide(100, {
@@ -482,7 +482,7 @@ describe('termite measurement overrides and safeguards', () => {
       labelConfirmed: true,
     });
     expect(sameTripAddOn.contextualFloor).toBe(106);
-    expect(sameTripAddOn.price).toBe(150);
+    expect(sameTripAddOn.price).toBe(146);
     expect(sameTripAddOn.price).not.toBe(600);
   });
 
@@ -526,7 +526,7 @@ describe('termite measurement overrides and safeguards', () => {
     const huge = pricePreSlabTermiticide(9950, { productKey: 'talstar_p', labelConfirmed: true });
     expect(huge.usageStepPricedSqFt).toBe(10000);
     expect(huge.laborHrs).toBe(5);
-    expect(huge.price).toBe(1246);
+    expect(huge.price).toBe(884);
 
     // Volume discounts apply to the stepped price (10plus implies the
     // builder-batch context: no drive cost, $128 floor at this size).

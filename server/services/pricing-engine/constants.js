@@ -1071,7 +1071,7 @@ const MOSQUITO = {
   // lots grow rather than pricing big jobs out.
   priceStepSqFt: 500,
   productCosts: {
-    bifenthrinOz: 41.57 / 96,       // Atticus Talak 7.9 F 96 fl oz @ $41.57 (inventory best 2026-11-01; Bifen I/T is retired).
+    bifenthrinOz: 30.90 / 128,      // LESCO Crosscheck Plus 1 gal (128 fl oz) @ $30.90 (owner 2026-11-18; was Atticus Talak 96 fl oz @ $41.57).
     tekkoProOz: 52.97 / 16,         // Tekko Pro IGR 16 oz @ $52.97.
     scionOz: 161.30 / 32,           // Scion 32 oz @ $161.30.
     in2CareStation: 13.14,
@@ -1081,7 +1081,7 @@ const MOSQUITO = {
   // inventory catalog's best approved price when it sits inside [0.5x, 2x] of the value above (db-bridge
   // syncMosquitoProductCostsFromCatalog). 'oz' divides by the row's unit_size_oz; 'count' by its pack count.
   productCostCatalog: {
-    bifenthrinOz: { catalogProductName: 'Atticus Talak 7.9 F', per: 'oz' },
+    bifenthrinOz: { catalogProductName: 'LESCO Crosscheck Plus', per: 'oz' },
     summitDunkTablet: { catalogProductName: 'Summit Mosquito Dunk Tablets', per: 'count' },
   },
   productUsage: {
@@ -1982,15 +1982,16 @@ const SPECIALTY = {
         ],
       },
       // Bifen I/T is the same Atticus Talak 7.9 F bottle (owner 2026-09-11; 2026-10-25 "bifen i/t
-      // as talak is fine"), so bifen_it prices exactly like talstar_p. The key stays so saved
-      // estimates replay; the estimate tool lists Talak once (talstar_p).
+      // as talak is fine"), so bifen_it prices exactly like talstar_p. 2026-11-18: both follow
+      // LESCO Crosscheck Plus. The key stays so saved estimates replay; the estimate tool lists
+      // the bottle once (talstar_p).
       bifen_it: {
-        label: 'Talak 7.9 F - Bifenthrin',
+        label: 'Crosscheck Plus - Bifenthrin',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
-        containerCost: 41.57,
-        containerOz: 96,
+        containerCost: 30.90,
+        containerOz: 128,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
         standardConcentrationLabel: '0.06%',
@@ -1998,19 +1999,20 @@ const SPECIALTY = {
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
-          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
+          'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).',
           'Do not attach long repair-and-retreat warranty without admin approval.',
         ],
       },
       // The bottle is Atticus Talak 7.9 F, 96 fl oz (owner 2026-10-24: "swap talstar
-      // for talak"). The talstar_p key stays so saved estimates replay.
+      // for talak"), then LESCO Crosscheck Plus, 1 gal at $30.90 (owner 2026-11-18: "swap
+      // out atticus talak for lesco crosscheck"). The talstar_p key stays so saved estimates replay.
       talstar_p: {
-        label: 'Talak 7.9 F - Bifenthrin',
+        label: 'Crosscheck Plus - Bifenthrin',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
-        containerCost: 41.57,
-        containerOz: 96,
+        containerCost: 30.90,
+        containerOz: 128,
         productOzPerFinishedGallonAtStandardRate: 1.0,
         productOzPerFinishedGallonAtHighRate: 2.0,
         standardConcentrationLabel: '0.06%',
@@ -2018,7 +2020,7 @@ const SPECIALTY = {
         defaultWarrantyPositioning: 'limited',
         warrantyRisk: 'high_for_long_warranty',
         warnings: [
-          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
+          'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).',
           'Do not attach long repair-and-retreat warranty without admin approval.',
         ],
       },
@@ -2152,47 +2154,47 @@ const SPECIALTY = {
       },
       // Bifen I/T is the same Atticus Talak 7.9 F bottle (owner 2026-09-11; 2026-10-25 "bifen i/t
       // as talak is fine"); the Bifen I/T catalog row is inactive. bifen_it prices exactly like
-      // talstar_p from the Talak row. The key stays so saved estimates replay; the estimate tool
-      // lists Talak once (talstar_p).
+      // talstar_p. 2026-11-18: both follow LESCO Crosscheck Plus. The key stays so saved estimates
+      // replay; the estimate tool lists the bottle once (talstar_p).
       bifen_it: {
-        label: 'Talak 7.9 F - Bifenthrin',
-        catalogProductName: 'Atticus Talak 7.9 F',
-        packageLabel: '96 fl oz',
+        label: 'Crosscheck Plus - Bifenthrin',
+        catalogProductName: 'LESCO Crosscheck Plus',
+        packageLabel: '128 fl oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
-        containerCost: 41.57,
-        containerOz: 96,
+        containerCost: 30.90,
+        containerOz: 128,
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
-          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
-          'Use only when the Talak 7.9 F label supports pre-construction subterranean termite treatment.',
+          'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).',
+          'Use only when the Crosscheck Plus label supports pre-construction subterranean termite treatment.',
         ],
       },
       // The bottle is Atticus Talak 7.9 F, 96 fl oz (owner 2026-10-24: "swap talstar
-      // for talak"); the Talstar P catalog row is inactive. The talstar_p key stays so
-      // saved estimates replay.
+      // for talak"), then LESCO Crosscheck Plus, 1 gal at $30.90 (owner 2026-11-18); the
+      // Talstar P catalog row is inactive. The talstar_p key stays so saved estimates replay.
       talstar_p: {
-        label: 'Talak 7.9 F - Bifenthrin',
-        catalogProductName: 'Atticus Talak 7.9 F',
-        packageLabel: '96 fl oz',
+        label: 'Crosscheck Plus - Bifenthrin',
+        catalogProductName: 'LESCO Crosscheck Plus',
+        packageLabel: '128 fl oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
-        containerCost: 41.57,
-        containerOz: 96,
+        containerCost: 30.90,
+        containerOz: 128,
         productOzPer10SqFt: 1.0,
         pricingMethod: 'product_oz_per_10_sqft',
         marginDivisor: 0.5294,  // 0.45 / 0.85 — 15% across-the-board price cut (margin ~47%)
         requiresLabelConfirmation: true,
         requiresCertificateOfCompliance: true,
         warnings: [
-          'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).',
-          'Use only when the Talak 7.9 F label supports pre-construction subterranean termite treatment.',
+          'Bifenthrin repellent barrier (LESCO Crosscheck Plus, EPA 10404-120).',
+          'Use only when the Crosscheck Plus label supports pre-construction subterranean termite treatment.',
         ],
       },
     },

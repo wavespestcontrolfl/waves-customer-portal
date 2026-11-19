@@ -4,7 +4,6 @@
  * updated by hand 2026-10-24) or edited by an admin are left alone. down() restores only what up() wrote.
  */
 const migration = require('../models/migrations/20261025130000_talstar_option_is_talak');
-const constants = require('../services/pricing-engine/constants');
 
 function fakeKnex(db) {
   const knex = (table) => {
@@ -46,24 +45,24 @@ const talstarOf = (db, key) => JSON.parse(db.pricing_config.find((r) => r.config
 const rowOf = (db, key) => JSON.parse(db.pricing_config.find((r) => r.config_key === key).data);
 
 describe('talstar_p option is Talak migration', () => {
-  test('the inlined Talak values match the talstar_p products in constants.js', () => {
-    const preslab = constants.SPECIALTY.preSlabTermiticide.products.talstar_p;
+  test('the inlined Talak values are frozen (constants.js moved to LESCO Crosscheck Plus on 2026-11-18)', () => {
+    // The link to constants.js moved to bifenthrin-option-crosscheck-migration.test.js; this migration's literals stay as shipped.
+    const warning = 'Bifenthrin repellent barrier (Atticus Talak 7.9 F, EPA 91234-145).';
     expect(migration.TALAK_PRESLAB).toEqual({
-      label: preslab.label,
-      catalog_product_name: preslab.catalogProductName,
-      package_label: preslab.packageLabel,
-      positioning: preslab.positioning,
-      container_cost: preslab.containerCost,
-      container_oz: preslab.containerOz,
-      warnings: preslab.warnings,
+      label: 'Talak 7.9 F - Bifenthrin',
+      catalog_product_name: 'Atticus Talak 7.9 F',
+      package_label: '96 fl oz',
+      positioning: 'standard_repellent',
+      container_cost: 41.57,
+      container_oz: 96,
+      warnings: [warning, 'Use only when the Talak 7.9 F label supports pre-construction subterranean termite treatment.'],
     });
-    const trench = constants.SPECIALTY.trenching.products.talstar_p;
     expect(migration.TALAK_TRENCH).toEqual({
-      label: trench.label,
-      positioning: trench.positioning,
-      container_cost: trench.containerCost,
-      container_oz: trench.containerOz,
-      warnings: trench.warnings,
+      label: 'Talak 7.9 F - Bifenthrin',
+      positioning: 'standard_repellent',
+      container_cost: 41.57,
+      container_oz: 96,
+      warnings: [warning, 'Do not attach long repair-and-retreat warranty without admin approval.'],
     });
   });
 
