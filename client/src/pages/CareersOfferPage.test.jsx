@@ -209,6 +209,28 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
   });
 
+  it('says an unticked text choice was not confirmed when the read after a lost reply still holds the old one', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
+      .mockRejectedValueOnce(new Error('offline')) // POST consent false: reply lost
+      .mockRejectedValueOnce(new Error('offline')) // re-read fails
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))) // Try again: the old choice is stored
+      .mockResolvedValueOnce(jsonResponse({ textConsent: false })); // the second tap saves
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const box = await screen.findByLabelText('Text me about this offer');
+    expect(box).toBeChecked();
+    fireEvent.click(box);
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('We could not confirm that change. The box shows the choice we have on file. Tap it again if that is not what you want.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Text me about this offer')).toBeChecked();
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked());
+    expect(screen.queryByText(/We could not confirm that change/)).toBeNull();
+    expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toEqual({ consent: false });
+  });
+
   it('re-reads the offer when a successful sign reply cannot be read', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
