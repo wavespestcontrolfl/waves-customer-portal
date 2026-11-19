@@ -43,6 +43,10 @@ describe('isDealEmail', () => {
     ['Price increase with attachment', { subject: 'Price increase', has_attachments: true, body_text: 'See the Early Order Program with cash discounts.' }],
     ['price-match reply with attachment', { subject: 'RE: Price-match request: 3 items (up to 16% per unit)', has_attachments: true }],
     ['maker domain subdomain', { from_address: 'news@mail.basf.com', subject: 'Fall rebate is open' }],
+    ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
+    ['case price with a product code', { subject: '10% off by the case: SKU12345' }],
+    ['case price with a CS-like product code', { subject: '10% off by the case: CS12345XL' }],
+    ['case code in the middle of a deal subject', { subject: 'Fall promo by the case: CS0012345' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
@@ -54,6 +58,11 @@ describe('isDealEmail', () => {
     ['shopping cart', { subject: 'Your SiteOne shopping cart is ready to go.' }],
     ['eWallet', { subject: 'Important: A credit card has been deleted from your eWallet.' }],
     ['automatic reply', { subject: 'Automatic reply: SDS request' }],
+    // Nov 9, 2026 bell: a support reply about redeeming points, with four inline logo images.
+    ['SiteOne case notice', { from_address: 'customersupport@ec.siteone.com', subject: 'Case: CS0012345 has been updated.', has_attachments: true, body_text: 'You can redeem the points by logging into your siteone.com account.' }],
+    ['case number reply', { subject: 'RE: Case Number: CS0012345', body_text: 'Special pricing and a rebate are listed below.' }],
+    ['case # notice', { subject: 'Case #01234567 updated', has_attachments: true, body_text: 'Ask about the promo.' }],
+    ['forwarded case notice', { subject: 'FW: Case: CS0012345 has been updated.', has_attachments: true, body_text: 'Ask about the promo.' }],
     ['order is ready', { subject: 'Order 55555 is ready for pickup', body_text: 'promo special' }],
     ['deal words from an unlisted domain', { from_address: 'sales@example.com', subject: 'Big promo and rebate sale' }],
     ['lookalike domain', { from_address: 'srep@siteone.com.evil.example', subject: 'Pest Specials' }],
@@ -98,6 +107,13 @@ describe('isDealEmail', () => {
     expect(isDealEmail(email({ subject: 'Hello', body_text: 'Rebate here, rebates there.' }))).toBe(false);
     // "cash discount" is one idea, not two.
     expect(isDealEmail(email({ subject: 'Hello', body_text: 'A cash discount applies.' }))).toBe(false);
+  });
+
+  test('a long run of spaces after "Case Number" is checked in linear time, and is no case ID', () => {
+    // Overlapping \s* runs made this take about 3 s at 1,200 spaces; one way to match takes under 1 ms.
+    const started = Date.now();
+    expect(isDealEmail(email({ subject: `Case Number${' '.repeat(1200)}x: 10% off` }))).toBe(true);
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   test('reads body_html when body_text is empty', () => {
