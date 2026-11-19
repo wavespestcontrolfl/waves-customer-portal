@@ -7,7 +7,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mo
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { classifyServiceIntent } = require('../services/sms-service-intent');
-const { SERVICE_TAIL_RE, cutAddressClause } = require('../services/service-pair-terms');
+const { stripServiceTail, cutAddressClause } = require('../services/service-pair-terms');
 
 beforeEach(() => {
   mockDispatch.mockReset();
@@ -51,12 +51,12 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     ['pest and lawn 👍', 'pest_lawn'],
     // One service, worded with words from both lists.
     ['I have got bugs in my yard', 'pest'],
-    ['chinch bugs in the lawn', 'lawn'],
     // The lawn-line turf-pest product, not two services.
     ['Lawn pest control', 'lawn'],
     // A turf insect is a lawn signal, so a pest word beside it is no
     // pest-only answer: the model reads the request.
     ['Quarterly pest control and grub treatment', 'pest_lawn'],
+    ['quarterly pest control and army worm treatment', 'pest_lawn'],
     ['roaches inside and armyworms in the grass', 'pest_lawn'],
   ])('%j => the model decides (%s)', async (body, modelInterest) => {
     mockDispatch.mockResolvedValue({ ok: true, json: { interest: modelInterest, confidence: 0.8 } });
@@ -99,7 +99,11 @@ describe('unchanged single-service and one-time answers', () => {
 });
 
 describe('turf insects are lawn signals (the Lawn Pest Knockdown list)', () => {
-  test.each(['grubs', 'Grub treatment please', 'sod webworms', 'armyworms all over', 'chinch damage'])('%j => lawn, no model call', async (body) => {
+  test.each([
+    'grubs', 'Grub treatment please', 'sod webworms', 'armyworms all over', 'chinch damage',
+    // Two-word names collapse first, so "bug" is no pest word here.
+    'chinch bugs in the lawn', 'sod web worms', 'army worms in the grass',
+  ])('%j => lawn, no model call', async (body) => {
     await expect(classifyServiceIntent(body)).resolves.toEqual({ interest: 'lawn', confidence: 0.9, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -118,11 +122,7 @@ describe('a long reply cannot stall the event loop', () => {
 });
 
 describe('the shared address-tail pattern drops the whole pair request, and single-service tails as before', () => {
-  const strip = (address) => {
-    let out = address;
-    while (SERVICE_TAIL_RE.test(out)) out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
-    return out;
-  };
+  const strip = stripServiceTail;
   test.each([
     ['123 Main St, pest and lawn', '123 Main St'],
     ['123 Main St, lawn fertilization and pest control', '123 Main St'],
@@ -140,6 +140,9 @@ describe('the shared address-tail pattern drops the whole pair request, and sing
     ['123 Main St (pest and lawn)', '123 Main St'],
     ['123 Main St - pest control', '123 Main St'],
     ['123 Main St Apt 4 pest and lawn', '123 Main St Apt 4'],
+    // Punctuation inside the pair too, as the classifier reads it.
+    ['100 Palm Ave, pest-control and lawn care', '100 Palm Ave'],
+    ['123 Main St, Lawn-Care & Pest-Control', '123 Main St'],
   ])('%j => %j', (address, street) => {
     expect(strip(address)).toBe(street);
   });
@@ -151,7 +154,7 @@ describe('the shared address-tail pattern drops the whole pair request, and sing
   });
 
   test('a long run of commas or spaces is tried once, not from each of its characters', () => {
-    // Before the lookbehind, 12,800 commas took about 4 s and 25,600 spaces about 1 s.
+    // Main's tail pattern took about 1.5 s on these 12,800 commas.
     const startedAt = Date.now();
     expect(strip(`1 Main St${', '.repeat(12800)}x`)).toMatch(/x$/);
     expect(strip(`1 Main St, pest and lawn${' '.repeat(25600)}x`)).toMatch(/x$/);

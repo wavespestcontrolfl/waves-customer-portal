@@ -25,7 +25,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
-const { SERVICE_TAIL_RE, cutAddressClause } = require('./service-pair-terms');
+const { stripServiceTail, cutAddressClause } = require('./service-pair-terms');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -64,17 +64,10 @@ function looksLikeAddress(body) {
 // the awaiting_address state still handles a follow-up reply.
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // belongs to the service, not the address — the classifier reads the full
-// body separately, so the tail is simply dropped here. The pest + lawn pair
-// request ("123 Main St, lawn fertilization and pest control", "…, both pest
-// and lawn services") is one tail (SERVICE_TAIL_RE in ./service-pair-terms,
-// the classifier's own pair words), so no part of it stays on the street line.
-function stripServiceTailFromAddress(address) {
-  let out = String(address || '').trim();
-  while (SERVICE_TAIL_RE.test(out)) {
-    out = out.replace(SERVICE_TAIL_RE, '').replace(/[,\s]+$/, '').trim();
-  }
-  return out;
-}
+// body separately, so the tail is simply dropped here (stripServiceTail in
+// ./service-pair-terms). The pest + lawn pair request ("…, lawn fertilization
+// and pest control", "…, both pest and lawn services") is one tail, read the
+// way the classifier reads it, so no part of it stays on the street line.
 
 function extractAddressCandidate(body) {
   const text = String(body || '');
@@ -94,7 +87,7 @@ function extractAddressCandidate(body) {
     }
   }
   if (best) {
-    const stripped = stripServiceTailFromAddress(best);
+    const stripped = stripServiceTail(best);
     best = stripped.length >= 6 ? stripped : null;
   }
   return best;
