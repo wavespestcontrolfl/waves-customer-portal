@@ -6,16 +6,17 @@
  * right estimate draft when they mention service details.
  *
  *   classifyServiceIntent(body) -> Promise<{
- *     interest: 'pest' | 'lawn' | 'one_time' | null,
+ *     interest: 'pest' | 'lawn' | 'pest_lawn' | 'one_time' | null,
  *     confidence: number (0..1),
  *     method: 'regex' | 'claude' | 'none',
  *   }>
  *
  * Fast-path unambiguous keyword matches, fall back to Claude FAST for
  * anything ambiguous (multi-service mentions, natural language like
- * "I've got bugs in my yard"). Returns null interest when the classifier
- * can't confidently pick a branch — caller should fall through to the
- * human-draft path in that case.
+ * "I've got bugs in my yard"). 'pest_lawn' is one request for BOTH pest
+ * control and lawn care ("pest and lawn"; owner 2026-11-19: one draft names
+ * both). Returns null interest when the classifier can't confidently pick a
+ * branch — caller should fall through to the human-draft path in that case.
  *
  * Sibling for inbound PHOTO texts (services/photo-text-triage.js):
  *
@@ -51,15 +52,53 @@ const PEST_KEYWORDS = [
   'quarterly', 'exterior', 'exterminator',
 ];
 
+// Turf insects, the Lawn Pest Knockdown list (chinch bugs, sod webworms,
+// armyworms, grubs). The service pick sends a reply that names one to the
+// model, never to a fast-path answer: the model reads the request ("quarterly
+// pest control and grub treatment", "I don't need grub treatment") with its
+// turf-insect rule. The photo pick counts them as lawn words. Two-word names
+// collapse to these first (normalizeLawnPests).
+const TURF_PEST_WORDS = ['grub', 'grubs', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch'];
+
 const LAWN_KEYWORDS = [
   'lawn', 'grass', 'turf', 'weed', 'weeds', 'fert', 'fertilizer',
   'fertilization', 'mow', 'mowing', 'plug', 'plugs', 'plugging',
   'sod', 'dethatch', 'dethatching', 'top dress', 'top-dress', 'top dressing',
-  'yard', 'yellow grass', 'brown grass', 'crabgrass', 'chinch',
+  'yard', 'yellow grass', 'brown grass', 'crabgrass',
 ];
+
+// One-word spellings of the two service names ("lawncare", "pestcontrol")
+// read as the two words for the pair ("Pest control & lawncare"). Any other
+// reply with one goes to the model, as on main, which reads a refusal ("I
+// don't want lawncare"): the keyword lists never see the expanded words.
+const SERVICE_COMPOUNDS = [[/\blawncare\b/g, 'lawn care'], [/\bpestcontrol\b/g, 'pest control']];
 
 // "one time" / "one-time" / "just once" / "single visit"
 const ONE_TIME_RE = /\b(one[\s-]?time|just once|one visit|single visit|one[\s-]?off|one shot)\b/i;
+
+// The two services named as a PAIR ("pest and lawn", "lawn fertilization &
+// pest control", "pest/lawn"): one request for both. The fast path takes
+// only a reply that IS the pair, with polite filler or a form reference
+// around it ("Residential pest & lawn care", "Pest and lawn as per form I
+// filled out"). A pair inside other words ("I already have pest and lawn
+// care. I only need mosquitoes.") goes to the model, which reads the
+// context. So do "bugs in my yard" and the lawn-line "lawn pest control":
+// they carry both keyword sets but ask for one service.
+// The pattern reads the reply normalized (normalizePairReply): each run of
+// spaces and plain punctuation is one space, so each separator has one way to
+// match. At most 3 words come before the pair and 4 after it, so matching
+// stays linear in the length of the text. Every other character stays (a "?",
+// an emoji, a word in another script: "不要 pest and lawn"), so that reply
+// does not match and goes to the model.
+const PEST_SERVICE = 'pests?(?:\\s+control)?';
+const LAWN_SERVICE = '(?:lawn(?:\\s+(?:care|fertilization|treatments?|maintenance|service))?|fertilization)';
+const PAIR_JOIN = '(?:\\s+(?:and|plus)\\s+|\\s*[&+/]\\s*)';
+const SERVICE_PAIR_PATTERN = `(?:${PEST_SERVICE}${PAIR_JOIN}${LAWN_SERVICE}|${LAWN_SERVICE}${PAIR_JOIN}${PEST_SERVICE})`;
+const PAIR_LEAD = '(?:(?:residential|both|just|i[\'’]d\\s+like|i\\s+would\\s+like|i\\s+want|i\\s+need|need|want|looking\\s+for|interested\\s+in)\\s+){0,3}';
+const PAIR_FORM = '(?:as\\s+per|per|like\\s+on|like|on|from)\\s+(?:the\\s+|my\\s+)?form(?:\\s+i\\s+(?:filled(?:\\s+(?:out|in))?|sent|submitted))?';
+const PAIR_TRAIL = `(?:\\s+(?:services?|please|pls|thanks|thank\\s+you|both|${PAIR_FORM})){0,4}`;
+const SERVICE_PAIR_RE = new RegExp(`^${PAIR_LEAD}${SERVICE_PAIR_PATTERN}${PAIR_TRAIL}$`);
+const normalizePairReply = (lower) => lower.replace(/[\s.,!;:"“”()*~…–—-]+/g, ' ').trim();
 
 function tokenMatches(lower, tokens) {
   for (const t of tokens) {
@@ -75,7 +114,10 @@ function escapeRe(s) {
 
 function regexClassify(body) {
   if (!body || typeof body !== 'string') return null;
-  const lower = body.toLowerCase();
+  // "chinch bug", "army worm" and "sod web worm" collapse to the turf word
+  // (the photo pick's rule, codex #4810 r11/r14).
+  const lower = normalizeLawnPests(body.toLowerCase());
+  const expanded = SERVICE_COMPOUNDS.reduce((text, [re, words]) => text.replace(re, words), lower);
 
   const hasPest = tokenMatches(lower, PEST_KEYWORDS);
   const hasLawn = tokenMatches(lower, LAWN_KEYWORDS);
@@ -86,8 +128,11 @@ function regexClassify(body) {
   // no service signal is still one_time.
   if (hasOneTime) return { interest: 'one_time', confidence: 0.9, method: 'regex' };
 
-  // Both pest + lawn mentioned → ambiguous, let Claude decide.
+  if (SERVICE_PAIR_RE.test(normalizePairReply(expanded))) return { interest: 'pest_lawn', confidence: 0.9, method: 'regex' };
+  // Both pest + lawn words but no explicit pair → ambiguous, let Claude decide.
+  // So does a turf insect (TURF_PEST_WORDS) or a one-word service name.
   if (hasPest && hasLawn) return null;
+  if (expanded !== lower || tokenMatches(lower, TURF_PEST_WORDS)) return null;
   if (hasPest) return { interest: 'pest', confidence: 0.9, method: 'regex' };
   if (hasLawn) return { interest: 'lawn', confidence: 0.9, method: 'regex' };
 
@@ -101,7 +146,7 @@ const INTENT_SCHEMA = {
   additionalProperties: false,
   required: ['interest', 'confidence'],
   properties: {
-    interest: { type: 'string', enum: ['pest', 'lawn', 'one_time', 'unknown'] },
+    interest: { type: 'string', enum: ['pest', 'lawn', 'pest_lawn', 'one_time', 'unknown'] },
     // Range constraints (minimum/maximum) are outside the structured-output
     // schema subset every provider accepts; the 0–1 range is enforced below.
     confidence: { type: 'number', description: 'Confidence in the classification, from 0 to 1' },
@@ -119,12 +164,14 @@ Their reply: ${JSON.stringify(body)}
 Classify into ONE of:
 - "pest" — recurring pest control (any bug/rodent/termite/mosquito/roach service, including quarterly exterior)
 - "lawn" — lawn care (grass, weeds, fertilizer, turf, mowing, lawn treatments)
+- "pest_lawn" — BOTH recurring pest control AND lawn care in the same request
 - "one_time" — a single-visit service (not a recurring plan)
-- "unknown" — ambiguous, doesn't match any of the three, a question, or a complaint
+- "unknown" — ambiguous, doesn't match any of these, a question, or a complaint
 
 Rules:
 - Classify by what the customer is ASKING FOR, not by which pest/lawn words appear — a species or yard word is evidence, not the request.
 - An explicit statement of cadence or scope (single visit vs recurring plan) outranks any species mention.
+- Turf insects (chinch bugs, grubs, sod webworms, armyworms) are lawn care, not pest control.
 - Customers phrase these intents in unseen ways; match the meaning at the least-specific reading that fits, not keywords.`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
@@ -136,7 +183,7 @@ Rules:
     });
     if (!response.ok || !response.json) return { interest: null, confidence: 0, method: 'ai' };
     const parsed = response.json;
-    const interest = ['pest', 'lawn', 'one_time'].includes(parsed.interest) ? parsed.interest : null;
+    const interest = ['pest', 'lawn', 'pest_lawn', 'one_time'].includes(parsed.interest) ? parsed.interest : null;
     const confidence = typeof parsed.confidence === 'number' && parsed.confidence >= 0 && parsed.confidence <= 1 ? parsed.confidence : 0;
     return { interest, confidence, method: 'ai' };
   } catch (err) {
@@ -182,10 +229,7 @@ async function classifyServiceIntent(body) {
 // assessment (pre-push audit r7: "grubs in my lawn" must stay lawn). A bare
 // "worm" is NOT lawn-specific ("worm in my kitchen") — it is no subject
 // word at all, so the caption takes the default pest path (codex #4810 r8).
-const PHOTO_LAWN_WORDS = [
-  'lawn', 'grass', 'yard', 'turf', 'weed', 'weeds', 'sod',
-  'grub', 'grubs', 'webworm', 'webworms', 'armyworm', 'armyworms', 'chinch',
-];
+const PHOTO_LAWN_WORDS = ['lawn', 'grass', 'yard', 'turf', 'weed', 'weeds', 'sod', ...TURF_PEST_WORDS];
 // Every pest class the classifier prompt names (bug, insect, spider,
 // rodent, termite) plus the common sightings customers actually type — a
 // mixed "spider on my plant" caption must reach the pest identifier, not

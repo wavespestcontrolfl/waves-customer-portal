@@ -6066,6 +6066,20 @@ export default function EstimateToolViewV2({
                 </Button>{" "}
               </div>{" "}
               <StatusLine status={satelliteStatus} />
+              {/* Above the property card: for a business inside a shared
+                  parcel the card below is all "Not found" until this is
+                  answered, and read alone it looks like a failed lookup
+                  (owner report 2026-11-19). */}
+              <ScopeQuestionPrompt
+                profile={enrichedProfile}
+                question={scopeQuestion}
+                // Only the answer the server applied reads as chosen; while
+                // the question is open none stands.
+                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
+                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
+                busy={lookupStatus.type === "loading"}
+                onAnswer={answerScope}
+              />
               {enrichedProfile && (
                 <PropertyLookupResult
                   profile={enrichedProfile}
@@ -6078,16 +6092,6 @@ export default function EstimateToolViewV2({
                   verification={verifySaveState}
                 />
               )}
-              <ScopeQuestionPrompt
-                profile={enrichedProfile}
-                question={scopeQuestion}
-                // Only the answer the server applied reads as chosen; while
-                // the question is open none stands.
-                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
-                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
-                busy={lookupStatus.type === "loading"}
-                onAnswer={answerScope}
-              />
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
