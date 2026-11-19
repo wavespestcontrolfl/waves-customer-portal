@@ -5987,8 +5987,9 @@ const ZONE_COORDS = {
 // Ranch for a city and ZIP no rule places. A stored zone with a forecast point
 // stays; else the row's city and ZIP place the stop, else the stored zone read
 // as a place name by the same rules (self-booking stores the service zone's
-// first name: 'bradenton', 'venice', 'port charlotte'); a stop none of these
-// place has no forecast zone (owner 2026-11-02, "leave the rain for all";
+// first name: 'bradenton', 'venice', 'port charlotte'; a board zone key such
+// as 'bradenton_south' is not a place name); a stop none of these place has
+// no forecast zone (owner 2026-11-02, "leave the rain for all";
 // 11-19: 18 of 84 stops, stored 'bradenton', showed no rain). The day query
 // fills each missing stamp field from the primary address, so a stamp for
 // another property reads only its own city and ZIP ("no pin beats a wrong
@@ -5999,7 +6000,7 @@ function stopForecastZone(row) {
   const city = ownAddress ? row.service_address_city : row.city;
   // getZone matches 5-digit ZIPs exactly: '34211-1234' reads as '34211'.
   const zip = require('../services/customer-properties').normalizeZip(ownAddress ? row.service_address_zip : row.zip);
-  return getZone(city, zip, getZone(row.zone, null, null));
+  return getZone(city, zip, ZONE_COLORS[row.zone] ? null : getZone(row.zone, null, null));
 }
 
 // Completion reuses a non-void invoice already attached to the visit

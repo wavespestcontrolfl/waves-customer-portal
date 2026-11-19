@@ -36,6 +36,9 @@ describe('stopForecastZone', () => {
 
   it('gives no forecast zone to an unknown stored zone the row cannot place', () => {
     expect(stopForecastZone(row('somewhere', 'Tampa', '33601'))).toBeNull();
+    // A board zone key with no forecast point is not read as a place name ('bradenton' is in it).
+    expect(stopForecastZone(row('bradenton_south', null, null))).toBeNull();
+    expect(stopForecastZone(row('bradenton_south', 'Bradenton', '34207'))).toBe('bradenton_north');
   });
 
   // The day query fills each missing stamp field from the primary address (COALESCE per field).
