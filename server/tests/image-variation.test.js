@@ -280,6 +280,18 @@ describe('buildPrompt cast', () => {
     expect(prompt('technician', { identification: true })).toContain(`${gen.TECHNICIAN_CAST_LINE} `);
   });
 
+  test('a people-free picture never gets the over-the-shoulder vantage, first try or retry; other casts keep the full list', () => {
+    const seen = new Set();
+    for (const slug of slugsOf(400)) {
+      for (const index of [0, 1, 2, 101, 1000, 1002]) {
+        const plan = gen.planFor({ slug, mode: index % 1000 === 0 ? 'blog-hero' : 'blog-body', index, subject: YARD_SUBJECT });
+        if (plan.cast === 'none') expect(plan.vantage).not.toBe('over the shoulder');
+        else seen.add(plan.vantage);
+      }
+    }
+    expect(seen.has('over the shoulder')).toBe(true);
+  });
+
   test('body action framing agrees with the cast', () => {
     const framing = (cast) => gen.buildPrompt({ keyword: 'Sealing the vents', topic: 'lead', mode: 'blog-body', shot: 'action', plan: { ...PLAN, cast } });
     expect(framing('technician')).toContain('Framing: the Waves technician actively doing what this section describes');

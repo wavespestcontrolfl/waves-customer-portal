@@ -337,6 +337,9 @@ function settingsFor(subject) {
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
+// A people-free picture cannot be shot over a shoulder: the vantage would ask
+// for the body part the cast line forbids.
+const PEOPLE_FREE_VANTAGES = VANTAGES.filter((vantage) => vantage !== 'over the shoulder');
 function hashString(input) {
   let h = 2166136261;
   const str = String(input || '');
@@ -346,9 +349,10 @@ function hashString(input) {
   }
   return h >>> 0;
 }
-// The slot a picture fills: the hero is 0 and body slot k is k. The publisher
-// passes index = k + 1 + attempt * 100 on a near-duplicate retry and
-// index + 1000 on a screen retry, so the slot is the index modulo 100 —
+// The slot a picture fills: the hero is 0 and the picture named body-N is N
+// (a post's names are unique, so its slots are too). The publisher passes
+// index = N + attempt * 100 on a near-duplicate retry and index + 1000 on a
+// screen retry, so the slot is the index modulo 100 —
 // style and cast follow the SLOT, never the raw index, or a retry would take
 // a sibling slot's style and cast. Setting, time and vantage keep the full
 // index: a retry must still get a fresh scene.
@@ -398,13 +402,14 @@ function planFor({ slug, mode = 'blog-hero', index = 0, subject = '', identifica
   const perm = stylePermutation(slug);
   const slot = slotFor(mode, index);
   const category = settingCategoryFor(subject);
+  const cast = castFor({ slug, mode, slot, identification });
   return {
     style: perm[slot % perm.length],
-    cast: castFor({ slug, mode, slot, identification }),
+    cast,
     identification: identification === true,
     setting: pick(SETTINGS[category], 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
-    vantage: pick(VANTAGES, 3),
+    vantage: pick(cast === 'none' ? PEOPLE_FREE_VANTAGES : VANTAGES, 3),
     // Owner ask 2026-09-23: the Waves van in the background of SOME exterior
     // scenes. Yard settings only (a van in a kitchen is a contradiction); one
     // slot in a quarter of posts (vanSlotFor, owner 2026-11-19) so the

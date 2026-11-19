@@ -3195,7 +3195,13 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           shot,
           avoid: heroSubject,
           slug,
-          index: k + 1 + attempt * 100,
+          // The planner slot is the NAME number (body-N plans as slot N), not
+          // the loop position. A name is never reused while its picture
+          // lives, so no two pictures of a post share a slot: a refresh that
+          // keeps body-1 and adds one picture plans it as body-2's or body-3's
+          // slot, never slot 1 again (which would repeat the kept picture's
+          // style and could put a second technician in the post).
+          index: n + attempt * 100,
           avoidDepicting: imageExclusionsFor(brief),
           deadlineAt: slotDeadline,
         });

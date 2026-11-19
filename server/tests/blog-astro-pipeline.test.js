@@ -6364,6 +6364,34 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     }
   });
 
+  test('resolveBodyImages: a new picture plans under its NAME number, so it never shares a slot with a kept picture', async () => {
+    const { resolveBodyImages, compressToWebp } = AstroPublisher._internals;
+    const imageGenerator = require('../services/content/image-generator');
+    const w1 = (await compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    // The post keeps one managed picture (body-<kept>) in its Alpha section; Beta has none yet.
+    const plannedFor = async (kept) => {
+      const keptSrc = `/images/blog/pest-control/my-post/body-${kept}.webp`;
+      const liveBody = `## Alpha\n\nAlpha lead prose.\n\n![Kept alt](${keptSrc})\n\n## Beta\n\nBeta prose.\n`;
+      gh.getFile.mockImplementation(async (path) => (path === `public${keptSrc}` ? { content: '', sha: 'kept', raw: { content: w1 } } : null));
+      gh.listDir.mockResolvedValue([{ type: 'file', name: `body-${kept}.webp`, path: `public${keptSrc}`, sha: 'kept' }]);
+      imageGenerator.planFor.mockClear();
+      const res = await resolveBodyImages({
+        frontmatter: { title: 'My Post' },
+        slug: 'pest-control/my-post',
+        body: liveBody,
+        existingFile: { path: 'src/content/blog/pest-control/my-post.mdx', file: { content: `---\ntitle: My Post\n---\n${liveBody}` } },
+      });
+      expect(res.body).toContain(keptSrc);
+      const slots = imageGenerator.planFor.mock.calls.map(([plan]) => plan).filter((plan) => plan.mode === 'blog-body').map((plan) => plan.index % 100);
+      expect(slots.length).toBeGreaterThan(0);
+      return { files: res.files.map((f) => f.path), slots: [...new Set(slots)] };
+    };
+    // Kept body-1: the new picture is body-2 and plans as slot 2 (the loop position alone would say slot 1 again).
+    expect(await plannedFor(1)).toEqual({ files: ['public/images/blog/pest-control/my-post/body-2.webp'], slots: [2] });
+    // Kept body-3 (an earlier refresh named it): body-1 is free again, and its slot 1 is not the kept picture's slot 3.
+    expect(await plannedFor(3)).toEqual({ files: ['public/images/blog/pest-control/my-post/body-1.webp'], slots: [1] });
+  });
+
   test('bodyImageRefs: a query or fragment on a local destination is resolved to its pathname — the committed file, not the suffixed URL, is what validates (GH r27)', () => {
     const { bodyImageRefs } = AstroPublisher._internals;
     const body = '![v](/images/blog/x/detail.webp?v=2)\n\n![f](/images/blog/x/other.webp#figure)\n\n![enc](/images/blog/x/what%3Fname.webp)';

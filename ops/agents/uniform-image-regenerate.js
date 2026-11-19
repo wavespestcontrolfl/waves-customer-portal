@@ -185,7 +185,10 @@ function planItem(t, publisher, audited) {
   const ref = hits[0]; const sec = sectionFor(body, ref.line);
   const heading = String(sec.heading || '').trim();
   return {
-    ...item, index: ref.ordinal + 1, ordinal: ref.ordinal,
+    // The planner slot is the name number (body-N = slot N), as in the
+    // publisher: the replacement keeps the cast its slot had. The ordinal
+    // still picks the framing.
+    ...item, index: Number(imagePath.match(/body-(\d+)\.webp$/i)[1]), ordinal: ref.ordinal,
     keyword: heading || item.keyword, topic: sec.lead || item.topic,
     avoid: item.heroAlt || fm.title,
   };
