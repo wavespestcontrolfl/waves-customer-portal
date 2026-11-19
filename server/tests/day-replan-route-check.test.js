@@ -95,6 +95,20 @@ describe('where the van is now (today)', () => {
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 560, completed: [], onSite })).toMatchObject({ clockMin: 630, source: 'on_site' });
   });
 
+  test("one visit's services with disconnected windows are two stops, as tracking keeps them", () => {
+    const am = { ...sibling('v1'), visit_id: 'visit-1', window_start: '09:00:00', window_end: '10:00:00' };
+    const pm = { ...sibling('v2'), visit_id: 'visit-1', window_start: '13:00:00', window_end: '14:00:00' };
+    expect(rc.physicalStops([am, pm])).toHaveLength(2);
+    expect(rc.physicalStops([am, { ...pm, window_start: '10:00:00', window_end: '11:00:00' }])).toHaveLength(1);
+    expect(rc.physicalStops([am, { ...pm, window_start: '10:00:00', window_end: '11:00:00', customer_id: 'cust-2' }])).toHaveLength(2);
+  });
+
+  test('a service of the on-site stop already done: the rest starts when it finished, not at the arrival', () => {
+    const onSite = rc.onSiteStays(rc.physicalStops([sibling('s2')]), new Map([['s2', '2026-11-19T15:00:00Z']])); // arrived 10:00
+    const completed = [{ completed_at: '2026-11-19T15:45:00Z', lat: 27.5, lng: -82.4 }]; // the first service done at 10:45
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed, onSite })).toMatchObject({ clockMin: 690, source: 'on_site' });
+  });
+
   test("today's stops: the progress status wins by id; on site, en route and the rest are split by physical stop", () => {
     const own = [stop('a', '09:00:00', null), stop('b', '11:00:00', null, { status: 'en_route' }), stop('c', '13:00:00', null)];
     const split = rc.todaysStops(own, [{ id: 'a', status: 'completed' }]);
@@ -115,8 +129,10 @@ describe('one tech-day', () => {
   test('counts each opening of a job slot or more', () => {
     const fig = rc.measureTechDay({ ...open, rows: [stop('a', '09:00:00', '10:00:00'), stop('b', '13:00:00', '14:00:00', { lat: 27.45, lng: -82.4 })] });
     expect(fig.openings.map((o) => o.kind)).toEqual(['wait', 'tail']);
-    expect(fig.openings.find((o) => o.kind === 'tail')).toEqual({ kind: 'tail', start: 840, min: 180, slots: 2 });
-    expect(fig).toMatchObject({ stops: 2, slots: 4 });
+    // 2 PM to 5 PM: the notice counts 2 whole slots; on the hour, 2 PM, then 4 PM would run past 5.
+    expect(fig.openings.find((o) => o.kind === 'tail')).toEqual({ kind: 'tail', start: 840, min: 180, slots: 1, noticeSlots: 2 });
+    expect(fig).toMatchObject({ stops: 2, noticeSlots: 4 });
+    expect(fig.slots).toBe(fig.openings.reduce((n, o) => n + o.slots, 0));
   });
 
   test('the stop the van is driving to comes first, even with a later window', () => {
@@ -132,7 +148,7 @@ describe('one tech-day', () => {
 
   test('a schedule block takes its time out of the openings', () => {
     const fig = rc.measureTechDay({ ...open, rows: [], blocks: [{ startMin: 720, endMin: 1020 }] });
-    expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 3 }]);
+    expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 2, noticeSlots: 3 }]); // 8:00, 10:00
   });
 
   test('a stop with no time or no place leaves the day unmeasured', () => {
@@ -178,21 +194,38 @@ describe('the totals and the ad rule shadow', () => {
 
   test('tech-blind: two technicians free at the same hours count that room once', () => {
     const TECH2 = '00000000-0000-4000-8000-000000000002';
-    const free = { openings: [{ kind: 'start', start: 540, min: 160, slots: 2 }], slots: 2 };
+    const free = { openings: [{ kind: 'start', start: 540, min: 200, slots: 2 }], slots: 2 }; // 9:00 and 11:00
     const days = [day('2026-11-20', free), { ...day('2026-11-20', free), technician_id: TECH2 }];
     expect(rc.summarize(days, '2026-11-19').totals.next.slots).toBe(4);
     expect(rc.summarize(days, '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
+  });
+
+  test('a job starts on the hour: a 10:30-11:50 opening holds none', () => {
+    expect(rc.hourSlots({ start: 630, min: 80 })).toBe(0);
+    expect(rc.hourSlots({ start: 600, min: 80 })).toBe(1);
+    expect(rc.blindSlots([{ start: 630, min: 80 }])).toBe(0);
   });
 
   test("tech-blind: every job fits one technician's opening (no job is handed from one to the other)", () => {
     expect(rc.blindSlots([{ start: 540, min: 120 }, { start: 660, min: 120 }])).toBe(2); // A 9-11, B 11-1: two, not three
   });
 
-  test('the 1% floor when no dispatch room exists in that window; an unmeasured day is counted, never as room', () => {
+  test('the 1% floor when no dispatch room exists in that window', () => {
     const { ad } = rc.summarize([
-      day('2026-11-19'), day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'), day('2026-11-24', { slots: 4 }),
+      day('2026-11-19'), day('2026-11-20'), day('2026-11-21'), day('2026-11-23'), day('2026-11-24', { slots: 4 }),
+      day('2026-11-25', { skip: 'UNTIMED_STOP' }), // past the window: not counted
     ], '2026-11-19');
-    expect(ad).toEqual({ decision: 'floor', slotsAhead: 0, techBlind: false, unmeasured: 1 });
+    expect(ad).toEqual({ decision: 'floor', slotsAhead: 0, techBlind: false, unmeasured: 0 });
+  });
+
+  test('unknown, never a floor, when no room is found and a day in the window could not be measured', () => {
+    const { ad } = rc.summarize([
+      day('2026-11-19'), day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
+    ], '2026-11-19');
+    expect(ad).toEqual({ decision: 'unknown', slotsAhead: 0, techBlind: false, unmeasured: 1 });
+    // Room found elsewhere: full, with the unmeasured day named.
+    expect(rc.summarize([day('2026-11-19', { slots: 1 }), day('2026-11-20', { skip: 'FAILED' })], '2026-11-19').ad)
+      .toMatchObject({ decision: 'full', unmeasured: 1 });
   });
 });
 

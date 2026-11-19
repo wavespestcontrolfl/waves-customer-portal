@@ -6,10 +6,12 @@
  * route and every staffed day up to STAFFED_DAYS staffed days ahead (at least DEMAND_DAYS calendar days, for the 7-day
  * demand view), for each technician who works that day. It records one row in route_check_runs:
  *   - each opening that holds a new job and its drive (close-gaps SLOT_MIN), and the jobs dispatch can place there
- *     (`slots`). While the occupancy check is tech-blind, a date's room is counted once across technicians;
+ *     (`slots`: each starts on the hour, AGENTS.md; `noticeSlots`: the 07:05 notice's own whole-slot count, to compare).
+ *     While the occupancy check is tech-blind, a date's room is counted once across technicians;
  *   - what the ad budget rule WOULD do (`ad_shadow`): full budget while dispatch room exists today or in the next
- *     STAFFED_DAYS staffed days, the 1% floor when none. It changes no budget. Every opening's start and length are
- *     stored, so another rule can be recounted from the rows.
+ *     STAFFED_DAYS staffed days, the 1% floor when none, and `unknown` when none is found but one of those days could
+ *     not be measured. It changes no budget. Every opening's start and length are stored, so another rule can be
+ *     recounted from the rows.
  * It measures only: nothing here changes a visit, a time, a budget or a message. What a customer could book online
  * (the /book page's own rules) is a separate follow-up measurement.
  * It runs every hour, not only while a technician is clocked in: no technician clocks in yet (time_entries had no row
@@ -49,6 +51,7 @@ const DEMAND_DAYS = 7;
 const SCAN_DAYS = 14;
 
 const weekday = (day) => new Date(`${day}T12:00:00Z`).getUTCDay();
+const ceilHour = (min) => Math.ceil(min / 60) * 60;
 const sum = (list, pick) => list.reduce((total, item) => total + pick(item), 0);
 
 /** The ET minute of a timestamp, or null when it is not on `day` (ET). */
@@ -67,31 +70,42 @@ const hasCoords = (row) => {
 };
 
 /**
- * Where the van is and when it is free on `day` (pure). completed: the day's completed rows (one with no place is
- * ignored); onSite: the stops on site now, one per physical stop ({ arrived_at, stayMin, lat, lng }), busy until the
- * stay ends and never before now (a job running long). Returns { origin, clockMin, source }; source 'start_point' when
- * nothing is done or under way.
+ * Where the van is and when it is free on `day` (pure). completed: the day's completed rows (one with no place sets
+ * no place); onSite: the stops on site now, one per physical stop ({ arrived_at, stayMin, lat, lng }; stayMin = the
+ * services not yet done). The van is at that stop since its arrival, so a service finished after the arrival was
+ * done there: the rest starts then. Busy until the stay ends and never before now (a job running long). Returns
+ * { origin, clockMin, source }; source 'start_point' when nothing is done or under way.
  */
 function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
+  const doneMins = completed.map((row) => etMinuteOn(row.completed_at, day)).filter((m) => m != null);
+  const lastDone = doneMins.length ? Math.max(...doneMins) : -Infinity;
+  const onSiteClock = (row) => Math.max(nowMin, Math.max(etMinuteOn(row.arrived_at, day) ?? nowMin, lastDone) + row.stayMin);
   const seen = [
     ...completed.filter(hasCoords).map((row) => ({ row, clockMin: etMinuteOn(row.completed_at, day), source: 'completed' })),
-    ...onSite.map((row) => ({ row, clockMin: Math.max(nowMin, (etMinuteOn(row.arrived_at, day) ?? nowMin) + row.stayMin), source: 'on_site' })),
+    ...onSite.map((row) => ({ row, clockMin: onSiteClock(row), source: 'on_site' })),
   ].filter((s) => s.clockMin != null);
   const best = seen.reduce((top, s) => (!top || s.clockMin > top.clockMin ? s : top), null);
   if (!best) return { origin: home, clockMin: departureMin, source: 'start_point' };
   return { origin: { lat: Number(best.row.lat), lng: Number(best.row.lng) }, clockMin: best.clockMin, source: best.source };
 }
 
+const sameStopTuple = (a, b) => String(a.customer_id) === String(b.customer_id) && String(a.property_id || '') === String(b.property_id || '');
+
 /**
  * The physical stops of a day's rows (pure), in promised-window order: each is a list of co-visit groups (app-sim
- * coVisitGroups), and the groups of one visit (one visit_id, which promisedWindowOrder keeps adjacent) are one stop.
+ * coVisitGroups). Groups of one visit (one visit_id, which promisedWindowOrder keeps adjacent) are one stop on
+ * tracking's own boundary (visit-groups.js): same customer and property, and windows that form one connected chain.
+ * A visit with a morning and an afternoon service is two stops, as tracking keeps them.
  */
 function physicalStops(rows) {
+  const { windowedMembersConnected } = require('../visit-groups');
   const stops = [];
   for (const group of coVisitGroups(promisedWindowOrder(rows))) {
     const last = stops.at(-1);
+    const sofar = last ? last.flat() : [];
     const visitId = group[0].visit_id;
-    const sameVisit = last && visitId != null && last.flat().some((r) => r.visit_id != null && String(r.visit_id) === String(visitId));
+    const sameVisit = visitId != null && sofar.some((r) => r.visit_id != null && String(r.visit_id) === String(visitId))
+      && group.every((r) => sofar.every((m) => sameStopTuple(r, m))) && windowedMembersConnected([...sofar, ...group]);
     if (sameVisit) last.push(group);
     else stops.push([group]);
   }
@@ -110,15 +124,22 @@ function onSiteStays(stops, arrivedById) {
   });
 }
 
+/** Jobs that fit one opening (pure): each a whole SLOT_MIN slot (job and drive) whose service starts on the hour. */
+function hourSlots(o) {
+  let count = 0;
+  for (let at = ceilHour(o.start); at + SLOT_MIN <= o.start + o.min; at = ceilHour(at + SLOT_MIN)) count += 1;
+  return count;
+}
+
 /**
  * Dispatch jobs across several technicians' openings when one booking holds its time for all of them (pure): each job
- * fits wholly inside one opening and no two overlap in time. Earliest-finish placement, which is the largest count.
+ * starts on the hour, fits wholly inside one opening, and no two overlap in time. Earliest-finish placement.
  */
 function blindSlots(openings) {
   let cursor = -Infinity;
   let count = 0;
   for (;;) {
-    const finishes = openings.map((o) => Math.max(o.start, cursor) + SLOT_MIN).filter((f, i) => f <= openings[i].start + openings[i].min);
+    const finishes = openings.map((o) => ceilHour(Math.max(o.start, cursor)) + SLOT_MIN).filter((f, i) => f <= openings[i].start + openings[i].min);
     if (!finishes.length) return count;
     count += 1;
     cursor = Math.min(...finishes);
@@ -154,8 +175,8 @@ function unmeasurable(rows) {
  * One tech-day's openings (pure). rows: the stops still to do, in any order (simulated in promised-window order, the
  * clock baseline), after `first` (the stop the van is driving to now: no opening before it, since a job there would
  * go ahead of that customer); blocks: the technician's schedule blocks; held: booked time, as intervals; origin:
- * where the van sets off; end: where it returns (the start point). The count per opening is the 07:05 notice's own
- * (close-gaps: whole SLOT_MIN slots), so the two can be compared.
+ * where the van sets off; end: where it returns (the start point). slots: jobs that start on the hour (hourSlots);
+ * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
  */
 function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, departureMin, openMin, closeMin }) {
   const all = [...first, ...rows];
@@ -168,13 +189,15 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
   const openings = open.filter((b) => b.min >= SLOT_MIN && !(first.length && b.kind === 'start'))
-    .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min), slots: Math.floor(b.min / SLOT_MIN) }));
+    .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
+    .map((o) => ({ ...o, slots: hourSlots(o), noticeSlots: Math.floor(o.min / SLOT_MIN) }));
   return {
     stops: all.length,
     driveMin: Math.round(sim.travelMin),
     endMin: Math.round(sim.serviceFinishMin),
     openings,
     slots: sum(openings, (o) => o.slots),
+    noticeSlots: sum(openings, (o) => o.noticeSlots),
   };
 }
 
@@ -223,9 +246,15 @@ function summarize(days, today, { techBlind = false } = {}) {
   const lastDemand = dayAfter(today, DEMAND_DAYS);
   const week = pick((d) => d.date > today && d.date <= lastDemand);
   const ahead = todayFig.slots + next.slots;
+  // A staffed day in the rule's window (today and the next staffed days) that could not be measured: with no room
+  // found elsewhere, the room is unknown, never a measured floor.
+  const unmeasured = days.filter((d) => d.staffed && d.skip && (d.date === today || staffedDates.includes(d.date))).length;
+  let decision = 'floor';
+  if (ahead > 0) decision = 'full';
+  else if (unmeasured) decision = 'unknown';
   return {
     totals: { today: todayFig, next: { dates: staffedDates, ...next }, week: { through: lastDemand, ...week } },
-    ad: { decision: ahead > 0 ? 'full' : 'floor', slotsAhead: ahead, techBlind, unmeasured: days.filter((d) => d.staffed && d.skip).length },
+    ad: { decision, slotsAhead: ahead, techBlind, unmeasured },
   };
 }
 
@@ -373,7 +402,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, blindSlots, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, blindSlots, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
     etMinuteOn, STAFFED_DAYS, DEMAND_DAYS,
   },
 };
