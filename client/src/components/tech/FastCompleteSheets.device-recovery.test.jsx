@@ -256,6 +256,40 @@ test.each([
   expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
 });
 
+// A correctable rejection whose saved copy this device could not clear: the
+// off-route view has no form to fix it, so it keeps the copy to discard
+// (never to retry), under the server's reason, until the delete lands.
+test('the lawn visit sheet on an off-route saved attempt keeps a rejected copy that will not clear, to discard', async () => {
+  const body = { idempotencyKey: 'lawn-off-kept', technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-off', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const message = 'A product on this completion is not on the lawn list.';
+  let rejectSend;
+  const request = vi.fn((path) => {
+    if (!path.endsWith('/complete')) return Promise.reject(Object.assign(new Error('Not this sheet'), { status: 404 }));
+    return new Promise((_resolve, reject) => { rejectSend = () => reject(Object.assign(new Error(message), { status: 422, code: 'invalid_product' })); });
+  });
+  render(<FastCompleteLawnSheet service={{ id: 'visit-off', recoveryOnly: true }} operatorId="tech-a" request={request} catalog={[]}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+  await waitFor(() => expect(rejectSend).toBeTypeOf('function'));
+  const store = globalThis.indexedDB;
+  globalThis.indexedDB = undefined;
+  try {
+    rejectSend();
+    expect(await screen.findByText(/could not clear its saved copy of this completion/)).toBeInTheDocument();
+  } finally { globalThis.indexedDB = store; }
+  expect(screen.getByText(message)).toBeInTheDocument();
+  expect(screen.queryByText(/No saved completion is left/)).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Retry completion/ })).not.toBeInTheDocument();
+  expect((await getFastCompletionAttempt('visit-off', 'tech-a')).attempt.body).toEqual(body);
+  fireEvent.click(screen.getByRole('button', { name: 'Discard saved retry' }));
+  await waitFor(async () => expect((await getFastCompletionAttempt('visit-off', 'tech-a')).attempt).toBeNull());
+  expect(await screen.findByText(/No saved completion is left for this visit/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Discard saved retry' })).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});
+
 test('the lawn visit sheet on an off-route saved attempt shows a notice after a discard, never a fresh form or the hand-off', async () => {
   const body = { idempotencyKey: 'lawn-off-key', technicianNotes: 'Lawn work' };
   await putFastCompletionAttempt('visit-off', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });

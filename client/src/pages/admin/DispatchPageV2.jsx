@@ -851,14 +851,20 @@ export default function DispatchPageV2({
   // jobs here as ?completeService=<scheduledServiceId> instead of alert-
   // bouncing. The param is consumed once (deleted immediately, same shape
   // as ?customer below); the open itself happens after handleComplete is
-  // defined, keyed off this ref.
+  // defined, keyed off this ref. The link opens the full form (a Fast
+  // Complete sheet's "Full form" escape). With &completeSheet=1 (the Today
+  // page, for the sheet only this page has: the Waves Assessment) it opens
+  // the visit as the Complete button does.
   const pendingCompleteIdRef = useRef(null);
+  const pendingCompleteSheetRef = useRef(false);
   useEffect(() => {
     const id = searchParams.get("completeService");
     if (!id) return;
     pendingCompleteIdRef.current = id;
+    pendingCompleteSheetRef.current = searchParams.get("completeSheet") === "1";
     const next = new URLSearchParams(searchParams);
     next.delete("completeService");
+    next.delete("completeSheet");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -1101,6 +1107,8 @@ export default function DispatchPageV2({
     const id = pendingCompleteIdRef.current;
     if (!id || !data) return;
     pendingCompleteIdRef.current = null;
+    const asComplete = pendingCompleteSheetRef.current;
+    pendingCompleteSheetRef.current = false;
     const svc = (data.services || []).find((s) => String(s.id) === String(id));
     if (!svc) {
       alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
@@ -1115,7 +1123,7 @@ export default function DispatchPageV2({
       // idempotency machinery replays it instead of double-submitting.
       alert(`That visit is already ${svc.status} — nothing to complete.`);
     } else {
-      handleComplete(svc, { fullForm: true });
+      handleComplete(svc, { fullForm: !asComplete });
     }
   }, [data, handleComplete]);
 

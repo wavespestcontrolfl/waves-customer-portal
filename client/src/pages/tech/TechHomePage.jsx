@@ -58,8 +58,7 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import FastCompleteLawnSheet from '../../components/tech/FastCompleteLawnSheet';
 import {
-  isProjectBackedCompletion, projectReportClosed, shouldOpenLawnFastComplete, shouldOpenLawnReserviceFastComplete,
-  shouldOpenSpecialtyFastComplete, shouldOpenTreeShrubFastComplete,
+  fastCompleteSheetFor, isProjectBackedCompletion, projectReportClosed,
 } from '../../lib/dispatchCompletionRouting';
 import { lawnSheetService } from './lawnSheetService';
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
@@ -181,8 +180,11 @@ function usesDispatchCompletion(service) {
 // refuse the deep-link (Codex P1): the completion endpoint would accept a
 // re-submission with a fresh idempotency key, minting duplicate
 // artifacts/invoices/SMS.
+// The link opens the full form (a Fast Complete sheet's "Full form" escape).
+// `sheet` adds &completeSheet=1: Dispatch opens the visit as its Complete
+// button does, for the sheet only Dispatch has (the Waves Assessment).
 const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
-function openTypedCompletion(service) {
+function openTypedCompletion(service, { sheet = false } = {}) {
   const status = String(service?.status || "");
   if (TERMINAL_SERVICE_STATUSES.has(status) && !service?.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) {
     alert(`This visit is already ${status} — nothing to complete.`);
@@ -190,7 +192,8 @@ function openTypedCompletion(service) {
   }
   // On the visit's own day: Dispatch looks for the visit in the day it loads,
   // and a Today page left open past midnight would send it to the next day.
-  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&completeService=${encodeURIComponent(service.id)}`);
+  const asComplete = sheet ? '&completeSheet=1' : '';
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&completeService=${encodeURIComponent(service.id)}${asComplete}`);
 }
 
 // The day a Dispatch deep link opens for a visit: its own date, else today.
@@ -883,19 +886,30 @@ export default function TechHomePage({ section = 'today' }) {
         ? { ...open, ...(read || { catalogError: LAWN_CATALOG_ERROR }) }
         : current)));
   }, []);
+  // The one-screen sheet admin Dispatch's own decision picks for a visit
+  // (fastCompleteSheetFor, in handleComplete), opened on this page: the lawn
+  // re-service, tree & shrub and lawn sheets, then the report-flow sheet (a
+  // lane visit, or a typed visit the reader reads, with the station checks
+  // under GATE_STATION_FAST_COMPLETE). The Waves Assessment's sheet is only
+  // on Dispatch: its link asks Dispatch to open the visit as its Complete
+  // button does. No sheet: the Dispatch completion form.
+  const openDispatchChoice = useCallback((service) => {
+    const kind = fastCompleteSheetFor(service, { stationMapOff, stationSheetOn });
+    const open = {
+      lawn_reservice: setLawnReserviceFastService, tree_shrub: setTreeShrubFastService, lawn: openLawnSheet, pest: setFastCompleteService,
+    }[kind];
+    if (open) open(service);
+    else openTypedCompletion(service, { sheet: kind === 'assessment' });
+  }, [stationMapOff, stationSheetOn, openLawnSheet]);
   // A visit that is neither typed nor pest control, routed as admin Dispatch
   // routes it (handleComplete): a visit that completes through a project opens
-  // the project editor, a lawn visit opens the lawn sheet, a lane visit under
-  // the lane voice fill opens the report-flow sheet, and any other visit opens
-  // the Dispatch completion form. The project editor is only for a
-  // project-backed visit: for any other, it made a project, not the visit's
-  // own record.
+  // the project editor; any other takes Dispatch's own choice above. The
+  // project editor is only for a project-backed visit: for any other, it made
+  // a project, not the visit's own record.
   const openUntypedVisit = useCallback((service) => {
     if (isProjectBackedCompletion(service)) openProjectOrContinue(service);
-    else if (shouldOpenLawnFastComplete(service)) openLawnSheet(service);
-    else if (shouldOpenSpecialtyFastComplete(service, { stationMapOff, stationSheetOn })) setFastCompleteService(service);
-    else openTypedCompletion(service);
-  }, [stationMapOff, stationSheetOn, openProjectOrContinue, openLawnSheet]);
+    else openDispatchChoice(service);
+  }, [openProjectOrContinue, openDispatchChoice]);
   // A sent or closed linked report ends only a visit that completes through
   // its project (isProjectBackedCompletion, as Dispatch asks it): a service-
   // report visit with a leftover legacy project still opens its own sheet or
@@ -915,19 +929,13 @@ export default function TechHomePage({ section = 'today' }) {
     else setRecapService(service);
   }, []);
   // A typed visit or a whole-visit closeout, in admin Dispatch's order
-  // (handleComplete, then fastCompleteSheetFor): a closeout or a project-backed
-  // visit takes the Dispatch deep link, which handles those first; then the
-  // lawn re-service, tree & shrub and lawn sheets; then the report-flow sheet
-  // for a typed visit the reader reads (with the station checks under
-  // GATE_STATION_FAST_COMPLETE); everything else is the deep link, as before.
+  // (handleComplete): a closeout or a project-backed visit takes the Dispatch
+  // deep link, which handles those first; any other takes Dispatch's own
+  // choice (openDispatchChoice).
   const openTypedVisit = useCallback((service) => {
     if (closesOutAsVisit(service) || isProjectBackedCompletion(service)) openTypedCompletion(service);
-    else if (shouldOpenLawnReserviceFastComplete(service)) setLawnReserviceFastService(service);
-    else if (shouldOpenTreeShrubFastComplete(service)) setTreeShrubFastService(service);
-    else if (shouldOpenLawnFastComplete(service)) openLawnSheet(service);
-    else if (shouldOpenSpecialtyFastComplete(service, { stationMapOff, stationSheetOn })) setFastCompleteService(service);
-    else openTypedCompletion(service);
-  }, [stationMapOff, stationSheetOn, openLawnSheet]);
+    else openDispatchChoice(service);
+  }, [openDispatchChoice]);
   // A saved attempt on this device opens the sheet that made it, before any
   // normal eligibility decision: a successful /complete may already have made
   // the row terminal while its saved body still needs the same-key retry.

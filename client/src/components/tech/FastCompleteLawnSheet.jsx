@@ -185,6 +185,7 @@ const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different propert
 const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
 // An off-route saved attempt's row once that attempt is gone (discarded, or finished elsewhere).
 const RECOVERY_ONLY_NOTICE = 'No saved completion is left for this visit. To complete it, close this and open the visit from its day on the schedule.';
+const REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here, then open the visit from its day on the schedule.';
 const REFUSAL_MESSAGES = {
   lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
   lawn_fast_not_eligible: NOT_ON_THIS_SHEET_MESSAGE,
@@ -1475,14 +1476,23 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
 // An off-route saved attempt's row holds only the visit id and the attempt's
 // summary: no customer, day, property or billing facts for a fresh completion.
 // Past the saved-attempt view, an error is the server's refusal of its retry
-// (refused for good, or a correctable rejection that cleared the copy): its
-// reason stays above the way back to the schedule.
+// (refused for good, or a correctable rejection): its reason stays above the
+// way back to the schedule. A rejected copy this device could not clear
+// (`rejectedCopy`) stays here to discard, never to retry: with no form to fix
+// it, nothing else would remove it.
 function RecoveryOnlyView({ submission }) {
   return (
-    <>
+    <div className="tech-visit-body">
       {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
-      <ActionFeedback className="tech-visit-feedback">{RECOVERY_ONLY_NOTICE}</ActionFeedback>
-    </>
+      <ActionFeedback className="tech-visit-feedback">{submission.rejectedCopy ? REJECTED_COPY_NOTICE : RECOVERY_ONLY_NOTICE}</ActionFeedback>
+      {submission.rejectedCopy && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={submission.submitting} onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -254,6 +254,27 @@ it('the lawn sheet offers Take payment now on its saved view here', async () => 
   expect(await screen.findByTestId('lawn-sheet')).toHaveAttribute('data-collect', 'true');
 });
 
+// A Waves Assessment: its one-screen sheet is only on Dispatch, so its link
+// asks Dispatch to open the visit as its Complete button does
+// (completeSheet=1). Typed or not, Dispatch's own decision picks it; with the
+// gate off it is the plain link to the completion form.
+const ASSESSMENT = {
+  serviceType: 'Waves Assessment', serviceTypeRaw: 'Waves Assessment', lawnFastCompleteEnabled: false,
+  completionProfile: { category: 'inspection', serviceKey: 'lawn_inspection', companions: [], findingsType: null, projectBacked: false, requiresProject: false },
+};
+it.each([
+  ['eligible', { assessmentFastCompleteEnabled: true }, '&completeSheet=1'],
+  ['eligible and typed', { assessmentFastCompleteEnabled: true, completionProfile: { ...ASSESSMENT.completionProfile, findingsType: 'lawn_assessment' } }, '&completeSheet=1'],
+  ['with the gate off', { assessmentFastCompleteEnabled: false }, ''],
+])('a Waves Assessment (%s) goes to Dispatch, which opens its own sheet when the gate allows', async (_label, overrides, param) => {
+  rows = [row('svc-as', { ...ASSESSMENT, ...overrides })];
+  mount();
+  await openFromTools();
+  await waitFor(() => expect(assign).toHaveBeenCalledWith(`${DISPATCH_FORM('svc-as')}${param}`));
+  expect(screen.queryByText(/Project editor for/)).not.toBeInTheDocument();
+  expect(screen.queryByTestId('lawn-sheet')).not.toBeInTheDocument();
+});
+
 it('a typed one-time lawn treatment opens the lawn sheet too, as Dispatch opens it', async () => {
   rows = [row('svc-typed-lawn', { serviceType: 'Lawn Treatment', serviceTypeRaw: 'One-Time Lawn Treatment', completionProfile: TYPED_LAWN })];
   mount();
