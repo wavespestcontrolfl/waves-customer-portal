@@ -655,6 +655,30 @@ describe('customer-question manifest 2026-11-18', () => {
     }
   });
 
+  // CQ10's Waves section gives what the pest identifier tells a customer with
+  // a honey bee wall colony: a referral to a bee removal and relocation
+  // specialist, with no Waves inspection offer (pre-push audit).
+  test('CQ10 gives the honey bee referral that the pest identifier gives', () => {
+    const { referralFor } = require('../services/photo-id-v2/pest-engine');
+    const colony = require('../data/species-catalog-v1/entries/wasps-bees.json')
+      .find((entry) => entry.slug === 'honey-bee-wall-colony' && entry.service);
+    expect(referralFor(colony)).toMatchObject({ kind: 'bee_relocation' });
+    expect(referralFor(colony).text).toContain('bee removal/relocation specialist');
+    const waves = manifest.briefs.find((b) => b.id === 'CQ10').outline
+      .find((item) => item.startsWith('What Waves does and does not do:'));
+    expect(waves).toContain('Waves refers you to a licensed bee removal and relocation specialist');
+    expect(waves).not.toMatch(/inspect/i);
+  });
+
+  // MedlinePlus encyclopedia pages are A.D.A.M. content. Their terms bar
+  // automated extraction and any AI use without written consent, and
+  // editorial review sends each source's text to a model (pre-push audit).
+  test('no brief cites a MedlinePlus encyclopedia page', () => {
+    const cited = ids.flatMap((id) => composeSeedBrief(manifest, id).voice_constraints.operator_brief.required_sources);
+    expect(cited.length).toBeGreaterThan(0);
+    expect(cited.filter((url) => /medlineplus\.gov\/ency\//i.test(url))).toEqual([]);
+  });
+
   // Global rule 3 bans prices outright. The completion gate and the publish
   // guardrails turn a brief's ban on only for the wording they recognize
   // ("no ... prices"), and under a ban nothing is exempt, so a price framed
