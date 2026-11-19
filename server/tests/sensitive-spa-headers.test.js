@@ -10,6 +10,7 @@ const {
   isContractPath,
   isAppointmentPath,
   isCareersInterviewPath,
+  isCareersOfferPath,
   isInspectionPath,
 } = require('../utils/sensitive-spa-headers');
 
@@ -110,6 +111,18 @@ describe('sensitive SPA document headers', () => {
     expect(isCareersInterviewPath(`/careers/interview/${'A'.repeat(64)}`)).toBe(false);
     expect(isCareersInterviewPath('/careers/interview/not-a-token')).toBe(false);
     expect(isCareersInterviewPath('/careers')).toBe(false);
+  });
+
+  test('marks the careers job-offer token page noindex, no-referrer and no-store, and only the full 64-hex path', () => {
+    const res = mockResponse();
+    applySensitiveSpaHeaders(`/careers/offer/${'a'.repeat(64)}`, res);
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(isCareersOfferPath(`/careers/offer/${'a'.repeat(64)}/`)).toBe(true);
+    expect(isCareersOfferPath(`/careers/offer/${'A'.repeat(64)}`)).toBe(false);
+    expect(isCareersOfferPath('/careers/offer/not-a-token')).toBe(false);
+    expect(isCareersOfferPath(`/api/public/careers/offer/${'a'.repeat(64)}`)).toBe(false);
   });
 
   test('recognizes only full lawn-report 32-hex token document paths', () => {
