@@ -45,7 +45,7 @@ describe('labelAnimalWarnings: which lines each kind gets', () => {
     const [w] = labelAnimalWarnings([{ name: '', type: 'Beehives' }]);
     expect(w.kind).toBe('beehives');
     expect(w.names).toEqual(['no name']);
-    expect(w.lines[0]).toBe('Toxic to bees: Talstar P, Talak, LESCO Crosscheck Plus, Arena, Merit 2F, Alpine, Tetrino. No contact with blooming plants while bees forage: Arena, Merit 2F. Tetrino: no contact with blooming plants; manage flowering weeds for 10 days; keep a 10 ft downwind buffer when blooming plants are within 10 ft of the downwind edge.');
+    expect(w.lines[0]).toBe('Toxic to bees: Talstar P, Talak, LESCO Crosscheck Plus, Arena, Merit 2F, Alpine, Tetrino. No contact with blooming plants while bees forage: Arena, Merit 2F, LESCO Crosscheck Plus. Tetrino: no contact with blooming plants; manage flowering weeds for 10 days; keep a 10 ft downwind buffer when blooming plants are within 10 ft of the downwind edge.');
   });
 
   test('dogs, cats, Other, blank and unknown kinds get no warning', () => {

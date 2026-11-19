@@ -349,6 +349,35 @@ describe('house bifenthrin crosscheck migration: up', () => {
     expect(byId(knex, 'lawn_protocol_products', 'r1').product_id).toBe(CROSS);
     expect(byId(knex, 'services', 's1').default_products).toEqual(['LESCO Crosscheck Plus']);
   });
+
+  test('a repo-built catalog with both Talak names: the links on each move, and down returns each to its own row', async () => {
+    const SHORT = 'dddddddd-0000-4000-8000-000000000004';
+    const tables = baseTables();
+    tables.products_catalog.push({ id: SHORT, name: 'Atticus Talak' });
+    tables.lawn_protocol_products.push({ id: 'r5', lawn_protocol_window_id: 'w1', product_id: SHORT, product_name: 'Atticus Talak', role: 'x', rate_per_1000: 1, updated_at: 't0' });
+    tables.services.push({ id: 's6', name: 'Mosquito Seed Service', default_products: ['Atticus Talak', 'Scion Insecticide'] });
+    tables.product_aliases.push({ id: 'a7', product_id: SHORT, alias_name: 'Talstar P', vendor_id: null });
+    tables.service_product_usage.push(
+      { id: 'u5', product_id: SHORT, service_type: 'Mosquito Treatment - Essential Barrier', usage_amount: 1 },
+      { id: 'u6', product_id: SHORT, service_type: 'Mosquito', usage_amount: 1 },
+    );
+    knex = makeKnex(tables);
+    const start = snapshot(knex);
+    await migration.up(knex);
+    expect(byId(knex, 'lawn_protocol_products', 'r5')).toMatchObject({ product_id: CROSS, product_name: 'LESCO Crosscheck Plus' });
+    expect(byId(knex, 'services', 's6').default_products).toEqual(['LESCO Crosscheck Plus', 'Scion Insecticide']);
+    expect(byId(knex, 'product_aliases', 'a7')).toBeUndefined(); // 'Talstar P' already moved from the long-name row
+    expect(byId(knex, 'service_product_usage', 'u5').product_id).toBe(CROSS);
+    expect(byId(knex, 'service_product_usage', 'u6')).toBeUndefined(); // Mosquito already maps Crosscheck (moved from u1)
+    for (const table of ['lawn_protocol_products', 'product_aliases', 'service_product_usage']) {
+      expect(knex.tables[table].filter((row) => row.product_id === TALAK || row.product_id === SHORT)
+        .filter((row) => table !== 'product_aliases' || row.alias_name !== 'Talak 7.9 F')).toEqual([]);
+    }
+    await migration.down(knex);
+    const { audit_log: _auditLog, ...rest } = snapshot(knex);
+    const { audit_log: _startLog, ...startRest } = start;
+    expect(byIdOrder(rest)).toEqual(byIdOrder(startRest));
+  });
 });
 
 describe('house bifenthrin crosscheck migration: missing products and tables', () => {

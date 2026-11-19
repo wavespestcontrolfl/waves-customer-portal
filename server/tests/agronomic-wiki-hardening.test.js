@@ -707,6 +707,49 @@ describe('updateProductPage', () => {
     expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
   });
 
+  test('a recorded name counts only whole: an outcome that names only Headway G is not on the Headway page', async () => {
+    const state = useDb({
+      products_catalog: [{ id: 'pc-headway', name: 'Headway' }],
+      product_aliases: [],
+      treatment_outcomes: [
+        { id: 'o-g', service_record_id: null, treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'Headway G' }] },
+        { id: 'o-own', service_record_id: null, treatment_date: '2026-07-05', grass_track: 'st_augustine', products_applied: [{ name: ' headway ' }] },
+      ],
+      service_products: [],
+      knowledge_entries: [],
+    });
+    await wiki.updateProductPage('Headway');
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids)).toEqual(['o-own']);
+  });
+
+  test('a stored product id names the page after its alias moved: the page refresh and the stale flag both reach it', async () => {
+    const CATALOG = { 'pc-talak': 'Atticus Talak 7.9 F', 'pc-cross': 'LESCO Crosscheck Plus' };
+    const responses = () => ({
+      products_catalog: (rec) => {
+        const id = rec.ops.find(([m, a]) => m === 'where' && a[0]?.id)?.[1][0].id;
+        return id && CATALOG[id] ? [{ id, name: CATALOG[id] }] : []; // "Talstar P" is no catalog name
+      },
+      // after the switch the alias names Crosscheck
+      product_aliases: (rec) => (rec.ops.some(([m, a]) => m === 'whereRaw' && a[1]?.[0] === 'talstar p') ? [{ product_id: 'pc-cross' }] : []),
+      service_products: [{ service_record_id: 'sr-1', product_name: 'Talstar P', product_id: 'pc-talak' }],
+      treatment_outcomes: [{ id: 'o-1', service_record_id: 'sr-1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] }],
+      knowledge_entries: [],
+    });
+    // The id the visit stored decides the page: Talak's, not the alias's new product.
+    let state = useDb(responses());
+    await wiki.updateProductPage('Talstar P', { productId: 'pc-talak' });
+    expect(state.inserts.knowledge_entries[0].slug).toBe('product/atticus-talak-7-9-f');
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids)).toEqual(['o-1']);
+
+    // The stale flag reaches the stored product's page and the recorded name's page.
+    state = useDb(responses());
+    const flagged = await wiki.markOutcomePagesStale({ id: 'o-1', service_record_id: 'sr-1', products_applied: JSON.stringify([{ name: 'Talstar P' }]) });
+    expect(flagged).toBe(1);
+    const rec = state.calls.knowledge_entries.find((r) => r.ops.some(([m]) => m === 'whereIn'));
+    const whereIn = rec.ops.find(([m]) => m === 'whereIn');
+    expect([...whereIn[1][1]].sort()).toEqual(['product/atticus-talak-7-9-f', 'product/lesco-crosscheck-plus']);
+  });
+
   test('a failed refresh of a real canonical page does not absorb variants', async () => {
     const responses = productResponses();
     // canonical page exists with REAL (non-stub) content

@@ -215,12 +215,16 @@ describe('a v13 yearly amount cap for one service line', () => {
     expect(share).toBeCloseTo(0.5 * 12, 6);
   });
 
-  test('the application being judged passes unjudged only when its visit is known pest, mosquito or termite work AND its method is not lawn work', () => {
+  test('the application being judged passes unjudged only when its visit is known pest, mosquito or termite work AND it is a perimeter spray', () => {
     for (const serviceType of ['Quarterly Pest Control Service', 'Pest Control Re-Service', 'Mosquito Treatment - Essential Barrier', 'Slab Pre-Treat Termite Service']) {
       expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: 'perimeter_spray' })).toBe(false);
-      // The visit type alone does not say the work is off the lawn, and a broadcast is lawn work on any visit.
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: ' Perimeter_Spray ' })).toBe(false);
+      // The visit type alone does not say the work is off the lawn; a broadcast is lawn work on any visit; a spot treatment can land
+      // on turf (an ant mound in the lawn); a method the cap does not know may be anything.
       expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType })).toBe(true);
-      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: 'broadcast_spray' })).toBe(true);
+      for (const applicationMethod of ['broadcast_spray', 'granular_broadcast', 'spot_treatment', 'foliar_spray', 'soil_drench', 'mystery']) {
+        expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod })).toBe(true);
+      }
     }
     for (const serviceType of ['Every 6 Weeks Lawn Care Service', 'Lawn Care Visit #4 + Quarterly Pest Control', 'Service Visit', null, undefined]) {
       expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType, applicationMethod: 'perimeter_spray' })).toBe(true);

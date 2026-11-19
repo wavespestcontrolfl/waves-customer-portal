@@ -167,12 +167,14 @@ function countsForServiceLine(row, limit) {
 
 // Whether the application being judged is work of the cap's service line. A cap on one line's applications (history_service_line)
 // does not judge another line's work: a perimeter spray of the house bifenthrin is not a lawn application. It passes unjudged only
-// when the caller names both the visit type (ctx.serviceType), known to be another line's work, and the method (ctx.applicationMethod),
-// one that is not lawn work (a perimeter or spot spray, not a broadcast). A caller that names neither (the lawn plan, the lawn brief,
+// when the caller names both the visit type (ctx.serviceType), known to be another line's work, and a method that cannot put it on
+// the lawn: for the lawn line, only a perimeter spray (a band at the foundation). A spot treatment can land on turf (an ant mound in
+// the lawn) and an unknown method can be anything, so both are judged. A caller that names neither (the lawn plan, the lawn brief,
 // a status read), or only one, is judged.
+const OFF_TURF_METHODS = new Set(['perimeter_spray']);
 function judgedForServiceLine(limit, ctx) {
   if (!limit.history_service_line || !ctx.serviceType || !ctx.applicationMethod) return true;
-  if (limit.history_service_line === 'lawn' && recordsLawnWork(null, ctx.applicationMethod)) return true;
+  if (limit.history_service_line === 'lawn' && !OFF_TURF_METHODS.has(String(ctx.applicationMethod).trim().toLowerCase())) return true;
   return !knownOtherServiceLine(ctx.serviceType, limit.history_service_line);
 }
 

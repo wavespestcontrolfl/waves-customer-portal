@@ -3,8 +3,10 @@
  * every default for NEW work; this migration moves the data rows that pick the product for new work. Atticus Talak 7.9 F stays a
  * valid catalog product (old records still render, leftover stock can still be recorded): its catalog row is never touched.
  *
- * Both products are found by exact catalog name: LESCO Crosscheck Plus, and Atticus Talak 7.9 F (else Atticus Talak, the name a
- * repo-built catalog carries). Steps 1 to 3 need both. If either is missing (a repo-built or test database) they do nothing and
+ * Both products are found by exact catalog name: LESCO Crosscheck Plus, and every Talak row: Atticus Talak 7.9 F (production's one
+ * row, read 2026-11-18) and Atticus Talak (the mosquito seed's name; a repo-built catalog can hold both, the lawn v13 seed adding the
+ * longer one). Steps 1, 3 and 5 run for each Talak row, and each event records the row it moved from; step 2 swaps either name.
+ * Steps 1, 2, 3 and 5 need Crosscheck and a Talak row. If either is missing (a repo-built or test database) they do nothing and
  * never throw. Step 4 needs only Crosscheck.
  *
  *   1. lawn_protocol_products: every row linked to Talak (15 in production) takes the Crosscheck product_id and product_name.
@@ -114,6 +116,16 @@ async function findCatalogRow(knex, names) {
   return null;
 }
 
+// Every Talak row, one per name (production holds one; a repo-built catalog can hold both), never the Crosscheck row itself.
+async function findTalakRows(knex, crosscheck) {
+  const rows = [];
+  for (const name of TALAK_NAMES) {
+    const row = await findCatalogRow(knex, [name]);
+    if (row && String(row.id) !== String(crosscheck.id)) rows.push(row);
+  }
+  return rows;
+}
+
 // The one audit_log writer (waves-db §4): critical, so a lost event fails the migration instead of leaving a change down() cannot see.
 async function writeAudit(knex, action, resourceType, resourceId, metadata) {
   const { recordAuditEvent } = require('../../services/audit-log');
@@ -158,9 +170,9 @@ async function moveProtocolRows(knex, talak, crosscheck) {
   }
 }
 
-async function swapServiceDefaults(knex, talak, crosscheck) {
+async function swapServiceDefaults(knex, talakNames) {
   if (!(await knex.schema.hasColumn('services', 'default_products'))) return;
-  const elements = new Set([TALAK_SERVICE_ELEMENT, talak.name]);
+  const elements = new Set([TALAK_SERVICE_ELEMENT, ...talakNames]);
   const services = await knex('services').select('id', 'name', 'default_products');
   for (const service of services) {
     const before = asArray(service.default_products);
@@ -288,12 +300,15 @@ exports.up = async function up(knex) {
     console.log(`${LOG} audit_log table is missing: nothing to do (no snapshot, no change)`);
     return;
   }
-  const talak = await findCatalogRow(knex, TALAK_NAMES);
-  if (talak && String(talak.id) !== String(crosscheck.id)) {
-    if (await hasTables(knex, ['lawn_protocol_products', 'lawn_protocol_windows', 'lawn_protocol_audit_log'])) await moveProtocolRows(knex, talak, crosscheck);
-    if (await knex.schema.hasTable('services')) await swapServiceDefaults(knex, talak, crosscheck);
-    if (await knex.schema.hasTable('product_aliases')) await moveAliases(knex, talak, crosscheck);
-    if (await knex.schema.hasTable('service_product_usage')) await moveUsageRows(knex, talak, crosscheck);
+  const talaks = await findTalakRows(knex, crosscheck);
+  if (talaks.length) {
+    const lawn = await hasTables(knex, ['lawn_protocol_products', 'lawn_protocol_windows', 'lawn_protocol_audit_log']);
+    if (await knex.schema.hasTable('services')) await swapServiceDefaults(knex, talaks.map((talak) => talak.name));
+    for (const talak of talaks) {
+      if (lawn) await moveProtocolRows(knex, talak, crosscheck);
+      if (await knex.schema.hasTable('product_aliases')) await moveAliases(knex, talak, crosscheck);
+      if (await knex.schema.hasTable('service_product_usage')) await moveUsageRows(knex, talak, crosscheck);
+    }
   } else {
     console.log(`${LOG} no catalog row named "${TALAK_NAMES.join('" or "')}": links, service defaults and aliases left alone`);
   }

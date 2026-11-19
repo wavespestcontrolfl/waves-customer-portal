@@ -78,13 +78,18 @@ function daysFrom(date, days) {
 // pages on the raw string splits one product's outcome data across pages.
 // Returns the canonical name plus every known name variant (catalog name +
 // aliases) so outcome aggregation covers all spellings.
-async function resolveCanonicalProduct(productName) {
+// A product id a visit stored (service_products.product_id) names its product first: an alias can move to another product after the
+// visit (owner 2026-11-18: "Talstar P").
+async function resolveCanonicalProduct(productName, productId = null) {
   const fallback = { canonicalName: productName, variants: [productName], productId: null };
   if (!productName) return fallback;
   try {
-    let catalogRow = await db('products_catalog')
-      .whereRaw('LOWER(name) = ?', [productName.toLowerCase()])
-      .first('id', 'name');
+    let catalogRow = productId ? await db('products_catalog').where({ id: productId }).first('id', 'name') : null;
+    if (!catalogRow) {
+      catalogRow = await db('products_catalog')
+        .whereRaw('LOWER(name) = ?', [productName.toLowerCase()])
+        .first('id', 'name');
+    }
     if (!catalogRow) {
       const alias = await db('product_aliases')
         .whereRaw('LOWER(alias_name) = ?', [productName.toLowerCase()])
@@ -115,8 +120,8 @@ async function resolveCanonicalProduct(productName) {
 // nothing about which bottle a past visit used: the product id its visit's service_products row stored decides. An outcome counts
 // when its visit stored this product's id, under any name. A name alone counts only when it is the catalog name itself: a visit row
 // with no product id, and an outcome with no visit (or whose visit stored no product rows), count only when they name it. With no
-// catalog product (productId null) the name match decides, as before. Production 2026-11-18: all 76 outcomes have a visit, and no
-// outcome visit has a product row without an id.
+// catalog product (productId null) the name match decides, as before. A recorded name matches only whole ("Headway G" is not
+// "Headway"). Production 2026-11-18: all 76 outcomes have a visit, and no outcome visit has a product row without an id.
 async function outcomesForProduct(variants, productId, catalogName) {
   const outcomes = await db('treatment_outcomes')
     .where(function () {
@@ -141,8 +146,27 @@ async function outcomesForProduct(variants, productId, catalogName) {
   return outcomes.filter((o) => {
     const visit = o.service_record_id == null ? null : String(o.service_record_id);
     if (visit && recorded.has(visit)) return mine.has(visit);
-    return Boolean(own) && JSON.stringify(o.products_applied ?? '').toLowerCase().includes(own);
+    return Boolean(own) && recordedProducts(o.products_applied).some((p) => String(p.name).trim().toLowerCase() === own);
   });
+}
+
+// The products an outcome recorded: products_applied is a JSON array of { name, rate, unit, method, area }.
+function recordedProducts(productsApplied) {
+  let list = productsApplied;
+  if (typeof list === 'string') {
+    try { list = JSON.parse(list); } catch { list = []; }
+  }
+  return Array.isArray(list) ? list.filter((p) => p && typeof p === 'object' && p.name) : [];
+}
+
+// The products whose pages an outcome feeds: the names it recorded, and its visit's stored product rows by id (an alias that moved
+// since the visit still names the product the visit used, so both pages are refreshed).
+async function pageProductsForOutcome(outcome) {
+  const products = recordedProducts(outcome.products_applied).map((p) => ({ name: p.name, productId: null }));
+  if (!outcome.service_record_id) return products;
+  const rows = await db('service_products').where({ service_record_id: outcome.service_record_id }).select('product_name', 'product_id');
+  for (const row of rows || []) if (row.product_name) products.push({ name: row.product_name, productId: row.product_id });
+  return products;
 }
 
 function getSeason(month) {
@@ -693,9 +717,11 @@ const AgronomicWiki = {
 
       // 4. Gather products applied
       let productsApplied = [];
+      let pageProducts = []; // the page refresh goes by the id each row stored (an alias can move after the visit)
       try {
         const products = await db('service_products')
           .where({ service_record_id: serviceRecordId });
+        pageProducts = products.map((p) => ({ name: p.product_name, productId: p.product_id }));
         productsApplied = products.map((p) => ({
           name: p.product_name,
           rate: p.application_rate,
@@ -796,8 +822,8 @@ const AgronomicWiki = {
         }
         try {
           // Update product pages
-          for (const p of productsApplied) {
-            if (p.name) await AgronomicWiki.updateProductPage(p.name);
+          for (const p of pageProducts) {
+            if (p.name) await AgronomicWiki.updateProductPage(p.name, { productId: p.productId });
           }
           // Update track page
           if (outcome.grass_track) {
@@ -886,16 +912,17 @@ const AgronomicWiki = {
   // ────────────────────────────────────────────────────────────
   // updateProductPage — aggregate outcomes for a product, generate wiki page
   // ────────────────────────────────────────────────────────────
-  async updateProductPage(productName, { rethrow = false, withState = false } = {}) {
+  async updateProductPage(productName, { rethrow = false, withState = false, productId } = {}) {
     try {
       // One page per catalog product: resolve the applied-product string to
       // its canonical catalog name and aggregate outcomes across every known
       // name variant, so vendor-listing spellings don't split the data; the visit's stored product id
       // settles a name that moved between products (outcomesForProduct).
-      const { canonicalName, variants, productId } = await resolveCanonicalProduct(productName);
+      const resolved = await resolveCanonicalProduct(productName, productId);
+      const { canonicalName, variants } = resolved;
       const slug = `product/${slugify(canonicalName)}`;
 
-      const outcomes = await outcomesForProduct(variants, productId, canonicalName);
+      const outcomes = await outcomesForProduct(variants, resolved.productId, canonicalName);
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);
@@ -1513,15 +1540,9 @@ Length: keep the whole page under ${PAGE_WORD_BUDGET} words. Rewrite the page as
       if (!outcome) return 0;
       const slugs = new Set();
 
-      let products = outcome.products_applied;
-      if (typeof products === 'string') {
-        try { products = JSON.parse(products); } catch { products = []; }
-      }
-      for (const p of Array.isArray(products) ? products : []) {
-        if (p?.name) {
-          const { canonicalName } = await resolveCanonicalProduct(p.name);
-          slugs.add(`product/${slugify(canonicalName)}`);
-        }
+      for (const { name, productId } of await pageProductsForOutcome(outcome)) {
+        const { canonicalName } = await resolveCanonicalProduct(name, productId);
+        slugs.add(`product/${slugify(canonicalName)}`);
       }
 
       if (outcome.grass_track) slugs.add(`track/${slugify(String(outcome.grass_track))}`);
