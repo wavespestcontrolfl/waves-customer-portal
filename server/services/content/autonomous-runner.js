@@ -2009,11 +2009,19 @@ class AutonomousRunner {
     if (!(terminalWriter.editorialReviewOnMac() && terminalWriter.runningOnMac())) {
       return { outcome: 'skipped_not_mac', skipped: true, reason: 'not_the_mac_job', count: 0, runs: [] };
     }
-    // The server cron checks the master gate before runDaily; runNext does not. Read the variable
-    // itself: off production, feature-gates reads autonomousContentEngine as on whatever it says, and
-    // this unattended job runs on the Mac with Railway's variables.
+    // Production gate semantics: off production, feature-gates reads gates such as the master gate and
+    // named-competitor posts as on whatever their variables say. `railway run` sets NODE_ENV=production.
+    if (process.env.NODE_ENV !== 'production') {
+      return { outcome: 'skipped_not_production', skipped: true, reason: 'node_env_not_production', count: 0, runs: [] };
+    }
+    // The server cron checks the master gate before runDaily; runNext does not.
     if (process.env.GATE_AUTONOMOUS_CONTENT !== 'true') {
       return { outcome: 'skipped_engine_off', skipped: true, reason: 'content_engine_off', count: 0, runs: [] };
+    }
+    // The owner's spend line (2026-11-19, "A"): the review calls ride the Max plan or nothing runs.
+    if (!terminalWriter.maxPlanAdapterCovers()) {
+      logger.warn('[autonomous-runner] runTerminalDrafts: the Max-plan adapter does not answer the editorial review lanes; nothing is claimed');
+      return { outcome: 'failed_max_plan_adapter', reason: 'max_plan_adapter_missing', count: 0, failures: 1, runs: [] };
     }
     return this._withEngineLock('runTerminalDrafts', () => this._runTerminalDraftsInner({ limit }));
   }
@@ -2040,7 +2048,7 @@ class AutonomousRunner {
       if (run.outcome === 'skipped_no_opportunity') { i -= 1; continue; }
       runs.push(run);
       if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) { i -= 1; streak = 0; continue; }
-      if (!String(run.outcome).startsWith('failed')) { streak = 0; continue; }
+      if (!macPassFailure(run)) { streak = 0; continue; }
       streak += 1;
       if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
       if (streak >= maxConsecutiveFailures) {
@@ -2053,7 +2061,7 @@ class AutonomousRunner {
       outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
       count: runs.length,
       limit: batchLimit,
-      failures: runs.filter((r) => String(r.outcome).startsWith('failed')).length,
+      failures: runs.filter(macPassFailure).length,
       runs,
     };
   }
@@ -5398,6 +5406,12 @@ function isDeterministicPublishError(err) {
 
 // The claim scope for the next batch slot (_terminalFirstIds lists): the
 // written drafts first, then the held rows, then none (score order).
+// The Mac pass counts a reviewer that could not run (the draft is kept and the row
+// waits) as a failure, so a model outage stops the pass and its run bell rings.
+function macPassFailure(run) {
+  return String(run.outcome).startsWith('failed') || run.skip_reason === require('./terminal-writer').PLAN_UNAVAILABLE;
+}
+
 function terminalFirstScope(lists) {
   if (lists.written.length) return { kind: 'written', ids: lists.written };
   if (lists.held.length) return { kind: 'held', ids: lists.held };

@@ -12,7 +12,9 @@ const MAX_HEADING_CHARS = 500;
 const MAX_QUESTION_CHARS = 1000;
 const MAX_ANSWER_CHARS = 4000;
 
-const text = (value) => String(value || '').trim();
+// Strings only: a number or an object is not section text (and String() can throw on a JSON object).
+const text = (value) => (typeof value === 'string' ? value.trim() : '');
+const isObject = (value) => value != null && typeof value === 'object' && !Array.isArray(value);
 
 /** Why `sections` is not a usable plan, or null. */
 function planSectionsProblem(sections) {
@@ -20,7 +22,7 @@ function planSectionsProblem(sections) {
     return `answer_plan.sections must hold one to ${LIMITS.sections} sections`;
   }
   for (let index = 0; index < sections.length; index += 1) {
-    const section = sections[index] || {};
+    const section = isObject(sections[index]) ? sections[index] : {};
     const heading = text(section.heading);
     const question = text(section.question);
     const answer = text(section.answer);

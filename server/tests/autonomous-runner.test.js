@@ -1741,6 +1741,8 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
         if (v == null) delete process.env[k]; else process.env[k] = v;
       }
       process.env.GATE_AUTONOMOUS_CONTENT = 'true';
+      process.env.NODE_ENV = 'production'; // `railway run` sets it on the Mac
+      spies.push(jest.spyOn(require('../services/content/terminal-writer'), 'maxPlanAdapterCovers').mockReturnValue(true));
     };
     const rows = () => [
       row('no_draft_90', 90), row('no_draft_70', 70),
@@ -1798,17 +1800,24 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     });
 
     test.each([
-      ['GATE_AUTONOMOUS_CONTENT=false', 'false'],
-      ['GATE_AUTONOMOUS_CONTENT unset', null],
-    ])('the Mac job does nothing while the content engine master gate is off (%s): no lock, no listing, no claim, no settle', async (_label, value) => {
+      ['NODE_ENV is not production (gates would read the non-production way)', { NODE_ENV: 'development' }, 'skipped_not_production'],
+      ['NODE_ENV unset', { NODE_ENV: null }, 'skipped_not_production'],
+      ['GATE_AUTONOMOUS_CONTENT=false', { GATE_AUTONOMOUS_CONTENT: 'false' }, 'skipped_engine_off'],
+      ['GATE_AUTONOMOUS_CONTENT unset', { GATE_AUTONOMOUS_CONTENT: null }, 'skipped_engine_off'],
+      ['no Max-plan adapter for the review lanes', { adapter: false }, 'failed_max_plan_adapter'],
+    ])('the Mac job does nothing when %s: no lock, no listing, no claim, no settle', async (_label, env, outcome) => {
       mac({ runner: 'mac' });
-      if (value == null) delete process.env.GATE_AUTONOMOUS_CONTENT; else process.env.GATE_AUTONOMOUS_CONTENT = value;
-      // The real gate config: off production it reads the master gate as on whatever the variable says.
-      delete process.env.NODE_ENV;
-      jest.isolateModules(() => expect(require('../config/feature-gates').isEnabled('autonomousContentEngine')).toBe(true));
+      for (const k of ['NODE_ENV', 'GATE_AUTONOMOUS_CONTENT']) {
+        if (k in env) { if (env[k] == null) delete process.env[k]; else process.env[k] = env[k]; }
+      }
+      if (env.adapter === false) require('../services/content/terminal-writer').maxPlanAdapterCovers.mockReturnValue(false);
+      if (outcome === 'skipped_not_production') {
+        // The real gate config: off production it reads the master gate as on whatever the variable says.
+        jest.isolateModules(() => expect(require('../config/feature-gates').isEnabled('autonomousContentEngine')).toBe(true));
+      }
       const { runner } = queueRunner(rows(), { written: ['written_a'] });
       runner._withEngineLock = jest.fn((label, fn) => fn());
-      await expect(runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'skipped_engine_off', skipped: true, count: 0, runs: [] });
+      await expect(runner.runTerminalDrafts()).resolves.toMatchObject({ outcome, count: 0, runs: [] });
       expect(runner._withEngineLock).not.toHaveBeenCalled();
       expect(runner._terminalFirstIds).not.toHaveBeenCalled();
       expect(runner.runNext).not.toHaveBeenCalled();
@@ -1908,6 +1917,16 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
       const result = await runner.runTerminalDrafts({ limit: 5 });
       expect(order).toEqual(['f1', 'f2']); // two consecutive failures stop the pass
       expect(result).toMatchObject({ count: 2, failures: 2 });
+    });
+
+    test('a reviewer that could not run counts as a Mac pass failure: the outage stops the pass and shows in failures', async () => {
+      mac({ runner: 'mac' });
+      const tw = require('../services/content/terminal-writer');
+      const outage = ['u1', 'u2', 'u3'].map((id, i) => row(id, 90 - i, { skip_reason: tw.PLAN_UNAVAILABLE }));
+      const { runner, order } = queueRunner(outage, { written: ['u1', 'u2', 'u3'] });
+      const result = await runner.runTerminalDrafts({ limit: 5 });
+      expect(order).toEqual(['u1', 'u2']);
+      expect(result).toMatchObject({ count: 2, failures: 2, outcome: 'deferred_terminal_draft' });
     });
   });
 

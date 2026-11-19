@@ -134,6 +134,29 @@ const recheckMs = () => (editorialReviewOnMac() ? MAC_RECHECK_MS : RECHECK_MS);
 // A rejected plan stays on its run so the listing does not offer the same commit again.
 const REJECTED_AT_RE = /\s*\[terminal revision ([^\]\s]+)\]$/;
 
+// The model lanes of the review the Mac job runs (editorial-review.js). The owner's spend line
+// (2026-11-19, "A"): each must be answered by the Max plan.
+const MAC_MODEL_LANES = Object.freeze(['editorial_review', 'editorial_repair', 'editorial_plan_review']);
+
+/**
+ * True when the Max-plan adapter (~/max-runner/claude-code-fetch.js) is the live fetch and answers
+ * every lane in MAC_MODEL_LANES: in lane mode it lists them and reads the lane from this very
+ * agent-control context module (a different copy of the portal reads another context, so its calls
+ * would pass through to the paid API). The adapter marks itself on the global when it wraps fetch.
+ */
+function maxPlanAdapterCovers({ target = globalThis, lanes = MAC_MODEL_LANES } = {}) {
+  const adapter = target.__maxRunnerAdapter;
+  if (!adapter || typeof target.fetch !== 'function' || adapter.fetch !== target.fetch) return false;
+  if (adapter.answers === 'all') return true;
+  if (!Array.isArray(adapter.answers) || !lanes.every((lane) => adapter.answers.includes(lane))) return false;
+  try {
+    const fs = require('fs');
+    return fs.realpathSync(require.resolve('../agent-control/context')) === fs.realpathSync(String(adapter.contextModule || ''));
+  } catch {
+    return false;
+  }
+}
+
 // Briefs the editorial-evidence gate covers (the same test as
 // brief-driven-tools.js registerSessionEditorial). With that gate on, the
 // agent session must get its answer plan approved and its headings are
@@ -404,6 +427,8 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
   const written = [];
   const held = [];
   const rebrief = [];
+  // Rejections come from the answer-plan review, which runs only while the blog fact check is on.
+  const plansReviewed = require('./editorial-evidence').enabled();
   for (const row of rows) {
     const item = { ...row, branch: branchFor(row.opportunity_id), draft_path: draftPathFor(row.opportunity_id) };
     // Same rule as the runner (_briefHandedToTerminal): a brief that is gone
@@ -413,7 +438,7 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     const fetched = await fetchTerminalDraft(row.opportunity_id, { gh, expectedBriefId: row.brief_id });
     // A plan the last run rejected at this very commit is not offered again: it is due,
     // with the reviewer's reason, until the branch tip changes.
-    const rejected = fetched.ok ? rejectedPlanProblem(row, fetched.revision) : null;
+    const rejected = fetched.ok && plansReviewed ? rejectedPlanProblem(row, fetched.revision) : null;
     if (rejected) due.push({ ...item, problem: rejected });
     else if (fetched.ok) written.push(item);
     else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold });
@@ -709,7 +734,7 @@ module.exports = {
   terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested, macHoldsBlogDraft,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
-  AWAITS_MAC, PLAN_UNAVAILABLE, MAC_RECHECK_MS, recheckMs,
+  AWAITS_MAC, PLAN_UNAVAILABLE, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };

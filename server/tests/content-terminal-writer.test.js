@@ -332,6 +332,48 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     expect((await list(rowFor(), 'commit-2')).written).toHaveLength(1);
     expect((await list(rowFor({ rejected_notes: 'terminal draft rejected: the file is not valid JSON' }), 'commit-1')).written).toHaveLength(1);
     expect((await list(rowFor({ skip_reason: tw.PLAN_UNAVAILABLE, rejected_notes: null }), 'commit-1')).written).toHaveLength(1);
+    // The fact check turned off: plans are no longer reviewed, so the same commit is written again.
+    mockEditorialOn = false;
+    expect((await list(rowFor(), 'commit-1')).written).toHaveLength(1);
+  });
+
+  test('the plan shape takes strings only: a number, an object or a toString trap is a row problem, never a throw', () => {
+    const shape = require('../services/content/editorial-plan-shape');
+    const ok = { heading: 'Why ghost ants trail', question: 'Why do they trail?', answer: 'They follow scent.' };
+    expect(shape.planSectionsProblem([ok])).toBeNull();
+    for (const bad of [{ ...ok, heading: 5 }, { ...ok, question: { text: 'Q?' } }, { ...ok, answer: ['A.'] }, { toString: 1 }, [ok]]) {
+      expect(() => shape.planSectionsProblem([bad])).not.toThrow();
+      expect(shape.planSectionsProblem([bad])).toMatch(/^answer_plan section 1 needs/);
+    }
+  });
+
+  describe('maxPlanAdapterCovers: the review lanes ride the Max plan', () => {
+    const context = require.resolve('../services/agent-control/context');
+    const target = (mark) => {
+      const fetch = () => {};
+      const g = { fetch };
+      if (mark) g.__maxRunnerAdapter = { fetch, ...mark };
+      return g;
+    };
+    test('true for the live adapter that answers every review lane from this context module, or every call', () => {
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES, 'fact_check_gate'], contextModule: context }) })).toBe(true);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: 'all' }) })).toBe(true);
+    });
+    test('false with no adapter, a replaced fetch, a lane missing, or another copy of the portal', () => {
+      expect(tw.maxPlanAdapterCovers({ target: target(null) })).toBe(false);
+      const replaced = target({ answers: 'all' });
+      replaced.fetch = () => {};
+      expect(tw.maxPlanAdapterCovers({ target: replaced })).toBe(false);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: ['editorial_review', 'editorial_repair'], contextModule: context }) })).toBe(false);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES], contextModule: '/elsewhere/portal/server/services/agent-control/context.js' }) })).toBe(false);
+      expect(tw.maxPlanAdapterCovers({ target: target({ answers: [...tw.MAC_MODEL_LANES] }) })).toBe(false);
+      expect(tw.maxPlanAdapterCovers()).toBe(false); // the test process has no adapter
+    });
+    test('the lanes are the ones editorial-review.js dispatches in', () => {
+      const src = require('fs').readFileSync(require.resolve('../services/content/editorial-review'), 'utf8');
+      const used = [...src.matchAll(/laneId: '([a-z_]+)'/g)].map((m) => m[1]).sort();
+      expect(used).toEqual([...tw.MAC_MODEL_LANES].sort());
+    });
   });
 
   test('a reviewer that throws, or fails closed with no model, WAITS with a code that is not INVALID', async () => {
