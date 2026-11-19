@@ -427,6 +427,12 @@ describe('findUnverifiedClaims', () => {
       'Coptotermes formosanus takes flight again after storms.',
       'C. formosanus flies in October.',
       'R. flavipes swarms in spring. They swarm again after storms.',
+      // the Formosan June window (UF/IFAS IN278) is narrow: a repeat, a later month or a native termite in June still flags
+      'Formosan termites swarm again in June.',
+      'Formosan termites fly in July.',
+      'Native subterranean termites swarm in June.',
+      'Formosan termites swarm in spring. They swarm again in June.',
+      'Formosan termites swarm April through June, and native termites fly in June.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });
@@ -434,6 +440,10 @@ describe('findUnverifiedClaims', () => {
     test.each([
       'Native subterranean termites swarm January through May, on warm days after rain.',
       'Formosan subterranean termites begin swarming in late April.',
+      // UF/IFAS IN278: the Formosan window runs early April to late June (Pest Insider fact T02)
+      'Formosan termites swarm April through June, just after sunset, peaking in May, and porch lights pull them to your house.',
+      'In Florida, Coptotermes formosanus typically swarms between early April and late June, shortly after sunset, with peak swarming activity in May.',
+      'C. formosanus swarms from April to June. They fly just after sunset.',
       'Termite swarmers appear on warm afternoons after rain in spring.',
       'After a storm, check the house for termite damage.',
       'Swarm season, January through May, is unrelated to hurricane season.',

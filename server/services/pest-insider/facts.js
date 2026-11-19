@@ -10,6 +10,7 @@
 
 const bank = require('../../data/pest-insider-facts-v1.json');
 const { etDateString } = require('../../utils/datetime-et');
+const { validDateOnly } = require('../../utils/date-only');
 
 const SERVICES = new Set(['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent']);
 const KINDS = new Set(['pest', 'plant', 'rule']);
@@ -47,7 +48,7 @@ function factProblem(f) {
   if (!SERVICES.has(f.service)) return `service must be one of ${[...SERVICES].join(', ')}`;
   if (!KINDS.has(f.kind)) return `kind must be one of ${[...KINDS].join(', ')}`;
   if (!CONFIDENCES.has(f.confidence)) return 'confidence must be high or medium';
-  if (f.expires_on !== undefined && !DATE_ONLY.test(String(f.expires_on))) return 'expires_on must be YYYY-MM-DD';
+  if (f.expires_on !== undefined && !validDateOnly(String(f.expires_on))) return 'expires_on must be a real YYYY-MM-DD date';
   return null;
 }
 
@@ -67,7 +68,13 @@ const FACTS = validateBank(bank);
 
 /** ET calendar date 'YYYY-MM-DD' for a 'YYYY-MM-DD' string or a Date. */
 function sendDateET(sendDate) {
-  if (typeof sendDate === 'string' && DATE_ONLY.test(sendDate)) return sendDate;
+  if (typeof sendDate === 'string') {
+    // A calendar day that does not exist (2027-02-30) is refused before any
+    // plan or model call; Date() would roll a timestamp on it into March.
+    const day = sendDate.slice(0, 10);
+    if (DATE_ONLY.test(day) && !validDateOnly(day)) throw new Error(`pest-insider: ${day} is not a real calendar date`);
+    if (DATE_ONLY.test(sendDate)) return sendDate;
+  }
   const d = sendDate instanceof Date ? sendDate : new Date(sendDate);
   if (Number.isNaN(d.getTime())) throw new Error('pest-insider: sendDate is not a valid date');
   return etDateString(d);

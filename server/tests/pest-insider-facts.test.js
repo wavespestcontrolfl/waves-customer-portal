@@ -97,6 +97,13 @@ describe('factsForSend', () => {
     expect(FACTS.find((f) => f.id === 'O04').months).not.toContain(4);
   });
 
+  test('refuses a calendar day that does not exist, as a date or a timestamp', () => {
+    expect(() => factsForSend('2027-02-30')).toThrow(/not a real calendar date/);
+    expect(() => factsForSend('2027-02-30T12:00:00-05:00')).toThrow(/not a real calendar date/);
+    expect(() => factsForSend('2026-13-01')).toThrow(/not a real calendar date/);
+    expect(factsForSend('2028-02-29').length).toBeGreaterThan(0);
+  });
+
   test('uses the ET calendar date of a Date, not UTC', () => {
     // 2026-12-01 02:00 UTC is still November 30 in Eastern time.
     const ids = factsForSend(new Date('2026-12-01T02:00:00Z')).map((f) => f.id);

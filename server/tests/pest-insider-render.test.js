@@ -1,5 +1,5 @@
 // Pest Insider renderer: escaping, optional blocks, absolute links, dark-mode hooks.
-const { renderIssue, wrapIssueHtml, FORWARD_LINE } = require('../services/pest-insider/render');
+const { renderIssue, wrapIssueHtml, toolAllowed, FORWARD_LINE } = require('../services/pest-insider/render');
 const { bodyIsDarkAware } = require('../services/email-template');
 
 const BASE = {
@@ -94,5 +94,24 @@ describe('wrapIssueHtml', () => {
     expect(html).toContain('Look &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;see&quot;');
     expect(html).toContain(issue.html_body);
     expect(html).toContain('{{unsubscribe_url}}');
+  });
+});
+
+describe('tool block affiliate guard', () => {
+  test('a tool with affiliate material is left out, as the send validator would refuse it', () => {
+    for (const url of ['https://www.amazon.com/dp/B000TEST00?tag=example-20', 'https://amzn.to/abc123', 'https://www.awin1.com/cread.php?x=1']) {
+      const tool = { ...DEMO.tool, url };
+      expect(toolAllowed(tool)).toBe(false);
+      const r = renderIssue({ ...BASE, tool });
+      expect(r.text_body).not.toContain("A TOOL WE'D USE");
+      expect(r.html_body).not.toContain('A tool we&#39;d use');
+      expect(r.text_body).not.toContain(url);
+      expect(r.html_body).not.toContain(url);
+    }
+    expect(toolAllowed({ ...DEMO.tool, why: 'See amzn.to/abc123 for it.' })).toBe(false);
+    expect(toolAllowed(DEMO.tool)).toBe(true);
+    const shown = renderIssue({ ...BASE, tool: DEMO.tool });
+    expect(shown.text_body).toContain("A TOOL WE'D USE");
+    expect(shown.html_body).toContain('A tool we&#39;d use');
   });
 });

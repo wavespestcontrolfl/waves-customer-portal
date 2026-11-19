@@ -72,10 +72,12 @@ LEAD ("Today I learned"):
 - 2 to 4 short sentences, plus a short headline.
 - Restate the lead fact. Name a publisher once, as given in say_the_source_as of the source text you restate (for example "UF/IFAS says ..."). Credit each publisher only for its own source text: when two publishers are given, never credit one for what the other wrote.
 - Every number, month, season and proper name you write must appear in the lead fact's statement or source text, spelled the same way. Keep each number with its own unit and its own claim: never move a number from one claim to another. Do not round, convert, estimate or add a number. Do not use a number word such as "one" or "two" unless the source text uses it.
+- A sentence that has a number or a month must COPY one sentence of the source text, or the statement or one part of it, word for word. You may put "<publisher> says" in front of the copy. Sentences without a number or a month may use your own plain words.
+- Each sentence adds something new: never say the same thing twice. Avoid a copy that holds an unexplained abbreviation (such as "WFA").
 - Put the fact id in every sentence's fact_id. Never open a sentence with a Latin name.
 - At most one sentence may mention Waves. It explains what we do in plain words, for example that a technician can look at the spot during a regular visit. It never sells: no offer, no booking, no phone number, no price.
 
-WHAT'S THIS ("id_item"): 1 to 3 short sentences about the species. Build them from the entry's "fact". Use the "note" only for its plain meaning, and skip any part of it that mentions treatment, sprays, baits or products, or calls the species harmless or safe. Do not add a number, a place, a season or a name the entry does not contain.
+WHAT'S THIS ("id_item"): 1 to 3 short sentences about the species. Build them from the entry's "fact". A sentence with a number or a month copies a sentence of the entry word for word. Use the "note" only for its plain meaning, and skip any part of it that mentions treatment, sprays, baits or products, or calls the species harmless or safe. Do not add a number, a place, a season or a name the entry does not contain.
 
 NEVER WRITE:
 - DIY steps, instructions, amounts, mixes, rates or recipes. Say what the source observed, not what the reader should do.
@@ -83,7 +85,7 @@ NEVER WRITE:
 - The word "safe" in any form, or any promise or guarantee.
 - Anything the source does not say. If a detail is missing, leave it out.
 
-SUBJECT: one leading emoji, then a space, then a plain, specific line, ${maxSubject} characters or fewer in all. Use only facts from the lead fact, never from the species entry. PREVIEW: 30 to 90 characters, a short teaser, not a summary.
+SUBJECT: one leading emoji, then a space, then a plain, specific line, ${maxSubject} characters or fewer in all. Use only facts from the lead fact, never from the species entry. PREVIEW: 30 to 90 characters, a short teaser, not a summary. The subject, the preview and the headline have no number and no month.
 
 Return only the JSON object in the required schema.`;
 }

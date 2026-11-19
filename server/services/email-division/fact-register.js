@@ -638,12 +638,28 @@ const REPEAT_TRIGGER = /\b(?:second|another|again|repeat\w*|twice|once\s+more|al
 // window inside January–May (R. flavipes January–April, R. virginicus
 // February–May, Asian subterranean from March, Formosan from late April)
 // plus the December–February R. hageni; only drywood termites fly in the
-// fall. A non-drywood termite subject flying in any other month or season —
+// fall. One sourced exception: UF/IFAS IN278 (EENY-059) gives the Formosan
+// window as "between early April and late June", so a clause whose termite
+// is Formosan (the common name, Coptotermes, or C. formosanus) may name June;
+// any later month, a season or a repeat word is still the claim. A non-drywood termite subject flying in any other month or season —
 // "swarm in fall", "take flight in October" — is the same false claim with
 // no "second" or "again" in it (codex round 12 P1). A clause saying the
 // swarmers are GONE or the season is OVER by then states the fact.
 const OUT_OF_SEASON = /\b(?:june|july|august|september|october|november|fall|autumn|late[-\s]?summer|summer(?:s|time)?|hurricane\s+season|rainy\s+season)\b/i;
 const SWARM_RECEDES = /\b(?:gone|over|done|ends?|ended|finished|past|behind\s+us|wrap(?:s|ped)?\s+up|wind(?:s|ing)?\s+down|taper(?:s|ed|ing)?(?:\s+off)?|stop(?:s|ped)?|no\s+longer|quiet|dormant)\b/i;
+const FORMOSAN = /\b(?:formosan|coptotermes|formosanus)\b/i;
+
+// The text of the last termite mention in `text` ('' when there is none).
+function lastTermiteMention(text) {
+  let mention = '';
+  for (const match of String(text || '').matchAll(TERMITE_MENTION)) mention = match[0];
+  return mention;
+}
+
+// Out of season for this clause's termite: June is inside the Formosan window.
+function swarmOutOfSeason(clause, formosan) {
+  return OUT_OF_SEASON.test(formosan ? clause.replace(/\bjune\b/gi, ' ') : clause);
+}
 
 // The kind of termite the last mention in `text` names: 'drywood',
 // 'other', or null when no termite is mentioned.
@@ -663,20 +679,24 @@ function termiteClaimInSentence(sentence, previousSentence) {
   // termite named LATER in the sentence ("..., while drywood termites can
   // fly in fall") never reaches back to shield an earlier pronoun clause.
   let subject = null;
+  let formosan = false;
   for (let i = 0; i < clauses.length; i += 1) {
     const clause = clauses[i];
     const own = lastTermiteKind(clause);
-    if (own) subject = own;
+    if (own) { subject = own; formosan = FORMOSAN.test(lastTermiteMention(clause)); }
     // A contrast lead-in ("Unlike fire ants,", "compared with mosquitoes,")
     // names the OTHER party, not the subject — the next clause's pronoun
     // still means the termites (codex round 8 P1).
     else if (CONTRAST_LEAD_IN.test(clause)) { /* subject unchanged */ }
-    else if (OTHER_PEST_SUBJECT.test(clause)) subject = 'other-pest';
-    if (subject === null && PRONOUN_SUBJECT.test(clause)) subject = lastTermiteKind(previousSentence);
+    else if (OTHER_PEST_SUBJECT.test(clause)) { subject = 'other-pest'; formosan = false; }
+    if (subject === null && PRONOUN_SUBJECT.test(clause)) {
+      subject = lastTermiteKind(previousSentence);
+      formosan = FORMOSAN.test(lastTermiteMention(previousSentence));
+    }
     if (subject !== 'other') continue;
     if (!SWARM_WORD.test(clause)) continue;
     const repeat = REPEAT_TRIGGER.test(clause);
-    const outOfSeason = !repeat && OUT_OF_SEASON.test(clause) && !SWARM_RECEDES.test(clause);
+    const outOfSeason = !repeat && swarmOutOfSeason(clause, formosan) && !SWARM_RECEDES.test(clause);
     if (!repeat && !outOfSeason) continue;
     if (clauseDenies(clause) || previousClauseIsMythLabel(clauses, i)) continue;
     return clause;

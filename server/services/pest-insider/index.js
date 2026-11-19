@@ -11,7 +11,7 @@
 const { planIssue } = require('./plan');
 const { writeIssue } = require('./writer');
 const { checkClaims } = require('./claim-check');
-const { renderIssue } = require('./render');
+const { renderIssue, toolAllowed } = require('./render');
 const { sendDateET } = require('./facts');
 
 const SERVICE_EMOJI = { pest: '🐜', lawn: '🌱', tree_shrub: '🌴', mosquito: '🦟', termite: '🪵', rodent: '🐀' };
@@ -51,17 +51,21 @@ async function buildIssue({ sendDate, recent = {}, blogUrl = null, areaLine = nu
   diagnostics.idItem = checked.idItem;
   if (!checked.ok) return { ok: false, reason: claimFailReason(checked), issue: null, diagnostics };
 
-  const issue = renderIssue({
+  if (tool && !toolAllowed(tool)) diagnostics.fallbacks.push('tool_dropped_affiliate');
+  const issue = renderChecked({ checked, leadFact, idItem, blocks: { blogUrl, areaLine, tool, home } });
+  return { ok: true, reason: null, issue, diagnostics };
+}
+
+// A failing subject or preview was already dropped by the claim check; the
+// stand-ins are the fact's reviewed title and the species name.
+function renderChecked({ checked, leadFact, idItem, blocks }) {
+  return renderIssue({
     subject: checked.subject || `${SERVICE_EMOJI[leadFact.service]} ${leadFact.title}`,
     preview: checked.preview || `What's this? ${idItem.name}`,
     lead: { headline: checked.headline, sentences: checked.lead },
     idItem: { text: checked.idItem.text, species: idItem },
-    blogUrl,
-    areaLine,
-    tool,
-    home,
+    ...blocks,
   });
-  return { ok: true, reason: null, issue, diagnostics };
 }
 
 module.exports = { buildIssue };

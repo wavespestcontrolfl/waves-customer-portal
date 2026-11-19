@@ -59,7 +59,6 @@ const BANNED_RULES = [
 // A Waves line explains; it never sells.
 const SELLING_RE = /\b(?:book|booking|schedule|call|contact|quote|estimate|free|offer|buy|hire|order|sign\s*up|subscribe|plans?|packages?)\b/i;
 const WAVES_RE = /\bwaves\b/i;
-const REPEAT_WORDS_RE = /\b(?:second|another|again|repeat\w*|twice|once\s+more|storms?|hurricanes?|post[-\s]?storms?|tropical)\b/i;
 
 // Words a sentence opens with that are not part of a name that follows them ("The CDC says ...").
 const OPENERS = new Set(['the', 'a', 'an', 'this', 'that', 'these', 'those', 'in', 'on', 'at', 'by', 'for', 'from', 'with', 'when', 'while', 'if', 'it', 'they', 'we', 'our', 'your', 'here', 'there', 'some', 'many', 'most', 'each', 'every', 'after', 'before', 'during', 'unlike', 'like', 'as', 'so', 'but', 'and', 'or', 'now', 'according']);
@@ -72,11 +71,9 @@ function bannedReason(text) {
   if (BRAND_RE.test(text)) return 'pesticide or brand name';
   const tripwire = findHallucinatedClaims(text)[0];
   if (tripwire) return `tripwire: ${/\(([^)]*)\)/.exec(tripwire)?.[1] || 'claim'}`;
-  // The register's termite rule reads any June-or-later swarm month as a false
-  // claim, which also catches UF's own April-to-June Formosan window. The month
-  // check below already pins months to the source, so that rule only applies
-  // when the sentence also speaks of a repeat or a storm.
-  const unverified = findUnverifiedClaims(text).find((u) => u.rule !== 'termite_second_swarm' || REPEAT_WORDS_RE.test(text));
+  // The same shared register the send validator runs (newsletter-validator.js),
+  // so a draft that passes here is not blocked there.
+  const unverified = findUnverifiedClaims(text)[0];
   if (unverified) return `tripwire: ${unverified.rule}`;
   return null;
 }
@@ -199,6 +196,75 @@ function unknownName(sentence, namesCorpus) {
   return null;
 }
 
+// ── numbers and months stay with their claim ───────────────────────────
+// Pooled checks cannot tell "12 days with food but no water" from "42 days
+// with water but no food" (R02): both numbers and both conditions are in the
+// source. So a sentence that states a number or a month must COPY one source
+// unit word for word: a sentence of a quote, the statement, or a part of the
+// statement between semicolons or either side of ", and" / ", but". It may wrap that copy in "<publisher> says" or
+// "According to <publisher>,". Case, punctuation, curly quotes and number
+// words ("eight" = "8") do not count as differences. Anything looser is cut.
+const NUMBER_WORD_RE = new RegExp(`\\b(${Object.keys(NUMBER_WORDS).join('|')})\\b`, 'g');
+const LEADING_CONNECTOR = /^(?:and|but|so|also|however|still|plus|in fact|did you (?:know|realize)(?: that)?)\s+/;
+const ATTRIBUTION_VERBS = '(?:says|said|notes|noted|reports|reported|explains|found|finds|writes|adds|points out|tells us|warns)';
+
+function canonical(text) {
+  return norm(text).toLowerCase()
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(NUMBER_WORD_RE, (w) => String(NUMBER_WORDS[w]))
+    .replace(/(\d),(\d{3})/g, '$1$2')
+    .replace(/[^a-z0-9%/\s-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Sentence split that keeps the original characters (curly quotes stay curly).
+function splitSentences(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().split(/(?<=[.!?])["')\]]*\s+(?=["'(]?[A-Z0-9])/).map((t) => t.trim()).filter(Boolean);
+}
+
+// canonical unit -> the labels it may be credited to ('*' = any: our statement).
+function sourceUnits(statement, attributed) {
+  const units = new Map();
+  const add = (text, label) => {
+    const c = canonical(text);
+    if (!c) return;
+    for (const key of [c, c.replace(LEADING_CONNECTOR, '')]) {
+      if (!units.has(key)) units.set(key, new Set());
+      units.get(key).add(label);
+    }
+  };
+  const whole = String(statement || '');
+  add(whole, '*');
+  // Our reviewed statement may also be quoted by its parts: between
+  // semicolons, or either side of ", and" / ", but".
+  for (const part of whole.split(/;\s*|,\s+(?:and|but)\s+/)) add(part, '*');
+  for (const { text, label } of attributed) for (const sentence of splitSentences(text)) add(sentence, label);
+  return units;
+}
+
+function stripAttribution(c, labels) {
+  const names = labels.map((l) => canonical(l)).filter(Boolean).map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  if (!names) return c;
+  return c
+    .replace(new RegExp(`^(?:the )?(?:${names}) ${ATTRIBUTION_VERBS}(?: that)? `), '')
+    .replace(new RegExp(`^according to (?:the )?(?:${names}) `), '')
+    .replace(new RegExp(` (?:the )?(?:${names}) ${ATTRIBUTION_VERBS}$`), '');
+}
+
+const needsCopy = (text) => [...numberTokens(text)].some((t) => !t.startsWith('scale:')) || [...timeTokens(text)].some((t) => MONTHS.includes(t));
+
+/** Why a number or month sentence is not a word-for-word copy of one source unit, or null. */
+function copyProblem(text, units, labels) {
+  if (!needsCopy(text)) return null;
+  const c = stripAttribution(canonical(text), labels).replace(LEADING_CONNECTOR, '');
+  const allowed = units.get(c);
+  if (!allowed) return 'a number or month must keep its own claim: copy that source sentence word for word';
+  if (allowed.has('*')) return null;
+  const wrong = [...labelsNamed(text)].find((l) => !allowed.has(l));
+  return wrong ? `credits ${wrong} for another source's text` : null;
+}
+
 // ── source credit ───────────────────────────────────────────────────────
 // Every publisher name the bank uses, plus the long form of UF/IFAS. A
 // sentence that names one of them must name a source of THIS fact, and the
@@ -257,20 +323,29 @@ function sentenceProblem(text, source) {
   for (const m of timeTokens(text)) if (!haveTime.has(m)) return `month or season not in the source: ${m}`;
   const name = unknownName(text, source.names);
   if (name) return `name not in the source: ${name}`;
-  return null;
+  return source.units ? copyProblem(text, source.units, source.labels) : null;
 }
 
 const factSource = (fact) => ({
+  units: sourceUnits(fact.statement, attributedQuotes(fact)),
+  labels: [...new Set([...fact.sources.map(sourceLabel), ...Object.keys(LABEL_ALIASES)])],
   facts: [fact.statement, ...fact.quotes].join(' '),
   names: [fact.title, fact.statement, ...fact.quotes, ...fact.sources.map((s) => `${s.publisher} ${s.title}`)].join(' '),
 });
 
 const speciesSource = (species) => ({
+  units: sourceUnits('', [species.fact, species.note].map((text) => ({ text, label: '*' }))),
+  labels: [],
   facts: [species.fact, species.note].join(' '),
   names: [species.name, species.category, species.fact, species.note].join(' '),
 });
 
-const joinSources = (...sources) => ({ facts: sources.map((s) => s.facts).join(' '), names: sources.map((s) => s.names).join(' ') });
+const joinSources = (...sources) => ({
+  units: new Map(sources.flatMap((s) => [...s.units])),
+  labels: [...new Set(sources.flatMap((s) => s.labels))],
+  facts: sources.map((s) => s.facts).join(' '),
+  names: sources.map((s) => s.names).join(' '),
+});
 
 function leadSentenceProblem(sentence, leadFact, source, state) {
   if (!sentence || typeof sentence.text !== 'string' || !sentence.text.trim()) return 'empty sentence';
@@ -323,17 +398,31 @@ function checkDisplay(draft, leadFact, source, withSpecies) {
  *   headline: string, subject: string|null, preview: string|null, idItem: {ok:boolean,text:string,reason:string|null},
  *   fallbacks: string[] }}
  */
+// "What's this?" is checked a sentence at a time against the species entry:
+// a failing sentence is cut, and the item fails only when none is left.
+function checkIdItem(text, species) {
+  if (!text) return { ok: false, text: '', reason: 'empty id_item', cut: [] };
+  const source = speciesSource(species);
+  const kept = [];
+  const cut = [];
+  for (const sentence of splitSentences(text)) {
+    const reason = sentenceProblem(sentence, source);
+    if (reason) cut.push({ text: sentence, reason: `id_item: ${reason}` });
+    else kept.push(sentence);
+  }
+  const reason = kept.length ? null : (cut[0] ? cut[0].reason.replace(/^id_item: /, '') : 'empty id_item');
+  return { ok: kept.length > 0, text: kept.join(' '), reason, cut };
+}
+
 function checkClaims({ draft, leadFact, idItem }) {
   const source = factSource(leadFact);
   const sentences = Array.isArray(draft?.lead?.sentences) ? draft.lead.sentences : [];
   const { lead, cut } = checkLead(sentences, leadFact, source);
   const display = checkDisplay(draft, leadFact, source, joinSources(source, speciesSource(idItem)));
-  const idText = tidy(draft?.id_item?.text);
-  const idProblem = idText ? sentenceProblem(idText, speciesSource(idItem)) : 'empty id_item';
-  const id = { ok: !idProblem, text: idText, reason: idProblem };
-  return { ok: lead.length >= MIN_LEAD_SENTENCES && id.ok, lead, cut, ...display, idItem: id };
+  const { cut: idCut, ...id } = checkIdItem(tidy(draft?.id_item?.text), idItem);
+  return { ok: lead.length >= MIN_LEAD_SENTENCES && id.ok, lead, cut: [...cut, ...idCut], ...display, idItem: id };
 }
 
 module.exports = {
-  checkClaims, sentenceProblem, creditProblem, quantityPairs, subjectFormatProblem, bannedReason, factSource, speciesSource, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
+  checkClaims, sentenceProblem, creditProblem, quantityPairs, copyProblem, canonical, subjectFormatProblem, bannedReason, factSource, speciesSource, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
 };

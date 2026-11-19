@@ -89,7 +89,7 @@ describe('writeIssue', () => {
 describe('prompt, schema and lane registration', () => {
   test('the prompt carries the writing rules', () => {
     const p = systemPrompt();
-    for (const rule of [/Restate the lead fact/, /Name a publisher once/, /Credit each publisher only for its own source text/, /never move a number from one claim to another/, /DIY steps/, /pesticide, active ingredient, product or brand/, /price or a dollar sign/, /"safe"/, /At most one sentence may mention Waves/, /80 characters/]) expect(p).toMatch(rule);
+    for (const rule of [/Restate the lead fact/, /Name a publisher once/, /Credit each publisher only for its own source text/, /never move a number from one claim to another/, /must COPY one sentence of the source text/, /DIY steps/, /pesticide, active ingredient, product or brand/, /price or a dollar sign/, /"safe"/, /At most one sentence may mention Waves/, /80 characters/]) expect(p).toMatch(rule);
     expect(userText({ month: 'December', leadFact: FACT, idItem: SPECIES_ENTRY })).not.toMatch(/\bnull\b/);
   });
 

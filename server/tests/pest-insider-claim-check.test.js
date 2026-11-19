@@ -6,13 +6,16 @@ const { SPECIES } = require('../services/pest-insider/plan');
 
 const FACT = factById('M01'); // mosquito eggs survive drying out for up to 8 months (CDC)
 const SPECIES_ENTRY = SPECIES.find((s) => s.slug === 'aedes-mosquito');
-const GOOD_1 = 'The CDC says mosquito eggs can survive drying out for up to 8 months.';
+const GOOD_1 = 'The CDC says eggs can survive drying out for up to 8 months.'; // a word-for-word copy of a CDC quote
 const GOOD_2 = 'Adult females lay them on the inner walls of containers, above the waterline.';
 
 const sentence = (text, fact_id = FACT.id) => ({ text, fact_id });
+// The pooled checks (numbers, units, months, names) on their own, without the
+// word-for-word copy rule, which has its own tests below.
+const loose = (fact) => ({ ...factSource(fact), units: null });
 const run = (sentences, extra = {}) => checkClaims({
   draft: {
-    subject: '🦟 Mosquito eggs wait 8 months dry',
+    subject: '🦟 Dry does not mean gone for mosquito eggs',
     preview: 'Dry does not mean gone.',
     lead: { headline: 'Dry eggs, wet future', sentences },
     id_item: { text: SPECIES_ENTRY.fact },
@@ -37,29 +40,29 @@ describe('lead sentences', () => {
   });
 
   test('number words and digits are the same number; a different number word is cut', () => {
-    expect(sentenceProblem('Eggs survive up to eight months.', factSource(FACT))).toBeNull();
-    expect(sentenceProblem('Eggs survive up to nine months.', factSource(FACT))).toMatch(/number not in the source: 9/);
-    expect(sentenceProblem('A mosquito needs 7-10 days to grow up.', factSource(FACT))).toBeNull();
-    expect(sentenceProblem('A mosquito needs 14 days to grow up.', factSource(FACT))).toMatch(/14/);
+    expect(sentenceProblem('Eggs survive up to eight months.', loose(FACT))).toBeNull();
+    expect(sentenceProblem('Eggs survive up to nine months.', loose(FACT))).toMatch(/number not in the source: 9/);
+    expect(sentenceProblem('A mosquito needs 7-10 days to grow up.', loose(FACT))).toBeNull();
+    expect(sentenceProblem('A mosquito needs 14 days to grow up.', loose(FACT))).toMatch(/14/);
   });
 
   test('fractions and percents must be in the fact too', () => {
     const lawn = factById('L05'); // never lose more than one-third of the blade; quote says 1/3
-    expect(sentenceProblem('Never cut more than 1/3 of the blade.', factSource(lawn))).toBeNull();
-    expect(sentenceProblem('Never cut more than one-third of the blade.', factSource(lawn))).toBeNull();
-    expect(sentenceProblem('Never cut more than half of the blade.', factSource(lawn))).toMatch(/1\/2/);
-    expect(sentenceProblem('About 50 percent of the blade can go.', factSource(lawn))).toMatch(/number not in the source/);
+    expect(sentenceProblem('Never cut more than 1/3 of the blade.', loose(lawn))).toBeNull();
+    expect(sentenceProblem('Never cut more than one-third of the blade.', loose(lawn))).toBeNull();
+    expect(sentenceProblem('Never cut more than half of the blade.', loose(lawn))).toMatch(/1\/2/);
+    expect(sentenceProblem('About 50 percent of the blade can go.', loose(lawn))).toMatch(/number not in the source/);
   });
 
   test('a month that is not in the fact cuts the sentence; "may" the verb does not count', () => {
     const r = run([sentence(GOOD_1), sentence(GOOD_2), sentence('The first rains in June hatch them.')]);
     expect(r.cut[0].reason).toMatch(/month or season not in the source: june/);
-    expect(sentenceProblem('Eggs may survive a dry spell.', factSource(FACT))).toBeNull();
-    expect(sentenceProblem('Watch for them in May.', factSource(FACT))).toMatch(/may/);
+    expect(sentenceProblem('Eggs may survive a dry spell.', loose(FACT))).toBeNull();
+    expect(sentenceProblem('Watch for them in May.', loose(FACT))).toMatch(/may/);
     const oct = factById('T02'); // April through June, peaking in May
-    expect(sentenceProblem('They swarm from April through June.', factSource(oct))).toBeNull();
-    expect(sentenceProblem('Swarms peak in May.', factSource(oct))).toBeNull();
-    expect(sentenceProblem('Swarms peak in October.', factSource(oct))).toMatch(/october/);
+    expect(sentenceProblem('They swarm from April through June.', loose(oct))).toBeNull();
+    expect(sentenceProblem('Swarms peak in May.', loose(oct))).toBeNull();
+    expect(sentenceProblem('Swarms peak in October.', loose(oct))).toMatch(/october/);
   });
 
   test('a season word that is not in the fact is cut', () => {
@@ -75,14 +78,14 @@ describe('lead sentences', () => {
   });
 
   test('a capital that opens a later sentence is not a name', () => {
-    expect(sentenceProblem('Eggs survive 8 months. That is why scrubbing matters. Mosquitoes lay them above the waterline.', factSource(FACT))).toBeNull();
-    expect(sentenceProblem('Eggs survive 8 months. Acme Corp says so.', factSource(FACT))).toMatch(/name not in the source: Acme Corp/);
+    expect(sentenceProblem('Eggs survive 8 months. That is why scrubbing matters. Mosquitoes lay them above the waterline.', loose(FACT))).toBeNull();
+    expect(sentenceProblem('Eggs survive 8 months. Acme Corp says so.', loose(FACT))).toMatch(/name not in the source: Acme Corp/);
   });
 
   test('Florida, Waves and the fact publisher are allowed names', () => {
-    expect(sentenceProblem('Here in Florida, the CDC says eggs survive 8 months.', factSource(FACT))).toBeNull();
+    expect(sentenceProblem('Here in Florida, the CDC says eggs survive 8 months.', loose(FACT))).toBeNull();
     const lawn = factById('L02');
-    expect(sentenceProblem('UF/IFAS says to water when the grass shows thirst.', factSource(lawn))).toBeNull();
+    expect(sentenceProblem('UF/IFAS says to water when the grass shows thirst.', loose(lawn))).toBeNull();
   });
 
   test('dollar signs, "safe", guarantees, promises and pesticide names are cut', () => {
@@ -97,21 +100,49 @@ describe('lead sentences', () => {
     ]) expect({ text, reason: sentenceProblem(text, factSource(FACT)) }).toEqual({ text, reason: expect.any(String) });
   });
 
-  test('the existing newsletter tripwires apply, but UF\'s own Formosan window is not blocked', () => {
+  test('the shared register the send validator runs applies here, with its Formosan window', () => {
     expect(sentenceProblem('A technician can eliminate them for good.', factSource(FACT))).toMatch(/tripwire/);
     const formosan = factById('T02');
     expect(sentenceProblem(formosan.statement, factSource(formosan))).toBeNull();
+    expect(sentenceProblem(formosan.quotes[0].split('. ')[0] + '.', factSource(formosan))).toBeNull();
     expect(sentenceProblem('Formosan termites swarm again after storms in June.', factSource(formosan))).toMatch(/tripwire|month/);
+    expect(sentenceProblem('Formosan termites swarm again in June.', loose(formosan))).toMatch(/tripwire: termite_second_swarm/);
   });
 
   test('a number must keep its own unit: a source number moved to another claim is cut', () => {
-    const src = factSource(FACT); // "up to 8 months" (dry eggs) and "7-10 days" (egg to adult)
+    const src = loose(FACT); // "up to 8 months" (dry eggs) and "7-10 days" (egg to adult)
     expect([...quantityPairs(src.facts)].sort()).toEqual(['10 day', '7 day', '8 month']);
     expect(sentenceProblem('Eggs survive dry for 10 months.', src)).toMatch(/number and unit not in the source: 10 month/);
     expect(sentenceProblem('An egg becomes an adult in 8 days.', src)).toMatch(/number and unit not in the source: 8 day/);
     expect(sentenceProblem('An egg takes 7 to 10 days to become an adult.', src)).toBeNull();
-    expect(sentenceProblem('Eggs can survive drying out for up to eight months.', src)).toBeNull();
     expect(sentenceProblem('Eggs last 8-month dry spells.', src)).toBeNull();
+  });
+
+  test('a number or month sentence must copy one source sentence word for word', () => {
+    const R02 = factById('R02'); // 12 days with food but no water; about 42 days with water but no food
+    const src = factSource(R02);
+    // Both numbers and both conditions are in the source, so only the copy rule catches the swap.
+    expect(sentenceProblem('With food but no water, German roaches survive for 42 days.', loose(R02))).toBeNull();
+    expect(sentenceProblem('With food but no water, German roaches survive for 42 days.', src)).toMatch(/copy that source sentence word for word/);
+    expect(sentenceProblem('UF/IFAS says German cockroaches can survive only 12 days with food but no water.', src)).toBeNull();
+    expect(sentenceProblem('If only water is present with no food, cockroaches can survive for about 42 days.', src)).toBeNull();
+    expect(sentenceProblem('According to UF/IFAS, German cockroaches can survive only twelve days with food but no water.', src)).toBeNull();
+    // the reviewed statement, whole or by its ", and" parts
+    expect(sentenceProblem(R02.statement, src)).toBeNull();
+    expect(sentenceProblem('A German roach lives 12 days with food but no water.', src)).toBeNull();
+    // a sentence with no number or month may use its own words
+    expect(sentenceProblem('Water matters more than food to a roach.', src)).toBeNull();
+    // months are bound the same way (T03: R. hageni December to February, R. flavipes January to April)
+    const T03 = factById('T03');
+    expect(sentenceProblem('Native termites fly from December to April.', factSource(T03))).toMatch(/word for word/);
+  });
+
+  test('a copied number sentence credits only the publisher of that quote', () => {
+    const D02 = factById('D02'); // CDC: mice and a pencil-width hole; UF/IFAS Charlotte: rats and half-inch cracks
+    const src = factSource(D02);
+    expect(sentenceProblem('The CDC says mice can fit through a hole the width of a pencil (1/4 inch or 6 millimeters in diameter).', src)).toBeNull();
+    expect(sentenceProblem('UF/IFAS says mice can fit through a hole the width of a pencil (1/4 inch or 6 millimeters in diameter).', src)).toMatch(/credits UF\/IFAS for another source/);
+    expect(sentenceProblem('The CDC says rats can squeeze through cracks one-half of an inch wide.', src)).toMatch(/credits CDC for another source/);
   });
 
   test('a sentence credits only the publisher whose quote it restates', () => {
@@ -183,9 +214,13 @@ describe('overall verdict', () => {
     expect(run([sentence('Eggs last 9 months.'), sentence('Eggs last 11 months.')]).ok).toBe(false);
   });
 
-  test('a failing id_item fails the issue; its numbers must be in the species entry', () => {
+  test('"What\'s this?" is checked a sentence at a time; it fails only when no sentence is left', () => {
     const ok = run([sentence(GOOD_1), sentence(GOOD_2)]);
     expect(ok.idItem).toEqual({ ok: true, text: SPECIES_ENTRY.fact, reason: null });
+    const partly = run([sentence(GOOD_1), sentence(GOOD_2)], { id_item: { text: `${SPECIES_ENTRY.fact} It raises a generation in about 3 days.` } });
+    expect(partly.ok).toBe(true);
+    expect(partly.idItem.text).toBe(SPECIES_ENTRY.fact);
+    expect(partly.cut).toEqual([{ text: 'It raises a generation in about 3 days.', reason: expect.stringMatching(/^id_item: number not in the source: 3/) }]);
     const bad = run([sentence(GOOD_1), sentence(GOOD_2)], { id_item: { text: 'It raises a generation in about 3 days.' } });
     expect(bad.ok).toBe(false);
     expect(bad.idItem.reason).toMatch(/number not in the source: 3/);
@@ -206,17 +241,18 @@ describe('overall verdict', () => {
   });
 
   test('the subject speaks for the lead fact alone; the preview may use the species', () => {
-    // "150 feet" and "Yellow Fever Mosquito" come from the species entry, not from M01.
-    const fromSpecies = run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Breeding within 150 feet', preview: 'Breeding within 150 feet of the patio.' });
+    // "Yellow Fever Mosquito" and "150 feet" come from the species entry, not from M01.
+    const fromSpecies = run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Meet the Yellow Fever Mosquito', preview: 'Meet the Yellow Fever Mosquito.' });
     expect(fromSpecies.subject).toBeNull();
-    expect(fromSpecies.preview).toBe('Breeding within 150 feet of the patio.');
-    expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Yellow Fever Mosquito eggs wait 8 months' }).subject).toBeNull();
+    expect(fromSpecies.preview).toBe('Meet the Yellow Fever Mosquito.');
+    expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Breeding within 150 feet' }).subject).toBeNull();
+    // a number in a subject is never a word-for-word copy, so it falls back to the fact title
     expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Eggs wait 10 months dry' }).subject).toBeNull();
   });
 
   test('a subject needs exactly one leading emoji and the voice-profile length', () => {
     expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟🦟 Mosquito eggs' }).subject).toBeNull();
     expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: `🦟 ${'Mosquito eggs '.repeat(8)}` }).subject).toBeNull();
-    expect(run([sentence(GOOD_1), sentence(GOOD_2)]).subject).toBe('🦟 Mosquito eggs wait 8 months dry');
+    expect(run([sentence(GOOD_1), sentence(GOOD_2)]).subject).toBe('🦟 Dry does not mean gone for mosquito eggs');
   });
 });

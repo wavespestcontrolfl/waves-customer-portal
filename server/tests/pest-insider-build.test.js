@@ -7,13 +7,13 @@ const { SPECIES } = require('../services/pest-insider/plan');
 // so these cases test write -> check -> render, not the planner's rotation.
 const fixedPlan = () => ({ leadFact: factById('A01'), idItem: SPECIES.find((s) => s.slug === 'white-footed-ant') });
 const draft = (over = {}) => ({
-  subject: '🐜 White-footed ant colonies can reach 3 million',
+  subject: '🐜 The ants on the trail are a small part of the colony',
   preview: 'Branches are the bridge.',
   lead: {
-    headline: 'Three million ants in a nest',
+    headline: 'Most of the colony stays hidden',
     sentences: [
-      { text: 'UF/IFAS says white-footed ant colonies can reach 3 million ants.', fact_id: 'A01' },
-      { text: 'Nearly half of a colony is fertile, reproductive females.', fact_id: 'A01' },
+      { text: 'UF/IFAS says colony population estimates vary from 8,000 to 3 million individuals.', fact_id: 'A01' },
+      { text: 'Nearly half of the entire WFA colony is composed of fertile, reproductive females called intercastes.', fact_id: 'A01' },
       { text: 'Ants can reach a house over branches that touch it, and the colony had 5 queens.', fact_id: 'A01' },
     ],
   },
@@ -29,12 +29,13 @@ describe('buildIssue', () => {
     expect(r.ok).toBe(true);
     expect(write).toHaveBeenCalledTimes(1);
     expect(write.mock.calls[0][0]).toMatchObject({ sendDate: '2026-12-03', leadFact: { id: 'A01' }, idItem: { slug: 'white-footed-ant' } });
-    expect(r.issue.subject).toBe('🐜 White-footed ant colonies can reach 3 million');
-    expect(r.issue.html_body).toContain('UF/IFAS says white-footed ant colonies can reach 3 million ants.');
+    expect(r.issue.subject).toBe('🐜 The ants on the trail are a small part of the colony');
+    expect(r.issue.html_body).toContain('UF/IFAS says colony population estimates vary from 8,000 to 3 million individuals.');
     expect(r.issue.html_body).not.toContain('5 queens');
     expect(r.issue.html_body).toContain('Read the full story');
     expect(r.diagnostics).toMatchObject({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', provider: 'anthropic', model: 'test-model' });
     expect(r.diagnostics.cut).toEqual([{ text: expect.stringContaining('5 queens'), reason: expect.stringContaining('number not in the source: 5') }]);
+    expect(r.diagnostics.fallbacks).toEqual([]);
   });
 
   test('recent picks are passed to the plan', async () => {
@@ -76,5 +77,19 @@ describe('buildIssue', () => {
     const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(draft()), areaLine: 'Sample area line.', home: { lastVisit: { date: '2026-11-04', areas: ['lanai'] } } });
     expect(r.issue.html_body).toContain('Sample area line.');
     expect(r.issue.html_body).toContain('Your home');
+  });
+
+  test('an impossible send date is refused before the writer is called', async () => {
+    const write = jest.fn();
+    await expect(buildIssue({ sendDate: '2027-02-30', write })).rejects.toThrow(/not a real calendar date/);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  test('a tool with an affiliate link is dropped and reported', async () => {
+    const tool = { name: 'Sample nozzle', why: 'Sample reason.', url: 'https://amzn.to/abc123' };
+    const r = await buildIssue({ sendDate: '2026-12-03', plan: fixedPlan, write: writer(draft()), tool });
+    expect(r.ok).toBe(true);
+    expect(r.issue.html_body).not.toContain('amzn.to');
+    expect(r.diagnostics.fallbacks).toContain('tool_dropped_affiliate');
   });
 });

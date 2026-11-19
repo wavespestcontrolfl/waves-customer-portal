@@ -15,6 +15,7 @@
 
 const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
 const { formatDisplayDate } = require('../../utils/date-only');
+const { containsAffiliateMaterial } = require('../content/content-guardrails');
 
 const SITE = 'https://www.wavespestcontrol.com';
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
@@ -83,9 +84,19 @@ function areaBlock({ areaLine }) {
   return { html: [headingHtml(0, 'Active near you'), paragraph(escapeHtml(line))].join('\n'), text: `ACTIVE NEAR YOU\n${line}` };
 }
 
+// The newsletter send validator blocks affiliate material in every email
+// (newsletter-validator.js, AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL), so a tool
+// whose url or text carries any is left out here, never rendered into a draft
+// the validator would then refuse. PR 3 owns the Amazon path.
+function toolAllowed(tool) {
+  if (!tool || typeof tool !== 'object') return false;
+  return ![tool.url, tool.name, tool.why, tool.disclosure].some((v) => v && containsAffiliateMaterial(String(v)));
+}
+
 // tool: { name, why, url, disclosure? }; name, why and an https url are required.
 function toolBlock({ tool }) {
-  const url = tool && httpsUrl(tool.url);
+  if (!toolAllowed(tool)) return null;
+  const url = httpsUrl(tool.url);
   if (!url || !String(tool.name || '').trim() || !String(tool.why || '').trim()) return null;
   const disclosure = String(tool.disclosure || '').trim();
   const html = [
@@ -154,4 +165,4 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
+module.exports = { renderIssue, wrapIssueHtml, toolAllowed, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
