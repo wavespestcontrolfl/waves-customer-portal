@@ -519,7 +519,7 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
       'State Term Contract Request for Quotes', 'Request for Statement of Qualifications', 'Request for Qualifications']) {
       expect(detectBidEmail(mfmpNotice({}, { type }))).toMatchObject({ bid: true, source: 'gov_email' });
     }
-    for (const type of ['Agency Decision', 'Request for Information', 'Public Meeting', 'Notice of Intent']) {
+    for (const type of ['Agency Decision', 'Request for Information', 'Public Meeting', 'Notice of Intent', 'Notice of Cancellation of Invitation to Bid', 'Addendum to Request for Proposals']) {
       expect(detectBidEmail(mfmpNotice({}, { type }))).toMatchObject({ bid: false, reason: 'not_solicitation' });
     }
     // A decision notice that carries a bid word in its subject is still not a bid.

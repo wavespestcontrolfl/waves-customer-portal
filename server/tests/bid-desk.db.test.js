@@ -572,6 +572,33 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(sub).toMatchObject({ created: false, bidId: newer.bidId });
     });
 
+    test('of two open copies of one advertisement, an older keyless one and a newer keyed one, a repeat joins the older', async () => {
+      const body = (number) => [
+        ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ' Advertisement Type: Invitation to Bid',
+        ' Title: Sample Pond Weed Control', ' Close Date: Oct 29, 2026',
+      ].join('\n');
+      const notice = (threadId, number = 'ITB-17600') => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: `Advertisement Posted - ${number}`, body_text: body(number),
+      });
+      // The older open copy was filed keyless before the template; the newer open copy carries the key.
+      const olderEmail = await notice('t-mfmp-open-1', 'ITB-17699');
+      const older = await service.ingestEmail(olderEmail);
+      await mockPg('emails').where({ id: olderEmail.id }).update({ subject: 'Advertisement Posted - ITB-17600', body_text: body('ITB-17600') });
+      // created_at is the transaction's time in this suite, so the older copy's is set apart.
+      await mockPg('bid_opportunities').where({ id: older.bidId }).update({
+        group_key: null, gc_or_agency: null, project_title: null, solicitation_number: null, created_at: new Date(NOW.getTime() - 5 * DAY),
+      });
+      const newerEmail = await notice('t-mfmp-open-2', 'ITB-17698');
+      const newer = await service.ingestEmail(newerEmail);
+      await mockPg('emails').where({ id: newerEmail.id }).update({ subject: 'Advertisement Posted - ITB-17600', body_text: body('ITB-17600') });
+      await mockPg('bid_opportunities').where({ id: newer.bidId }).update({ group_key: 'mfmp|itb 17600', solicitation_number: 'ITB-17600' });
+      const repeat = await service.ingestEmail(await notice('t-mfmp-open-3'));
+      expect(repeat).toMatchObject({ created: false, bidId: older.bidId });
+      expect(await bidRow(older.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17600' });
+    });
+
     test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {
       const bare = BC_BODY().replace(': Pest Control', '');
       const decided = await service.ingestEmail(await storeEmail({ body_text: bare }));

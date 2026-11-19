@@ -145,6 +145,8 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null, temp
     if (byThread) return byThread;
   }
   if (!groupKey) return null;
+  // An MFMP advertisement has its own lookup over keyed and keyless bids (one order for both).
+  if (REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   // Only OPEN bids group by key: a GC's new solicitation with the same project and package after the old one was
   // decided is new work. (A reply in the bid's own thread above still joins it.)
   const exact = await trx('bid_opportunities').where({ group_key: groupKey }).whereIn('status', OPEN_STATUSES)
@@ -160,7 +162,6 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null, temp
   // An addendum or a reminder is never new work: with no open bid to join, one for a bid already decided joins that
   // bid (the newest with the key), so a county's addendum to a bid we declined does not file it again. It rings
   // nothing there (attachPatch: closed).
-  if (REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   if (!ADDS_TO_EXISTING.has(kind)) return null;
   return (await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first()) || null;
 }
