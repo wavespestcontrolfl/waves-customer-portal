@@ -26589,6 +26589,19 @@ router.get('/:id/card-request', async (req, res, next) => {
         logger.warn(`[schedule] card-request autopay check failed for ${visit.id}: ${e.message}`);
       }
     }
+    // A closed visit points the office to the customer's own Auto Pay link
+    // only when that link would go out (gate, payer, billing lane, Auto Pay
+    // state). An unreadable check names no fallback.
+    const closedReason = visitCardLinkClosedReason(visit);
+    let customerLinkAvailable = false;
+    if (closedReason && visit.customer_id) {
+      try {
+        const { setupLinkIneligibility } = require('../services/autopay-setup-link');
+        customerLinkAvailable = (await setupLinkIneligibility(visit.customer_id)).reason === null;
+      } catch (e) {
+        logger.warn(`[schedule] card-request Auto Pay link check failed for ${visit.id}: ${e?.code || e?.name || 'error'}`);
+      }
+    }
     res.json({
       enabled: await isSecureCardLaneReady(),
       autopayActive,
@@ -26596,7 +26609,8 @@ router.get('/:id/card-request', async (req, res, next) => {
       // Non-null once the visit can no longer take a card link (tech en route
       // or on site, done, cancelled, or a past date): the panel shows why in
       // place of a send button the funnel would refuse.
-      closedReason: visitCardLinkClosedReason(visit),
+      closedReason,
+      customerLinkAvailable,
       request: request
         ? {
           status: request.status,
@@ -26626,7 +26640,8 @@ router.post('/:id/card-request', requireAdmin, async (req, res, next) => {
     const result = await requestCardForAppointment({ scheduledServiceId: visit.id, trigger: 'admin' });
     // A skip answers 200 and writes no row, so this line is the only record
     // of why an office tap sent nothing (2026-11-19: read from body size).
-    logger.info(`[schedule] office card-link tap for ${visit.id}: ${result.action} (${result.reason})`);
+    // The code before ':' only: an error or provider suffix is free text.
+    logger.info(`[schedule] office card-link tap for ${visit.id}: ${result.action} (${String(result.reason || '').split(':')[0]})`);
     res.json({ requested: result.requested, action: result.action, reason: result.reason });
   } catch (err) { next(err); }
 });

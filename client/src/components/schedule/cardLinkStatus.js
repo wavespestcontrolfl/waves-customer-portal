@@ -30,26 +30,31 @@ export function describeCardRequestState(data) {
       text: 'Auto Pay no longer active — card was secured but the method lapsed or was removed. Check the customer\'s saved payment methods.',
     };
   }
+  // The visit no longer takes a card link: say why instead of offering a
+  // send the server can only refuse. Checked before the sent stamp — a link
+  // texted earlier closes too (its /secure page answers "closed"), so
+  // "awaiting customer" would be stale.
+  if (data.closedReason) return closedVisitLine(data.closedReason, data.customerLinkAvailable === true);
   // A pending row or a consumed one-text-ever stamp both mean a link is
   // (or was) out — the funnel will never text this visit again, so offer
   // no send button, just the state.
   if (data.request?.sentAt || data.cardLinkSentAt) {
     return { tone: 'muted', text: 'Secure card link sent — awaiting customer' };
   }
-  // The visit no longer takes a card link: say why and where the link lives
-  // instead of offering a send the server can only refuse.
-  if (data.closedReason) return closedVisitLine(data.closedReason);
   return null;
 }
 
 // Owner 2026-11-19: a card link tapped while the tech was on site came back
 // "not live" three times. The visit's link closes once the tech is on the
-// way; the customer's own Auto Pay link still works.
-function closedVisitLine(reason) {
+// way. The line names the customer's own Auto Pay link only when the server
+// says that link would go out (its gate, payer, billing lane and Auto Pay
+// state all allow it).
+function closedVisitLine(reason, customerLinkAvailable) {
   let why = 'This visit is not live';
   if (reason === 'visit_in_past') why = "This visit's date has passed";
   else if (/^visit_not_live:(en_route|on_site|completed)$/.test(reason)) why = 'The tech is on the way or done';
-  return { tone: 'muted', text: `${why}, so its card link is closed. Use Text Auto Pay link on the customer's page.` };
+  const next = customerLinkAvailable ? " Use Text Auto Pay link on the customer's page." : '';
+  return { tone: 'muted', text: `${why}, so its card link is closed.${next}` };
 }
 
 // The send action only renders when the lane is on and there is nothing
@@ -115,7 +120,9 @@ export function describeCardRequestResult(result) {
   if (reason === 'link_already_sent' || reason === 'request_exists') {
     return { tone: 'muted', text: 'Secure link already sent for this visit' };
   }
-  if (reason.startsWith('visit_not_live') || reason === 'visit_in_past') return closedVisitLine(reason);
+  // A tap that raced the status change: the POST does not check the
+  // customer's own Auto Pay link, so the line names no fallback.
+  if (reason.startsWith('visit_not_live') || reason === 'visit_in_past') return closedVisitLine(reason, false);
   if (reason === 'gate_off' || reason === 'template_inactive') {
     return { tone: 'muted', text: 'Card-link texting is switched off' };
   }
