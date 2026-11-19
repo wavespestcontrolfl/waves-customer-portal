@@ -206,15 +206,29 @@ function noteSlotAnswer(req, estimate, { windowDays = null, date = null, search 
     if (!estimate?.id || NO_BOOKING_FLAGS.some((flag) => result?.[flag]) || !customerRequest(req)) return null;
     const empty = !slotsIn(result);
     const via = search || (date ? 'date' : null);
-    if (via) {
-      await recordStep('estimate_slot_search', estimate, { via, date: date || null, empty });
-      return empty ? raiseOnEmptyRun(estimate) : null;
-    }
-    // The 90-day list is capped and route-ordered: metadata.firstDayAvailability can name an opening the list left
-    // out, and the page reads that day next (client slotLookahead.js fetchLookaheadSlots).
-    if (!empty || result?.metadata?.firstDayAvailability?.date || !(Number(windowDays) >= LOOKAHEAD_DAYS)) return null;
-    return raiseStuck(estimate.id, 'stuck', () => 'No open times in 90 days.');
+    const observation = result[require('./day-replan/booking-fit').OFFER_RANK];
+    const saveOffers = typeof observation === 'function' ? safely('record offered hours', async () => {
+      const offers = await observation();
+      // New evidence states its API-order basis explicitly. Existing rows with displayed/proposed and no rankBasis
+      // remain valid historical evidence; no runtime reader rewrites or interprets them as rendered card positions.
+      await recordStep('estimate_slot_offers', estimate, {
+        via: via || 'picker', generatedAt: result.metadata?.generatedAt, rankBasis: 'api_order', offers,
+      });
+    }) : null;
+    const [outcome] = await Promise.all([slotOutcome(estimate, { via, date, windowDays, empty }, result), saveOffers]);
+    return outcome;
   });
+}
+
+async function slotOutcome(estimate, { via, date, windowDays, empty }, result) {
+  if (via) {
+    await recordStep('estimate_slot_search', estimate, { via, date: date || null, empty });
+    return empty ? raiseOnEmptyRun(estimate) : null;
+  }
+  // The 90-day list is capped and route-ordered: metadata.firstDayAvailability can name an opening the list left
+  // out, and the page reads that day next (client slotLookahead.js fetchLookaheadSlots).
+  if (!empty || result?.metadata?.firstDayAvailability?.date || !(Number(windowDays) >= LOOKAHEAD_DAYS)) return null;
+  return raiseStuck(estimate.id, 'stuck', () => 'No open times in 90 days.');
 }
 
 // The time list answered an error (available-slots' catch). A capacity miss asks the page to retry

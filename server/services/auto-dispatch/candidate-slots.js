@@ -1383,6 +1383,8 @@ module.exports = {
   territoryTechnicianForVisit,
   territoryCoverForVisit,
   inBlackout,
+  isWeekendDay,
+  seriesDatesInWindow,
   violatesPreferredDay,
   violatesPreferredTime,
   _internals: {

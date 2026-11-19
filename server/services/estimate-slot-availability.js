@@ -32,6 +32,7 @@ const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
+const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1739,9 +1740,7 @@ async function filterCollidingSlots(slots, {
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    });
+    .andWhere(liveServiceOrHold);
   if (excludeServiceIds.length) collisionQuery = collisionQuery.whereNotIn('scheduled_services.id', excludeServiceIds);
   if (ownEstimateId) {
     // This estimate's own UNCOMMITTED hold is not a collision for itself
@@ -2001,9 +2000,7 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
-      .where((q) => {
-        q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
-      });
+      .where(liveServiceOrHold);
     if (ownEstimateId) {
       query = query.whereNot((own) => {
         own.where('source_estimate_id', ownEstimateId)
@@ -2134,12 +2131,19 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
   // generate identical IDs — techId differentiates.
   const windowStart = roundUpToHour(slot.start_time);
   const windowEnd = addMinutesToHHMM(windowStart, durationMinutes);
+  const routeOrder = Array.isArray(slot.route_arrivals)
+    ? slot.route_arrivals.map(row => row?.id).filter(id => id != null) : [];
+  const capacityProof = slot.route_mode === 'arrival_windows' && routeOrder.length === slot.route_arrivals?.length
+    ? { [Symbol.for('waves.dispatch.certifiedCapacityPlacement')]: {
+      routeMode: slot.route_mode, order: routeOrder, durationMinutes: Number(durationMinutes),
+    } } : {};
   return {
     slotId: `${slot.date}_${windowStart.replace(':', '-')}_${slot.technician?.id || 'unassigned'}`,
     date: slot.date,
     windowStart,
     windowEnd,
     durationMinutes,
+    ...capacityProof,
     ...(capacityEnabled() ? { routeMode: slot.route_mode } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
@@ -2171,13 +2175,14 @@ function routeCheckModeFor(userOpts) {
 // removal can never leave an empty picker (the floor returns the pool whole). The helper
 // returns the input's own objects in input order. Returns the pool unchanged with the
 // gate off or on any error.
-async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode }) {
+async function routeCheckedPool(pool, { coords, estimateId, durationMinutes, mode, paidCalls = true }) {
   try {
     if (mode === 'off' || !pool.length) return pool;
     const routeCheck = require('./scheduling/customer-route-check');
     const checked = await routeCheck.filterOfferedSlots({
       surface: 'estimate', mode, slots: pool, durationMinutes, today: new Date(),
-      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes }, excludeEstimateId: estimateId },
+      target: { prospective: { lat: coords.lat, lng: coords.lng, estimated_duration_minutes: durationMinutes },
+        ...(!paidCalls ? { cacheLocation: true } : {}), excludeEstimateId: estimateId },
     });
     return Array.isArray(checked.slots) ? checked.slots : pool;
   } catch (err) {
@@ -2396,6 +2401,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // GATE_BOOKING_MAKE_ROOM on (hour mode): this list may carry one make-room hour; read at call time.
   const makeRoomMode = makeRoomModeFor(userOpts);
   const makeRoomOffer = makeRoomOffersOn(makeRoomMode);
+  const measureHours = userOpts.measureBookingFit === true ||
+    (userOpts.offer === true && ['shadow', 'apply'].includes(require('../config/feature-gates').dayReplanMode?.()));
   // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
   // visit before the move-in date, which the customer can still change. Only
   // a stamped estimate reads its move; every other estimate skips the lookup.
@@ -2451,6 +2458,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // switch must not serve the other mode's list for the TTL. An entry built for a
     // caller that did not ask for the check (offer unset) is always 'off'.
     `route-check:${routeCheckMode}`,
+    measureHours ? 'measure-hours' : 'no-hour-measure',
     // A gate flip to live must not serve the other list for the TTL.
     ...(lineMapOfferLive() ? ['line-map:live'] : []),
     // A list with a make-room hour (mode on) is never served to a caller in another mode, or the other way round.
@@ -2508,7 +2516,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // outlook now so it overlaps the slot computation below. Bounded + cached +
   // fail-open inside the service; the extra .catch is belt-and-braces — this
   // decoration must never break or delay a slot payload.
-  const rainOutlookPromise = isEnabled('bookingRainChips')
+  const rainOutlookPromise = paidCalls && isEnabled('bookingRainChips')
     ? getDailyRainOutlookBounded(RAIN_OFFICE_POINT.lat, RAIN_OFFICE_POINT.lng).catch(() => null)
     : null;
 
@@ -2635,6 +2643,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         ...(funnel ? { zoneDayFunnel: funnel } : {}),
       },
     };
+    if (measureHours) {
+      const { observeOffers, OFFER_RANK } = require('./day-replan/booking-fit');
+      fallback[OFFER_RANK] = observeOffers(db, [...primary, ...expander], null);
+    }
     return fallback;
   }
 
@@ -2771,7 +2783,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // over the final eligible pool (every filter above has run). Inside this uncached
   // builder, so a wrapper cache hit neither recomputes nor logs.
   const routeChecked = await routeCheckedPool(funneledEligible, {
-    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode,
+    coords, estimateId, durationMinutes: serviceProfile.durationMinutes, mode: routeCheckMode, paidCalls,
   });
   // GATE_BOOKING_MAKE_ROOM: the taken hours this customer could have, measured against this same final pool.
   const makeRoomArgs = {
@@ -2803,9 +2815,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = await slotRainTierOf(funneledBookable, {
+  const rainTierOf = paidCalls ? await slotRainTierOf(funneledBookable, {
     profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
-  });
+  }) : null;
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,
@@ -2849,6 +2861,26 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       // staleness guard.
     },
   };
+
+  if (measureHours) {
+    const { observeOffers, OFFER_RANK } = require('./day-replan/booking-fit');
+    const scarcity = firstDayAvailability(funneledBookable);
+    const pinned = scarcity?.openCount <= SCARCE_FIRST_DAY_MAX
+      ? shown.reduce((last, slot, i) => slot.date === scarcity.date ? i + 1 : last, 1) : 1;
+    const target = coords.source === 'service_zone_fallback' ? null : {
+      lat: coords.lat, lng: coords.lng, planning_exempt: true, estimated_duration_minutes: candidateExpectedMinutes || serviceProfile.durationMinutes,
+    };
+    // `estimateId` is the root-scoped, server-loaded estimate (never a caller-supplied exclusion). Its own active
+    // reservation may occupy one of these public cards; booking-fit ignores only that hold and keeps every rival hold.
+    result[OFFER_RANK] = observeOffers(db, shown, target, {
+      pinned, rainTierOf, calendar: userOpts.dispatchCalendar, ownEstimateId: estimateId,
+      // Office placement may repair stale numbering under the arrival-route policy; a public reservation may do so
+      // only under capacity, whose writer persists the certified order.
+      allowStaleOrderFallback: userOpts.dispatchCalendar
+        ? require('./scheduling/arrival-route').arrivalWindowRoutingEnabled()
+        : require('./scheduling/policy').capacityEnabled(),
+    });
+  }
 
   // Never cache a funnel-ACTIVE result: the funnel's day set changes with
   // EVERY zone-stop mutation (create/cancel/reschedule/hold-expiry on ANY
@@ -2913,7 +2945,9 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const primary = result.primary || [];
   const expander = result.expander || [];
   const nearby = result.nearby ?? [...primary, ...expander].some((s) => s.routeOptimal);
+  const { OFFER_RANK } = require('./day-replan/booking-fit');
   return {
+    ...(result[OFFER_RANK] ? { [OFFER_RANK]: result[OFFER_RANK] } : {}),
     summary: summarizeWindow(when, { count: primary.length + expander.length, nearby }),
     understood: when.understood,
     window: { date_from: when.dateFrom, date_to: when.dateTo },

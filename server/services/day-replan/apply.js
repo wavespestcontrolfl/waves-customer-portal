@@ -48,6 +48,7 @@ const { parseETDateTime } = require('../../utils/datetime-et');
 const { staleOrderReasons } = require('../route-reorder-window-fit');
 const { withHour, appSimCheck } = require('./app-sim');
 const { DEFAULT_OPTIONS } = require('./planner');
+const { liveServiceOrHold } = require('../scheduling/reservation-occupancy');
 
 const INITIATOR = 'day_replan';
 const REASON_CODE = 'day_replan';
@@ -136,9 +137,9 @@ function movesFrom(fresh) {
  * The route the plan will leave: the new hours in the accepted order, expanded to rows. Null when the app would not
  * read it as a real plan, or when the app's simulator does not give the planned figures for it.
  */
-function finalRoute(fresh, env, techId) {
+function finalRoute(fresh, env, techId, changes = fresh.result.changes) {
   const best = fresh.result.best;
-  const toStart = new Map(fresh.result.changes.map((c) => [String(c.id), c.toMin]));
+  const toStart = new Map(changes.map((c) => [String(c.id), c.toMin]));
   const groupOf = new Map(fresh.rowGroups.map((g) => [String(g[0].id), g]));
   const finalGroups = fresh.rowGroups.map((g) => g.map((r) => (toStart.has(String(r.id)) ? withHour(r, toStart.get(String(r.id))) : r)));
   const ordered = best.order.flatMap((id) => groupOf.get(String(id)) || []);
@@ -206,7 +207,7 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
     ? await live(trx('scheduled_services').where({ visit_id: row.visit_id }).whereNot({ id })).first('id') : null;
   const sameCustomer = row.customer_id != null
     ? await live(trx('scheduled_services').where({ customer_id: row.customer_id, scheduled_date: dateStr }).whereNot({ id }))
-      .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())').first('id') : null;
+      .where(liveServiceOrHold).first('id') : null;
   const reminder = await trx('appointment_reminders').where({ scheduled_service_id: id })
     .first('reminder_24h_sent');
   const ctx = {
@@ -298,7 +299,7 @@ async function writeRouteOrder(trx, deps, { dateStr, techId, order, finalStarts 
   const rows = await trx('scheduled_services')
     .where({ scheduled_date: dateStr, technician_id: techId })
     .whereNotIn('status', deps.excludedStatuses)
-    .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
+    .where(liveServiceOrHold)
     .select('id', 'window_start');
   const want = new Set(order.map(String));
   if (rows.length !== want.size || rows.some((r) => !want.has(String(r.id)))) throw coded('ROUTE_CHANGED', 'the technician\'s stops are not the planned ones');
@@ -459,6 +460,6 @@ async function reconcileApplied(conn, depsOrGetter, { today }) {
 }
 
 module.exports = {
-  applyAcceptedDay, reconcileApplied, INITIATOR, REASON_CODE,
+  applyAcceptedDay, reconcileApplied, finalRoute, INITIATOR, REASON_CODE,
   _internals: { changesKey, recheckVisit, movesFrom, finalRoute, fingerprintOf, stopSignature, reconcileReminders, writeMoves, writeRouteOrder, assertNoClash },
 };

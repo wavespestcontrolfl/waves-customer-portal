@@ -33,13 +33,13 @@ function serviceQuery(input) {
       const group = {
         whereNull(key) { nullColumn = column(key); return group; },
         orWhereRaw(sql) {
-          expect(sql).toBe('scheduled_services.reservation_expires_at > NOW()');
+          expect(sql).toBe('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
           liveColumn = 'reservation_expires_at';
           return group;
         },
       };
       fn(group);
-      rows = rows.filter(row => row[nullColumn] == null || new Date(row[liveColumn]) > new Date());
+      rows = rows.filter(row => row[nullColumn] == null || row.customer_id != null || new Date(row[liveColumn]) > new Date());
       return q;
     },
     leftJoin: () => q,
@@ -70,6 +70,8 @@ test('expired holds release the route while live holds still block it', async ()
   wire([stop({ reservation_expires_at: new Date(Date.now() - 60_000) })]);
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(1);
   wire([stop({ reservation_expires_at: new Date(Date.now() + 60_000) })]);
+  expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
+  wire([stop({ customer_id: 'booked-customer', reservation_expires_at: new Date(Date.now() - 60_000) })]);
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
 });
 
