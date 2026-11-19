@@ -207,6 +207,23 @@ jest.setTimeout(30000);
     expect(await collect()).toHaveLength(0);
   });
 
+  test('the first win decides: when it came after a paid visit, a later win of an older lead takes no credit', async () => {
+    const c = await customer({ member_since: null });
+    // A paid visit on Nov 5. The first win (Nov 12) is a lead opened after that visit...
+    await database('service_records').insert({ id: randomUUID(), customer_id: c.id, service_date: '2026-11-05', status: 'completed' });
+    await lead(c, {
+      first_contact_at: new Date('2026-11-10T12:00:00Z'), created_at: new Date('2026-11-10T12:00:00Z'),
+      converted_at: new Date('2026-11-12T15:00:00Z'),
+    });
+    // ...and a lead opened before the visit wins later, on Nov 20. It passes the
+    // visit check alone, but it is not the customer's first win.
+    await lead(c, {
+      first_contact_at: new Date('2026-10-20T12:00:00Z'), created_at: new Date('2026-10-20T12:00:00Z'),
+      converted_at: new Date('2026-11-20T15:00:00Z'),
+    });
+    expect(await collect()).toHaveLength(0);
+  });
+
   test('a prospect stamped member_since at its first form is still new when a later call wins', async () => {
     const c = await customer({ member_since: '2026-11-01' });
     await lead(c, {

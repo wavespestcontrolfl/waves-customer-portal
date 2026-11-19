@@ -776,8 +776,11 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
   });
 
   test('an internal test record is skipped as internal_test (owner cell, test name, linked test customer)', () => {
+    // The listed test name, read from the list so no real name is written here.
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    const [listedFirst, ...listedRest] = INTERNAL_TEST_CUSTOMERS[0].split(' ');
     expect(skipReason(mapLeadCandidate({ ...baseLead, phone: OWNER_CELL }))).toBe('internal_test');
-    expect(skipReason(mapLeadCandidate({ ...baseLead, first_name: 'Adam', last_name: 'Martinez' }))).toBe('internal_test');
+    expect(skipReason(mapLeadCandidate({ ...baseLead, first_name: listedFirst, last_name: listedRest.join(' ') }))).toBe('internal_test');
     expect(skipReason(mapLeadCandidate({
       ...baseLead, customer_id: 'c1', customer_first_name: 'Shakedown', customer_last_name: 'Test (internal)',
     }))).toBe('internal_test');
@@ -855,6 +858,27 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
       });
       expect(skipReason(c)).toBeNull();
       expect(buildEvent(c)).toMatchObject({ transactionId: 'waves_new_customer:cust-1', conversionValue: 3500, currency: 'USD' });
+    });
+
+    test("a won lead with no email or phone sends its customer's contact, with that contact's name and ZIP; consent checks it", async () => {
+      const bare = {
+        ...row, email: null, phone: null, gclid: null, first_name: 'Lee', last_name: 'Caller', zip: '34219',
+        customer_email: 'acct@example.com', customer_phone: '(941) 555-0142',
+        customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+      };
+      const c = mapNewCustomerCandidate(bare);
+      expect(c).toMatchObject({ email: 'acct@example.com', phone: '(941) 555-0142', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
+      expect(skipReason(c)).toBeNull();
+      // A lead with a contact of its own keeps it: the customer's is never mixed in.
+      expect(mapNewCustomerCandidate({ ...bare, phone: '9415550101' }))
+        .toMatchObject({ email: null, phone: '9415550101', firstName: 'Lee', lastName: 'Caller', zip: '34219' });
+      // The customer's opted-out email strips the upload like any uploaded contact.
+      mockLoadSuppression.mockResolvedValue({
+        invalidPhones: new Set(),
+        isSuppressed: (m) => String((m && m.email) || '').toLowerCase() === 'acct@example.com',
+      });
+      const [stripped] = await DataManager._private.applyMarketingConsent('new_customer', [c]);
+      expect(stripped).toMatchObject({ email: null, phone: null, firstName: null, zip: null, consentSuppressed: true });
     });
 
     test('value comes from AD_NEW_CUSTOMER_VALUE; a bad value falls back to 3500', () => {

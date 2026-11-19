@@ -636,14 +636,23 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
   return applyMarketingConsent('qualified_lead', rows.map(mapLeadCandidate));
 }
 
-// New business only. A lead reaches won/converted and its linked customer had
-// no completed visit and no member_since from before the lead's first contact
-// (minus a few days of slack). A current customer's add-on ask, or a former
-// customer coming back, fails that test and is not a new customer.
+// New business only. A customer's first won/converted lead, when the customer
+// had no completed visit and no member_since from before that lead's first
+// contact (minus a few days of slack). A current customer's add-on ask, or a
+// former customer coming back, fails that test and is not a new customer.
 function mapNewCustomerCandidate(row) {
   const base = mapLeadCandidate(row);
+  // The event is the customer's, so a won lead with no email or phone of its own
+  // sends the customer's, with that contact's name and ZIP. Consent checks it as
+  // the uploaded contact.
+  const contact = row.email || row.phone ? {} : {
+    email: row.customer_email || null,
+    phone: row.customer_phone || null,
+    ...matchFields.identityForContact({ email: row.customer_email, phone: row.customer_phone }, ...leadIdentitySources(row)),
+  };
   return {
     ...base,
+    ...contact,
     conversionType: 'new_customer',
     sourceTable: 'leads',
     eventName: eventNameFor('new_customer'),
@@ -688,9 +697,9 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
   const customerFirstContactSql = "(SELECT (MIN(COALESCE(fl.first_contact_at, fl.created_at)) AT TIME ZONE 'America/New_York')::date FROM leads fl WHERE fl.customer_id = c.id)";
   // since / endDate are Eastern calendar dates, so each bound is Eastern midnight.
   const etMidnightSql = "((?::date)::timestamp AT TIME ZONE 'America/New_York')";
-  // Each customer's FIRST qualifying win over all time is the acquisition: its
-  // time and click ids stay together, and a later add-on win never takes the
-  // credit (nor makes a new event once the first win is outside the window).
+  // Each customer's FIRST current win over all time is the acquisition: its time
+  // and click ids stay together, and a later add-on win never takes the credit
+  // (nor makes a new event once the first win is outside the window).
   const firstWinIds = () => db('leads as l')
     .distinctOn('l.customer_id')
     .join('customers as c', 'l.customer_id', 'c.id')
@@ -699,6 +708,18 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     // The win must be current: a lead marked lost (or junk) after its win keeps
     // converted_at, so the status decides, never converted_at alone.
     .whereRaw("LOWER(COALESCE(l.status, '')) IN ('won', 'converted')")
+    .select('l.id')
+    .orderBy('l.customer_id')
+    .orderByRaw(`${eventTimestampSql} ASC, l.id`);
+  // An upload run reads full pages whatever its limit, so a small limit does
+  // not turn into one query per customer.
+  const pageSize = sendableTransactionIds ? MAX_LIMIT : cap;
+  const page = (offset) => db('leads as l')
+    .join('customers as c', 'l.customer_id', 'c.id')
+    .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
+    .whereIn('l.id', firstWinIds())
+    // That first win must be new business. It is judged after the pick, so a
+    // customer whose first win was not new business gets no event from a later one.
     .whereRaw(`(c.member_since IS NULL OR c.member_since >= ${customerFirstContactSql} - ?::int)`, [NEW_CUSTOMER_SLACK_DAYS])
     // A completed visit before this lead's own first contact = an existing or
     // former customer: a completed service record (imported history lives only
@@ -721,16 +742,6 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
         .where('ss.status', 'completed')
         .whereRaw(`COALESCE((ss.completed_at AT TIME ZONE 'America/New_York')::date, ss.scheduled_date) < ${ownContactDateSql} - ?::int`, [NEW_CUSTOMER_SLACK_DAYS]), 'ss', 'sv');
     })
-    .select('l.id')
-    .orderBy('l.customer_id')
-    .orderByRaw(`${eventTimestampSql} ASC, l.id`);
-  // An upload run reads full pages whatever its limit, so a small limit does
-  // not turn into one query per customer.
-  const pageSize = sendableTransactionIds ? MAX_LIMIT : cap;
-  const page = (offset) => db('leads as l')
-    .join('customers as c', 'l.customer_id', 'c.id')
-    .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
-    .whereIn('l.id', firstWinIds())
     .whereRaw(`${eventTimestampSql} >= ${etMidnightSql}`, [since])
     .whereRaw(`${eventTimestampSql} < ${etMidnightSql}`, [addDateStringDays(endDate, 1)])
     .select(...LEAD_SELECT_COLUMNS, db.raw(`${eventTimestampSql} as event_at`))

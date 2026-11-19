@@ -10,11 +10,18 @@ const {
 const ENV = { ...process.env };
 afterEach(() => { process.env = { ...ENV }; });
 
+// The listed test name, read from the list so no real name is written here.
+const [LISTED_FIRST, ...LISTED_REST] = INTERNAL_TEST_CUSTOMERS[0].split(' ');
+const LISTED_LAST = LISTED_REST.join(' ');
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
 describe('isInternalTestContact', () => {
   test('existing exports keep working', () => {
     expect(isInternalTestCustomerId('3274944a-f509-413c-9dee-a8b0cdb16493')).toBe(true);
     expect(isInternalTestEmail('AppReview+demo@wavespestcontrol.com')).toBe(true);
-    expect(INTERNAL_TEST_CUSTOMERS).toContain('adam martinez');
+    // Names are stored lowercased, as "first last".
+    expect(INTERNAL_TEST_CUSTOMERS.length).toBeGreaterThan(0);
+    expect(INTERNAL_TEST_CUSTOMERS.every((n) => n === n.trim().toLowerCase())).toBe(true);
   });
 
   test('a listed customer id', () => {
@@ -22,9 +29,9 @@ describe('isInternalTestContact', () => {
   });
 
   test('a listed name, case and spacing ignored', () => {
-    expect(isInternalTestContact({ firstName: ' ADAM ', lastName: 'Martinez' })).toBe(true);
-    expect(isInternalTestContact({ firstName: 'Adam  Martinez' })).toBe(true);
-    expect(isInternalTestContact({ firstName: 'Adam', lastName: 'Other' })).toBe(false);
+    expect(isInternalTestContact({ firstName: ` ${LISTED_FIRST.toUpperCase()} `, lastName: cap(LISTED_LAST) })).toBe(true);
+    expect(isInternalTestContact({ firstName: `${cap(LISTED_FIRST)}  ${cap(LISTED_LAST)}` })).toBe(true);
+    expect(isInternalTestContact({ firstName: cap(LISTED_FIRST), lastName: 'Other' })).toBe(false);
   });
 
   test('a listed email', () => {
