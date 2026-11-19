@@ -1,0 +1,177 @@
+// Same-start visits check on real Postgres (owner 2026-11-19, "build check"): the finder's SQL
+// against the migrated schema, and one bell's whole life through the schedule-integrity
+// watchdog (raise, a new day rings, a fixed day is quiet, the split closes it, a comeback
+// rings again). Real migrated PostgreSQL and the REAL notification service, synthetic records,
+// rolled back after every test (same harness as prepay-coverage-bell-refresh-postgres.test.js).
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+jest.mock('../models/db', () => {
+  const db = (...args) => db.connection(...args);
+  db.raw = (...args) => db.connection.raw(...args);
+  db.transaction = (...args) => db.connection.transaction(...args);
+  Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
+  Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  return db;
+});
+jest.mock('../services/irrigation-weekly-email', () => ({
+  findLawnEmailAudienceGaps: jest.fn(async () => []), findUnstampedRecurringLawnMembers: jest.fn(async () => []),
+}));
+const { randomUUID } = require('node:crypto');
+
+postgres('same-start visits check on Postgres', () => {
+  let database;
+  let trx;
+  const TODAY = '2040-01-10';
+  const now = new Date('2040-01-10T16:00:00Z');
+
+  beforeAll(() => {
+    const url = new URL(process.env.DATABASE_URL);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+  });
+  beforeEach(async () => {
+    trx = await database.transaction();
+    require('../models/db').connection = trx;
+  });
+  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterAll(async () => { await database?.destroy(); });
+
+  const customer = async (overrides = {}) => {
+    const id = randomUUID();
+    await trx('customers').insert({ id, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${id}@example.invalid`, phone: `fixture-${id.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer', ...overrides });
+    return id;
+  };
+  const technician = async () => {
+    const id = randomUUID();
+    await trx('technicians').insert({ id, name: 'Sample Tech' });
+    return id;
+  };
+  // Priced, one-hour, non-recurring visits, so no other watchdog class has a finding about them.
+  const visit = async (customerId, overrides = {}) => (await trx('scheduled_services').insert({ id: randomUUID(),
+    customer_id: customerId, service_type: 'Lawn Care Service', status: 'pending', scheduled_date: '2040-01-15',
+    window_start: '10:00', window_end: '11:00', estimated_price: 100, is_recurring: false, ...overrides }).returning('*'))[0];
+  // Two visits of one customer on one day: a lawn visit (`shared`), and a pest visit (`shared` + `second`).
+  const pair = async (customerId, shared = {}, second = {}) => [
+    await visit(customerId, shared),
+    await visit(customerId, { ...shared, service_type: 'Pest Control Service', ...second }),
+  ];
+  const ids = (rows) => rows.map((r) => String(r.id)).sort();
+
+  test('the finder: one customer, one day after today, one start, live, one technician or one unassigned', async () => {
+    const { _findSameStartVisits, sameStartVisitAlerts, SAME_START_PREFIX } = require('../services/same-start-visits-check');
+    const techA = await technician();
+    const techB = await technician();
+    const live = await customer();
+    const inactive = await customer({ active: false });
+    const deleted = await customer({ deleted_at: new Date('2040-01-01T12:00:00Z') });
+    const counted = [
+      // The same technician; pending and confirmed both count.
+      ...(await pair(live, { scheduled_date: '2040-01-15', technician_id: techA }, { status: 'confirmed' })),
+      // One of the two has no technician yet.
+      ...(await pair(live, { scheduled_date: '2040-01-16', window_start: '09:00', window_end: '10:00', technician_id: techA }, { technician_id: null })),
+      // Three at one start: each visit is one row, not one row per partner.
+      ...(await pair(live, { scheduled_date: '2040-01-23' })),
+      await visit(live, { scheduled_date: '2040-01-23', service_type: 'Mosquito Service' }),
+    ];
+    await pair(live, { scheduled_date: '2040-01-17', technician_id: techA }, { technician_id: techB }); // two people working at once
+    await pair(live, { scheduled_date: '2040-01-18' }, { status: 'cancelled' });
+    await pair(live, { scheduled_date: '2040-01-19' }, { status: 'completed' });
+    await pair(live, { scheduled_date: '2040-01-20' }, { window_start: '11:00', window_end: '12:00' }); // already back to back
+    await pair(live, { scheduled_date: TODAY }); // today: its route is set and its day-before text has gone
+    await pair(live, { scheduled_date: '2040-01-09' });
+    await pair(live, { scheduled_date: '2040-01-21', window_start: null, window_end: null }); // no arrival time
+    await pair(inactive, { scheduled_date: '2040-01-15' });
+    await pair(deleted, { scheduled_date: '2040-01-15' });
+
+    const mine = new Set([live, inactive, deleted]);
+    const rows = (await _findSameStartVisits(TODAY)).filter((r) => mine.has(String(r.customer_id)));
+    expect(ids(rows)).toEqual(ids(counted));
+
+    // The pg DATE and TIME values read back as the calendar day and the wall-clock start.
+    const { alerts, failed } = await sameStartVisitAlerts(TODAY);
+    expect(failed).toBe(false);
+    const ours = alerts.filter((a) => mine.has(String(a[3].customer_id)));
+    expect(ours.map((a) => a[0])).toEqual([`${SAME_START_PREFIX}${live}`]);
+    expect(ours[0][3]).toMatchObject({
+      first_date: '2040-01-15', day_count: 3, day_keys: ['2040-01-15 10:00', '2040-01-16 09:00', '2040-01-23 10:00'],
+    });
+    expect(ours[0][2]).toBe('3 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
+    expect(ours[0][4].detail).toBe('Jan 15 at 10 AM: Lawn Care Service and Pest Control Service.'
+      + ' Jan 16 at 9 AM: Lawn Care Service and Pest Control Service.'
+      + ' Jan 23 at 10 AM: Lawn Care Service, Mosquito Service and Pest Control Service.');
+  });
+
+  test('one bell through the watchdog: raised, a new day rings, a fixed day is quiet, the split closes it, a comeback rings', async () => {
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    const tech = await technician();
+    const customerId = await customer();
+    const key = `same-start-visits:${customerId}`;
+    const bells = () => trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]);
+    const markRead = async (at) => { await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [key]).update({ read_at: at }); };
+    const [, jan15Pest] = await pair(customerId, { scheduled_date: '2040-01-15', technician_id: tech });
+
+    // 1. Raised.
+    const first = await runInner({ now });
+    expect(first.sameStartCheckFailed).toBe(false);
+    const [raised, ...extra] = await bells();
+    expect(extra).toHaveLength(0);
+    expect(raised.title).toBe("Schedule — split Synthetic Fixture's visits at the same time");
+    expect(raised.body).toBe('2 visits start at 10 AM on Jan 15; split them so they run back to back, one hour each.');
+    expect(raised.detail).toBe('Jan 15 at 10 AM: Lawn Care Service and Pest Control Service.');
+    expect(raised.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-15&appointment=${jan15Pest.id}`);
+    expect(raised.read_at).toBeNull();
+    expect(raised.metadata).toMatchObject({
+      dedupeKey: key, customer_id: customerId, day_keys: ['2040-01-15 10:00'], area: 'Schedule', severity: 'needs-you',
+      subject: { type: 'customer', id: customerId }, doneWhen: 'visits_start_apart', who: 'person',
+    });
+
+    // 2. A day the bell did not list joins: the same row rings again.
+    await markRead(new Date('2040-01-10T17:00:00Z'));
+    const [, jan22Pest] = await pair(customerId, { scheduled_date: '2040-01-22', window_start: '11:00', window_end: '12:00', technician_id: tech });
+    await runInner({ now });
+    const [rang, ...extra2] = await bells();
+    expect(extra2).toHaveLength(0);
+    expect(rang.id).toBe(raised.id);
+    expect(rang.read_at).toBeNull();
+    expect(rang.body).toBe('2 days have visits at the same time, first Jan 15 at 10 AM; split each so they run back to back.');
+    expect(rang.metadata.day_keys).toEqual(['2040-01-15 10:00', '2040-01-22 11:00']);
+
+    // 3. One day is split: the bell updates quietly (read state and last ring kept).
+    const readAt = new Date('2040-01-10T18:00:00Z');
+    await markRead(readAt);
+    await trx('scheduled_services').where({ id: jan15Pest.id }).update({ window_start: '11:00', window_end: '12:00' });
+    await runInner({ now });
+    const [quiet] = await bells();
+    expect(quiet.id).toBe(raised.id);
+    expect(quiet.body).toBe('2 visits start at 11 AM on Jan 22; split them so they run back to back, one hour each.');
+    expect(quiet.link).toBe(`/admin/dispatch?tab=schedule&date=2040-01-22&appointment=${jan22Pest.id}`);
+    expect(new Date(quiet.read_at).toISOString()).toBe(readAt.toISOString());
+    expect(quiet.metadata.rungAt).toBe(rang.metadata.rungAt);
+    expect(quiet.metadata.day_keys).toEqual(['2040-01-22 11:00']);
+    expect(quiet.done_at).toBeNull();
+
+    // 4. The last day is split: the bell closes itself.
+    await trx('scheduled_services').where({ id: jan22Pest.id }).update({ window_start: '12:00', window_end: '13:00' });
+    await runInner({ now });
+    const [closed] = await bells();
+    expect(closed.id).toBe(raised.id);
+    expect(closed.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'no upcoming visits at the same time' });
+    expect(closed.done_at).not.toBeNull();
+
+    // 5. The pair comes back: the same row rings again, unread and not done.
+    await trx('scheduled_services').where({ id: jan22Pest.id }).update({ window_start: '11:00', window_end: '12:00' });
+    await runInner({ now });
+    const [back, ...extra5] = await bells();
+    expect(extra5).toHaveLength(0);
+    expect(back.id).toBe(raised.id);
+    expect(back.read_at).toBeNull();
+    expect(back.done_at).toBeNull();
+    expect(back.metadata).toMatchObject({ autoCleared: false, recurrenceGeneration: 1 });
+  });
+});

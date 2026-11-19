@@ -39,6 +39,11 @@
  *     churn done outside the app's cancel path (a direct database edit skips
  *     its steps, leaving open visits on the books and a draft unvoided). One
  *     bell per customer; it clears once the work is cancelled or voided.
+ *  5. SAME-START VISITS — one customer with two or more live visits on one
+ *     upcoming day that start at the same time, for one technician (owner
+ *     2026-11-19: they run back to back, one hour each). One bell per
+ *     customer; it clears once no upcoming day has such a pair. The finder
+ *     and the copy are in same-start-visits-check.js.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -105,6 +110,7 @@ const LAWN_GAP_PREFIX = 'lawn-email-gap:';
 const PREPAY_PREFIX = 'prepay-coverage:';
 const ACCEPTED_PREFIX = 'accepted-schedule:';
 const CHURNED_PREFIX = 'churned-live-work:';
+const { SAME_START_PREFIX, sameStartVisitAlerts } = require('./same-start-visits-check');
 // Invoice statuses that have not reached the customer (the status column has no
 // CHECK; 'send_failed' is an estimate status, never an invoice one).
 const UNSENT_INVOICE_STATUSES = ['draft', 'scheduled'];
@@ -789,10 +795,14 @@ async function runInner({ now = new Date() } = {}) {
   // above under the per-run cap.
   const churned = await churnedLiveWorkAlerts(todayET);
   alerts.push(...churned.alerts);
+  // After that, two visits at one start: a schedule fix with days to spare, so
+  // it takes only what is left of the cap.
+  const sameStart = await sameStartVisitAlerts(todayET);
+  alerts.push(...sameStart.alerts);
 
   const delivered = await deliverAlerts({
     alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
-    churnedWorkCheckFailed: churned.failed,
+    churnedWorkCheckFailed: churned.failed, sameStartCheckFailed: sameStart.failed,
   });
 
   // Combined-booking check (owner request 2026-09-29): a multi-service accept's
@@ -826,6 +836,8 @@ async function runInner({ now = new Date() } = {}) {
     acceptedScheduleCheckFailed,
     churnedLiveWork: churned.alerts.length,
     churnedWorkCheckFailed: churned.failed,
+    sameStartVisits: sameStart.alerts.length,
+    sameStartCheckFailed: sameStart.failed,
     combinedBooking,
     combinedBookingCheckFailed,
     // alerted, plus closed / closePassFailed under episodes.
@@ -836,7 +848,7 @@ async function runInner({ now = new Date() } = {}) {
 // Delivers one run's findings: rings them in order, capped at
 // MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
 // standing bell the findings no longer name (closeResolvedAlerts).
-async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed }) {
+async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed, sameStartCheckFailed }) {
   let alerted = 0;
   const capped = () => {
     if (alerted < MAX_ALERTS_PER_RUN) return false;
@@ -904,6 +916,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
   if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
   if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
   if (churnedWorkCheckFailed) skipPrefixes.push(CHURNED_PREFIX);
+  if (sameStartCheckFailed) skipPrefixes.push(SAME_START_PREFIX);
   try {
     return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
@@ -1139,6 +1152,8 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
   closed += await closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay });
   // Cleaned up, or the customer came back (reactivated / merged away).
   closed += await close(await absentOf(CHURNED_PREFIX), 'no live work left');
+  // Split, moved, cancelled or past: no upcoming day of the customer has two visits at one start.
+  closed += await close(await absentOf(SAME_START_PREFIX), 'no upcoming visits at the same time');
   return closed;
 }
 

@@ -57,8 +57,16 @@ jest.mock('../services/combined-booking-check', () => ({
   runCombinedBookingCheck: jest.fn(async () => ({ checked: 0, ok: 0, problems: 0, deferred: 0, skipped: 0, failed: 0 })),
 }));
 
+// The same-start class's finder and copy are covered in same-start-visits-check.test.js
+// (and its SQL on Postgres); here only how the watchdog rings and closes its bells.
+jest.mock('../services/same-start-visits-check', () => ({
+  SAME_START_PREFIX: 'same-start-visits:',
+  sameStartVisitAlerts: jest.fn(async () => ({ alerts: [], failed: false })),
+}));
+
 const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-schedule-audit');
 const { runCombinedBookingCheck } = require('../services/combined-booking-check');
+const { sameStartVisitAlerts } = require('../services/same-start-visits-check');
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled, alertEpisodesLive } = require('../config/feature-gates');
@@ -1150,6 +1158,60 @@ describe('churned customer with live work (class 4)', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ dedupeKey: 'churned-live-work:cust-churned-1', bell: true });
     expect(episodeHelpers.closeAdminAlertKeys).not.toHaveBeenCalled();
     expect(result).toMatchObject({ alerted: 1, churnedLiveWork: 1 });
+  });
+});
+
+describe('same-start visits (class 5)', () => {
+  const pairAlert = (customerId) => [
+    `same-start-visits:${customerId}`,
+    "Schedule — split Pat Example's visits at the same time",
+    '2 visits start at 11 AM on Aug 10; split them so they run back to back, one hour each.',
+    { customer_id: customerId, day_keys: ['2026-08-10 11:00'] },
+    { link: `/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-${customerId}`, detail: 'Aug 10 at 11 AM: Lawn and Pest.',
+      refreshOnDedupe: true, ringOnRefresh: () => false },
+  ];
+  const openKeysByPrefix = (byPrefix) => episodeHelpers.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => byPrefix[prefix] || []);
+  const closedBy = () => Object.fromEntries(episodeHelpers.closeAdminAlertKeys.mock.calls.map(([, keys, reason]) => [reason, keys]));
+
+  test('its bells ring last, after the churned class, with the copy, link and detail the check built', async () => {
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1')], failed: false });
+    makeDbMock({ coverageRows: [unpricedChild()], churnedRows: [{ id: 'cust-churned-1', live_visits: 1, unsent_invoices: 0 }] });
+    const result = await runInner({ now: NOW });
+    expect(sameStartVisitAlerts).toHaveBeenCalledWith('2026-08-04');
+    const calls = episodeHelpers.raiseAdminAlertWithReopen.mock.calls;
+    expect(calls.map((c) => c[3].dedupeKey))
+      .toEqual(['unpriced-series:ss-parent-1', 'churned-live-work:cust-churned-1', 'same-start-visits:cust-pair-1']);
+    const [category, title, body, opts] = calls[2];
+    expect(category).toBe('alert');
+    expect(title).toBe("Schedule — split Pat Example's visits at the same time");
+    expect(body).toBe('2 visits start at 11 AM on Aug 10; split them so they run back to back, one hour each.');
+    expect(opts).toMatchObject({
+      link: '/admin/dispatch?tab=schedule&date=2026-08-10&appointment=visit-cust-pair-1', detail: 'Aug 10 at 11 AM: Lawn and Pest.',
+      bell: true, dedupeKey: 'same-start-visits:cust-pair-1', refreshOnDedupe: true,
+      metadata: { dedupeKey: 'same-start-visits:cust-pair-1', customer_id: 'cust-pair-1', day_keys: ['2026-08-10 11:00'] },
+    });
+    expect(result).toMatchObject({ sameStartVisits: 1, sameStartCheckFailed: false, alerted: 3 });
+  });
+
+  test('a customer with no same-time day left has its bell closed; a customer still listed keeps it', async () => {
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [pairAlert('cust-pair-1')], failed: false });
+    makeDbMock();
+    openKeysByPrefix({ 'same-start-visits:': ['same-start-visits:cust-pair-1', 'same-start-visits:cust-split'] });
+    const result = await runInner({ now: NOW });
+    expect(closedBy()).toEqual({ 'no upcoming visits at the same time': ['same-start-visits:cust-split'] });
+    expect(result).toMatchObject({ closed: 1, closePassFailed: false });
+  });
+
+  test('a failed check never closes its bells; the other classes still close', async () => {
+    sameStartVisitAlerts.mockResolvedValueOnce({ alerts: [], failed: true });
+    makeDbMock();
+    openKeysByPrefix({
+      'same-start-visits:': ['same-start-visits:cust-pair-1'],
+      'churned-live-work:': ['churned-live-work:cust-gone'],
+    });
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ sameStartCheckFailed: true, sameStartVisits: 0 });
+    expect(closedBy()).toEqual({ 'no live work left': ['churned-live-work:cust-gone'] });
   });
 });
 
