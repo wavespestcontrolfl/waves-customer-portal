@@ -23,8 +23,6 @@ jest.mock('../services/service-report/pdf-events', () => ({
   safePdfRenderError: (err) => String(err?.message || err),
 }));
 
-const fs = require('fs');
-const path = require('path');
 const { renderReportPdf, renderServiceReportV1Pdf, reportPdfReadySelector } = require('../services/service-report/pdf');
 
 const ENV_KEYS = ['GATE_REPORT_WRITER_RULES', 'PDF_RENDERER', 'CF_ACCOUNT_ID', 'CF_BROWSER_RENDERING_TOKEN'];
@@ -88,8 +86,6 @@ describe('a service report PDF prints only a page built in its own writer-rules 
     expect(mockPage.waitForSelector).toHaveBeenCalledWith('.service-report-v1', { timeout: 10000 });
   });
 
-  test('the report page shows the state the payload names on its root element', () => {
-    const page = fs.readFileSync(path.join(__dirname, '../../client/src/pages/ReportViewPage.jsx'), 'utf8');
-    expect(page).toContain("<div className={`service-report-v1${sharedTemplate ? ' customer-report-template' : ''}`} data-writer-rules={data.writerRules}>");
-  });
+  // The page side (the PDF document's root carries the state, in both
+  // states) is a DOM test: client/src/pages/ServiceReportDocument.test.jsx.
 });

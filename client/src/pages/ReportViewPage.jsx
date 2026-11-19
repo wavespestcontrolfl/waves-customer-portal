@@ -7017,9 +7017,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     </div>
   );
   return (
-    // data-writer-rules: the state the PDF payload was built in (PDF mode
-    // only); the server's renderer prints only once it matches its own.
-    <div className={`service-report-v1${sharedTemplate ? ' customer-report-template' : ''}`} data-writer-rules={data.writerRules}>
+    <div className={`service-report-v1${sharedTemplate ? ' customer-report-template' : ''}`}>
       <style>{`
         .service-report-v1 {
           --text: ${ESTIMATE_TEXT};

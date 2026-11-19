@@ -428,10 +428,10 @@ function customerCopyViolations(text) {
 
 module.exports = {
   technicianReportCustomerCopy,
-  renderWriterRulesState,
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,
   summaryCopySignature,
+  renderWriterRulesState,
   MAX_REPORT_CHARS,
 };
