@@ -282,7 +282,7 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     const beforeAt = new Date(askAt.getTime() - hour);
     const delivered = (at) => JSON.stringify({ deliveryState: { firstDeliveredAt: at.toISOString(), lastDeliveredAt: at.toISOString() } });
     const textBell = (digits, over = {}) => bell({ category: 'lead', created_at: askAt, link: '/admin/leads',
-      metadata: { smsThreadKey: `sms:${digits}`, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over } });
+      metadata: { smsThreadKey: `sms:${digits.slice(-10)}`, senderIdentity: digits, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over } });
     const verdicts = async (...bells) => {
       await relevance.runAdminAlertRelevanceSweep({ now });
       return Promise.all(bells.map((b) => get(b.id)));
@@ -318,6 +318,41 @@ maybeDescribe('alert relevance re-arm (live Postgres)', () => {
     await db('estimates').where({ customer_id: quotedPerson.id }).update({ estimate_data: JSON.stringify({}) });
     const [back] = await verdicts(quotedBell);
     expect([back.done_at, back.metadata.retired]).toEqual([null, undefined]);
+
+    // A number that is A's primary phone and B's service_contact2_phone is shared: no verdict, even with a delivered quote to A.
+    const sharedPrimary = await insert('customers', { first_name: 'Svcprimary', phone: '+15555557051' });
+    await insert('customers', { first_name: 'Svcsecond', phone: '+15555557060', service_contact2_phone: '(555) 555-7051' });
+    const svcSharedBell = await textBell('5555557051');
+    await insert('estimates', { status: 'sent', customer_id: sharedPrimary.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    expect((await verdicts(svcSharedBell))[0].done_at).toBeNull();
+    // One account found only through a service-contact slot is the subject: its delivered quote closes the bell.
+    const svcOnly = await insert('customers', { first_name: 'Svcsole', phone: '+15555557061', service_contact_phone: '(555) 555-7052' });
+    const svcOnlyBell = await textBell('5555557052');
+    await insert('estimates', { status: 'sent', customer_id: svcOnly.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    const [svcClosed] = await verdicts(svcOnlyBell);
+    expect([svcClosed.done_by, svcClosed.resolution]).toEqual(['relevance', 'Estimate was sent']);
+
+    // International sender: the stored identity '+447700900123' settles only for the customer whose phone IS that number,
+    // never for a US customer whose phone ends in the same 10 digits (7700900123), whatever the thread key's last 10 say.
+    const usSameTail = await insert('customers', { first_name: 'Texttail', phone: '+17700900123' });
+    const intlBell = await textBell('+447700900123');
+    await insert('estimates', { status: 'sent', customer_id: usSameTail.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    expect((await verdicts(intlBell))[0].done_at).toBeNull();
+    const intlPerson = await insert('customers', { first_name: 'Textintl', phone: '+44 7700 900123' });
+    expect((await verdicts(intlBell))[0].done_at).toBeNull();
+    await insert('estimates', { status: 'sent', customer_id: intlPerson.id, sent_at: quoteAt, estimate_data: delivered(quoteAt) });
+    const [intlClosed] = await verdicts(intlBell);
+    expect([intlClosed.done_by, intlClosed.resolution]).toEqual(['relevance', 'Estimate was sent']);
+    // A US sender's bell is not settled by the international customer's quote.
+    const usBell = await textBell('7700900123');
+    const [usOnly] = await verdicts(usBell);
+    expect(usOnly.resolution).toBe('Estimate was sent');
+    // A bell with no senderIdentity (written before it was stored) is never judged, even with a quote for its thread phone.
+    const legacyBell = await bell({ category: 'lead', created_at: askAt, link: '/admin/leads',
+      metadata: { smsThreadKey: 'sms:5555557041', callSid: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential' } });
+    await db('estimates').where({ customer_id: quotedPerson.id }).update({ estimate_data: delivered(quoteAt) });
+    expect((await verdicts(legacyBell))[0].done_at).toBeNull();
+    await db('estimates').where({ customer_id: quotedPerson.id }).update({ estimate_data: JSON.stringify({}) });
 
     // A live top-level visit booked after the ask closes it; one booked before it, and a cancelled one, do not; a cancel puts it back.
     const visitPerson = await insert('customers', { first_name: 'Textvisit', phone: '+15555557045' });

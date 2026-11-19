@@ -893,10 +893,10 @@ describe('class rules', () => {
     const ASK = new Date('2026-09-27T12:00:00Z'); // note()'s created_at
     const textBell = (over = {}) => note({
       category: 'lead', link: '/admin/leads',
-      metadata: { smsThreadKey: `sms:${DIGITS}`, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over },
+      metadata: { smsThreadKey: `sms:${DIGITS}`, senderIdentity: DIGITS, callSid: null, estimateId: null, estimator_engine: true, quote_promised: true, promise: true, lane: 'residential', ...over },
     });
     // The loader's customers read (id + the phone identity it matched) and its leads read.
-    const onPhone = (...ids) => { mockTables.customers = ids.map((id) => ({ id, peer: DIGITS, deleted_at: null })); };
+    const onPhone = (...ids) => { mockTables.customers = ids.map((id) => ({ id, peers: [DIGITS], deleted_at: null })); };
     const asked = (table) => mockQueries.filter((q) => q.table === table);
 
     test('classification: a text bell is its own class; a call bell stays in the call class; a Leads bell without the estimator marker is in neither', () => {
@@ -944,7 +944,7 @@ describe('class rules', () => {
       mockTables.leads = [{ customer_id: CUST, peer: DIGITS, deleted_at: new Date() }];
       expect((await reasonFor(row)).reason).toBeNull();
       // The same customer by phone and by lead is ONE customer.
-      mockTables.customers = [{ id: CUST, peer: DIGITS, deleted_at: null }];
+      mockTables.customers = [{ id: CUST, peers: [DIGITS], deleted_at: null }];
       mockTables.leads = [{ customer_id: CUST, peer: DIGITS, deleted_at: null }];
       expect((await reasonFor(row)).reason).toBe('Estimate was sent');
     });
@@ -968,11 +968,61 @@ describe('class rules', () => {
       expect((await reasonFor(row)).reason).toBeNull();
       onPhone(CUST, OTHER);
       expect((await reasonFor(row)).reason).toBeNull();
-      // A thread key that names no 10-digit phone is never judged, and reads nothing.
-      onPhone(CUST);
+    });
+
+    test('the phone columns are the primary phone and the three service contacts: a number primary on one account and a service contact on another is shared (no verdict); one account found only through a service-contact slot is the subject', async () => {
+      const A = CUST;
+      const B = uid(96);
+      const row = textBell();
+      mockTables.estimates = [{ id: uid(533), customer_id: A }];
+      mockTables.customers = [{ id: A, peers: [DIGITS, '', '', ''], deleted_at: null }, { id: B, peers: ['5555550199', '', DIGITS, ''], deleted_at: null }];
       mockQueries = [];
-      expect((await reasonFor(textBell({ smsThreadKey: `sms-thread:${CUST}` }))).reason).toBeNull();
-      expect(asked('customers')).toEqual([]);
+      expect((await reasonFor(row)).reason).toBeNull();
+      expect(asked('estimates')).toEqual([]);
+      // One query over the four columns, OR'd, each against the sender identity.
+      const customerReads = asked('customers');
+      expect(customerReads).toHaveLength(1);
+      const rawCall = customerReads[0].calls.find(([method, sql]) => method === 'whereRaw' && String(sql).includes('service_contact3_phone'));
+      expect(rawCall).toBeTruthy();
+      expect(String(rawCall[1]).match(/ = ANY\(\?\)/g)).toHaveLength(4);
+      expect(String(rawCall[1])).toContain('customers.service_contact2_phone');
+      // Only the service-contact account matches: it is the subject, and its quote settles the bell.
+      mockTables.customers = [{ id: A, peers: ['5555550198', DIGITS, '', ''], deleted_at: null }];
+      expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+      expect(JSON.stringify(asked('estimates').pop().calls)).toContain(A);
+    });
+
+    test('a bell with no senderIdentity (written before it was stored) is no verdict and runs no witness query, whatever the smsThreadKey says', async () => {
+      onPhone(CUST);
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      mockTables.scheduled_services = [{ customer_id: CUST, latest_created_at: AFTER_BELL }];
+      for (const bare of [textBell({ senderIdentity: undefined }), textBell({ senderIdentity: '  ' }), textBell({ senderIdentity: 5555550142 })]) {
+        mockQueries = [];
+        expect(await reasonFor(bare)).toEqual({ cls: 'text_quote_sent', reason: null });
+        expect(mockQueries.filter((q) => ['customers', 'leads', 'estimates', 'scheduled_services'].includes(q.table))).toEqual([]);
+      }
+    });
+
+    test('an international sender settles only for the customer whose phone identity IS that number, never a US customer with the same last 10 digits', async () => {
+      const INTL = '+447700900123';
+      const US = uid(97);
+      const row = textBell({ smsThreadKey: 'sms:7700900123', senderIdentity: INTL });
+      mockTables.estimates = [{ id: uid(533), customer_id: CUST }];
+      // Only the US customer (identity 7700900123) is on file: the international sender has nobody.
+      mockTables.customers = [{ id: US, peers: ['7700900123'], deleted_at: null }];
+      mockQueries = [];
+      expect((await reasonFor(row)).reason).toBeNull();
+      // The SQL is asked for the stored identity, never the last 10 digits.
+      const customerRead = asked('customers')[0];
+      expect(JSON.stringify(customerRead.calls)).toContain(INTL);
+      expect(JSON.stringify(customerRead.calls)).not.toContain('"7700900123"');
+      // The customer whose phone identity is that number is the subject, even with the US customer beside them.
+      mockTables.customers = [{ id: US, peers: ['7700900123'], deleted_at: null }, { id: CUST, peers: [INTL], deleted_at: null }];
+      expect((await reasonFor(row)).reason).toBe('Estimate was sent');
+      expect(JSON.stringify(asked('estimates').pop().calls)).toContain(CUST);
+      // And a US sender's bell never settles for the international customer.
+      mockTables.customers = [{ id: CUST, peers: [INTL], deleted_at: null }];
+      expect((await reasonFor(textBell({ smsThreadKey: 'sms:7700900123', senderIdentity: '7700900123' }))).reason).toBeNull();
     });
 
     test('a failed read is no verdict and the re-arm pass does not put a retired bell back on it', async () => {

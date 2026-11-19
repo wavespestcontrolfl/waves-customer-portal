@@ -154,11 +154,17 @@
  *
  * The estimator's TEXT bells (owner 2026-11-19, admin notification faults check: "fix if you rec"; the same
  * estimator-engine notify with an `smsThreadKey` of `sms:<10 digits>` and no callSid: "Quote asked by text", "estimate
- * already open", "AI estimate draft needs review", the commercial scaffold) close by the same two facts, judged from
- * the bell's created_at (the first ask; an in-place upgrade does not move it). The subject is the ONE live customer the
- * thread's phone belongs to (a live customer by the shared phone identity, plus the customer of a live lead with
- * that phone). No customer, or two or more (a shared phone), is no verdict and the bell stays open for the 72 hour
- * fall-off. A failed read is no verdict and keeps the re-arm pass from putting one back.
+ * already open", "AI estimate draft needs review", the commercial scaffold) close by the same two facts. Boundary: the
+ * bell's created_at, the ask. A new ask after a closed bell gets its own row and its own created_at (estimator-engine
+ * notify inserts a fresh bell when the newest thread bell is already Done), so an old closure is never inherited; an
+ * in-place upgrade of an open bell does not move it. Subject: the sender identity the estimator stored on the bell
+ * (`metadata.senderIdentity`, phoneIdentityKey: 10 digits for a NANP number, `+<digits>` for any other country), NOT
+ * the smsThreadKey, whose last-10 digits would let an international sender match a US customer. The ONE live customer
+ * with that phone identity on `phone` or any service-contact phone (shared phone identity SQL, the estimator's own sender
+ * lookup), plus the customer of a live lead with that phone, is judged.
+ * No identity (a bell written before it was stored), no customer, or two or more (a shared phone) is no verdict and
+ * the bell stays open for the 72 hour fall-off. A failed read is no verdict and keeps the re-arm pass from putting
+ * one back.
  */
 
 const db = require('../models/db');
@@ -648,18 +654,30 @@ function isTextQuoteBell(meta, row) {
   return row.category === 'lead' && meta.estimator_engine === true && typeof meta.smsThreadKey === 'string' && meta.smsThreadKey.trim() !== ''
     && !hasText(meta.callSid);
 }
-// The thread's phone: `sms:<last 10 digits>`. Any other shape names no phone, so the bell is never judged.
-const textThreadDigits = (meta) => /^sms:(\d{10})$/.exec(String(meta.smsThreadKey).trim())?.[1] || null;
+// The sender the bell is about: `metadata.senderIdentity`, the estimator's phoneIdentityKey of the texting phone (a NANP
+// number is its 10 digits, any other country `+<digits>`: phoneIdentitySql's JS twin). NOT the smsThreadKey, which keeps
+// only the last 10 digits and so lets an international sender collide with a US customer. A bell with no identity (every
+// bell written before the estimator stored it) is never judged: no verdict, no read, the 72 hour fall-off keeps it.
+const textSenderIdentity = (meta) => (typeof meta.senderIdentity === 'string' && meta.senderIdentity.trim() ? meta.senderIdentity.trim() : null);
 
-// The live customers each thread phone belongs to (phone identity digits -> Set of customer ids): customers by the
-// shared phone identity SQL, plus the customer of a live lead with that phone (that customer must be live too).
-async function textQuotePeers(conn, digits) {
+// The columns of a customer that hold a phone the estimator's sender lookup matches (loadCustomerByPhone with
+// includeServiceContacts): a number that is primary on one account and a service contact on another is shared there.
+const TEXT_QUOTE_PHONE_COLUMNS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+
+// The live customers each sender identity belongs to (phone identity -> Set of customer ids): customers by the
+// shared phone identity SQL on any of the four phone columns (one query), plus the customer of a live lead with that
+// phone (that customer must be live too).
+async function textQuotePeers(conn, identities) {
   const { phoneIdentitySql } = require('./sms-response-policy');
-  const peers = new Map(digits.map((d) => [d, new Set()]));
+  const peers = new Map(identities.map((d) => [d, new Set()]));
   const tie = (peer, id) => { if (id && peers.has(peer)) peers.get(peer).add(String(id)); };
-  for (const c of await conn('customers').whereNull('deleted_at').whereRaw(`${phoneIdentitySql('customers.phone')} = ANY(?)`, [digits])
-    .select('id', conn.raw(`${phoneIdentitySql('customers.phone')} as peer`))) tie(c.peer, c.id);
-  const leads = await conn('leads').whereNull('deleted_at').whereNotNull('customer_id').whereRaw(`${phoneIdentitySql('leads.phone')} = ANY(?)`, [digits])
+  const identity = (column) => phoneIdentitySql(`customers.${column}`);
+  for (const c of await conn('customers').whereNull('deleted_at')
+    .whereRaw(`(${TEXT_QUOTE_PHONE_COLUMNS.map((column) => `${identity(column)} = ANY(?)`).join(' OR ')})`, TEXT_QUOTE_PHONE_COLUMNS.map(() => identities))
+    .select('id', conn.raw(`ARRAY[${TEXT_QUOTE_PHONE_COLUMNS.map(identity).join(', ')}]::text[] as peers`))) {
+    for (const peer of new Set(c.peers || [])) tie(peer, c.id);
+  }
+  const leads = await conn('leads').whereNull('deleted_at').whereNotNull('customer_id').whereRaw(`${phoneIdentitySql('leads.phone')} = ANY(?)`, [identities])
     .select('customer_id', conn.raw(`${phoneIdentitySql('leads.phone')} as peer`));
   const leadCustomerIds = [...new Set(leads.map((l) => String(l.customer_id)))];
   const live = new Set(leadCustomerIds.length
@@ -676,12 +694,12 @@ async function textQuotePeers(conn, digits) {
 // keeps the re-arm pass from putting one back (textQuoteFailed).
 async function loadTextQuoteMovedOn(rows, data, conn) {
   const bells = rows.map((row) => ({ row, meta: parseMeta(row.metadata) })).filter(({ row, meta }) => isTextQuoteBell(meta, row))
-    .map(({ row, meta }) => ({ id: String(row.id), digits: textThreadDigits(meta), askedAt: row.created_at ? new Date(row.created_at) : null }))
-    .filter((b) => b.digits && b.askedAt && !Number.isNaN(b.askedAt.getTime()));
+    .map(({ row, meta }) => ({ id: String(row.id), identity: textSenderIdentity(meta), askedAt: row.created_at ? new Date(row.created_at) : null }))
+    .filter((b) => b.identity && b.askedAt && !Number.isNaN(b.askedAt.getTime()));
   if (!bells.length) return;
   try {
-    const peers = await textQuotePeers(conn, [...new Set(bells.map((b) => b.digits))]);
-    const subjects = bells.map((b) => ({ ...b, customerIds: [...peers.get(b.digits)] })).filter((b) => b.customerIds.length === 1);
+    const peers = await textQuotePeers(conn, [...new Set(bells.map((b) => b.identity))]);
+    const subjects = bells.map((b) => ({ ...b, customerIds: [...peers.get(b.identity)] })).filter((b) => b.customerIds.length === 1);
     const booked = await bookedVisitsByCustomer(conn, [...new Set(subjects.flatMap((b) => b.customerIds))]);
     const { handedOffWithin, whereEstimateCustomerOwnership } = require('./call-commitments');
     for (const { id, askedAt, customerIds: [customerId] } of subjects) {
