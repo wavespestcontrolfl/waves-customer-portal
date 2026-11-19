@@ -2163,6 +2163,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY 7:30 AM-7:30 PM — route check, shadow (owner 2026-11-19, "do whatever you reccomend"). Recalculates the
+  // rest of today's route and the next staffed days from the live schedule, counts the openings a new job fits
+  // (dispatch and online) and records what the ad budget rule would do, in route_check_runs. It changes no visit,
+  // budget or message. Every hour, not only while a tech is clocked in: no technician clocks in yet (time_entries).
+  cron.schedule('30 7-19 * * *', async () => {
+    try {
+      await runExclusive('route-check', async () => {
+        const result = await require('./day-replan/route-check').runRouteCheck();
+        logger.info(`[route-check] ${result.status} ad=${result.ad.decision}`);
+      });
+    } catch (err) {
+      logger.error(`[route-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 5:00AM — Auto-Dispatch CATCH-UP (owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
