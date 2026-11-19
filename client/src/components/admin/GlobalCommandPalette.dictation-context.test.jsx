@@ -12,12 +12,15 @@ import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } fr
 // screen right when the Intelligence Bar mic sends that customer's id. The bar must forward the
 // page's customer id, on the desktop bar and on the phone sheet, and nothing when none is on screen.
 const micProps = vi.hoisted(() => []);
-vi.mock('../tech/DictationButton', () => ({
-  default: (props) => {
-    micProps.push(props);
-    return null;
-  },
-}));
+vi.mock('../tech/DictationButton', async () => {
+  const { createElement } = await import('react');
+  return {
+    default: (props) => {
+      micProps.push(props);
+      return createElement('span', { 'data-testid': `mic:${props.title}` });
+    },
+  };
+});
 vi.mock('../../lib/adminUsage', () => ({ markUsageSource: vi.fn(), trackAdminPageView: vi.fn() }));
 vi.mock('../../hooks/useIsMobile', () => ({ default: vi.fn(() => false) }));
 
@@ -67,6 +70,53 @@ describe('Intelligence Bar mic context', () => {
     await openBar(null);
     expect(micProps.length).toBeGreaterThan(0);
     expect(micProps.every((props) => props.dictationContext === undefined)).toBe(true);
+  });
+
+  // A send with no answer (iOS "Load failed", owner 2026-11-06) may ask to resend: the prompt takes any words.
+  it.each([[false, 'Dictate your question'], [true, 'Tap to talk']])('mobile=%s: the mic asks to resend a recording that got no answer', async (mobile, title) => {
+    useIsMobile.mockReturnValue(mobile);
+    await openBar(CUSTOMER);
+    expect(micProps.filter((props) => props.title === title).at(-1).resendWanted()).toBe(true);
+  });
+
+  it('New chat remounts the mic: a recording or resend question from the old chat never lands in the new one', async () => {
+    useIsMobile.mockReturnValue(true);
+    await openBar(CUSTOMER);
+    const before = await screen.findByTestId('mic:Tap to talk');
+    fireEvent.click(screen.getByText('New chat'));
+    await waitFor(() => expect(screen.getByTestId('mic:Tap to talk')).not.toBe(before));
+  });
+
+  const savedThread = (id, reply) => ({ id, lastSeq: 2,
+    conversationHistory: [{ role: 'user', content: 'Synthetic ask' }, { role: 'assistant', content: reply }] });
+
+  it('a thread picked from History remounts the mic', async () => {
+    useIsMobile.mockReturnValue(true);
+    fetch.mockImplementation((url) => Promise.resolve(
+      String(url).includes('/threads/latest') ? ok({ thread: null })
+        : String(url).includes('/threads/thread-b') ? ok({ thread: savedThread('thread-b', 'Synthetic picked reply') })
+          : ok({ actions: [], tasks: [], threads: [{ id: 'thread-b', title: 'Synthetic earlier chat' }] }),
+    ));
+    await openBar(CUSTOMER);
+    const before = await screen.findByTestId('mic:Tap to talk');
+    fireEvent.click(await screen.findByText('History'));
+    fireEvent.click(await screen.findByText('Synthetic earlier chat'));
+    expect(await screen.findByText('Synthetic picked reply')).toBeInTheDocument();
+    expect(screen.getByTestId('mic:Tap to talk')).not.toBe(before);
+  });
+
+  it('the automatic resume on open keeps the mic: a recording started before it lands goes on', async () => {
+    useIsMobile.mockReturnValue(true);
+    let resume;
+    fetch.mockImplementation((url) => (String(url).includes('/threads/latest')
+      ? new Promise((resolve) => { resume = resolve; })
+      : Promise.resolve(ok({ actions: [], tasks: [], threads: [] }))));
+    await openBar(CUSTOMER);
+    const before = await screen.findByTestId('mic:Tap to talk');
+    await waitFor(() => expect(resume).toBeTypeOf('function'));
+    await act(async () => resume(ok({ thread: savedThread('thread-a', 'Synthetic resumed reply') })));
+    expect(await screen.findByText('Synthetic resumed reply')).toBeInTheDocument();
+    expect(screen.getByTestId('mic:Tap to talk')).toBe(before);
   });
 });
 

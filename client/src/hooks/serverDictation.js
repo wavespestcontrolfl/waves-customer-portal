@@ -238,31 +238,38 @@ export function pickRecorderMime() {
 }
 
 /**
- * The hidden-page, cutoff and login guard for a clip recording: the recording
- * stops (`stopRecording`) when the page is hidden or closing, after `maxMs`, or
- * when another tab signs out or switches staff (`sameLogin()` false on a
- * `storage` event), so nothing records or streams on under another login.
+ * The hidden-page and cutoff guard for a clip recording: the recording stops
+ * (`stopRecording`) when the page is hidden or closing, or after `maxMs`.
  * Returns the function that takes the guard off, or null when the page is
  * already hidden (the clip must not start).
  */
-export function guardRecording(stopRecording, maxMs, sameLogin) {
+export function guardRecording(stopRecording, maxMs) {
   if (document.visibilityState === "hidden") return null;
   const onHidden = () => {
     if (document.visibilityState === "hidden") stopRecording();
   };
-  const onStorage = () => {
-    if (!sameLogin()) stopRecording();
-  };
   document.addEventListener("visibilitychange", onHidden);
   window.addEventListener("pagehide", stopRecording);
-  window.addEventListener("storage", onStorage);
   const cutoffTimer = setTimeout(stopRecording, maxMs);
   return () => {
     clearTimeout(cutoffTimer);
     document.removeEventListener("visibilitychange", onHidden);
     window.removeEventListener("pagehide", stopRecording);
-    window.removeEventListener("storage", onStorage);
   };
+}
+
+/**
+ * Stops every recording, guarded or not, when another tab signs out or switches staff
+ * (`sameLogin()` false on a `storage` event), so nothing records or streams on under another
+ * login; the stop then sends nothing (useSpeechDictation's uploadClip). Returns the function that
+ * takes it off.
+ */
+export function stopOnLoginChange(stopRecording, sameLogin) {
+  const onStorage = () => {
+    if (!sameLogin()) stopRecording();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
 }
 
 /** Stops a recorder; one that already stopped (or is gone) is not an error. */

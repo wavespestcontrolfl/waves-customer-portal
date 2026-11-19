@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopQuietly, transcribeClipWithResend,
+  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopOnLoginChange, stopQuietly,
+  transcribeClipWithResend,
 } from "./serverDictation";
 import useServerDictationMode, { readToken } from "./useServerDictationMode";
 import { startLiveWords } from "./liveDictation";
@@ -372,7 +373,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // mic on a visible page (a phone on a mount) ends by itself at the cutoff:
     // the clip stops and what was recorded is handed over.
     const guarded = clipMode || serverMode;
-    const unguard = guarded ? guardRecording(stopRecording, clipMaxMs, () => readToken() === clip.token) : () => {};
+    const unguard = guarded ? guardRecording(stopRecording, clipMaxMs) : () => {};
     if (!unguard) {
       // Hidden while the permission prompt was open: the clip never starts.
       stream.getTracks().forEach((t) => t.stop());
@@ -380,9 +381,12 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       doneStarting();
       return;
     }
-    // Everything a finished recording lets go of: the page guard and the slot.
+    // Every recording, guarded or not, stops when another tab signs out or switches staff.
+    const unwatchLogin = stopOnLoginChange(stopRecording, () => readToken() === clip.token);
+    // Everything a finished recording lets go of: the page guard, the login watch and the slot.
     const finish = () => {
       unguard();
+      unwatchLogin();
       release();
       unguardRef.current = null;
     };

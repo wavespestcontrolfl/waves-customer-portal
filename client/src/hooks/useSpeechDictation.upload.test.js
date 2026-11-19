@@ -91,6 +91,22 @@ describe("useSpeechDictation upload fallback", () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
+  it("another tab switches the login while the per-visit fallback records: it stops and sends nothing", async () => {
+    const onTranscript = vi.fn();
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    const { result } = renderHook(() => useSpeechDictation(onTranscript, { uploadServiceId: "svc-1" }));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    localStorage.setItem("waves_admin_token", "other-staff-jwt");
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+    await waitFor(() => expect(result.current.listening).toBe(false));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(track.stop).toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
   it("surfaces a failed upload and leaves the notes untouched", async () => {
     const onTranscript = vi.fn();
     fetch
