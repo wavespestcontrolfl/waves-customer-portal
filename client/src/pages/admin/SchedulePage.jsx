@@ -137,6 +137,12 @@ import {
 import {
   protocolCompletionDefaultSelections,
 } from "../../lib/protocol-completion-defaults";
+import {
+  applyTaurusYearlyLimit,
+  taurusLeftOutLine,
+  taurusOverLimitWarning,
+  taurusYearlyCountOf,
+} from "../../lib/taurus-yearly-limit";
 import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
   exclusiveProtocolProductConflict,
@@ -14012,19 +14018,27 @@ export function CompletionPanel({
   // #5049 r3 — a pest-mix row the tech removed must not come back when the
   // outcome goes declined → completed).
   const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
+  // The server's protocol/default-products answer, read once per visit. It also
+  // carries Taurus SC's yearly count (label limit 4 a year per home): the pest
+  // mix seed waits for the answer to settle (a failure settles it too, with the
+  // count unknown, so Taurus stays on the mix and nothing blocks the close-out).
+  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
+  const [protocolCompletionDefaultsSettled, setProtocolCompletionDefaultsSettled] = useState(false);
+  const taurusYearlyCount = taurusYearlyCountOf(protocolCompletionDefaults?.taurusYearly);
   const pestDefaultMixSeededRef = useRef(false);
   const pestDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
     if (pestDefaultMixSeededRef.current) return;
     if (isTypedFindings || isBedBugVisit || !isPestDefaultMixVisit(service)) return;
     if (visitOutcome !== "completed") return;
+    if (!protocolCompletionDefaultsSettled) return;
     if (!Array.isArray(products) || products.length === 0) return;
     if (selectedProducts.length) {
       pestDefaultMixSeededRef.current = true;
       return;
     }
     pestDefaultMixSeededRef.current = true;
-    const rows = pestDefaultMixSelections(products)
+    const rows = applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearlyCount)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
       // A regular pest visit's seeded rows start on their area (owner
@@ -14044,7 +14058,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearlyCount]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -14052,16 +14066,20 @@ export function CompletionPanel({
   // completionDefaultProducts entries. Lawn and pest already seed
   // themselves through their own mechanisms; lib/protocol-completion-
   // defaults.js keeps this hook out of their way.
-  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
   useEffect(() => {
     let cancelled = false;
     setProtocolCompletionDefaults(null);
-    if (!service.id) return undefined;
+    setProtocolCompletionDefaultsSettled(false);
+    if (!service.id) {
+      setProtocolCompletionDefaultsSettled(true);
+      return undefined;
+    }
     adminFetch(`/admin/dispatch/${service.id}/default-products`)
       .then((data) => { if (!cancelled) setProtocolCompletionDefaults(data); })
       // Fail-soft on the client too: a failed lookup just means no prefill,
       // never a blocked drawer.
-      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); });
+      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); })
+      .finally(() => { if (!cancelled) setProtocolCompletionDefaultsSettled(true); });
     return () => { cancelled = true; };
   }, [service.id]);
   const protocolCompletionDefaultsSeededRef = useRef(false);
@@ -23690,6 +23708,12 @@ export function CompletionPanel({
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
+          {(() => {
+            // Taurus SC's label limit: 4 a year per home. Warns only, never blocks the save.
+            const note = taurusOverLimitWarning(taurusYearlyCount, selectedProducts)
+              || (isRegularPestVisit ? taurusLeftOutLine(taurusYearlyCount) : null);
+            return note ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{note}</p> : null;
+          })()}
           {quickComplete ? (
             <div
               style={{

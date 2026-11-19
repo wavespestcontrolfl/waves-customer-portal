@@ -21,6 +21,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { isMlUnit } from '../lib/measure-units';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
+import { applyTaurusYearlyLimit, taurusLeftOutLine, taurusOverLimitWarning, taurusYearlyCountOf } from '../lib/taurus-yearly-limit';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
 import { UiSurface, Button, Field, Input, Textarea, Checkbox, ActionFeedback, cn } from './ui';
@@ -98,6 +99,8 @@ export default function ServiceRecapModal({
 
   const [note, setNote] = useState('');
   const [selected, setSelected] = useState(() => new Set());
+  // The house mix was pre-selected on open (so a Taurus left off it for the label limit is worth saying).
+  const [houseMixSeeded, setHouseMixSeeded] = useState(false);
   // productId -> { rate: string, unit: string }. Seeded from the rate
   // already recorded on the visit (reopen) or the catalog prefill
   // (fresh selection); the tech edits it before submit.
@@ -238,7 +241,8 @@ export default function ServiceRecapModal({
         ) {
           const mixSelect = new Set();
           const mixRates = {};
-          pestDefaultMixSelections(data.products).forEach(({ product }) => {
+          // Taurus SC's label limit (4 a year per home): the server's count leaves it off once a home is at the limit.
+          applyTaurusYearlyLimit(pestDefaultMixSelections(data.products), taurusYearlyCountOf(data.taurusYearly)).forEach(({ product }) => {
             mixSelect.add(product.id);
             const prefill = catalogRatePrefill(product, data?.service?.serviceType);
             if (prefill) mixRates[product.id] = prefill;
@@ -246,6 +250,7 @@ export default function ServiceRecapModal({
           if (mixSelect.size) {
             setSelected(mixSelect);
             setRates(mixRates);
+            setHouseMixSeeded(true);
           }
         }
         if (!data?.service?.hasPhone) setSendText(false);
@@ -264,6 +269,12 @@ export default function ServiceRecapModal({
     products.forEach((p) => m.set(p.id, p));
     return m;
   }, [products]);
+
+  // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
+  // saying the house mix left it off. Null when the count is under the limit or unknown.
+  const taurusCount = taurusYearlyCountOf(ctx?.taurusYearly);
+  const taurusNote = taurusOverLimitWarning(taurusCount, [...selected].map((id) => productById.get(id)))
+    || (houseMixSeeded ? taurusLeftOutLine(taurusCount) : null);
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({
@@ -476,7 +487,7 @@ export default function ServiceRecapModal({
                     placeholder="Quick internal note — areas treated, what you found, anything for the next visit."
                   />
                 </Field>
-                <RecapProducts products={products} catalogLoadFailed={ctx?.catalogLoadFailed} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} />
+                <RecapProducts products={products} catalogLoadFailed={ctx?.catalogLoadFailed} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} taurusNote={taurusNote} />
                 <RecapMissingSelections ids={draft.missingSelections} names={restoredNames} onRemove={toggleProduct} />
                 <RecapMessage
                   message={message} setMessage={setMessage} drafting={drafting} handleDraft={handleDraft}
@@ -508,7 +519,7 @@ export default function ServiceRecapModal({
   );
 }
 
-function RecapProducts({ products, catalogLoadFailed, selected, rates, productById, toggleProduct, setRateValue }) {
+function RecapProducts({ products, catalogLoadFailed, selected, rates, productById, toggleProduct, setRateValue, taurusNote = null }) {
   const rateRows = [...selected]
     .map((id) => ({ id, product: productById.get(id), entry: rates[id] }))
     .filter((row) => row.product && row.entry?.unit);
@@ -534,6 +545,7 @@ function RecapProducts({ products, catalogLoadFailed, selected, rates, productBy
           ))}
         </div>
       )}
+      {taurusNote && <p className="tech-visit-muted" role="status">{taurusNote}</p>}
       {rateRows.length > 0 && (
         <div className="tech-visit-card">
           <h3 className="tech-visit-section-title">Application rates (adjust to what you applied)</h3>

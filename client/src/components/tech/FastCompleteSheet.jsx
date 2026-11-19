@@ -71,6 +71,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
+import { applyTaurusYearlyLimit, taurusLeftOutLine, taurusOverLimitWarning, taurusYearlyCountOf } from '../../lib/taurus-yearly-limit';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
@@ -476,7 +477,7 @@ function useFastCompleteContext({
   typedType = null,
 }) {
   const [ctx, setCtx] = useState({
-    loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null, oneTap: false,
+    loading: true, loadError: '', blockedReason: '', rows: [], products: [], commonProducts: [], visitIdentity: null, visit: null, oneTap: false, taurusYearlyCount: null,
     rating: { allowed: false, scaleLabels: null },
   });
   useEffect(() => {
@@ -503,6 +504,8 @@ function useFastCompleteContext({
         // 1 to 5 rating on a typed form), so it asks for none.
         const rates = ratingContract?.allowed === true && !typedType;
         const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType });
+        // Taurus SC's label limit (4 a year per home), counted by the server with this context; null (unknown) keeps it on the mix.
+        const taurusYearlyCount = taurusYearlyCountOf(data?.taurusYearly);
         setCtx({
           loading: false,
           loadError: '',
@@ -518,8 +521,9 @@ function useFastCompleteContext({
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
           rows: houseMix
-            ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
+            ? applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearlyCount).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
             : [],
+          taurusYearlyCount,
           // A visit on the house mix is a regular pest visit or a pest
           // re-service, never a lane or typed one: the visits the full form
           // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
@@ -890,6 +894,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             onToggleEdit={() => setEditAmounts((on) => !on)}
             other={picker.button}
             popover={picker.popover}
+            taurusNote={taurusNoteFor(ctx, rows.filter((row) => row.active))}
           />
           <PestsSection form={form} setField={setField} locked={formLocked} />
           <ChoiceSection title="Where" columns={3}>
@@ -1484,9 +1489,16 @@ function writerSources({ productCount, photoCount, marked, rated }) {
   ];
 }
 
+// Taurus SC's label limit (4 a year per home): the line saying it was left off the house mix, or the warning when it
+// is on the sheet over the limit. Warns only; null when the count is under the limit or unknown.
+function taurusNoteFor(ctx, active) {
+  const count = ctx?.taurusYearlyCount;
+  return taurusOverLimitWarning(count, active) || (ctx?.houseMix ? taurusLeftOutLine(count) : null);
+}
+
 // The products as one line ("Taurus SC 4 fl oz · …"), opened to the full
 // product tiles on Edit.
-function ProductsLine({ active, locked, onOpen }) {
+function ProductsLine({ active, locked, onOpen, taurusNote = null }) {
   const listed = active.map((row) => (hasAmount(row) ? `${row.name} ${amountText(row.totalAmount, row.amountUnit)}` : row.name));
   return (
     <section className="tech-visit-choice-section">
@@ -1495,6 +1507,7 @@ function ProductsLine({ active, locked, onOpen }) {
         <Button type="button" variant="ghost" className="tech-visit-action" aria-expanded={false} disabled={locked} onClick={onOpen}>Edit</Button>
       </div>
       <p className="tech-visit-muted">{listed.length ? listed.join(' · ') : 'None selected'}</p>
+      {taurusNote && <p className="tech-visit-muted" role="status">{taurusNote}</p>}
     </section>
   );
 }
@@ -2385,9 +2398,10 @@ function VisitStep({
               other={picker.button}
               popover={picker.popover}
               onCollapse={() => setProductsOpen(false)}
+              taurusNote={taurusNoteFor(ctx, active)}
             />
           ) : (
-            <ProductsLine active={active} locked={locked} onOpen={() => setProductsOpen(true)} />
+            <ProductsLine active={active} locked={locked} onOpen={() => setProductsOpen(true)} taurusNote={taurusNoteFor(ctx, active)} />
           )}
           {stockNotices}
           {/* A clip being recorded keeps recording behind the photo manager, so
@@ -2476,7 +2490,7 @@ function CustomerTextResult({ outcome }) {
 // stickyPicks (the report flow): a way the tech picks for a product stays that
 // way. The visit's way there is the note's read, which can change when the
 // report is written, so a pick never quietly follows it.
-function ProductsSection({ products, heardLines = null, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse, stickyPicks = false }) {
+function ProductsSection({ products, heardLines = null, method, editAmounts, locked, onToggleEdit, other, popover, onCollapse, stickyPicks = false, taurusNote = null }) {
   const { rows, editingId, setEditingId, updateRow, removeRow } = products;
   const editorId = useId();
   const tileRefs = useRef(new Map());
@@ -2527,6 +2541,7 @@ function ProductsSection({ products, heardLines = null, method, editAmounts, loc
           />
         ))}
       </div>
+      {taurusNote && <p className="tech-visit-muted" role="status">{taurusNote}</p>}
       {heardLines}
       {editing && (
         <AddedProductEditor
