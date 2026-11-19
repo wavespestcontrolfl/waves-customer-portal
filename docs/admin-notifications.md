@@ -637,7 +637,9 @@ today filter. N is that page's own list: `services/estimate-call-today-push.js` 
 only, never a customer name or phone. With nothing on the list it sends nothing. It is the `estimate_call_today`
 trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
 day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
-is not made up). The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
+is not made up). The banner expires with its day: it carries `expiresAt` (the next ET midnight, `pushExpiryFor` in
+`notification-triggers.js`), which web push sends as its TTL, APNs as `apns-expiration` and FCM as `android.ttl`, so a
+phone offline past the day never shows an old count. The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
 (a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). The dispatcher marks a
 throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
 block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a

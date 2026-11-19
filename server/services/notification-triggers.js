@@ -24,6 +24,7 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { stripEmoji } = require('../utils/strip-emoji');
 const { agentName } = require('./voice-agent/relay-protocol');
 const { soundForTrigger } = require('./alert-sounds');
+const { validCalendarDate, parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // Lookarounds keep the match from starting or ending inside a longer
@@ -1479,6 +1480,14 @@ function pushTagFor(triggerKey, payload = {}) {
   return `waves-${triggerKey}`;
 }
 
+// A push that is true for one ET day only expires with that day (push-notifications.js webPushTtl, apns.js, fcm.js): a
+// phone that reconnects days later never shows an old "Call today" count. The end of the day is the next ET midnight.
+function pushExpiryFor(triggerKey, payload = {}) {
+  if (triggerKey !== 'estimate_call_today' || !validCalendarDate(payload.day)) return {};
+  const nextDay = etDateString(addETDays(parseETDateTime(`${payload.day}T12:00`), 1));
+  return { expiresAt: parseETDateTime(`${nextDay}T00:00`).toISOString() };
+}
+
 // GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): the labels a registry type's rule already declares,
 // in the shape a composed alert stores (area, severity, who, doneWhen, contact or promise), each kept only when the
 // composer would accept it. Never a subject: a rule names no record. {} while the gate is off, or when the reader is
@@ -1879,6 +1888,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               renotify: (triggerKey === 'sms_reply' && !dedupeKey) || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)) || triggerKey === 'portal_ask' || Boolean(payload.alertRowId),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
               ...(pushCall && adminRoleIds.has(adminUserId) ? pushCall : {}),
+              ...pushExpiryFor(triggerKey, payload),
             };
           },
           { beforeDispatch, ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
@@ -1925,6 +1935,7 @@ module.exports = {
     maskEmail,
     maskPhone,
     pushTagFor,
+    pushExpiryFor,
     PRIORITY_VIBRATE,
     redactSensitiveText,
     registryLabels,

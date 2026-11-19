@@ -130,3 +130,14 @@ test('a delivered push is sent', async () => {
   await expect(run()).resolves.toMatchObject({ count: 1, sent: true });
   expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
 });
+
+// Web Push keeps an undelivered push for weeks by default: a phone that reconnects days later must not show an old count.
+test('the outgoing push expires at the end of its ET day', async () => {
+  let built = null;
+  PushService.sendToAdminUsers.mockImplementation(async (ids, build) => {
+    built = build(ids[0], {});
+    return { subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0, results: [] };
+  });
+  await expect(run()).resolves.toMatchObject({ count: 1, sent: true });
+  expect(built).toMatchObject({ tag: 'waves-estimate_call_today-2026-11-19', expiresAt: '2026-11-20T05:00:00.000Z' });
+});
