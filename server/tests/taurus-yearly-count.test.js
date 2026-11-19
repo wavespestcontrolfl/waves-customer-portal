@@ -108,6 +108,9 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ quantity_applied: '0.013', quantity_unit: 'gal' }))).toBe('low');
     expect(applicationConcentration(row({ quantity_applied: '0.014', quantity_unit: 'gal' }))).toBe('high');
     expect(applicationConcentration(row({ quantity_applied: '1.602', quantity_unit: 'fl_oz' }))).toBe('high');
+    // A rate keeps 4 decimals (application_rate decimal(8,4)): 0.0125 gal stays the house mix, 0.013 gal is above it.
+    expect(applicationConcentration(row({ application_rate: '0.0125', rate_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ application_rate: '0.0130', rate_unit: 'gal' }))).toBe('high');
     // A per-gallon rate in mL: 23.7 mL/gal = 0.8 fl oz/gal.
     expect(applicationConcentration(row({ application_rate: '23.7', rate_unit: 'ml/gal' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: '11.8', rate_unit: 'ml/gal' }))).toBe('low');
@@ -159,7 +162,7 @@ describe('taurusYearlyCount', () => {
   it('passes the home, the visit to leave out, the ET year window and the name rule; one read-only query', async () => {
     const knex = ledger([]);
     const out = await taurusYearlyCount(VISIT, { knex, now: new Date('2027-01-01T04:00:00Z') });
-    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, eligibleHigh: true, year: 2026 });
+    expect(out).toEqual({ high: 0, low: 0, count: 0, eligible: true, eligibleHigh: true, year: 2026, beforeRuling: false });
     expect(knex.raw).toHaveBeenCalledTimes(1);
     const [sql, bindings] = knex.raw.mock.calls[0];
     expect(bindings).toEqual({
@@ -187,7 +190,7 @@ describe('taurusYearlyCount', () => {
       row({ service_record_id: null, application_date: NEW }),
     ]);
     // rec-a: one 0.06%; rec-b: two rows, one 0.06% -> one 0.06%; the record-less row is its own 0.03% application.
-    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, eligibleHigh: false, year: 2026 });
+    expect(await taurusYearlyCount(VISIT, { knex, now: new Date('2026-12-10T15:00:00Z') })).toEqual({ high: 2, low: 1, count: 3, eligible: false, eligibleHigh: false, year: 2026, beforeRuling: false });
   });
 
   it.each([
@@ -201,6 +204,16 @@ describe('taurusYearlyCount', () => {
     })), { high: 2, low: 0, eligible: false }],
   ])('%s', async (_name, rows, expected) => {
     expect(await taurusYearlyCount(VISIT, { knex: ledger(rows) })).toMatchObject(expected);
+  });
+
+  it('says when the visit may be dated before the 0.03% ruling (its day or today), for the close-out warning', async () => {
+    const knex = ledger([]);
+    const at = (scheduled_date, now) => taurusYearlyCount({ ...VISIT, scheduled_date }, { knex, now: new Date(now) });
+    expect(await at('2026-11-19', '2026-11-25T15:00:00Z')).toMatchObject({ beforeRuling: true });
+    expect(await at('2026-11-21', '2026-11-19T20:00:00Z')).toMatchObject({ beforeRuling: true });
+    expect(await at('2026-11-20', '2026-11-20T15:00:00Z')).toMatchObject({ beforeRuling: false });
+    expect(await at(null, '2026-11-20T04:30:00Z')).toMatchObject({ beforeRuling: true }); // 11:30 PM ET on Nov 19
+    expect(await at(null, '2026-12-10T15:00:00Z')).toMatchObject({ beforeRuling: false });
   });
 
   it('checks both years for a visit scheduled in another year than today, and is eligible only when both are', async () => {

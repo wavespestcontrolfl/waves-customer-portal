@@ -5,7 +5,7 @@
 // used (owner ruling 2026-11-19, "A": the house mix is 1.6 fl oz per 4 gal,
 // 0.03%). The server reads the compliance ledger
 // (server/services/taurus-yearly-count.js) and sends
-// `taurusYearly: { high, low, count, eligible, eligibleHigh, year }` with the
+// `taurusYearly: { high, low, count, eligible, eligibleHigh, year, beforeRuling }` with the
 // close-out's product context, where `eligible` says whether another 0.03%
 // application fits and `eligibleHigh` whether another 0.06% one does. This module turns that into: the house mix without Taurus when it does
 // not fit, a plain line saying so, and a warning when Taurus is added back.
@@ -40,15 +40,16 @@ export const isFlOzPerGal = isFlOzPerGalUnit;
 export const isHouseTaurusAmount = (totalAmount, amountUnit) => isHouseTaurusFlOz(flOzAmount(totalAmount, amountUnit, { nullUnitIsFlOz: true }));
 // A selected row that is a 0.06% application, by the rule the yearly count applies to the saved ledger row
 // (shared/taurus-concentration.cjs): its dilution, else its per-gallon rate, else its amount against the
-// 1.6 fl oz house mix. A reopened recap's recorded row carries the ledger's dilution and application date;
-// a row being entered has neither and is read as an application after the 0.03% ruling.
-export const isHighTaurusRate = (row) => taurusConcentration({
+// 1.6 fl oz house mix. A reopened recap's recorded row carries the ledger's dilution and application date; a row
+// being entered is dated by `beforeRuling` (the server's `taurusYearly.beforeRuling`: the visit may be dated before
+// the 0.03% ruling).
+export const isHighTaurusRate = (row, { beforeRuling = false } = {}) => taurusConcentration({
   dilution: row?.dilution,
   rate: row?.rate,
   rateUnit: row?.rateUnit,
   amount: row?.totalAmount,
   amountUnit: row?.amountUnit,
-  beforeRuling: typeof row?.applicationDate === 'string' && row.applicationDate < TAURUS_LOW_RATE_SINCE,
+  beforeRuling: typeof row?.applicationDate === 'string' ? row.applicationDate < TAURUS_LOW_RATE_SINCE : beforeRuling,
   nullAmountUnitIsFlOz: true,
 }) === 'high';
 
@@ -76,7 +77,8 @@ export function taurusOverLimitWarning(taurusYearly, products) {
   const list = Array.isArray(products) ? products : [];
   const over = list.some((p) => {
     if (!p || !isTaurusProduct(p)) return false;
-    const fits = isHighTaurusRate(p) && typeof taurusYearly.eligibleHigh === 'boolean' ? taurusYearly.eligibleHigh : taurusYearly.eligible;
+    const high = isHighTaurusRate(p, { beforeRuling: taurusYearly.beforeRuling === true });
+    const fits = high && typeof taurusYearly.eligibleHigh === 'boolean' ? taurusYearly.eligibleHigh : taurusYearly.eligible;
     return fits === false;
   });
   return over ? "Over the label's yearly Taurus limit at this home." : null;

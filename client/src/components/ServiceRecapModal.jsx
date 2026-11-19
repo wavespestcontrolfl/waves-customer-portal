@@ -75,13 +75,24 @@ function fmtTime(ts) {
 }
 
 // The ledger's rows on a recorded product (the recap's own rows keep no amounts), as the Taurus yearly-limit
-// warning reads a row: quantity with its unit, dilution, application date. The yearly count reads them, and a
-// record with several rows for one product at its strongest, so each row is checked.
+// warning reads a row: quantity with its unit, stored rate, dilution, application date.
 function recordedLedgerRows(rp) {
   return (Array.isArray(rp.ledger_rows) ? rp.ledger_rows : []).map((row) => ({
     ...(Number(row?.quantity) > 0 && row.quantity_unit ? { totalAmount: Number(row.quantity), amountUnit: row.quantity_unit } : {}),
+    ...(Number(row?.application_rate) > 0 && row.rate_unit ? { storedRate: Number(row.application_rate), storedRateUnit: row.rate_unit } : {}),
     ...(row?.dilution_rate ? { dilution: row.dilution_rate } : {}),
     ...(row?.application_date ? { applicationDate: row.application_date } : {}),
+  }));
+}
+
+// The rows the Taurus warning reads for one selected product: on a reopened recap one per ledger row, so any 0.06%
+// row warns (the yearly count reads a record at its strongest); else the product at its rate. With no rate row (a
+// recorded mL rate is never shown) the save keeps each row's stored rate, so that rate is read.
+function taurusWarningRows(product, rateRow, ledgerRows) {
+  const rated = { ...product, rate: rateRow?.rate, rateUnit: rateRow?.unit };
+  if (!ledgerRows?.length) return [rated];
+  return ledgerRows.map(({ storedRate, storedRateUnit, ...facts }) => ({
+    ...rated, ...facts, ...(rateRow ? {} : { rate: storedRate, rateUnit: storedRateUnit }),
   }));
 }
 
@@ -290,11 +301,7 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].flatMap((id) => {
-    // One row per ledger row, so any 0.06% row warns, as the count reads the record at its strongest.
-    const row = { ...productById.get(id), rate: rates[id]?.rate, rateUnit: rates[id]?.unit };
-    return recordedLedger[id]?.length ? recordedLedger[id].map((facts) => ({ ...row, ...facts })) : [row];
-  }), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].flatMap((id) => taurusWarningRows(productById.get(id), rates[id], recordedLedger[id])), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

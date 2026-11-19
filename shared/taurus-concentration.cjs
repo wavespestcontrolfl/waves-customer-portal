@@ -27,9 +27,10 @@ const HIGH_DILUTION_PERCENT = 0.06;
 const TSP_PER_FL_OZ = 6;
 // Float slack for converted amounts (9.6 tsp is 1.5999999999999999 fl oz).
 const FL_OZ_EPSILON = 1e-6;
-// The ledger keeps an amount to 3 decimals in its own unit (quantity_applied decimal(8,3)): 0.0125 gal is saved as
-// 0.013 gal (1.664 fl oz). An amount within that rounding of the house mix is the house mix, at entry and once saved.
-const STORED_AMOUNT_SLACK = 0.0005;
+// The ledger keeps a value to a fixed number of decimals in its own unit: quantity_applied decimal(8,3) (0.0125 gal is
+// saved as 0.013 gal, 1.664 fl oz), application_rate decimal(8,4). A value within half its last stored decimal of
+// the house mix is the house mix, at entry and once saved.
+const STORED_DECIMALS = { amount: 3, rate: 4 };
 
 // fl oz in one unit of a liquid amount of product: the volume units the completion API accepts
 // (shared/rate-units.json: oz, fl_oz, ml, gal), at the factors of server/services/inventory-units.js, and the
@@ -73,11 +74,11 @@ function dilutionPercent(text) {
 
 /** Whether a fl oz amount is the 1.6 fl oz house mix. */
 const isHouseTaurusFlOz = (flOz) => Math.abs(flOz - HOUSE_TAURUS_FL_OZ) < FL_OZ_EPSILON;
-/** Whether an amount of product is more than the house mix, beyond the ledger's rounding in its own unit. */
-function aboveHouse(value, unit, options) {
-  const flOz = flOzAmount(value, unit, options);
+/** Whether an amount of product is more than the house mix, beyond the ledger's rounding of that column in its unit. */
+function aboveHouse(value, unit, { decimals, nullUnitIsFlOz = false }) {
+  const flOz = flOzAmount(value, unit, { nullUnitIsFlOz });
   const flOzPerUnit = (unit == null ? null : FL_OZ_PER_UNIT[unitKey(unit)]) || 1;
-  return flOz - HOUSE_TAURUS_FL_OZ > STORED_AMOUNT_SLACK * flOzPerUnit + FL_OZ_EPSILON;
+  return flOz - HOUSE_TAURUS_FL_OZ > 0.5 * 10 ** -decimals * flOzPerUnit + FL_OZ_EPSILON;
 }
 
 /**
@@ -94,14 +95,14 @@ function taurusConcentration({
 } = {}) {
   const percent = dilutionPercent(dilution);
   if (percent != null) return percent >= HIGH_DILUTION_PERCENT ? 'high' : 'low';
-  const amountAboveHouse = aboveHouse(amount, amountUnit, { nullUnitIsFlOz: nullAmountUnitIsFlOz });
+  const amountAboveHouse = aboveHouse(amount, amountUnit, { decimals: STORED_DECIMALS.amount, nullUnitIsFlOz: nullAmountUnitIsFlOz });
   const perGal = flOzPerGal(rate, rateUnit);
   if (perGal != null) {
     if (perGal - LOW_RATE_MAX_FL_OZ_PER_GAL > FL_OZ_EPSILON) return 'high';
     return beforeRuling && amountAboveHouse ? 'high' : 'low';
   }
   if (beforeRuling) return 'high';
-  return amountAboveHouse || aboveHouse(rate, rateUnit) ? 'high' : 'low';
+  return amountAboveHouse || aboveHouse(rate, rateUnit, { decimals: STORED_DECIMALS.rate }) ? 'high' : 'low';
 }
 
 module.exports = {

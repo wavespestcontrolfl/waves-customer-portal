@@ -150,8 +150,10 @@ async function yearAnswer(knex, visit, bounds) {
 /**
  * @param {{ id?: string|null, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }} visit
  *   the scheduled_services row being completed
- * @returns {Promise<{ high: number, low: number, count: number, eligible: boolean, eligibleHigh: boolean, year: number } | null>}
- *   `eligible`: another 0.03% application fits; `eligibleHigh`: another 0.06% one fits. null when the history is
+ * @returns {Promise<{ high: number, low: number, count: number, eligible: boolean, eligibleHigh: boolean, year: number, beforeRuling: boolean } | null>}
+ *   `eligible`: another 0.03% application fits; `eligibleHigh`: another 0.06% one fits; `beforeRuling`: this visit's
+ *   application may be dated before TAURUS_LOW_RATE_SINCE (the close-out warning then reads it as the count will,
+ *   shared/taurus-concentration.cjs). null when the history is
  *   unknown (no customer, or the read failed): the close-outs then leave Taurus off the house mix and say so; none blocks.
  */
 async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
@@ -168,6 +170,9 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
       ...shown,
       eligible: answers.every((a) => a.eligible),
       eligibleHigh: answers.every((a) => a.eligibleHigh),
+      // The completion writers date the ledger row the visit day or today: either one before the ruling (the
+      // conservative answer).
+      beforeRuling: [day, etDateString(now)].some((d) => /^\d{4}-\d{2}-\d{2}$/.test(d || '') && d < TAURUS_LOW_RATE_SINCE),
     };
   } catch (err) {
     // No driver message: it can echo SQL and bound values.

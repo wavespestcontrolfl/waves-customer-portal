@@ -175,6 +175,19 @@ describe('isHighTaurusRate (the same rule the server applies to a saved ledger r
     expect(isHighTaurusRate({ rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 1.6, amountUnit: 'fl_oz', applicationDate: '2026-11-19' })).toBe(false);
   });
 
+  it("dates a row being entered by the server's beforeRuling; a ledger row's own date wins", () => {
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz' }, { beforeRuling: true })).toBe(true);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz' })).toBe(false);
+    expect(isHighTaurusRate({ rate: '1.6', rateUnit: 'oz', applicationDate: '2026-11-20' }, { beforeRuling: true })).toBe(false);
+    // A visit dated before the ruling at 1.6 oz, after three 0.03% applications: the count will read 0.06%, so it warns.
+    const threeLow = { high: 0, low: 3, count: 3, eligible: true, eligibleHigh: false, year: 2026 };
+    const row = [{ name: 'Taurus SC', rate: '1.6', rateUnit: 'oz' }];
+    expect(taurusOverLimitWarning({ ...threeLow, beforeRuling: true }, row)).toBe("Over the label's yearly Taurus limit at this home.");
+    expect(taurusOverLimitWarning({ ...threeLow, beforeRuling: false }, row)).toBeNull();
+    // The house mix's 0.4 fl oz/gal row stays 0.03% on that day too.
+    expect(taurusOverLimitWarning({ ...threeLow, beforeRuling: true }, [{ name: 'Taurus SC', rate: '0.4', rateUnit: 'fl_oz/gal', totalAmount: 1.6, amountUnit: 'fl_oz' }])).toBeNull();
+  });
+
   it('reads a per-100-gallon rate as fl oz per gallon, as the server does', () => {
     expect(isHighTaurusRate({ rate: '80', rateUnit: 'fl_oz/100gal' })).toBe(true);
     expect(isHighTaurusRate({ rate: 80, rateUnit: 'oz/100gal' })).toBe(true);
