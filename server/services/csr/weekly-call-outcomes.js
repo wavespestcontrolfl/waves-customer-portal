@@ -38,6 +38,9 @@ const NO_PROSPECT_OUTCOMES = Object.freeze([
 // The valid extraction's own quote flags, JSON true only (call-disposition.js tests `=== true`).
 const QUOTE_FLAGS_SQL = "cl.ai_extraction_enriched #> '{service_request,quote_requested}' = 'true'::jsonb"
   + " OR cl.ai_extraction_enriched #> '{service_request,quote_promised}' = 'true'::jsonb";
+// The valid extraction says the number is not the caller's own (caller.caller_id_disclaimed, JSON true only): an office
+// line or a borrowed phone that more than one prospect may call from.
+const CALLER_ID_DISCLAIMED_SQL = "cl.ai_extraction_enriched #> '{caller,caller_id_disclaimed}' = 'true'::jsonb";
 // Seven ET calendar days: by default the last seven ending now (the CSR overview's live view); for a report run every
 // seven days (`completedDays`), the seven completed days before today, so successive reports cover every call once.
 const WEEK_DAYS = 7;
@@ -56,8 +59,11 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
   const from = parseETDateTime(`${etDateString(addETDays(now, completedDays ? -WEEK_DAYS : 1 - WEEK_DAYS))}T00:00`);
   // A completed window ends at today's ET midnight, exclusive; the live window ends now.
   const to = completedDays ? parseETDateTime(`${etDateString(now)}T00:00`) : now;
-  // A caller is their phone identity; a call with no number stands alone.
-  const caller = `COALESCE(NULLIF(${phoneIdentitySql('cl.from_phone')}, ''), cl.id::text)`;
+  // A caller is their phone identity. A call with no number stands alone, and so does a call whose number the caller
+  // disclaimed: two prospects on one shared line are two callers. (A prospect who rings twice from a disclaimed line
+  // counts twice; that is the safer error, since merging would hide one caller's outcome behind the other's.)
+  const caller = `CASE WHEN ${CALLER_ID_DISCLAIMED_SQL} THEN cl.id::text`
+    + ` ELSE COALESCE(NULLIF(${phoneIdentitySql('cl.from_phone')}, ''), cl.id::text) END`;
   const started = callStartedAtSql('cl');
   const callers = whereNotSandboxCall(conn('call_log as cl'), 'cl.source')
     .whereRaw("cl.direction LIKE 'inbound%'")
@@ -105,13 +111,13 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
   };
 }
 
-// "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised: 20."
+// "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, not booked: 20."
 function formatWeeklyCallOutcomes(o) {
   const head = `New-customer callers: ${o.newCustomerCallers}.`;
-  if (o.newCustomerCallers === 0) return `${head} Booked on the call: 0. Estimate requested or promised: 0.`;
+  if (o.newCustomerCallers === 0) return `${head} Booked on the call: 0. Estimate requested or promised, not booked: 0.`;
   // The extraction's quote flags need no recorded outcome, so the estimate count shows even with no booking rate.
-  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised: ${o.estimateRequestedOrPromised}.`;
-  return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised: ${o.estimateRequestedOrPromised}.`;
+  if (!o.callersWithOutcome) return `${head} No call outcomes recorded yet, so no booking rate. Estimate requested or promised, not booked: ${o.estimateRequestedOrPromised}.`;
+  return `${head} Outcome known for ${o.callersWithOutcome}. Booked on the call: ${o.bookedOnCall} of ${o.callersWithOutcome} (${o.bookedPct}%). Estimate requested or promised, not booked: ${o.estimateRequestedOrPromised}.`;
 }
 
 module.exports = {

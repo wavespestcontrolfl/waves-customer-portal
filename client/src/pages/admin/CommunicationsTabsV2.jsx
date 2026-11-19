@@ -861,13 +861,14 @@ export function SmsTemplatesTabV2() {
 const COACH_SECTIONS = ["overview", "tasks", "weeklyRec", "leaderboard", "leadQuality"];
 const OPEN_TASK_STATUSES = ["pending", "in_progress"];
 
-// This week's new-customer calls and how they ended (server/services/csr/weekly-call-outcomes.js).
+// The last 7 days' new-customer calls and how they ended (server/services/csr/weekly-call-outcomes.js): seven ET dates
+// ending now, not a calendar week (the Friday tip reports the seven completed days instead).
 function WeeklyCallOutcomes({ overview }) {
   const outcomes = overview?.weeklyCallOutcomes;
   if (!outcomes?.text) return null;
   return (
     <div className="text-13 text-ink-secondary mb-3">
-      <span className="font-medium text-ink-primary">This week: </span>
+      <span className="font-medium text-ink-primary">Last 7 days: </span>
       {outcomes.text}
     </div>
   );
