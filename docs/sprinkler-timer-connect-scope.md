@@ -336,7 +336,10 @@ and 3.
 - **What it does.** At the day and start time on file, Waves starts the
   turf zones for the week's minutes. A week whose plan is `hold` gets no
   run, so a skip week is real with nothing to pause. A plan with two runs
-  uses two slots.
+  uses two slots, and each slot is a day the customer chose. The opt-in
+  sheet lists every watering day on file, all selected, and the customer
+  can unselect one. With one day chosen, a two-run week gets one run and
+  the card says the second was not started; Waves never adds a day.
 - **Who sets the time.** The customer picks their watering day and a start
   time once, the same statement they make today when they program a timer.
   The watering days are already on file (`watering_days`), so the sheet
@@ -366,6 +369,12 @@ and 3.
   the reading missing (decision 8); it is never counted as zero. A window
   that ends today is still filling, and the helper caches it for 30
   minutes, so the read is made within the hour before the run.
+- **Only rain that has fallen.** For the current day the helper can return
+  the larger of radar rain so far and Open-Meteo's forecast for the whole
+  day. A 5 AM run must not be skipped for rain forecast that afternoon,
+  and the card must not say rain "fell" when it has not. For the run day
+  the worker uses observed rain up to the run time only. When no observed
+  amount is available for that day, the reading is missing (decision 8).
 - **A reading can be missing.** Both rungs are outside services, and the
   radar rung is a free university relay with no uptime promise. On
   2026-11-02 both failed for one home in 45.
@@ -379,6 +388,13 @@ and 3.
   pause to end and still has to land in a permitted slot. Otherwise it is
   dropped, the rule the report already applies (`renderWeekPlanNotBefore`,
   `server/services/irrigation-week-plan.js:539`).
+- **A pause is not the whole instruction.** An "until dry" hold has no end
+  time, so step 3 writes no pause for it, and a timed hold can also say to
+  wait until the lawn is dry. So the worker does not ask only "has the
+  pause ended". At run time it reads the saved instruction for the home's
+  latest visit. While that instruction still says to keep the lawn dry and
+  nothing confirms it is dry, no automatic run starts. The card says why,
+  and the customer can start the run when the lawn is dry.
 - **The timer's own lawn schedule has to be empty.** Otherwise the lawn is
   watered twice. The opt-in says so, and the card warns while the timer
   still shows lawn runs of its own. Beds and drip keep their schedule.
@@ -388,9 +404,12 @@ and 3.
   can give minutes for each zone. Until then the home has neither Run nor
   automatic runs, and the card shows the guide (the step 2 rule).
 - **State kept apart.** The two settings (pause after treatments,
-  automatic runs) and the day and time are the customer's own. A pause, a
+  automatic runs) and the days and time are the customer's own. A pause, a
   run in progress, an offline timer or a zone edit never changes them, and
   turning a setting on never hides a pause or the Stop button.
+- **The opt-in belongs to one connection.** Disconnect clears automatic
+  runs and the chosen days. A new connection, to the same timer or another
+  one, starts with automatic runs off and asks again.
 - **When a run cannot happen** (timer offline, Hunter unreachable, Waves
   down) the lawn is not watered. This is the reverse of today, where the
   timer waters no matter what the plan says. The card shows the missed run
