@@ -284,21 +284,35 @@ const CALL_LIST_MATCHERS = {
 // The list filter, with ?view=call_today (the 9 AM push links here) selecting "Call today". Any other value does
 // nothing. The list takes the parameter once and drops it from the URL (replace: no new history entry), so a later
 // filter change, a refresh, or leaving and coming back is not pinned to it. The effect watches the URL, so the link
-// also works on a list that is already open.
+// also works on a list that is already open. The third value counts the links taken: the list clears its search, date
+// filter and page when it changes (useClearControlsOnCallTodayLink), so nothing left from earlier hides a row the push
+// counted.
 function useCallTodayLinkFilter() {
   const [searchParams, setSearchParams] = useSearchParams();
   const linked = searchParams.get("view") === "call_today";
   const [filter, setFilter] = useState(linked ? "call_today" : "all");
+  const [linksTaken, setLinksTaken] = useState(0);
   useEffect(() => {
     if (!linked) return;
     setFilter("call_today");
+    setLinksTaken((n) => n + 1);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("view");
       return next;
     }, { replace: true });
   }, [linked, setSearchParams]);
-  return [filter, setFilter];
+  return [filter, setFilter, linksTaken];
+}
+// Each Call today link the list takes clears the controls that narrow it beyond the filter. Called after the paging
+// hook, with the state setters (stable) and the paging page setter (stable, a useState setter).
+function useClearControlsOnCallTodayLink(linksTaken, { setSearch, setDate, setPage }) {
+  useEffect(() => {
+    if (!linksTaken) return;
+    setSearch("");
+    setDate("all");
+    setPage(1);
+  }, [linksTaken, setSearch, setDate, setPage]);
 }
 function withCallListChips(chips, afterKey) {
   const at = chips.findIndex((c) => c.key === afterKey);
@@ -2065,7 +2079,7 @@ function EstimatePipelineViewV2({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter] = useCallTodayLinkFilter();
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -2370,6 +2384,11 @@ function EstimatePipelineViewV2({
     deepLinkEstimateId,
     deepLinkToken,
   );
+  useClearControlsOnCallTodayLink(callTodayLinksTaken, {
+    setSearch,
+    setDate: setDateRange,
+    setPage: paging.setPage,
+  });
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,
@@ -4136,7 +4155,7 @@ function EstimatesMobileListView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useCallTodayLinkFilter();
+  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4426,6 +4445,11 @@ function EstimatesMobileListView({
     deepLinkEstimateId,
     deepLinkToken,
   );
+  useClearControlsOnCallTodayLink(callTodayLinksTaken, {
+    setSearch,
+    setDate: setDateFilter,
+    setPage: paging.setPage,
+  });
   const highlightId = useEstimateDeepLinkHighlight({
     targetId: deepLinkEstimateId,
     token: deepLinkToken,

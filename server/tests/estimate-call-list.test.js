@@ -299,6 +299,8 @@ describe('estimateListQuery', () => {
       ['leftJoin', 'technicians', 'estimates.created_by_technician_id', 'technicians.id'],
       ['select', 'estimates.*', 'technicians.name as created_by_name'],
       ['orderBy', 'estimates.created_at', 'desc'],
+      // A stable tie-breaker: the push and the page cut the newest 2,000 at the same rows.
+      ['orderBy', 'estimates.id', 'desc'],
       ['whereNull', 'estimates.archived_at'],
     ]);
   });

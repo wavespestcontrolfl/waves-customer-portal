@@ -216,6 +216,22 @@ describe('the banner', () => {
     expect([...claimed]).toEqual(['estimate_call_today:2026-11-19', 'estimate_call_today:2026-11-20']);
   });
 
+  test('no dispatch result is uncertain: the claim is kept, so a rerun sends no second banner', async () => {
+    estimateRows = [row('a', 5)];
+    mockTrigger.mockResolvedValueOnce(undefined);
+    await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toEqual({ count: 1, sent: false, error: 'delivery_uncertain' });
+    expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+    expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: delivery uncertain (no dispatch result); claim kept');
+    await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toMatchObject({ sent: false, skipped: 'already_claimed' });
+  });
+
+  test('the push marker outranks an error a deduped dispatch also set', async () => {
+    estimateRows = [row('a', 5)];
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, retryable: true, error: 'provider down', pushFailed: 'push_dispatch' });
+    await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toEqual({ count: 1, sent: false, error: 'push_dispatch_failed' });
+    expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+  });
+
   test('a send that did not happen frees the day for a retry', async () => {
     estimateRows = [row('a', 5)];
     mockTrigger.mockResolvedValueOnce({ error: 'x' });

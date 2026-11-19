@@ -85,7 +85,10 @@ function estimateListQuery(database, { status, sentOnly = false, sources = null,
   let query = database('estimates')
     .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
     .select('estimates.*', 'technicians.name as created_by_name')
-    .orderBy('estimates.created_at', 'desc');
+    // The id breaks created_at ties, so every caller's limit cuts at the same rows (the push's narrow select and the
+    // page's full one must count the same 2,000).
+    .orderBy('estimates.created_at', 'desc')
+    .orderBy('estimates.id', 'desc');
   if (status) query = query.where('estimates.status', status);
   if (sentOnly) {
     query = query.where(function () {

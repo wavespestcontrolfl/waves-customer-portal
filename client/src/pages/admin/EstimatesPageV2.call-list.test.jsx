@@ -189,6 +189,21 @@ it("(desktop) the link also works on a list that is already open", async () => {
   await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
 });
 
+// A search left on an open list would hide rows the push counted: the link clears it (and the date filter and page).
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) the link on an open list clears a search that hid the Call today rows", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates");
+  await screen.findByText("Fresh View");
+  fireEvent.change(screen.getByRole("searchbox", { name: "Search estimates" }), { target: { value: "Fresh View" } });
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-1h"]));
+  act(() => routerProbe.navigate("/admin/pipeline?tab=estimates&view=call_today"));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  expect(screen.getByRole("searchbox", { name: "Search estimates" })).toHaveValue("");
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+});
+
 it("(mobile) the status-pills flag loading after the link keeps Call today; after the customer picks All it stays All", async () => {
   flags.estimates_v2_status_pills = false;
   const { container, rerenderSame } = renderPage(390, "?tab=estimates&view=call_today");

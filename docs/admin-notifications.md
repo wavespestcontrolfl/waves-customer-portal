@@ -638,7 +638,7 @@ only, never a customer name or phone. With nothing on the list it sends nothing.
 trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
 day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
 is not made up). The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
-(a later run may try); after a device failure, or any result it does not recognize, it is kept (no second banner). The dispatcher marks a
+(a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). The dispatcher marks a
 throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
 block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a
 device send began may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure

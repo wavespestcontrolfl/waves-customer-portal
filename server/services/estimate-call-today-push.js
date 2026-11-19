@@ -98,11 +98,11 @@ async function releaseDay(day) {
   }
 }
 
-// What the dispatch did. Sent only when a phone accepted it (push.sent > 0). An error or unreadable preferences, push
-// off (push null) or a RECOGNIZED nothing-to-send-to result (no device, expired devices, a policy skip: sent 0 with no
-// failure counted) is a skip: the claim is released so a later run may try. Anything else (a device failed, a retry is
-// pending, or a result shape we do not recognize, such as missing counters) is uncertain: the claim stays, so there is
-// never a second banner that day. The dispatcher's own `pushFailed` marker (its recipient lookup or push block threw,
+// What the dispatch did. Sent only when a phone accepted it (push.sent > 0). An error before the push block (the
+// dispatcher's outer catch) or unreadable preferences, push off (push null) or a RECOGNIZED nothing-to-send-to result
+// (no device, expired devices, a policy skip: sent 0 with no failure counted) is a skip: the claim is released so a
+// later run may try. Anything else (no result at all, a device failed, a retry is pending, or a result shape we do not
+// recognize, such as missing counters) is uncertain: the claim stays, so there is never a second banner that day. The dispatcher's own `pushFailed` marker (its recipient lookup or push block threw,
 // which also leaves push null) is a failure, not a disabled push, and the run reports an error. A throw before any
 // push reached a provider (PRE_HANDOFF_FAILURES) releases the claim, so a same-day rerun may send once the database
 // recovers; a thrown push dispatch after a device send began may have reached a phone, so its claim stays. A claim
@@ -116,12 +116,13 @@ function isRecognizedNoDelivery(push) {
 }
 
 async function settle(day, count, result) {
-  const push = result?.push;
-  if (!result || result.error || result.prefsUnavailable) {
-    const released = await releaseDay(day);
-    logger.error(`[estimate-call-today] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})${released ? '' : '; claim release failed'}`);
-    return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
+  // No result is no evidence that the push stopped before a handoff: keep the claim.
+  if (!result || typeof result !== 'object') {
+    logger.error(`[estimate-call-today] ${day}: delivery uncertain (no dispatch result); claim kept`);
+    return { count, sent: false, error: 'delivery_uncertain' };
   }
+  // The push block's own marker comes first: its throw can also set `error` (a deduped dispatch), and only the marker
+  // says whether a provider may have been reached.
   if (PRE_HANDOFF_FAILURES.has(result.pushFailed)) {
     const released = await releaseDay(day);
     logger.error(`[estimate-call-today] ${day}: push failed before any handoff (${result.pushFailed}); ${released ? 'claim released' : 'claim release failed'}`);
@@ -131,6 +132,14 @@ async function settle(day, count, result) {
     logger.error(`[estimate-call-today] ${day}: push dispatch failed (${String(result.pushFailed)}); claim kept`);
     return { count, sent: false, error: 'push_dispatch_failed' };
   }
+  // Without a push marker, `error` is the dispatcher's outer catch (before its push block), and unreadable preferences
+  // deliver to nobody: nothing reached a provider, so the claim is released.
+  if (result.error || result.prefsUnavailable) {
+    const released = await releaseDay(day);
+    logger.error(`[estimate-call-today] ${day}: banner not sent (${result.error ? 'dispatch error' : 'preferences unavailable'})${released ? '' : '; claim release failed'}`);
+    return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
+  }
+  const push = result.push;
   if (push && Number(push.sent) > 0) {
     logger.info(`[estimate-call-today] ${day}: ${count} on the list, banner sent`);
     return { count, sent: true, result };
@@ -165,6 +174,8 @@ async function claimAndSend(day, count) {
     const result = await triggerNotification('estimate_call_today', { count, day }, { pushOnly: true });
     return settle(day, count, result);
   } catch (err) {
+    // triggerNotification catches every throw in its body and returns { error }, so a rejection here comes before it
+    // ran (its require or its call): no push was attempted, and the claim is released.
     const released = await releaseDay(day);
     logger.error(`[estimate-call-today] ${day}: banner failed (${err?.code || 'no code'})${released ? '' : '; claim release failed'}`);
     return { count, sent: false, error: released ? 'dispatch_failed' : 'claim_release_failed' };
