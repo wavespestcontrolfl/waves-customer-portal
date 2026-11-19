@@ -57,21 +57,16 @@ describe('editorial review coverage validation', () => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
   });
 
-  test('allows a number inside the text of a link to one of our own pages', () => {
-    const passage = 'Our [guide to the 8 cockroach types in Florida](/pest-control/cockroach-types/) covers the rest.';
-    expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
-  });
-
   test('allows a document code that names a source', () => {
     expect(validateClaim('Here is what EENY-514 says about the spray:', NON_EXTERNAL)).toBeNull();
   });
 
   test.each([
     'Last updated: November 2026, when 40% of homes had roaches.',
-    'Our [guide](/pest-control/cockroach-types/) says 8 types live here.',
-    'Read the [8 types guide](https://example.org/roaches) first.',
+    // Link text is held too: a linked figure can be the claim itself (pre-push audit on this PR).
+    'Our [guide to the 8 cockroach types in Florida](/pest-control/cockroach-types/) covers the rest.',
+    'Termites cause [$5 billion in damage](/termite-control/) annually.',
     'Read the [8 Florida species](//example.org/species) list.',
-    'Read the [8 Florida species](/\\example.org/species) list.',
     'EENY-514 says the roach is 1.5 inches long.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBe('claim_kind_mismatch:C1');

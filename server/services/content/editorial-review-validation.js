@@ -48,12 +48,11 @@ function validateChecks(checks, document, title, sources) {
 // removed for the figure test only: an attributed quote is detected on the passage as written.
 const DOCUMENT_CODE_RE = /\b[A-Z]{2,}-?\d+[A-Z]?\b/g;
 const FIGURE_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
-const hasFigure = (text) => FIGURE_RE.test(String(text).replace(DOCUMENT_CODE_RE, ' '));
 function deterministicClaimKind(passage) {
   const text = String(passage || '');
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
-  if (hasFigure(text)) return 'quantitative';
+  if (FIGURE_RE.test(text.replace(DOCUMENT_CODE_RE, ' '))) return 'quantitative';
   return null;
 }
 
@@ -67,17 +66,13 @@ function isTrivialNumericInstruction(passage) {
   return /^(?:check|empty|inspect|look|remove|walk)\b/i.test(String(passage || '').trim());
 }
 
-// A non_external passage may carry a number only where the number makes no outside claim: the visible
-// "Last updated: Month Year" line every brief asks for (content-brief-builder), and the text of a link to
-// one of our own pages (a root-relative path; that page carries its own review). "//host" and "/\\host"
-// are other sites (browsers read both as protocol-relative), so their text keeps its figures. Anything
-// else with a figure left over is still held to the deterministic kind.
+// A non_external passage may carry a number only where the number makes no outside claim: a trivial
+// instruction, or the visible "Last updated: Month Year" line every brief asks for (content-brief-builder).
+// Any other figure, link text included, is held to the deterministic kind.
 const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)\s*:?\s*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
-const OWN_PAGE_LINK_RE = /\[([^\]]*)\]\(\/(?![/\\])[^)\s]*\)/g;
 function numericNonExternalAllowed(passage) {
   const text = String(passage || '').trim();
-  if (isTrivialNumericInstruction(text) || DATE_STAMP_RE.test(text)) return true;
-  return !hasFigure(text.replace(OWN_PAGE_LINK_RE, ' '));
+  return isTrivialNumericInstruction(text) || DATE_STAMP_RE.test(text);
 }
 
 // A supported claim meets the rules of BOTH its label and the deterministic kind, so a wrong label
