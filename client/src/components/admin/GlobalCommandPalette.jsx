@@ -406,11 +406,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // Server-persisted thread id (GATE_IB_THREADS). Null = ephemeral/new chat;
   // the id is set from query responses and from resume-on-open.
   const [threadId, setThreadId] = useState(null);
-  // The bar's mics remount whenever the conversation is replaced (New chat, a thread picked from
-  // History, a context change that clears it): a recording or resend question from the old
-  // conversation never puts its words into the new one's prompt. The automatic resume on open does
-  // not: it only fills in the conversation the bar opened on, so a recording started meanwhile is
-  // for it (on a slow phone connection the resume can land mid-recording).
+  // The bar's mics remount whenever the operator replaces the conversation (New chat, a thread
+  // picked from History: at the pick, before it loads; a context change that clears it): a
+  // recording or resend question from the old conversation never puts its words into the new
+  // one's prompt. Words already in the prompt stay, typed or dictated (a pick keeps the prompt).
+  // The automatic resume on open does not remount: it only fills in the conversation the bar
+  // opened on, so a recording started meanwhile is for it (on a slow phone connection the resume
+  // can land mid-recording).
   const [micEpoch, setMicEpoch] = useState(0);
   const renewMics = useCallback(() => setMicEpoch((n) => n + 1), []);
   // The thread tail seq this client last saw — sent with each query so the
@@ -632,7 +634,6 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     const hist = thread?.conversationHistory;
     if (!hist?.length) return false;
     setConversationHistory(hist);
-    if (deliberate) renewMics();
     holdThread(thread.id, thread.lastSeq, deliberate);
     setPendingActions([]);
     setChoices(null);
@@ -657,7 +658,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         : null,
     );
     return true;
-  }, [holdThread, renewMics]);
+  }, [holdThread]);
 
   // Picker: fetch the actor's recent threads (server-side actor-bound) and
   // this session's saved requests. 404/403 means the list is off for this
@@ -694,6 +695,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const openThread = (id) => {
     threadEpochRef.current += 1;
     const epoch = threadEpochRef.current;
+    // At the pick, not when the thread lands: a transcript that returns meanwhile must not reach
+    // the prompt the picked thread keeps.
+    renewMics();
     let reloading = false;
     setThreadsLoading(true);
     setThreadOpenError(null);

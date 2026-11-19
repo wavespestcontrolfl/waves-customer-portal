@@ -90,19 +90,24 @@ describe('Intelligence Bar mic context', () => {
   const savedThread = (id, reply) => ({ id, lastSeq: 2,
     conversationHistory: [{ role: 'user', content: 'Synthetic ask' }, { role: 'assistant', content: reply }] });
 
-  it('a thread picked from History remounts the mic', async () => {
+  it('a thread picked from History remounts the mic at the pick, before the thread loads', async () => {
     useIsMobile.mockReturnValue(true);
-    fetch.mockImplementation((url) => Promise.resolve(
-      String(url).includes('/threads/latest') ? ok({ thread: null })
-        : String(url).includes('/threads/thread-b') ? ok({ thread: savedThread('thread-b', 'Synthetic picked reply') })
-          : ok({ actions: [], tasks: [], threads: [{ id: 'thread-b', title: 'Synthetic earlier chat' }] }),
-    ));
+    let pickedThread;
+    fetch.mockImplementation((url) => {
+      if (String(url).includes('/threads/latest')) return Promise.resolve(ok({ thread: null }));
+      if (String(url).includes('/threads/thread-b')) return new Promise((resolve) => { pickedThread = resolve; });
+      return Promise.resolve(ok({ actions: [], tasks: [], threads: [{ id: 'thread-b', title: 'Synthetic earlier chat' }] }));
+    });
     await openBar(CUSTOMER);
     const before = await screen.findByTestId('mic:Tap to talk');
     fireEvent.click(await screen.findByText('History'));
     fireEvent.click(await screen.findByText('Synthetic earlier chat'));
+    // The old mic is gone while the thread loads, so a transcript of it that lands now is dropped
+    // (useSpeechDictation: an unmounted mic appends nothing).
+    await waitFor(() => expect(screen.getByTestId('mic:Tap to talk')).not.toBe(before));
+    expect(pickedThread).toBeTypeOf('function');
+    await act(async () => pickedThread(ok({ thread: savedThread('thread-b', 'Synthetic picked reply') })));
     expect(await screen.findByText('Synthetic picked reply')).toBeInTheDocument();
-    expect(screen.getByTestId('mic:Tap to talk')).not.toBe(before);
   });
 
   it('the automatic resume on open keeps the mic: a recording started before it lands goes on', async () => {
