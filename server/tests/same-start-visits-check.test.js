@@ -212,6 +212,24 @@ test('the services of one legacy visit group are one stop: alone they never ring
   expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-03&appointment=s1');
 });
 
+test('forDays rebuilds the same bell from only some of its days: why, detail, link, visits and itemKeys; none left = null', async () => {
+  finderReturns([
+    visit({ id: 'd1', scheduled_date: day('2026-12-03') }),
+    visit({ id: 'd2', scheduled_date: day('2026-12-03'), service_type: 'Pest Control Service' }),
+    visit({ id: 'j1', scheduled_date: day('2027-01-12'), window_start: '09:00:00' }),
+    visit({ id: 'j2', scheduled_date: day('2027-01-12'), window_start: '09:00:00', service_type: 'Pest Control Service' }),
+  ]);
+  const [alert] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect(alert[2]).toBe('2 days have visits at the same time, first Dec 3 at 11 AM; split each so they run back to back.');
+  const [key, , body, metadata, opts] = alert[4].forDays(['2027-01-12', '2026-11-30']);
+  expect(key).toBe(alert[0]);
+  expect(body).toBe('2 visits start at 9 AM on Jan 12, 2027; split them so they run back to back.');
+  expect(opts.detail).toBe('Jan 12, 2027 at 9 AM: Lawn Care Service and Pest Control Service.');
+  expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2027-01-12&appointment=j2');
+  expect(metadata).toMatchObject({ first_date: '2027-01-12', day_count: 1, itemKeys: ['2027-01-12'], visit_ids: ['j1', 'j2'] });
+  expect(alert[4].forDays(['2026-11-30'])).toBeNull();
+});
+
 test('the bells come earliest first day first, whatever the customer order, so a capped run rings the nearest days', async () => {
   finderReturns([
     visit({ id: 'c1', customer_id: 'cust-a', scheduled_date: day('2027-03-01') }),

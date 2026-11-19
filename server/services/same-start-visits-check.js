@@ -270,6 +270,13 @@ function sameStartAlert(finding, todayET) {
         const known = new Set(Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : []);
         return dates.some((date) => !known.has(date));
       },
+      // The same bell built from only some of its days (YYYY-MM-DD): its why,
+      // detail, link, visits and itemKeys all from those days. Null when none of
+      // them is still a finding. The watchdog's quiet update past its budget.
+      forDays: (keep) => {
+        const days = finding.days.filter((day) => keep.includes(day.date));
+        return days.length ? sameStartAlert({ ...finding, days }, todayET) : null;
+      },
     },
   ];
 }

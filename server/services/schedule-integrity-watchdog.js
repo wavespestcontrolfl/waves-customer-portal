@@ -817,7 +817,7 @@ async function runInner({ now = new Date() } = {}) {
     // It rings within what is left of this run's shared budget
     // (docs/admin-notifications.md: non-customer rows ring at most 10 a day).
     combinedBooking = await require('./combined-booking-check').runCombinedBookingCheck({
-      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - delivered.alerted),
+      now, ringBudget: Math.max(0, MAX_ALERTS_PER_RUN - classRings),
     });
   } catch (err) {
     combinedBookingCheckFailed = true;
@@ -825,7 +825,7 @@ async function runInner({ now = new Date() } = {}) {
   }
 
   // Last: two visits at one start, within what is left of the shared budget.
-  const sameStartRang = await ringWithinBudget(sameStart.alerts, { episodes, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX });
+  const late = await ringWithinBudget(sameStart.alerts, { episodes, now, budget: lateBudget(classRings, combinedBooking), prefix: SAME_START_PREFIX });
 
   return {
     skipped: false,
@@ -843,9 +843,11 @@ async function runInner({ now = new Date() } = {}) {
     sameStartCheckFailed: sameStart.failed,
     combinedBooking,
     combinedBookingCheckFailed,
+    // Same-start bells closed past the budget, none of their days still a finding.
+    sameStartClosed: late.closed,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
-    alerted: delivered.alerted + sameStartRang,
+    alerted: delivered.alerted + late.rang,
   };
 }
 
@@ -929,30 +931,36 @@ async function standingBellDays(prefix) {
 }
 
 // The late class's alerts in order, with real rings up to `budget`. Past the
-// budget, under episodes, a standing bell still gets its quiet update (link,
-// detail, fixed days), so it never points at a visit already fixed: the update
-// carries only the days the bell already had and never rings, so a new day
-// stays new and rings on a later run. A finding with no standing bell, or an
+// budget, under episodes, a standing bell still gets its quiet update, so it
+// never points at a visit already fixed: the bell rebuilt from only the days it
+// already carried (`forDays`: why, detail, link, visits and itemKeys), never
+// ringing, so a new day is not shown yet and rings on a later run. A standing
+// bell none of whose days is still a finding closes (that episode is over; its
+// new days ring as a new one later). A finding with no standing bell, or an
 // auto-cleared one (a delivery would reopen it), waits. Killed, the rest wait.
-async function ringWithinBudget(alerts, { episodes, budget, prefix }) {
+// Returns the real rings and the bells closed.
+async function ringWithinBudget(alerts, { episodes, now, budget, prefix }) {
   let rang = 0;
   let held = 0;
   let standing = null;
+  const over = [];
   for (const alert of alerts) {
     let delivery = alert;
     if (rang >= budget) {
       if (!episodes) { held += 1; break; }
       standing ??= await standingBellDays(prefix);
       const carried = standing.get(alert[0]);
-      if (!carried) { held += 1; continue; }
-      const [key, title, body, metadata, opts] = alert;
-      const kept = (metadata.itemKeys || []).filter((day) => carried.includes(day));
-      delivery = [key, title, body, { ...metadata, itemKeys: kept }, { ...opts, ringOnRefresh: () => false }];
+      held += 1;
+      if (!carried) continue;
+      const kept = typeof alert[4]?.forDays === 'function' ? alert[4].forDays(carried) : null;
+      if (!kept) { over.push(alert[0]); continue; }
+      delivery = [...kept.slice(0, 4), { ...kept[4], ringOnRefresh: () => false }];
     }
     if (realRing(await ringAlert(episodes, ...delivery), episodes, { countRefreshRings: true })) rang += 1;
   }
   if (held) capHit();
-  return rang;
+  const closed = over.length ? await alertEpisodes.closeAdminAlertKeys(db, over, 'its days no longer start together', { now }) : 0;
+  return { rang, closed };
 }
 
 // Delivers one run's findings: rings them in order, capped at
