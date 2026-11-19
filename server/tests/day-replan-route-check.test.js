@@ -14,6 +14,7 @@ jest.mock('../services/scheduling/departure-time', () => ({ dayDepartureMinutes:
 jest.mock('../services/scheduling/tech-start-point', () => ({
   loadTechStartPoints: jest.fn(async () => new Map()), homeFromMap: jest.fn(() => ({ lat: 27.4, lng: -82.45 })),
 }));
+jest.mock('../services/interview-slots', () => ({ bookedInterviewWindowsForDate: jest.fn(async () => []) }));
 jest.mock('../services/day-replan/index', () => ({
   _internals: { loadDayStops: jest.fn(async () => []), loadBlocks: jest.fn(async () => []), blockedHoursFor: jest.fn(() => []) },
 }));
@@ -21,6 +22,7 @@ jest.mock('../services/day-replan/index', () => ({
 const { _internals: replan } = require('../services/day-replan/index');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const { absentTechDays } = require('../services/technician-eligibility');
+const { bookedInterviewWindowsForDate } = require('../services/interview-slots');
 const { runRouteCheck, _internals: rc } = require('../services/day-replan/route-check');
 
 const TECH = '00000000-0000-4000-8000-000000000001';
@@ -51,7 +53,8 @@ describe('online count: the customer booking rules', () => {
   test('an opening holds an online job only on the hour grid, with a full job slot inside it', () => {
     const admit = rc.onlineAdmit(MONDAY, AHEAD);
     expect(rc.onlineStarts({ startMin: 560, min: 80 }, admit)).toEqual([]); // 9:20-10:40: dispatch fits one, no hourly start does
-    expect(rc.onlineStarts({ startMin: 540, min: 480 }, admit)).toEqual([540, 660, 780, 900]); // 9, 11, 1 and 3
+    expect(rc.onlineStarts({ startMin: 540, min: 480 }, admit)).toEqual([540, 600, 660, 720, 780, 840, 900]); // 4 PM would run past 5
+    expect(rc.spaced(rc.onlineStarts({ startMin: 540, min: 480 }, admit))).toEqual([540, 660, 780, 900]); // 4 jobs
     expect(rc.onlineAdmit('2026-11-22', AHEAD)).toBeNull(); // a Sunday: the picker offers no day
   });
 
@@ -65,9 +68,26 @@ describe('online count: the customer booking rules', () => {
     const now = new Date('2026-11-23T15:30:00Z'); // Monday 10:30 AM ET, notice 1 h: the first online start is noon
     const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now) });
     // 4 PM would need the job slot to 5:20; the opening ends at 5.
-    expect(fig.openings).toEqual([{ kind: 'tail', start: 630, min: 390, slots: 4, online: 2, starts: [720, 840] }]);
+    expect(fig.openings).toEqual([{ kind: 'tail', start: 630, min: 390, slots: 4, online: 2, starts: [720, 780, 840, 900] }]);
     process.env.SELF_SERVE_NOTICE_HOURS = '24';
     expect(rc.measureTechDay({ ...open, rows: [], departureMin: 630, openMin: 630, admit: rc.onlineAdmit(MONDAY, now) })).toMatchObject({ slots: 4, online: 0 });
+  });
+
+  test("a completed visit's booked window and the owner's interviews hold time against online starts", () => {
+    const busy = rc.onlineBusy({
+      techId: TECH, techBlind: false,
+      completed: [
+        { technician_id: TECH, window_start: '09:00:00', window_end: '11:00:00' },
+        { technician_id: 'other-tech', window_start: '13:00:00', window_end: null, estimated_duration_minutes: 60 },
+      ],
+      interviews: [{ start: '14:45', end: '16:15' }],
+    });
+    expect(busy).toEqual([{ startMin: 540, endMin: 660 }, { startMin: 885, endMin: 975 }]); // another tech's visit holds nothing
+    // 2 PM would run to 3, into the interview's 2:45 buffer.
+    expect(rc.onlineStarts({ startMin: 540, min: 480 }, rc.onlineAdmit(MONDAY, AHEAD, busy))).toEqual([660, 720, 780]);
+    // Tech-blind: another technician's completed visit holds its window too.
+    const blind = rc.onlineBusy({ techId: TECH, techBlind: true, completed: [{ technician_id: 'other-tech', window_start: '13:00:00', window_end: null }], interviews: [] });
+    expect(blind).toEqual([{ startMin: 780, endMin: 840 }]);
   });
 
   test("booking_config's day end bounds the customer's visit", async () => {
@@ -128,14 +148,14 @@ describe('one tech-day', () => {
   test('counts each opening of a job slot or more, for dispatch and for online booking', () => {
     const fig = rc.measureTechDay({ ...open, rows: [stop('a', '09:00:00', '10:00:00'), stop('b', '13:00:00', '14:00:00', { lat: 27.45, lng: -82.4 })] });
     expect(fig.openings.map((o) => o.kind)).toEqual(['wait', 'tail']);
-    expect(fig.openings.find((o) => o.kind === 'tail')).toMatchObject({ start: 840, min: 180, slots: 2, online: 1, starts: [840] });
+    expect(fig.openings.find((o) => o.kind === 'tail')).toMatchObject({ start: 840, min: 180, slots: 2, online: 1, starts: [840, 900] });
     expect(fig).toMatchObject({ stops: 2, slots: 4, online: 2 });
   });
 
   test('a schedule block takes its time out of the openings', () => {
     const fig = rc.measureTechDay({ ...open, rows: [], blocks: [{ startMin: 720, endMin: 1020 }] });
     // 8 AM is not on the customer grid: online fits 9:00 only (11:00 would run past noon).
-    expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 3, online: 1, starts: [540] }]);
+    expect(fig.openings).toEqual([{ kind: 'tail', start: 480, min: 240, slots: 3, online: 1, starts: [540, 600] }]);
   });
 
   test('a stop with no time or no place leaves the day unmeasured', () => {
@@ -188,6 +208,18 @@ describe('the totals and the ad rule shadow', () => {
     expect(rc.summarize(days, '2026-11-19', { techBlind: true }).totals.next).toMatchObject({ slots: 2, online: 1 });
   });
 
+  test('tech-blind: every job fits one technician\'s opening, and starts are spaced once for the date', () => {
+    // A free 9-11, B free 11-1: two jobs, not three (no job is handed from one technician to the other).
+    expect(rc.blindSlots([{ start: 540, min: 120 }, { start: 660, min: 120 }])).toBe(2);
+    // A can start only at 9, B at 10 or 11: 9 and 11 both fit.
+    const TECH2 = '00000000-0000-4000-8000-000000000002';
+    const days = [
+      day('2026-11-20', { openings: [{ start: 540, min: 80, slots: 1, starts: [540] }] }),
+      { ...day('2026-11-20', { openings: [{ start: 600, min: 140, slots: 1, starts: [600, 660] }] }), technician_id: TECH2 },
+    ];
+    expect(rc.summarize(days, '2026-11-19', { techBlind: true }).totals.next.online).toBe(2);
+  });
+
   test('the 1% floor when no online opening exists; an unmeasured day is counted, never as room', () => {
     const { ad } = rc.summarize([
       day('2026-11-19', { slots: 2 }), day('2026-11-20', { skip: 'UNTIMED_STOP', online: 0 }), day('2026-11-21'), day('2026-11-23'),
@@ -200,7 +232,7 @@ describe('the totals and the ad rule shadow', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
-  function fakeConn({ progress = [], campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }] } = {}) {
+  function fakeConn({ progress = [], campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], bookingConfig = { advance_days_min: 1 } } = {}) {
     const writes = [];
     const conn = (table) => {
       const q = {
@@ -211,6 +243,7 @@ describe('runRouteCheck', () => {
           if (table === 'ad_campaigns') return campaigns;
           return [];
         },
+        first: async () => (table === 'booking_config' ? bookingConfig : undefined),
         insert: async (row) => { writes.push([table, row]); return [1]; },
         update: async (row) => { writes.push([table, row]); return 1; },
       };
@@ -269,6 +302,36 @@ describe('runRouteCheck', () => {
     const { conn, writes } = fakeConn({ progress: [{ id: 't1', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:00:00Z', lat: null, lng: null }] });
     await runRouteCheck({ conn, now: NOW });
     expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ON_SITE_WITHOUT_COORDINATES' });
+  });
+
+  test("today's completed visit keeps its booked window out of the online starts; interviews are read per date", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn({
+      bookingConfig: { advance_days_min: 0 },
+      progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T15:00:00Z', window_start: '11:00:00', window_end: '13:00:00', lat: 27.5, lng: -82.4 }],
+    });
+    await runRouteCheck({ conn, now: NOW }); // 10:30 AM, notice 1 h; the 11-1 visit finished at 10
+    const today = JSON.parse(writes[0][1].days)[0];
+    expect(today.openings[0].starts).toEqual([780, 840, 900]);
+    expect(bookedInterviewWindowsForDate.mock.calls.map(([d]) => d)).toContain('2026-11-20');
+  });
+
+  test("the /book page's first day: with advance_days_min 1, today holds dispatch room only", async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    const days = JSON.parse(writes[0][1].days);
+    expect(days[0]).toMatchObject({ date: '2026-11-19', online: 0 });
+    expect(days[0].slots).toBeGreaterThan(0);
+    expect(days[1].online).toBeGreaterThan(0); // tomorrow is bookable
+  });
+
+  test('an unreadable interview list holds no time and the run still completes', async () => {
+    bookedInterviewWindowsForDate.mockRejectedValue(new Error('timeout'));
+    const { conn, writes } = fakeConn();
+    expect((await runRouteCheck({ conn, now: NOW })).status).toBe('completed');
+    expect(writes).toHaveLength(1);
+    bookedInterviewWindowsForDate.mockResolvedValue([]);
   });
 
   test("a Sunday stays staffed after its last stop is done", async () => {
