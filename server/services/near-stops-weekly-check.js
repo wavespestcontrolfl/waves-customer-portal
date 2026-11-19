@@ -12,7 +12,8 @@
  *      day. Each line says what holds each visit where it is: for two days,
  *      the newest night run's own log line for that visit (auto_dispatch_audit_logs,
  *      a dry run marked as one); for one day, the 4:40 AM day re-plan's own reason
- *      the visit keeps its hour (day_replan_plans.fixed, the visit's own technician).
+ *      the visit keeps its hour (day_replan_plans.fixed, the visit's own technician,
+ *      from the newest run that job_health records, even a run that planned nothing).
  *   3. Truck GPS minutes for visit-to-visit drives under half a mile
  *      (visit_gps_legs), one drive per stop, every drive since the first
  *      matched leg: the evidence a short-hop drive price would need.
@@ -70,6 +71,7 @@ const OWN_HOMES_MILES = 0.5; // one customer's two homes
 const SAME_PLACE_MILES = 0.003; // about 16 feet: one customer's stops at one home
 const SHORT_DRIVE_MILES = 0.5;
 const NIGHT_LOG_HOURS = 36;
+const REPLAN_JOB = 'day-replan-nightly'; // the 4:40 re-plan's job_health row (scheduler.js runExclusive)
 const MAX_LINES = 5;
 const NEWEST_DRIVES = 3;
 const DETAIL_MAX = 2000;
@@ -381,7 +383,6 @@ function homeDays(place) {
       date: visits[0].date,
       visits,
       lead,
-      pin: lead.geo || visits.find((v) => v.geo)?.geo || null, // that day's own pin, never another day's
       anchor: [...visits].sort(bookedFirst)[0].id,
       done: visits.every((v) => v.done),
     };
@@ -440,35 +441,43 @@ function stopsBetween(route, a, b, pair) {
   return new Set(between.map((s) => s.home).filter((home) => home !== pair.a.key && home !== pair.b.key)).size;
 }
 
-// How two homes' stops sit on the calendar, with the two services that show it and
-// their distance, or null when those services' own pins are not next door (or near,
-// for one customer's homes), or a stop has no pin that day. A null split is not one
-// to report: together (one day, one route, back to back) or not judged (no time yet,
-// or neither visit on a route yet). Two days: each stop's lead service. One day: the
-// two homes' nearest open services on one route decide, counted on the route as the
-// board runs it, so a home's second trip that day never hides a back-to-back pair
-// and a stop in a tied hour counts where the route puts it. A same-day split is
-// reported for any two customers: the 4:40 AM day re-plan keeps most stops at their
-// hours (a told time, a first visit, a staff pick, 24 hours out), so it cannot be
-// left to join them.
-function splitOf(x, y, pair, routes) {
-  return x.date !== y.date ? twoDaySplit(x, y, pair) : sameDaySplit(x, y, pair, routes);
+// Every pair of the two stops' services whose own pins are next door (near, for one
+// customer's homes), with its distance. A service with no pin pairs with none.
+function nearServices(x, y, pair) {
+  return x.visits
+    .flatMap((a) => y.visits.map((b) => ({ a, b, miles: a.geo && b.geo ? milesApart(a.geo, b.geo) : Infinity })))
+    .filter((c) => c.miles <= pair.limit);
 }
 
-function twoDaySplit(x, y, pair) {
-  if (!x.pin || !y.pin || milesApart(x.pin, y.pin) > pair.limit) return null;
-  const [first, second] = [x.lead, y.lead].sort(visitOrder);
-  return { first, second, miles: milesApart(x.pin, y.pin), split: { gap: daysBetween(first.date, second.date) } };
+// How two homes' stops sit on the calendar, with the two services that show it and
+// their distance, or null when no two of their services are next door on their own
+// pins. The services a split shows are always a pair next door. A null split is not
+// one to report: together (one day, one route, back to back) or not judged (no time
+// yet, or neither visit on a route yet). Two days: the open services first, each
+// stop's lead first. One day: the nearest open pair on one route decides, counted on
+// the route as the board runs it, so a home's second trip that day never hides a
+// back-to-back pair and a stop in a tied hour counts where the route puts it. A
+// same-day split is reported for any two customers: the 4:40 AM day re-plan keeps
+// most stops at their hours (a told time, a first visit, a staff pick, 24 hours out),
+// so it cannot be left to join them.
+function splitOf(x, y, pair, routes) {
+  const near = nearServices(x, y, pair);
+  if (!near.length) return null;
+  return x.date !== y.date ? twoDaySplit(near) : sameDaySplit(x, y, near, pair, routes);
+}
+
+const servedIn = (c) => Number(c.a.done) + Number(c.b.done);
+
+function twoDaySplit(near) {
+  const [shown] = [...near].sort((p, q) => servedIn(p) - servedIn(q) || visitOrder(p.a, q.a) || visitOrder(p.b, q.b));
+  const [first, second] = [shown.a, shown.b].sort(visitOrder);
+  return { first, second, miles: shown.miles, split: { gap: daysBetween(first.date, second.date) } };
 }
 
 // Two services one day can be judged when both are open and timed and one is on a route.
 const judgeable = (a, b) => !a.done && !b.done && !!a.windowStart && !!b.windowStart && !!(a.tech || b.tech);
 
-function sameDaySplit(x, y, pair, routes) {
-  const near = x.visits
-    .flatMap((a) => y.visits.map((b) => ({ a, b, miles: a.geo && b.geo ? milesApart(a.geo, b.geo) : Infinity })))
-    .filter((c) => c.miles <= pair.limit); // each pair of services on its own two pins
-  if (!near.length) return null;
+function sameDaySplit(x, y, near, pair, routes) {
   const judged = nearestOnRoute(near.filter((c) => judgeable(c.a, c.b)), pair, routes);
   if (judged) return judged;
   // Next door but not judged yet (no time, or neither on a route): the stops pair as together.
@@ -804,10 +813,13 @@ async function loadNightLog(visitIds, now = new Date(), conn = db) {
 async function loadReplanFixed(apart, now = new Date(), conn = db) {
   const visits = apart.filter((p) => p.first.date === p.second.date).flatMap((p) => [p.first, p.second]).filter((v) => v.tech);
   if (!visits.length) return new Map();
-  // The newest run in the window, as the open-blocks alert picks it, so an older
-  // run's plan never stands in for a day the newest run skipped.
+  // The newest run, from its own run record (job_health is written at each start,
+  // even for a run that plans nothing), then its plan rows, as the open-blocks alert
+  // picks them: an older run's plan never stands in for a day the newest run skipped.
+  const health = await conn('job_health').where({ job_name: REPLAN_JOB }).first('last_started_at');
+  const since = Math.max(now.getTime() - NIGHT_LOG_HOURS * 3600000, ms(health?.last_started_at) || 0);
   const run = await conn('day_replan_plans')
-    .where('created_at', '>=', new Date(now.getTime() - NIGHT_LOG_HOURS * 3600000))
+    .where('created_at', '>=', new Date(since))
     .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .first('run_id');
   if (!run) return new Map();

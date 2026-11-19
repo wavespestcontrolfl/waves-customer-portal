@@ -200,6 +200,20 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs(rows)).toEqual([]);
   });
 
+  test('two days: the two services next door show the split, not a lead a mile away or with no pin', () => {
+    const homeA = (pin, start) => stop({ customer: 'c-a', at: pin, date: '2027-03-01', start, street: '100 Sample Way', plan: true });
+    const neighbor = () => stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true });
+    // The 9:00 lead carries a pin a mile away; the 11:00 service is next door.
+    const farLead = [homeA(north(1, HOME_A), '09:00'), homeA(HOME_A, '11:00'), neighbor()];
+    expect(findApartPairs(farLead)).toEqual([expect.objectContaining({ gap: 3, first: expect.objectContaining({ id: farLead[1].id }) })]);
+    // The 9:00 lead has no pin: the line shows the 11:00 service whose pin it reads.
+    const unpinned = { ...homeA(HOME_A, '09:00'), lat: null, lng: null, customer_latitude: null, customer_longitude: null };
+    const noPinLead = [unpinned, homeA(HOME_A, '11:00'), neighbor()];
+    const pairs = findApartPairs(noPinLead);
+    expect(pairs).toEqual([expect.objectContaining({ gap: 3, first: expect.objectContaining({ id: noPinLead[1].id }) })]);
+    expect(pairs[0].miles).toBeLessThan(0.1);
+  });
+
   test("one day: only services whose own pins are next door are judged, and the line shows their distance", () => {
     const route = (row, order) => ({ ...row, route_order: order });
     const homeA = (pin, start) => stop({ customer: 'c-a', at: pin, date: '2027-03-01', start, street: '100 Sample Way' });
@@ -693,13 +707,15 @@ describe('what the check reads', () => {
       { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'within_24h' }, { id: 'svc-2', why: 'person_placed' }] },
       { service_date: '2027-03-01', technician_id: 'tech-2', fixed: [] },
     ]];
-    const { conn, calls } = recorder({ day_replan_plans: () => results.shift() });
+    // A run record older than the window: the 36-hour bound holds.
+    const { conn, calls } = recorder({ job_health: { last_started_at: '2027-02-25T09:40:00.000Z' }, day_replan_plans: () => results.shift() });
     const plans = await loadReplanFixed([sameDay, twoTechs, twoDays], NOW, conn);
     expect(plans).toEqual(new Map([
       ['2027-03-01|tech-1', new Map([['svc-1', 'time_told']])],
       ['2027-03-01|tech-2', new Map()],
     ]));
     expect(calls).toContainEqual(['table', 'day_replan_plans']);
+    expect(calls).toContainEqual(['where', 'created_at', '>=', new Date(NOW.getTime() - 36 * 3600000)]);
     expect(calls).toContainEqual(['first', 'run_id']);
     expect(calls).toContainEqual(['where', { run_id: 'run-2' }]);
     expect(calls).toContainEqual(['whereIn', 'service_date', ['2027-03-01']]);
@@ -707,11 +723,14 @@ describe('what the check reads', () => {
     expect(calls).toContainEqual(['orderBy', [{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]]);
   });
 
-  test('no re-plan run in the window: no plan to read, and no second query', async () => {
-    const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: 'tech-1' } };
-    const { conn, calls } = recorder({ day_replan_plans: () => undefined });
+  test("a newest re-plan run that planned nothing: an older run's plan never stands in, and no plan query", async () => {
+    const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-02', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-02', tech: 'tech-1' } };
+    const started = '2027-03-01T09:40:00.000Z'; // this morning's 4:40 run, which wrote no plan rows
+    const { conn, calls } = recorder({ job_health: { last_started_at: started }, day_replan_plans: () => undefined });
     expect(await loadReplanFixed([sameDay], NOW, conn)).toEqual(new Map());
-    expect(calls.filter((c) => c[0] === 'table')).toHaveLength(1);
+    expect(calls).toContainEqual(['where', { job_name: 'day-replan-nightly' }]);
+    expect(calls).toContainEqual(['where', 'created_at', '>=', new Date(started)]);
+    expect(calls.filter((c) => c[0] === 'table' && c[1] === 'day_replan_plans')).toHaveLength(1);
   });
 
   test('the newest finished night run of either mode: a dry run marks its lines', async () => {
