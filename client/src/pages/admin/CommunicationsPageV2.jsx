@@ -3508,12 +3508,14 @@ export function SmsTab({
               ))}
             </optgroup>
           ))}
-          {/* A thread-locked From resolved from server config (e.g. a GBP
-              tracking line) may not be in the client list — render it so
-              the locked select doesn't show blank. */}
-          {threadLock && fromNumber
+          {/* The From may not be in the client list: a thread-locked line
+              resolved from server config (e.g. a GBP tracking line), or a
+              reply-only line (REPLY_LINE_NUMBERS) still set after Override.
+              Render it, so the select always shows the line Send uses and
+              never a blank or another line. */}
+          {fromNumber
             && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
-            <option value={fromNumber}>{threadLock.label}</option>
+            <option value={fromNumber}>{threadLock?.label || NUMBER_LABEL_MAP[fromNumber] || fromNumber}</option>
           )}
         </Select>
         </Field>

@@ -190,7 +190,8 @@ const SCHEDULE_GUARDS = [
     status: 400,
     error: 'fromNumber must be a Waves Twilio number',
   },
-  // A website-only line texts only someone who already called or texted it (website-line-contact.js).
+  // A website-only line texts only someone who already called or texted it (website-line-contact.js). The
+  // dispatcher checks it again at send time (scheduled-sms-delivery.js scheduledWebsiteLineRefusal).
   { check: async (c) => Boolean(await websiteLineRefusal(c.chosenFrom, c.to)), status: 400, error: WEBSITE_LINE_REFUSAL, extra: { code: 'WEBSITE_LINE_FIRST_CONTACT' } },
   // An Agent Review draft can be scheduled instead of sent now. Carry the verified decision id on the scheduled row
   // so the 5-min dispatch cron resolves it when the send fires. A stale card (most often another operator just

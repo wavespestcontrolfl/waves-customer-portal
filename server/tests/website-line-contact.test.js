@@ -3,9 +3,10 @@
  * website-only line goes only to someone who already called or texted that
  * line. The fake database answers the helper's two reads (sms_log, call_log)
  * by the rule its SQL states: an inbound row whose sender ends in the
- * person's last 10 digits (the indexed prefilter) and is one of the person's
- * full-number forms, to one of the line's forms. The SQL itself runs on
- * Postgres in website-line-contact-postgres.test.js.
+ * person's last 10 digits (the indexed prefilter) and has the person's E.164
+ * identity, to the line's E.164 identity. A stored value with a leading + keeps
+ * its country code; a bare 10-digit or 1+10-digit value is a US number. The SQL
+ * itself runs on Postgres in website-line-contact-postgres.test.js.
  */
 const { websiteLineRefusal, WEBSITE_LINE_REFUSAL } = require('../services/website-line-contact');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -15,6 +16,14 @@ const WEB_LINE = '+19412542617';
 const SPOKE_LINE = websiteOnlyLines(TWILIO_NUMBERS).find((line) => line.number !== WEB_LINE).number;
 const PERSON = '+19415550123';
 const digitsOf = (value) => String(value || '').replace(/[^0-9]/g, '');
+// A stored value's E.164 identity, by the rule of the helper's SQL (storedE164Sql).
+function storedE164(value) {
+  const text = String(value ?? '').trim();
+  const digits = digitsOf(text);
+  if (text.startsWith('+')) return `+${digits}`;
+  if (/^1[0-9]{10}$/.test(digits)) return `+${digits}`;
+  return /^[0-9]{10}$/.test(digits) ? `+1${digits}` : null;
+}
 
 function fakeDatabase(rows = {}) {
   const reads = [];
@@ -34,8 +43,8 @@ function fakeDatabase(rows = {}) {
         return (rows[table] || []).find((row) => read.where.every(([column, value]) => row[column] === value)
           && read.not.every(([column, value]) => (row[column] ?? '') !== value)
           && digitsOf(row.from_phone).slice(-10) === read.last10
-          && forColumn('from_phone').includes(digitsOf(row.from_phone))
-          && forColumn('to_phone').includes(digitsOf(row.to_phone)));
+          && forColumn('from_phone') === storedE164(row.from_phone)
+          && forColumn('to_phone') === storedE164(row.to_phone));
       },
     };
     return builder;
@@ -82,6 +91,15 @@ test('contact on another line, an outbound row, or a foreign number with the sam
     call_log: [{ id: 3, direction: 'outbound', from_phone: PERSON, to_phone: WEB_LINE }],
   });
   expect(await websiteLineRefusal(WEB_LINE, PERSON, { database })).toBe(WEBSITE_LINE_REFUSAL);
+});
+
+test('a 10-digit international number and the US number with the same 10 digits are two people', async () => {
+  const usTexted = fakeDatabase({ sms_log: [inbound('9415550123', WEB_LINE)] });
+  expect(await websiteLineRefusal(WEB_LINE, '+9415550123', { database: usTexted })).toBe(WEBSITE_LINE_REFUSAL);
+  expect(await websiteLineRefusal(WEB_LINE, PERSON, { database: usTexted })).toBeNull();
+  const internationalCalled = fakeDatabase({ call_log: [inbound('+9415550123', WEB_LINE)] });
+  expect(await websiteLineRefusal(WEB_LINE, '9415550123', { database: internationalCalled })).toBe(WEBSITE_LINE_REFUSAL);
+  expect(await websiteLineRefusal(WEB_LINE, '+9415550123', { database: internationalCalled })).toBeNull();
 });
 
 test('a Sandy sandbox call or a tech-voice call is internal and does not count', async () => {

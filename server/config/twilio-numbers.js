@@ -104,8 +104,10 @@ const TWILIO_NUMBERS = {
     // Kept AFTER the main-line entry on purpose: the main line stays the first
     // wavespestcontrol.com entry, and every lookup here is by number, never by
     // domain. Explicit label: the missed-call alert otherwise names it
-    // "Bradenton website (Pest)".
-    { number: '+19412542617', formatted: '(941) 254-2617', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'main site (web-only line)', label: 'Main site web-only line' },
+    // "Bradenton website (Pest)". `page` is the landing page URL: the April
+    // seed (20260401000096) copies it into lead_sources.landing_page_url on a
+    // fresh database, and production's row (20261119120000) has the same URL.
+    { number: '+19412542617', formatted: '(941) 254-2617', domain: 'wavespestcontrol.com', area: 'General', location: 'bradenton', page: 'https://wavespestcontrol.com', label: 'Main site web-only line' },
   ],
 
   // ── Lawn Care Domain Tracking ───────────────────────────────

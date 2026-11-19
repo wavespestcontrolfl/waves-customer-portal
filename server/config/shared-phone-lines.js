@@ -17,15 +17,20 @@
  *   - a request handler never calls into a twilio-named module, which the
  *     Intelligence Bar read scanner blocks as a possible outside call;
  *   - suites that mock the registry with only a few fields keep loading.
+ * A registry without one of the lists reads as having none of those lines,
+ * never as an error: a suite's partial mock, or a broken registry, must not
+ * turn into a failed check on every text (scheduled-sms-delivery.js retries
+ * and then blocks a text whose website-line check fails).
  */
 function sharedLineNumbers(registry) {
-  return [registry.mainLine.number, ...Object.values(registry.locations).map((line) => line.number)];
+  return [registry?.mainLine, ...Object.values(registry?.locations || {})].map((line) => line?.number).filter(Boolean);
 }
 
 // The registry entries ({ number, domain, label?, ... }) of the website-only lines.
 function websiteOnlyLines(registry) {
   const shared = new Set(sharedLineNumbers(registry));
-  return [...registry.domainTracking, ...registry.lawnDomainTracking].filter((line) => !shared.has(line.number));
+  return [...(registry?.domainTracking || []), ...(registry?.lawnDomainTracking || [])]
+    .filter((line) => line?.number && !shared.has(line.number));
 }
 
 module.exports = { sharedLineNumbers, websiteOnlyLines };

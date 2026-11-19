@@ -80,6 +80,21 @@ const PERSON = '+19415550123';
     expect(await refusal(OTHER_WEB_LINE)).toBeNull();
   });
 
+  test('a 10-digit international number and the US number with the same 10 digits are two people', async () => {
+    const INTERNATIONAL = '+9415550123';
+    const US_BARE = '9415550123';
+    // The US number texted the line: no contact for the international number.
+    await trx('sms_log').insert({ direction: 'inbound', from_phone: US_BARE, to_phone: WEB_LINE });
+    expect(await refusal(WEB_LINE, INTERNATIONAL)).toBe(WEBSITE_LINE_REFUSAL);
+    expect(await refusal(WEB_LINE, PERSON)).toBeNull();
+    await trx('sms_log').del();
+    // The international number called the line: no contact for the US number, in either stored form.
+    await trx('call_log').insert({ direction: 'inbound', from_phone: INTERNATIONAL, to_phone: WEB_LINE });
+    expect(await refusal(WEB_LINE, US_BARE)).toBe(WEBSITE_LINE_REFUSAL);
+    expect(await refusal(WEB_LINE, PERSON)).toBe(WEBSITE_LINE_REFUSAL);
+    expect(await refusal(WEB_LINE, INTERNATIONAL)).toBeNull();
+  });
+
   test('both reads can use the last-10 expression index on from_phone', async () => {
     const built = [];
     const database = (table) => { const query = trx(table); built.push(query); return query; };

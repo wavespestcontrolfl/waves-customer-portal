@@ -53,6 +53,13 @@ describe('website-only line in the Twilio registry', () => {
     expect(TWILIO_NUMBERS.techVoiceNumber()).not.toBe(WEB_LINE);
   });
 
+  test('a registry without the lists (a suite\'s partial mock) has no shared or website-only lines, and never throws', () => {
+    for (const partial of [{ getOutboundNumber: () => '+19415550199' }, {}, undefined]) {
+      expect(sharedLineNumbers(partial)).toEqual([]);
+      expect(websiteOnlyLines(partial)).toEqual([]);
+    }
+  });
+
   test('the main line stays the first wavespestcontrol.com entry, so a by-domain find picks it', () => {
     const hub = TWILIO_NUMBERS.domainTracking.find((d) => d.domain === 'wavespestcontrol.com');
     expect(hub.number).toBe('+19412975749');
@@ -104,9 +111,13 @@ describe('migration 20261119120000: lead_sources row for the website-only line',
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
-  test('fresh database: the April seed already made a phone_tracking row for the line', async () => {
+  test('fresh database: the April seed already made a phone_tracking row for the line, with the landing page production stores', async () => {
+    const prod = fakeKnex();
+    await migration.up(prod);
+    expect(prod._calls.inserted[0].landing_page_url).toBe('https://wavespestcontrol.com');
     expect(await aprilSeedRow()).toMatchObject({
       name: 'wavespestcontrol.com — General', source_type: 'phone_tracking', channel: 'website_organic', is_active: true,
+      landing_page_url: prod._calls.inserted[0].landing_page_url,
     });
   });
 

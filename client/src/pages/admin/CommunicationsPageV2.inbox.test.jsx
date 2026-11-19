@@ -671,6 +671,30 @@ it("a Text back for a call to the web-only reply line sends from that line", asy
   expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: webLine, to: "+19415550100", body: "Thanks for calling" });
 });
 
+it.each([
+  ["keeps the web-only line", null],
+  ["picks another line", line],
+])("after Override the select shows the line Send uses: %s", async (_case, picked) => {
+  const webLine = "+19412542617";
+  window.history.replaceState({}, "", `/?phone=%2B19415550100&fromNumber=${encodeURIComponent(webLine)}`);
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Override" })); await tick();
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  expect(sender).toBeEnabled();
+  expect(sender).toHaveValue(webLine);
+  expect(sender).toHaveDisplayValue("Main site web-only line");
+  if (picked) {
+    fireEvent.change(sender, { target: { value: picked } }); await tick();
+    expect(sender).toHaveValue(picked);
+    // The web-only line is offered only while it is the line in use.
+    expect(within(sender).queryByRole("option", { name: "Main site web-only line" })).not.toBeInTheDocument();
+  }
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Thanks for calling" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: picked || webLine, to: "+19415550100" });
+});
+
 it.each([23, 24])("checks restored attachment expiry at send time (%s hours old)", async (ageHours) => {
   const owner = `attachment-owner-${ageHours}`;
   const media = { ...attachment, key: `sms-attachments/${Date.now() - ageHours * 60 * 60 * 1000}-fixture-gate.png` };
