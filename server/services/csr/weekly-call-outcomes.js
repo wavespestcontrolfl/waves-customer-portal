@@ -5,7 +5,8 @@
  * (STAFF_NEW_LEAD_TAGS: the tag decides, whatever the extraction says or if there is none), or whose valid
  * extraction (v2_extraction_status 'valid', the processor's one extraction success) classes it `new_lead`
  * (call_nature, the same rule production uses for is_lead, extraction-compat.js, and that
- * caller-callback-bell.js reads in SQL) and whose outcome does not say it was no prospect (NO_PROSPECT_OUTCOMES). The week is by when
+ * caller-callback-bell.js reads in SQL), that no spam verdict marks, and whose outcome is none yet or one a prospect's call can
+ * end with (PROSPECT_OUTCOMES). The week is by when
  * the call STARTED (callStartedAtSql: a row inserted after hangup has a later created_at).
  * Its outcome is call_log.disposition, written by the AI (call-disposition.js TERMINAL_DISPOSITIONS) or by
  * staff tagging the call (admin-call-recordings.js DISPOSITION_LABELS): 'booked' or the staff tag
@@ -28,13 +29,17 @@ const { callStartedAtSql } = require('../sms-pending-conversations');
 // The AI's 'booked' and the staff tag 'new_lead_booked' both mean an appointment was made on the call.
 const BOOKED_DISPOSITIONS = Object.freeze(['booked', 'new_lead_booked']);
 const ESTIMATE_DISPOSITION = 'estimate_send';
-// Outcomes that say the caller was no prospect, whatever the extraction classed: an existing customer
-// (the AI's routing or a staff tag), spam, a wrong number or a vendor. Not 'no_action_needed': the processor
-// also writes it after a real new-lead conversation (an out-of-area caller with nothing owed,
-// call-recording-processor.js), so that caller stays in the count as one who did not book.
-const NO_PROSPECT_OUTCOMES = Object.freeze([
-  'existing_customer_routed', 'existing_service_q', 'existing_complaint',
-  'spam_discarded', 'wrong_number_closed', 'vendor_logged',
+// The outcomes a prospect's call can end with: the AI's (call-disposition.js TERMINAL_DISPOSITIONS) that leave a new
+// caller a prospect. 'no_action_needed' is one: the processor also writes it after a real new-lead conversation (an
+// out-of-area caller with nothing owed, call-recording-processor.js), so that caller counts as one who did not book.
+// An allow-list, so a call with a valid new_lead extraction counts only with one of these (or no outcome yet). Every
+// other outcome says the caller was no prospect, whatever the extraction classed: an existing customer (routed, a
+// cancellation or reschedule of their visit, a complaint from a known customer), a vendor, spam or a wrong number,
+// and every staff tag but the new-lead ones (admin-call-recordings.js DISPOSITION_LABELS: a service question, a
+// complaint, spam). An outcome added later counts only once it is placed here (the tests classify every AI outcome).
+const PROSPECT_OUTCOMES = Object.freeze([
+  'booked', 'callback_task_created', 'lead_response_flow_triggered', 'estimate_send',
+  'voicemail_processed', 'no_action_needed',
 ]);
 // Staff tags that say the call was a new lead (admin-call-recordings.js DISPOSITION_LABELS). Staff can tag a call whose
 // extraction is missing, failed validation, or classed it otherwise; the tag alone qualifies the call.
@@ -89,13 +94,13 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
   const callers = whereNotSandboxCall(conn('call_log as cl'), 'cl.source')
     .whereRaw("cl.direction LIKE 'inbound%'")
     // Staff tagged it a new lead (the tag decides on its own), or its valid extraction classes it new_lead, no spam
-    // verdict marks it, and no outcome says it was no prospect.
+    // verdict marks it, and its outcome is none yet or a prospect's (PROSPECT_OUTCOMES).
     .whereRaw(
       `(cl.disposition IN (${placeholders(STAFF_NEW_LEAD_TAGS)}) OR (${VALID_EXTRACTION_SQL}`
         + " AND cl.ai_extraction_enriched->>'call_nature' = 'new_lead'"
         + ` AND ${NO_SPAM_VERDICT_SQL}`
-        + ` AND (cl.disposition IS NULL OR cl.disposition NOT IN (${placeholders(NO_PROSPECT_OUTCOMES)}))))`,
-      [...STAFF_NEW_LEAD_TAGS, ...NO_PROSPECT_OUTCOMES],
+        + ` AND (cl.disposition IS NULL OR cl.disposition IN (${placeholders(PROSPECT_OUTCOMES)}))))`,
+      [...STAFF_NEW_LEAD_TAGS, ...PROSPECT_OUTCOMES],
     )
     // A call's row is never written before the call starts, so created_at >= from keeps every call that
     // started in the week (and lets the index narrow the scan); the start time decides the week.
@@ -150,5 +155,5 @@ function formatWeeklyCallOutcomes(o) {
 
 module.exports = {
   loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, BOOKED_DISPOSITIONS, ESTIMATE_DISPOSITION,
-  NO_PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
+  PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
 };

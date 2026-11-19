@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 
 const {
-  loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, NO_PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
+  loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
 } = require('../services/csr/weekly-call-outcomes');
 const { callStartedAtSql } = require('../services/sms-pending-conversations');
 
@@ -56,8 +56,8 @@ describe('loadWeeklyCallOutcomes', () => {
       + " AND cl.ai_extraction_enriched->>'call_nature' = 'new_lead'"
       + " AND cl.processing_status IS DISTINCT FROM 'spam'"
       + " AND cl.metadata #> '{callback_verdict,spam}' IS DISTINCT FROM 'true'::jsonb"
-      + ` AND (cl.disposition IS NULL OR cl.disposition NOT IN (${NO_PROSPECT_OUTCOMES.map(() => '?').join(', ')}))))`);
-    expect(bindings).toEqual([...STAFF_NEW_LEAD_TAGS, ...NO_PROSPECT_OUTCOMES]);
+      + ` AND (cl.disposition IS NULL OR cl.disposition IN (${PROSPECT_OUTCOMES.map(() => '?').join(', ')}))))`);
+    expect(bindings).toEqual([...STAFF_NEW_LEAD_TAGS, ...PROSPECT_OUTCOMES]);
     // No separate extraction filter remains to drop a staff-tagged call.
     expect(conn.calls).not.toContainEqual(['where', 'cl.v2_extraction_status', 'valid']);
   });
@@ -121,17 +121,29 @@ describe('loadWeeklyCallOutcomes', () => {
     expect(fridayAfternoon >= b.from.getTime() && fridayAfternoon < b.to.getTime()).toBe(true);
   });
 
-  test('a call whose outcome says it was no prospect is not a new-customer call (staff tags count too)', async () => {
+  // Which outcomes leave an extraction-qualified call in the count: an allow-list, so an outcome nobody placed (a staff tag,
+  // or an AI outcome added later) never adds a caller. Every AI outcome is classified here; a new one fails this test.
+  test('only a prospect\'s outcome (or none yet) keeps an extraction-qualified call; every AI outcome is classified', async () => {
+    const { TERMINAL_DISPOSITIONS } = require('../services/call-disposition');
+    const NO_PROSPECT = [
+      'existing_customer_routed', 'cancellation_processed', 'complaint_escalated',
+      'vendor_logged', 'spam_discarded', 'wrong_number_closed',
+    ];
+    expect([...PROSPECT_OUTCOMES, ...NO_PROSPECT].sort()).toEqual([...TERMINAL_DISPOSITIONS].sort());
+    expect(PROSPECT_OUTCOMES.filter((o) => NO_PROSPECT.includes(o))).toEqual([]);
+    // A real new-lead conversation can end 'no_action_needed' (an out-of-area caller): that caller did not book.
+    expect(PROSPECT_OUTCOMES).toContain('no_action_needed');
+    // A known customer's cancellation or reschedule is no new prospect, whatever the extraction classed.
+    expect(PROSPECT_OUTCOMES).not.toContain('cancellation_processed');
+    // Staff tags other than the new-lead ones say no prospect (a service question, a complaint, spam).
+    for (const tag of ['existing_service_q', 'existing_complaint', 'spam']) expect(PROSPECT_OUTCOMES).not.toContain(tag);
+    expect(PROSPECT_OUTCOMES.some((o) => STAFF_NEW_LEAD_TAGS.includes(o))).toBe(false);
     const conn = fakeConn({ total: 0, known: 0, booked: 0, estimates: 0 });
     await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn });
-    expect(NO_PROSPECT_OUTCOMES).toEqual(expect.arrayContaining(['existing_customer_routed', 'existing_service_q', 'existing_complaint', 'spam_discarded', 'wrong_number_closed']));
-    // A real new-lead conversation can end 'no_action_needed' (an out-of-area caller): that caller did not book.
-    expect(NO_PROSPECT_OUTCOMES).not.toContain('no_action_needed');
-    // No outcome yet still counts; any outcome but these counts (a staff new-lead tag is never one of them).
     const [, sql, bindings] = qualification(conn);
-    expect(sql).toContain(`(cl.disposition IS NULL OR cl.disposition NOT IN (${NO_PROSPECT_OUTCOMES.map(() => '?').join(', ')}))`);
-    expect(bindings.slice(STAFF_NEW_LEAD_TAGS.length)).toEqual(NO_PROSPECT_OUTCOMES);
-    expect(NO_PROSPECT_OUTCOMES.some((o) => STAFF_NEW_LEAD_TAGS.includes(o))).toBe(false);
+    expect(sql).toContain(`(cl.disposition IS NULL OR cl.disposition IN (${PROSPECT_OUTCOMES.map(() => '?').join(', ')}))`);
+    expect(sql).not.toContain('NOT IN');
+    expect(bindings.slice(STAFF_NEW_LEAD_TAGS.length)).toEqual(PROSPECT_OUTCOMES);
   });
 
   test('completedWeekDates: the seven completed ET dates before today, today exclusive', () => {
