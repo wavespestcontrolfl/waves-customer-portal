@@ -1438,4 +1438,38 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
     });
   });
+
+  // Accept's own check. With no priced frequency (an engine replay that failed) there is no tier flag to read, and the
+  // service mix alone admits any recurring mix: the unit count must still refuse a plan the converter refuses.
+  describe('acceptPrepayAvailable', () => {
+    const { acceptPrepayAvailable } = require('../routes/estimate-public');
+    const pestRow = { service: 'pest_control', name: 'Pest Control', mo: 45, perTreatment: 135, visitsPerYear: 4 };
+    const lawnRow = { service: 'lawn_care', name: 'Lawn Care', mo: 69.75, visitsPerYear: 9 };
+    const termiteRow = { service: 'termite_bait', name: 'Termite Bait Stations', annual: 250 };
+    const NO_CHOICE = { show_one_time_option: false };
+    const termitePlan = (services) => ({
+      result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }], recurring: { services } },
+    });
+    const check = (services, estData, selectedFrequency = null) => acceptPrepayAvailable({
+      selectedFrequency, recurringSvcList: services, oneTimeList: [], estData, estimate: NO_CHOICE,
+    });
+
+    test('no priced frequency: a termite annual plan bundled with pest is refused, a solo plan is not', () => {
+      expect(check([termiteRow], termitePlan([termiteRow]))).toBe(true);
+      expect(check([termiteRow, pestRow], termitePlan([termiteRow, pestRow]))).toBe(false);
+    });
+
+    test('no priced frequency: two ordinary services are refused, one is not', () => {
+      expect(check([pestRow], { result: { recurring: { services: [pestRow] } } })).toBe(true);
+      expect(check([lawnRow, pestRow], { result: { recurring: { services: [lawnRow, pestRow] } } })).toBe(false);
+    });
+
+    test('a tier flag still decides for one unit, and never re-opens two', () => {
+      const one = { result: { recurring: { services: [pestRow] } } };
+      expect(check([pestRow], one, { key: 'quarterly', annualPrepayEligible: false })).toBe(false);
+      expect(check([pestRow], one, { key: 'quarterly', annualPrepayEligible: true })).toBe(true);
+      const two = { result: { recurring: { services: [lawnRow, pestRow] } } };
+      expect(check([lawnRow, pestRow], two, { key: 'quarterly', annualPrepayEligible: true })).toBe(false);
+    });
+  });
 });

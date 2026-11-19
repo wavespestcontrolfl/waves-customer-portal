@@ -11513,14 +11513,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       // stamped flag or the stored mix. When combos exist, the MATCHED
       // combo's stamped flag is enforced right after combo resolution below
       // (combos are always prepay-ineligible today), and an unmatched map
-      // 400s there.
-      const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
-        ? selectedFrequency.annualPrepayEligible
-        : null;
-      const prepayMixEligible = tierPrepayFlag != null
-        ? tierPrepayFlag
-        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
-      if (!prepayMixEligible) {
+      // 400s there. The unit count applies on every path (acceptPrepayAvailable).
+      if (!acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeList, estData, estimate })) {
         return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
     }
@@ -28396,6 +28390,21 @@ function prepayUnitCountClosed(estData, estimate) {
   }
 }
 
+// Accept's annual-prepay check: the selected tier's stamped flag when a tier resolves, else the stored service mix, and
+// on every path the unit count (prepayUnitCountClosed). The flags finalizePricingBundle stamps already carry the count,
+// but a bundle with no priced frequency (an engine replay that failed) has no flag to read, and the mix alone admits a
+// multi-service plan the converter refuses: a termite annual plan bundled with pest would park for a signature its
+// activation refuses.
+function acceptPrepayAvailable({ selectedFrequency, recurringSvcList, oneTimeList, estData, estimate }) {
+  const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
+    ? selectedFrequency.annualPrepayEligible
+    : null;
+  const prepayMixEligible = tierPrepayFlag != null
+    ? tierPrepayFlag
+    : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+  return prepayMixEligible && !prepayUnitCountClosed(estData, estimate);
+}
+
 // Prepay only. The fee lines are left as each builder made them: on a legacy plan split across the two recurring
 // blocks, the page's fee readers see one block and can show a $99 WaveGuard setup fee that accept, reading both, never
 // bills. Which reader is right is a separate ruling for the owner (CLAUDE.md rule 22); with prepay closed, that fee
@@ -32842,6 +32851,7 @@ module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.withPestOnlyRecurringChoice = withPestOnlyRecurringChoice;
 module.exports.withMultiServicePrepayClosed = withMultiServicePrepayClosed;
+module.exports.acceptPrepayAvailable = acceptPrepayAvailable;
 module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
