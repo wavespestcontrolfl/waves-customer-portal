@@ -761,3 +761,81 @@ describe('follow-up 20261119010200: the Crosscheck row gets production\'s label 
     expect(snapshot(knex)).toEqual(before);
   });
 });
+
+// Follow-up 20261119010300: Crosscheck's tags gain the lines 20261119010000 links it to (mosquito services, Slab Pre-Treat).
+describe('follow-up 20261119010300: the Crosscheck row is tagged mosquito and termite too', () => {
+  const holds = require('../models/migrations/20261119010100_crosscheck_seeded_row_holds');
+  const fill = require('../models/migrations/20261119010200_crosscheck_catalog_label_fill');
+  const tags = require('../models/migrations/20261119010300_crosscheck_service_line_tags');
+  const tagEvents = (knex) => knex.tables.audit_log.filter((e) => e.action === `migration:${tags.MIGRATION}:tags`);
+  const withTags = (serviceLines) => {
+    const tables = baseTables();
+    tables.products_catalog[1].service_lines = serviceLines;
+    return makeKnex(tables);
+  };
+
+  test('a repo-built catalog: pest, lawn, mosquito, termite; one audit row; a re-run and down() change nothing', async () => {
+    const tables = baseTables();
+    tables.products_catalog.splice(1, 1);
+    const columns = ['id', 'name', 'category', 'active_ingredient', 'formulation', 'container_size', 'unit_size_oz', 'default_rate_per_1000',
+      'active', 'needs_pricing', 'label_source_note', 'created_at', 'updated_at', ...fill.FILL_IF_NULL.map(([c]) => c), ...fill.SEEDED_ROW.map(([c]) => c)];
+    const knex = makeKnex(tables, { columns: { products_catalog: columns } });
+    for (const step of [migration, holds, fill, tags]) await step.up(knex);
+    const row = knex.tables.products_catalog.find((r) => r.name === 'LESCO Crosscheck Plus');
+    expect(row.service_lines).toEqual(['pest', 'lawn', 'mosquito', 'termite']);
+    expect(tagEvents(knex)).toHaveLength(1);
+    expect(tagEvents(knex)[0].metadata).toMatchObject({ before: { service_lines: ['pest', 'lawn'] }, after: { service_lines: ['pest', 'lawn', 'mosquito', 'termite'] } });
+    expect(tagEvents(knex)[0].action.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await tags.up(knex);
+    await tags.down(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test.each([
+    ['production\'s tags', ['pest', 'lawn'], ['pest', 'lawn', 'mosquito', 'termite']],
+    ['an office tag stays, first', ['rodent', 'pest', 'lawn'], ['rodent', 'pest', 'lawn', 'mosquito', 'termite']],
+    ['one of the two is there', ['pest', 'lawn', 'termite'], ['pest', 'lawn', 'termite', 'mosquito']],
+  ])('%s: the missing lines are added after the kept ones', async (_label, before, expected) => {
+    const knex = withTags(before);
+    await tags.up(knex);
+    expect(byId(knex, 'products_catalog', CROSS).service_lines).toEqual(expected);
+    expect(tagEvents(knex)).toHaveLength(1);
+  });
+
+  test.each([
+    ['already tagged with both', ['pest', 'lawn', 'mosquito', 'termite']],
+    ['untagged (the category decides)', null],
+    ['not a tag list', { lawn: true }],
+  ])('%s: nothing changes', async (_label, serviceLines) => {
+    const knex = withTags(serviceLines);
+    const before = snapshot(knex);
+    await tags.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+
+  test('an edit between the read and the write stands', async () => {
+    const knex = withTags(['pest', 'lawn']);
+    const original = knex;
+    const wrapped = (table) => {
+      const b = original(table);
+      const { update } = b;
+      b.update = (patch) => { byId(original, 'products_catalog', CROSS).service_lines = ['lawn']; return update(patch); };
+      return b;
+    };
+    Object.assign(wrapped, { schema: original.schema, fn: original.fn, tables: original.tables });
+    await tags.up(wrapped);
+    expect(byId(knex, 'products_catalog', CROSS).service_lines).toEqual(['lawn']);
+    expect(tagEvents(knex)).toHaveLength(0);
+  });
+
+  test('no audit_log table: nothing is written', async () => {
+    const tables = baseTables();
+    delete tables.audit_log;
+    tables.products_catalog[1].service_lines = ['pest', 'lawn'];
+    const knex = makeKnex(tables);
+    const before = snapshot(knex);
+    await tags.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
