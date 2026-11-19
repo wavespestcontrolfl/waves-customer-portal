@@ -11,7 +11,9 @@ const { callerWordsOf } = require('../services/call-phone-yes-word');
 
 test('the module reads only: it writes nothing and sends nothing', () => {
   const source = fs.readFileSync(require.resolve('../services/call-phone-yes-word.js'), 'utf8');
-  for (const word of ['.insert(', '.update(', '.del(', '.delete(', 'sendSms', 'sendEmail', 'notifyAdmin', 'sendCustomerMessage', 'twilio']) {
+  // The Twilio client and its create calls; the module reads the number registry (config/twilio-numbers) only.
+  for (const word of ['.insert(', '.update(', '.del(', '.delete(', 'sendSms', 'sendEmail', 'notifyAdmin', 'sendCustomerMessage',
+    "require('twilio')", '.messages.create(', '.calls.create(']) {
     expect(source).not.toContain(word);
   }
 });

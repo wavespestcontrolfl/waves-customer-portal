@@ -144,6 +144,39 @@ describeDb("the caller's word (PostgreSQL)", () => {
     await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(false);
   });
 
+  // Intake links a call by the primary phone only; the processor links a service-contact number after its read.
+  // Each customer: a service-contact number, a secondary number filed in another format, and a Waves number in a slot.
+  const OURS = () => require('../config/twilio-numbers').mainLine.number;
+  async function customerWithNumbers() {
+    const customerId = await customer();
+    const numbers = { contact: `+1941555${6000 + seq}`, secondary: `+1941555${7000 + seq}` };
+    await trx('customers').where({ id: customerId }).update({
+      service_contact_phone: numbers.contact, secondary_phone: `(941) 555-${7000 + seq}`, service_contact3_phone: OURS(),
+    });
+    return { customerId, ...numbers };
+  }
+
+  test.each([
+    ['from their service-contact number', (n) => ({ from_phone: n.contact }), true],
+    ['from their secondary number, filed in another format', (n) => ({ from_phone: n.secondary }), true],
+    ['an outbound call to their secondary number', (n) => ({ direction: 'Outbound-API', from_phone: OURS(), to_phone: n.secondary }), true],
+    ['from a number not on their record', () => ({ from_phone: '+19415550199' }), false],
+    ['an outbound call whose number called is not theirs', (n) => ({ direction: 'outbound-dial', from_phone: n.contact, to_phone: '+19415550199' }), false],
+    ['from the Waves number in their slot (a forwarding leg)', () => ({ from_phone: OURS() }), false],
+    ['from their number but linked to another customer', (n) => ({ from_phone: n.contact, customer_id: n.otherId }), false],
+  ])('a call not linked to the customer, being read: %s', async (_name, over, counts) => {
+    const otherId = await customer();
+    const n = await customerWithNumbers();
+    await call(null, null, { processing_status: 'processing', ...over({ ...n, otherId }) });
+    await expect(unreadCallSince(trx, { customerId: n.customerId, since: since() })).resolves.toBe(counts);
+  });
+
+  test('a word is read from linked calls only: a yes on an unlinked call from their number is no yes', async () => {
+    const n = await customerWithNumbers();
+    await call(null, 'per_application', { from_phone: n.contact });
+    await expect(callerWord(trx, { customerId: n.customerId, since: since() })).resolves.toEqual({ yes: null, noYes: 'no_yes_heard' });
+  });
+
   test("a yes: the caller's pay-per-application choice with their own sentence", async () => {
     const customerId = await customer();
     const yesCallId = await call(customerId, 'per_application', { created_at: hoursAgo(5) });
@@ -317,5 +350,16 @@ describeDb("the caller's word (PostgreSQL)", () => {
     await expect(laterWordProblem(trx, { customerId, yes: null, booking: await rowOf(bookingCallId) })).resolves.toBeNull();
     await call(customerId, null, { created_at: hoursAgo(1) });
     await expect(laterWordProblem(trx, { customerId, yes: null, booking: await rowOf(bookingCallId) })).resolves.toBe('newer_call');
+  });
+
+  test("a later call from the customer's other number, linked to no one, is a newer call", async () => {
+    const n = await customerWithNumbers();
+    const yesCallId = await call(n.customerId, 'per_application', { created_at: hoursAgo(5) });
+    const bookingCallId = await call(n.customerId, null, { created_at: hoursAgo(2) });
+    const yes = { callLogId: yesCallId, at: hoursAgo(5) };
+    await call(null, null, { created_at: hoursAgo(1), from_phone: '+19415550199' });
+    await expect(laterWordProblem(trx, { customerId: n.customerId, yes, booking: await rowOf(bookingCallId) })).resolves.toBeNull();
+    await call(null, null, { created_at: hoursAgo(1), from_phone: n.contact });
+    await expect(laterWordProblem(trx, { customerId: n.customerId, yes, booking: await rowOf(bookingCallId) })).resolves.toBe('newer_call');
   });
 });

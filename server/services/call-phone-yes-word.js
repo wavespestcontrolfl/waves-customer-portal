@@ -155,12 +155,45 @@ async function latestBillingChoice(conn, { customerId, since }) {
   }
 }
 
-// True when a call from the customer that began since `since` still owes a read (owedReadSql): it may hold the yes or
-// take it back. Sandbox calls do not count.
+// The customer's numbers as 10-digit keys (customerPhoneLookupKey), from every identity column a call is attributed by
+// (KNOWN_CALLER_PHONE_COLS). Never a Waves number: forwarding legs show ours as the contact (call-log-relink.js).
+async function customerPhoneKeys(conn, customerId) {
+  const { KNOWN_CALLER_PHONE_COLS, customerPhoneLookupKey } = require('../utils/known-caller-phone');
+  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+  const row = await conn('customers').where({ id: customerId }).first(KNOWN_CALLER_PHONE_COLS);
+  const keys = KNOWN_CALLER_PHONE_COLS.map((col) => row?.[col])
+    .filter((phone) => phone && !TWILIO_NUMBERS.isInternalNumber(phone))
+    .map(customerPhoneLookupKey)
+    .filter((key) => key.length === 10);
+  return [...new Set(keys)];
+}
+
+// Calls with the customer, for the two hold checks only: linked to them, or linked to no one with one of their numbers
+// (customerPhoneKeys) as the contact (the caller; on an outbound call, the number called: call-log-relink's
+// pickContactPhone, with the processor's case-blind outbound test). Intake links by the primary phone alone, and the
+// processor links a service-contact number only after its read (findCustomerForCallContact), so until then a call from
+// the customer's other number has no customer. A word is read from linked calls only (latestBillingChoice).
+function whereWithCustomer(qb, customerId, keys) {
+  return qb.where((w) => {
+    w.where('call_log.customer_id', customerId);
+    if (!keys.length) return;
+    w.orWhere((unlinked) => unlinked.whereNull('call_log.customer_id').where((contact) => contact
+      .where((inbound) => inbound.whereRaw("lower(COALESCE(call_log.direction, '')) NOT LIKE 'outbound%'")
+        .whereRaw("right(regexp_replace(call_log.from_phone, '\\D', '', 'g'), 10) = ANY(?)", [keys]))
+      .orWhere((outbound) => outbound.whereRaw("lower(call_log.direction) LIKE 'outbound%'")
+        .whereRaw("right(regexp_replace(call_log.to_phone, '\\D', '', 'g'), 10) = ANY(?)", [keys]))));
+  });
+}
+
+// True when a call with the customer (whereWithCustomer) that began since `since` still owes a read (owedReadSql): it
+// may hold the yes or take it back. Sandbox calls do not count. A call begins at or before its row's insert, so the
+// created_at bound drops no row; it lets the created_at index serve the unlinked calls.
 async function unreadCallSince(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const keys = await customerPhoneKeys(conn, customerId);
   return !!(await conn('call_log')
-    .where({ customer_id: customerId })
+    .modify(whereWithCustomer, customerId, keys)
+    .where('call_log.created_at', '>=', since)
     .whereRaw(`${startedSql()} >= ?`, [since])
     .whereRaw(owedReadSql('call_log'))
     .modify((qb) => whereNotSandboxCall(qb))
@@ -171,7 +204,8 @@ async function unreadCallSince(conn, { customerId, since }) {
 //   yes_after_booking    the yes came on a later call than the booking (the visit was not booked for the plan);
 //   booking_call_unread  the booking call's last read did not finish (a failed re-read or an invalid extraction may
 //                        hide a no);
-//   newer_call           another call from the customer began since the yes (or, with no yes, since the booking).
+//   newer_call           another call with the customer (whereWithCustomer) began since the yes (or, with no yes,
+//                        since the booking).
 // Times are when each call began (callStartedAt). Call it once every call in the window is read (unreadCallSince).
 // Sandbox calls do not count.
 async function laterWordProblem(conn, { customerId, yes, booking }) {
@@ -179,9 +213,12 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
   if (yes && new Date(yes.at) > bookingAt) return 'yes_after_booking';
   if (booking.processing_status !== 'processed' || booking.v2_extraction_status !== 'valid') return 'booking_call_unread';
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+  const after = yes ? yes.at : bookingAt;
+  const keys = await customerPhoneKeys(conn, customerId);
   const later = await conn('call_log')
-    .where({ customer_id: customerId })
-    .whereRaw(`${startedSql()} > ?`, [yes ? yes.at : bookingAt])
+    .modify(whereWithCustomer, customerId, keys)
+    .where('call_log.created_at', '>', after)
+    .whereRaw(`${startedSql()} > ?`, [after])
     .whereNotIn('id', [yes?.callLogId, booking.id].filter(Boolean))
     .modify((qb) => whereNotSandboxCall(qb))
     .first('id');
