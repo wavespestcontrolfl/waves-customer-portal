@@ -1415,3 +1415,18 @@ it("a technician's large row read goes out in batches of 200 ids, all started at
   await act(async () => { window.dispatchEvent(new Event("pagehide")); });
   expect(readPosts("/messages/read").map(([, init]) => JSON.parse(init.body).messageIds.length)).toEqual([200, 200, 50]);
 });
+
+it("a very large technician row read keeps its keepalive bodies under the browser's shared 64 KiB", async () => {
+  // Real ids are UUIDs: 200 of them are about 7.8 KiB of JSON.
+  messages = Array.from({ length: 2000 }, (_, i) => ({ ...inbound(`00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, 0, i)).toISOString() }));
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+  const posts = readPosts("/messages/read");
+  // Every id is sent; the keepalive ones together stay under the shared budget.
+  expect(posts.reduce((n, [, init]) => n + JSON.parse(init.body).messageIds.length, 0)).toBe(2000);
+  const keepaliveBytes = posts.filter(([, init]) => init.keepalive).reduce((n, [, init]) => n + init.body.length, 0);
+  expect(keepaliveBytes).toBeLessThanOrEqual(64 * 1024);
+  expect(posts.some(([, init]) => !init.keepalive)).toBe(true);
+});

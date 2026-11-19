@@ -248,8 +248,17 @@ function newestCreatedAt(list) {
 
 // A list Mark read waits this long so its Undo can take it back.
 const LIST_READ_UNDO_MS = 5000;
-// Message ids per keepalive request (about 8 KB of JSON).
+// Message ids per request (about 8 KB of JSON).
 const LIST_READ_ID_BATCH = 200;
+// The browser gives all keepalive requests in flight one shared 64 KiB of
+// body; list reads stay under this part of it.
+const LIST_READ_KEEPALIVE_BUDGET = 48 * 1024;
+// True when this body fits the keepalive budget, and then counts it in.
+function takeKeepaliveBudget(bytesRef, body) {
+  if (bytesRef.current + body.length > LIST_READ_KEEPALIVE_BUDGET) return false;
+  bytesRef.current += body.length;
+  return true;
+}
 
 // Does a list read cover this loaded text? Mark all read covers every inbound
 // text up to its boundary except recruiting replies and blocked senders (the
@@ -1791,8 +1800,11 @@ export function SmsTab({
   const [listReadError, setListReadError] = useState("");
   const pendingReadRef = useRef(null);
   const pendingReadTimerRef = useRef(null);
-  // Every list read goes out with keepalive: a tab that closes while it is in
-  // flight (after Undo is gone) still delivers it.
+  // A list read goes out with keepalive while the shared keepalive budget has
+  // room, so a tab that closes while it is in flight (after Undo is gone)
+  // still delivers it. A request past the budget goes out as a normal one:
+  // it still lands while the page stays open.
+  const keepaliveBytesRef = useRef(0);
   const commitPendingRead = useCallback(async () => {
     const pending = pendingReadRef.current;
     window.clearTimeout(pendingReadTimerRef.current);
@@ -1803,26 +1815,32 @@ export function SmsTab({
     try {
       if (pending.all || pending.senderKey) {
         // A row's sender read covers that sender's older texts on pages not loaded.
-        await adminFetch("/admin/communications/messages/read-all", {
-          method: "POST",
-          keepalive: true,
-          body: JSON.stringify(pending.senderKey
-            ? { readBefore: pending.readBefore, contactPhone: pending.contactPhone }
-            : { readBefore: pending.readBefore }),
-        });
+        const body = JSON.stringify(pending.senderKey
+          ? { readBefore: pending.readBefore, contactPhone: pending.contactPhone }
+          : { readBefore: pending.readBefore });
+        const keepalive = takeKeepaliveBudget(keepaliveBytesRef, body);
+        try {
+          await adminFetch("/admin/communications/messages/read-all", { method: "POST", keepalive, body });
+        } finally {
+          if (keepalive) keepaliveBytesRef.current -= body.length;
+        }
       } else {
         // A row with no phone, or a technician's row: its loaded texts, in
-        // batches under the browser's 64 KiB keepalive limit, all started at
-        // once so a tab that closes cannot stop the later ones.
+        // batches all started at once so a tab that closes cannot stop the
+        // later ones.
         const batches = [];
         for (let i = 0; i < pending.messageIds.length; i += LIST_READ_ID_BATCH) {
           batches.push(pending.messageIds.slice(i, i + LIST_READ_ID_BATCH));
         }
-        await Promise.all(batches.map((messageIds) => adminFetch("/admin/communications/messages/read", {
-          method: "POST",
-          keepalive: true,
-          body: JSON.stringify({ messageIds }),
-        })));
+        await Promise.all(batches.map(async (messageIds) => {
+          const body = JSON.stringify({ messageIds });
+          const keepalive = takeKeepaliveBudget(keepaliveBytesRef, body);
+          try {
+            await adminFetch("/admin/communications/messages/read", { method: "POST", keepalive, body });
+          } finally {
+            if (keepalive) keepaliveBytesRef.current -= body.length;
+          }
+        }));
       }
       const readAt = new Date().toISOString();
       readCommitSeqRef.current += 1;
