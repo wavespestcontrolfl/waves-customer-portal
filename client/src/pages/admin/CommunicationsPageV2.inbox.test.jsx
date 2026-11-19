@@ -1310,3 +1310,17 @@ it("Mark all read waits for the whole list to load after a search is cleared, so
   await tick(0);
   expect(screen.getByRole("button", { name: "Mark all read" })).toBeInTheDocument();
 });
+
+it("closing or reloading the tab inside the Undo window sends the waiting read with keepalive", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  expect(readPosts("/messages/read")).toHaveLength(0);
+  await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+  const posts = readPosts("/messages/read");
+  expect(posts).toHaveLength(1);
+  expect(posts[0][1]).toMatchObject({ method: "POST", keepalive: true });
+  expect(JSON.parse(posts[0][1].body)).toEqual({ messageIds: ["a"] });
+  await tick(5000);
+  expect(readPosts("/messages/read")).toHaveLength(1);
+});

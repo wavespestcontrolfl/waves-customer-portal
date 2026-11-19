@@ -18,7 +18,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
-const { inboundSmsReceiptProjectionSql } = require('./sms-response-policy');
+const { inboundSmsReceiptProjectionSql, phoneIdentitySql } = require('./sms-response-policy');
 
 const LEGACY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -301,7 +301,11 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
   // The inbox shows a text at its effective time (an opt-out receipt can date
   // it earlier than the row), so the cutoff compares that same time.
   const receipt = inboundSmsReceiptProjectionSql({ messageAlias: 'm', legacyAlias: 'm', receiptAlias: 'r' });
-  const ids = await db('messages as m')
+  // A blocked sender is hidden from the inbox (and the badge), so its texts
+  // keep their read state for the day it is unblocked. Same peer identity as
+  // the badge: the thread's contact phone, else the customer's phone.
+  const peer = phoneIdentitySql("COALESCE(NULLIF(c.contact_phone, ''), cu.phone, '')");
+  const eligible = () => db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
     .joinRaw(receipt.joinSql)
@@ -317,12 +321,20 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
           .where((b) => b.whereNot('cu.phone', phone).orWhereNull('cu.phone'));
       }
     })
-    .pluck('m.id');
+    .whereNotExists(function blockedSender() {
+      this.select(1).from('blocked_numbers as b').whereRaw(`${phoneIdentitySql('b.number')} = ${peer}`);
+    });
+  const ids = await eligible().pluck('m.id');
   // The writer binds each id (and its SIDs); batches keep a long backlog
-  // under PostgreSQL's bind-parameter limit.
+  // under PostgreSQL's bind-parameter limit. A later batch rechecks every
+  // rule first (a technician's route can change while a backlog runs), so
+  // only texts still in scope are written and their bells reconciled.
   const total = { updated: 0, notificationsCleared: 0 };
   for (let i = 0; i < ids.length; i += MARK_ALL_BATCH) {
-    const done = await markInboundSmsRead({ messageIds: ids.slice(i, i + MARK_ALL_BATCH), adminUserId, role });
+    const chunk = ids.slice(i, i + MARK_ALL_BATCH);
+    const batch = i === 0 ? chunk : await eligible().whereIn('m.id', chunk).pluck('m.id');
+    if (!batch.length) continue;
+    const done = await markInboundSmsRead({ messageIds: batch, adminUserId, role });
     total.updated += done.updated;
     total.notificationsCleared += done.notificationsCleared;
   }

@@ -130,7 +130,7 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
   });
 
   // Owner 2026-11-19 ("Mark Texts Read" A): Mark all read on real SQL.
-  test('Mark all read covers the shown time to the microsecond and an opt-out shown earlier, never later texts, internal phones or recruiting replies', async () => {
+  test('Mark all read covers the shown time to the microsecond and an opt-out shown earlier, never later texts, internal phones, recruiting replies or blocked senders', async () => {
     await mockPg.raw(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at timestamptz,
       ADD COLUMN IF NOT EXISTS read_by_admin_user_id uuid, ADD COLUMN IF NOT EXISTS updated_at timestamptz;
       ALTER TABLE sms_log ADD COLUMN IF NOT EXISTS is_read boolean;
@@ -152,12 +152,14 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     const later = await text('arrived after the list loaded', { phone: '+19415550102', createdAt: '2026-11-19T12:00:00.124001Z' });
     const internal = await text('internal phone', { phone: '+19415550199', createdAt: '2026-11-19T11:00:00Z' });
     const recruiting = await text('applicant reply', { phone: '+19415550103', createdAt: '2026-11-19T11:00:00Z', type: 'job_applicant_reply' });
+    const blockedText = await text('blocked sender', { phone: '+19415550104', createdAt: '2026-11-19T11:00:00Z' });
+    await mockPg('blocked_numbers').insert({ id: randomUUID(), number: '(941) 555-0104' });
     // The client shows the newest text at millisecond precision.
     const result = await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00.123Z'), role: 'admin', excludePhones: ['+19415550199'] });
     expect(result.updated).toBe(2);
     // Every query in the writer ran: a failed one would abort this transaction.
     expect(require('../services/logger').warn.mock.calls.filter(([, meta]) => /^[0-9A-Z]{5}$/.test(meta?.code || ''))).toEqual([]);
     const read = new Set(await mockPg('messages').where({ is_read: true }).pluck('id'));
-    expect([shown, optOut, later, internal, recruiting].map((id) => read.has(id))).toEqual([true, true, false, false, false]);
+    expect([shown, optOut, later, internal, recruiting, blockedText].map((id) => read.has(id))).toEqual([true, true, false, false, false, false]);
   });
 });

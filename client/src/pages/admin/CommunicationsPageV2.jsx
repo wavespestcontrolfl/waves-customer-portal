@@ -250,12 +250,14 @@ function newestCreatedAt(list) {
 const LIST_READ_UNDO_MS = 5000;
 
 // Does a list read cover this loaded text? Mark all read covers every inbound
-// text up to its boundary except recruiting replies (the server leaves those
-// for the Recruiting page); a row's Mark read covers that row's texts.
+// text up to its boundary except recruiting replies and blocked senders (the
+// server leaves both unread); a row's Mark read covers that row's texts.
 function pendingReadCovers(pending, m) {
   if (!pending || m.direction !== "inbound") return false;
   if (pending.all) {
-    return !String(m.messageType || "").startsWith("job_") && new Date(m.createdAt) <= new Date(pending.readBefore);
+    return !String(m.messageType || "").startsWith("job_")
+      && !pending.blockedKeys?.has(smsMessageThreadKey(m))
+      && new Date(m.createdAt) <= new Date(pending.readBefore);
   }
   return pending.messageIds.includes(m.id);
 }
@@ -1770,7 +1772,7 @@ export function SmsTab({
   const [listReadError, setListReadError] = useState("");
   const pendingReadRef = useRef(null);
   const pendingReadTimerRef = useRef(null);
-  const commitPendingRead = useCallback(async () => {
+  const commitPendingRead = useCallback(async ({ keepalive = false } = {}) => {
     const pending = pendingReadRef.current;
     window.clearTimeout(pendingReadTimerRef.current);
     pendingReadRef.current = null;
@@ -1781,12 +1783,14 @@ export function SmsTab({
       if (pending.all) {
         await adminFetch("/admin/communications/messages/read-all", {
           method: "POST",
+          keepalive,
           body: JSON.stringify({ readBefore: pending.readBefore }),
         });
       } else {
         // The row's own texts only: a customer's two phones can share one conversation.
         await adminFetch("/admin/communications/messages/read", {
           method: "POST",
+          keepalive,
           body: JSON.stringify({ messageIds: pending.messageIds }),
         });
       }
@@ -1802,7 +1806,16 @@ export function SmsTab({
   }, [loadData]);
   const commitPendingReadRef = useRef(commitPendingRead);
   commitPendingReadRef.current = commitPendingRead;
-  useEffect(() => () => { void commitPendingReadRef.current(); }, []);
+  // Leaving the inbox sends a waiting read; closing or reloading the tab does
+  // too (pagehide), with keepalive so the request outlives the page.
+  useEffect(() => {
+    const onPageHide = () => { void commitPendingReadRef.current({ keepalive: true }); };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      void commitPendingReadRef.current();
+    };
+  }, []);
   const startListRead = (next) => {
     if (pendingReadRef.current) void commitPendingRead();
     setListReadError("");
@@ -1825,7 +1838,7 @@ export function SmsTab({
     if (smsLoadedSearchRef.current !== "" || smsLoadedStatusFilterRef.current === "unanswered") return;
     const readBefore = newestCreatedAt(messages);
     if (!readBefore) return;
-    startListRead({ all: true, readBefore, label: "Marked all texts read" });
+    startListRead({ all: true, readBefore, blockedKeys: blocked, label: "Marked all texts read" });
   };
 
   useEffect(() => {
