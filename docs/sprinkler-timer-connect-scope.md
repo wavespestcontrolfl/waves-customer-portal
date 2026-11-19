@@ -358,17 +358,22 @@ and 3.
   home's coordinates first, Open-Meteo second (owner ruling 2026-07-30,
   `server/services/mrms-qpe.js`). It skips at half an inch or more.
 - **Which rain counts.** The card promises "rain since your last watering
-  day". The helper returns a seven-day window, and its total can hold rain
-  from before that day. So the worker does not use the total. It sums the
-  helper's `dailyRain` rows from the day after the home's previous
-  watering day through the run day. For a home that waters twice a week,
-  the previous watering day is the nearer one, so the interval is three or
-  four days. The previous watering day comes from `watering_days`, not
-  from whether a run happened: the timer may have watered on its own
-  before automatic runs were on. A missing row inside the interval makes
-  the reading missing (decision 8); it is never counted as zero. A window
-  that ends today is still filling, and the helper caches it for 30
-  minutes, so the read is made within the hour before the run.
+  day", meaning the last day the lawn was watered. The helper returns a
+  seven-day window, and its total can hold rain from before that day. So
+  the worker does not use the total. It sums the helper's `dailyRain` rows
+  from the day after the last watering through the run day.
+  - The last watering is the latest turf run in the ledger, automatic or
+    tapped. It is not read from the day list in `watering_days`: a customer
+    may leave one of those days unselected, and then nothing waters on it.
+  - The first automatic run has no ledger run behind it. Its baseline is
+    the latest day in `watering_days` before the opt-in, when the timer's
+    own schedule still ran.
+  - If the last watering is more than seven days back, the interval is the
+    helper's seven days.
+  - A missing row inside the interval makes the reading missing (decision
+    8); it is never counted as zero. A window that ends today is still
+    filling, and the helper caches it for 30 minutes, so the read is made
+    within the hour before the run.
 - **Only rain that has fallen.** For the current day the helper can return
   the larger of radar rain so far and Open-Meteo's forecast for the whole
   day. A 5 AM run must not be skipped for rain forecast that afternoon,
@@ -418,6 +423,16 @@ and 3.
   written when Monday's plan is published (the transaction that sets
   `published_at` in `server/services/irrigation-weekly-email.js`) and
   applied by the worker at their time.
+- **A queued run is a plan, not a permission.** The customer can turn
+  automatic runs off, change the days or the time, change the turf zones
+  or connect another timer after Monday. So at run time the worker checks
+  again: the connection is the one the run was written for and is active,
+  automatic runs are on, the slot is still a chosen day and time, the
+  zones are the current turf zones, and the plan is the current one. A run
+  that fails any check is discarded and never sent.
+- **Zone edits wait for a run to end.** While a run is in progress the
+  card keeps Stop and does not offer the zone screen. A run finishes on
+  the zones it started with; an edit applies to later runs.
 - **The connect sheet changes** for a customer who switches this on: "never
   starts watering on its own" becomes "starts watering only at the day and
   time you set".

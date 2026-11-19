@@ -13,7 +13,7 @@
 import { useState } from 'react';
 import Icon from '../../components/Icon';
 import { COLORS as B, FONTS, BUTTON_BASE } from '../../theme-brand';
-import { addETDays, etDateString, formatETDateOnly } from '../../lib/timezone';
+import { addETDays, etDateString, formatETDateOnly, etNowMinutes } from '../../lib/timezone';
 
 const BODY = '#3F4A65';
 const RULE = '#E7E2D7';
@@ -240,8 +240,8 @@ function SettingRow({ label, detail, checked, onChange }) {
 
 function ManageRow({ onZones, onDisconnect }) {
   return (
-    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginTop: 12 }}>
-      <TextButton onClick={onZones}>Change turf zones</TextButton>
+    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'center', marginTop: 12 }}>
+      {onZones ? <TextButton onClick={onZones}>Change turf zones</TextButton> : <span style={meta}>You can change turf zones after this run ends.</span>}
       <TextButton onClick={onDisconnect}>Disconnect</TextButton>
     </div>
   );
@@ -459,7 +459,7 @@ function RunningCallout({ go, turfZones, totalMinutes }) {
 function AutoCallout({ openSheet, turfCount, totalMinutes, schedule }) {
   return (
     <Callout>
-      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Next run: {DAY_NAMES[nextSavedDay(schedule.days)]} at {clock(schedule.time)}</div>
+      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Next run: {DAY_NAMES[nextRunDay(schedule)]} at {clock(schedule.time)}</div>
       <div style={{ color: BODY }}>About 30 minutes per turf zone, from this week's plan. {zoneCount(turfCount)}, about {duration(totalMinutes)} in all.</div>
       <div style={{ marginTop: 4 }}><TextButton onClick={() => openSheet('auto')}>Change day or time</TextButton></div>
     </Callout>
@@ -538,7 +538,7 @@ function LiveView({ view, go, openSheet, editZones, disconnect, turfZones, turfC
           detail="Each week we start your turf zones for that week's minutes, on the days and time you pick." />
       </div>
       <ActivityList rows={(ACTIVITY[callout] || ACTIVITY.usual)()} />
-      <ManageRow onZones={editZones} onDisconnect={disconnect} />
+      <ManageRow onZones={view === 'running' ? null : editZones} onDisconnect={disconnect} />
     </>
   );
 }
@@ -571,8 +571,12 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const START_TIMES = ['4 AM', '5 AM', '6 AM', '8 PM'];
 // The watering days on file in Irrigation settings ("tuesday"), as the short names the chips use.
 const savedDayChips = (wateringDays) => WEEKDAYS.filter((day) => wateringDays.includes(DAY_NAMES[day].toLowerCase()));
-// The next of the chosen days after today.
-const nextSavedDay = (days) => [1, 2, 3, 4, 5, 6, 7].map(weekdayShort).find((day) => days.includes(day)) || null;
+const startHour = (time) => (Number(time.split(' ')[0]) % 12) + (time.endsWith('PM') ? 12 : 0);
+// The next of the chosen days: today while today's start time is still ahead, else the first one after today.
+const nextRunDay = ({ days, time }) => {
+  const offsets = etNowMinutes() < startHour(time) * 60 ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5, 6, 7];
+  return offsets.map(weekdayShort).find((day) => days.includes(day)) || null;
+};
 
 function AutoRunSheet({ schedule, savedDays, onClose, onSave }) {
   const [days, setDays] = useState(schedule.days);
