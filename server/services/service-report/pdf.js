@@ -48,7 +48,18 @@ function assertPdfBuffer(buf, provider) {
   throw err;
 }
 
-async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
+// The element both PDF providers wait for before printing a service report.
+// A record whose render depends on GATE_REPORT_WRITER_RULES (technician-
+// report-copy reportDependsOnWriterRules) waits for its root showing the
+// state this render's key is computed under (renderWriterRulesState; /data
+// names it in PDF mode). Every other record renders the same in both states,
+// so it waits for the root alone, also in a restart overlap.
+function reportPdfReadySelector(dependsOnWriterRules = true) {
+  if (!dependsOnWriterRules) return '.service-report-v1';
+  return `.service-report-v1[data-writer-rules="${require('./technician-report-copy').renderWriterRulesState()}"]`;
+}
+
+async function renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector = '.service-report-v1' } = {}) {
   const accountId = process.env.CF_ACCOUNT_ID;
   const token = process.env.CF_BROWSER_RENDERING_TOKEN;
 
@@ -69,7 +80,7 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
         url,
         viewport: { width: 816, height: 1056 },
         gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
-        waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
+        waitForSelector: { selector: readySelector, visible: true, timeout: 10000 },
         emulateMediaType: 'print',
         pdfOptions: {
           format: 'letter',
@@ -150,16 +161,19 @@ async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
 // page's own count of image-load fallbacks (Playwright reads it after
 // page.pdf()); null = unknown — the Cloudflare renderer returns only bytes,
 // so callers fall back to the server-side URL probe there.
-async function renderReportPdf(url, { serviceRecordId } = {}) {
+async function renderReportPdf(url, { serviceRecordId, readySelector } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
-    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null };
+    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId, readySelector }), imageFailures: null };
   }
-  return renderReportPdfWithBrowser(url);
+  return renderReportPdfWithBrowser(url, { readySelector });
 }
 
 async function renderServiceReportV1Pdf(data, {
   token, req, logger: callLogger, serviceRecordId, pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity,
+  // reportDependsOnWriterRules(service), from the row the caller keys the
+  // render on. Unknown = true: the strict wait.
+  dependsOnWriterRules = true,
 } = {}) {
   const reportToken = token || data.token;
   const recordId = serviceRecordId || data.serviceRecordId || data.id || null;
@@ -170,7 +184,7 @@ async function renderServiceReportV1Pdf(data, {
   const started = Date.now();
 
   try {
-    const rendered = await renderReportPdf(url, { serviceRecordId: recordId });
+    const rendered = await renderReportPdf(url, { serviceRecordId: recordId, readySelector: reportPdfReadySelector(dependsOnWriterRules) });
     const pdf = assertPdfBuffer(rendered.pdf, provider);
     const elapsedMs = Date.now() - started;
     emitPdfRenderSuccess({
@@ -209,6 +223,7 @@ module.exports = {
   renderReportPdfWithBrowser,
   renderReportPdfWithCloudflare,
   renderServiceReportV1Pdf,
+  reportPdfReadySelector,
   selectedPdfRenderer,
   serviceReportViewerUrl,
 };

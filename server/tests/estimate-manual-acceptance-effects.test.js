@@ -226,6 +226,35 @@ describe('a dry run', () => {
   });
 });
 
+// The converter seeds the plan's next visits inside the accept's transaction when a visit is linked to the estimate,
+// and defers their reminders in every manual accept: only a committed accept registers them.
+describe("the seeded visits' reminders", () => {
+  const seeded = [{ id: 'svc-next', scheduled_date: '2026-12-01', window_start: '09:00' }];
+  const withSeeded = (world, register) => ({
+    ...fakeConverter(world, { conversion: { deferredFollowUpReminderRows: seeded } }), registerSeededFollowUpReminders: register,
+  });
+
+  test('a real run registers them once the accept has committed', async () => {
+    const world = makeWorld();
+    let committedAtRegister = null;
+    const converter = withSeeded(world, jest.fn(async () => { committedAtRegister = world.state.committed; }));
+    await markEstimateManuallyAccepted(base(world, converter));
+    expect(converter.convertEstimate.mock.calls[0][1]).toMatchObject({ deferFollowUpReminderRegistration: true });
+    expect(converter.registerSeededFollowUpReminders).toHaveBeenCalledWith(seeded, 'cust-1');
+    expect(committedAtRegister).toBe(1);
+  });
+
+  test('a dry run registers none: the transaction rolls back', async () => {
+    const world = makeWorld();
+    const converter = withSeeded(world, jest.fn());
+    const result = await markEstimateManuallyAccepted(base(world, converter, { dryRun: true }));
+    expect(result.dryRun).toBe(true);
+    expect(world.state).toMatchObject({ committed: 0, rolledBack: 1 });
+    expect(converter.convertEstimate.mock.calls[0][1]).toMatchObject({ deferFollowUpReminderRegistration: true });
+    expect(converter.registerSeededFollowUpReminders).not.toHaveBeenCalled();
+  });
+});
+
 describe('the real run against the pinned list', () => {
   async function pinned(worldArgs, converterOpts) {
     const world = makeWorld(worldArgs);

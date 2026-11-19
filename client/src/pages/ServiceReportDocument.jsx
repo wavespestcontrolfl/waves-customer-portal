@@ -375,6 +375,21 @@ function Bullet({ children }) {
   );
 }
 
+// reports-public.js attaches reportV2.todaysResult (a STRING) to a lawn report
+// with a watch item or a follow-up: the summary's first sentence, or a neutral
+// lead. It replaces legacy summary copy that contradicts the watch items;
+// without it the PDF can claim nothing notable was found directly above those
+// findings. The technician's report (summarySource 'technician_report') is not
+// legacy copy: the live page prints it whole in its Visit Summary, so the PDF
+// prints it whole too, as reconciled (the reconciliation corrects a stale rain
+// figure in data.summary), ahead of a typed report's frozen body. At most one
+// of the two returned texts is non-empty.
+function lawnReconciledSummary(data) {
+  const reconciled = typeof data.reportV2?.todaysResult === 'string' ? data.reportV2.todaysResult.trim() : '';
+  const technicianSummary = reconciled && data.summarySource === 'technician_report' ? cleanVisitSummary(data.summary) : '';
+  return { technicianSummary, reconciledResult: technicianSummary ? '' : reconciled };
+}
+
 export default function ServiceReportDocument({ data, token }) {
   // Remote images (the traced S3 snapshot, photos) can fail during the
   // headless capture. A heading with no image under it is a broken-looking
@@ -662,11 +677,7 @@ export default function ServiceReportDocument({ data, token }) {
     const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
     if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
   } else if (result?.headline && !reserviceNoApplication) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
-  // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
-  // replace legacy summary copy that contradicts the watch items — without it
-  // the PDF can claim nothing notable was found directly above those findings.
-  const reconciledResult = typeof data.reportV2?.todaysResult === 'string'
-    ? data.reportV2.todaysResult.trim() : '';
+  const { technicianSummary, reconciledResult } = lawnReconciledSummary(data);
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
@@ -674,8 +685,8 @@ export default function ServiceReportDocument({ data, token }) {
   // code, vetted as a whole and never contradicting the watch items, so the PDF prints ALL of
   // it. The reconciled todaysResult is only its first sentence and must not replace it.
   const frozenVisitSummary = data.summarySource === 'lawn_visit_summary' && typeof data.summary === 'string' ? data.summary.trim() : '';
-  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (frozenVisitSummary || reconciledResult
-    || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
+  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (frozenVisitSummary || technicianSummary
+    || reconciledResult || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   // The four-section report carries its own "What to expect": the separate
   // block below would print the same thing twice (as the live pest
@@ -1028,7 +1039,10 @@ export default function ServiceReportDocument({ data, token }) {
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
-    <FieldDocument className="service-report-v1 service-report-document" sheetClassName="doc-page">
+    // data-writer-rules: the state the PDF payload was built in (mode=pdf
+    // only). The server's PDF renderer prints only once this root shows the
+    // state its key was computed under (server pdf.js reportPdfReadySelector).
+    <FieldDocument className="service-report-v1 service-report-document" sheetClassName="doc-page" data-writer-rules={data.writerRules}>
       <style>{`
         .service-report-document table { border-collapse: collapse; width: 100%; }
         @media print {

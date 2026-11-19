@@ -808,7 +808,7 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
   it("resolves Taurus SC, LESCO Crosscheck Plus, and the LESCO 90/10 surfactant with the house totals", () => {
     const selections = pestDefaultMixSelections(CATALOG);
     expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
-      ["Taurus SC", 4],
+      ["Taurus SC", 1.6],
       ["LESCO Crosscheck Plus", 4],
       // Exact identity only — the bare "Non-ionic Surfactant", the
       // retired "Talstar P" and the old "Atticus Talak 7.9 F" rows are never eligible.

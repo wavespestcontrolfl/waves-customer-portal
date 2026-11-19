@@ -154,12 +154,11 @@ describe('buildAltText', () => {
 
 describe('buildPrompt', () => {
   test.each([
-    ['blog-hero', 'photo'], ['blog-body', 'photo'], ['blog-body', 'infographic'],
+    ['blog-hero', 'photo'], ['blog-body', 'photo'], ['blog-body', 'cartoon'],
   ])('keeps %s %s explanatory without fabricated evidence or source branding', (mode, style) => {
     const prompt = buildPrompt({
       title: 'Shrub assessment photos', topic: 'UF/IFAS photo guidance', mode,
       plan: { style, setting: 'plain background', timeOfDay: 'morning', vantage: 'close up' },
-      captions: style === 'infographic' ? ['Leaf', 'Stem'] : [],
     });
     expect(prompt).toContain('Editorial image content');
     expect(prompt).not.toContain('Editorial illustration only');
@@ -167,7 +166,8 @@ describe('buildPrompt', () => {
     expect(prompt).toContain('Source organizations mentioned in the context are attribution, not image subjects');
     expect(prompt).toContain('Keep anatomy and relative scale plausible');
     if (style === 'photo') expect(prompt).toContain('no illustration look');
-    else expect(prompt).toContain('The ONLY text in the image is exactly: "Leaf", "Stem"');
+    else expect(prompt).toContain('friendly cartoon illustration');
+    expect(prompt).toContain('No text, words, letters, numbers, watermarks, or logos');
   });
 
 
@@ -189,35 +189,29 @@ describe('buildPrompt', () => {
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
   });
-  test('every scene mode AND the infographic pin the real Waves uniform (owner directive 2026-09-23)', () => {
+  test('every scene mode pins the real Waves uniform when the plan names no cast (owner directive 2026-09-23)', () => {
     const uniform = /red long-sleeve polo .* a baseball cap that is either light blue or red, and plain black or dark navy work pants/;
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(uniform);
     expect(buildPrompt({ keyword: 'k', topic: 'lead', mode: 'blog-body', shot: 'action' })).toMatch(uniform);
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(uniform);
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/never a blue shirt, never khaki or tan pants/);
-    // An infographic draws no people at all — neither a uniform line nor the
-    // logo reference (Codex r3 P2 on #4761, superseding the #4696 P2).
-    const info = buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'close-up', captions: ['One'], plan: { style: 'infographic', setting: 'a three-column layout', timeOfDay: '', vantage: 'straight-on, centered' }, uniformLogo: true });
-    expect(info).not.toMatch(uniform);
-    expect(info).toMatch(/Do not draw people, technician figures, faces, hands or mascots/);
-    expect(info).not.toMatch(/reference image/);
-    expect(info).toMatch(/plain light background/);
   });
 
   test('the limited illustration palettes admit uniform red, and equipment/vehicles stay generic (Codex P2s on #4696)', () => {
-    for (const style of ['illustration', 'cartoon', 'infographic']) {
-      const prompt = buildPrompt({ title: 'Post', keyword: 'k', mode: 'blog-hero', captions: ['One'], plan: { style, setting: 's', timeOfDay: 'noon', vantage: 'v' } });
+    for (const style of ['illustration', 'cartoon']) {
+      const prompt = buildPrompt({ title: 'Post', keyword: 'k', mode: 'blog-hero', plan: { style, setting: 's', timeOfDay: 'noon', vantage: 'v' } });
       expect(prompt).toMatch(/a technician's red shirt or red cap is part of the palette/);
     }
     expect(buildPrompt({ title: 'Post', mode: 'blog-hero' })).toMatch(/equipment and vehicles are generic and unbranded/);
   });
 
   test('the unmarked Waves van appears in the background of SOME yard scenes only (owner ask 2026-09-23)', () => {
-    const yardPlans = Array.from({ length: 60 }, (_, i) => planFor({ slug: `post-${i}`, subject: 'chinch bug damage on a St. Augustine lawn' }));
+    const slotPlans = (slug, subject) => [0, 1, 2].map((index) => planFor({ slug, mode: index ? 'blog-body' : 'blog-hero', index, subject }));
+    const yardPlans = Array.from({ length: 120 }, (_, i) => slotPlans(`post-${i}`, 'chinch bug damage on a St. Augustine lawn')).flat();
     const withVan = yardPlans.filter((p) => p.van);
     expect(withVan.length).toBeGreaterThan(5);
-    expect(withVan.length).toBeLessThan(40);
-    const indoorPlans = Array.from({ length: 60 }, (_, i) => planFor({ slug: `post-${i}`, subject: 'German cockroaches in the kitchen' }));
+    expect(withVan.length).toBeLessThan(0.2 * yardPlans.length);
+    const indoorPlans = Array.from({ length: 60 }, (_, i) => slotPlans(`post-${i}`, 'German cockroaches in the kitchen')).flat();
     expect(indoorPlans.every((p) => !p.van)).toBe(true);
     const vanPlan = { ...withVan[0] };
     const prompt = buildPrompt({ title: 'Post', keyword: 'chinch bug damage', mode: 'blog-hero', plan: vanPlan });
@@ -498,6 +492,7 @@ describe('gemini image-native models', () => {
 
 describe('uniform logo reference (owner directive 2026-09-24: logo on cap + right chest)', () => {
   const LOGO = Buffer.from('89504e470d0a1a0a', 'hex');
+  const TECH_PLAN = { ...planFor({ slug: 'p', mode: 'blog-hero' }), cast: 'technician' };
   test('the bundled asset exists and the kill switch reads only an explicit false', () => {
     expect(require('fs').existsSync(_internals.UNIFORM_LOGO_PATH)).toBe(true);
     delete process.env.BLOG_IMAGE_UNIFORM_LOGO;
@@ -508,7 +503,7 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
   });
 
   test('buildPrompt with the reference puts the logo on the cap and RIGHT chest, nowhere else; without it the logo stays off', () => {
-    const withLogo = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
+    const withLogo = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: TECH_PLAN, uniformLogo: true });
     expect(withLogo).toMatch(/a roughly 3-inch badge on the wearer's anatomical RIGHT chest/);
     expect(withLogo).toMatch(/clearly LEFT of the button placket as the viewer sees it/);
     expect(withLogo).toMatch(/The viewer-right chest is uninterrupted red fabric/);
@@ -518,29 +513,34 @@ describe('uniform logo reference (owner directive 2026-09-24: logo on cap + righ
     expect(withLogo).toMatch(/other than the Waves logo on the technician's cap and right chest\./);
     expect(withLogo).toMatch(/brand marks other than the Waves logo on the technician's cap and chest — equipment and vehicles are generic and unbranded/);
     expect(withLogo).not.toMatch(/carry no readable logo/);
-    const without = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }) });
+    const without = buildPrompt({ title: 'Post', mode: 'blog-hero', plan: TECH_PLAN });
     expect(without).toMatch(/shirt and cap carry no readable logo or lettering/);
     expect(without).toMatch(/No text, words, letters, numbers, watermarks, or logos anywhere in the image\./);
     expect(without).not.toMatch(/reference image/);
   });
 
-  test('an infographic never carries the reference (it draws no people), even when asked', async () => {
-    const info = buildPrompt({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
-    expect(info).not.toMatch(/reference image/);
-    expect(info).toMatch(/Do not draw people/);
+  test.each(['none', 'homeowner'])('a %s-cast picture never carries the logo reference, even when asked (the reference image cues a technician)', async (cast) => {
+    const plan = { ...TECH_PLAN, cast };
+    const prompt = buildPrompt({ title: 'X', mode: 'blog-body', plan, uniformLogo: false });
+    expect(prompt).not.toMatch(/reference image/);
     process.env.OPENAI_API_KEY = 'sk-test';
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
-    const r = await gen.generate({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], uniformLogo: true });
+    const r = await gen.generate({ title: 'X', mode: 'blog-body', plan, uniformLogo: true });
     expect(r.logoReference).toBe(false);
+    expect(r.prompt).not.toMatch(/TECHNICIAN:|If a Waves technician appears|HARD REFERENCE ROLES/);
     expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
+    // A technician plan attaches it as before.
+    const t = await gen.generate({ title: 'X', mode: 'blog-body', plan: TECH_PLAN, uniformLogo: true });
+    expect(t.logoReference).toBe(true);
+    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/images/edits');
   });
 
   test('OpenAI legs post the reference to /v1/images/edits as multipart; the result says logoReference', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
     const gen = new ImageGenerator({ envChain: 'gpt-image-2', fetchFn: mockFetch, uniformLogo: LOGO });
-    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: planFor({ slug: 'p', mode: 'blog-hero' }), uniformLogo: true });
+    const r = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: TECH_PLAN, uniformLogo: true });
     expect(r.logoReference).toBe(true);
     expect(r.prompt).toMatch(/HARD REFERENCE ROLES: Attached Image 1 is the complete Waves logo lockup/);
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -701,12 +701,6 @@ describe('van wrap reference (owner ruling 2026-09-24: real current wrap on the 
     expect(both).toMatch(/no company logos, brand names, or brand marks other than the Waves logo on the technician's cap and chest and the Waves wrap on the one van described above/);
   });
 
-  test('an infographic never carries the van wrap reference (it draws no scene at all)', () => {
-    const info = buildPrompt({ title: 'X', mode: 'blog-body', plan: { style: 'infographic', setting: 'three-step row', vantage: 'straight-on' }, captions: ['One'], vanWrap: true });
-    expect(info).not.toMatch(/Ford Transit/);
-    expect(info).not.toMatch(/reference photos/);
-  });
-
   test('OpenAI legs post both van reference photos to /v1/images/edits as multipart; the result says vanWrapReference', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     const mockFetch = jest.fn().mockReturnValue(ok(OPENAI_OK_BODY));
@@ -745,10 +739,6 @@ describe('van wrap reference (owner ruling 2026-09-24: real current wrap on the 
     expect(mockFetch.mock.calls[0][0]).toBe('https://api.openai.com/v1/images/generations');
     const noVanPlan = await gen.generate({ title: 'Test', mode: 'blog-hero', plan: NO_VAN_PLAN, vanWrap: true });
     expect(noVanPlan.vanWrapReference).toBe(false);
-    // An infographic plan that carries van: true still attaches nothing — its
-    // prompt has no van to anchor the photos to.
-    const info = await gen.generate({ title: 'Test', mode: 'blog-body', plan: { ...VAN_PLAN, style: 'infographic' }, captions: ['One'], vanWrap: true });
-    expect(info.vanWrapReference).toBe(false);
     expect(mockFetch.mock.calls.every((c) => c[0] === 'https://api.openai.com/v1/images/generations')).toBe(true);
   });
 

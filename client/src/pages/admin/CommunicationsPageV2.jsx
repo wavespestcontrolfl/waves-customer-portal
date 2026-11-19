@@ -85,7 +85,7 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import EmailPage from "./EmailPage";
-import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
+import { ALL_NUMBERS, NUMBER_LABEL_MAP, REPLY_LINE_NUMBERS } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import LiveCallPanelV2 from "./LiveCallPanelV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
@@ -219,6 +219,64 @@ function phoneKey(value) {
   return String(value || "").replace(/\D/g, "").slice(-10);
 }
 
+// What reading a thread covers: its unread inbound texts, its conversations,
+// and the newest loaded text as the boundary, so a text that lands after it
+// stays unread.
+function threadReadScope(thread) {
+  const threadMessages = Array.isArray(thread?.messages)
+    ? thread.messages
+    : Array.isArray(thread?.messagesList)
+      ? thread.messagesList
+      : [];
+  const unreadIds = threadMessages
+    .filter((m) => m.direction === "inbound" && !m.isRead)
+    .map((m) => m.id)
+    .filter(Boolean);
+  const conversationIds = [
+    ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
+  ];
+  const readBefore = thread?.lastTimestamp || newestCreatedAt(threadMessages);
+  return { unreadIds, conversationIds, readBefore };
+}
+
+function newestCreatedAt(list) {
+  return list.reduce(
+    (latest, m) => (!latest || new Date(m.createdAt) > new Date(latest) ? m.createdAt : latest),
+    null,
+  );
+}
+
+// A list Mark read waits this long so its Undo can take it back.
+const LIST_READ_UNDO_MS = 5000;
+// Message ids per request (about 8 KB of JSON).
+const LIST_READ_ID_BATCH = 200;
+// The browser gives all keepalive requests in flight one shared 64 KiB of
+// body; list reads stay under this part of it.
+const LIST_READ_KEEPALIVE_BUDGET = 48 * 1024;
+// True when this body fits the keepalive budget, and then counts it in.
+function takeKeepaliveBudget(bytesRef, body) {
+  if (bytesRef.current + body.length > LIST_READ_KEEPALIVE_BUDGET) return false;
+  bytesRef.current += body.length;
+  return true;
+}
+
+// Does a list read cover this loaded text? Mark all read covers every inbound
+// text up to its boundary except recruiting replies and blocked senders (the
+// server leaves both unread); a row's Mark read covers that sender's texts up
+// to the row's newest one (a row with no phone: its loaded texts).
+function pendingReadCovers(pending, m) {
+  if (!pending || m.direction !== "inbound") return false;
+  if (pending.senderKey) {
+    return smsMessageThreadKey(m) === pending.senderKey && new Date(m.createdAt) <= new Date(pending.readBefore);
+  }
+  if (pending.all) {
+    return !String(m.messageType || "").startsWith("job_")
+      && !pending.blockedKeys?.has(smsMessageThreadKey(m))
+      && new Date(m.createdAt) <= new Date(pending.readBefore);
+  }
+  return pending.messageIds.includes(m.id);
+}
+
 function getInitials(nameOrPhone) {
   if (!nameOrPhone) return "?";
   const trimmed = String(nameOrPhone).trim();
@@ -246,11 +304,14 @@ function getCustomerOptionName(customer) {
   );
 }
 
+// Every Waves line a thread can be on: the picker's lines plus the reply-only
+// lines (REPLY_LINE_NUMBERS), so a Text back or a thread on one of those
+// replies from that same line.
+const KNOWN_WAVES_NUMBERS = [...ALL_NUMBERS.flatMap((group) => group.numbers), ...REPLY_LINE_NUMBERS].map((n) => n.number);
+
 function findKnownWavesNumber(value) {
   if (!value) return "";
-  return ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => n.number)).find(
-    (number) => phoneKey(number) === phoneKey(value),
-  ) || "";
+  return KNOWN_WAVES_NUMBERS.find((number) => phoneKey(number) === phoneKey(value)) || "";
 }
 
 const TABS = [
@@ -1394,6 +1455,12 @@ export function SmsTab({
   const routeLocationKeyRef = useRef(location.key);
   const [selected360Id, setSelected360Id] = useState(null);
   const [smsPage, setSmsPage] = useState(1);
+  // What the shown messages were loaded for: Mark all read waits for the whole list to load.
+  const [smsLoadedScope, setSmsLoadedScope] = useState(null);
+  // List reads the server confirmed, numbered, so an inbox load that started
+  // before a confirmation cannot bring its dots back with stale rows.
+  const readCommitSeqRef = useRef(0);
+  const confirmedReadsRef = useRef([]);
   const [smsHasMore, setSmsHasMore] = useState(false);
   const [smsLoadingMore, setSmsLoadingMore] = useState(false);
   const smsSearchRef = useRef("");
@@ -1520,6 +1587,7 @@ export function SmsTab({
     smsRequestRef.current = controller;
     setSmsRefreshing(true);
     const requestSeq = ++smsLoadSeqRef.current;
+    const readSeqAtStart = readCommitSeqRef.current;
     const params = new URLSearchParams({
       limit: String(SMS_LOG_PAGE_SIZE),
       page: String(page),
@@ -1603,7 +1671,13 @@ export function SmsTab({
       const logData = logResult.status === "fulfilled" ? logResult.value : null;
       if (Array.isArray(logData?.messages) && !logData.error) {
         const retainHistory = refreshesLoadedDataset && requestedStatusFilter !== "unanswered";
-        setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, logData.messages) : logData.messages);
+        // Reads confirmed after this load started still hold on its rows.
+        const laterReads = confirmedReadsRef.current.filter((read) => read.seq > readSeqAtStart);
+        confirmedReadsRef.current = laterReads;
+        const loaded = laterReads.length
+          ? logData.messages.map((m) => (!m.isRead && laterReads.some((read) => pendingReadCovers(read.pending, m)) ? { ...m, isRead: true } : m))
+          : logData.messages;
+        setMessages((prev) => append || retainHistory ? mergeSmsMessages(prev, loaded) : loaded);
         if (refreshesLoadedDataset && requestedStatusFilter === "unanswered" && !append) {
           const openPhone = activeThreadRef.current?.contactPhone;
           const openKey = openPhone ? smsThreadKey(openPhone) : "";
@@ -1620,6 +1694,7 @@ export function SmsTab({
         setSmsHasMore(!!logData.hasMore);
         smsLoadedSearchRef.current = normalizedSearch;
         smsLoadedStatusFilterRef.current = requestedStatusFilter;
+        setSmsLoadedScope({ search: normalizedSearch, statusFilter: requestedStatusFilter });
         setSmsLoadError("");
       } else {
         setSmsLoadError("Messages could not be refreshed. Any messages shown are from the last successful load.");
@@ -1680,27 +1755,7 @@ export function SmsTab({
 
   const markMessagesRead = useCallback(
     async (thread) => {
-      const threadMessages = Array.isArray(thread?.messages)
-        ? thread.messages
-        : Array.isArray(thread?.messagesList)
-          ? thread.messagesList
-          : [];
-      const unreadIds = threadMessages
-        .filter((m) => m.direction === "inbound" && !m.isRead)
-        .map((m) => m.id)
-        .filter(Boolean);
-      const conversationIds = [
-        ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
-      ];
-      const readBefore =
-        thread?.lastTimestamp ||
-        threadMessages.reduce(
-          (latest, m) =>
-            !latest || new Date(m.createdAt) > new Date(latest)
-              ? m.createdAt
-              : latest,
-          null,
-        );
+      const { unreadIds, conversationIds, readBefore } = threadReadScope(thread);
       if (!unreadIds.length && !conversationIds.length) return;
 
       const readAt = new Date().toISOString();
@@ -1735,6 +1790,126 @@ export function SmsTab({
     },
     [loadData, smsSearch],
   );
+
+  // Mark read from the list (owner 2026-11-19): the dot clears at once and the
+  // write waits LIST_READ_UNDO_MS so Undo can take it back. One list read waits
+  // at a time; a second tap, leaving the page or the timer sends it. Undo ends
+  // when the write starts; the dot stays hidden until the server answers.
+  const [pendingRead, setPendingRead] = useState(null);
+  const [sendingReads, setSendingReads] = useState([]);
+  const hiddenReads = useMemo(() => (pendingRead ? [pendingRead, ...sendingReads] : sendingReads), [pendingRead, sendingReads]);
+  // Mark all read waits until its first one is sent and answered.
+  const bulkReadBusy = !!pendingRead?.all || sendingReads.some((read) => read.all);
+  const [listReadError, setListReadError] = useState("");
+  const pendingReadRef = useRef(null);
+  const pendingReadTimerRef = useRef(null);
+  // A list read goes out with keepalive while the shared keepalive budget has
+  // room, so a tab that closes while it is in flight (after Undo is gone)
+  // still delivers it. A request past the budget goes out as a normal one:
+  // it still lands while the page stays open.
+  const keepaliveBytesRef = useRef(0);
+  const commitPendingRead = useCallback(async () => {
+    const pending = pendingReadRef.current;
+    window.clearTimeout(pendingReadTimerRef.current);
+    pendingReadRef.current = null;
+    if (!pending) return;
+    setSendingReads((prev) => [...prev, pending]);
+    setPendingRead((current) => (current === pending ? null : current));
+    // The read the server took: all of `pending`, or only the batches that landed.
+    let confirmed = pending;
+    try {
+      if (pending.all || pending.senderKey) {
+        // A row's sender read covers that sender's older texts on pages not loaded.
+        const body = JSON.stringify(pending.senderKey
+          ? { readBefore: pending.readBefore, contactPhone: pending.contactPhone }
+          : { readBefore: pending.readBefore });
+        const keepalive = takeKeepaliveBudget(keepaliveBytesRef, body);
+        try {
+          await adminFetch("/admin/communications/messages/read-all", { method: "POST", keepalive, body });
+        } finally {
+          if (keepalive) keepaliveBytesRef.current -= body.length;
+        }
+      } else {
+        // A row with no phone, or a technician's row: its loaded texts, in
+        // batches all started at once so a tab that closes cannot stop the
+        // later ones.
+        const batches = [];
+        for (let i = 0; i < pending.messageIds.length; i += LIST_READ_ID_BATCH) {
+          batches.push(pending.messageIds.slice(i, i + LIST_READ_ID_BATCH));
+        }
+        // Every batch settles before the page is updated, so a failed one
+        // cannot hide the ones that landed.
+        const results = await Promise.allSettled(batches.map(async (messageIds) => {
+          const body = JSON.stringify({ messageIds });
+          const keepalive = takeKeepaliveBudget(keepaliveBytesRef, body);
+          try {
+            await adminFetch("/admin/communications/messages/read", { method: "POST", keepalive, body });
+          } finally {
+            if (keepalive) keepaliveBytesRef.current -= body.length;
+          }
+        }));
+        const landed = batches.filter((_, i) => results[i].status === "fulfilled").flat();
+        if (landed.length < pending.messageIds.length) confirmed = { ...pending, messageIds: landed, partial: true };
+      }
+      const readAt = new Date().toISOString();
+      readCommitSeqRef.current += 1;
+      confirmedReadsRef.current = [...confirmedReadsRef.current, { seq: readCommitSeqRef.current, pending: confirmed }];
+      setMessages((prev) => prev.map((m) => (!m.isRead && pendingReadCovers(confirmed, m) ? { ...m, isRead: true, readAt } : m)));
+      notifyUnreadChanged();
+      if (confirmed.partial) throw new Error("Some read batches failed");
+    } catch {
+      setListReadError("The texts were not marked read. Try again.");
+      loadData(smsSearchRef.current, { refresh: true });
+    } finally {
+      setSendingReads((prev) => prev.filter((read) => read !== pending));
+    }
+  }, [loadData]);
+  const commitPendingReadRef = useRef(commitPendingRead);
+  commitPendingReadRef.current = commitPendingRead;
+  // Leaving the inbox sends a waiting read; closing or reloading the tab does
+  // too (pagehide).
+  useEffect(() => {
+    const onPageHide = () => { void commitPendingReadRef.current(); };
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      void commitPendingReadRef.current();
+    };
+  }, []);
+  const startListRead = (next) => {
+    if (pendingReadRef.current) void commitPendingRead();
+    setListReadError("");
+    pendingReadRef.current = next;
+    setPendingRead(next);
+    pendingReadTimerRef.current = window.setTimeout(() => { void commitPendingRead(); }, LIST_READ_UNDO_MS);
+  };
+  const undoListRead = () => {
+    window.clearTimeout(pendingReadTimerRef.current);
+    pendingReadRef.current = null;
+    setPendingRead(null);
+  };
+  const markThreadReadFromList = (thread) => {
+    const { unreadIds, readBefore } = threadReadScope(thread);
+    if (!unreadIds.length) return;
+    // The row is one sender: read by that phone (not the conversation, which a
+    // customer's second phone can share), up to the row's newest text. A
+    // technician reads the row's loaded texts through the scoped id read.
+    const senderKey = smsThreadKey(thread.contactPhone);
+    if (!smsIsTechnicianRole && senderKey !== "unknown" && readBefore) {
+      startListRead({ senderKey, contactPhone: thread.contactPhone, readBefore, label: "Marked read" });
+    } else {
+      startListRead({ messageIds: unreadIds, label: "Marked read" });
+    }
+  };
+  const markAllReadFromList = () => {
+    // A second tap while one waits or is out would send or repeat the first and leave Undo nothing to take back.
+    if (bulkReadBusy) return;
+    // The cutoff comes from the whole list only, never from search or Unanswered results still on screen.
+    if (smsLoadedSearchRef.current !== "" || smsLoadedStatusFilterRef.current === "unanswered") return;
+    const readBefore = newestCreatedAt(messages);
+    if (!readBefore) return;
+    startListRead({ all: true, readBefore, blockedKeys: blocked, label: "Marked all texts read" });
+  };
 
   useEffect(() => {
     if (!active || !customer) return;
@@ -3080,8 +3255,7 @@ export function SmsTab({
     const sorted = [...messages].sort(
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
     );
-    const allNums = new Set();
-    ALL_NUMBERS.forEach((g) => g.numbers.forEach((n) => allNums.add(n.number)));
+    const allNums = new Set(KNOWN_WAVES_NUMBERS);
     sorted.forEach((m) => {
       let contactPhone, ourNumber;
       if (m.direction === "inbound") {
@@ -3127,7 +3301,7 @@ export function SmsTab({
       if (unansweredReply) {
         t.ourNumber = unansweredReply.businessLine;
       }
-      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead);
+      t.unread = t.messages.some((m) => m.direction === "inbound" && !m.isRead && !hiddenReads.some((read) => pendingReadCovers(read, m)));
       return t;
     });
     threadList.sort(
@@ -3136,7 +3310,7 @@ export function SmsTab({
     return blocked.size
       ? threadList.filter((t) => !blocked.has(smsThreadKey(t.contactPhone)))
       : threadList;
-  }, [messages, blocked]);
+  }, [messages, blocked, hiddenReads]);
 
   useEffect(() => {
     if (!activeThread) return;
@@ -3216,6 +3390,8 @@ export function SmsTab({
     setActiveThread(openedThread);
     setSmsView("conversation");
     selectSmsRecipient(match.contactPhone, match.ourNumber, match.customerId);
+    // Opening reads the thread now, so a waiting list read of it can no longer be undone: send it.
+    if (openedThread.messages.some((m) => pendingReadCovers(pendingReadRef.current, m))) void commitPendingReadRef.current();
     markMessagesRead(openedThread);
   }, [deepLinkThreadKey, threads, markMessagesRead]);
   useEffect(() => {
@@ -3506,12 +3682,14 @@ export function SmsTab({
               ))}
             </optgroup>
           ))}
-          {/* A thread-locked From resolved from server config (e.g. a GBP
-              tracking line) may not be in the client list — render it so
-              the locked select doesn't show blank. */}
-          {threadLock && fromNumber
+          {/* The From may not be in the client list: a thread-locked line
+              resolved from server config (e.g. a GBP tracking line), or a
+              reply-only line (REPLY_LINE_NUMBERS) still set after Override.
+              Render it, so the select always shows the line Send uses and
+              never a blank or another line. */}
+          {fromNumber
             && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
-            <option value={fromNumber}>{threadLock.label}</option>
+            <option value={fromNumber}>{threadLock?.label || NUMBER_LABEL_MAP[fromNumber] || fromNumber}</option>
           )}
         </Select>
         </Field>
@@ -4136,6 +4314,17 @@ export function SmsTab({
           className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
         />{" "}
       </div>
+      {pendingRead && (
+        <div
+          role="status"
+          className="fixed z-[300] left-4 right-4 md:left-auto md:right-6 md:w-80 bottom-[calc(80px+env(safe-area-inset-bottom))] md:bottom-6 flex items-center justify-between gap-3 rounded-sm bg-zinc-900 px-4 py-2 text-14 text-white shadow-lg"
+        >
+          <span>{pendingRead.label}</span>
+          <button type="button" onClick={undoListRead} className="u-focus-ring min-h-[44px] md:min-h-[32px] border-0 bg-transparent px-2 font-medium text-white underline">
+            Undo
+          </button>
+        </div>
+      )}
       {/* Thread list / conversation / log */}
       {smsView === "conversation" && activeThread ? (
         <Card className="p-5">
@@ -4169,7 +4358,22 @@ export function SmsTab({
                 ({filteredThreads.length})
               </span>{" "}
             </div>{" "}
+            {/* Mark all read covers every text, including older ones not loaded yet, so it
+                shows on the whole list only, whatever the loaded rows hold. */}
+            {/* Office only: a technician reads one thread at a time. */}
+            {!smsIsTechnicianRole && messages.length > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread")
+              && smsLoadedScope?.search === "" && smsLoadedScope.statusFilter !== "unanswered" && (
+              <button
+                type="button"
+                onClick={markAllReadFromList}
+                disabled={bulkReadBusy}
+                className="u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-50 disabled:opacity-50 disabled:hover:bg-white"
+              >
+                Mark all read
+              </button>
+            )}
           </div>
+          {listReadError && <ActionFeedback error className="mb-3">{listReadError}</ActionFeedback>}
           {/* Status filter — one dropdown instead of a pill row so it
               costs a single line on phones; counts ride in the labels. */}
           <div className="mb-3">
@@ -4226,6 +4430,8 @@ export function SmsTab({
                       setActiveThread(openedThread);
                       setSmsView("conversation");
                       selectSmsRecipient(t.contactPhone, t.ourNumber, t.customerId);
+                      // Opening reads the thread now, so a waiting list read of it can no longer be undone: send it.
+                      if (openedThread.messages.some((m) => pendingReadCovers(pendingReadRef.current, m))) void commitPendingReadRef.current();
                       markMessagesRead(openedThread);
                     }}
                     className={cn(
@@ -4276,16 +4482,32 @@ export function SmsTab({
                           {timeAgo(t.lastTimestamp)}
                         </span>{" "}
                       </div>{" "}
-                      <div
-                        className={cn(
-                          "text-16 md:text-12 truncate leading-snug",
-                          hasUnseen ? "text-zinc-900" : "text-ink-secondary",
-                        )}
-                      >
-                        {preview || (
-                          <span className="text-ink-tertiary italic">
-                            No messages
-                          </span>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={cn(
+                            "flex-1 min-w-0 text-16 md:text-12 truncate leading-snug",
+                            hasUnseen ? "text-zinc-900" : "text-ink-secondary",
+                          )}
+                        >
+                          {preview || (
+                            <span className="text-ink-tertiary italic">
+                              No messages
+                            </span>
+                          )}
+                        </div>
+                        {/* Mark read sits on the text line so a phone keeps the name and time whole. */}
+                        {hasUnseen && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              markThreadReadFromList(t);
+                            }}
+                            aria-label={`Mark ${displayName} read`}
+                            className="flex-shrink-0 u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-100"
+                          >
+                            Mark read
+                          </button>
                         )}
                       </div>{" "}
                     </div>{" "}

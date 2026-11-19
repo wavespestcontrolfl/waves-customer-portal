@@ -34,12 +34,14 @@ jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUp
 
 jest.mock('../services/day-replan', () => ({ runDayReplanIfEnabled: jest.fn() }));
 jest.mock('../services/day-replan/open-blocks-alert', () => ({ runOpenBlocksAlert: jest.fn() }));
+jest.mock('../services/day-replan/route-check', () => ({ runRouteCheck: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled, dayReplanMode } = require('../config/feature-gates');
 const { runDayReplanIfEnabled } = require('../services/day-replan');
 const { runOpenBlocksAlert } = require('../services/day-replan/open-blocks-alert');
+const { runRouteCheck } = require('../services/day-replan/route-check');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -127,5 +129,47 @@ describe('07:05 open blocks to sell (owner 2026-11-18): reads the re-plan number
     runOpenBlocksAlert.mockRejectedValueOnce(new Error('db down'));
     await expect(openBlocksJob()[1]()).resolves.toBeUndefined();
     expect(logger.error).toHaveBeenCalledWith('[open-blocks] tick failed: db down');
+  });
+});
+
+describe('hourly route check, shadow (owner 2026-11-19): measures the openings, writes only its own log', () => {
+  function routeCheckJob() {
+    isEnabled.mockImplementation((name) => name === 'cronJobs');
+    initScheduledJobs();
+    const found = cron.schedule.mock.calls.filter(([, task]) => String(task).includes("'route-check'"));
+    expect(found).toHaveLength(1);
+    return found[0];
+  }
+
+  test('registered once, every hour 7:30 AM to 7:30 PM Eastern, under its own health lock with no gate', async () => {
+    const [expression, task, options] = routeCheckJob();
+    expect(expression).toBe('30 7-19 * * *');
+    expect(options).toEqual({ timezone: 'America/New_York' });
+    runRouteCheck.mockResolvedValueOnce({ status: 'completed', totals: { next: { slots: 2 } } });
+    await task();
+    expect(runExclusive.mock.calls.map(([name]) => name)).toEqual(['route-check']);
+    expect(logger.info).toHaveBeenCalledWith('[route-check] completed slots=2');
+  });
+
+  test('a failure is logged, never thrown out of the tick', async () => {
+    runRouteCheck.mockRejectedValueOnce(new Error('db down'));
+    await expect(routeCheckJob()[1]()).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith('[route-check] tick failed: db down');
+  });
+
+  // A second instance's run of an hour already recorded reports that hour's status (duplicate: true): a failed hour
+  // stays a failure in job health.
+  test.each([
+    ['failed', false], ['completed_with_errors', false], ['failed', true],
+  ])('a run recorded as %s (duplicate %s) still fails the health lock, and the tick does not throw', async (status, duplicate) => {
+    runRouteCheck.mockResolvedValueOnce({ status, duplicate, totals: {} });
+    let lockOutcome;
+    runExclusive.mockImplementationOnce(async (_key, task) => {
+      lockOutcome = task().then(() => 'ok', (err) => err.message);
+      return lockOutcome.then((o) => { if (o !== 'ok') throw new Error(o); });
+    });
+    await expect(routeCheckJob()[1]()).resolves.toBeUndefined();
+    expect(await lockOutcome).toBe(`route check ${status} (recorded)`);
+    expect(logger.error).toHaveBeenCalledWith(`[route-check] tick failed: route check ${status} (recorded)`);
   });
 });

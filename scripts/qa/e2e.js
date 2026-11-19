@@ -203,18 +203,22 @@ async function main() {
       const pendingBeforeRead = await pendingLog();
       assert.deepEqual(pendingBeforeRead.messages.filter(message => message.responseNeedsResponse).map(message => message.id), [inbound[1]]);
       await json(await page.request.post(`${baseUrl}/api/admin/communications/messages/read`, { headers, data: { messageIds: [inbound[1]] } }));
-      assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 1, messages: 1 });
+      // Owner 2026-11-19 (option A): the red Messages count is unread texts that need a reply,
+      // so a read text leaves the count, while the Unanswered list still holds it.
+      assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 0, messages: 0 });
       assert.deepEqual((await pendingLog()).messages.filter(message => message.responseNeedsResponse).map(message => message.id), [inbound[1]]);
       await db('messages').insert({ id: crypto.randomUUID(), conversation_id: unified.conversation_id, channel: 'sms', direction: 'outbound', author_type: 'admin',
         body: 'Yes, the QA visit time is confirmed.', message_type: 'manual', delivery_status: 'delivered', created_at: new Date(boundary.getTime() + 1500) });
       assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 0, messages: 0 });
       assert.deepEqual((await pendingLog()).messages, []);
-      await db('messages').insert({ id: crypto.randomUUID(), conversation_id: unified.conversation_id, channel: 'sms', direction: 'inbound', author_type: 'customer',
-        body: 'Can you also confirm the QA arrival window?', is_read: true, created_at: new Date(boundary.getTime() + 2000) });
+      const laterQuestion = crypto.randomUUID();
+      await db('messages').insert({ id: laterQuestion, conversation_id: unified.conversation_id, channel: 'sms', direction: 'inbound', author_type: 'customer',
+        body: 'Can you also confirm the QA arrival window?', is_read: false, created_at: new Date(boundary.getTime() + 2000) });
       assert.deepEqual(await json(await page.request.get(`${baseUrl}/api/admin/communications/unread-count?customerId=${fixture.customerId}`, { headers })), { conversations: 1, messages: 1 });
+      assert.deepEqual((await pendingLog()).messages.filter(message => message.responseNeedsResponse).map(message => message.id), [laterQuestion]);
       return { providerTransportSimulated: true, signedCallbackStatus: 200, unsignedCallbackStatus: 403,
         legacyAndUnifiedDelivered: true, callbackRetryRows: 1, authorAttributed: true, readBoundaryPreserved: true,
-        readDoesNotClearNeedResponse: true, humanReplyClearsNeedResponse: true, laterQuestionRestoresNeedResponse: true };
+        readClearsBadge: true, readDoesNotClearNeedResponse: true, humanReplyClearsNeedResponse: true, laterQuestionRestoresNeedResponse: true };
     });
     await step('account-property-switch-and-record-isolation', async () => {
       let headers = { Authorization: `Bearer ${customerToken}` };

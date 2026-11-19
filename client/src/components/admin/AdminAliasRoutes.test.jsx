@@ -9,6 +9,8 @@ import AdminTabRedirect from "./AdminTabRedirect";
 import { isPathAdminOnly } from "../../config/adminNavigation";
 
 const app = readFileSync("src/App.jsx", "utf8");
+const indexRedirect = readFileSync("src/components/AdminIndexRedirect.jsx", "utf8");
+const fieldViewEntry = readFileSync("src/components/AdminFieldViewEntry.jsx", "utf8");
 // Child route names may also exist in Tech. Check the admin parent only.
 const adminStart = app.indexOf('<Route path="/admin"');
 const adminRoutes = app.slice(adminStart, app.indexOf('\n          </Route>', adminStart));
@@ -73,9 +75,15 @@ describe("App's /admin index and catch-all", () => {
   it("replaces the /admin entry so Back leaves the dashboard (F0008)", () => {
     // Every sibling redirect passes replace; the index one pushed, so
     // /admin → /admin/dashboard → Back → /admin → /admin/dashboard looped.
-    // The index route is role-aware (technicians land on /admin/today) but must still replace.
+    // The index route is role-aware (technicians land on /admin/today, and so
+    // does an admin with Field view on) but must still replace; so must the
+    // Field view redirect in front of the admin shell.
     expect(adminRoutes).toContain('<Route index element={<AdminIndexRedirect />} />');
-    expect(app).toContain("<Navigate to={role === 'technician' ? 'today' : 'dashboard'} replace />");
+    for (const source of [indexRedirect, fieldViewEntry]) {
+      const navigates = source.match(/<Navigate\b[^>]*\/>/g) || [];
+      expect(navigates.length).toBeGreaterThan(0);
+      for (const navigate of navigates) expect(navigate).toMatch(/\sreplace(\s|\/>)/);
+    }
     render(<MemoryRouter initialEntries={["/before", "/admin"]} initialIndex={1}>
       <Routes>
         <Route path="/admin">
