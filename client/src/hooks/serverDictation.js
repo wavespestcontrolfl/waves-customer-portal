@@ -134,15 +134,20 @@ export const RESEND_QUESTION = `${UNSENT_MESSAGE} Send the recording again?`;
 
 // A hidden page (the app went to the background as the recording stopped) may not show a
 // question at all, and a suppressed confirm() reads as "no": ask only once the page is back.
-function pageVisible() {
-  if (document.visibilityState !== "hidden") return Promise.resolve();
+// `signal` (the mic unmounted) ends the wait at once, so the recording is let go.
+function pageVisible(signal) {
+  if (document.visibilityState !== "hidden" || signal?.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const onChange = () => {
-      if (document.visibilityState === "hidden") return;
+    const done = () => {
       document.removeEventListener("visibilitychange", onChange);
+      signal?.removeEventListener("abort", done);
       resolve();
     };
+    const onChange = () => {
+      if (document.visibilityState !== "hidden") done();
+    };
     document.addEventListener("visibilitychange", onChange);
+    signal?.addEventListener("abort", done);
   });
 }
 
@@ -151,14 +156,15 @@ function pageVisible() {
  * there and still this recording's), asks to send the SAME recording again, once the page is
  * visible. Never automatic: when only the answer was lost, the server already paid for those
  * words. Resolves null when the person says no; throws the unsent error when the field moved on.
+ * `signal` aborts when the mic unmounts: a wait for the page then ends at once.
  */
-export async function transcribeClipWithResend(blob, durationSeconds, clip, token, canResend) {
+export async function transcribeClipWithResend(blob, durationSeconds, clip, token, canResend, signal) {
   for (;;) {
     try {
       return await transcribeClip(blob, durationSeconds, clip, token);
     } catch (e) {
-      if (!e?.unsent) throw e;
-      await pageVisible();
+      if (!e?.unsent || !canResend()) throw e;
+      await pageVisible(signal);
       if (!canResend()) throw e;
       if (!window.confirm(RESEND_QUESTION)) return null;
       // Another tab can sign out or switch login while the question is open: check again.

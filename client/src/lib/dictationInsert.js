@@ -43,9 +43,9 @@ function currentSelection(el, selection) {
   return document.activeElement === el ? readSelection(el) : { start: el.value.length, end: el.value.length };
 }
 
-// How many characters the box still takes (maxLength), or Infinity.
+// How many characters the box still takes (maxLength; -1 = none set, 0 = takes nothing), or Infinity.
 function roomFor(el, replacing) {
-  return el.maxLength > 0 ? el.maxLength - (el.value.length - replacing) : Infinity;
+  return el.maxLength >= 0 ? el.maxLength - (el.value.length - replacing) : Infinity;
 }
 
 function clampSelection(value, selection) {

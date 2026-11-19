@@ -130,6 +130,11 @@ describe("insertDictatedText", () => {
     // after a space, the same one character takes the first letter
     const spaced = box('<textarea maxlength="7">Hello </textarea>');
     expect(dictationRefusal(spaced, { start: 6, end: 6 })).toBe(null);
+    // maxlength="0" takes nothing; no maxlength takes anything
+    const zero = box('<textarea maxlength="0"></textarea>');
+    expect(dictationRefusal(zero, { start: 0, end: 0 })).toBe("full");
+    expect(insertDictatedText(zero, "world", { start: 0, end: 0 })).toEqual({ ok: false, reason: "full" });
+    expect(dictationRefusal(box("<textarea></textarea>"), { start: 0, end: 0 })).toBe(null);
   });
 
   it("a box in a disabled fieldset is locked: no mic, no words", () => {

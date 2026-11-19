@@ -366,6 +366,37 @@ describe("useSpeechDictation with server dictation on", () => {
     }
   });
 
+  it("a mic unmounted while the question waits for the page lets the recording go at once", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const fetchMock = stubServer();
+    let visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    const removed = vi.spyOn(document, "removeEventListener");
+    try {
+      failFirstPost(fetchMock, () => { visibility = "hidden"; throw new TypeError("Load failed"); });
+      const { result, unmount } = renderHook(() => useSpeechDictation(vi.fn()));
+      await waitFor(() => expect(result.current.mode).toBe("upload"));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      removed.mockClear();
+      unmount();
+      // the wait's listener comes off with the unmount, not when the page comes back
+      await waitFor(() => expect(removed).toHaveBeenCalledWith("visibilitychange", expect.any(Function)));
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(postsTo(fetchMock)).toHaveLength(1);
+      expect(alert).not.toHaveBeenCalled();
+    } finally {
+      removed.mockRestore();
+      delete document.visibilityState;
+    }
+  });
+
   it("the login changed before the question: no resend with the new login, the error is shown", async () => {
     const confirm = vi.fn(() => true);
     vi.stubGlobal("confirm", confirm);

@@ -270,7 +270,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       const canResend = () => stillWanted() && resendWantedRef.current?.() !== false;
       try {
         // A send with no answer asks to send the same recording again (null = the person said no).
-        const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, canResend);
+        const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, canResend, unmountSignalRef.current);
         if (!answer || !stillWanted()) return;
         const { text, money } = answer;
         if (text && onTranscriptRef.current) {
@@ -370,7 +370,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // A recording never runs behind a hidden or closing page, and a forgotten
     // mic on a visible page (a phone on a mount) ends by itself at the cutoff:
     // the clip stops and what was recorded is handed over.
-    const guarded = (clipMode || serverMode) && typeof document !== "undefined";
+    const guarded = clipMode || serverMode;
     const unguard = guarded ? guardRecording(stopRecording, clipMaxMs) : () => {};
     if (!unguard) {
       // Hidden while the permission prompt was open: the clip never starts.
@@ -625,6 +625,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // modal closes mid-dictation) so the mic isn't left recording and stale
   // callbacks can't fire against an unmounted notes setter.
   const mountedRef = useRef(true);
+  // Aborts when the mic unmounts: ends a resend question's wait for the page (serverDictation.js).
+  const unmountSignalRef = useRef(null);
   // Abandon, don't upload: the field is gone. Lets go of a running recorder, its
   // page guard and the app-wide slot; its clip is never sent. No-op when nothing records.
   const dropRecorder = useCallback(() => {
@@ -644,8 +646,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   }, []);
   useEffect(() => {
     mountedRef.current = true;
+    const unmounted = new AbortController();
+    unmountSignalRef.current = unmounted.signal;
     return () => {
       mountedRef.current = false;
+      unmounted.abort();
       clearTimeout(idleTimerRef.current);
       const rec = recognitionRef.current;
       if (rec) {
