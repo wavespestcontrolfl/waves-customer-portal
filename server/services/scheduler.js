@@ -2545,8 +2545,8 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY NEAR-STOPS CHECK — Monday 6:17am ET (owner 2026-11-19, "check" on the
   // Next-Door and Nearby Stops page): one read-only owner notification with the
-  // next-door stops booked apart, last week's bookings that took a costlier hour,
-  // and the truck GPS minutes for short drives. It runs after the 4:10 night run
+  // next-door stops booked apart and the truck GPS minutes for short drives
+  // (parts 1 and 3 of the page). It runs after the 4:10 night run
   // and the 4:40 day re-plan, so it reads their newest log. Minute 17 of hours 6
   // and 11 is free in every schedule here.
   // =========================================================================
@@ -2557,7 +2557,7 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('near-stops-weekly', async () => {
         const { runNearStopsWeeklyCheck } = require('./near-stops-weekly-check');
         const result = await runNearStopsWeeklyCheck();
-        logger.info(`[near-stops-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, pairs: result.pairs ?? null, bookings: result.bookings ?? null })}`);
+        logger.info(`[near-stops-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, pairs: result.pairs ?? null })}`);
         if (result?.skipped === 'query_failed' || result?.error) {
           throw new Error(`near-stops weekly check did not complete (${result.skipped || 'send_failed'})`);
         }

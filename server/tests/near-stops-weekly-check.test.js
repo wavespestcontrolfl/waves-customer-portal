@@ -2,8 +2,7 @@
  * Weekly near-stops check (owner 2026-11-19, "check"): one read-only owner
  * notification each Monday. These tests pin what the owner reads:
  *   1. which next-door stops count as booked apart (and which do not),
- *   2. the booking replay: a booking is costly only against an hour that was
- *      really open when it was made, on the booking engine's own gap math,
+ *   2. the truck GPS count: one drive per stop, a combined visit too,
  *   3. the notification's size limits, wording and weekly dedupe,
  *   4. the run's marker: one run a week, a catch-up only while it is missing.
  * Names here are synthetic. Drive minutes are the plain model (no calibration).
@@ -21,18 +20,15 @@ jest.mock('../models/db', () => {
 });
 
 delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-delete process.env.GATE_TECH_START_POINTS;
 
 const { deliverOpsDigest } = require('../services/ops-digest');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
 const { HQ } = require('../services/auto-dispatch/geo');
-const { parseETDateTime } = require('../utils/datetime-et');
 const {
   runNearStopsWeeklyCheck,
   weekIsMissing,
   _private: {
-    buildPlaces, findApartPairs, holdFor, stateAt, groupBookings, replayBooking, replayAll, seriesSiblingMoves, shortDriveSummary,
-    composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
+    buildPlaces, findApartPairs, holdFor, physicalLegs, shortDriveSummary, composeWeeklyCheck, sentRecently, noEmail, OPS_KEY,
   },
 } = require('../services/near-stops-weekly-check');
 
@@ -216,228 +212,6 @@ describe('what holds each visit, in plain words', () => {
   });
 });
 
-// ------------------------------------------------------------------ part 2
-
-const DAY = '2027-03-03'; // Wednesday
-const BOOKED_AT = parseETDateTime('2027-03-02T10:00'); // Tuesday 10:00 AM ET
-const X = north(10); // the new customer, 28 model minutes from the office
-const BESIDE_X = north(0.05, X);
-const Y = north(-10); // the other side of the office, 56 minutes from X
-const before = (minutes) => new Date(BOOKED_AT.getTime() - minutes * 60000);
-const after = (minutes) => new Date(BOOKED_AT.getTime() + minutes * 60000);
-
-function svc({ id, customer, date = DAY, start, end, at, createdAt = before(60 * 24 * 3), status = 'pending', extra = {} }) {
-  return {
-    id,
-    customer_id: customer,
-    scheduled_date: date,
-    technician_id: TECH.id,
-    window_start: `${start}:00`,
-    window_end: `${end}:00`,
-    service_type: 'Pest Control',
-    estimated_duration_minutes: 60,
-    reservation_service_mix: null,
-    is_recurring: false,
-    recurring_parent_id: null,
-    status,
-    created_at: createdAt,
-    updated_at: createdAt,
-    cancelled_at: null,
-    reservation_expires_at: null,
-    source: 'admin',
-    booking_source: null,
-    svc_lat: at.lat,
-    svc_lng: at.lng,
-    first_name: 'Casey',
-    last_name: 'Fixture',
-    city: 'Parrish',
-    cust_lat: at.lat,
-    cust_lng: at.lng,
-    ...extra,
-  };
-}
-
-// The day as booked: a stop beside the new customer at 9, one across town at 1.
-const besideStop = () => svc({ id: 's-beside', customer: 'c-1', start: '09:00', end: '10:00', at: BESIDE_X });
-const acrossStop = () => svc({ id: 's-across', customer: 'c-2', start: '13:00', end: '14:00', at: Y });
-const bookingRow = (extra = {}) => svc({
-  id: 'b-1', customer: 'c-new', start: '15:00', end: '16:00', at: X, createdAt: BOOKED_AT, extra,
-});
-
-function replay({ rows, moves = [], created = [bookingRow()], closed = new Set(), absent = new Set(), absences = [] }) {
-  const movesById = new Map();
-  for (const m of moves) movesById.set(m.scheduled_service_id, [...(movesById.get(m.scheduled_service_id) || []), m]);
-  const [booking] = groupBookings(created, movesById);
-  const ctx = { rows: [...rows, ...created], movesById, tech: TECH, closed, offDays: absent, absences, techStartPoints: false };
-  return replayBooking(booking, ctx);
-}
-
-describe('part 2: the booking replay', () => {
-  test('the 3 PM hour across town cost 56 minutes when 10 AM beside a stop cost 0', () => {
-    const r = replay({ rows: [besideStop(), acrossStop()] });
-    expect(r.booked).toBe(56);
-    expect(r.best).toMatchObject({ date: DAY, start_time: '10:00', detour_minutes: 0 });
-    expect(r.saving).toBe(56);
-    const { detail } = composeWeeklyCheck({ costly: [r], replayed: 1, weekStart: '2027-03-01' });
-    expect(detail).toContain('- Office, booked Tue, Mar 2: Casey F. (Parrish) on Wed, Mar 3 3:00');
-    expect(detail).toMatch(/adds 56 min; Wed, Mar 3 10:00\s?AM was open and adds 0 min \(56 less\)\./);
-  });
-
-  test('a stop booked after the booking was not there to choose', () => {
-    const later = { ...besideStop(), created_at: after(30), updated_at: after(30) };
-    const r = replay({ rows: [later, acrossStop()] });
-    expect(r.saving).toBe(0);
-  });
-
-  test('a stop moved away later still counts on the day it held at booking', () => {
-    const moved = { ...besideStop(), scheduled_date: '2027-03-20' };
-    const moves = [{ scheduled_service_id: 's-beside', original_date: DAY, original_window: '09:00:00-10:00:00', created_at: after(120) }];
-    const r = replay({ rows: [moved, acrossStop()], moves });
-    expect(r.saving).toBe(56);
-  });
-
-  test('a stop cancelled after the booking was still on the calendar then; one cancelled before was not', () => {
-    const cancelledLater = { ...besideStop(), status: 'cancelled', cancelled_at: after(60) };
-    expect(replay({ rows: [cancelledLater, acrossStop()] }).saving).toBe(56);
-    const cancelledBefore = { ...besideStop(), status: 'cancelled', cancelled_at: before(60) };
-    expect(replay({ rows: [cancelledBefore, acrossStop()] }).saving).toBe(0);
-  });
-
-  test('a move logged with a start alone still holds the stop at that hour', () => {
-    const moved = { ...besideStop(), scheduled_date: '2027-03-20' };
-    const moves = [{ scheduled_service_id: 's-beside', original_date: DAY, original_window: '09:00:00', created_at: after(120) }];
-    expect(replay({ rows: [moved, acrossStop()], moves }).saving).toBe(56);
-  });
-
-  test('a visit with no technician is a stop on the one route, and so is a booking with none', () => {
-    const unassigned = { ...besideStop(), technician_id: null };
-    expect(replay({ rows: [unassigned, acrossStop()] }).saving).toBe(56);
-    const created = [bookingRow({ technician_id: null })];
-    expect(replay({ rows: [besideStop(), acrossStop()], created }).saving).toBe(56);
-  });
-
-  test('a stop skipped before the booking was off the route; one skipped after was still on it', () => {
-    const skippedBefore = { ...besideStop(), status: 'skipped', updated_at: before(30) };
-    expect(replay({ rows: [skippedBefore, acrossStop()] }).saving).toBe(0);
-    const skippedAfter = { ...besideStop(), status: 'skipped', updated_at: after(30), off_at: after(30) };
-    expect(replay({ rows: [skippedAfter, acrossStop()] }).saving).toBe(56);
-  });
-
-  test('the status log dates a skip: skipped before the booking, then edited, was off the route', () => {
-    const loggedEarly = { ...besideStop(), status: 'skipped', updated_at: after(90), off_at: before(30) };
-    expect(replay({ rows: [loggedEarly, acrossStop()] }).saving).toBe(0);
-  });
-
-  test('a skip with no logged time, edited after the booking, makes that day unknown: skipped', () => {
-    const unlogged = { ...besideStop(), status: 'skipped', updated_at: after(90) };
-    expect(replay({ rows: [unlogged, acrossStop()] })).toBeNull();
-  });
-
-  test('a booking moved after it was made is judged at the hour it took', () => {
-    const created = [bookingRow({ scheduled_date: '2027-03-09', window_start: '08:00:00', window_end: '09:00:00' })];
-    const moves = [{ scheduled_service_id: 'b-1', original_date: DAY, original_window: '15:00:00-16:00:00', created_at: after(5) }];
-    const r = replay({ rows: [besideStop(), acrossStop()], moves, created });
-    expect(r.booking.day).toBe(DAY);
-    expect(r.booked).toBe(56);
-  });
-
-  test('on the booking day, an hour less than 30 minutes ahead was not open', () => {
-    const lateMorning = parseETDateTime(`${DAY}T11:15`);
-    const created = [bookingRow({ created_at: lateMorning, updated_at: lateMorning })];
-    const r = replay({ rows: [besideStop(), acrossStop()], created });
-    expect(r.saving).toBe(0);
-  });
-
-  test('office and phone bookings are replayed; a link booking is counted, not replayed', () => {
-    const rows = [besideStop(), acrossStop()];
-    const link = bookingRow({ id: 'b-link', customer_id: 'c-link', source: 'inspection_link', scheduled_date: '2027-03-10' });
-    const created = [bookingRow(), link];
-    const ctx = { rows: [...rows, ...created], movesById: new Map(), tech: TECH, closed: new Set(), offDays: new Set(), absences: [], techStartPoints: false };
-    const out = replayAll(groupBookings(created, new Map()), ctx);
-    expect(out).toMatchObject({ replayed: 1, notReplayed: 1 });
-    expect(out.costly.map((r) => r.saving)).toEqual([56]);
-    const { detail } = composeWeeklyCheck({ ...out, weekStart: '2027-03-01' });
-    expect(detail).toContain('Office and phone bookings last week that took a costlier hour: 1 of 1 replayed (not replayed: 1 from links, self-booking or estimates, which offer hours by their own rules)');
-  });
-
-  test('a self-booking or an estimate booking is not an office-screen booking, even when its source reads admin', () => {
-    const office = (extra) => groupBookings([bookingRow(extra)], new Map())[0].officeScreen;
-    expect(office({ self_booking_id: 'sb-1' })).toBe(false);
-    expect(office({ source_estimate_id: 'est-1' })).toBe(false);
-    expect(office({})).toBe(true);
-  });
-
-  test("a sibling moved by a series move held its old hour at booking (series_moves.rows)", () => {
-    const moved = { ...besideStop(), scheduled_date: '2027-03-24' };
-    const series = [{ created_at: after(60), rows: [{ id: 's-beside', before: { scheduled_date: DAY, window_start: '09:00:00', window_end: '10:00:00' }, after: { scheduled_date: '2027-03-24' } }] }];
-    const moves = seriesSiblingMoves(series);
-    expect(moves).toEqual([{ scheduled_service_id: 's-beside', original_date: DAY, original_window: '09:00:00-10:00:00', created_at: after(60) }]);
-    expect(replay({ rows: [moved, acrossStop()], moves }).saving).toBe(56);
-  });
-
-  test('an absence counts as it stood at booking: one entered later does not close the day', () => {
-    const later = [{ absence_date: DAY, created_at: after(60), cleared_at: null }];
-    expect(replay({ rows: [besideStop(), acrossStop()], absences: later }).saving).toBe(56);
-    const thenCleared = [{ absence_date: DAY, created_at: before(60), cleared_at: after(60) }];
-    expect(replay({ rows: [besideStop(), acrossStop()], absences: thenCleared }).saving).toBe(0);
-  });
-
-  test('a booking cancelled after it was made still counts: it took the hour when booked', () => {
-    const cancelledLater = bookingRow({ status: 'cancelled', cancelled_at: after(90) });
-    expect(groupBookings([cancelledLater], new Map())).toHaveLength(1);
-  });
-
-  test("a stop on another technician's route those days makes the replay ambiguous: skipped", () => {
-    const otherRoute = { ...acrossStop(), technician_id: 'tech-2' };
-    expect(replay({ rows: [besideStop(), otherRoute] })).toBeNull();
-    expect(replay({ rows: [besideStop(), acrossStop()], created: [bookingRow({ technician_id: 'tech-2' })] })).toBeNull();
-  });
-
-  test("a closed day, or the technician's day off, offers no hour", () => {
-    expect(replay({ rows: [besideStop(), acrossStop()], closed: new Set([DAY]) }).saving).toBe(0);
-    expect(replay({ rows: [besideStop(), acrossStop()], absent: new Set([`${TECH.id}:${DAY}`]) }).saving).toBe(0);
-  });
-
-  test('the screen each booking came from', () => {
-    const screen = (extra) => groupBookings([bookingRow(extra)], new Map())[0].screen;
-    expect(screen({})).toBe('office');
-    expect(screen({ booking_source: 'phone_call' })).toBe('phone call');
-    expect(screen({ source: 'reservice_link' })).toBe('re-service link');
-    expect(screen({ source: 'inspection_link' })).toBe('inspection link');
-  });
-
-  test('one booking per customer, home, day and start, however many service rows it holds', () => {
-    const second = bookingRow({ id: 'b-2' });
-    const bookings = groupBookings([bookingRow(), second], new Map());
-    expect(bookings).toHaveLength(1);
-    expect([...bookings[0].ids].sort()).toEqual(['b-1', 'b-2']);
-  });
-
-  test('a later booking that reuses the same slot is its own booking', () => {
-    const rebooked = bookingRow({ id: 'b-2', created_at: after(120), updated_at: after(120) });
-    const bookings = groupBookings([bookingRow(), rebooked], new Map());
-    expect(bookings.map((b) => [...b.ids])).toEqual([['b-1'], ['b-2']]);
-  });
-
-  test('a second appointment at the same home that day stays its own booking', () => {
-    const morning = bookingRow({ id: 'b-2', window_start: '09:00:00', window_end: '10:00:00' });
-    const bookings = groupBookings([bookingRow(), morning], new Map());
-    expect(bookings.map((b) => [b.startMin, b.durationMinutes])).toEqual([[900, 60], [540, 60]]);
-  });
-});
-
-describe('stateAt', () => {
-  const row = bookingRow();
-  test('a row made after the instant was not on the calendar', () => {
-    expect(stateAt(row, before(1).getTime())).toBeNull();
-  });
-  test('an expired hold was off the calendar', () => {
-    const hold = { ...row, reservation_expires_at: after(10) };
-    expect(stateAt(hold, after(5).getTime())).not.toBeNull();
-    expect(stateAt(hold, after(15).getTime())).toBeNull();
-  });
-});
-
 // ------------------------------------------------------------- the message
 
 function manyPairs(n) {
@@ -451,38 +225,37 @@ function manyPairs(n) {
 }
 
 describe('the notification', () => {
-  test('nothing in parts 1 and 2: nothing to post', () => {
-    expect(composeWeeklyCheck({ apart: [], costly: [], replayed: 4, weekStart: '2027-03-01' })).toEqual({ items: 0 });
+  test('no next-door split: nothing to post', () => {
+    expect(composeWeeklyCheck({ apart: [], weekStart: '2027-03-01' })).toEqual({ items: 0 });
   });
 
   test('headline, summary and detail stay inside the admin-notification limits', () => {
-    const base = replay({ rows: [besideStop(), acrossStop()] });
-    const costly = Array.from({ length: 12 }, () => ({ ...base, booking: { ...base.booking, customerName: 'Maximiliana-Josephine W.', city: 'Lakewood Ranch Main Street District' } }));
     const out = composeWeeklyCheck({
-      apart: manyPairs(12), costly, replayed: 30, nightLog: new Map(), weekStart: '2027-03-01',
+      apart: manyPairs(12), nightLog: new Map(), weekStart: '2027-03-01',
       drives: { week: [{ drive_miles: 0.4, drive_minutes: 1.9 }], total: 1, median: 1.9, since: '2026-08-27' },
     });
-    expect(out.items).toBe(24);
-    expect(out.headline).toBe('Schedule — review 12 next-door splits and 12 costly bookings');
+    expect(out.items).toBe(12);
+    expect(out.headline).toBe('Schedule — review 12 next-door splits');
     expect(out.headline.length).toBeLessThanOrEqual(60);
     expect(out.summary.length).toBeLessThanOrEqual(110);
     expect(out.detail.length).toBeLessThanOrEqual(2000);
     expect(out.detail).not.toContain('…');
     for (const text of [out.headline, out.summary]) expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}/);
-    expect(out.detail.match(/- and 9 more/g)).toHaveLength(2);
-    expect(out.detail).toContain('Not checked: arrival windows, customer wishes, short holds, office edits the move log missed.');
+    expect(out.detail.match(/- and 9 more/g)).toHaveLength(1);
     expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: last week 0.4 mi in 1.9 min. All since Thu, Aug 27: 1, median 1.9 min.');
-    expect(out.metadata).toMatchObject({ weekOf: '2027-03-01', pairsApart: 12, bookingsReplayed: 30, bookingsCostly: 12, costlyMinutes: 672 });
+    expect(out.metadata).toEqual({ weekOf: '2027-03-01', pairsApart: 12, shortDrivesWeek: 1, shortDrivesTotal: 1 });
   });
 
-  test('with two technicians the booking part says it is paused, and why', () => {
-    const rows = [
-      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true }),
-      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
-    ];
-    const out = composeWeeklyCheck({ apart: findApartPairs(rows), nightLog: new Map(), techCount: 2, weekStart: '2027-03-01' });
-    expect(out.detail).toContain('Bookings last week: not replayed. The replay needs one technician to know whose route each stop was on; the schedule has 2.');
-    expect(out.detail).not.toContain('An estimate:');
+  test("a combined visit's inbound drive, written on each of its service rows, counts once", () => {
+    const arrived = new Date('2027-03-02T14:00:00.000Z');
+    const leg = (id, extra = {}) => ({
+      scheduled_service_id: id, technician_id: 'tech-1', service_date: '2027-03-02', gps_arrived_at: arrived,
+      leg_group_key: 'g-1', drive_miles: 0.4, drive_minutes: 1.9, ...extra,
+    });
+    const rows = [leg('svc-a'), leg('svc-b'), leg('svc-c', { gps_arrived_at: new Date('2027-03-02T16:00:00.000Z'), leg_group_key: 'g-2' })];
+    expect(physicalLegs(rows).map((r) => r.scheduled_service_id)).toEqual(['svc-a', 'svc-c']);
+    const noArrival = [leg('svc-d', { gps_arrived_at: null }), leg('svc-e', { gps_arrived_at: null }), leg('svc-f', { gps_arrived_at: null, leg_group_key: 'g-3' })];
+    expect(physicalLegs(noArrival).map((r) => r.scheduled_service_id)).toEqual(['svc-d', 'svc-f']);
   });
 
   test('the GPS median of an even count is the mean of the middle two', () => {
@@ -520,7 +293,7 @@ const oneSplit = () => {
     stop({ customer: 'c-a', at: HOME_A, date: '2027-03-10', plan: true }),
     stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-12', plan: true }),
   ];
-  return { weekStart: '2027-03-08', apart: findApartPairs(rows), nightLog: new Map(), costly: [], replayed: 2, drives: null };
+  return { weekStart: '2027-03-08', apart: findApartPairs(rows), nightLog: new Map(), drives: null };
 };
 
 describe('runNearStopsWeeklyCheck', () => {
@@ -535,7 +308,7 @@ describe('runNearStopsWeeklyCheck', () => {
 
   test('a finding posts one owner row a week, rung once, closing last week\'s row, never by email', async () => {
     const opts = deps(oneSplit());
-    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: true, pairs: 1, bookings: 0 });
+    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: true, pairs: 1 });
     expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
     const call = deliverOpsDigest.mock.calls[0][0];
     expect(call).toMatchObject({
@@ -555,8 +328,8 @@ describe('runNearStopsWeeklyCheck', () => {
   });
 
   test('a clean week posts nothing, closes the open row and stamps the week', async () => {
-    const opts = deps({ weekStart: '2027-03-08', apart: [], nightLog: new Map(), costly: [], replayed: 3, drives: null });
-    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: false, empty: true, pairs: 0, bookings: 0 });
+    const opts = deps({ weekStart: '2027-03-08', apart: [], nightLog: new Map(), drives: null });
+    await expect(runNearStopsWeeklyCheck(opts)).resolves.toEqual({ sent: false, empty: true, pairs: 0 });
     expect(deliverOpsDigest).not.toHaveBeenCalled();
     expect(retireIfClean).toHaveBeenCalledWith(OPS_KEY);
     expect(opts.stampSendMarker).toHaveBeenCalledTimes(1);
