@@ -18,7 +18,6 @@ const {
   confirmedWallClockET,
   rowClearsSlot,
   bookItAlert,
-  dateCheckAlert,
   liveDecision,
   decisionHoldReason,
   GRACE_MINUTES,
@@ -246,6 +245,8 @@ describe('a visit the call agent held', () => {
   const minutesAgo = (n) => new Date(NOW.getTime() - n * 60 * 1000).toISOString();
   const missesOf = (calls, booked = []) => computeBookingMisses(calls, booked, { now: NOW });
   const heldMiss = (over = {}, held = decision()) => missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: held, ...over })])[0];
+  // A held bell's last step: it asks for no call or text, so it fits every hold reason.
+  const HELD_STEP = 'Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or tap Done if dispatch shows none.';
 
   test('rings after HELD_GRACE_MINUTES with its reason; an unheld call of the same age still waits GRACE_MINUTES', () => {
     const misses = missesOf([
@@ -300,11 +301,8 @@ describe('a visit the call agent held', () => {
   // (spam, out of area, an opt-out), and a booking a later check held stores 'auto_route_skipped'.
   test('a hard-veto exit and a booking held after approval ring fast too', () => {
     expect(heldMiss({}, decision({ blocked_reasons: ['out_of_service_area'] })).holdReason).toBe('the address is outside our area');
+    expect(heldMiss({}, decision({ blocked_reasons: ['do_not_contact_requested'] })).holdReason).toBe('the caller asked not to be contacted');
     expect(heldMiss({}, decision({ final_action_taken: 'auto_route_skipped', blocked_reasons: [] })).holdReason).toBe(HOLD_REASON_FALLBACK);
-    const optOut = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['do_not_contact_requested'] })), false);
-    expect(optOut.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked not to be contacted.');
-    expect(optOut.detail).toContain('Check the call in dispatch before booking it, and do not call or text the caller.');
-    expect(optOut.detail).not.toContain('call back');
     // A 'spam' row keeps the plain wait.
     expect(missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), processing_status: 'spam', live_decision: decision({ blocked_reasons: ['spam_or_wrong_number'] }) })])).toHaveLength(0);
   });
@@ -346,77 +344,37 @@ describe('a visit the call agent held', () => {
   });
 
   // Pre-push P1s (2026-11-18): a held visit may not be one to book as agreed (a cancel request, a
-  // visit already on file), so its bell says review and asks staff to check the call first; and
-  // Done on the bell alone leaves the held row on Dispatch, so the step names its Dismiss.
+  // visit already on file), so its bell says review and asks staff to check the call first. Done
+  // on the bell alone leaves the held row on Dispatch, so the step names its Dismiss, with Done
+  // only when Dispatch shows no held row (the strip has its own gate and leaves out a call whose
+  // cards the office closed).
   test('a held bell says review and why, and asks to check the call; an unheld miss keeps "book" and "nothing is on the calendar"', () => {
     const text = bookItAlert(heldMiss(), false);
     expect(text.action).toBe("review Pat Sample's Waves Assessment");
     expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the address is not confirmed.');
     expect(text.detail).toContain('The call agent held this visit and did not book it, because the address is not confirmed.');
-    expect(text.detail).toContain('Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there.');
+    expect(text.detail.endsWith(HELD_STEP)).toBe(true);
     expect(text.detail).not.toContain('Book it in dispatch');
     const cancel = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['cancellation_request'] })), false);
     expect(cancel.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked to cancel.');
-    expect(cancel.detail).toContain('If no visit is needed, dismiss its held row there.');
+    expect(cancel.detail.endsWith(HELD_STEP)).toBe(true);
     const [plain] = missesOf([call()]);
     expect(bookItAlert(plain, false).action).toBe("book Pat Sample's Waves Assessment");
     expect(bookItAlert(plain, false).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
     expect(bookItAlert(plain, false).detail).toContain('Book it in dispatch or call back to reset expectations.');
   });
 
-  // Pre-push P1 (2026-11-18): a hold for having no number must not end on "call back".
-  test('a hold for having no number names it and drops the callback step', () => {
-    const noNumber = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['address_unverified', 'caller_phone_missing'] })), false);
-    expect(noNumber.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the call has no callback number.');
-    expect(noNumber.detail).toContain('Check the call in dispatch before booking it; the call left no number to call back.');
-    // The routing-reason form of the opt-out reads the same as the flag.
-    expect(decisionHoldReason(decision({ blocked_reasons: ['do_not_contact'] }))).toBe('the caller asked not to be contacted');
-  });
-
-  // Pre-push P1s (2026-11-18): every stored opt-out signal bars contact, and an opt-out alone
-  // never proves a hold (in shadow mode V2 does not decide the booking).
-  test('an opt-out in any stored signal never asks for a call, and alone it does not shorten the wait', () => {
-    const optOuts = {
-      'V2 consent': { ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) },
-      // A flag-only opt-out: the processor's hard veto reads the flag, with no consent boolean.
-      'V2 triage flag': { ai_extraction_enriched: extraction({ triage_flags: ['do_not_contact_requested'] }) },
-      'V1 extraction': { ai_extraction: { do_not_contact_request: true } },
-    };
-    for (const [label, over] of Object.entries(optOuts)) {
-      expect([label, missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ...over })])]).toEqual([label, []]);
-      const [miss] = missesOf([call(over)]);
-      expect(miss.holdReason).toBeNull();
-      const text = bookItAlert(miss, false);
-      expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
-      expect([label, text.detail]).toEqual([label, expect.stringContaining('Review it in dispatch before booking, and do not call or text the caller.')]);
+  // Pre-push P1s (2026-11-18): a bell that names an opt-out or a missing number must not ask
+  // staff to call back.
+  test('a hold that limits contact names it first, and the held step never asks for a call', () => {
+    for (const [flag, reason] of [['do_not_contact_requested', 'the caller asked not to be contacted'], ['caller_phone_missing', 'the call has no callback number']]) {
+      const text = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['address_unverified', flag] })), false);
+      expect(text.why).toBe(`Confirmed Sat Aug 1 at 12:00 PM on a call; held because ${reason}.`);
+      expect(text.detail.endsWith(HELD_STEP)).toBe(true);
       expect(text.detail).not.toContain('call back');
     }
-  });
-
-  // The watchdog makes no contact rule of its own: the number a bell shows is main's (the
-  // customer's leg of the call), and only a stored opt-out or a no-number hold changes the step.
-  test('the number shown is the customer\'s leg of the call, and a missing number alone keeps the callback step', () => {
-    const detailOf = (over) => bookItAlert(missesOf([call(over)])[0], false).detail;
-    expect(detailOf({})).toMatch(/^Pat Sample \(\+19415550111\) confirmed /);
-    const noLine = detailOf({ to_phone: null });
-    expect(noLine).toMatch(/^Pat Sample \(no number\) confirmed /);
-    expect(noLine).toContain('Book it in dispatch or call back to reset expectations.');
-  });
-
-  // Pre-push P1 (2026-11-18): the date check follows the same contact rule as "book it".
-  test('a date check never asks staff to contact an opted-out caller, or to confirm on a call with no number', () => {
-    const slot = { dateET: '2026-08-01', minutes: 12 * 60 };
-    const mismatch = { visit_id: 'visit-9', date: '2026-08-03', time: '09:00' };
-    const check = (c, holdReason = null) => dateCheckAlert({ name: 'Pat Sample', slot, call: c, mismatch, service: 'Waves Assessment', holdReason }).detail;
-    expect(check(call())).toMatch(/Move it to the agreed day, or confirm the new day with the customer, then tap Done\.$/);
-    const optedOut = check(call({ ai_extraction_enriched: extraction({ consent: { do_not_contact_request: true } }) }));
-    // Pre-push P1 (2026-11-18): with no way to confirm a new day, the step never offers to keep the booked one.
-    expect(optedOut).toMatch(/Move it to the agreed day, then tap Done; do not call or text the caller\.$/);
-    expect(optedOut).not.toContain('keep the booked day');
-    expect(optedOut).not.toContain('confirm the new day with the customer');
-    expect(check(call(), 'the caller asked not to be contacted')).toContain('do not call or text the caller');
-    expect(check(call({ ai_extraction: { do_not_contact_request: true } }))).toContain('do not call or text the caller');
-    expect(check(call(), 'the call has no callback number')).toMatch(/Move it to the agreed day, then tap Done; the call left no number to confirm a new day\.$/);
+    // The routing-reason form of the opt-out reads the same as the flag.
+    expect(decisionHoldReason(decision({ blocked_reasons: ['do_not_contact'] }))).toBe('the caller asked not to be contacted');
   });
 
   test('every blocking triage flag has a phrase', () => {

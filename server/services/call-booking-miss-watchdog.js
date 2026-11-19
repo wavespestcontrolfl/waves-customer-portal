@@ -101,12 +101,12 @@ const HELD_GRACE_MINUTES = 10;
 // A phrase says what the flag means wherever it is raised: address_unverified comes from
 // the address check's verdict, from two readings of the call that disagree on where, or
 // from a stated address that conflicts with the one on file, so it names no provider.
+// One phrase for the opt-out, as a blocking flag and as a routing reason.
 const NO_CONTACT_REASON = 'the caller asked not to be contacted';
-const NO_NUMBER_REASON = 'the call has no callback number';
 const HOLD_REASONS = [
-  // A reason that changes what staff should do (contactLimit) comes first.
+  // A reason that limits contact with the caller comes first.
   ['do_not_contact_requested', NO_CONTACT_REASON],
-  ['caller_phone_missing', NO_NUMBER_REASON],
+  ['caller_phone_missing', 'the call has no callback number'],
   ['spam_or_wrong_number', 'the call may be spam or misdialed'],
   ['voicemail', 'the call was a voicemail'],
   ['out_of_service_area', 'the address is outside our area'],
@@ -128,30 +128,13 @@ const HOLD_REASONS = [
   ['low_extraction_confidence', 'the call details are unclear'],
   ['on_file_house_number_conflict', 'a different house number was given'],
 ];
-// The detail's last step, by alert and by what the call allows (contactLimit): no bell tells
-// staff to contact a caller who opted out, or to call back a call the call agent held for
-// having no number. With no way to confirm a new day, the date check asks for the agreed day.
-const LAST_STEP = {
-  book: {
-    none: 'Book it in dispatch or call back to reset expectations.',
-    opted_out: 'Review it in dispatch before booking, and do not call or text the caller.',
-    no_number: 'Book it in dispatch; the call left no number to call back.',
-  },
-  // A held visit may not be one to book as agreed (a cancel request, a visit already on
-  // file, a quote first): staff check the call before they book it. Dismiss on its Dispatch
-  // held row (dismissHeldVisit) records that no visit is needed and closes the call's bells;
-  // Done on the bell alone leaves the row.
-  held: {
-    none: 'Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there.',
-    opted_out: 'Check the call in dispatch before booking it, and do not call or text the caller. If no visit is needed, dismiss its held row there.',
-    no_number: 'Check the call in dispatch before booking it; the call left no number to call back. If no visit is needed, dismiss its held row there.',
-  },
-  check: {
-    none: 'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
-    opted_out: 'Move it to the agreed day, then tap Done; do not call or text the caller.',
-    no_number: 'Move it to the agreed day, then tap Done; the call left no number to confirm a new day.',
-  },
-};
+// A held bell's last step. A held visit may not be one to book as agreed (a cancel request, a
+// visit already on file, a quote first), so staff check the call before booking it. Dismiss on
+// the call's held row on Dispatch (dismissHeldVisit) records that no visit is needed and closes
+// the call's bells. Dispatch can show no held row (the strip has its own gate,
+// GATE_CALL_HELD_VISIT, and leaves out a call whose cards the office closed): then Done closes
+// the bell. The step asks for no call or text, so it fits every hold reason.
+const HELD_STEP = 'Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or tap Done if dispatch shows none.';
 // A hold the live decision names no listed reason for, and a booking a check held after
 // routing approved it (the row names no reason).
 const HOLD_REASON_FALLBACK = 'the call needs a review';
@@ -313,17 +296,6 @@ function decisionHoldReason(decision) {
   return hit ? hit[1] : HOLD_REASON_FALLBACK;
 }
 
-// The caller opted out of contact, by any stored signal the processor honors: the V2
-// extraction's consent.do_not_contact_request or its do_not_contact_requested triage flag (a
-// hard veto), or the V1 extraction's do_not_contact_request. It shapes what a bell asks staff
-// to do; it never proves a hold by itself (in shadow mode V2 does not decide the booking).
-function callerOptedOut(call) {
-  const v2 = readJson(call.ai_extraction_enriched);
-  return v2?.consent?.do_not_contact_request === true
-    || (Array.isArray(v2?.triage_flags) && v2.triage_flags.includes('do_not_contact_requested'))
-    || readJson(call.ai_extraction)?.do_not_contact_request === true;
-}
-
 // When a held call's wait starts: when the call ended, as the latest end the row gives, so the
 // wait never starts early. call-booking-link-text's callEndFor reads an outbound bridge's
 // customer-leg receipt, else bridged_at + length, else start + length; callEndedAt reads
@@ -346,16 +318,6 @@ function heldWaitStart(call, createdAt) {
 function callHoldReason(call) {
   if (call.processing_status !== 'processed') return null;
   return decisionHoldReason(liveDecision(call));
-}
-
-// What the call lets staff do next (LAST_STEP): 'opted_out' (a stored opt-out signal, or the
-// hold, says so), 'no_number' (the call agent held it for having no number to call), or
-// 'none'. Only those two facts change the step; which number a bell shows is main's rule
-// (callFacts), and the call's own cards carry its other contact limits.
-function contactLimit(call, holdReason) {
-  if (holdReason === NO_CONTACT_REASON || callerOptedOut(call)) return 'opted_out';
-  if (holdReason === NO_NUMBER_REASON) return 'no_number';
-  return 'none';
 }
 
 function windowStartMinutes(windowStart) {
@@ -444,7 +406,7 @@ function clearingRow(call, slot, bookedRows, sameName) {
 // Pure diff, exported for tests: which calls confirmed a slot that has no
 // call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
 // customer_id, direction, created_at, from_phone, to_phone,
-// ai_extraction_enriched, ai_extraction, live_decision (LIVE_DECISION_SELECT),
+// ai_extraction_enriched, live_decision (LIVE_DECISION_SELECT),
 // processing_status, processing_started_at, metadata, duration_seconds,
 // recording_duration_seconds, bridged_at }); a call the call agent held (callHoldReason)
 // waits HELD_GRACE_MINUTES from the call's end (heldWaitStart) instead of
@@ -783,7 +745,7 @@ function callFacts(call) {
 // pass raises when a visit lands on another day: the office booked a visit, but not on the day the call agreed. `name`
 // is null when only the old bell's slot is known. Headline and why follow
 // docs/admin-notifications.md (composeAdminAlert checks them).
-function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason = null }) {
+function dateCheckAlert({ name, slot, call, mismatch, service = null }) {
   const agreedAt = spokenSlot(slot.dateET, slot.minutes);
   const bookedAt = spokenSlot(mismatch.date, windowStartMinutes(mismatch.time));
   const { callAtET, contactPhone, direction } = callFacts(call);
@@ -792,7 +754,7 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason
     why: `Booked ${bookedAt}; the call agreed ${agreedAt}.`,
     detail: `${name || 'The caller'} (${contactPhone || 'no number'}) agreed ${service || 'a visit'} for ${agreedAt} ` +
       `on a ${direction} call at ${callAtET} ET. The visit on the calendar is ${bookedAt}. ` +
-      LAST_STEP.check[contactLimit(call, holdReason)],
+      'Move it to the agreed day, or confirm the new day with the customer, then tap Done.',
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(mismatch.date)}`,
   };
 }
@@ -805,7 +767,7 @@ function bookItAlert(m, repeat) {
   const confirmed = `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call`;
   const verb = m.holdReason ? 'review' : 'book';
   return {
-    // A held visit is one to check before booking (LAST_STEP.held), so its headline says review.
+    // A held visit is one to check before booking (HELD_STEP), so its headline says review.
     action: `${verb} ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - `Schedule — ${verb} `.length)}`,
     why: m.holdReason ? `${confirmed}; held because ${m.holdReason}.` : `${confirmed}; nothing is on the calendar.`,
     link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
@@ -814,7 +776,7 @@ function bookItAlert(m, repeat) {
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
       (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
-      LAST_STEP[m.holdReason ? 'held' : 'book'][contactLimit(m.call, m.holdReason)] +
+      (m.holdReason ? HELD_STEP : 'Book it in dispatch or call back to reset expectations.') +
       (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
   };
 }
@@ -849,8 +811,8 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
-      // callHoldReason's inputs, and callerOptedOut's V1 signal.
-      'processing_status', 'processing_started_at', 'ai_extraction', db.raw(LIVE_DECISION_SELECT),
+      // callHoldReason's inputs.
+      'processing_status', 'processing_started_at', db.raw(LIVE_DECISION_SELECT),
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
@@ -919,7 +881,7 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
       // it, a plan that needs a new bell waits for the next tick with its old bells open;
       // plain closes still run.
       if (raised >= MAX_ALERTS_PER_RUN) { waiting += 1; continue; }
-      // A replacement "book it" bell for a call the call agent held says why, as its first bell did.
+      // A replacement bell for a call the call agent held says why and asks for a review, as its first bell did.
       const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason };
       const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey, repeat: false })
         .catch((err) => { logger.warn(`[call-booking-miss] failed to raise the replacement bell for call ${call.id}: ${err.message}`); return 'failed'; });
@@ -988,10 +950,9 @@ async function runInner({ now }) {
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched',
-      // callHoldReason's inputs, then heldWaitStart's (a held call's wait), then callerOptedOut's
-      // V1 signal.
+      // callHoldReason's inputs, then heldWaitStart's (a held call's wait).
       'processing_status', 'processing_started_at', db.raw(LIVE_DECISION_SELECT),
-      'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'ai_extraction',
+      'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at',
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
@@ -1087,7 +1048,7 @@ async function ringMiss(m, { dedupeKey, repeat }) {
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
-    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason })
+    ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service })
     : bookItAlert(m, repeat);
   const created = await raiseAdminAlert(
     'alert',

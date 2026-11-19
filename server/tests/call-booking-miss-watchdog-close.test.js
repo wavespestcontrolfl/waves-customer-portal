@@ -332,20 +332,6 @@ describe('close pass', () => {
     expect(mockState.updates.some((u) => 'read_at' in u.payload || 'metadata' in u.payload)).toBe(false);
   });
 
-  // Pre-push P1 (2026-11-18): a date check follows the call's contact rule too.
-  test('a date check for a caller who opted out never says to confirm the new day with the customer', async () => {
-    const optedOut = call().ai_extraction_enriched;
-    mockState.calls = [call({ ai_extraction_enriched: { ...optedOut, consent: { do_not_contact_request: true } } })];
-    mockState.open = [open('n1', '10'), open('n2', '20')];
-    mockState.booked = wrongWeek();
-    const result = await tick();
-    expect(result).toMatchObject({ closed: 2, raised: 1 });
-    const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(title).toBe("Schedule — check Sam Sample's visit date");
-    expect(opts.detail).toMatch(/Move it to the agreed day, then tap Done; do not call or text the caller\.$/);
-    expect(opts.detail).not.toContain('confirm the new day with the customer');
-  });
-
   test('a date check that already exists under the key (a person marked it Done) is not raised again, and the old bells close', async () => {
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-standing', deduped: true });
     mockState.open = [open('n1', '10')];
@@ -387,7 +373,7 @@ describe('close pass', () => {
     mockState.booked = [visit({ id: 'visit-9', sched_date: '2026-10-28', status: 'cancelled' })];
     await planOpenBookingMissBells({ now: NOW });
     expect(mockState.callLogSelects[0]).toEqual(expect.arrayContaining([
-      'processing_status', 'processing_started_at', 'ai_extraction', expect.objectContaining({ raw: expect.stringContaining('AS live_decision') }),
+      'processing_status', 'processing_started_at', expect.objectContaining({ raw: expect.stringContaining('AS live_decision') }),
     ]));
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 1 });

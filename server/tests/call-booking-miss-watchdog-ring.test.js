@@ -143,9 +143,9 @@ describe('a visit the call agent held', () => {
     expect(title).toBe("Schedule — review Robin Example's Wasp Nest Removal");
     expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; held because the address is not confirmed.');
     expect(opts.bell).toBe(true);
-    // callHoldReason's inputs (the pass's status and claim time), heldWaitStart's (where a held
-    // call's wait starts), and callerOptedOut's V1 signal.
-    const needed = ['processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at', 'ai_extraction'];
+    // callHoldReason's inputs (the pass's status and claim time) and heldWaitStart's (where a
+    // held call's wait starts).
+    const needed = ['processing_status', 'processing_started_at', 'metadata', 'duration_seconds', 'recording_duration_seconds', 'bridged_at'];
     const scan = mockState.callLogSelects.find((cols) => needed.every((col) => cols.includes(col)));
     expect(scan).toBeDefined();
     // Pre-push P1 (2026-11-18): the live decision comes back in the same statement as the call
