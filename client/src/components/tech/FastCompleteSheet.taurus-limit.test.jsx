@@ -2,7 +2,7 @@
 // Taurus SC's label limit (4 a year per home) on the pest Fast Complete sheet:
 // pest-recap/context carries the server's count; at 4 the house mix opens
 // without Taurus, a manual Taurus warns (never blocks), an unknown count
-// changes nothing.
+// leaves Taurus out too and says so.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
@@ -10,6 +10,8 @@ import FastCompleteSheet from './FastCompleteSheet';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
 
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'insecticide', active_ingredient: 'fipronil', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', inventory_unit: 'fl_oz', inventory_on_hand: '120.0000' },
@@ -58,14 +60,14 @@ describe('FastCompleteSheet Taurus yearly limit', () => {
     expect(screen.queryByText(/label limit|over the label/)).toBeNull();
   });
 
-  test('unknown count (null, or no key from an older server): Taurus stays and nothing is said', async () => {
-    await open(null);
-    expect(taurusTile()).toBeTruthy();
-    expect(screen.queryByText(/label limit|over the label/)).toBeNull();
-    cleanup();
-    await open(undefined);
-    expect(taurusTile()).toBeTruthy();
-    expect(screen.queryByText(/label limit|over the label/)).toBeNull();
+  test('unknown count (null, or no key from an older server): the mix opens without Taurus and says the count is unavailable', async () => {
+    for (const unknown of [null, undefined]) {
+      await open(unknown);
+      expect(taurusTile()).toBeNull();
+      expect(screen.getByRole('button', { name: /LESCO Crosscheck Plus/ })).toBeTruthy();
+      expect(screen.getByText(UNKNOWN_LINE)).toBeTruthy();
+      cleanup();
+    }
   });
 
   test('adding Taurus back from the picker at 4 warns, and the warning replaces the left-out line', async () => {

@@ -3,10 +3,12 @@
 // CompletionPanel-level coverage for Taurus SC's label limit (4 a year per
 // home, owner 2026-11-19): /default-products carries the server's count; at 4
 // the pest house mix seeds without Taurus, a manual Taurus warns (never
-// blocks), and an unknown count (failed request, or no key) seeds as before.
+// blocks), and an unknown count (failed request, or no key) leaves Taurus out too and says so.
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CompletionPanel } from './SchedulePage';
+
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
 
 const pestCatalog = [
   { id: 'p1', name: 'Taurus SC', category: 'Insecticide' },
@@ -77,12 +79,13 @@ it('3 of 4: seeds the whole mix and says nothing', async () => {
   expect(screen.queryByText(/label limit|over the label/)).toBeNull();
 });
 
-it('unknown count (no key, null, or a failed request): seeds the whole mix and says nothing', async () => {
+it('unknown count (no key, null, or a failed request): seeds the mix without Taurus and says the count is unavailable', async () => {
   for (const defaults of [{}, { taurusYearly: null }, 'fail']) {
     await openPanel(defaults);
-    await screen.findByText('Taurus SC');
-    expect(screen.getByText('LESCO Crosscheck Plus')).toBeTruthy();
-    expect(screen.queryByText(/label limit|over the label/)).toBeNull();
+    await screen.findByText('LESCO Crosscheck Plus');
+    expect(screen.getByText('LESCO 90/10 Nonionic Surfactant')).toBeTruthy();
+    expect(screen.queryByText('Taurus SC')).toBeNull();
+    expect(screen.getByText(UNKNOWN_LINE)).toBeTruthy();
     cleanup();
   }
 });

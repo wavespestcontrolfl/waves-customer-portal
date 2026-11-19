@@ -10,8 +10,10 @@
 //
 // It filters the selections pestDefaultMixSelections returns, by product name;
 // pest-default-mix.js stays the one place that names the house mix.
-// An unknown count (null, a failed request, no home) changes nothing, and
-// nothing here blocks a save.
+// An UNKNOWN count (null, a failed request, no home) leaves Taurus out too
+// (Codex P1: never default an application whose label eligibility is not
+// known); the line says so and the tech adds it by hand. Nothing here blocks
+// a save.
 
 export const TAURUS_YEARLY_LIMIT = 4;
 
@@ -26,15 +28,19 @@ export function taurusYearlyCountOf(taurusYearly) {
 }
 
 const atLimit = (count) => Number.isInteger(count) && count >= TAURUS_YEARLY_LIMIT;
+const known = (count) => Number.isInteger(count) && count >= 0;
 
-// pestDefaultMixSelections(...) rows, minus Taurus SC once the home is at the limit.
+// pestDefaultMixSelections(...) rows, minus Taurus SC unless the home is known to be under the limit.
 export function applyTaurusYearlyLimit(selections, count) {
   const list = Array.isArray(selections) ? selections : [];
-  return atLimit(count) ? list.filter(({ product }) => !isTaurusProduct(product)) : list;
+  return known(count) && !atLimit(count) ? list : list.filter(({ product }) => !isTaurusProduct(product));
 }
 
-// The line under the house mix when Taurus was left out; null otherwise.
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
+
+// The line under the house mix when Taurus was left out; null when the count says it stays.
 export function taurusLeftOutLine(count) {
+  if (!known(count)) return UNKNOWN_LINE;
   return atLimit(count)
     ? `Taurus left out: ${count} of ${TAURUS_YEARLY_LIMIT} this year at this home (label limit).`
     : null;
@@ -55,8 +61,11 @@ function ordinalSuffix(n) {
   return ({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th';
 }
 
-// The one note a close-out shows: the warning when Taurus is selected, else the
-// left-out line, else null (count under the limit or unknown).
-export function taurusYearlyNote(count, selectedProducts) {
-  return taurusOverLimitWarning(count, selectedProducts) || taurusLeftOutLine(count);
+// The one note a close-out shows: the warning when Taurus is selected over the limit, else, on a visit that
+// opens on the house mix (`mixVisit`) with Taurus not selected, the left-out line; else null.
+export function taurusYearlyNote(count, selectedProducts, { mixVisit = false } = {}) {
+  const warning = taurusOverLimitWarning(count, selectedProducts);
+  if (warning) return warning;
+  const list = Array.isArray(selectedProducts) ? selectedProducts : [];
+  return mixVisit && !list.some((p) => p && isTaurusProduct(p)) ? taurusLeftOutLine(count) : null;
 }

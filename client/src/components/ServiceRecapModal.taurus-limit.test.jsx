@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Taurus SC's label limit (4 a year per home) on the recap modal's house mix:
 // the context carries the server's count; at 4 the mix opens without Taurus,
-// a manual Taurus warns (never blocks), an unknown count changes nothing.
+// a manual Taurus warns (never blocks), an unknown count leaves Taurus out too.
 import React from 'react';
 import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -9,6 +9,8 @@ import ServiceRecapModal from './ServiceRecapModal';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
+
+const UNKNOWN_LINE = "Taurus left out: this year's count is unavailable. Add it only if this home has had fewer than 4 this year.";
 
 const CATALOG = [
   { id: 1, name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
@@ -52,14 +54,14 @@ describe('ServiceRecapModal Taurus yearly limit', () => {
     expect(screen.queryByText(/label limit|over the label/)).toBeNull();
   });
 
-  test('unknown count (null, or no key from an older server): Taurus stays on the mix and nothing is said', async () => {
-    await open(null);
-    expect(screen.getByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.queryByText(/label limit|over the label/)).toBeNull();
-    cleanup();
-    await open(undefined);
-    expect(screen.getByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.queryByText(/label limit|over the label/)).toBeNull();
+  test('unknown count (null, or no key from an older server): the mix opens without Taurus and says the count is unavailable', async () => {
+    for (const unknown of [null, undefined]) {
+      await open(unknown);
+      expect(screen.getByRole('button', { name: 'Taurus SC', pressed: false })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
+      expect(screen.getByText(UNKNOWN_LINE)).toBeTruthy();
+      cleanup();
+    }
   });
 
   test('adding Taurus back by hand at 4 warns (the warning never touches the save)', async () => {

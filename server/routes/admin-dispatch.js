@@ -3655,7 +3655,7 @@ router.get('/:serviceId/default-products', async (req, res, next) => {
     // before-and-after check as the Job Card route).
     const recheck = technicianCurrentVisitFilter(req, db('scheduled_services').where('scheduled_services.id', req.params.serviceId));
     const includeFertilizer = ['tree_shrub', 'palm'].includes(detectServiceLine(scheduled.service_type));
-    // Taurus SC's label limit (4 a year per home) for the pest house mix: null (unknown) keeps today's prefill.
+    // Taurus SC's label limit (4 a year per home) for the pest house mix: unknown (no key) leaves Taurus off it.
     const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount(scheduled);
     const stillInScope = includeFertilizer
       ? await recheck.leftJoin('customers', 'customers.id', 'scheduled_services.customer_id')
@@ -3964,7 +3964,7 @@ router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
     // 0-in-stock product through. The key exists only on a pest visit.
     const stockAdvisory = isPestStockAdvisoryCompletion({ service_type: ctx.service?.serviceType });
     // Taurus SC's label limit (4 a year per home): how many this home has had, so the house mix can leave it out.
-    // Unknown (no key) keeps today's prefill; the count never blocks the sheet.
+    // Unknown (no key) leaves Taurus off the house mix; the count never blocks the sheet.
     const taurusYearly = await require('../services/taurus-yearly-count').taurusYearlyCount({
       id: ctx.service?.id, customer_id: ctx.service?.customerId, property_id: ctx.service?.propertyId,
       scheduled_date: ctx.service?.scheduledDate,

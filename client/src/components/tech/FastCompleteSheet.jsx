@@ -71,7 +71,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../../lib/pest-default-mix';
-import { applyTaurusYearlyLimit, taurusLeftOutLine, taurusOverLimitWarning, taurusYearlyCountOf } from '../../lib/taurus-yearly-limit';
+import { applyTaurusYearlyLimit, taurusYearlyCountOf, taurusYearlyNote } from '../../lib/taurus-yearly-limit';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
@@ -1490,10 +1490,10 @@ function writerSources({ productCount, photoCount, marked, rated }) {
 }
 
 // Taurus SC's label limit (4 a year per home): the line saying it was left off the house mix, or the warning when it
-// is on the sheet over the limit. Warns only; null when the count is under the limit or unknown.
+// is on the sheet over the limit. Warns only; null when the count is under the limit.
 function taurusNoteFor(ctx, active) {
   const count = ctx?.taurusYearlyCount;
-  return taurusOverLimitWarning(count, active) || (ctx?.houseMix ? taurusLeftOutLine(count) : null);
+  return taurusYearlyNote(count, active, { mixVisit: ctx?.houseMix === true });
 }
 
 // The products as one line ("Taurus SC 4 fl oz · …"), opened to the full

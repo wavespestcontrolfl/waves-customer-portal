@@ -139,9 +139,8 @@ import {
 } from "../../lib/protocol-completion-defaults";
 import {
   applyTaurusYearlyLimit,
-  taurusLeftOutLine,
-  taurusOverLimitWarning,
   taurusYearlyCountOf,
+  taurusYearlyNote,
 } from "../../lib/taurus-yearly-limit";
 import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
@@ -14021,7 +14020,7 @@ export function CompletionPanel({
   // The server's protocol/default-products answer, read once per visit. It also
   // carries Taurus SC's yearly count (label limit 4 a year per home): the pest
   // mix seed waits for the answer to settle (a failure settles it too, with the
-  // count unknown, so Taurus stays on the mix and nothing blocks the close-out).
+  // count unknown, so Taurus stays off the mix; nothing blocks the close-out).
   const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
   const [protocolCompletionDefaultsSettled, setProtocolCompletionDefaultsSettled] = useState(false);
   const taurusYearlyCount = taurusYearlyCountOf(protocolCompletionDefaults?.taurusYearly);
@@ -23710,8 +23709,7 @@ export function CompletionPanel({
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
           {(() => {
             // Taurus SC's label limit: 4 a year per home. Warns only, never blocks the save.
-            const note = taurusOverLimitWarning(taurusYearlyCount, selectedProducts)
-              || (isRegularPestVisit ? taurusLeftOutLine(taurusYearlyCount) : null);
+            const note = taurusYearlyNote(taurusYearlyCount, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
             return note ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{note}</p> : null;
           })()}
           {quickComplete ? (

@@ -21,7 +21,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { isMlUnit } from '../lib/measure-units';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
-import { applyTaurusYearlyLimit, taurusLeftOutLine, taurusOverLimitWarning, taurusYearlyCountOf } from '../lib/taurus-yearly-limit';
+import { applyTaurusYearlyLimit, taurusYearlyCountOf, taurusYearlyNote } from '../lib/taurus-yearly-limit';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
 import { UiSurface, Button, Field, Input, Textarea, Checkbox, ActionFeedback, cn } from './ui';
@@ -271,10 +271,9 @@ export default function ServiceRecapModal({
   }, [products]);
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
-  // saying the house mix left it off. Null when the count is under the limit or unknown.
+  // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
   const taurusCount = taurusYearlyCountOf(ctx?.taurusYearly);
-  const taurusNote = taurusOverLimitWarning(taurusCount, [...selected].map((id) => productById.get(id)))
-    || (houseMixSeeded ? taurusLeftOutLine(taurusCount) : null);
+  const taurusNote = taurusYearlyNote(taurusCount, [...selected].map((id) => productById.get(id)), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

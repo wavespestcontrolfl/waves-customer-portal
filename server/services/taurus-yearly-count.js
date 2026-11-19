@@ -68,8 +68,8 @@ function etYearBounds(now = new Date(), scheduledDate = null) {
  * @param {{ id?: string|null, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }} visit
  *   the scheduled_services row being completed
  * @returns {Promise<{ count: number, limit: number, year: number } | null>}
- *   null when the count is unknown (no customer, or the read failed): callers
- *   keep today's behavior and never block a close-out.
+ *   null when the count is unknown (no customer, or the read failed): the
+ *   close-outs then leave Taurus off the house mix and say so; none blocks.
  */
 async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
   const customerId = visit?.customer_id || null;
