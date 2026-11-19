@@ -75,10 +75,22 @@ async function websiteLineRefusal(fromNumber, to, { database = db } = {}) {
     .first('id');
   // A Sandy sandbox call or a tech-voice call is internal: it is never a
   // person who reached Waves on that line.
-  const [text, call] = await Promise.all([
-    contacted(database('sms_log')),
-    contacted(whereNotSandboxCall(database('call_log'))),
-  ]);
+  let text;
+  let call;
+  try {
+    [text, call] = await Promise.all([
+      contacted(database('sms_log')),
+      contacted(whereNotSandboxCall(database('call_log'))),
+    ]);
+  } catch (readErr) {
+    // A knex error message carries the bound values, so this person's phone
+    // number. Every caller logs or forwards what it catches: the error it gets
+    // names no number (only the Postgres error code), and it still fails closed.
+    const err = new Error('The website-only line contact check could not read the message and call logs');
+    err.code = 'WEBSITE_LINE_UNVERIFIED';
+    if (readErr && typeof readErr.code === 'string' && /^[0-9A-Z]{5}$/.test(readErr.code)) err.pgCode = readErr.code;
+    throw err;
+  }
   return text || call ? null : WEBSITE_LINE_REFUSAL;
 }
 
