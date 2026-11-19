@@ -662,25 +662,39 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
     });
 
-    test('per truck (GATE_MULTI_TECH_CONFIRM on): the receiving technician decides, and the move guard passes it', async () => {
+    test('per truck (GATE_MULTI_TECH_CONFIRM on): each technician the visit can sit with decides, and the move guard passes them', async () => {
       const { assertDestinationClear } = require('../services/auto-dispatch/south-day-kept');
       const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
-      const t2Stop = [{ ...STOP_WED[0], technician_id: 't2' }];
-      const check = (stops, techId) => assertDestinationClear(southDb({ stops }), NORTH, NORTH, WED, refuse, techId);
+      const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+      const check = (stops, techIds) => assertDestinationClear(southDb({ stops }), NORTH, NORTH, WED, refuse, techIds);
+      // The guard's far-south verdict for a move to t1 (best.technician_id) whose transaction writes `written`.
+      const guardHeld = async (stops, written) => {
+        const err = await guardFor(NORTH)({ trx: southDb({ stops }), technicianId: written }).then(() => null, (e) => e);
+        return String(err?.message || '').includes('far-south stop');
+      };
       const saved = process.env.GATE_MULTI_TECH_CONFIRM;
-      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
       try {
-        await expect(check(t2Stop, 't1')).resolves.toBeUndefined();
-        await expect(check(t2Stop, 't2')).rejects.toMatchObject({ code: 'REFUSED' });
-        await expect(check(STOP_WED, 't1')).rejects.toMatchObject({ code: 'REFUSED' });
-        // apply.js hands the guard's receiving technician (best.technician_id) to the check: t1 is not held by t2's day.
-        const err = await guardFor(NORTH)({ trx: southDb({ stops: t2Stop }), technicianId: 't1' }).then(() => null, (e) => e);
-        expect(String(err?.message || '')).not.toContain('far-south stop');
+        process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+        await expect(check(stopOf('t2'), ['t1'])).resolves.toBeUndefined();
+        await expect(check(stopOf('t2'), ['t2'])).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(stopOf('t2'), ['t1', 't2'])).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(STOP_WED, ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
+        // A move whose transaction writes t1 (the rebooker's kept technician) is not held by t2's day.
+        expect(await guardHeld(stopOf('t2'), 't1')).toBe(false);
+        // A grouped member's date commits on its old technician (t2) before the unit mover re-points it to t1 in its
+        // own transaction (visit-groups alignMember): t2's day holds it, and any stop holds an unassigned row.
+        expect(await guardHeld(stopOf('t2'), 't2')).toBe(true);
+        expect(await guardHeld(stopOf('t2'), null)).toBe(true);
+        // The receiving technician's own day holds it, whatever this transaction writes.
+        expect(await guardHeld(stopOf('t1'), 't2')).toBe(true);
+        expect(await guardHeld(stopOf('t3'), 't2')).toBe(false);
+        // Off: t2's far-south stop holds the date for t1 as well.
+        delete process.env.GATE_MULTI_TECH_CONFIRM;
+        await expect(check(stopOf('t2'), ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
+        expect(await guardHeld(stopOf('t2'), 't1')).toBe(true);
       } finally {
         restore('GATE_MULTI_TECH_CONFIRM', saved);
       }
-      // Off: t2's far-south stop holds the date for t1 as well.
-      await expect(check(t2Stop, 't1')).rejects.toMatchObject({ code: 'REFUSED' });
     });
   });
 });

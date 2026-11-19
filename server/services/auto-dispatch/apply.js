@@ -366,9 +366,13 @@ function makeMoveGuard({ service, best, config = {} }) {
     // GATE_AUTO_DISPATCH_MOWING_DAYS='true': the destination against the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
-    // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop
-    // (with GATE_MULTI_TECH_CONFIRM: a stop of the receiving technician, or an unassigned one).
-    await southDayKept.assertDestinationClear(trx, row, service, best.date, refuse, receiving);
+    // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
+    // With GATE_MULTI_TECH_CONFIRM: a stop of each technician the visit can sit with that day, or an unassigned one.
+    // That is the receiving technician and the one this transaction writes (`technicianId`, the rebooker's kept
+    // technician; null = unassigned): the unit mover commits a member's date on its old technician and re-points it
+    // after, in its own transaction (visit-groups alignMember), so a failed re-point leaves it there.
+    const southTechs = technicianId === undefined ? [receiving] : [receiving, technicianId || null];
+    await southDayKept.assertDestinationClear(trx, row, service, best.date, refuse, southTechs);
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // GATE_TERRITORY_NIGHT_RUN: the moving visit lands only in its own territory, read at apply (a ZIP can
     // change hands, or the visit's address change, after the run scored the move).
