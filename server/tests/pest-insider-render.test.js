@@ -53,6 +53,14 @@ describe('renderIssue', () => {
     for (const areaLine of ['Side gate #1234.', 'Gate 4417 sticks.', 'Gate code is 1-2-3-4.']) {
       expect(renderIssue({ ...BASE, areaLine }).html_body).not.toContain('Active near you');
     }
+    // personal contact details and the newsletter's own banned words are left out too (pre-push round 9)
+    for (const areaLine of ['Email resident@example.com for details.', 'Call 941-555-0123 today.', 'Mary Johnson on Elm Street reported ants.']) {
+      expect(renderIssue({ ...BASE, areaLine }).html_body).not.toContain('Active near you');
+    }
+    for (const tool of [{ ...DEMO.tool, name: 'Termidor' }, { ...DEMO.tool, why: 'Mix it with vinegar.' }]) {
+      expect(renderIssue({ ...BASE, tool }).html_body).not.toContain('A tool we&#39;d use');
+      expect(droppedBlocks({ tool })).toEqual(['tool_dropped_copy']);
+    }
     // a count is not an access code
     expect(renderIssue({ ...BASE, areaLine: '12 homes near you reported ants this month.' }).text_body).toContain('ACTIVE NEAR YOU\n12 homes near you reported ants this month.');
     expect(droppedBlocks(bad)).toEqual(['area_line_dropped', 'tool_dropped_copy']);

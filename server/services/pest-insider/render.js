@@ -87,25 +87,32 @@ function identifierBlock({ idItem }) {
   return { html, text };
 }
 
-// Caller-supplied text (the area line, a tool's words) is
-// not reviewed copy, so it runs the complete customer-copy screen
-// (AGENTS.md) before it renders, and text that fails is left out
-// (pre-push rounds 5 and 6). The screen loads the report-copy modules, so it
-// is required only when such text is given.
-// A forwardable mass email also holds that text to a stricter bar than a
-// report: a number shaped like a code ("Side gate #1234", "gate 4417",
-// "1-2-3-4") is left out, though the shared screen lets a device name next
-// to digits pass so that report prose like "120 linear feet around the
-// garage" stays legal (pre-push round 7). One- and two-digit counts
-// ("12 homes near you") stay.
+// Caller-supplied text (the area line, a tool's words) is not reviewed copy,
+// so before it renders it must pass every check, and text that fails one is
+// left out (pre-push rounds 5 to 9):
+// - the checks the reviewed copy passes (claim-check bannedReason: banned
+//   words, pesticide and brand names, DIY ingredients, the tripwires and the
+//   shared fact register);
+// - the complete customer-copy screen (AGENTS.md customerCopyViolations);
+// - the content PII check (an email, a phone, a street address, a name);
+// - no code-shaped number. The report screen lets a device name next to
+//   digits pass, so that report prose like "120 linear feet around the
+//   garage" stays legal; a forwardable mass email leaves out "Side gate
+//   #1234", "gate 4417" and "1-2-3-4". One- and two-digit counts ("12 homes
+//   near you") stay.
+// The checks load heavier modules, so they are required only when such text
+// is given.
 const CODE_SHAPED_NUMBER = /#\s*\d|\d{3}|\b\d(?:[\s-]+\d){2,}\b/;
 
 function screenedText(value) {
   if (typeof value !== 'string') return '';
   const text = value.replace(/\s+/g, ' ').trim();
   if (!text || CODE_SHAPED_NUMBER.test(text) || MERGE_TAG.test(text)) return '';
+  const { bannedReason } = require('./claim-check');
   const { customerCopyViolations } = require('../service-report/technician-report-copy');
-  return customerCopyViolations(text).length ? '' : text;
+  const { redact } = require('../content/pii-redactor');
+  if (bannedReason(text) || customerCopyViolations(text).length || redact(text).findings.length) return '';
+  return text;
 }
 
 const given = (value) => value != null && String(value).trim() !== '';
