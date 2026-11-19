@@ -66,6 +66,16 @@ describe('fact bank', () => {
     expect(() => validateBank({ facts: [{ ...good, service: 'ants' }] })).toThrow(/service/);
     expect(() => validateBank({ facts: [good, good] })).toThrow(/duplicate/);
     expect(() => validateBank({ facts: [] })).toThrow(/no facts/);
+    expect(() => validateBank({ facts: [{ ...good, quote_sources: [] }] })).toThrow(/quote_sources/);
+    expect(() => validateBank({ facts: [{ ...good, quote_sources: good.quotes.map(() => good.sources.length) }] })).toThrow(/quote_sources/);
+  });
+
+  test('every quote names the source it came from; two-publisher facts are split correctly', () => {
+    const { attributedQuotes, factById } = require('../services/pest-insider/facts');
+    for (const f of bank.facts) expect(f.quote_sources).toHaveLength(f.quotes.length);
+    expect(attributedQuotes(factById('M02')).map((q) => q.label)).toEqual(['CDC', 'CDC', 'UF/IFAS', 'UF/IFAS']);
+    expect(attributedQuotes(factById('O03')).map((q) => q.label)).toEqual(['Florida law', 'UF/IFAS']);
+    expect(attributedQuotes(factById('O02')).map((q) => q.label)).toEqual(['UF/IFAS', 'UF/IFAS', 'WUSF', 'WUSF']);
   });
 });
 

@@ -44,7 +44,12 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": "The \"all the phosphorus\" line rests on an Australian study (Queensland) that SS587 cites. SS587 also warns: \"overwatering with reclaimed water is a common problem.\" Older EDIS reclaimed-water fact sheets SS542, SS544 and SS704 return HTTP 410 (retired); AE449 returns 404."
+      "notes": "The \"all the phosphorus\" line rests on an Australian study (Queensland) that SS587 cites. SS587 also warns: \"overwatering with reclaimed water is a common problem.\" Older EDIS reclaimed-water fact sheets SS542, SS544 and SS704 return HTTP 410 (retired); AE449 returns 404.",
+      "quote_sources": [
+        0,
+        0,
+        1
+      ]
     },
     {
       "id": "L02",
@@ -79,7 +84,14 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "L03",
@@ -114,7 +126,11 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "L04",
@@ -151,7 +167,11 @@
       "kind": "plant",
       "confidence": "medium",
       "notes": "medium (combines a UF disease rule with the District's hours; check your city or county, which may set stricter hours).",
-      "recheck_before_send": true
+      "recheck_before_send": true,
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "L05",
@@ -191,7 +211,14 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": "high. (The cultivar names are grass varieties, not products.)"
+      "notes": "high. (The cultivar names are grass varieties, not products.)",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        1,
+        1
+      ]
     },
     {
       "id": "L06",
@@ -235,7 +262,12 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        1
+      ]
     },
     {
       "id": "L07",
@@ -263,7 +295,12 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "L08",
@@ -304,7 +341,11 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "L09",
@@ -344,7 +385,13 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        1
+      ]
     },
     {
       "id": "L10",
@@ -386,7 +433,15 @@
       "service": "lawn",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high. (The coffee-can check uses plain water only.)"
+      "notes": "high. (The coffee-can check uses plain water only.)",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
     },
     {
       "id": "L11",
@@ -423,7 +478,12 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "L12",
@@ -455,7 +515,11 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "medium",
-      "notes": "medium (needs EP353's map line to place SWFL in \"south Florida\"; SR 60 runs Tampa to Vero Beach, so all three counties lie south of it)."
+      "notes": "medium (needs EP353's map line to place SWFL in \"south Florida\"; SR 60 runs Tampa to Vero Beach, so all three counties lie south of it).",
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "O01",
@@ -488,7 +552,12 @@
       "service": "lawn",
       "kind": "rule",
       "confidence": "high",
-      "notes": "high. Note: the city page says landscape plants (not turf) may still get fertilizer with 50% or more slow-release nitrogen; the brochure lists \"turf or landscape plants.\" Check the ordinance text before you state the plant rule."
+      "notes": "high. Note: the city page says landscape plants (not turf) may still get fertilizer with 50% or more slow-release nitrogen; the brochure lists \"turf or landscape plants.\" Check the ordinance text before you state the plant rule.",
+      "quote_sources": [
+        0,
+        1,
+        1
+      ]
     },
     {
       "id": "O02",
@@ -523,7 +592,13 @@
       "kind": "rule",
       "confidence": "high",
       "notes": "high for Sarasota County jurisdictions; medium for Manatee (news source, no county code text opened); Charlotte County not verified. Related: the same brochure sets a fertilizer-free zone near water: 10 feet in unincorporated Sarasota County, City of Sarasota, Venice and North Port; 3 feet on Longboat Key (10 feet with a broadcast spreader that has no deflector).",
-      "scope_note": "Sarasota County towns only (unincorporated Sarasota County, City of Sarasota, City of Venice, Longboat Key). Manatee is medium confidence (news source, no county code text opened); Charlotte County not verified. North Port has its own April 1 start (O01)."
+      "scope_note": "Sarasota County towns only (unincorporated Sarasota County, City of Sarasota, City of Venice, Longboat Key). Manatee is medium confidence (news source, no county code text opened); Charlotte County not verified. North Port has its own April 1 start (O01).",
+      "quote_sources": [
+        0,
+        0,
+        1,
+        1
+      ]
     },
     {
       "id": "O03",
@@ -558,7 +633,11 @@
       "service": "lawn",
       "kind": "rule",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "O04",
@@ -591,7 +670,13 @@
       "confidence": "high",
       "notes": "high, but time-sensitive. Re-read the District page the week the email goes out.",
       "recheck_before_send": true,
-      "expires_on": "2027-03-31"
+      "expires_on": "2027-03-31",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "P01",
@@ -627,7 +712,11 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "P02",
@@ -652,7 +741,10 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": "high. (UF calls this an observation; the paper cites supporting oil-palm research.)"
+      "notes": "high. (UF calls this an observation; the paper cites supporting oil-palm research.)",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "P03",
@@ -684,7 +776,11 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": "high. (Research site: UF/IFAS Fort Lauderdale; South Florida conditions.)"
+      "notes": "high. (Research site: UF/IFAS Fort Lauderdale; South Florida conditions.)",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "P04",
@@ -721,7 +817,12 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": "high. Note: PP100 ranked #57 in UF's 2024 top 100 EDIS list (13,119 visits), so homeowners already search for it."
+      "notes": "high. Note: PP100 ranked #57 in UF's 2024 top 100 EDIS list (13,119 visits), so homeowners already search for it.",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "P05",
@@ -758,7 +859,12 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": "high. (The publication names a preventive injection; left out per the no-product rule.)"
+      "notes": "high. (The publication names a preventive injection; left out per the no-product rule.)",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "P06",
@@ -801,7 +907,11 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "M01",
@@ -841,7 +951,13 @@
       "kind": "pest",
       "confidence": "high",
       "notes": "",
-      "recheck_before_send": true
+      "recheck_before_send": true,
+      "quote_sources": [
+        0,
+        0,
+        0,
+        1
+      ]
     },
     {
       "id": "M02",
@@ -880,7 +996,13 @@
       "kind": "pest",
       "confidence": "medium",
       "notes": "medium (two sources; IN1035 gives no distance figure).",
-      "recheck_before_send": true
+      "recheck_before_send": true,
+      "quote_sources": [
+        0,
+        0,
+        1,
+        1
+      ]
     },
     {
       "id": "M03",
@@ -910,7 +1032,11 @@
       "service": "mosquito",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high. Extra hook: UF found most bromeliad mosquitoes are native Wyeomyia, which can bite but are not the main disease carriers."
+      "notes": "high. Extra hook: UF found most bromeliad mosquitoes are native Wyeomyia, which can bite but are not the main disease carriers.",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "M04",
@@ -937,7 +1063,11 @@
       "service": "mosquito",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high for what UF reported; the source is old (1997)."
+      "notes": "high for what UF reported; the source is old (1997).",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "T01",
@@ -975,7 +1105,13 @@
       "service": "termite",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high. IN236 says the species has spread through Florida's coastal regions, with the largest populations in older buildings in the southern half of the state."
+      "notes": "high. IN236 says the species has spread through Florida's coastal regions, with the largest populations in older buildings in the southern half of the state.",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "T02",
@@ -1002,7 +1138,11 @@
       "service": "termite",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "T03",
@@ -1040,7 +1180,12 @@
       "service": "termite",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        1
+      ]
     },
     {
       "id": "T04",
@@ -1066,7 +1211,10 @@
       "service": "termite",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "A01",
@@ -1104,7 +1252,13 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high. Note: IN551 says the ant \"does not bite or sting.\""
+      "notes": "high. Note: IN551 says the ant \"does not bite or sting.\"",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "A02",
@@ -1141,7 +1295,12 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "R01",
@@ -1170,7 +1329,12 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "R02",
@@ -1196,7 +1360,10 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "R03",
@@ -1233,7 +1400,12 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "D01",
@@ -1286,7 +1458,14 @@
       "service": "rodent",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high (each piece is stated directly; the jump distance comes from a county blog, not a research paper)."
+      "notes": "high (each piece is stated directly; the jump distance comes from a county blog, not a research paper).",
+      "quote_sources": [
+        0,
+        0,
+        0,
+        1,
+        2
+      ]
     },
     {
       "id": "D02",
@@ -1330,7 +1509,11 @@
       "kind": "pest",
       "confidence": "high",
       "notes": "",
-      "recheck_before_send": true
+      "recheck_before_send": true,
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "D03",
@@ -1368,7 +1551,12 @@
       "kind": "pest",
       "confidence": "high",
       "notes": "high. (No mixing ratio given here on purpose.)",
-      "recheck_before_send": true
+      "recheck_before_send": true,
+      "quote_sources": [
+        0,
+        0,
+        0
+      ]
     },
     {
       "id": "S01",
@@ -1412,7 +1600,12 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": "high. The \"Tampa region\" in IN576 is the Tampa poison-control region of 21 central Florida counties. IN1366 ranked #27 in UF's 2024 top 100 (20,257 visits)."
+      "notes": "high. The \"Tampa region\" in IN576 is the Tampa poison-control region of 21 central Florida counties. IN1366 ranked #27 in UF's 2024 top 100 (20,257 visits).",
+      "quote_sources": [
+        0,
+        1,
+        1
+      ]
     },
     {
       "id": "S02",
@@ -1439,7 +1632,10 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X01",
@@ -1475,7 +1671,10 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": "Its Table 1 (Miami column, nearest to SWFL) shows St. Augustine can go 3-10 days between waterings in winter and 1-4 in summer."
+      "notes": "Its Table 1 (Miami column, nearest to SWFL) shows St. Augustine can go 3-10 days between waterings in winter and 1-4 in summer.",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X02",
@@ -1519,7 +1718,11 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "medium",
-      "notes": "Medium (two sources)."
+      "notes": "Medium (two sources).",
+      "quote_sources": [
+        0,
+        1
+      ]
     },
     {
       "id": "X03",
@@ -1555,7 +1758,10 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X04",
@@ -1591,7 +1797,10 @@
       "service": "lawn",
       "kind": "plant",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X05",
@@ -1627,7 +1836,10 @@
       "service": "lawn",
       "kind": "pest",
       "confidence": "high",
-      "notes": "The source gives a detergent-and-water mix; left out per the no-mixing rule. Plain wording only."
+      "notes": "The source gives a detergent-and-water mix; left out per the no-mixing rule. Plain wording only.",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X06",
@@ -1664,7 +1876,11 @@
       "service": "tree_shrub",
       "kind": "plant",
       "confidence": "high",
-      "notes": "Queen palm is listed among palms that \"are particularly susceptible.\""
+      "notes": "Queen palm is listed among palms that \"are particularly susceptible.\"",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "X07",
@@ -1702,7 +1918,11 @@
       "kind": "rule",
       "confidence": "high",
       "notes": "First quote: County, City of Sarasota and Venice column. Second quote: North Port column. Longboat Key: 3 feet, or 10 feet with a spreader that has no deflector.",
-      "scope_note": "Sarasota County towns only; Longboat Key and North Port differ (see notes)."
+      "scope_note": "Sarasota County towns only; Longboat Key and North Port differ (see notes).",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "X08",
@@ -1739,7 +1959,11 @@
       "service": "mosquito",
       "kind": "pest",
       "confidence": "high",
-      "notes": "The page names \"vases or flowerpot saucers\" as indoor sources."
+      "notes": "The page names \"vases or flowerpot saucers\" as indoor sources.",
+      "quote_sources": [
+        0,
+        0
+      ]
     },
     {
       "id": "X09",
@@ -1775,7 +1999,10 @@
       "service": "pest",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X10",
@@ -1811,7 +2038,10 @@
       "service": "termite",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     },
     {
       "id": "X11",
@@ -1847,7 +2077,10 @@
       "service": "lawn",
       "kind": "pest",
       "confidence": "high",
-      "notes": ""
+      "notes": "",
+      "quote_sources": [
+        0
+      ]
     }
   ]
 }

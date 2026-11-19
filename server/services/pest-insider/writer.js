@@ -16,6 +16,7 @@
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { getVoiceProfile } = require('../../config/voice-profiles');
+const { attributedQuotes } = require('./facts');
 
 const VOICE_PROFILE = 'waves_phase_3_local';
 const WRITER_MAX_TOKENS = 4000;
@@ -65,12 +66,12 @@ function systemPrompt() {
 
 VOICE: plain, friendly, like a knowledgeable neighbor. Short sentences. No hype, no jokes at the reader's expense, no fear.
 
-YOU RECEIVE: one LEAD FACT (its statement, the source text it came from and who published it) and one SPECIES entry from the Waves pest identifier. You write only from those two. You have no other knowledge to add.
+YOU RECEIVE: one LEAD FACT (its statement and its source texts, each with the publisher it came from) and one SPECIES entry from the Waves pest identifier. You write only from those two. You have no other knowledge to add.
 
 LEAD ("Today I learned"):
 - 2 to 4 short sentences, plus a short headline.
-- Restate the lead fact. Name the publisher once, as given in SAY THE SOURCE AS (for example "UF/IFAS says ...").
-- Every number, month, season and proper name you write must appear in the lead fact's statement or source text, spelled the same way. Do not round, convert, estimate or add a number. Do not use a number word such as "one" or "two" unless the source text uses it.
+- Restate the lead fact. Name a publisher once, as given in say_the_source_as of the source text you restate (for example "UF/IFAS says ..."). Credit each publisher only for its own source text: when two publishers are given, never credit one for what the other wrote.
+- Every number, month, season and proper name you write must appear in the lead fact's statement or source text, spelled the same way. Keep each number with its own unit and its own claim: never move a number from one claim to another. Do not round, convert, estimate or add a number. Do not use a number word such as "one" or "two" unless the source text uses it.
 - Put the fact id in every sentence's fact_id. Never open a sentence with a Latin name.
 - At most one sentence may mention Waves. It explains what we do in plain words, for example that a technician can look at the spot during a regular visit. It never sells: no offer, no booking, no phone number, no price.
 
@@ -82,17 +83,9 @@ NEVER WRITE:
 - The word "safe" in any form, or any promise or guarantee.
 - Anything the source does not say. If a detail is missing, leave it out.
 
-SUBJECT: one leading emoji, then a space, then a plain, specific line, ${maxSubject} characters or fewer in all. Use only facts from the lead fact. PREVIEW: 30 to 90 characters, a short teaser, not a summary.
+SUBJECT: one leading emoji, then a space, then a plain, specific line, ${maxSubject} characters or fewer in all. Use only facts from the lead fact, never from the species entry. PREVIEW: 30 to 90 characters, a short teaser, not a summary.
 
 Return only the JSON object in the required schema.`;
-}
-
-/** The label a sentence uses for a source: "UF/IFAS", "CDC", ... */
-function sourceLabel(fact) {
-  const publisher = fact.sources[0].publisher;
-  if (/^UF\/IFAS/.test(publisher)) return 'UF/IFAS';
-  if (publisher === 'Florida Statutes') return 'Florida law';
-  return publisher;
 }
 
 function userText({ month, leadFact, idItem }) {
@@ -102,8 +95,7 @@ function userText({ month, leadFact, idItem }) {
       fact_id: leadFact.id,
       title: leadFact.title,
       statement: leadFact.statement,
-      source_text: leadFact.quotes,
-      say_the_source_as: sourceLabel(leadFact),
+      source_text: attributedQuotes(leadFact).map(({ text, label }) => ({ text, say_the_source_as: label })),
       ...(leadFact.scope_note ? { scope_note: leadFact.scope_note } : {}),
     },
     species: {
@@ -151,4 +143,4 @@ async function writeIssue({ sendDate, leadFact, idItem, effort = WRITER_EFFORT, 
   return { ok: true, draft: response.json, provider: response.provider, model: response.model };
 }
 
-module.exports = { writeIssue, shapeProblem, systemPrompt, userText, sourceLabel, OUTPUT_SCHEMA };
+module.exports = { writeIssue, shapeProblem, systemPrompt, userText, OUTPUT_SCHEMA };

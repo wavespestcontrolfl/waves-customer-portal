@@ -3,8 +3,9 @@
  *
  * The writer may only restate the lead fact and the species entry it was
  * given. Every lead sentence is checked against that fact's own statement and
- * quotes: its numbers, month and season words, and proper names must all
- * appear there. A sentence that fails is CUT, never rewritten. The issue
+ * quotes: its numbers (with their units), month and season words, and proper
+ * names must all appear there, and a publisher it names must be the one whose
+ * quote it restates. A sentence that fails is CUT, never rewritten. The issue
  * passes only with at least MIN_LEAD_SENTENCES kept sentences and a passing
  * id_item.
  *
@@ -17,6 +18,7 @@
 const { findHallucinatedClaims } = require('../newsletter-validator');
 const { findUnverifiedClaims } = require('../email-division/fact-register');
 const { getVoiceProfile } = require('../../config/voice-profiles');
+const { FACTS, sourceLabel, attributedQuotes } = require('./facts');
 
 const MIN_LEAD_SENTENCES = 2;
 const MAX_LEAD_SENTENCES = 4;
@@ -46,6 +48,8 @@ const BRAND_AND_PRODUCT = [
 const BRAND_RE = new RegExp(`(?:^|[^a-z])(?:${BRAND_AND_PRODUCT.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})s?(?![a-z])`, 'i');
 
 const BANNED_RULES = [
+  // The text lands in HTML (body and preheader): no markup, ever.
+  { re: /[<>]/, reason: 'markup character' },
   { re: /\$/, reason: 'dollar sign' },
   { re: /\b(?:dollars|bucks|prices?|pricing|discounts?|coupons?|cheap(?:er|est)?)\b/i, reason: 'price word' },
   { re: /\b(?:un)?safe(?:ly|r|st|ty)?\b/i, reason: 'the word "safe"' },
@@ -92,6 +96,50 @@ function numberTokens(text) {
   for (const w of t.match(/[a-z]+/g) || []) if (NUMBER_WORDS[w]) tokens.add(String(NUMBER_WORDS[w]));
   if (/%|\bpercent\b/i.test(text)) tokens.add('percent');
   return tokens;
+}
+
+// A number with its unit ("8 months", "7-10 days", "eight feet") must appear
+// with the SAME unit in the source: "10 months" fails against a source that
+// only has "8 months" and "7-10 days", although 10 occurs there.
+const UNITS = {
+  second: 'second', minute: 'minute', hour: 'hour', day: 'day', week: 'week', month: 'month', year: 'year', decade: 'decade',
+  inch: 'inch', inches: 'inch', foot: 'foot', feet: 'foot', yard: 'yard', mile: 'mile', block: 'block',
+  meter: 'meter', metre: 'meter', millimeter: 'millimeter', centimeter: 'centimeter', kilometer: 'kilometer',
+  percent: 'percent', degree: 'degree', pound: 'pound', ounce: 'ounce', gallon: 'gallon', acre: 'acre',
+  hundred: 'hundred', thousand: 'thousand', million: 'million', billion: 'billion', dozen: 'dozen',
+  generation: 'generation', time: 'time',
+};
+const unitOf = (word) => UNITS[word] || UNITS[word.replace(/(?:es|s)$/, '')] || UNITS[word.replace(/s$/, '')] || null;
+const RANGE_WORDS = new Set(['to', 'through', 'thru', 'and', 'or', '-']);
+
+function quantityTokens(text) {
+  return norm(text).toLowerCase()
+    .replace(/(\d)\s*%/g, '$1 percent ')
+    .replace(/(\d)\s*[-\u2013\u2014]\s*(?=\d)/g, '$1 - ')
+    .replace(/(\d)-(?=[a-z])/g, '$1 ')
+    .replace(/°\s*f\b/g, ' degree ')
+    .match(/\d+(?:,\d{3})*(?:\.\d+)?|[a-z]+|-/g) || [];
+}
+
+const tokenNumber = (tok) => (/^\d/.test(tok) ? String(Number(tok.replace(/,/g, ''))) : (NUMBER_WORDS[tok] ? String(NUMBER_WORDS[tok]) : null));
+
+/** "number unit" pairs; a range ("7 to 10 days") gives the unit to every number in it. */
+function quantityPairs(text) {
+  const toks = quantityTokens(text);
+  const pairs = new Set();
+  let run = [];
+  let expectNumber = false;
+  for (const tok of toks) {
+    const n = tokenNumber(tok);
+    if (n !== null && (run.length === 0 || expectNumber)) { run.push(n); expectNumber = false; continue; }
+    if (run.length && !expectNumber && RANGE_WORDS.has(tok)) { expectNumber = true; continue; }
+    if (run.length && !expectNumber && /^(?:up|more|than|about|nearly|almost|over|under|less|least|most|at)$/.test(tok)) continue;
+    const unit = run.length && !expectNumber ? unitOf(tok) : null;
+    if (unit) for (const v of run) pairs.add(`${v} ${unit}`);
+    run = n !== null ? [n] : [];
+    expectNumber = false;
+  }
+  return pairs;
 }
 
 const SEASON_RES = [
@@ -151,6 +199,39 @@ function unknownName(sentence, namesCorpus) {
   return null;
 }
 
+// ── source credit ───────────────────────────────────────────────────────
+// Every publisher name the bank uses, plus the long form of UF/IFAS. A
+// sentence that names one of them must name a source of THIS fact, and the
+// text it restates must come from that publisher's quotes, not another's.
+const LABEL_ALIASES = { 'university of florida': 'UF/IFAS', uf: 'UF/IFAS' };
+const BANK_LABELS = [...new Set(FACTS.flatMap((f) => f.sources.map(sourceLabel)))];
+const STOP = new Set(['that', 'this', 'with', 'from', 'have', 'they', 'their', 'them', 'these', 'those', 'will', 'only', 'into', 'than', 'when', 'your', 'about', 'says', 'said', 'also', 'more', 'most', 'some', 'such', 'been', 'were', 'which', 'what', 'there', 'other', 'here', 'just', 'like', 'over', 'even', 'each', 'very', 'does', 'doesn']);
+const contentWords = (text) => new Set((norm(text).toLowerCase().match(/[a-z]{4,}/g) || [])
+  .filter((w) => !STOP.has(w)).map((w) => w.replace(/(?:es|s)$/, '')));
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const namesLabel = (text, label) => new RegExp(`(?:^|[^a-z/])${escapeRe(label.toLowerCase())}(?![a-z])`, 'i').test(norm(text));
+
+function labelsNamed(text) {
+  const named = new Set(BANK_LABELS.filter((l) => namesLabel(text, l)));
+  for (const [alias, label] of Object.entries(LABEL_ALIASES)) if (namesLabel(text, alias)) named.add(label);
+  return named;
+}
+
+function creditProblem(text, fact) {
+  const named = labelsNamed(text);
+  if (!named.size) return null;
+  const groups = new Map();
+  for (const { text: quote, label } of attributedQuotes(fact)) groups.set(label, `${groups.get(label) || ''} ${quote}`);
+  for (const label of named) if (!groups.has(label)) return `credits ${label}, not a source of this fact`;
+  if (groups.size < 2) return null;
+  const labelWords = contentWords([...groups.keys()].join(' '));
+  const words = [...contentWords(text)].filter((w) => !labelWords.has(w));
+  const score = (label) => { const q = contentWords(groups.get(label)); return words.filter((w) => q.has(w)).length; };
+  const best = Math.max(...[...groups.keys()].map(score));
+  for (const label of named) if (score(label) < best) return `credits ${label} for another source's text`;
+  return null;
+}
+
 // Subject rule from the newsletter voice profile: one leading emoji, max length.
 function subjectFormatProblem(subject) {
   const max = getVoiceProfile('waves_phase_3_local').subjectLineRules.maxLength;
@@ -170,6 +251,8 @@ function sentenceProblem(text, source) {
   if (banned) return banned;
   const have = numberTokens(source.facts);
   for (const n of numberTokens(text)) if (!have.has(n)) return `number not in the source: ${n}`;
+  const havePairs = quantityPairs(source.facts);
+  for (const q of quantityPairs(text)) if (!havePairs.has(q)) return `number and unit not in the source: ${q}`;
   const haveTime = timeTokens(source.facts);
   for (const m of timeTokens(text)) if (!haveTime.has(m)) return `month or season not in the source: ${m}`;
   const name = unknownName(text, source.names);
@@ -192,7 +275,7 @@ const joinSources = (...sources) => ({ facts: sources.map((s) => s.facts).join('
 function leadSentenceProblem(sentence, leadFact, source, state) {
   if (!sentence || typeof sentence.text !== 'string' || !sentence.text.trim()) return 'empty sentence';
   if (sentence.fact_id !== leadFact.id) return `fact_id ${sentence.fact_id} is not the lead fact ${leadFact.id}`;
-  const problem = sentenceProblem(sentence.text, source);
+  const problem = sentenceProblem(sentence.text, source) || creditProblem(sentence.text, leadFact);
   if (problem) return problem;
   if (WAVES_RE.test(sentence.text)) {
     if (state.wavesLines >= 1) return 'more than one Waves line';
@@ -221,10 +304,11 @@ function checkLead(sentences, leadFact, source) {
 function checkDisplay(draft, leadFact, source, withSpecies) {
   const fallbacks = [];
   const headlineText = tidy(draft?.lead?.headline);
-  const headline = headlineText && !sentenceProblem(headlineText, source) ? headlineText : leadFact.title;
+  const headline = headlineText && !sentenceProblem(headlineText, source) && !creditProblem(headlineText, leadFact) ? headlineText : leadFact.title;
   if (headline !== headlineText) fallbacks.push('headline');
   const subjectText = tidy(draft?.subject);
-  const subject = subjectText && !subjectFormatProblem(subjectText) && !sentenceProblem(subjectText, withSpecies) ? subjectText : null;
+  // The subject speaks for the lead alone: a species number or name is not allowed in it.
+  const subject = subjectText && !subjectFormatProblem(subjectText) && !sentenceProblem(subjectText, source) && !creditProblem(subjectText, leadFact) ? subjectText : null;
   if (!subject) fallbacks.push('subject');
   const previewText = tidy(draft?.preview);
   const preview = previewText && !sentenceProblem(previewText, withSpecies) ? previewText : null;
@@ -250,4 +334,6 @@ function checkClaims({ draft, leadFact, idItem }) {
   return { ok: lead.length >= MIN_LEAD_SENTENCES && id.ok, lead, cut, ...display, idItem: id };
 }
 
-module.exports = { checkClaims, sentenceProblem, subjectFormatProblem, bannedReason, factSource, speciesSource, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES };
+module.exports = {
+  checkClaims, sentenceProblem, creditProblem, quantityPairs, subjectFormatProblem, bannedReason, factSource, speciesSource, MIN_LEAD_SENTENCES, MAX_LEAD_SENTENCES,
+};

@@ -13,7 +13,7 @@
  */
 'use strict';
 
-const { newsletterPalette, newsletterSectionTheme } = require('../email-template');
+const { newsletterPalette, newsletterSectionTheme, wrapNewsletter, bodyIsDarkAware } = require('../email-template');
 const { formatDisplayDate } = require('../../utils/date-only');
 
 const SITE = 'https://www.wavespestcontrol.com';
@@ -138,4 +138,20 @@ function renderIssue(issue) {
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: `${text}\n` };
 }
 
-module.exports = { renderIssue, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
+/**
+ * The full email page: the body inside the newsletter chrome. wrapNewsletter
+ * puts the preheader into the HTML as given, so it is escaped here; the
+ * subject never enters the HTML.
+ * @param {{ html_body: string, preview: string }} issue
+ * @param {{ unsubscribeUrl: string }} opts
+ */
+function wrapIssueHtml(issue, { unsubscribeUrl }) {
+  return wrapNewsletter({
+    body: issue.html_body,
+    unsubscribeUrl,
+    preheader: escapeHtml(issue.preview),
+    darkAwareBody: bodyIsDarkAware(issue.html_body),
+  });
+}
+
+module.exports = { renderIssue, wrapIssueHtml, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };

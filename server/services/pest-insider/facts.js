@@ -26,14 +26,23 @@ function sourceProblem(s) {
   return null;
 }
 
-function factProblem(f) {
-  if (!f || typeof f !== 'object') return 'entry is not an object';
-  if (!/^[A-Z]\d{2}$/.test(String(f.id))) return 'id must look like P03';
-  if (!isText(f.title) || !isText(f.statement)) return 'title and statement are required';
+function quotesProblem(f) {
   if (!Array.isArray(f.quotes) || !f.quotes.length || !f.quotes.every(isText)) return 'quotes must be a non-empty array of text';
   if (!Array.isArray(f.sources) || !f.sources.length) return 'sources must be non-empty';
   const bad = f.sources.map(sourceProblem).find(Boolean);
   if (bad) return bad;
+  // quote_sources[i] is the index in `sources` of the publisher quotes[i] came from.
+  if (!Array.isArray(f.quote_sources) || f.quote_sources.length !== f.quotes.length
+    || !f.quote_sources.every((i) => Number.isInteger(i) && i >= 0 && i < f.sources.length)) return 'quote_sources must give a source index for each quote';
+  return null;
+}
+
+function factProblem(f) {
+  if (!f || typeof f !== 'object') return 'entry is not an object';
+  if (!/^[A-Z]\d{2}$/.test(String(f.id))) return 'id must look like P03';
+  if (!isText(f.title) || !isText(f.statement)) return 'title and statement are required';
+  const quoteBad = quotesProblem(f);
+  if (quoteBad) return quoteBad;
   if (!Array.isArray(f.months) || !f.months.length || !f.months.every((m) => Number.isInteger(m) && m >= 1 && m <= 12)) return 'months must be integers 1-12';
   if (!SERVICES.has(f.service)) return `service must be one of ${[...SERVICES].join(', ')}`;
   if (!KINDS.has(f.kind)) return `kind must be one of ${[...KINDS].join(', ')}`;
@@ -92,4 +101,15 @@ function factsForSend(sendDate, { excludeIds = [] } = {}) {
 
 const factById = (id) => FACTS.find((f) => f.id === id) || null;
 
-module.exports = { FACTS, SERVICES, factsForSend, factById, sendDateET, validateBank };
+/** The name a sentence gives a source: "UF/IFAS", "CDC", "Florida law", ... */
+function sourceLabel(source) {
+  const publisher = source.publisher;
+  if (/^UF\/IFAS/.test(publisher)) return 'UF/IFAS';
+  if (publisher === 'Florida Statutes') return 'Florida law';
+  return publisher;
+}
+
+/** Each quote with the label of the publisher it came from. */
+const attributedQuotes = (fact) => fact.quotes.map((text, i) => ({ text, label: sourceLabel(fact.sources[fact.quote_sources[i]]) }));
+
+module.exports = { FACTS, SERVICES, factsForSend, factById, sendDateET, validateBank, sourceLabel, attributedQuotes };

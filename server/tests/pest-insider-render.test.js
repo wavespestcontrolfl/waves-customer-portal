@@ -1,5 +1,5 @@
 // Pest Insider renderer: escaping, optional blocks, absolute links, dark-mode hooks.
-const { renderIssue, FORWARD_LINE } = require('../services/pest-insider/render');
+const { renderIssue, wrapIssueHtml, FORWARD_LINE } = require('../services/pest-insider/render');
 const { bodyIsDarkAware } = require('../services/email-template');
 
 const BASE = {
@@ -83,5 +83,16 @@ describe('renderIssue', () => {
   test('the body is dark-mode aware like the other newsletter bodies', () => {
     expect(bodyIsDarkAware(renderIssue({ ...BASE, ...DEMO }).html_body)).toBe(true);
     expect(bodyIsDarkAware(renderIssue(BASE).html_body)).toBe(true);
+  });
+});
+
+describe('wrapIssueHtml', () => {
+  test('the full page escapes the preview, which wrapNewsletter places raw', () => {
+    const issue = renderIssue({ ...BASE, preview: 'Look <script>alert(1)</script> & "see"' });
+    const html = wrapIssueHtml(issue, { unsubscribeUrl: '{{unsubscribe_url}}' });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('Look &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;see&quot;');
+    expect(html).toContain(issue.html_body);
+    expect(html).toContain('{{unsubscribe_url}}');
   });
 });

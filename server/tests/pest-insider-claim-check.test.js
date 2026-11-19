@@ -1,6 +1,6 @@
 // Pest Insider claim check: a lead sentence survives only when its numbers, months
 // and names all come from the lead fact. A failing sentence is cut, never rewritten.
-const { checkClaims, sentenceProblem, factSource, MIN_LEAD_SENTENCES } = require('../services/pest-insider/claim-check');
+const { checkClaims, sentenceProblem, creditProblem, quantityPairs, factSource, MIN_LEAD_SENTENCES } = require('../services/pest-insider/claim-check');
 const { factById } = require('../services/pest-insider/facts');
 const { SPECIES } = require('../services/pest-insider/plan');
 
@@ -104,6 +104,55 @@ describe('lead sentences', () => {
     expect(sentenceProblem('Formosan termites swarm again after storms in June.', factSource(formosan))).toMatch(/tripwire|month/);
   });
 
+  test('a number must keep its own unit: a source number moved to another claim is cut', () => {
+    const src = factSource(FACT); // "up to 8 months" (dry eggs) and "7-10 days" (egg to adult)
+    expect([...quantityPairs(src.facts)].sort()).toEqual(['10 day', '7 day', '8 month']);
+    expect(sentenceProblem('Eggs survive dry for 10 months.', src)).toMatch(/number and unit not in the source: 10 month/);
+    expect(sentenceProblem('An egg becomes an adult in 8 days.', src)).toMatch(/number and unit not in the source: 8 day/);
+    expect(sentenceProblem('An egg takes 7 to 10 days to become an adult.', src)).toBeNull();
+    expect(sentenceProblem('Eggs can survive drying out for up to eight months.', src)).toBeNull();
+    expect(sentenceProblem('Eggs last 8-month dry spells.', src)).toBeNull();
+  });
+
+  test('a sentence credits only the publisher whose quote it restates', () => {
+    const M02 = factById('M02'); // CDC: yard mosquitoes fly a few blocks; UF/IFAS IN1035: salt marsh long flight range
+    expect(creditProblem('CDC says salt marsh mosquitoes have a long flight range and can be found far inland.', M02)).toMatch(/credits CDC for another source/);
+    expect(creditProblem('UF/IFAS says salt marsh mosquitoes have a long flight range and can be found far inland.', M02)).toBeNull();
+    expect(creditProblem('The CDC says these mosquitoes only fly a few blocks in their lifetime.', M02)).toBeNull();
+    expect(creditProblem('UF/IFAS says these mosquitoes only fly a few blocks in their lifetime.', M02)).toMatch(/credits UF\/IFAS for another source/);
+    // A publisher this fact does not cite is cut, the UF long form included.
+    expect(creditProblem('WUSF says eggs survive drying out.', FACT)).toMatch(/credits WUSF, not a source of this fact/);
+    expect(creditProblem('The University of Florida says eggs survive drying out.', FACT)).toMatch(/credits UF\/IFAS, not a source/);
+    expect(creditProblem('Eggs survive drying out for up to 8 months.', FACT)).toBeNull();
+  });
+
+  test('a lead sentence that credits the wrong publisher is cut', () => {
+    const M02 = factById('M02');
+    const r = checkClaims({
+      draft: {
+        subject: '🦟 Some mosquitoes stay close to home',
+        preview: 'Not all biters travel.',
+        lead: {
+          headline: 'Two kinds of travelers',
+          sentences: [
+            { text: 'The CDC says these mosquitoes only fly a few blocks in their lifetime.', fact_id: 'M02' },
+            { text: 'UF/IFAS says salt marsh mosquitoes have a long flight range and can be found far inland.', fact_id: 'M02' },
+            { text: 'The CDC says salt marsh mosquitoes can be found far inland.', fact_id: 'M02' },
+          ],
+        },
+        id_item: { text: SPECIES_ENTRY.fact },
+      },
+      leadFact: M02,
+      idItem: SPECIES_ENTRY,
+    });
+    expect(r.lead).toHaveLength(2);
+    expect(r.cut).toEqual([{ text: 'The CDC says salt marsh mosquitoes can be found far inland.', reason: expect.stringMatching(/credits CDC/) }]);
+  });
+
+  test('markup characters are cut', () => {
+    expect(sentenceProblem('Eggs survive <b>8 months</b>.', factSource(FACT))).toBe('markup character');
+  });
+
   test('fact_id must be the plan\'s lead fact', () => {
     const r = run([sentence(GOOD_1), sentence(GOOD_2), sentence(GOOD_2, 'P03')]);
     expect(r.cut).toEqual([{ text: GOOD_2, reason: expect.stringContaining('is not the lead fact M01') }]);
@@ -154,6 +203,15 @@ describe('overall verdict', () => {
     expect(r.subject).toBeNull();
     expect(r.preview).toBeNull();
     expect(r.fallbacks).toEqual(['headline', 'subject', 'preview']);
+  });
+
+  test('the subject speaks for the lead fact alone; the preview may use the species', () => {
+    // "150 feet" and "Yellow Fever Mosquito" come from the species entry, not from M01.
+    const fromSpecies = run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Breeding within 150 feet', preview: 'Breeding within 150 feet of the patio.' });
+    expect(fromSpecies.subject).toBeNull();
+    expect(fromSpecies.preview).toBe('Breeding within 150 feet of the patio.');
+    expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Yellow Fever Mosquito eggs wait 8 months' }).subject).toBeNull();
+    expect(run([sentence(GOOD_1), sentence(GOOD_2)], { subject: '🦟 Eggs wait 10 months dry' }).subject).toBeNull();
   });
 
   test('a subject needs exactly one leading emoji and the voice-profile length', () => {

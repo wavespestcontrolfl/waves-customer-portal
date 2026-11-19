@@ -44,9 +44,22 @@ describe('writeIssue', () => {
     await writeIssue({ sendDate: '2026-12-03', leadFact: FACT, idItem: SPECIES_ENTRY });
     const sent = JSON.parse(dispatchWithFallback.mock.calls[0][1].text);
     expect(sent.send_month).toBe('December');
-    expect(sent.lead_fact).toMatchObject({ fact_id: 'M01', statement: FACT.statement, source_text: FACT.quotes, say_the_source_as: 'CDC' });
+    expect(sent.lead_fact).toMatchObject({ fact_id: 'M01', statement: FACT.statement });
+    expect(sent.lead_fact.source_text).toEqual(FACT.quotes.map((text) => ({ text, say_the_source_as: 'CDC' })));
     expect(sent.species).toEqual({ name: SPECIES_ENTRY.name, category: SPECIES_ENTRY.category, fact: SPECIES_ENTRY.fact, note: SPECIES_ENTRY.note });
     expect(Object.keys(sent).sort()).toEqual(['lead_fact', 'send_month', 'species']);
+  });
+
+  test('each quote of a two-publisher fact carries its own publisher', async () => {
+    const { factById } = require('../services/pest-insider/facts');
+    const M02 = factById('M02');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: REPLY, provider: 'anthropic', model: 'm' });
+    await writeIssue({ sendDate: '2026-07-02', leadFact: M02, idItem: SPECIES_ENTRY });
+    const sent = JSON.parse(dispatchWithFallback.mock.calls[0][1].text);
+    const byLabel = sent.lead_fact.source_text.map((q) => q.say_the_source_as);
+    expect(byLabel).toEqual(['CDC', 'CDC', 'UF/IFAS', 'UF/IFAS']);
+    expect(sent.lead_fact.source_text[2].text).toMatch(/long flight range/);
+    expect(sent.lead_fact).not.toHaveProperty('say_the_source_as');
   });
 
   test('a reply that is not the schema shape fails over through the chain validator', async () => {
@@ -76,7 +89,7 @@ describe('writeIssue', () => {
 describe('prompt, schema and lane registration', () => {
   test('the prompt carries the writing rules', () => {
     const p = systemPrompt();
-    for (const rule of [/Restate the lead fact/, /Name the publisher/, /DIY steps/, /pesticide, active ingredient, product or brand/, /price or a dollar sign/, /"safe"/, /At most one sentence may mention Waves/, /80 characters/]) expect(p).toMatch(rule);
+    for (const rule of [/Restate the lead fact/, /Name a publisher once/, /Credit each publisher only for its own source text/, /never move a number from one claim to another/, /DIY steps/, /pesticide, active ingredient, product or brand/, /price or a dollar sign/, /"safe"/, /At most one sentence may mention Waves/, /80 characters/]) expect(p).toMatch(rule);
     expect(userText({ month: 'December', leadFact: FACT, idItem: SPECIES_ENTRY })).not.toMatch(/\bnull\b/);
   });
 

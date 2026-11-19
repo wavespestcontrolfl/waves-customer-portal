@@ -50,9 +50,27 @@ if (modes.length !== 1) {
   process.exit(2);
 }
 
-// No database for this process, so no ledger row and no other write is possible.
-delete process.env.DATABASE_URL;
-delete process.env.DATABASE_PUBLIC_URL;
+// No database for this process, so no ledger row and no other write is possible:
+// 1. no credentials: every name knexfile.js can rebuild DATABASE_URL from is
+//    removed, and WAVES_LOCAL_DEV=1 stops config/load-env.js from reloading
+//    them from the checkout's .env;
+// 2. no telemetry: GATE_LLM_DISPATCH_METRICS is forced off;
+// 3. no client: server/models/db.js is replaced in the require cache by a stub
+//    that throws on any use, before any portal module can load the real one.
+for (const name of Object.keys(process.env)) {
+  if (/^(DATABASE_|POSTGRES_|PG[A-Z]+$)/.test(name)) delete process.env[name];
+}
+process.env.WAVES_LOCAL_DEV = '1';
+process.env.GATE_LLM_DISPATCH_METRICS = 'false';
+const dbPath = require.resolve('../../server/models/db');
+const noDb = new Proxy(function noDatabase() {}, {
+  get(target, prop) {
+    if (prop === 'then' || typeof prop === 'symbol') return undefined;
+    throw new Error(`pest-insider-sample: no database in this process (db.${String(prop)})`);
+  },
+  apply() { throw new Error('pest-insider-sample: no database in this process'); },
+});
+require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: noDb };
 
 if (flags.has('--max-runner')) {
   // Must run before any portal module loads: the Anthropic SDK reads fetch at import.
@@ -64,7 +82,8 @@ if (flags.has('--max-runner')) {
 }
 
 const { buildIssue } = require('../../server/services/pest-insider');
-const { wrapNewsletter, bodyIsDarkAware } = require('../../server/services/email-template');
+const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
+const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 
 // Stand-in writer for --stub: restates the statement, no model.
 async function stubWrite({ leadFact, idItem }) {
@@ -96,7 +115,7 @@ async function main() {
   for (const sendDate of dates) {
     const result = await buildIssue({
       sendDate,
-      recent,
+      recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW) },
       write: flags.has('--stub') ? stubWrite : undefined,
       ...(flags.has('--demo-blocks') ? DEMO : {}),
     });
@@ -109,15 +128,18 @@ async function main() {
       const { issue } = result;
       console.log(`   subject: ${issue.subject}\n   preview: ${issue.preview}`);
       const base = path.join(outDir, `pest-insider-${sendDate}`);
-      const html = wrapNewsletter({ body: issue.html_body, unsubscribeUrl: '{{unsubscribe_url}}', preheader: issue.preview, darkAwareBody: bodyIsDarkAware(issue.html_body) });
+      const html = wrapIssueHtml(issue, { unsubscribeUrl: '{{unsubscribe_url}}' });
       fs.writeFileSync(`${base}.html`, `<!-- subject: ${issue.subject.replace(/--/g, '- -')} -->\n${html}`);
       fs.writeFileSync(`${base}.txt`, `Subject: ${issue.subject}\nPreview: ${issue.preview}\n\n${issue.text_body}`);
       console.log(`   wrote ${base}.html and .txt`);
     }
     for (const c of d.cut) console.log(`   CUT (${c.reason}): ${c.text}`);
     if (d.fallbacks.length) console.log(`   fallbacks used: ${d.fallbacks.join(', ')}`);
-    if (d.factId) recent.factIds.push(d.factId);
-    if (d.speciesSlug) recent.speciesSlugs.push(d.speciesSlug);
+    // Only a built issue counts toward the rotation, like a sent one will.
+    if (result.ok) {
+      recent.factIds.push(d.factId);
+      recent.speciesSlugs.push(d.speciesSlug);
+    }
   }
   process.exit(failed ? 1 : 0);
 }
