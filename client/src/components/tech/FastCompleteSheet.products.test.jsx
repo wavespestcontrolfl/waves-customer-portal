@@ -75,6 +75,8 @@ const COMMON = [
   { productId: 'retired', visits: 3, usualUnit: 'g', usualAmount: 1 },
 ];
 
+// This home's Taurus count so far this year (under the 4-a-year label limit, so the house mix keeps Taurus).
+const HOUSE_COUNT = { count: 0, limit: 4, year: 2026 };
 const CONTEXT_SERVICE = {
   id: 'svc-1', customerName: 'Pat Jones', customerId: 'cust-1', propertyId: 'prop-1',
   serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
@@ -89,7 +91,7 @@ function makeRequest({ products = CATALOG, commonProducts = COMMON, stockAdvisor
     calls.push({ path, options });
     if (path.split('?')[0].endsWith('/pest-recap/context')) {
       const rows = typeof products === 'function' ? products() : products;
-      return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
+      return { ok: true, eligible: true, service: CONTEXT_SERVICE, products: rows, commonProducts, existingRecord: null, taurusYearly: HOUSE_COUNT, ...(stockAdvisory ? { stockAdvisory: true } : {}) };
     }
     if (path.endsWith('/tech-rating-allowed')) return { allowed: false };
     if (path.endsWith('/tech-tips')) return { available: false };
@@ -475,7 +477,7 @@ describe('FastCompleteSheet added product amounts', () => {
     expectNoRate(productIn(body, 'gentrol'));
     expect(productIn(body, 'advion')).toMatchObject({ rate: 0.5, rateUnit: 'g/spot', totalAmount: 2, amountUnit: 'g' });
     // The house mix still starts at the rate the full form seeds.
-    expect(productIn(body, 'taurus')).toMatchObject({ rate: 4, rateUnit: 'oz' });
+    expect(productIn(body, 'taurus')).toMatchObject({ rate: 1.6, rateUnit: 'oz' });
   });
 
   test('a label rate kept in mL is neither shown nor recorded', async () => {

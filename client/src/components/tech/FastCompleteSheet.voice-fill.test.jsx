@@ -79,7 +79,7 @@ function makeRequest({ fill = FILL, fillError = null, products = CATALOG, contex
       if (answer.status >= 200 && answer.status < 300) return answer.body;
       throw Object.assign(new Error(answer.body?.error || `Request failed (${answer.status})`), { status: answer.status, code: answer.body?.code });
     }
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: CONTEXT_SERVICE, products, ...context };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, reportFlow: true, service: CONTEXT_SERVICE, products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.endsWith('/photos')) return { photos: [] };

@@ -39,7 +39,7 @@ function makeRequest({ wrapUp = true, seeds = { exteriorMinutes: 30, interiorMin
   const request = vi.fn(async (path, options) => {
     calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
     const bare = path.split('?')[0];
-    if (bare.endsWith('/pest-recap/context')) return { ok: true, eligible: true, service: VISIT, products: CATALOG, existingRecord: null, ...(wrapUp ? { wrapUp: true } : {}) };
+    if (bare.endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, service: VISIT, products: CATALOG, existingRecord: null, ...(wrapUp ? { wrapUp: true } : {}) };
     if (bare.endsWith('/tech-rating-allowed')) return { allowed: true, scaleLabels: null };
     if (bare.endsWith('/reentry-defaults')) return seeds;
     if (bare === '/admin/schedule/next-visit') return { nextVisit };

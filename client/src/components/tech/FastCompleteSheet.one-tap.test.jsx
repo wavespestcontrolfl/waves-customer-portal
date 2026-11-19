@@ -48,7 +48,7 @@ function makeRequest({
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: options?.body ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service, products: typeof products === 'function' ? products() : products, ...context };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, reportFlow: true, service, products: typeof products === 'function' ? products() : products, ...context };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return { available: false, promises: [] };

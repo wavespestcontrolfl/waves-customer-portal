@@ -56,7 +56,7 @@ function makeRequest({ reportFlow = false, asks = { enabled: true, lane: 'pest',
     calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
     const bare = path.split('?')[0];
     if (bare.endsWith('/pest-recap/context')) {
-      return { ok: true, eligible: true, ...(reportFlow ? { reportFlow: true } : {}), service: VISIT, products: CATALOG, existingRecord: null };
+      return { ok: true, eligible: true, taurusYearly: { count: 0, limit: 4, year: 2026 }, ...(reportFlow ? { reportFlow: true } : {}), service: VISIT, products: CATALOG, existingRecord: null };
     }
     if (bare.endsWith('/reservice-asks')) {
       askReads += 1;

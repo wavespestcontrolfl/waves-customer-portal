@@ -41,6 +41,8 @@ function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = 
         service,
         products,
         existingRecord: null,
+        // Under the 4-a-year Taurus label limit, so the house mix keeps Taurus.
+        taurusYearly: { count: 0, limit: 4, year: 2026 },
       };
     }
     if (path.endsWith('/tech-rating-allowed')) return rating;
@@ -136,10 +138,10 @@ describe('FastCompleteSheet', () => {
     const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft', applicationArea: 'Outside' });
-    // At perimeter spray the shared resolver gives the 4-oz house default
-    // rate — what the full form seeds. The amount keeps the fl oz the tile
+    // At perimeter spray the shared resolver gives the house mix's own rate
+    // for Taurus (1.6 oz, the mix's total) — what the full form seeds. The amount keeps the fl oz the tile
     // showed: a liquid is never recorded in a bare oz.
-    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz', amountUnit: 'fl_oz' });
+    expect(taurus).toMatchObject({ rate: 1.6, rateUnit: 'oz', amountUnit: 'fl_oz' });
     expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
     expect(body.products.map((p) => p.productId).sort()).toEqual(['surfactant', 'talstar', 'taurus']);
   }, 15000);
@@ -439,7 +441,7 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
   });
 
-  test('the 4-oz house default at perimeter spray is never flagged over the label', async () => {
+  test('the house default at perimeter spray is never flagged over the label', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
@@ -447,9 +449,9 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
-    // The house default is 4 oz in the tank, not Taurus's 0.2-0.8 fl oz per
-    // gallon label, so there is no label maximum to be over.
-    expect(screen.getByLabelText('Taurus SC rate').value).toBe('4');
+    // The house default is the mix's 1.6 oz in the tank, not Taurus's 0.2-0.8
+    // fl oz per gallon label, so there is no label maximum to be over.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('1.6');
     expect(screen.queryByText(/label max/)).toBeNull();
   });
 
