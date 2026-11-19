@@ -2067,11 +2067,12 @@ Unsupported families/cadences, recurring foam and commercial programs return
 `PUT /api/estimates/:token/accept` on an estimate with `source = 'plan_start'` (the portal
 pricing card's first-plan quote, `GATE_PORTAL_PLAN_START`) re-runs the mint's eligibility inside
 the accept transaction, at the same point and under the same locks as the plan-restart re-check
-(comms advisory lock, then the customers row `FOR UPDATE`): the customer must still be active, not
-churned, not deleted, carry no plan membership on the row (a real WaveGuard tier, a plan billing
-lane or a monthly rate), and own no live recurring service of any family (rodent and commercial
-rows included) and no annual prepay term covering today, since the mint priced the option with no
-WaveGuard qualifiers. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
+(comms advisory lock, then the customers row `FOR UPDATE`): the customer must still be active (the
+flag exactly true: customer auth reads NULL as inactive), not churned, not deleted, carry no plan
+membership on the row (a real WaveGuard tier, a plan billing lane or a monthly rate), and own no
+live recurring service of any family (rodent and commercial rows included, and a visit still en
+route or on site after ET midnight) and no annual prepay term covering today, since the mint priced
+the option with no WaveGuard qualifiers. Otherwise it answers 409 `{ error, code: 'PLAN_START_STATE_CHANGED' }` (the
 error reads "This account changed since this estimate was created — please go back to your portal
 for a current price.", or a retry line when the state cannot be read) and writes nothing. Estimates of every other source are unchanged.
 

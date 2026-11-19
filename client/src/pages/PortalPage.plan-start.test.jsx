@@ -98,6 +98,18 @@ it('falls back to today\'s request on a 409 (or any error), so the customer neve
   expect(await screen.findByText('Request sent')).toBeInTheDocument();
 });
 
+it('turns the button off while a new answer loads: the option on screen is the old answer\'s', async () => {
+  await priceIt(priced(OFFER));
+  const start = await screen.findByRole('button', { name: 'See my price and book' });
+  api.queryCustomerPricing.mockReturnValue(new Promise(() => {}));
+  fireEvent.click(screen.getByRole('button', { name: 'Get Pricing' }));
+  expect(await screen.findByRole('button', { name: 'Pricing...' })).toBeDisabled();
+  expect(start).toBeDisabled();
+  fireEvent.click(start);
+  expect(api.startPlan).not.toHaveBeenCalled();
+  expect(api.createRequest).not.toHaveBeenCalled();
+});
+
 it('offers the button per option: another option the server did not list keeps today\'s request', async () => {
   await priceIt(pricedTwo());
   expect(await screen.findByRole('button', { name: 'See my price and book' })).toBeInTheDocument();

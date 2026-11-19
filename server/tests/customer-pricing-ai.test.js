@@ -2169,6 +2169,26 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect('planStart' in await ask(plain())).toBe(false);
   });
 
+  test('pest offers quarterly only: the estimate page opens a pest estimate on quarterly', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    // Full property facts, so every pest option prices without a review marker.
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: plain(),
+    });
+    const priced = result.options.filter((o) => o.monthly > 0 && !o.manualReview).map((o) => o.id);
+    expect(priced).toEqual(['pest-quarterly', 'pest-bimonthly', 'pest-monthly']);
+    expect(result.planStart).toEqual({ optionIds: ['pest-quarterly'] });
+  });
+
+  test('absent for an account whose active flag is NULL (customer auth reads it as inactive)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    expect('planStart' in await ask(plain({ active: null }))).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
   test('a service the route cannot book (rodent bait) is never offered', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
     const result = await ask(plain(), null, 'Can you add rodent bait stations?');

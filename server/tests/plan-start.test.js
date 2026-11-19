@@ -42,6 +42,8 @@ jest.mock('../services/self-booking-plan-sync', () => ({
   },
   isCommercialServiceRow: () => false,
   isRodentLedServiceRow: (row) => /rodent/i.test(String(row.service_type || '')),
+  // The shared live-plan reader (waveguard-existing-services) skips one-time booking sources.
+  isOneTimeBookingSource: (source) => ['estimate-accept', 'quote-wizard-onetime', 'admin-manual-booking-resend'].includes(String(source || '').toLowerCase()),
   uniqueServiceFamilies: (keys) => Array.from(new Set(keys.map((k) => ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'].find((f) => k === f || k.startsWith(`${f}_`)) || k))),
 }));
 
@@ -201,6 +203,8 @@ function builder(table) {
   b.orderBy = () => b;
   b.leftJoin = () => b;
   b.select = () => b;
+  // The shared live-plan reader (loadActiveRecurringServiceRows) asks which columns exist.
+  b.columnInfo = async () => ({ is_recurring: {}, is_callback: {}, source: {} });
   b.forUpdate = () => b;
   b.limit = (n) => { limitN = n; return b; };
   b.first = async () => rows()[0] || null;
@@ -250,6 +254,14 @@ const CUSTOMER = {
   address_line1: '1 Main St', city: 'Parrish', state: 'FL', zip: '34219', property_type: null,
 };
 const recompute = jest.fn();
+// The frozen bundle in the real builder's shape (services[], each with defaultFrequencyKey and
+// frequencies[]): one section for the minted family whose opening entry carries the row's own
+// totals. A test that moves the page's opening entry passes `entry`.
+function openingBundle(row, entry = {}) {
+  const family = JSON.parse(row.estimate_data).planStart?.families?.[0];
+  return { services: [{ key: family, defaultFrequencyKey: 'opening', frequencies: [{ key: 'opening', monthly: row.monthly_total, annual: row.annual_total, perVisit: null, ...entry }] }] };
+}
+const snapshotWith = (entry) => async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: openingBundle(row, entry) } });
 function deps(overrides = {}) {
   const pricingAi = require('../services/customer-pricing-ai');
   return {
@@ -274,7 +286,7 @@ function deps(overrides = {}) {
     customerHasOnlyPrimaryPremises: async () => true,
     hasVerifiedOverrides: async () => false,
     bundleUtils: { pricingBundleMatchesEstimateTotals: () => true },
-    buildEstimateSendSnapshot: async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: { frozen: true } } }),
+    buildEstimateSendSnapshot: snapshotWith({}),
     ...overrides,
   };
 }
@@ -319,6 +331,8 @@ function pricedAs(line) {
 }
 const PEST_LINE = engineLine('pest_control', 31.67);
 const BIMONTHLY_LINE = engineLine('pest_control', 44, { visitsPerYear: 6 });
+const LAWN_LINE = engineLine('lawn_care', 49, { visitsPerYear: 9 });
+const PREMIUM_LAWN_LINE = engineLine('lawn_care', 65, { visitsPerYear: 12 });
 const FIXED_NOW = () => new Date('2026-11-19T12:00:00Z');
 const TOKEN_BYTES = () => Buffer.from('abcdef0123456789');
 function mint(overrides = {}, depOverrides = {}) {
@@ -359,11 +373,17 @@ describe('mintPlanStartEstimate', () => {
     expect(tables.service_requests).toBeUndefined();
   });
 
-  test('prices the SELECTED option, not the generic first one (bi-monthly pest)', async () => {
-    recompute.mockResolvedValue(pricedAs(BIMONTHLY_LINE));
-    await mint({ optionId: 'pest-bimonthly', shown: shownOf(BIMONTHLY_LINE) });
-    expect(recompute.mock.calls[0][0].engineInputs.services.pest.frequency).toBe('bimonthly');
-    expect(JSON.parse(tables.estimates[0].estimate_data).planStart.optionId).toBe('pest-bimonthly');
+  test('prices the SELECTED option, not the generic first one (premium lawn)', async () => {
+    recompute.mockResolvedValue(pricedAs(PREMIUM_LAWN_LINE));
+    await mint({ serviceKey: 'lawn_care', optionId: 'lawn-premium', shown: shownOf(PREMIUM_LAWN_LINE) });
+    expect(recompute.mock.calls[0][0].engineInputs.services.lawn.tier).toBe('premium');
+    expect(JSON.parse(tables.estimates[0].estimate_data).planStart.optionId).toBe('lawn-premium');
+  });
+
+  test('freezes the page snapshot with no delivery stamp: nothing was delivered', async () => {
+    const snapshot = jest.fn(snapshotWith({}));
+    await mint({}, { buildEstimateSendSnapshot: snapshot });
+    expect(snapshot).toHaveBeenCalledWith(expect.objectContaining({ source: 'plan_start' }), FIXED_NOW, { delivered: false });
   });
 
   test('termite prices through the termite_bait family, its station setup checked like every shown amount', async () => {
@@ -389,6 +409,18 @@ describe('mintPlanStartEstimate', () => {
     test('a member owning a DIFFERENT family is still refused', async () => {
       tables.scheduled_services = [{ id: 'live-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Lawn Care Program' }];
       await refused('not_eligible');
+    });
+
+    test('a recurring visit still on site after ET midnight is a plan (the shared live-plan reader)', async () => {
+      // Past-dated and not a rebook row: the restart read alone drops it.
+      tables.scheduled_services = [{ id: 'ip-1', customer_id: 'cust-1', status: 'on_site', is_recurring: true, scheduled_date: '2000-01-01', service_type: 'Quarterly Pest Control' }];
+      expect(await actualRestart._test.ownedResidualFamilies(fakeTrx(), 'cust-1')).toEqual([]);
+      await refused('not_eligible');
+    });
+
+    test('bi-monthly or monthly pest is not offered: the estimate page opens pest on quarterly', async () => {
+      await refused('not_eligible', { optionId: 'pest-bimonthly', shown: shownOf(BIMONTHLY_LINE) });
+      await refused('not_eligible', { optionId: 'pest-monthly', shown: shownOf(BIMONTHLY_LINE) });
     });
 
     test('a live rodent monitoring plan is a plan too (the restart residual skips rodent-led rows)', async () => {
@@ -424,8 +456,10 @@ describe('mintPlanStartEstimate', () => {
       await refused('not_eligible');
     });
 
-    test('active drifted to false, or a missing / deleted row, refuses', async () => {
+    test('active drifted to false or NULL (customer auth reads NULL as inactive), or a missing / deleted row, refuses', async () => {
       tables.customers = [{ ...LEAD, active: false }];
+      await refused('not_eligible');
+      tables.customers = [{ ...LEAD, active: null }];
       await refused('not_eligible');
       tables.customers = [{ ...LEAD, deleted_at: '2026-11-01' }];
       await refused('not_eligible');
@@ -506,6 +540,36 @@ describe('mintPlanStartEstimate', () => {
     });
   });
 
+  describe('the estimate page opens on the card\'s price', () => {
+    test.each([
+      ['another monthly price', snapshotWith({ monthly: 31.68 })],
+      ['another per-application price', snapshotWith({ perVisit: 94 })],
+      ['no section for the family', async (row) => ({ ...JSON.parse(row.estimate_data), sendSnapshot: { pricingBundle: { services: [] } } })],
+    ])('an opening entry with %s refuses (priced by hand)', async (_label, buildEstimateSendSnapshot) => {
+      await expect(mint({}, { buildEstimateSendSnapshot })).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+    });
+
+    test('pest compares per application: its yearly figure (monthly x 12) can sit cents off the engine total', async () => {
+      // The engine's quarterly total is 4 x 95 = 380; the page's entry carries 31.67 x 12 = 380.04, which the
+      // generic "some entry within a cent of the totals" check rejects.
+      const line = engineLine('pest_control', 31.67, { annualAfterDiscount: 380 });
+      recompute.mockResolvedValue(pricedAs(line));
+      const result = await mint({ shown: shownOf(line) }, {
+        bundleUtils: { pricingBundleMatchesEstimateTotals: () => false },
+        buildEstimateSendSnapshot: snapshotWith({ annual: 380.04, perVisit: 95 }),
+      });
+      expect(result.reused).toBe(false);
+    });
+
+    test('an entry with no per-application price (lawn) compares the yearly price behind the monthly', async () => {
+      recompute.mockResolvedValue(pricedAs(LAWN_LINE));
+      const lawn = { serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE) };
+      await expect(mint(lawn, { buildEstimateSendSnapshot: snapshotWith({ annual: 587.99 }) })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+      tables.estimates = [];
+      await expect(mint(lawn)).resolves.toMatchObject({ reused: false });
+    });
+  });
+
   describe('reuse and lineage', () => {
     test('a live plan_start estimate for the same option at today\'s identical offer is handed back, not re-minted', async () => {
       const first = await mint();
@@ -525,8 +589,8 @@ describe('mintPlanStartEstimate', () => {
 
     test('a quote for ANOTHER option is archived and a fresh one minted', async () => {
       const first = await mint();
-      recompute.mockResolvedValue(pricedAs(BIMONTHLY_LINE));
-      const next = await mint({ optionId: 'pest-bimonthly', shown: shownOf(BIMONTHLY_LINE), randomBytes: () => Buffer.from('0123456789abcdef') });
+      recompute.mockResolvedValue(pricedAs(LAWN_LINE));
+      const next = await mint({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE), randomBytes: () => Buffer.from('0123456789abcdef') });
       expect(next.reused).toBe(false);
       expect(next.estimateId).not.toBe(first.estimateId);
       expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
@@ -580,6 +644,11 @@ describe('assertPlanStartAcceptEligible', () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });
 
+  test('a recurring visit still en route after ET midnight refuses (the shared live-plan reader)', async () => {
+    tables.scheduled_services = [{ id: 'ip-1', customer_id: 'cust-1', status: 'en_route', is_recurring: true, scheduled_date: '2000-01-01', service_type: 'Lawn Care Program' }];
+    await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
+  });
+
   test('a rodent monitoring plan started since the mint refuses (not a restartable family, still a plan)', async () => {
     tables.scheduled_services = [{ id: 'rodent-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Rodent Bait Monitoring' }];
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
@@ -594,8 +663,8 @@ describe('assertPlanStartAcceptEligible', () => {
     await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
   });
 
-  test('a churned, inactive-flagged, deleted or missing customer refuses', async () => {
-    for (const rows of [[{ ...CUSTOMER }], [{ ...LEAD, active: false }], [{ ...LEAD, deleted_at: '2026-11-01' }], []]) {
+  test('a churned, inactive-flagged (false or NULL), deleted or missing customer refuses', async () => {
+    for (const rows of [[{ ...CUSTOMER }], [{ ...LEAD, active: false }], [{ ...LEAD, active: null }], [{ ...LEAD, deleted_at: '2026-11-01' }], []]) {
       tables.customers = rows;
       await expect(actualRestart.assertPlanStartAcceptEligible(trx, ESTIMATE)).rejects.toMatchObject({ status: 409, code: 'PLAN_START_STATE_CHANGED' });
     }

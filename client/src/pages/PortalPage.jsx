@@ -10979,16 +10979,16 @@ const HIDDEN_BADGE_TYPES = ['portal_regular', 'document_downloader', 'doc_downlo
 
 // The pricing card's primary action: today's "Request This", or "See my price and book" when the
 // server offers a first plan (GATE_PORTAL_PLAN_START). One button, so both look and behave alike.
-function PricingActionButton({ onClick, busy, label, busyLabel, compact, primaryButton }) {
+function PricingActionButton({ onClick, busy, disabled = false, label, busyLabel, compact, primaryButton }) {
   return (
-    <button type="button" onClick={onClick} disabled={busy} data-glass-accent="" data-glass-size="primary" style={{
+    <button type="button" onClick={onClick} disabled={busy || disabled} data-glass-accent="" data-glass-size="primary" style={{
       ...primaryButton,
       width: compact ? '100%' : 'fit-content',
       display: 'inline-flex',
       alignItems: 'center',
       gap: 8,
-      opacity: busy ? 0.65 : 1,
-      cursor: busy ? 'wait' : 'pointer',
+      opacity: busy || disabled ? 0.65 : 1,
+      cursor: busy ? 'wait' : (disabled ? 'not-allowed' : 'pointer'),
     }}>
       <Icon name="plus" size={15} strokeWidth={2} />
       {busy ? busyLabel : label}
@@ -11063,9 +11063,10 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   };
 
   // Opens the priced estimate (pick a time, save a card there). Any refusal or error falls back to
-  // today's request, so the customer never hits a dead end.
+  // today's request, so the customer never hits a dead end. Off while a new answer loads: the
+  // option on screen is the old answer's (codex pre-push P1).
   const startPlan = async () => {
-    if (startingPlan || requesting || !selected) return;
+    if (startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
     setStartingPlan(true);
     try {
@@ -11304,7 +11305,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </span>
                   ) : canStartPlan ? (
                     <div style={{ display: 'grid', gap: 6 }}>
-                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
+                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} disabled={loading} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
                       <div style={{ color: '#475569', fontSize: 14, lineHeight: 1.45 }}>
                         Your estimate shows the full price and open times. Pick a time to book.
                       </div>

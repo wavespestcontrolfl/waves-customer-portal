@@ -48,6 +48,29 @@ const PLAN_BILLING_LANES = ['monthly_membership', 'per_application', 'annual_pre
 // plan-start offer check compares each one in cents.
 const PLAN_START_SHOWN_KEYS = ['monthly', 'perVisit', 'dueAtStart', 'oneTime'];
 const toCents = (value) => Math.round(Number(value || 0) * 100);
+
+// An option plan start can book. Pest is quarterly only: the estimate page
+// opens a pest estimate on its section default, the first ladder entry
+// (quarterly), whatever cadence was priced (EstimateViewPage
+// defaultSelectedForServices), so a bi-monthly or monthly start would open on
+// another price. The other services open on the priced tier. The mint's
+// snapshot check (planStartOpeningEntry) is the belt.
+function planStartOptionBookable(serviceKey, option) {
+  return PLAN_START_SERVICE_KEYS.includes(serviceKey) && Boolean(option)
+    && (serviceKey !== 'pest_control' || option.frequency === 'quarterly');
+}
+
+// The frozen bundle entry the estimate page opens on, chosen as
+// EstimateViewPage does: the family's section (a flat bundle is one pest
+// section), then its defaultFrequencyKey, else its first entry.
+function planStartOpeningEntry(bundle, family) {
+  const sections = Array.isArray(bundle?.services) && bundle.services.length
+    ? bundle.services
+    : [{ key: 'pest_control', frequencies: bundle?.frequencies }];
+  const section = sections.find((candidate) => candidate?.key === family);
+  const frequencies = Array.isArray(section?.frequencies) ? section.frequencies : [];
+  return frequencies.find((entry) => entry?.key === section.defaultFrequencyKey) || frequencies[0] || null;
+}
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
 
@@ -478,9 +501,14 @@ async function ownedResidualFamilies(dbh, customerId) {
 // Plan start's ownership bar (codex pre-push P0): ANY live recurring row owns
 // a plan, rodent-led and commercial rows included (the restart residual skips
 // both because they are not restartable families), and so does an annual
-// prepay term still covering today. Same reads and rebook rule as the
-// residual. Throws when the rows cannot be read; every caller FAILS CLOSED.
+// prepay term still covering today. Two row reads: the canonical "does this
+// customer have a live recurring plan?" set (waveguard-existing-services,
+// which keeps a visit still en_route / on_site across ET midnight), and the
+// restart read, which adds open rebook rows and re-armed series anchors.
+// Throws when a read fails; every caller FAILS CLOSED.
 async function ownsAnyRecurringService(dbh, customerId) {
+  const { loadLiveRecurringObligationRows } = require('../waveguard-existing-services');
+  if ((await loadLiveRecurringObligationRows(dbh, customerId)).length) return true;
   if ((await liveRecurringRows(dbh, customerId)).length) return true;
   const { coveredTermsAsOf } = require('../annual-prepay-renewals');
   const { etDateString } = require('../../utils/datetime-et');
@@ -488,12 +516,13 @@ async function ownsAnyRecurringService(dbh, customerId) {
   return terms.length > 0;
 }
 
-// A plan start is for an account with no plan (codex pre-push P0): active, not
-// cancelled, and no plan membership on the row: a real WaveGuard tier, a plan
-// billing lane, or a legacy monthly rate. The card hint, the mint and the
-// accept re-check all read this one predicate.
+// A plan start is for an account with no plan (codex pre-push P0): active
+// (exactly true: customer auth reads a NULL flag as inactive), not cancelled,
+// and no plan membership on the row: a real WaveGuard tier, a plan billing
+// lane, or a legacy monthly rate. The card hint, the mint and the accept
+// re-check all read this one predicate.
 function planStartAccountOpen(row) {
-  if (!row || row.active === false || row.pipeline_stage === 'churned') return false;
+  if (!row || row.active !== true || row.pipeline_stage === 'churned') return false;
   const { isMembershipTier, resolveBillingLane } = require('../billing-lane');
   if (isMembershipTier(row.waveguard_tier)) return false;
   return !PLAN_BILLING_LANES.includes(resolveBillingLane(row).mode) && !(Number(row.monthly_rate || 0) > 0);
@@ -563,15 +592,18 @@ function resolveMintDeps(deps) {
 //   matchesLive       (liveEstimateData) => the entry's own scope/identity
 //                     test for reusing a live quote (the core adds the
 //                     cent-exact totals + full-offer fingerprint checks)
-//   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal }) =>
-//                     throws when the server's totals are not the offer the
-//                     entry expects
+//   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal,
+//                     rawEngineResult }) => throws when the server's price is
+//                     not the offer the entry expects
+//   assertSnapshot    optional (pricingBundle, createdRow) => throws when the
+//                     frozen bundle is not the offer; default = the bundle
+//                     carries the minted totals (pricingBundleMatchesEstimateTotals)
 //   note              (estimateId) => { subject, body } for the timeline
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate({
   trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive,
-  assertOffer = null, note, logTag, logDetail = '', handMessage,
+  assertOffer = null, assertSnapshot = null, note, logTag, logDetail = '', handMessage,
   assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
 }) {
   const {
@@ -875,12 +907,18 @@ async function mintPricedEstimate({
 
   // Freeze the send snapshot so the public page replays the shown price
   // instead of live config — a snapshot that failed to freeze is a
-  // publication failure (sibling-publication rule), never a warning.
-  const withSnapshot = await buildEstimateSendSnapshot(created, now);
+  // publication failure (sibling-publication rule), never a warning. No
+  // delivery stamp (codex pre-push P1; website-quote-publication's
+  // posture): nothing was delivered, and the stamp is what a real handoff
+  // delivered (the triage sweep's quote_promised witness, the
+  // updated-wording check).
+  const withSnapshot = await buildEstimateSendSnapshot(created, now, { delivered: false });
   if (!withSnapshot?.sendSnapshot || withSnapshot.sendSnapshot.pricingBundleError) {
     throw new Error(`${logTag} send snapshot did not freeze pricing${withSnapshot?.sendSnapshot?.pricingBundleError ? `: ${withSnapshot.sendSnapshot.pricingBundleError}` : ''}`);
   }
-  if (!pricingBundleMatchesEstimateTotals(withSnapshot.sendSnapshot.pricingBundle, created)) {
+  if (assertSnapshot) {
+    assertSnapshot(withSnapshot.sendSnapshot.pricingBundle, created);
+  } else if (!pricingBundleMatchesEstimateTotals(withSnapshot.sendSnapshot.pricingBundle, created)) {
     throw new Error(`${logTag} send snapshot does not match the minted totals`);
   }
   await trx('estimates').where({ id: created.id }).update({
@@ -1034,7 +1072,7 @@ async function mintPlanStartEstimate({
   // is priced (never the generic first one, never a client-shaped option).
   const option = mintDeps.pricingAi.variantsForService(serviceKey, '', false)
     .find((candidate) => candidate && candidate.id === optionId);
-  if (!option) throw notEligible();
+  if (!planStartOptionBookable(serviceKey, option)) throw notEligible();
   const family = serviceKey === 'termite' ? 'termite_bait' : serviceKey;
   const dbh = deps.db || db;
   const nowDate = now();
@@ -1093,6 +1131,22 @@ async function mintPlanStartEstimate({
           || PLAN_START_SHOWN_KEYS.some((key) => toCents(today[key]) !== toCents(shown[key]));
         if (drifted) {
           throw new RestartUnavailableError('offer_changed', 'The price changed since you last looked. Please check the new price.');
+        }
+      },
+      // The entry the estimate page opens on must show the card's price to
+      // the cent (codex pre-push P0), not merely some entry within a cent of
+      // the totals: its monthly, and its per-application price where it
+      // carries one, else the yearly price behind it. A pest entry's yearly
+      // figure is monthly x 12, cents off the engine's per-visit total, so
+      // pest compares per application.
+      assertSnapshot: (bundle, created) => {
+        const entry = planStartOpeningEntry(bundle, family);
+        const sameCents = (a, b) => toCents(a) === toCents(b);
+        const matches = Boolean(entry) && sameCents(entry.monthly, shownMonthly)
+          && (entry.perVisit != null ? sameCents(entry.perVisit, shown.perVisit) : sameCents(entry.annual, created.annual_total));
+        if (!matches) {
+          logger.warn(`[plan-start] estimate page would open on ${entry?.key || 'no entry'}, not option ${option.id} — refusing`);
+          throw new RestartUnavailableError('pricing_unavailable', HAND_PRICED_PLAN_START);
         }
       },
       note: (estimateId) => ({
@@ -1262,6 +1316,8 @@ module.exports = {
   PLAN_START_SERVICE_KEYS,
   PLAN_START_SHOWN_KEYS,
   planStartAccountOpen,
+  planStartOptionBookable,
+  planStartOpeningEntry,
   ownsAnyRecurringService,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,

@@ -119,6 +119,8 @@ jest.mock('../models/db', () => {
     // `s.`-prefixed filters simply match nothing against unprefixed rows).
     b.leftJoin = () => b;
     b.limit = () => b;
+    // The shared live-plan reader (plan-start revalidation) asks which columns exist.
+    b.columnInfo = async () => ({ is_recurring: {} });
     // Row-lock + overlap-predicate surface the slot-commit path chains
     // (commitReservation's FOR UPDATE read, applyWindowOverlapFilter,
     // findConflictingVisits' hold filter). Lock/OR semantics are inert here —
