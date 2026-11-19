@@ -943,16 +943,17 @@ describe('follow-up 20261119010400: links to Talstar P and Bifen I/T follow to C
 });
 
 // Follow-up 20261119010500: the rows the swap moved keep Talak's gates; Crosscheck's label has a 25 ft ground setback from water (page 7).
+// The protocol rows' gates for 20261119010500 and 20261119010700: none, Talak's own, a narrower and a wider setback.
+const gatedTables = () => {
+  const tables = baseTables();
+  const gates = { r1: { trigger: 'chinch_bugs', delayWateringHours: 24 }, r2: { maxLabelRate: 1, trigger: 'fire_ants' }, r3: { minDistanceFromWaterFt: 10 }, r4: { applyAlone: true } };
+  for (const row of tables.lawn_protocol_products) row.gates = gates[row.id];
+  tables.lawn_protocol_products.push({ id: 'r8', lawn_protocol_window_id: 'w3', product_id: CROSS, product_name: 'LESCO Crosscheck Plus', role: 'insecticide_spot', rate_per_1000: 1, gates: { minDistanceFromWaterFt: 50 }, updated_at: 't0' });
+  return tables;
+};
+const gatesOf = (knex, id) => byId(knex, 'lawn_protocol_products', id).gates;
 describe('follow-up 20261119010500: Crosscheck protocol rows carry the label\'s 25 ft water setback', () => {
   const setback = require('../models/migrations/20261119010500_crosscheck_water_setback_gate');
-  const gatedTables = () => {
-    const tables = baseTables();
-    const gates = { r1: { trigger: 'chinch_bugs', delayWateringHours: 24 }, r2: { maxLabelRate: 1, trigger: 'fire_ants' }, r3: { minDistanceFromWaterFt: 10 }, r4: { applyAlone: true } };
-    for (const row of tables.lawn_protocol_products) row.gates = gates[row.id];
-    tables.lawn_protocol_products.push({ id: 'r8', lawn_protocol_window_id: 'w3', product_id: CROSS, product_name: 'LESCO Crosscheck Plus', role: 'insecticide_spot', rate_per_1000: 1, gates: { minDistanceFromWaterFt: 50 }, updated_at: 't0' });
-    return tables;
-  };
-  const gatesOf = (knex, id) => byId(knex, 'lawn_protocol_products', id).gates;
   const setbackLogs = (knex) => knex.tables.lawn_protocol_audit_log.filter((log) => log.action === setback.LAWN_ACTION);
   let logSpy;
   beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
@@ -1019,20 +1020,76 @@ describe('follow-up 20261119010500: Crosscheck protocol rows carry the label\'s 
   });
 });
 
+// Follow-up 20261119010700: a rollback keeps the setback (waves-db: a data correction's down() is a documented no-op).
+describe('follow-up 20261119010700: a rollback keeps the 25 ft water setback', () => {
+  const setback = require('../models/migrations/20261119010500_crosscheck_water_setback_gate');
+  const kept = require('../models/migrations/20261119010700_crosscheck_setback_kept_on_rollback');
+  const logsOf = (knex, action) => knex.tables.lawn_protocol_audit_log.filter((log) => log.action === action);
+  const withoutAction = (logs) => logs.map(({ action: _action, ...rest }) => rest);
+  let logSpy;
+  beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('after it, 20261119010500\'s down() changes no gate, also on a row the office moved to Tetrino; each record keeps its snapshots', async () => {
+    const knex = makeKnex(gatedTables());
+    await migration.up(knex);
+    await setback.up(knex);
+    const records = withoutAction(logsOf(knex, setback.LAWN_ACTION));
+    expect(records).toHaveLength(2);
+    await kept.up(knex);
+    expect(logsOf(knex, setback.LAWN_ACTION)).toHaveLength(0);
+    expect(withoutAction(logsOf(knex, kept.KEPT_ACTION))).toEqual(records);
+    // Tetrino's label needs the same setback.
+    knex.tables.products_catalog.push({ id: 'tetrino', name: 'Tetrino Insecticide' });
+    Object.assign(byId(knex, 'lawn_protocol_products', 'r3'), { product_id: 'tetrino', product_name: 'Tetrino Insecticide' });
+    const before = snapshot(knex);
+    await kept.down(knex);
+    await setback.down(knex);
+    expect(snapshot(knex)).toEqual(before);
+    expect(kept.KEPT_ACTION.length).toBeLessThanOrEqual(40);
+  });
+
+  test('the full rollback (each down() in reverse order): the rows go back to Talak and keep the setback; a re-run of up() changes nothing', async () => {
+    const knex = makeKnex(gatedTables());
+    await migration.up(knex);
+    await setback.up(knex);
+    await kept.up(knex);
+    const after = snapshot(knex);
+    await kept.up(knex);
+    expect(snapshot(knex)).toEqual(after);
+    await kept.down(knex);
+    await setback.down(knex);
+    await migration.down(knex);
+    for (const id of ['r1', 'r2', 'r3']) {
+      expect(byId(knex, 'lawn_protocol_products', id)).toMatchObject({ product_id: TALAK, gates: expect.objectContaining({ minDistanceFromWaterFt: 25 }) });
+    }
+  });
+
+  test('no lawn_protocol_audit_log table: nothing happens', async () => {
+    const tables = gatedTables();
+    delete tables.lawn_protocol_audit_log;
+    const knex = makeKnex(tables);
+    const before = snapshot(knex);
+    await kept.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
+
 // Follow-up 20261119010600: two Talak usage rows on one service type both move in 20261119010000; one stays.
+// Two Talak rows on Mosquito with different amounts (u1 1, u5 4), and two Crosscheck rows the swap never moved.
+const usageTables = () => {
+  const tables = baseTables();
+  tables.service_product_usage.push(
+    { id: 'u5', product_id: TALAK, service_type: 'Mosquito', usage_amount: 4 },
+    { id: 'u8', product_id: CROSS, service_type: 'Office Pair', usage_amount: 1 },
+    { id: 'u9', product_id: CROSS, service_type: 'Office Pair', usage_amount: 1 },
+  );
+  return tables;
+};
+const usage = (knex, id) => byId(knex, 'service_product_usage', id);
+const withoutAudit = (tables) => { const { audit_log: _log, ...rest } = tables; return byIdOrder(rest); };
 describe('follow-up 20261119010600: each service type keeps one Crosscheck usage row from the swap', () => {
   const onePerType = require('../models/migrations/20261119010600_crosscheck_usage_one_per_type');
-  const usageTables = () => {
-    const tables = baseTables();
-    tables.service_product_usage.push(
-      { id: 'u5', product_id: TALAK, service_type: 'Mosquito', usage_amount: 4 },
-      { id: 'u8', product_id: CROSS, service_type: 'Office Pair', usage_amount: 1 },
-      { id: 'u9', product_id: CROSS, service_type: 'Office Pair', usage_amount: 1 },
-    );
-    return tables;
-  };
-  const usage = (knex, id) => byId(knex, 'service_product_usage', id);
-  const withoutAudit = (tables) => { const { audit_log: _log, ...rest } = tables; return byIdOrder(rest); };
   let logSpy;
   beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
   afterEach(() => logSpy.mockRestore());
@@ -1097,6 +1154,154 @@ describe('follow-up 20261119010600: each service type keeps one Crosscheck usage
     await migration.up(knex);
     const before = snapshot(knex);
     await onePerType.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
+
+// Follow-up 20261119010800: a usage row 20261119010600 removed comes back when it costs its service type differently.
+describe('follow-up 20261119010800: a removed usage row with another cost comes back', () => {
+  const onePerType = require('../models/migrations/20261119010600_crosscheck_usage_one_per_type');
+  const conflicts = require('../models/migrations/20261119010800_crosscheck_usage_conflicts_stay');
+  // u6 repeats u1's cost; pg hands a decimal back as a string.
+  const conflictTables = () => {
+    const tables = usageTables();
+    tables.service_product_usage.push({ id: 'u6', product_id: TALAK, service_type: 'Mosquito', usage_amount: '1.0000' });
+    return tables;
+  };
+  let logSpy;
+  beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('up: the row with another amount comes back, a copy of the kept row stays out; its events; a re-run and down() change nothing', async () => {
+    const knex = makeKnex(conflictTables());
+    await migration.up(knex);
+    await onePerType.up(knex);
+    expect([usage(knex, 'u5'), usage(knex, 'u6')]).toEqual([undefined, undefined]);
+    knex.locks.length = 0;
+    await conflicts.up(knex);
+    expect(knex.locks.map(([table]) => table)).toEqual(['service_product_usage']);
+    expect(usage(knex, 'u1')).toMatchObject({ product_id: CROSS, service_type: 'Mosquito', usage_amount: 1 });
+    expect(usage(knex, 'u5')).toMatchObject({ product_id: CROSS, service_type: 'Mosquito', usage_amount: 4 });
+    expect(usage(knex, 'u6')).toBeUndefined();
+    const events = eventsOf(knex, conflicts.ACTION);
+    expect(events.map((event) => [event.resource_id, meta(event)])).toEqual([['u5', expect.objectContaining({ kind: 'restored', service_type: 'Mosquito', kept: 'u1' })]]);
+    const removal = eventsOf(knex, onePerType.ACTION).find((event) => event.resource_id === 'u5');
+    expect(eventsOf(knex, onePerType.ROLLBACK_ACTION).map(meta)).toEqual([expect.objectContaining({ from_audit_id: String(removal.id) })]);
+    expect(logSpy.mock.calls.flat().join('\n')).toMatch(/"Mosquito": usage rows u1 and u5/);
+    expect(conflicts.ACTION.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await conflicts.up(knex);
+    await conflicts.down(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test('the full rollback: 20261119010600 puts back only the copy, never u5 a second time; the swap\'s down() ends where it began', async () => {
+    const knex = makeKnex(conflictTables());
+    const start = snapshot(knex);
+    await migration.up(knex);
+    await onePerType.up(knex);
+    await conflicts.up(knex);
+    await conflicts.down(knex);
+    await onePerType.down(knex);
+    expect(knex.tables.service_product_usage.filter((row) => row.id === 'u5')).toHaveLength(1);
+    expect(usage(knex, 'u6')).toMatchObject({ product_id: CROSS, usage_amount: '1.0000' });
+    await migration.down(knex);
+    expect(withoutAudit(snapshot(knex))).toEqual(withoutAudit(start));
+  });
+
+  test('a removal 20261119010600 already rolled back stays as the office left it, even after the office deleted that row', async () => {
+    const knex = makeKnex(usageTables());
+    await migration.up(knex);
+    await onePerType.up(knex);
+    await onePerType.down(knex);
+    knex.tables.service_product_usage = knex.tables.service_product_usage.filter((row) => row.id !== 'u5');
+    const before = snapshot(knex);
+    await conflicts.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+
+  test('a removed row whose id was taken since stays out, with no event', async () => {
+    const knex = makeKnex(usageTables());
+    await migration.up(knex);
+    await onePerType.up(knex);
+    knex.tables.service_product_usage.push({ id: 'u5', product_id: OTHER, service_type: 'Office', usage_amount: 9 });
+    const before = snapshot(knex);
+    await conflicts.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+
+  test.each([
+    ['production: one Talak usage row', (tables) => tables],
+    ['no audit_log table', (tables) => { delete tables.audit_log; return tables; }],
+  ])('%s: nothing changes', async (_label, shape) => {
+    const knex = makeKnex(shape(baseTables()));
+    await migration.up(knex);
+    await onePerType.up(knex);
+    const before = snapshot(knex);
+    await conflicts.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
+
+// Follow-up 20261119010900: the swap fills the low-stock threshold (128, in its fl_oz) and the unit each only while NULL.
+describe('follow-up 20261119010900: the Crosscheck low-stock threshold is set in the row\'s own unit', () => {
+  const threshold = require('../models/migrations/20261119010900_crosscheck_stock_threshold_unit');
+  const stockTables = (unit) => {
+    const tables = baseTables();
+    Object.assign(tables.products_catalog.find((row) => row.id === CROSS), { inventory_unit: unit });
+    return tables;
+  };
+  const stock = (knex) => {
+    const { inventory_unit: unit, low_stock_threshold: level } = byId(knex, 'products_catalog', CROSS);
+    return { unit, level };
+  };
+  let logSpy;
+  beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('production: the receipt reader set gal before the swap, so the swap\'s 128 becomes 1 gal; one event; a re-run and down() change nothing', async () => {
+    const knex = makeKnex(stockTables('gal'));
+    await migration.up(knex);
+    expect(stock(knex)).toEqual({ unit: 'gal', level: 128 });
+    await threshold.up(knex);
+    expect(stock(knex)).toEqual({ unit: 'gal', level: 1 });
+    const events = eventsOf(knex, threshold.ACTION);
+    expect(events.map(meta)).toEqual([expect.objectContaining({ unit: 'gal', changes: { low_stock_threshold: { before: 128, after: 1 } } })]);
+    expect(threshold.ACTION.length).toBeLessThanOrEqual(96);
+    const after = snapshot(knex);
+    await threshold.up(knex);
+    await threshold.down(knex);
+    expect(snapshot(knex)).toEqual(after);
+    // The swap's down() keeps a column that changed since its up(): the row keeps one jug.
+    await migration.down(knex);
+    expect(stock(knex)).toEqual({ unit: 'gal', level: 1 });
+  });
+
+  test.each([
+    [' Gal ', 1], ['qt', 4], ['pt', 8], ['each', null],
+  ])('a row counted in "%s": one jug is %s', async (unit, jug) => {
+    const knex = makeKnex(stockTables(unit));
+    await migration.up(knex);
+    await threshold.up(knex);
+    expect(stock(knex)).toEqual({ unit, level: jug });
+    expect(eventsOf(knex, threshold.ACTION)).toHaveLength(1);
+  });
+
+  test.each([
+    ['the row already counts in fl_oz', 'fl_oz', () => {}],
+    ['the swap filled the unit too; a later unit change is not the swap\'s', null, (knex) => { byId(knex, 'products_catalog', CROSS).inventory_unit = 'gal'; }],
+    ['the office changed the threshold since the swap', 'gal', (knex) => { byId(knex, 'products_catalog', CROSS).low_stock_threshold = 3; }],
+    ['the swap\'s catalog step was rolled back', 'gal', (knex) => {
+      const [event] = eventsOf(knex, migration.actionFor(migration.STEPS.catalog));
+      knex.tables.audit_log.push({ id: 'rb-catalog', action: migration.rollbackActionFor(migration.STEPS.catalog), metadata: { from_audit_id: String(event.id) } });
+    }],
+    ['two catalog rows named Crosscheck', 'gal', (knex) => { knex.tables.products_catalog.push({ id: 'cross-2', name: 'LESCO Crosscheck Plus' }); }],
+  ])('%s: nothing changes', async (_label, unit, edit) => {
+    const knex = makeKnex(stockTables(unit));
+    await migration.up(knex);
+    edit(knex);
+    const before = snapshot(knex);
+    await threshold.up(knex);
     expect(snapshot(knex)).toEqual(before);
   });
 });

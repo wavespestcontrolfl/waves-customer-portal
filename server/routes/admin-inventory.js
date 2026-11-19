@@ -781,14 +781,16 @@ const LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   { key: 'dismiss', label: 'Dismiss', aliases: ['Dismiss NXT', 'Dismiss'], type: 'pesticide', category: 'sedge herbicide' },
   { key: 'carbonpro_l', label: 'CarbonPro-L', aliases: ['CarbonPro-L', 'CarbonPro', 'LESCO CarbonPro'], type: 'biostimulant', category: 'soil amendment / biostimulant' },
   { key: 'hydretain', label: 'Hydretain', aliases: ['Hydretain'], type: 'wetting_agent', category: 'moisture manager' },
-  { key: 'talstar', label: 'Talstar', aliases: ['Talstar P', 'Talstar'], type: 'pesticide', category: 'insecticide' },
+  // Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin. Both June lines name it, and the July "Bifen" and "bifenthrin"
+  // mentions are the same product. It is looked up by its full catalog name only, so a missing row never stands in Bifen XTS or the
+  // retired Talstar P and Bifen I/T rows (inactive; migration 20261119010400 moved their links to Crosscheck).
+  { key: 'crosscheck', label: 'LESCO Crosscheck Plus', aliases: ['LESCO Crosscheck Plus', 'Bifen'], catalogNames: ['LESCO Crosscheck Plus'], type: 'pesticide', category: 'insecticide' },
   { key: 'arena_50_wdg', label: 'Arena 50 WDG', aliases: ['Arena 50 WDG', 'Arena'], type: 'pesticide', category: 'insecticide' },
   { key: 'atrazine_4l', label: 'Atrazine 4L', aliases: ['Atrazine 4L', 'Atrazine'], type: 'pesticide', category: 'herbicide' },
   { key: 'three_way', label: 'Three-Way', aliases: ['Three-Way', 'Three Way'], type: 'pesticide', category: 'herbicide' },
   { key: 'bio_kmag', label: 'LESCO 0-0-18 Bio KMAG', aliases: ['LESCO 0-0-18 Bio KMAG', 'Bio KMAG', 'KMAG'], type: 'fertilizer', category: 'potassium and magnesium support' },
   { key: 'lesco_elite_0_0_28', label: 'LESCO Elite 0-0-28', aliases: ['LESCO Elite 0-0-28', 'Elite 0-0-28', '0-0-28'], type: 'fertilizer', category: 'potassium support' },
   { key: 'armada_50_wdg', label: 'Armada 50 WDG', aliases: ['Armada 50 WDG', 'Armada'], type: 'pesticide', category: 'fungicide' },
-  { key: 'bifen_it', label: 'Bifen I/T', aliases: ['Bifen I/T', 'Bifen'], type: 'pesticide', category: 'insecticide' },
   { key: 'dylox_420_sl', label: 'Dylox 420 SL', aliases: ['Dylox 420 SL', 'Dylox'], type: 'pesticide', category: 'insecticide' },
   { key: 'topchoice', label: 'Topchoice Granular Insecticide', aliases: ['Topchoice Granular Insecticide', 'Topchoice'], type: 'pesticide', category: 'fire ant insecticide' },
   { key: 'drive_xlr8', label: 'Drive XLR8', aliases: ['Drive XLR8'], type: 'pesticide', category: 'post-emergent herbicide' },
@@ -1071,7 +1073,7 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
       const references = protocolProductReferences(definition);
       if (!references.length) continue;
       let product = null;
-      for (const alias of definition.aliases) {
+      for (const alias of definition.catalogNames || definition.aliases) {
         product = await db('products_catalog')
           .whereILike('name', `%${alias}%`)
           .select(

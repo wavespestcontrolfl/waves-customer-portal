@@ -98,7 +98,7 @@
           "visit": 6,
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP K-Flow → micros only\nHigh Mn Combo ($1.33)",
-          "secondary": "★ CHINCH FLOAT TEST #1: threshold ≥20/sq ft\nLESCO Crosscheck Plus curative if threshold met ($3.82)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce 20%",
+          "secondary": "★ CHINCH FLOAT TEST #1: threshold ≥20/sq ft\nLESCO Crosscheck Plus curative if threshold met; keep 25 ft from ponds, lakes and canals ($3.82)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce 20%",
           "material_cost": "6.63",
           "labor_cost": "26.96",
           "tiers": {
@@ -314,7 +314,7 @@
           "visit": 6,
           "month": "Jun",
           "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ IF soil K >80 ppm: SKIP → micros only\nPrimo Maxx PGR ($1.91)",
-          "secondary": "★ ARMYWORM SOAP FLUSH — threshold ≥3/sq ft\n★ If threshold met: LESCO Crosscheck Plus curative (Group 3A) ($3.50)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce",
+          "secondary": "★ ARMYWORM SOAP FLUSH — threshold ≥3/sq ft\n★ If threshold met: LESCO Crosscheck Plus curative (Group 3A); keep 25 ft from ponds, lakes and canals ($3.50)\n★ IRRIGATION AUDIT #2: VWC >40% = reduce",
           "material_cost": "14.05",
           "labor_cost": "26.96",
           "tiers": {
