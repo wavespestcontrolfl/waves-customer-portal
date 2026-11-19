@@ -36,12 +36,13 @@ const VISIT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const MIC = /Dictate into this box/;
 let clipRequests;
 let resolveClip;
+let rejectClip;
 
 function stubServer(availability) {
   vi.stubGlobal("fetch", vi.fn(async (url, opts) => {
     if (String(url).includes("/availability")) return { ok: true, json: async () => availability };
     clipRequests.push(String(url));
-    return new Promise((r) => { resolveClip = r; });
+    return new Promise((r, reject) => { resolveClip = r; rejectClip = reject; });
   }));
 }
 
@@ -189,6 +190,45 @@ describe("FocusedBoxMic", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(/closed before the words came back/);
     expect(screen.queryByLabelText("notes")).toBeNull();
     expect(document.body.textContent).not.toContain("lost words");
+  });
+
+  it("box gone when the send gets no answer: no resend is offered for words with nowhere to go", async () => {
+    stubServer({ available: true, everyBox: true });
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    function Host() {
+      const [open, setOpen] = useState(true);
+      return <>{open && <textarea aria-label="notes" defaultValue="Hello" />}<button type="button" onClick={() => setOpen(false)}>Close</button></>;
+    }
+    await mount(<Host />);
+    await focusBox();
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    const stop = await screen.findByRole("button", { name: "Stop dictation" });
+    await act(async () => { fireEvent.click(stop); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByText("Close")); });
+    await act(async () => { rejectClip(new TypeError("Load failed")); });
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The recording did not go through."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(clipRequests).toHaveLength(1);
+  });
+
+  it("box still there when the send gets no answer: yes resends the same recording and the words land", async () => {
+    stubServer({ available: true, everyBox: true });
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    await mount(<textarea aria-label="notes" defaultValue="" />);
+    await focusBox();
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    const stop = await screen.findByRole("button", { name: "Stop dictation" });
+    await act(async () => { fireEvent.click(stop); });
+    await waitFor(() => expect(clipRequests).toHaveLength(1));
+    await act(async () => { rejectClip(new TypeError("Load failed")); });
+    await waitFor(() => expect(clipRequests).toHaveLength(2));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveClip({ ok: true, json: async () => ({ text: "kept words" }) }); });
+    await waitFor(() => expect(screen.getByLabelText("notes").value).toContain("kept words"));
+    expect(alert).not.toHaveBeenCalled();
   });
 
   it("holds a Send button in the box's own dialog until the words land, but not Cancel", async () => {

@@ -344,7 +344,9 @@ function FocusedBoxMicInner() {
     const result = insertDictatedText(session.el, text, session.selection);
     if (!result.ok) setNotice(NOTICES[result.reason]);
   }, []);
-  const { listening, starting, uploading, toggle, abandon, mode, supported, liveText } = useSpeechDictation(onTranscript, { dictationContext });
+  // A send with no answer may ask to resend the clip: only while the tap's box is still on the page.
+  const resendWanted = useCallback(() => Boolean(sessionRef.current?.el?.isConnected), []);
+  const { listening, starting, uploading, toggle, abandon, mode, supported, liveText } = useSpeechDictation(onTranscript, { dictationContext, resendWanted });
   const busy = mode === "upload" && (starting || listening || uploading);
 
   // Send / Ask buttons wait for words still in flight (dictationPending.js).

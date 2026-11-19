@@ -146,19 +146,19 @@ function pageVisible() {
 }
 
 /**
- * transcribeClip, and when a send got no answer while `stillWanted()` holds (the field is still
+ * transcribeClip, and when a send got no answer while `canResend()` holds (the field is still
  * there and still this recording's), asks to send the SAME recording again, once the page is
  * visible. Never automatic: when only the answer was lost, the server already paid for those
  * words. Resolves null when the person says no; throws the unsent error when the field moved on.
  */
-export async function transcribeClipWithResend(blob, durationSeconds, clip, token, stillWanted) {
+export async function transcribeClipWithResend(blob, durationSeconds, clip, token, canResend) {
   for (;;) {
     try {
       return await transcribeClip(blob, durationSeconds, clip, token);
     } catch (e) {
       if (!e?.unsent) throw e;
       await pageVisible();
-      if (!stillWanted()) throw e;
+      if (!canResend()) throw e;
       if (!window.confirm(RESEND_QUESTION)) return null;
     }
   }

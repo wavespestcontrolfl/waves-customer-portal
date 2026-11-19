@@ -77,6 +77,11 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  * `liveText` is cleared when they land (or the clip fails, or the mic is cancelled, unmounted or moved to
  * another customer or visit). A live session that fails only drops the preview.
  *
+ * A send that got no answer (iOS "Load failed", or a 2xx answer cut off) keeps the clip and asks
+ * "Send it again?" once the page is visible, while the field still belongs to the recording; it
+ * is never resent on its own. Pass `{ resendWanted: () => boolean }` when the caller can tell its
+ * field is gone while the hook stays mounted (FocusedBoxMic): false means no question.
+ *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
  * finished clip to the handler instead of transcribing it here: no speech
@@ -90,6 +95,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const clipMaxMs = Number(options.clipMaxMs) > 0 ? Number(options.clipMaxMs) : CLIP_MAX_MS;
   const clipHandlerRef = useRef(options.clipHandler);
   clipHandlerRef.current = options.clipHandler;
+  const resendWantedRef = useRef(options.resendWanted);
+  resendWantedRef.current = options.resendWanted;
   const [listening, setListening] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadAvailable, setUploadAvailable] = useState(false);
@@ -252,9 +259,12 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // The round trip can outlive the field: unmounted, or the mic now
       // belongs to another customer or visit. Never append into the wrong field.
       const stillWanted = () => mountedRef.current && targetRef.current.key === clip.key;
+      // The caller can also say its field is gone (FocusedBoxMic: the box left the page), so no
+      // paid resend is offered for words with nowhere to go.
+      const canResend = () => stillWanted() && resendWantedRef.current?.() !== false;
       try {
         // A send with no answer asks to send the same recording again (null = the person said no).
-        const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, stillWanted);
+        const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, canResend);
         if (!answer || !stillWanted()) return;
         const { text, money } = answer;
         if (text && onTranscriptRef.current) {
