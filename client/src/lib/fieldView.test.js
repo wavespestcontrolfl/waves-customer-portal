@@ -122,6 +122,7 @@ describe('warmFieldViewLanding', () => {
       return { arrayBuffer: async () => new ArrayBuffer(0) };
     }));
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: {} } });
+    return cache;
   }
 
   async function freshWarm() {
@@ -169,31 +170,104 @@ describe('warmFieldViewLanding', () => {
     expect(fetch.mock.calls.map(([url]) => url)).toEqual(TODAY_FILES);
   });
 
-  // Pre-push P1 (round 8): a try before the worker took control must not
-  // block the next one for the rest of the page.
-  it('keeps only a success: the next call after a failed try runs again', async () => {
+  // Pre-push P1 (rounds 8 and 9): a try before the worker took control must
+  // not block the page for good, and the shell's mount on every page change
+  // must not download the same files again and again.
+  it('keeps a failed try for 5 minutes: a call reuses it, then runs again; a tap runs at once', async () => {
+    vi.useFakeTimers();
     listTodayFiles();
     controlledBy({ stored: TODAY_FILES });
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: null } });
     const warm = await freshWarm();
     await expect(warm()).resolves.toBe(false);
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: {} } });
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+    await expect(warm()).resolves.toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60 * 1000);
     await expect(warm()).resolves.toBe(true);
     expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
     await expect(warm()).resolves.toBe(true);
     expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
+    await expect(warm({ again: true })).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length * 2);
   });
 
-  it('with no signal reports false and asks for nothing; the next try with signal runs', async () => {
+  // Pre-push P1 (round 9): a download that stalls must not hold the try open.
+  it('gives up on a stalled download after 60 s: cancels the rest and reports false', async () => {
+    vi.useFakeTimers();
+    listTodayFiles();
+    controlledBy({ stored: TODAY_FILES.slice(0, 2) });
+    const signals = [];
+    fetch.mockImplementation((url, options) => {
+      signals.push(options?.signal);
+      return url === TODAY_FILES[2] ? new Promise(() => {}) : Promise.resolve({ arrayBuffer: async () => new ArrayBuffer(0) });
+    });
+    const warm = await freshWarm();
+    let settled = false;
+    const ready = warm().then((value) => { settled = true; return value; });
+    await vi.advanceTimersByTimeAsync(59 * 1000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(5 * 1000);
+    await expect(ready).resolves.toBe(false);
+    expect(signals).toHaveLength(TODAY_FILES.length);
+    expect(signals.every((signal) => signal?.aborted === true)).toBe(true);
+  });
+
+  // Pre-push P1 (round 9): the Settings row shows the newest try's answer.
+  it("shares the newest try's answer: null while it runs, then its result", async () => {
     listTodayFiles();
     controlledBy({ stored: TODAY_FILES });
+    vi.resetModules();
+    const fieldView = await import('./fieldView');
+    const heard = vi.fn();
+    const stop = fieldView.subscribeFieldViewReadiness(heard);
+    expect(fieldView.fieldViewReadiness()).toBeNull();
+    const ready = fieldView.warmFieldViewLanding();
+    expect(fieldView.fieldViewReadiness()).toBeNull();
+    await expect(ready).resolves.toBe(true);
+    expect(fieldView.fieldViewReadiness()).toBe(true);
+    expect(heard).toHaveBeenCalledTimes(2);
+    fieldView.warmFieldViewLanding();
+    expect(heard).toHaveBeenCalledTimes(2);
+    stop();
+    await fieldView.warmFieldViewLanding({ again: true });
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+
+  it("never lets an older try that ends late overwrite a newer try's answer", async () => {
+    vi.useFakeTimers();
+    listTodayFiles();
+    const cache = controlledBy({ stored: TODAY_FILES });
+    let release;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ arrayBuffer: async () => new ArrayBuffer(0) }); }));
+    vi.resetModules();
+    const fieldView = await import('./fieldView');
+    const older = fieldView.warmFieldViewLanding();
+    const newer = fieldView.warmFieldViewLanding({ again: true });
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(newer).resolves.toBe(true);
+    cache.delete(TODAY_FILES[2]);
+    release();
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(older).resolves.toBe(false);
+    expect(fieldView.fieldViewReadiness()).toBe(true);
+  });
+
+  // Pre-push P1 (round 9): with no signal the row's answer must still be
+  // true when the phone already holds every file.
+  it('with no signal asks for nothing, answers from storage alone, and keeps nothing', async () => {
+    listTodayFiles();
+    const cache = controlledBy({ stored: TODAY_FILES.slice(0, 2) });
     const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     const warm = await freshWarm();
     await expect(warm()).resolves.toBe(false);
-    expect(caches.match).not.toHaveBeenCalled();
+    cache.add(TODAY_FILES[2]);
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
     onLine.mockReturnValue(true);
     await expect(warm()).resolves.toBe(true);
-    expect(caches.match).toHaveBeenCalledTimes(TODAY_FILES.length);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
   });
 
   it('with no service worker in control reports false and asks for nothing', async () => {

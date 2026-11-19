@@ -48,16 +48,36 @@ export function fieldViewLanding(pathname) {
 // The worker writes one file at a time, so a slow phone gets about 3 s.
 const STORE_CHECKS = 10;
 const STORE_CHECK_MS = 300;
+// A download that stalls on a weak signal must not hold the try open: after
+// 60 s the rest are cancelled, and the try reads false.
+const DOWNLOAD_MS = 60000;
+// The shell remounts the provider on every page change, and each mount asks
+// again. A failed try answers those calls for 5 minutes before one runs
+// again: with full storage, every try downloads the files it cannot store.
+const RETRY_MS = 5 * 60 * 1000;
 let pageWarm = null;
+let failedAt = 0;
 
 async function unstored(files) {
   const stored = await Promise.all(files.map((file) => caches.match(file).then(Boolean, () => false)));
   return files.filter((_, index) => !stored[index]);
 }
 
+async function downloadAll(files) {
+  const abort = typeof AbortController === 'undefined' ? null : new AbortController();
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(resolve, DOWNLOAD_MS); });
+  const downloads = files.map((file) => fetch(file, abort ? { signal: abort.signal } : undefined)
+    .then((response) => response.arrayBuffer())
+    .catch(() => null));
+  await Promise.race([Promise.all(downloads), deadline]);
+  clearTimeout(timer);
+  abort?.abort();
+}
+
 async function warmTodayFiles(files) {
   if (typeof caches === 'undefined' || !navigator.serviceWorker?.controller) return false;
-  await Promise.all(files.map((file) => fetch(file).then((response) => response.arrayBuffer()).catch(() => null)));
+  await downloadAll(files);
   // The worker stores a file after it answered the request.
   let missing = await unstored(files);
   for (let check = 0; missing.length && check < STORE_CHECKS; check += 1) {
@@ -67,25 +87,56 @@ async function warmTodayFiles(files) {
   return missing.length === 0;
 }
 
+// With no signal nothing can download, so the answer is whether the phone
+// already holds every file.
+async function storedAlready(files) {
+  if (typeof caches === 'undefined') return false;
+  return (await unstored(files)).length === 0;
+}
+
+// The newest try's answer, for the Settings row: true, false, or null (a try
+// is running, none ran yet, or the dev server). An older try that ends after
+// a newer one started never overwrites it.
+let readiness = null;
+let newestTry = 0;
+const readinessListeners = new Set();
+function setReadiness(value) {
+  readiness = value;
+  readinessListeners.forEach((listener) => listener());
+}
+export function fieldViewReadiness() {
+  return readiness;
+}
+export function subscribeFieldViewReadiness(listener) {
+  readinessListeners.add(listener);
+  return () => { readinessListeners.delete(listener); };
+}
+
 // Resolves true when the phone holds every file, false when it does not (no
-// signal, no service worker in control yet, full storage, a file a newer
+// worker in control yet, full storage, a stalled download, a file a newer
 // deploy removed, or a build with no list), and null on the dev server,
-// which has no list. Only a success is kept for the page, so a call after a
-// failed try runs again (the provider calls when the signal returns or a
-// worker takes control). The switch's own tap and a new worker (`again`)
-// always try anew.
+// which has no list. With no signal it answers from storage alone, asks for
+// nothing and keeps nothing. A call reuses the page's try while it runs,
+// after it worked, or for 5 minutes after it failed. The switch's own tap,
+// a new worker and the signal returning (`again`) always try anew.
 export function warmFieldViewLanding({ again = false } = {}) {
+  if (!again && pageWarm && (!failedAt || Date.now() - failedAt < RETRY_MS)) return pageWarm;
+  const tryId = ++newestTry;
+  const answer = (ready) => {
+    if (tryId === newestTry) setReadiness(ready);
+    return ready;
+  };
+  setReadiness(null);
   const files = readFieldViewAssets();
-  if (!files) return Promise.resolve(import.meta.env.DEV ? null : false);
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return Promise.resolve(false);
-  if (again || !pageWarm) {
-    const warm = warmTodayFiles(files).then((ready) => {
-      if (!ready && pageWarm === warm) pageWarm = null;
-      return ready;
-    });
-    pageWarm = warm;
-  }
-  return pageWarm;
+  if (!files) return Promise.resolve(answer(import.meta.env.DEV ? null : false));
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return storedAlready(files).then(answer);
+  failedAt = 0;
+  const warm = warmTodayFiles(files).catch(() => false).then((ready) => {
+    if (!ready && pageWarm === warm) failedAt = Date.now();
+    return answer(ready);
+  });
+  pageWarm = warm;
+  return warm;
 }
 
 // Router state on the Today address a Field view landing opened.

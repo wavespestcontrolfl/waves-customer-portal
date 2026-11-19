@@ -6,7 +6,25 @@ import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../hooks/useIsMobile", () => ({ default: () => true }));
-vi.mock("../../lib/fieldView", async (importOriginal) => ({ ...(await importOriginal()), warmFieldViewLanding: vi.fn(async () => true) }));
+// The Settings row shows the shared answer of the page's newest try; the
+// tests set that answer through this stand-in for the module's store.
+const readinessStore = vi.hoisted(() => {
+  const listeners = new Set();
+  return {
+    value: null,
+    listeners,
+    set(value) { this.value = value; listeners.forEach((listener) => listener()); },
+  };
+});
+vi.mock("../../lib/fieldView", async (importOriginal) => ({
+  ...(await importOriginal()),
+  warmFieldViewLanding: vi.fn(async () => true),
+  fieldViewReadiness: () => readinessStore.value,
+  subscribeFieldViewReadiness: (listener) => {
+    readinessStore.listeners.add(listener);
+    return () => { readinessStore.listeners.delete(listener); };
+  },
+}));
 vi.mock("../../hooks/useFeatureFlag", () => ({
   useFeatureFlag: () => false,
   refetchFlags: vi.fn(),
@@ -32,7 +50,7 @@ function renderMore(role = "admin", navigation = true, name) {
   );
 }
 
-afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); warmFieldViewLanding.mockClear(); });
+afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); warmFieldViewLanding.mockClear(); readinessStore.value = null; });
 
 describe("MorePage — the mobile Settings tab", () => {
   it('is the one phone menu: every page that is not a bottom tab, with no row named after a tab (owner 2026-10-29)', () => {
@@ -165,45 +183,67 @@ describe("MorePage — the mobile Settings tab", () => {
       expect(screen.queryByText(/Not saved on this phone/)).not.toBeInTheDocument();
     });
 
-    // Pre-push P1 (rounds 5 to 7): turning it on readies Today's code for an
-    // open with no signal; the row says when it could not. Only the row's own
-    // tries count here (`again`); the session's try is the provider's test.
+    // Pre-push P1 (rounds 5 to 9): turning it on readies Today's code for an
+    // open with no signal, and the row shows the newest try's answer while
+    // the switch is on. Only the row's own tries count here (`again`); the
+    // session's try is the provider's test.
     const rowTries = () => warmFieldViewLanding.mock.calls.filter(([options]) => options?.again === true).length;
+    const answer = (value) => act(() => { readinessStore.set(value); });
+    const notReady = () => screen.queryByText("Today is not ready for no signal yet. Open Today once with signal.");
 
     it("turning it on readies Today's code, and says nothing when that worked", async () => {
       renderMore("admin");
       await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
       expect(rowTries()).toBe(1);
-      expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
+      answer(true);
+      expect(notReady()).not.toBeInTheDocument();
       await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
       expect(rowTries()).toBe(1);
     });
 
     it("says when Today's code is not on the phone, until the switch turns off", async () => {
-      warmFieldViewLanding.mockResolvedValueOnce(false);
       renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      answer(false);
+      expect(notReady()).toHaveAttribute("role", "status");
       fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
-      expect(await screen.findByText("Today is not ready for no signal yet. Open Today once with signal.")).toHaveAttribute("role", "status");
-      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
-      expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
+      expect(notReady()).not.toBeInTheDocument();
+    });
+
+    // Pre-push P1 (round 9): a later automatic try (the worker took control,
+    // the signal returned) answers for the row too.
+    it("shows the newest try's answer: a try that runs, or one that worked, clears the line", async () => {
+      renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      answer(false);
+      expect(notReady()).toBeInTheDocument();
+      answer(null);
+      expect(notReady()).not.toBeInTheDocument();
+      answer(false);
+      answer(true);
+      expect(notReady()).not.toBeInTheDocument();
+    });
+
+    // Pre-push P1 (round 9): another tab can turn the switch off.
+    it("says nothing while the switch is off, also when another tab turned it off", async () => {
+      renderMore("admin");
+      answer(false);
+      expect(notReady()).not.toBeInTheDocument();
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      expect(notReady()).toBeInTheDocument();
+      const key = "waves_admin_navigation:fixture";
+      localStorage.setItem(key, JSON.stringify({ ...JSON.parse(localStorage.getItem(key)), fieldView: false }));
+      act(() => { window.dispatchEvent(new StorageEvent("storage", { key })); });
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "false");
+      expect(notReady()).not.toBeInTheDocument();
     });
 
     it("says nothing when this page cannot tell (the dev server has no file list)", async () => {
-      warmFieldViewLanding.mockResolvedValueOnce(null);
       renderMore("admin");
       await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
       expect(rowTries()).toBe(1);
-      expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
-    });
-
-    it("an answer that comes after the switch turned off says nothing", async () => {
-      let answer;
-      warmFieldViewLanding.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
-      renderMore("admin");
-      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
-      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
-      await act(async () => { answer(false); });
-      expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
+      answer(null);
+      expect(notReady()).not.toBeInTheDocument();
     });
 
     it("never shows for a technician or with no navigation context", () => {

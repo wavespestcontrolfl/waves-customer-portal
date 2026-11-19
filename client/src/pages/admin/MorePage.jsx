@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { clearStaffDeviceData } from "../../lib/adminAuth";
-import { warmFieldViewLanding } from "../../lib/fieldView";
+import { fieldViewReadiness, subscribeFieldViewReadiness, warmFieldViewLanding } from "../../lib/fieldView";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
@@ -41,21 +41,17 @@ const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
 // only when this phone saved it (setFieldView returns false when it could
 // not). Turning it on also readies Today's code on the phone for a later
 // open with no signal (warmFieldViewLanding). The row says when either
-// failed; only the newest tap's answer counts.
+// failed. While the switch is on, the Today line shows this page's newest
+// try: the tap's own, or a later automatic one (the signal returning, a
+// worker taking control), whose success clears it.
 function FieldViewRow({ navigation }) {
   const fieldView = navigation.fieldView === true;
   const [notSaved, setNotSaved] = useState(false);
-  const [todayNotReady, setTodayNotReady] = useState(false);
-  const lastTap = useRef(0);
+  const readiness = useSyncExternalStore(subscribeFieldViewReadiness, fieldViewReadiness, fieldViewReadiness);
   const change = (on) => {
     const saved = navigation.setFieldView(on);
-    const tap = ++lastTap.current;
     setNotSaved(saved === false);
-    setTodayNotReady(false);
-    if (saved !== true || !on) return;
-    void warmFieldViewLanding({ again: true }).then((ready) => {
-      if (tap === lastTap.current) setTodayNotReady(ready === false);
-    });
+    if (saved === true && on) void warmFieldViewLanding({ again: true });
   };
   return (
     <section className="mt-2">
@@ -65,7 +61,7 @@ function FieldViewRow({ navigation }) {
             <div id="field-view-label" className="text-14 text-zinc-900">Field view</div>
             <div id="field-view-hint" className="text-14 text-zinc-500">Opens on Today. Today takes the Dashboard tab.</div>
             {notSaved && <div role="alert" className="text-14 text-alert-fg">Not saved on this phone: its storage is full or blocked. Field view stays {fieldView ? "on" : "off"}.</div>}
-            {todayNotReady && <div role="status" className="text-14 text-zinc-700">Today is not ready for no signal yet. Open Today once with signal.</div>}
+            {fieldView && readiness === false && <div role="status" className="text-14 text-zinc-700">Today is not ready for no signal yet. Open Today once with signal.</div>}
           </div>
           <Switch checked={fieldView} onChange={change} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
         </li>

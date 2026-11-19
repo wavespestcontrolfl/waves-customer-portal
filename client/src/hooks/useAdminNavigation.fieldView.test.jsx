@@ -30,9 +30,9 @@ describe('Field view preference', () => {
     mount({ id: 'acct-1', role: 'admin' });
     expect(warmFieldViewLanding).toHaveBeenCalledTimes(2);
   });
-  // Pre-push P1 (round 8): the module keeps only a success, so a try that
-  // failed (no worker in control yet, no signal) needs a later call.
-  it('tries again when the signal returns, and anew when a worker takes control, until the switch turns off', () => {
+  // Pre-push P1 (rounds 8 and 9): a try that failed (no worker in control
+  // yet, the signal lost) needs a later call; mounts reuse a failed try.
+  it('tries anew when the signal returns or a worker takes control, until the switch turns off', () => {
     const worker = new EventTarget();
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: worker });
     try {
@@ -40,7 +40,7 @@ describe('Field view preference', () => {
       act(() => navigation.setFieldView(true));
       window.dispatchEvent(new Event('online'));
       worker.dispatchEvent(new Event('controllerchange'));
-      expect(warmFieldViewLanding.mock.calls).toEqual([[], [], [{ again: true }]]);
+      expect(warmFieldViewLanding.mock.calls).toEqual([[], [{ again: true }], [{ again: true }]]);
       act(() => navigation.setFieldView(false));
       window.dispatchEvent(new Event('online'));
       worker.dispatchEvent(new Event('controllerchange'));
