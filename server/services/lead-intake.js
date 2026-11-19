@@ -25,7 +25,7 @@ const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('./logger');
 const { classifyServiceIntent, parseCallTextReply } = require('./sms-service-intent');
-const { SERVICE_TAIL_RE } = require('./service-pair-terms');
+const { SERVICE_TAIL_RE, cutAddressClause } = require('./service-pair-terms');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -85,9 +85,10 @@ function extractAddressCandidate(body) {
     // address_line1 — commas stay (city/zip live after them).
     // Clause boundary first, then service-introducing prose ("123 Main St
     // for ants") — connector words end the address ("Fort Myers" survives:
-    // \bfor\b never matches inside Fort).
+    // \bfor\b never matches inside Fort), except inside a service tail
+    // (cutAddressClause in ./service-pair-terms: "…, I want pest and lawn").
     const clause = text.slice(match.index).split(/[.;!?\n]/)[0];
-    const candidate = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
+    const candidate = cutAddressClause(clause);
     if (candidate.length >= 6 && candidate.length <= 160 && STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }

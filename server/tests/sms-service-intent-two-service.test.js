@@ -7,7 +7,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mo
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { classifyServiceIntent } = require('../services/sms-service-intent');
-const { SERVICE_TAIL_RE } = require('../services/service-pair-terms');
+const { SERVICE_TAIL_RE, cutAddressClause } = require('../services/service-pair-terms');
 
 beforeEach(() => {
   mockDispatch.mockReset();
@@ -46,6 +46,8 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
     // The pair inside a longer reply: only the context tells the request.
     ['I already have pest and lawn care. I only need mosquitoes.', 'pest'],
     ['100 Palm Ave, pest and lawn', 'pest_lawn'],
+    // A clause the clarify reader passes on: a city with no comma before it.
+    ['Sarasota pest and lawn', 'pest_lawn'],
     // A question goes to the model too, and so does an emoji (it can mean "no").
     ['pest and lawn? how much', 'pest_lawn'],
     ['pest and lawn 👍', 'pest_lawn'],
@@ -76,6 +78,9 @@ describe('a pair inside other words, or both keyword sets without a pair, goes t
 
   test('"unknown" from the model is still no service', async () => {
     await expect(classifyServiceIntent('I have got bugs in my yard')).resolves.toEqual({ interest: null, confidence: 0.4, method: 'ai' });
+    // The negated pair the clarify reader passes on is the model's to read.
+    await expect(classifyServiceIntent('we already have pest/lawn')).resolves.toEqual({ interest: null, confidence: 0.4, method: 'ai' });
+    expect(mockDispatch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -140,3 +145,16 @@ describe('the shared address-tail pattern drops the whole pair request, and sing
   });
 });
 
+describe('the street-line cut ends at a connector word, but keeps a service tail whole', () => {
+  test.each([
+    // The pair request's own words ("want", "please") are not cut.
+    ['123 Main St, I want pest and lawn', '123 Main St, I want pest and lawn'],
+    ['123 Main St, pest and lawn please', '123 Main St, pest and lawn please'],
+    // Connector prose before the tail still ends the line, tail and all.
+    ['123 Main St for ants, they are everywhere', '123 Main St'],
+    ['123 Main St for my mom, pest and lawn', '123 Main St'],
+    ['Fort Myers, 123 Main St', 'Fort Myers, 123 Main St'],
+  ])('%j => %j', (clause, line) => {
+    expect(cutAddressClause(clause)).toBe(line);
+  });
+});

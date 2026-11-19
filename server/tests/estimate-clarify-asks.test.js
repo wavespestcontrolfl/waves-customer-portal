@@ -93,11 +93,15 @@ jest.mock('../services/estimator-engine/sms-thread', () => ({
 }));
 
 // Service replies are classifier-gated; the regex leg of the real
-// classifier accepts obvious service words and rejects chit-chat.
+// classifier accepts obvious service words and rejects chit-chat. The model
+// leg reads context: "we already have pest/lawn" is no request (stand-in).
+const mockClassifyTexts = [];
 jest.mock('../services/sms-service-intent', () => ({
-  classifyServiceIntent: async (text) => (/pest|lawn|mosquito|termite/i.test(String(text))
-    ? { interest: 'pest', confidence: 0.9, method: 'regex' }
-    : null),
+  classifyServiceIntent: async (text) => {
+    mockClassifyTexts.push(String(text));
+    if (/already have/i.test(String(text))) return null;
+    return /pest|lawn|mosquito|termite/i.test(String(text)) ? { interest: 'pest', confidence: 0.9, method: 'regex' } : null;
+  },
 }));
 
 // Keeps the dispatch-decision tests deterministic without loading the real
@@ -134,6 +138,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockClassifyTexts.length = 0;
   mockState = { existingDraft: null, firstQueue: [], selectQueue: [], inserts: [], updates: [], updateResults: [], locks: [], raws: [], firsts: [], selects: [] };
   mockRecordCallProperty.mockReset().mockResolvedValue({ created: true, propertyId: 'prop-1' });
   mockSyncPrimaryAddress.mockReset().mockResolvedValue(undefined);
@@ -356,6 +361,7 @@ describe('handleClarifyReply', () => {
     'lawn fertilization and pest control',
     'pest and lawn services',
     'both pest and lawn, like on the form',
+    'I want pest and lawn',
   ])('a combined reply ending in "%s" records the street without the pair, and the pair as the service', async (pair) => {
     mockState.existingDraft = AWAITING(['street_address', 'specific_service']);
     const result = await handleClarifyReply({ phone: '9415550142', body: `123 Main St, Sarasota, ${pair}` });
@@ -363,6 +369,26 @@ describe('handleClarifyReply', () => {
     const leadUpdates = mockState.updates.filter((u) => u.table === 'leads');
     expect(leadUpdates.some((u) => u.payload.address === '123 Main St, Sarasota')).toBe(true);
     expect(leadUpdates.some((u) => u.payload.service_interest === pair)).toBe(true);
+    // The classifier vouches for the pair; it read the pair alone.
+    expect(mockClassifyTexts).toEqual([pair]);
+  });
+
+  // A pair inside other words goes to the classifier with them, from the last
+  // comma or street suffix. A request keeps the street line as written; no
+  // request ("we already have") is no service and no part of the street.
+  test.each([
+    ['123 Main St pest and lawn', 'pest and lawn', '123 Main St', 'pest and lawn'],
+    ['123 Main St Sarasota pest and lawn', 'Sarasota pest and lawn', '123 Main St Sarasota', 'Sarasota pest and lawn'],
+    ['123 Main St, Sarasota, we already have pest/lawn', 'we already have pest/lawn', '123 Main St, Sarasota', null],
+    ['123 Main St we already have pest and lawn', 'we already have pest and lawn', '123 Main St', null],
+  ])('%j: the classifier reads %j; the street is %j and the service %j', async (body, read, street, service) => {
+    mockState.existingDraft = AWAITING(['street_address', 'specific_service']);
+    const result = await handleClarifyReply({ phone: '9415550142', body });
+    expect(result.handled).toBe(true);
+    expect(mockClassifyTexts).toEqual([read]);
+    const leadUpdates = mockState.updates.filter((u) => u.table === 'leads');
+    expect(leadUpdates.filter((u) => 'address' in u.payload).map((u) => u.payload.address)).toEqual([street]);
+    expect(leadUpdates.find((u) => 'service_interest' in u.payload)?.payload.service_interest ?? null).toBe(service);
   });
 
   test('an unrecognizable reply is not handled — the normal inbox flow owns it', async () => {

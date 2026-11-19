@@ -26,7 +26,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { SERVICE_TAIL_RE } = require('./service-pair-terms');
+const { SERVICE_TAIL_RE, cutAddressClause } = require('./service-pair-terms');
 
 const RECENT_SENT_WINDOW_MS = 7 * 86400000;
 
@@ -1006,17 +1006,39 @@ async function voiceOriginCallLogId(estimateId) {
 }
 
 // SERVICE_TAIL_RE is the tail pattern lead-intake.js uses: the pest + lawn
-// pair ("123 Main St, pest and lawn") is one tail, so the service answer is
-// the whole pair and the street line keeps no half of it.
+// pair request ("123 Main St, pest and lawn") is one tail, so the street line
+// keeps no part of it. A pair request is no vocabulary answer (serviceTail
+// stays null): the service classifier reads the reply past addressSpan.
+// - A pair the street line ends at (after a comma or a street suffix: "…,
+//   pest and lawn", "123 Main St pest and lawn") is read with every tail.
+// - A pair inside other words is read with them, from the last comma or
+//   street suffix before it ("…, we already have pest/lawn"). When the
+//   classifier finds no request there, the street line is
+//   addressIfNoRequest, without those words.
 function stripServiceTail(address) {
-  let out = String(address || '').trim();
-  let tailParts = [];
+  const raw = String(address || '').trim();
+  let out = raw;
+  const tailParts = [];
+  let pair = null;
   let match;
   while ((match = out.match(SERVICE_TAIL_RE))) {
-    tailParts.unshift(match[1]);
+    tailParts.unshift(match.groups.tail);
+    if (match.groups.pair && !pair) pair = { before: out.slice(0, match.index), sep: match.groups.sep };
     out = out.slice(0, match.index).replace(/[,\s]+$/, '').trim();
   }
-  return { address: out, serviceTail: tailParts.join(' ') || null };
+  if (!pair) return { address: out, serviceTail: tailParts.join(' ') || null, addressSpan: raw, addressIfNoRequest: out };
+  const { before, sep } = pair;
+  const lastSuffix = [...before.matchAll(new RegExp(CLARIFY_STREET_SUFFIX_RE.source, 'gi'))].pop();
+  const clauseStart = sep.includes(',') ? before.length
+    : Math.max(before.lastIndexOf(',') + 1, lastSuffix ? lastSuffix.index + lastSuffix[0].length : 0);
+  const context = before.slice(clauseStart).trim();
+  const street = before.slice(0, clauseStart).replace(/[,\s]+$/, '').trim();
+  return {
+    address: out,
+    serviceTail: null,
+    addressSpan: context ? before.slice(0, clauseStart) : out,
+    addressIfNoRequest: context && street.length >= 6 ? street : out,
+  };
 }
 
 // Local address heuristics (mirrors lead-intake's leniency; duplicated
@@ -1066,7 +1088,7 @@ function extractAddressReply(body) {
   // Whole-body address reply ("123 Main St, Sarasota 34239").
   if (/^\s*\d{1,6}\s+[A-Za-z]/.test(text) && text.length <= 160) {
     const clause = text.split(/[.;!?\n]/)[0];
-    const cut = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
+    const cut = cutAddressClause(clause);
     // Suffix required even on whole-body replies — "2 dogs and pest
     // control" starts with digits but is not an address.
     if (cut.length >= 6 && CLARIFY_STREET_SUFFIX_RE.test(cut)) return cut;
@@ -1075,9 +1097,10 @@ function extractAddressReply(body) {
   let best = null;
   for (const match of text.matchAll(/\d{1,6}\s+[A-Za-z]/g)) {
     // Clause boundary first, then service-introducing prose ("123 Main St
-    // for pest control") — connector words end the address.
+    // for pest control") — connector words end the address, except inside a
+    // service tail (cutAddressClause: "…, I want pest and lawn").
     const clause = text.slice(match.index).split(/[.;!?\n]/)[0];
-    const candidate = clause.split(/\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i)[0].trim();
+    const candidate = cutAddressClause(clause);
     if (candidate.length >= 6 && candidate.length <= 160 && CLARIFY_STREET_SUFFIX_RE.test(candidate)) {
       best = candidate;
     }
@@ -1230,8 +1253,14 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
     let capturedAddress = null;
     let rawCapturedAddress = null;
     let serviceTailFromAddress = null;
+    // What the service classifier skips (the captured address, or less when
+    // a pair request's clause starts inside it), and the street line when
+    // that clause is no request. Both stay null while no street is captured.
+    let addressSpan = null;
+    let addressIfNoRequest = null;
     if (missing.includes('street_address')) {
       rawCapturedAddress = extractAddressReply(text);
+      addressSpan = rawCapturedAddress;
       if (rawCapturedAddress) {
         // "123 Main St, pest control" — a KNOWN-service tail is the
         // service answer, never part of the address.
@@ -1239,6 +1268,8 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
         if (stripped.address.length >= 6) {
           capturedAddress = stripped.address;
           serviceTailFromAddress = stripped.serviceTail;
+          addressSpan = stripped.addressSpan;
+          addressIfNoRequest = stripped.addressIfNoRequest;
           candidates.push('street_address');
         }
       }
@@ -1267,8 +1298,10 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
       // The classifier is the acceptance bar — length alone would record
       // "thanks, sounds good" as the requested service. The RAW text is
       // stored (label semantics preserved); the classifier only vouches
-      // that it actually names a service.
-      serviceText = rawCapturedAddress ? text.replace(rawCapturedAddress, ' ') : text;
+      // that it actually names a service. A pair request reaches it with
+      // its clause (addressSpan, stripServiceTail): "pest and lawn" takes
+      // the regex leg, and "we already have pest/lawn" is no answer.
+      serviceText = addressSpan ? text.replace(addressSpan, ' ') : text;
       serviceText = serviceText.replace(/\s+/g, ' ').replace(/^[\s,\-–—:]+|[\s,\-–—:]+$/g, '').trim();
       if (serviceText.length >= 3 && serviceText.length <= 80) {
         const { classifyServiceIntent } = require('./sms-service-intent');
@@ -1282,7 +1315,10 @@ async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
             if (typeof timer.unref === 'function') timer.unref();
           }),
         ]);
+        // A clause with no request in it is no part of the street line
+        // either: "123 Main St, we already have pest/lawn" keeps the street.
         if (cls?.interest) candidates.push('specific_service');
+        else capturedAddress = addressIfNoRequest;
       }
     }
     if (!candidates.length) return { handled: false };

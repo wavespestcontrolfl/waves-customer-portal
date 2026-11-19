@@ -6,7 +6,8 @@
  *  - lead-intake.js and estimate-clarify-asks.js drop a known service tail from
  *    a captured street line ("123 Main St, pest and lawn services"). A pair
  *    request the classifier reads is one whole tail, with the words around the
- *    pair, so no part of it stays on the street line.
+ *    pair, so no part of it stays on the street line. Both cut the line with
+ *    cutAddressClause, which keeps such a tail whole ("I want pest and lawn").
  *
  * No dependencies, so a test that mocks sms-service-intent still gets the real
  * address strip. Each separator has one way to match (a comma takes the spaces
@@ -32,11 +33,26 @@ const PAIR_REQUEST_PATTERN = `${PAIR_LEAD}${SERVICE_PAIR_PATTERN}${PAIR_TRAIL}`;
 
 // A known-service tail on a captured address: an optional cadence, then a pair
 // request or one service ("123 Main St, pest control", "…, quarterly pest and
-// lawn services"). The lookbehind starts a match only where a run of
-// separators begins, so a long run of commas or spaces is tried once, not
-// from each of its characters.
+// lawn services"). Groups: sep (the separators before it), tail, and pair
+// when the tail is a pair request. The lookbehind starts a match only where a
+// run of separators begins, so a long run of commas or spaces is tried once,
+// not from each of its characters.
 const TAIL_CADENCE = '(?:quarterly\\s+|monthly\\s+|recurring\\s+|one[-\\s]?time\\s+)?';
 const TAIL_SERVICE = '(?:pest|lawn|mosquito(?:es)?|termites?|bed\\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\\s+(?:control|care|service|treatment|program|removal))?';
-const SERVICE_TAIL_RE = new RegExp(`(?<![,\\s])[,\\s]+(${TAIL_CADENCE}(?:${PAIR_REQUEST_PATTERN}|${TAIL_SERVICE}))\\s*$`, 'i');
+const SERVICE_TAIL_RE = new RegExp(`(?<![,\\s])(?<sep>[,\\s]+)(?<tail>${TAIL_CADENCE}(?:(?<pair>${PAIR_REQUEST_PATTERN})|${TAIL_SERVICE}))\\s*$`, 'i');
 
-module.exports = { PAIR_REQUEST_PATTERN, SERVICE_TAIL_RE };
+// Service-introducing prose ends a captured street line at its first
+// connector word ("123 Main St for ants, they're everywhere"). A known service
+// tail at the end of the clause is matched first and kept whole, so the
+// connector words inside a pair request ("I want pest and lawn", "…, pest and
+// lawn please") do not cut it. When the line is cut before the tail, the tail
+// goes with the cut.
+const CONNECTOR_RE = /\s+(?:for|about|regarding|because|since|need|want|please|thanks)\b/i;
+function cutAddressClause(clause) {
+  const tail = clause.match(SERVICE_TAIL_RE);
+  const head = tail ? clause.slice(0, tail.index) : clause;
+  const cut = head.split(CONNECTOR_RE)[0];
+  return (tail && cut === head ? clause : cut).trim();
+}
+
+module.exports = { PAIR_REQUEST_PATTERN, SERVICE_TAIL_RE, cutAddressClause };
