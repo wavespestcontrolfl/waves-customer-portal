@@ -192,6 +192,20 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       expect(await held({ poolCage: '' })).toBe(true);
     });
 
+    test('gate on: omitted poolCage with a trusted 500 sq ft cage is charged like an explicit YES', async () => {
+      mockServerLookup = {
+        enriched: { pool: 'YES', poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM', poolCageSqft: 500 },
+        propertyRecord: {},
+      };
+      process.env[TWO_SIZES] = 'true';
+      const explicit = await quote({ poolCage: 'YES', poolCageSize: 'MEDIUM' });
+      const omitted = await quote({ poolCage: undefined, poolCageSize: 'MEDIUM' });
+      const noCage = await quote({ poolCage: 'NO', poolCageSize: 'NONE' });
+      expect(omitted.quote_required).toBeUndefined();
+      expect(omitted.monthly_total).toBe(explicit.monthly_total);
+      expect(omitted.monthly_total).toBeGreaterThan(noCage.monthly_total);
+    });
+
     test('gate on: an explicit NO (string or boolean) with a trusted held cage is priced', async () => {
       trustedHeldCage();
       process.env[TWO_SIZES] = 'true';

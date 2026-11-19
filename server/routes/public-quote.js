@@ -248,8 +248,8 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
 // it decided the cage (YES or NO); it beats the client's profile, which only an API
 // caller can hand-build (the website forms echo the lookup unchanged).
 //  - Gate on: price the two-size answer; hold the four-size answer's Large and
-//    Oversized. A client that OMITS poolCage takes the re-read's cage only when it
-//    is held; an explicit client answer stands.
+//    Oversized. A client that OMITS poolCage takes the re-read's cage answer, so it
+//    prices like an explicit answer; an explicit client answer stands.
 //  - Gate off: a profile with its own poolCageLegacySize key (a two-size profile from
 //    before a rollback) prices its four-size answer, the re-read first. Any other
 //    profile is today's code exactly.
@@ -280,17 +280,18 @@ function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
 }
 
 // Gate on: price the two-size answer, hold the four-size answer's Large and
-// Oversized. A client that OMITS poolCage takes the re-read's cage only when it is
-// held; an explicit client answer stands.
+// Oversized. A client that OMITS poolCage takes the re-read's cage answer, so it
+// prices like an explicit YES (a held cage is held, a Medium one is charged); an
+// explicit client answer stands.
 function twoSizeCageFeatures(ep, trusted, { pool, clientCage }) {
   const { fourSizeOf, twoSizeOf, isHeldFourSize } = require('../services/property-lookup/cage-sizes');
   const four = fourSizeOf(trusted) || fourSizeOf(ep);
   const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
-  const trustedHeldCage = cageOmitted && String(trusted?.poolCage).toUpperCase() === 'YES' && isHeldFourSize(four);
-  const poolCage = clientCage || trustedHeldCage;
+  const trustedCage = cageOmitted && String(trusted?.poolCage).toUpperCase() === 'YES';
+  const poolCage = clientCage || trustedCage;
   const size = twoSizeOf(trusted) ?? twoSizeOf(ep);
   return {
-    pool: pool || trustedHeldCage,
+    pool: pool || trustedCage,
     poolCage,
     poolCageSize: size ? size.toLowerCase() : undefined,
     ...(poolCage && isHeldFourSize(four) ? { poolCageReview: true } : {}),

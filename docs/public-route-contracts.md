@@ -5261,13 +5261,17 @@ quote text, or any customer-facing copy.
 Pool cage hold (`GATE_CAGE_TWO_SIZES`, owner 2026-11-19, "hold"; dark by default):
 the lookup's `enriched.poolCageLegacySize` (the four-size answer, see the
 property-lookup entry), and the server's own cache-only re-read of the same
-address, are read ONLY to hold a quote (`quote_required`, the existing manual-quote
-answer) for a cage that today's four sizes call Large or Oversized; they never
-lower or change a price. A visitor who answers no cage is not held, and a client
-that omits the cage answer takes the re-read's, so a partial `enriched` cannot
-drop the hold. Gate off: the route prices the four-size answer
-(`poolCageLegacySize` when a profile carries one from before a rollback, else
-`poolCageSize`), so a Large or Oversized cage is held as before. The response
+address, decide the cage under the gate state of THIS request, the re-read first
+and the county area first (`server/services/property-lookup/cage-sizes.js`). Gate
+on: the priced size is the two-size answer (Medium up to 1,000 sq ft, Large above),
+and a cage that today's four sizes call Large or Oversized is held
+(`quote_required`, the existing manual-quote answer). A visitor who answers no
+cage is not held and not charged; a client that omits the cage answer takes the
+re-read's, so it prices like an explicit answer and a partial `enriched` cannot
+drop a hold. Gate off: a profile that carries `poolCageLegacySize` (one from before
+a rollback) prices the four-size answer, the re-read first; any other profile
+prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
+Oversized cage is held as before. The response
 shape does not change; `quote_required` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
