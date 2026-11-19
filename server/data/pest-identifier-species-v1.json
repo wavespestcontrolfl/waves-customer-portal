@@ -1,0 +1,925 @@
+{
+  "version": 1,
+  "source_repo": "wavespestcontrolfl/wavespestcontrol-astro",
+  "source_file": "src/data/pestIdentifier.ts",
+  "source_commit": "21ab804c2294a050db5e6450ac2c45a85a9b61a1",
+  "source_file_last_changed_in": "b26ef9e022baac6ad25debf97dc45c183dcf4f9b",
+  "snapshot_note": "Copied verbatim from origin/main of the astro repo (PESTS array). Fields kept: slug, name, category, fact, verdict, note, looks, where. Refresh by re-reading that file and updating source_commit; page URL is https://www.wavespestcontrol.com/pest-identifier/<slug>/",
+  "species": [
+    {
+      "slug": "ghost-ant",
+      "name": "Ghost Ant",
+      "category": "Ants",
+      "fact": "The most common kitchen ant in South Florida — colonies split into many satellite nests, which is why sprays seem to make more of them.",
+      "verdict": "watch",
+      "note": "One trail is a bait job; trails every week mean nests in the walls.",
+      "looks": [
+        "ant-like"
+      ],
+      "where": [
+        "kitchen",
+        "bathroom"
+      ]
+    },
+    {
+      "slug": "bigheaded-ant",
+      "name": "Bigheaded Ant",
+      "category": "Ants",
+      "fact": "The big-headed workers are the colony’s \"soldiers\" — those jaws crack seeds, not skin.",
+      "verdict": "watch",
+      "note": "Mostly a paver/foundation nuisance, but supercolonies get enormous without treatment.",
+      "looks": [
+        "ant-like"
+      ],
+      "where": [
+        "lanai-patio",
+        "lawn-garden",
+        "kitchen"
+      ]
+    },
+    {
+      "slug": "fire-ant",
+      "name": "Red Imported Fire Ant",
+      "category": "Ants",
+      "fact": "Workers grip with their jaws and pivot to sting multiple times — and they cue on movement, so they tend to sting all at once.",
+      "verdict": "call",
+      "note": "With kids or pets in the yard, mounds are worth treating properly — kicking them just relocates the colony.",
+      "looks": [
+        "ant-like"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "carpenter-ant",
+      "name": "Florida Carpenter Ant",
+      "category": "Ants",
+      "fact": "They don’t eat wood like termites — they hollow out damp or damaged wood to nest, so finding them often means finding a moisture problem.",
+      "verdict": "call",
+      "note": "The ants are manageable; the moisture-damaged wood they chose is the real finding.",
+      "looks": [
+        "ant-like",
+        "winged-swarmer"
+      ],
+      "where": [
+        "kitchen",
+        "attic-walls",
+        "lights-windows"
+      ]
+    },
+    {
+      "slug": "tawny-crazy-ant",
+      "name": "Tawny Crazy Ant",
+      "category": "Ants",
+      "fact": "They’re notorious for swarming into electrical boxes and equipment — and they displace even fire ants where they establish.",
+      "verdict": "call",
+      "note": "Numbers make DIY hopeless; infestations are measured in millions.",
+      "looks": [
+        "ant-like"
+      ],
+      "where": [
+        "garage-storage",
+        "lanai-patio",
+        "kitchen"
+      ]
+    },
+    {
+      "slug": "white-footed-ant",
+      "name": "White-footed Ant",
+      "category": "Ants",
+      "fact": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you kill keeps coming back.",
+      "verdict": "watch",
+      "note": "Harmless but famously persistent; exterior treatment beats kitchen-counter sprays.",
+      "looks": [
+        "ant-like"
+      ],
+      "where": [
+        "kitchen",
+        "lanai-patio",
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "subterranean-termite",
+      "name": "Subterranean Termite",
+      "category": "Termites",
+      "fact": "The mud tubes are climate-controlled highways — termites dry out fast, so they build covered roads between soil and wood.",
+      "verdict": "call",
+      "note": "Termite damage is rarely covered by homeowners insurance. Tubes or swarmers = inspection time.",
+      "looks": [
+        "winged-swarmer",
+        "ant-like"
+      ],
+      "where": [
+        "attic-walls",
+        "garage-storage",
+        "lights-windows"
+      ]
+    },
+    {
+      "slug": "drywood-termite",
+      "name": "Drywood Termite",
+      "category": "Termites",
+      "fact": "Those pellet piles are \"kick-out\" debris — the colony sweeps its gallery and pushes the pellets out a hole the size of a pin.",
+      "verdict": "call",
+      "note": "Pellets mean an active colony in that wood member. Early treatment is far cheaper than late.",
+      "looks": [
+        "winged-swarmer"
+      ],
+      "where": [
+        "attic-walls",
+        "bedroom",
+        "garage-storage"
+      ]
+    },
+    {
+      "slug": "formosan-termite",
+      "name": "Formosan Termite",
+      "category": "Termites",
+      "fact": "A mature Formosan colony can hold millions — they’re called \"super termites\" for colony size, not bite.",
+      "verdict": "call",
+      "note": "The most destructive termite in Florida. Swarms near your lights justify an inspection.",
+      "looks": [
+        "winged-swarmer"
+      ],
+      "where": [
+        "attic-walls",
+        "lights-windows",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "american-cockroach",
+      "name": "American Cockroach",
+      "category": "Roaches",
+      "fact": "The classic Florida \"palmetto bug.\" It lives outdoors in mulch, palms, and sewers — one in the house is a visitor, not an infestation.",
+      "verdict": "watch",
+      "note": "Occasional wanderers are weather-driven. Nightly sightings mean an entry point or moisture source worth fixing.",
+      "looks": [
+        "roach-like"
+      ],
+      "where": [
+        "lanai-patio",
+        "garage-storage",
+        "bathroom",
+        "kitchen"
+      ]
+    },
+    {
+      "slug": "german-cockroach",
+      "name": "German Cockroach",
+      "category": "Roaches",
+      "fact": "This one never lives outdoors in Florida — it arrives in bags, boxes, and used appliances. It’s a hitchhiker, not a cleanliness verdict.",
+      "verdict": "call",
+      "note": "The fastest-breeding indoor roach. Foggers scatter them deeper — baiting programs work.",
+      "looks": [
+        "roach-like"
+      ],
+      "where": [
+        "kitchen",
+        "bathroom"
+      ]
+    },
+    {
+      "slug": "smokybrown-cockroach",
+      "name": "Smokybrown Cockroach",
+      "category": "Roaches",
+      "fact": "Dries out easily, so it follows moisture — clogged gutters are a favorite address.",
+      "verdict": "watch",
+      "note": "Porch-light visitors are normal; attic activity is worth addressing.",
+      "looks": [
+        "roach-like"
+      ],
+      "where": [
+        "lanai-patio",
+        "attic-walls",
+        "lights-windows"
+      ]
+    },
+    {
+      "slug": "aedes-mosquito",
+      "name": "Yellow Fever Mosquito",
+      "category": "Mosquitoes & biters",
+      "fact": "It doesn’t need a pond — a plant saucer after one afternoon storm raises a generation in about a week.",
+      "verdict": "call",
+      "note": "Day-biting around the patio = container breeding within ~150 feet. Tip the water first; treatment handles the rest.",
+      "looks": [
+        "flying-biter"
+      ],
+      "where": [
+        "lanai-patio",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "asian-tiger-mosquito",
+      "name": "Asian Tiger Mosquito",
+      "category": "Mosquitoes & biters",
+      "fact": "Arrived in the US in the 1980s in shipments of used tires — the world’s most-traveled mosquito.",
+      "verdict": "call",
+      "note": "Same playbook: eliminate standing water, then treat resting areas.",
+      "looks": [
+        "flying-biter"
+      ],
+      "where": [
+        "lanai-patio",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "no-see-um",
+      "name": "No-See-Um",
+      "category": "Mosquitoes & biters",
+      "fact": "They’re small enough to pass through regular 16-mesh screening — coastal homes use finer \"no-see-um mesh\" for a reason.",
+      "verdict": "harmless",
+      "note": "Miserable but not a home infestation issue — timing, fans, and finer screens are the real fixes.",
+      "looks": [
+        "flying-biter"
+      ],
+      "where": [
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "lovebug",
+      "name": "Lovebug",
+      "category": "Mosquitoes & biters",
+      "fact": "They don’t bite or sting at all — but their body residue is mildly acidic and can mark car paint if baked on for days.",
+      "verdict": "harmless",
+      "note": "A car-wash problem, not a pest-control problem. They’re gone in a few weeks.",
+      "looks": [
+        "small-fly",
+        "crawler"
+      ],
+      "where": [
+        "lanai-patio",
+        "lights-windows"
+      ]
+    },
+    {
+      "slug": "chinch-bug",
+      "name": "Southern Chinch Bug",
+      "category": "Lawn",
+      "fact": "The #1 killer of St. Augustine lawns in Florida. The tell: drought stress recovers with water, chinch damage doesn’t.",
+      "verdict": "call",
+      "note": "They kill outward from the first patch — early treatment saves the lawn, late means resodding.",
+      "looks": [
+        "lawn-damage",
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "mole-cricket",
+      "name": "Mole Cricket",
+      "category": "Lawn",
+      "fact": "Males sing from burrows they shape like megaphones to amplify the call across the neighborhood.",
+      "verdict": "call",
+      "note": "Tunneling severs roots — small areas recover, spreading tunnels need treatment.",
+      "looks": [
+        "lawn-damage",
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "sod-webworm",
+      "name": "Tropical Sod Webworm",
+      "category": "Lawn",
+      "fact": "The moths do zero damage — it’s their caterpillars feeding at night that shear the lawn.",
+      "verdict": "call",
+      "note": "Late-summer classic. Treated early, the lawn regrows quickly.",
+      "looks": [
+        "worm-caterpillar",
+        "lawn-damage"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "fall-armyworm",
+      "name": "Fall Armyworm",
+      "category": "Lawn",
+      "fact": "The name is literal — they advance across turf in fronts, eating as they go.",
+      "verdict": "call",
+      "note": "Fast movers. The birds found them before you did.",
+      "looks": [
+        "worm-caterpillar",
+        "lawn-damage"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "white-grub",
+      "name": "White Grub",
+      "category": "Lawn",
+      "fact": "Animal digging is usually the first sign — the grubs are the buffet, your lawn is the tablecloth.",
+      "verdict": "call",
+      "note": "Fix the grubs and the diggers have less reason to stick around — not a guarantee, but the right first move.",
+      "looks": [
+        "worm-caterpillar",
+        "lawn-damage"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "spittlebug",
+      "name": "Twolined Spittlebug",
+      "category": "Lawn",
+      "fact": "The \"spit\" is a bubble tent the nymph builds around itself for moisture and protection.",
+      "verdict": "watch",
+      "note": "Light foam is cosmetic; widespread stripes-and-foam plus browning is treatable.",
+      "looks": [
+        "crawler",
+        "lawn-damage"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "lubber-grasshopper",
+      "name": "Eastern Lubber Grasshopper",
+      "category": "Lawn",
+      "fact": "Its colors are a warning label — lubbers are toxic enough that most predators spit them back out.",
+      "verdict": "watch",
+      "note": "Toxic enough to make a pet sick if eaten — keep pets away, vet if one does. Defensive foam irritates skin and eyes, so don’t handle them; ornamental damage is rarely severe.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "golden-silk-orbweaver",
+      "name": "Golden Silk Orb-weaver",
+      "category": "Spiders",
+      "fact": "Her silk is, weight-for-weight, tougher than steel — and she rebuilds the web’s damaged sections nightly.",
+      "verdict": "ally",
+      "note": "Eats mosquitoes and flies all day. Relocate the web if it’s across your walkway; don’t kill the engineer.",
+      "looks": [
+        "spider"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "wolf-spider",
+      "name": "Wolf Spider",
+      "category": "Spiders",
+      "fact": "Mothers carry their spiderlings piggyback — dozens riding shotgun. It’s the only spider that does this.",
+      "verdict": "ally",
+      "note": "Free roach and cricket control. Scoop-and-release beats squishing.",
+      "looks": [
+        "spider"
+      ],
+      "where": [
+        "garage-storage",
+        "living-areas",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "huntsman-spider",
+      "name": "Huntsman Spider",
+      "category": "Spiders",
+      "fact": "A dedicated cockroach hunter — one huntsman on patrol is a roach’s worst night.",
+      "verdict": "ally",
+      "note": "Terrifying-looking, essentially harmless, genuinely useful. The scream is optional.",
+      "looks": [
+        "spider"
+      ],
+      "where": [
+        "garage-storage",
+        "living-areas",
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "brown-widow",
+      "name": "Brown Widow",
+      "category": "Spiders",
+      "fact": "Now more common than black widows in much of Florida — but notably shyer and less prone to bite.",
+      "verdict": "watch",
+      "note": "Respect, don’t panic. Gloves when moving stored patio furniture; treat if egg sacs multiply.",
+      "looks": [
+        "spider"
+      ],
+      "where": [
+        "lanai-patio",
+        "garage-storage"
+      ]
+    },
+    {
+      "slug": "black-widow",
+      "name": "Southern Black Widow",
+      "category": "Spiders",
+      "fact": "Bites are rare and defensive — nearly all happen when a hand reaches blind into her hiding spot.",
+      "verdict": "call",
+      "note": "The one Florida spider worth professional attention when found where kids or pets play.",
+      "looks": [
+        "spider"
+      ],
+      "where": [
+        "garage-storage",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "roof-rat",
+      "name": "Roof Rat",
+      "category": "Rodents",
+      "fact": "Florida’s aerialist — it runs fences and branches like a tightrope walker and enters at roofline, not floor level.",
+      "verdict": "call",
+      "note": "Attic noise + chewed wires is an urgent combination. Exclusion (sealing entries) is the permanent fix.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "attic-walls",
+        "lanai-patio",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "norway-rat",
+      "name": "Norway Rat",
+      "category": "Rodents",
+      "fact": "Ground-floor specialist — where roof rats take the high road, Norways dig in at the foundation.",
+      "verdict": "call",
+      "note": "Burrow + droppings = established. Trapping plus entry sealing, in that order.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "garage-storage",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "house-mouse",
+      "name": "House Mouse",
+      "category": "Rodents",
+      "fact": "A mouse nibbles at 20–30 food sites a night rather than one big meal — which is why droppings show up everywhere at once.",
+      "verdict": "call",
+      "note": "One mouse is rarely one mouse. Seal dime-sized gaps or the next one uses the same door.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "kitchen",
+        "garage-storage",
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "cat-flea",
+      "name": "Cat Flea",
+      "category": "Biting",
+      "fact": "Adults on the pet are ~5% of the infestation — the other 95% is eggs, larvae, and pupae in carpet and bedding.",
+      "verdict": "call",
+      "note": "Pet treatment alone loses. Home + yard + pet together, timed to the life cycle, wins.",
+      "looks": [
+        "crawler",
+        "flying-biter"
+      ],
+      "where": [
+        "on-pets",
+        "living-areas",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "brown-dog-tick",
+      "name": "Brown Dog Tick",
+      "category": "Biting",
+      "fact": "The only tick that can complete its entire life cycle indoors — an infestation can live in the house itself.",
+      "verdict": "call",
+      "note": "Indoor ticks are a program, not a one-off spray. Coordinate with your vet on pet treatment.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "on-pets",
+        "living-areas",
+        "garage-storage"
+      ]
+    },
+    {
+      "slug": "bed-bug",
+      "name": "Bed Bug",
+      "category": "Biting",
+      "fact": "They follow luggage and furniture, not filth — five-star hotels get them too. Clean homes are not immune.",
+      "verdict": "call",
+      "note": "DIY sprays scatter them to neighboring rooms. Inspection first, then targeted treatment.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "bedroom",
+        "living-areas"
+      ]
+    },
+    {
+      "slug": "paper-wasp",
+      "name": "Paper Wasp",
+      "category": "Stingers",
+      "fact": "They hunt caterpillars all day to feed their young — a nest away from doors is quietly working your garden.",
+      "verdict": "watch",
+      "note": "Leave nests you can ignore; remove the ones over doorways (early morning, or have us do it).",
+      "looks": [
+        "wasp-bee"
+      ],
+      "where": [
+        "lanai-patio",
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "mud-dauber",
+      "name": "Mud Dauber",
+      "category": "Stingers",
+      "fact": "She stocks each mud cell with paralyzed spiders for her young — including widows. A spider-control subcontractor.",
+      "verdict": "ally",
+      "note": "Almost never stings. Scrape old tubes off; that’s the whole job.",
+      "looks": [
+        "wasp-bee"
+      ],
+      "where": [
+        "lanai-patio",
+        "garage-storage",
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "yellowjacket",
+      "name": "Yellowjacket",
+      "category": "Stingers",
+      "fact": "A hidden ground nest can hold thousands by fall — the lawnmower usually finds it first.",
+      "verdict": "call",
+      "note": "Ground nests near activity areas are the definition of a professional job.",
+      "looks": [
+        "wasp-bee"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "honey-bee-swarm",
+      "name": "Honey Bee (swarm)",
+      "category": "Stingers",
+      "fact": "One worker bee makes about 1/12 of a teaspoon of honey in her lifetime — a swarm is house-hunting, not attacking.",
+      "verdict": "ally",
+      "note": "Swarms usually move on within days. A local beekeeper can collect them free — don’t spray pollinators.",
+      "looks": [
+        "wasp-bee"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "honey-bee-wall-colony",
+      "name": "Honey Bee (wall colony)",
+      "category": "Stingers",
+      "fact": "A wall colony builds comb fast — and sealing the entrance traps bees inside, where dying comb leaks honey into the wall.",
+      "verdict": "call",
+      "note": "Needs prompt bee-friendly removal (comb out, cavity cleaned). Never just plug the hole.",
+      "looks": [
+        "wasp-bee"
+      ],
+      "where": [
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "carpenter-bee",
+      "name": "Carpenter Bee",
+      "category": "Stingers",
+      "fact": "That intimidating hovering guard is a male with no stinger — pure bluff.",
+      "verdict": "watch",
+      "note": "A hole or two is cosmetic; years of re-drilling plus woodpecker follow-up damage adds up. Paint is the best prevention.",
+      "looks": [
+        "wasp-bee"
+      ],
+      "where": [
+        "lanai-patio",
+        "attic-walls"
+      ]
+    },
+    {
+      "slug": "puss-caterpillar",
+      "name": "Puss Caterpillar",
+      "category": "Stingers",
+      "fact": "The most venomous caterpillar in the United States hides under that fur — the \"hairs\" conceal venomous spines.",
+      "verdict": "watch",
+      "note": "Never touch; teach kids the \"cute = don’t\" rule. Stings are intensely painful but rarely dangerous.",
+      "looks": [
+        "worm-caterpillar"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "io-moth-caterpillar",
+      "name": "Io Moth Caterpillar",
+      "category": "Stingers",
+      "fact": "It grows into a moth with huge false \"eyes\" on its hindwings — one of Florida’s prettiest transformations from one of its spiciest caterpillars.",
+      "verdict": "watch",
+      "note": "Spines sting like nettles. Look, photograph, don’t pet.",
+      "looks": [
+        "worm-caterpillar"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "silverfish",
+      "name": "Silverfish",
+      "category": "Occasional invaders",
+      "fact": "Silverfish are older than dinosaurs — they were doing this exact job 100 million years before T. rex.",
+      "verdict": "harmless",
+      "note": "Mostly a storage-box nuisance. Lots of them signals a humidity problem worth fixing.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "bathroom",
+        "garage-storage",
+        "living-areas"
+      ]
+    },
+    {
+      "slug": "earwig",
+      "name": "Earwig",
+      "category": "Occasional invaders",
+      "fact": "The pincers are for folding its wings and courtship — the ear thing is pure medieval myth.",
+      "verdict": "harmless",
+      "note": "Fix door sweeps and drainage; the visitors stop themselves.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "bathroom",
+        "lanai-patio",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "millipede",
+      "name": "Florida Ivory Millipede",
+      "category": "Occasional invaders",
+      "fact": "A composting machine — it recycles dead leaves into soil. Rain floods the leaf litter and evicts them onto your lanai.",
+      "verdict": "harmless",
+      "note": "They can’t survive indoors — sweep them out or wait; they dry out in a day.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "garage-storage",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "house-centipede",
+      "name": "House Centipede",
+      "category": "Occasional invaders",
+      "fact": "It actively hunts roaches, silverfish, and moths at night — an unpaid exterminator with too many legs.",
+      "verdict": "ally",
+      "note": "If you can stand it, it’s working for you. If you can’t, cup-and-release counts.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "bathroom",
+        "garage-storage"
+      ]
+    },
+    {
+      "slug": "pillbug",
+      "name": "Pillbug",
+      "category": "Occasional invaders",
+      "fact": "Not an insect at all — it’s a land crustacean that breathes through gill-like organs. A tiny armored shrimp cousin.",
+      "verdict": "harmless",
+      "note": "A drainage indicator more than a pest. Kids’ favorite yard animal.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden",
+        "garage-storage"
+      ]
+    },
+    {
+      "slug": "stink-bug",
+      "name": "Stink Bug",
+      "category": "Occasional invaders",
+      "fact": "The smell is a defense chemical from glands on its thorax — vacuum, don’t squish.",
+      "verdict": "harmless",
+      "note": "Seasonal wall-sitters. Sealing window gaps is the whole fix.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lights-windows",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "drain-fly",
+      "name": "Drain Fly",
+      "category": "Occasional invaders",
+      "fact": "The larvae live in the gel film inside drains — which is why sprays fail and a stiff brush succeeds.",
+      "verdict": "harmless",
+      "note": "Clean the drain film (brush + enzyme cleaner) and they’re gone in days.",
+      "looks": [
+        "small-fly"
+      ],
+      "where": [
+        "bathroom",
+        "kitchen"
+      ]
+    },
+    {
+      "slug": "fungus-gnat",
+      "name": "Fungus Gnat",
+      "category": "Occasional invaders",
+      "fact": "It’s an overwatering alarm with wings — the larvae need soggy soil to survive.",
+      "verdict": "harmless",
+      "note": "Let pots dry between waterings; yellow sticky cards catch the stragglers.",
+      "looks": [
+        "small-fly"
+      ],
+      "where": [
+        "living-areas",
+        "kitchen"
+      ]
+    },
+    {
+      "slug": "cuban-treefrog",
+      "name": "Cuban Treefrog",
+      "category": "Wildlife neighbors",
+      "fact": "An invasive that eats Florida’s smaller native treefrogs — one reason your porch chorus may have gone quiet.",
+      "verdict": "watch",
+      "note": "Wash hands after contact. Turning porch lights off (or amber) removes the insect buffet that draws them.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lanai-patio",
+        "lights-windows"
+      ]
+    },
+    {
+      "slug": "brown-anole",
+      "name": "Brown Anole",
+      "category": "Wildlife neighbors",
+      "fact": "The invasive cousin — it pushed Florida’s native green anole up into the trees. Look UP to find the green ones.",
+      "verdict": "ally",
+      "note": "Eats enormous numbers of insects. The lanai’s volunteer security team.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lanai-patio",
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "gecko",
+      "name": "House Gecko",
+      "category": "Wildlife neighbors",
+      "fact": "One of the few lizards with a voice — those evening chirps are territorial calls.",
+      "verdict": "ally",
+      "note": "Night-shift bug patrol. The droppings on the windowsill are the rent.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lights-windows",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "gopher-tortoise",
+      "name": "Gopher Tortoise",
+      "category": "Wildlife neighbors",
+      "fact": "Its burrow shelters 350+ other species — Florida’s original landlord, and a protected species you’re lucky to host.",
+      "verdict": "ally",
+      "note": "Protected by law — burrows can’t be disturbed. Mow around the apron and enjoy the neighbor.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "armadillo",
+      "name": "Nine-banded Armadillo",
+      "category": "Wildlife neighbors",
+      "fact": "When startled it jumps straight up — a reflex that surprises people more than it protects the armadillo.",
+      "verdict": "call",
+      "note": "We don’t trap wildlife — a licensed trapper can remove it under FWC rules. It eats grubs and earthworms, so treating grubs helps but won’t reliably send it away; don’t handle it bare-handed.",
+      "looks": [
+        "lawn-damage"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "spiraling-whitefly",
+      "name": "Rugose Spiraling Whitefly",
+      "category": "Plant pests",
+      "fact": "The spiral pattern is her egg-laying signature — like a tiny crop circle under every frond.",
+      "verdict": "call",
+      "note": "Trees usually survive, but the sticky fallout zone makes treatment worth it.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "mealybug",
+      "name": "Mealybug",
+      "category": "Plant pests",
+      "fact": "Ants literally farm them — guarding the herd and milking the honeydew like six-legged dairymen.",
+      "verdict": "watch",
+      "note": "Small outbreaks wipe off with soapy water; recurring ones ride on the ant problem.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden",
+        "lanai-patio"
+      ]
+    },
+    {
+      "slug": "aphid",
+      "name": "Aphid",
+      "category": "Plant pests",
+      "fact": "Aphids are born pregnant — generations telescope inside each other, which is how a clean plant is covered by Friday.",
+      "verdict": "watch",
+      "note": "Blast with water, let the ladybugs work; treat only persistent infestations.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "tea-scale",
+      "name": "Tea Scale",
+      "category": "Plant pests",
+      "fact": "Adult scales never move again — they cement themselves down and live under armor for life.",
+      "verdict": "watch",
+      "note": "Systemic treatment beats sprays — the armor sheds contact products.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    },
+    {
+      "slug": "sri-lankan-weevil",
+      "name": "Sri Lankan Weevil",
+      "category": "Plant pests",
+      "fact": "A newer Florida arrival that already feeds on 150+ plant species — the notched-leaf signature is everywhere.",
+      "verdict": "watch",
+      "note": "Cosmetic on mature plants; young ornamentals may need protection.",
+      "looks": [
+        "crawler"
+      ],
+      "where": [
+        "lawn-garden"
+      ]
+    }
+  ]
+}

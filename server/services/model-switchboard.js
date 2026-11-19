@@ -526,6 +526,7 @@ const LANES = [
   L('invoice_summary', 'Invoice AI summary', 'invoice-ai-summary.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('websiteContent', 'primary'), P('websiteContent', 'fallback')),
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max' }),
+  L('pest_insider', 'Pest Insider email (lead fact + species restatement)', 'pest-insider/writer.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: "newsletterWriter's model at effort 'medium' (a short restatement; one single-turn JSON call, no tools); claim-check.js cuts anything the fact bank does not state; also runs on the Max-plan runner (ops/agents/pest-insider-sample.js)" }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
@@ -777,6 +778,7 @@ const LANE_AREA = {
   blog_draft: 'content',
   blog_optimize: 'content',
   newsletter: 'content',
+  pest_insider: 'content',
   content_misc: 'content',
   social_copy: 'content',
   social_judge: 'content',
@@ -949,6 +951,7 @@ const LANE_DESCRIBE = {
   blog_draft: 'Writes blog posts',
   blog_optimize: 'Improves a draft post',
   newsletter: 'Writes and ranks the newsletter',
+  pest_insider: 'Writes the twice-a-month Pest Insider email',
   content_misc: 'Content ideas, scheduler copy, automation emails',
   social_copy: 'Writes social posts',
   social_judge: 'Checks social posts for compliance',

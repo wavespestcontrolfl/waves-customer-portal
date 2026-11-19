@@ -1,0 +1,1853 @@
+{
+  "version": 1,
+  "source": "research_notes/TIL facts for Field Notes/facts.md (researched 2026-11-19)",
+  "facts": [
+    {
+      "id": "L01",
+      "title": "Reclaimed water feeds your lawn",
+      "statement": "Reclaimed irrigation water carries nitrogen and phosphorus, so a lawn on reclaimed water may need less fertilizer.",
+      "quotes": [
+        "Depending on the level of treatment and storage, reclaimed water may contain significant amounts of nutrients. Plants in the landscape can use the nutrients present in reclaimed water, potentially reducing the need for applying fertilizer.",
+        "Using reclaimed water for irrigation can provide a portion of the nitrogen and all the phosphorus required by turfgrass (Menzel and Broomhall, 2006). Accounting for nutrients from reclaimed water in the nutrient budget can reduce nitrogen fertilizer applications, resulting in lower costs.",
+        "Most reclaimed water contains nutrients, such as nitrogen and phosphorus, that can contribute to the landscape's fertilization needs; therefore, fertilization could potentially be reduced to account for the extra nutrients in reclaimed water. Levels of nutrients vary according to the source, so check with your water provider for specifics."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Maximizing the Benefits of Reclaimed Water for Irrigating the Landscape and Protecting the Environment",
+          "pub_id": "SS587 (SL385)",
+          "url": "https://edis.ifas.ufl.edu/publication/SS587/pdf",
+          "date_text": "Original Nov 2013; revised April 2022 and December 2025"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Reclaimed Water in Your Florida-Friendly Edible Landscape",
+          "pub_id": "EP628 (ENH1364)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP628/pdf",
+          "date_text": "Original Jan 2023; revised June 2026"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "The \"all the phosphorus\" line rests on an Australian study (Queensland) that SS587 cites. SS587 also warns: \"overwatering with reclaimed water is a common problem.\" Older EDIS reclaimed-water fact sheets SS542, SS544 and SS704 return HTTP 410 (retired); AE449 returns 404."
+    },
+    {
+      "id": "L02",
+      "title": "Water when the grass asks",
+      "statement": "UF says water only when the grass shows thirst: blades fold in half, color turns blue-gray, and footprints stay visible.",
+      "quotes": [
+        "Ideally, University of Florida guidelines call for watering lawns on an \"as-needed\" basis.",
+        "Leaf blades are folded in half lengthwise in an attempt to conserve water",
+        "The grass takes on a blue-gray tint rather than maintaining a green color.",
+        "Footprints or tire tracks remain visible on the grass long after they are made.",
+        "Light, frequent watering is inefficient and encourages shallow root systems."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Watering Your Florida Lawn",
+          "pub_id": "LH025 (ENH9)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH025/pdf",
+          "date_text": "Revised April 2013; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        10,
+        11,
+        12,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L03",
+      "title": "Dollarweed means too much water",
+      "statement": "Dollarweed and sedges are often a sign of overwatering; cut back irrigation before you reach for weed killer.",
+      "quotes": [
+        "Additionally, overwatering promotes the growth of certain weed species such as dollarweed and sedges.",
+        "Dollarweed usually appears in places where a gardener has overwatered or in naturally wet places, so adjust your irrigation or improve drainage in the area."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Watering Your Florida Lawn",
+          "pub_id": "LH025 (ENH9)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH025/pdf",
+          "date_text": "Revised April 2013; reviewed 10/2025"
+        },
+        {
+          "publisher": "UF/IFAS Gardening Solutions",
+          "title": "Dollarweed",
+          "pub_id": null,
+          "url": "https://gardeningsolutions.ifas.ufl.edu/home/lawns/problems-and-solutions/dollarweed/",
+          "date_text": "no date shown; read 2026-11-19"
+        }
+      ],
+      "months": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L04",
+      "title": "Water inside the dew window",
+      "statement": "Watering in the evening lengthens leaf wetness and invites fungus; water pre-dawn, while dew is already on the grass.",
+      "quotes": [
+        "Irrigating in the evening before dew forms or in the morning after dew evaporates extends the dew period. One strategy to reduce the risk of disease development is to irrigate when dew is already present. Dew is usually present in the predawn hours, between 2 and 8 a.m.",
+        "Properties one acre or larger may only water before 4 a.m. and after 8 p.m."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Turfgrass Disease Management",
+          "pub_id": "LH040 (SSPLP14)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH040/pdf",
+          "date_text": "Original Feb 2001; revised Aug 2018 and Dec 2025"
+        },
+        {
+          "publisher": "SWFWMD",
+          "title": "Modified Phase III 'Extreme' Water Shortage Restrictions",
+          "pub_id": null,
+          "url": "https://www.swfwmd.state.fl.us/conservation/restrictions/swfwmd.php",
+          "date_text": "read 2026-11-19"
+        }
+      ],
+      "months": [
+        11,
+        12,
+        1,
+        2,
+        3
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "medium",
+      "notes": "medium (combines a UF disease rule with the District's hours; check your city or county, which may set stricter hours).",
+      "recheck_before_send": true
+    },
+    {
+      "id": "L05",
+      "title": "Mow St. Augustine tall",
+      "statement": "Most St. Augustine should be cut at 3.5 to 4 inches, and never lose more than one-third of the blade at once.",
+      "quotes": [
+        "Mow often enough so that no more than 1/3 of the blade height is removed per mowing.",
+        "Dwarf and semi-dwarf cultivars of St. Augustinegrass (Captiva, Delmar, Seville) are the only cultivars of this species that should be mowed at 2.5\" Other cultivars should be mowed at 3.5–4\"",
+        "Mowing also influences rooting depth, with development of a deeper root system in response to higher mowing heights.",
+        "Mower blades must be sharp so they cut rather than tear the turf leaves.",
+        "When any disease occurs, the cutting height should be raised."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Mowing Your Florida Lawn",
+          "pub_id": "LH028 (ENH10)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH028/pdf",
+          "date_text": "Revised June 2018; reviewed 04/2025"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Turfgrass Disease Management",
+          "pub_id": "LH040 (SSPLP14)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH040/pdf",
+          "date_text": "Original Feb 2001; revised Aug 2018 and Dec 2025"
+        }
+      ],
+      "months": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "high. (The cultivar names are grass varieties, not products.)"
+    },
+    {
+      "id": "L06",
+      "title": "Clippings are not thatch, and they are not trash for the street",
+      "statement": "Clippings do not cause thatch, so leave them on the lawn, but sweep them off the driveway; local code bans blowing them into drains.",
+      "quotes": [
+        "Clippings do not contribute to thatch under most conditions.",
+        "These clippings contain nutrients that could contribute to water pollution if they go down a storm drain or blow into a water body, so be sure to sweep them back onto the lawn where the nutrients can be used to help feed the grass.",
+        "No grass clippings, vegetative material, or vegetative debris may be washed, swept, blown, or otherwise deposited in stormwater drains, ditches, conveyances, water bodies, wetlands, or sidewalks or roadways."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Mowing Your Florida Lawn",
+          "pub_id": "LH028 (ENH10)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH028/pdf",
+          "date_text": "Revised June 2018; reviewed 04/2025"
+        },
+        {
+          "publisher": "UF/IFAS Extension Sarasota County",
+          "title": "Sarasota County's Fertilizer & Landscape Management Codes (brochure)",
+          "pub_id": null,
+          "url": "https://sfyl.ifas.ufl.edu/media/sfylifasufledu/sarasota/documents/pdf/hortres/keydocs/2025_HortRes_brochureSacoFertilizerCodes_FINAL_ADA.pdf",
+          "date_text": "PDF dated Aug 27, 2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L07",
+      "title": "Spring yellowing is usually iron, and it passes",
+      "statement": "A lawn that yellows right after its first spring feeding is often short on iron while roots catch up; it usually fades in weeks.",
+      "quotes": [
+        "Iron deficiency is commonly observed in Florida in the spring following N fertilizer applications, especially to bahiagrass, centipedegrass, and St. Augustinegrass. This can be frustrating because the N application should have resulted in greener turfgrass, but, in fact, the lawn may appear chlorotic in places.",
+        "Springtime occurrences of Fe deficiency normally dissipate within a few weeks.",
+        "the application of Fe will not cure nitrogen (N) deficiency."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Iron for Florida Turfgrasses",
+          "pub_id": "EP551 (ENH1287)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP551/pdf",
+          "date_text": "Original Jan 2018; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        2,
+        3,
+        4
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L08",
+      "title": "Too much nitrogen feeds lawn fungus",
+      "statement": "Extra nitrogen invites brown patch and gray leaf spot; too little invites dollar spot. Nitrogen is easy to add and impossible to remove.",
+      "quotes": [
+        "For example, excessive nitrogen applications encourage brown patch and gray leaf spot diseases, while very low nitrogen levels are conducive for the development of dollar spot disease. The minimal amount of nitrogen required for the particular species of turfgrass in the lawn should be applied because it is easy to add nitrogen but impossible to remove it.",
+        "If large patch or gray leaf spot diseases are a continuous problem, excessive watering and nitrogen fertilization may be responsible."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Turfgrass Disease Management",
+          "pub_id": "LH040 (SSPLP14)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH040/pdf",
+          "date_text": "Original Feb 2001; revised Aug 2018 and Dec 2025"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "St. Augustinegrass for Florida Lawns",
+          "pub_id": "LH010 (ENH5)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH010/pdf",
+          "date_text": "Revised July 2024; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        6,
+        7,
+        8,
+        11,
+        12,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L09",
+      "title": "Large patch is a cool-season disease",
+      "statement": "Large patch shows up November through May, below 80°F, after leaves stay wet 48 hours; it rots leaf bases, not roots.",
+      "quotes": [
+        "This disease is most likely to be observed from November through May when temperatures are below 80°F. It is normally not observed in the summer months. Infection is triggered by rainfall, excessive irrigation, or extended periods of high humidity resulting in the leaves being continuously wet for 48 hours or more.",
+        "Roots are not affected by this pathogen.",
+        "Excessive nitrogen application during potential disease development periods should be avoided.",
+        "It often becomes a problem in fall, when cooler temperatures and damp weather create ideal conditions for the fungus."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Large Patch",
+          "pub_id": "LH044 (SS-PLP-5)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH044/pdf",
+          "date_text": "Original May 1991; revised Aug 2014 and Dec 2025"
+        },
+        {
+          "publisher": "UF/IFAS Gardening Solutions",
+          "title": "Large Patch",
+          "pub_id": null,
+          "url": "https://gardeningsolutions.ifas.ufl.edu/home/lawns/problems-and-solutions/large-patch",
+          "date_text": "no date shown; read 2026-11-19"
+        }
+      ],
+      "months": [
+        11,
+        12,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L10",
+      "title": "Chinch bugs start at the hot edges",
+      "statement": "Chinch bug damage starts in sunny, water-stressed spots along drives and sidewalks; a bottomless coffee can full of water floats them up.",
+      "quotes": [
+        "Injury typically occurs first in water-stressed areas along the edges of the lawn or where the grass is growing in full sunlight",
+        "Yellow or brownish spots of St. Augustinegrass do not necessarily denote a chinch bug infestation.",
+        "remove the bottom of a metal coffee can and insert the can into the soil surrounding the discolored grass.",
+        "The chinch bugs trapped in the can will float to the top of the water.",
+        "Large applications of inorganic nitrogen fertilizers can cause rapid grass growth and heightened chinch bug susceptibility",
+        "Chinch bugs are most active when it is warm, but may cause damage year-round, particularly in South Florida."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Southern Chinch Bug",
+          "pub_id": "IN383 (EENY-226)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN383/pdf",
+          "date_text": "Original Aug 2001; revised June 2024"
+        },
+        {
+          "publisher": "UF/IFAS Gardening Solutions",
+          "title": "Chinch Bugs",
+          "pub_id": null,
+          "url": "https://gardeningsolutions.ifas.ufl.edu/home/lawns/problems-and-solutions/chinch-bugs/",
+          "date_text": "no date shown; read 2026-11-19"
+        }
+      ],
+      "months": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "service": "lawn",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high. (The coffee-can check uses plain water only.)"
+    },
+    {
+      "id": "L11",
+      "title": "Weeds fill a gap; they do not make one",
+      "statement": "Weeds are a symptom of thin, stressed turf, not the cause, so fixing mowing, water and feeding prevents them best.",
+      "quotes": [
+        "The presence of weeds is a result of a weakened turfgrass stand, not the cause of it",
+        "Healthy turf shades the soil so sunlight can't reach weed seeds ready to germinate.",
+        "It is very important to understand that weeds don't create a void; they fill a void."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Weed Management Guide for Florida Lawns",
+          "pub_id": "EP141 (ENH884)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP141/pdf",
+          "date_text": "Original March 2003; revised Sept 2020 and Dec 2024"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "L12",
+      "title": "Pre-emergent goes down by February 1 here",
+      "statement": "In South Florida, which includes Manatee, Sarasota and Charlotte, UF's rule of thumb is crabgrass pre-emergent by February 1, not spring.",
+      "quotes": [
+        "This narrow window of application timing is a potential disadvantage for many lawn care companies and homeowners, who often wait too late in the spring to apply the preemergence herbicide. A general rule of thumb for preemergence herbicide application is February 1 in south Florida, February 15 in central Florida, and March 1 in north Florida, or before day temperatures reach 65°F–70°F for 4 or 5 consecutive days.",
+        "North Florida is considered to be north of Ocala, Central Florida from Ocala to State Road 60, and South Florida the remainder of the state south of State Road 60."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Weed Management Guide for Florida Lawns",
+          "pub_id": "EP141 (ENH884)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP141/pdf",
+          "date_text": "Original March 2003; revised Sept 2020 and Dec 2024"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Urban Turf Fertilizer Rule for Home Lawn Fertilization",
+          "pub_id": "EP353 (ENH1089)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP353/pdf",
+          "date_text": "Original Jan 2008; revised Jan 2018 and Nov 2025"
+        }
+      ],
+      "months": [
+        1
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "medium",
+      "notes": "medium (needs EP353's map line to place SWFL in \"south Florida\"; SR 60 runs Tampa to Vero Beach, so all three counties lie south of it)."
+    },
+    {
+      "id": "O01",
+      "title": "North Port's blackout starts in April",
+      "statement": "In North Port, lawn fertilizer with nitrogen or phosphorus is banned from April 1, two months earlier than the rest of Sarasota County.",
+      "quotes": [
+        "From April 1 through Sept. 30, no fertilizer containing nitrogen or phosphorus shall be applied to turf or landscape plants in residential areas.",
+        "Use of fertilizer on turf grass is prohibited between April 1 through Sept. 30.",
+        "On May 9, 2023, the North Port City Commission approved"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS Extension Sarasota County",
+          "title": "Sarasota County's Fertilizer & Landscape Management Codes (brochure)",
+          "pub_id": null,
+          "url": "https://sfyl.ifas.ufl.edu/media/sfylifasufledu/sarasota/documents/pdf/hortres/keydocs/2025_HortRes_brochureSacoFertilizerCodes_FINAL_ADA.pdf",
+          "date_text": "Aug 2025"
+        },
+        {
+          "publisher": "City of North Port",
+          "title": "Fertilizer Ordinance",
+          "pub_id": null,
+          "url": "https://www.northportfl.gov/City-Services-and-Safety/Public-Works/Stormwater-Management/Fertilizer-Ordinance",
+          "date_text": "read 2026-11-19"
+        }
+      ],
+      "months": [
+        3
+      ],
+      "service": "lawn",
+      "kind": "rule",
+      "confidence": "high",
+      "notes": "high. Note: the city page says landscape plants (not turf) may still get fertilizer with 50% or more slow-release nitrogen; the brochure lists \"turf or landscape plants.\" Check the ordinance text before you state the plant rule."
+    },
+    {
+      "id": "O02",
+      "title": "The summer fertilizer blackout",
+      "statement": "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer; other months, half must be slow-release.",
+      "quotes": [
+        "From June 1 through Sept. 30, no fertilizer containing nitrogen or phosphorus shall be applied to turf or landscape plants in residential areas.",
+        "Nitrogen fertilizer must contain at least 50 percent slow-release nitrogen.",
+        "The bans are limited to fertilizers containing nitrogen and phosphorus.",
+        "In Manatee County, the fertilizer ban has been in place for over a decade."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS Extension Sarasota County",
+          "title": "Sarasota County's Fertilizer & Landscape Management Codes (brochure)",
+          "pub_id": null,
+          "url": "https://sfyl.ifas.ufl.edu/media/sfylifasufledu/sarasota/documents/pdf/hortres/keydocs/2025_HortRes_brochureSacoFertilizerCodes_FINAL_ADA.pdf",
+          "date_text": "Aug 2025"
+        },
+        {
+          "publisher": "WUSF",
+          "title": "WUSF, June 3, 2026",
+          "pub_id": null,
+          "url": "https://www.wusf.org/environment/2026-06-03/most-of-the-tampa-bay-region-is-under-a-seasonal-fertilizer-ban-heres-what-you-need-to-know",
+          "date_text": "June 3, 2026"
+        }
+      ],
+      "months": [
+        5
+      ],
+      "service": "lawn",
+      "kind": "rule",
+      "confidence": "high",
+      "notes": "high for Sarasota County jurisdictions; medium for Manatee (news source, no county code text opened); Charlotte County not verified. Related: the same brochure sets a fertilizer-free zone near water: 10 feet in unincorporated Sarasota County, City of Sarasota, Venice and North Port; 3 feet on Longboat Key (10 feet with a broadcast spreader that has no deflector).",
+      "scope_note": "Sarasota County towns only (unincorporated Sarasota County, City of Sarasota, City of Venice, Longboat Key). Manatee is medium confidence (news source, no county code text opened); Charlotte County not verified. North Port has its own April 1 start (O01)."
+    },
+    {
+      "id": "O03",
+      "title": "Florida law requires a rain shutoff",
+      "statement": "Florida law requires every automatic sprinkler system to have a working device that stops it when it has rained enough.",
+      "quotes": [
+        "(1) Any person who purchases and installs an automatic landscape irrigation system must properly install, maintain, and operate technology that inhibits or interrupts operation of the system during periods of sufficient moisture.",
+        "When rainfall is adequate to meet plant needs, supplemental irrigation systems should be turned off."
+      ],
+      "sources": [
+        {
+          "publisher": "Florida Statutes",
+          "title": "The 2026 Florida Statutes, s. 373.62",
+          "pub_id": "F.S. 373.62",
+          "url": "http://www.leg.state.fl.us/statutes/index.cfm?App_mode=Display_Statute&URL=0300-0399/0373/Sections/0373.62.html",
+          "date_text": "The 2026 Florida Statutes; history: ch. 91-41 (1991), amended 2001 and 2009"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Watering Your Florida Lawn",
+          "pub_id": "LH025 (ENH9)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH025/pdf",
+          "date_text": "Revised April 2013; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "service": "lawn",
+      "kind": "rule",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "O04",
+      "title": "Once a week, until spring",
+      "statement": "SWFWMD limits lawn watering to one day a week through March 31, 2027, but new lawns may be watered any day for 30 days.",
+      "quotes": [
+        "The District's Modified Phase III one-day-per-week water shortage restrictions were extended through March 31, 2027.",
+        "Lawn and landscape watering remains limited to a once-per-week schedule.",
+        "On days 1-30, new lawns and plants may be watered any day of the week.",
+        "only subject to voluntary watering hours"
+      ],
+      "sources": [
+        {
+          "publisher": "SWFWMD",
+          "title": "Modified Phase III 'Extreme' Water Shortage Restrictions",
+          "pub_id": null,
+          "url": "https://www.swfwmd.state.fl.us/conservation/restrictions/swfwmd.php",
+          "date_text": "read 2026-11-19"
+        }
+      ],
+      "months": [
+        11,
+        12,
+        1,
+        2,
+        3
+      ],
+      "service": "lawn",
+      "kind": "rule",
+      "confidence": "high",
+      "notes": "high, but time-sensitive. Re-read the District page the week the email goes out.",
+      "recheck_before_send": true,
+      "expires_on": "2027-03-31"
+    },
+    {
+      "id": "P01",
+      "title": "Leave the yellow fronds on",
+      "statement": "Yellow or orange-spotted lower palm fronds are feeding the palm potassium; cutting them off makes the deficiency move up.",
+      "quotes": [
+        "If these older discolored leaves are removed, the palm then removes K from the next leaves up within the canopy that are currently green and symptom free. Repeated pruning of K-deficient older leaves has been shown to reduce the number of green, symptom-free leaves within the canopy (Broschat 1994) and, in severely K-deficient palms, is known to accelerate the rate of decline leading to death of the palm.",
+        "Despite their unattractive appearance, these leaves should be left on the palm as they are providing K in the absence of sufficient K in the soil."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Pruning Palms",
+          "pub_id": "EP443 (ENH1182)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP443/pdf",
+          "date_text": "Original April 2011; revised May 2014"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "P02",
+      "title": "\"Hurricane cuts\" make palms snap",
+      "statement": "After the 2004-2005 hurricanes, UF saw that palms stripped to a few fronds lost their crowns more often than full palms.",
+      "quotes": [
+        "However, observations of palms after the severe hurricane seasons of 2004 and 2005 in Florida showed that these \"hurricane-cut\" palms were more likely to have their crowns snapped off than those with fuller crowns (Figures 13 and 14)."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Pruning Palms",
+          "pub_id": "EP443 (ENH1182)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP443/pdf",
+          "date_text": "Original April 2011; revised May 2014"
+        }
+      ],
+      "months": [
+        5,
+        6
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "high. (UF calls this an observation; the paper cites supporting oil-palm research.)"
+    },
+    {
+      "id": "P03",
+      "title": "Lawn fertilizer can kill your palm",
+      "statement": "Palm roots reach 50 feet; high-nitrogen lawn fertilizer, even 30 feet away, has killed palms by triggering potassium deficiency.",
+      "quotes": [
+        "Roots of large palms typically extend out 50 feet or more from the trunk in all directions and will take up whatever fertilizers have been applied to the turfgrass.",
+        "High N fertilizers applied to turfgrass, even 30 feet away from a palm on one side only, have been known to kill palms from induced K deficiency."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Fertilization of Field-Grown and Landscape Palms in Florida",
+          "pub_id": "EP261 (ENH1009)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP261/pdf",
+          "date_text": "Original Sept 2005; revised Nov 2016; reviewed Sept 2021"
+        }
+      ],
+      "months": [
+        10,
+        11,
+        12,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "high. (Research site: UF/IFAS Fort Lauderdale; South Florida conditions.)"
+    },
+    {
+      "id": "P04",
+      "title": "Ganoderma has no cure, and it stays in the soil",
+      "statement": "A hard shelf-like conk low on a palm trunk means Ganoderma butt rot; nothing cures it, and replanting there is risky.",
+      "quotes": [
+        "There are currently no cultural or chemical controls for preventing the disease or for curing the disease once the palm is infected.",
+        "Because the fungus survives in the soil, planting another palm back in that same location is not recommended without special precautions.",
+        "All palms are considered hosts of this fungus."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Ganoderma Butt Rot of Palms",
+          "pub_id": "PP100 (PP54)",
+          "url": "https://edis.ifas.ufl.edu/publication/PP100/pdf",
+          "date_text": "Revised Jan 2018"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "high. Note: PP100 ranked #57 in UF's 2024 top 100 EDIS list (13,119 visits), so homeowners already search for it."
+    },
+    {
+      "id": "P05",
+      "title": "Lethal bronzing is here, and pruners do not spread it",
+      "statement": "Lethal bronzing, which kills cabbage, queen and date palms, is confirmed in Manatee, Sarasota and Charlotte; insects spread it, not pruning tools.",
+      "quotes": [
+        "The LB phytoplasma is limited to the phloem (sap) of the palm and cannot survive outside a plant or insect; therefore, it cannot be mechanically transmitted (e.g., by pruning tools or infected roots touching new roots).",
+        "Once a palm shows symptoms and tests positive for the LBD phytoplasma, it should be removed immediately.",
+        "if fruit is present, the first symptom is generally premature fruit drop"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Lethal Bronzing Disease (LB)",
+          "pub_id": "PP163 (PP243)",
+          "url": "https://edis.ifas.ufl.edu/publication/PP163/pdf",
+          "date_text": "Original Nov 2007; revised June 2022; reviewed 08/2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "high. (The publication names a preventive injection; left out per the no-product rule.)"
+    },
+    {
+      "id": "P06",
+      "title": "Mulch volcanoes rot trunks",
+      "statement": "Mulch piled against a trunk holds moisture that rots bark and invites insects; keep it 12 to 18 inches back from trees.",
+      "quotes": [
+        "Do not apply mulch against the stem or trunk of the plant; this is called volcano mulching. Volcano mulching damages plants because the excess moisture can cause rot around the trunk and insect infestations.",
+        "Keep mulch away (12\"-18\") from the base of trees."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Mulching Herbs, Vegetables and Fruit Trees in the Florida-Friendly Edible Landscape",
+          "pub_id": "EP625 (ENH1361)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP625/pdf",
+          "date_text": "Nov 2022"
+        },
+        {
+          "publisher": "UF/IFAS Florida-Friendly Landscaping",
+          "title": "Principle 4 Guidance",
+          "pub_id": null,
+          "url": "https://ffl.ifas.ufl.edu/about-ffl/9-principles/principle-4-guidance/",
+          "date_text": "last modified April 2, 2026"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "M01",
+      "title": "Mosquito eggs wait 8 months dry",
+      "statement": "Yard mosquito eggs stick to container walls and survive dry for up to 8 months, so scrub containers, do not just dump them.",
+      "quotes": [
+        "Adult female mosquitoes lay eggs on the inner walls of containers with water, above the waterline.",
+        "Eggs can survive drying out for up to 8 months.",
+        "A mosquito egg takes 7–10 days to develop into an adult mosquito.",
+        "Once a week, empty and scrub, turn over, cover, or throw out any items that hold water"
+      ],
+      "sources": [
+        {
+          "publisher": "CDC",
+          "title": "Life Cycle of Aedes Mosquitoes",
+          "pub_id": null,
+          "url": "https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html",
+          "date_text": "page date April 16, 2024"
+        },
+        {
+          "publisher": "CDC",
+          "title": "Mosquito Control at Home",
+          "pub_id": null,
+          "url": "https://www.cdc.gov/mosquitoes/mosquito-control/mosquito-control-at-home.html",
+          "date_text": "April 16, 2024"
+        }
+      ],
+      "months": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "service": "mosquito",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "",
+      "recheck_before_send": true
+    },
+    {
+      "id": "M02",
+      "title": "Your daytime biters live next door; salt marsh mosquitoes travel",
+      "statement": "Daytime yard mosquitoes fly only a few blocks, but salt marsh mosquitoes come in from the coast after rains and tides.",
+      "quotes": [
+        "Aedes aegypti and Ae. albopictus don't fly long distances.",
+        "In their lifetime, these mosquitoes will only fly a few blocks.",
+        "Although the larval habitats are typically restricted to the coastal salt marshes, this species has a long flight range and can be found far inland at times, particularly in Florida where it can be found throughout the state",
+        "Its characteristic emergence in large numbers after rains and flooding events as well as its aggressive biting contribute to its notoriety as a pest insect."
+      ],
+      "sources": [
+        {
+          "publisher": "CDC",
+          "title": "Life Cycle of Aedes Mosquitoes",
+          "pub_id": null,
+          "url": "https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html",
+          "date_text": "page date April 16, 2024"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Black Salt Marsh Mosquito",
+          "pub_id": "IN1035 (EENY591)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN1035/pdf",
+          "date_text": "Original April 2014; revised Nov 2024"
+        }
+      ],
+      "months": [
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "service": "mosquito",
+      "kind": "pest",
+      "confidence": "medium",
+      "notes": "medium (two sources; IN1035 gives no distance figure).",
+      "recheck_before_send": true
+    },
+    {
+      "id": "M03",
+      "title": "Flush your bromeliads weekly",
+      "statement": "Water in bromeliad cups breeds mosquitoes; UF says hose them out hard once a week instead of ripping the plants out.",
+      "quotes": [
+        "Flush out eggs, larvae and debris accumulated in bromeliad axils and tanks using a strong jet of water from a hose at least once a week.",
+        "currently there is no validation for the elimination of bromeliads during outbreaks of mosquito-borne viruses."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Mosquitoes and Bromeliads",
+          "pub_id": "IN1343 (ENY2073)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN1343/pdf",
+          "date_text": "Nov 2021; reviewed 12/2024"
+        }
+      ],
+      "months": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "service": "mosquito",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high. Extra hook: UF found most bromeliad mosquitoes are native Wyeomyia, which can bite but are not the main disease carriers."
+    },
+    {
+      "id": "M04",
+      "title": "Bug zappers kill almost no mosquitoes",
+      "statement": "In a UF one-night test, a bug zapper killed about 10,000 insects, and only eight were mosquitoes.",
+      "quotes": [
+        "Out of some 10,000 insects destroyed by one bug zapper during a one-night test period, only eight were mosquitoes.",
+        "In fact, bug zappers actually make things worse by attracting more mosquitoes into your yard, and they end up killing thousands of beneficial insects that don't bother people."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS News",
+          "title": "Electric Bug Zappers Useless For Controlling Mosquitoes",
+          "pub_id": null,
+          "url": "https://blogs.ifas.ufl.edu/news/?p=104",
+          "date_text": "Published July 23, 1997 (re-posted, modified June 16, 2021)"
+        }
+      ],
+      "months": [
+        4,
+        5,
+        6
+      ],
+      "service": "mosquito",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high for what UF reported; the source is old (1997)."
+    },
+    {
+      "id": "T01",
+      "title": "Drywood termites need no soil",
+      "statement": "Drywood termites live entirely inside wood and push out six-sided pellets; sweep the pile, then watch for a new one.",
+      "quotes": [
+        "Drywood termites differ from subterranean termites in that the colony lives entirely within wood.",
+        "Drywood termite pellets are hexagonal in cross section",
+        "the removal of all pellets and wings after a treatment provides a good monitoring system. After a treatment that has been accompanied by these removal measures, any new and growing piles of pellets and/or presence of alates or wings, typically indicate that the treatment was unsuccessful.",
+        "These alates leave the colony on multiple mating flights from April to June, though flights are possible any time of the year."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "West Indian Drywood Termite",
+          "pub_id": "IN236 (EENY-79)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN236/pdf",
+          "date_text": "Original April 1999; revised Dec 2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "termite",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high. IN236 says the species has spread through Florida's coastal regions, with the largest populations in older buildings in the southern half of the state."
+    },
+    {
+      "id": "T02",
+      "title": "Formosan termites swarm at sunset in May",
+      "statement": "Formosan termites swarm April through June, just after sunset, peaking in May, and porch lights pull them to your house.",
+      "quotes": [
+        "In Florida, Coptotermes formosanus typically swarms between early April and late June, shortly after sunset, with peak swarming activity in May. These dispersal flights can contain upwards of tens of thousands of individuals.",
+        "Alates are also attracted to lights, which can attract them to structures or boats"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Formosan Subterranean Termite",
+          "pub_id": "IN278 (EENY121)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN278/pdf",
+          "date_text": "Original Jan 2000; revised Sept 2025"
+        }
+      ],
+      "months": [
+        4,
+        5,
+        6
+      ],
+      "service": "termite",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "T03",
+      "title": "Winter swarms are native termites, and here is how to tell",
+      "statement": "Florida's native subterranean termites swarm December through May on warm afternoons after rain; check the waist and antennae to rule out ants.",
+      "quotes": [
+        "Reticulitermes hageni alate flights begin in early December and last until early February, while Reticulitermes flavipes flights start in early January and end in April. Dispersal flights of Reticulitermes virginicus occur between early February and late May. Dispersal by Reticulitermes flavipes and Reticulitermes virginicus occurs during warm, sunny, and windless early afternoons usually after rain",
+        "After indoor flights, most Reticulitermes sp. alates are found dead (dried up) near windows or in sinks and bathtubs—usually with their wings still attached.",
+        "Ant Alate: Elbowed antennae, fore wings larger than hind wings, waist constricted.\" and \"Termite Alate: Beaded antennae, fore and hind wings of equal size, waist broad."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Native Subterranean Termites",
+          "pub_id": "IN369 (EENY-212)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN369/pdf",
+          "date_text": "Original May 2004; revised July 2024"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Florida Carpenter Ant",
+          "pub_id": "IN455 (EENY272)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN455/pdf",
+          "date_text": "Revised Oct 2024"
+        }
+      ],
+      "months": [
+        12,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "service": "termite",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "T04",
+      "title": "Termites can hollow a live tree",
+      "statement": "Formosan termites can hollow out a living tree's core, leaving a healthy-looking tree that can collapse in high winds.",
+      "quotes": [
+        "In addition to infesting structures, Coptotermes formosanus also infest live trees, typically feeding on the dead xylem at the center and hollowing out the tree (Figure 12). While this does not directly impact the health of the tree, it can weaken it structurally and make it more susceptible to collapse, especially in high winds. Trees surrounding a structure should be inspected regularly for termite activity"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Formosan Subterranean Termite",
+          "pub_id": "IN278 (EENY121)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN278/pdf",
+          "date_text": "Original Jan 2000; revised Sept 2025"
+        }
+      ],
+      "months": [
+        5,
+        6,
+        9
+      ],
+      "service": "termite",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "A01",
+      "title": "White-footed ant colonies reach 3 million",
+      "statement": "White-footed ant colonies can hold 3 million ants, half of them egg-layers, and they reach your house over touching branches.",
+      "quotes": [
+        "Colony population estimates vary from 8,000 to 3 million individuals",
+        "Nearly half of the entire WFA colony is composed of fertile, reproductive females called intercastes",
+        "Laboratory tests (2002–2005) at the UF/IFAS Research and Education Center in Fort Lauderdale have shown baits to be the only effective management method to date for WFA control.",
+        "best policy is to not have any vegetation touching exterior walls."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "White-Footed Ant",
+          "pub_id": "IN551 (EENY-273)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN551/pdf",
+          "date_text": "Original Aug 2002; revised April 2016; reviewed April 2019"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high. Note: IN551 says the ant \"does not bite or sting.\""
+    },
+    {
+      "id": "A02",
+      "title": "Florida carpenter ants do not eat sound wood",
+      "statement": "Florida carpenter ants nest in voids and rotten wood, never sound wood; they bite but do not sting.",
+      "quotes": [
+        "Florida carpenter ants seek either existing voids in which to nest or excavate only soft materials such as rotten or pithy wood and Styrofoam. Other concerns are that these ants sting (they do not) and bite (they do).",
+        "They will not excavate nesting galleries in sound wood.",
+        "Tall trees touching structures cause \"bridges\" which provide foraging access into buildings."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Florida Carpenter Ant",
+          "pub_id": "IN455 (EENY272)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN455/pdf",
+          "date_text": "Revised Oct 2024"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "R01",
+      "title": "Big \"palmetto bugs\" are outdoor roaches",
+      "statement": "The big roaches Floridians call palmetto bugs live outdoors and do not survive well inside; one in the kitchen is usually a visitor.",
+      "quotes": [
+        "The larger cockroaches—American, Australian, brown, and the smokybrown—are 1–1/4 to 2 inches (31–51 mm) long and are often called palmetto bugs. Though they are generally found outdoors, they can become indoor problems when they migrate or are carried indoors.",
+        "Outdoor cockroaches do not survive well indoors, and many times people overreact to the presence of these cockroaches. Often, removal of these outdoor cockroaches from the house is all that is needed for control.",
+        "The Asian cockroach looks very much like a German cockroach, except it flies. Asian cockroaches live outside and are attracted to the lights from buildings."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Cockroaches and Their Management",
+          "pub_id": "IG082 (ENY-214)",
+          "url": "https://edis.ifas.ufl.edu/publication/IG082/pdf",
+          "date_text": "Revised Feb 2022; reviewed 02/2025"
+        }
+      ],
+      "months": [
+        6,
+        7,
+        8,
+        9
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "R02",
+      "title": "Roaches need water more than food",
+      "statement": "A German roach lives 12 days with food but no water, and 42 days with water but no food; drought drives roaches inside.",
+      "quotes": [
+        "Water is the most important factor in cockroach survival. German cockroaches can survive only 12 days with food but no water. However, if only water is present with no food, cockroaches can survive for about 42 days. Cockroaches often come indoors during periods of drought because they are looking for moisture."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Cockroaches and Their Management",
+          "pub_id": "IG082 (ENY-214)",
+          "url": "https://edis.ifas.ufl.edu/publication/IG082/pdf",
+          "date_text": "Revised Feb 2022; reviewed 02/2025"
+        }
+      ],
+      "months": [
+        2,
+        4,
+        5
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "R03",
+      "title": "German roaches ride in on groceries and cardboard",
+      "statement": "German roaches often arrive in grocery bags and breed in corrugated boxes, so unpack outside and recycle boxes fast.",
+      "quotes": [
+        "German cockroaches can initially infest a structure when infested grocery bags are brought inside. Inspect groceries for cockroaches before storing. Keep grocery bags in outside storage areas.",
+        "Cockroaches breed prolifically in corrugated cardboard boxes. Discard unnecessary boxes immediately.",
+        "contact with these allergens can result in mild to severe rashes, other allergic reactions, and in extreme cases death from asthma attacks."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Cockroaches and Their Management",
+          "pub_id": "IG082 (ENY-214)",
+          "url": "https://edis.ifas.ufl.edu/publication/IG082/pdf",
+          "date_text": "Revised Feb 2022; reviewed 02/2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "D01",
+      "title": "Roof rats live in palm skirts and can jump to your roof",
+      "statement": "Roof rats, Florida's top rodent pest, nest in old palm fronds and attics, and can jump eight feet from a tree to a house.",
+      "quotes": [
+        "Did you realize that rats have been known to jump eight feet from a tree to a house?",
+        "Roof rats are now the number one rodent pest in Florida.",
+        "They also prefer to keep their nests in attics, soffits, hollow trees, and the old fronds on palm trees",
+        "Removal of old palm leaf skirts such as those found on Mexican fan palms (Figure 10) can remove hiding places for rats, snakes, scorpions, and other desirable or not so desirable wildlife.",
+        "When they invade buildings, they chew through wires that can potentially start fires, gnaw through plastic and lead water pipes, make holes in walls and cause other structural damage."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS Extension Charlotte County",
+          "title": "Roof rat best management practices",
+          "pub_id": null,
+          "url": "https://charlottecountyextension.blogspot.com/2015/10/roof-rat-best-management-practices.html",
+          "date_text": "Oct 2015"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Pruning Palms",
+          "pub_id": "EP443 (ENH1182)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP443/pdf",
+          "date_text": "Original April 2011; revised May 2014"
+        },
+        {
+          "publisher": "UF/IFAS News",
+          "title": "UF/IFAS News, Feb 22, 2023",
+          "pub_id": null,
+          "url": "https://blogs.ifas.ufl.edu/news/2023/02/22/uf-ifas-entomologist-lists-top-eight-invasive-species-that-invade-households-and-empty-wallets/",
+          "date_text": "Feb 22, 2023"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "rodent",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high (each piece is stated directly; the jump distance comes from a county blog, not a research paper)."
+    },
+    {
+      "id": "D02",
+      "title": "A mouse fits through a pencil-width hole",
+      "statement": "A mouse can squeeze through a hole the width of a pencil, so any gap you can fit a pencil into needs sealing.",
+      "quotes": [
+        "Mice can fit through a hole the width of a pencil (1/4 inch or 6 millimeters in diameter).",
+        "rats can squeeze through cracks one-half of an inch wide"
+      ],
+      "sources": [
+        {
+          "publisher": "CDC",
+          "title": "How to Seal Up to Prevent Rodents",
+          "pub_id": null,
+          "url": "https://www.cdc.gov/healthy-pets/rodent-control/seal-up.html",
+          "date_text": "April 8, 2024"
+        },
+        {
+          "publisher": "UF/IFAS Extension Charlotte County",
+          "title": "Roof rat best management practices",
+          "pub_id": null,
+          "url": "https://charlottecountyextension.blogspot.com/2015/10/roof-rat-best-management-practices.html",
+          "date_text": "Oct 2015"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "rodent",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "",
+      "recheck_before_send": true
+    },
+    {
+      "id": "D03",
+      "title": "Never sweep rodent droppings",
+      "statement": "Sweeping or vacuuming rodent droppings can put germs in the air; soak them with disinfectant for 5 minutes first.",
+      "quotes": [
+        "Don't vacuum or sweep rodent urine, droppings, or nesting materials.",
+        "Spray urine and droppings with bleach solution or an EPA-registered disinfectant until very wet. Let it soak for 5 minutes or according to instructions on the disinfectant label.",
+        "Diseases are mainly spread to people from rodents when they breathe in contaminated air."
+      ],
+      "sources": [
+        {
+          "publisher": "CDC",
+          "title": "How to Clean Up After Rodents",
+          "pub_id": null,
+          "url": "https://www.cdc.gov/healthy-pets/rodent-control/clean-up.html",
+          "date_text": "April 8, 2024"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "rodent",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high. (No mixing ratio given here on purpose.)",
+      "recheck_before_send": true
+    },
+    {
+      "id": "S01",
+      "title": "Brown recluses are not established here",
+      "statement": "Despite yearly \"recluse bite\" reports, UF says brown recluses are not established in Florida; widows are our only medically significant spiders.",
+      "quotes": [
+        "The actual numbers are less important than the fact that a significant number of unconfirmed brown recluse spider bites are reported in the state every year. Yet not one specimen of brown recluse spider has ever been collected in Tampa, and the only records of Loxosceles species in the entire region are from Orlando and vicinity.",
+        "The only spiders native to or established in Florida with medically significant venom are the widow spiders (Latrodectus spp.).",
+        "widow spiders are shy and non-aggressive, and bites rarely occur unless the spider is taunted or accidentally crushed/pinched in clothing"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Brown Recluse Spider",
+          "pub_id": "IN576 (EENY299)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN576/pdf",
+          "date_text": "Original Aug 2003; revised Sept 2024"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "An Introduction to Some Common and Charismatic Florida Spiders",
+          "pub_id": "IN1366 (ENY2080)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN1366/pdf",
+          "date_text": "Feb 2023"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "high. The \"Tampa region\" in IN576 is the Tampa poison-control region of 21 central Florida counties. IN1366 ranked #27 in UF's 2024 top 100 (20,257 visits)."
+    },
+    {
+      "id": "S02",
+      "title": "A crushed yellowjacket calls the colony",
+      "statement": "An injured yellowjacket releases an alarm scent that sends the colony after you, and unlike honeybees they sting repeatedly.",
+      "quotes": [
+        "Unlike the honeybee, which dies upon inflicting a single sting, vespid wasps may sting as often as they find a target. In fact, when a yellowjacket or hornet is injured, it often releases an \"alarm pheromone\" which quickly results in an aggressive, defensive behavior from other members of the colony."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Yellowjackets and Hornets",
+          "pub_id": "IN238 (EENY-081)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN238/pdf",
+          "date_text": "Original May 1999; revised Dec 2023"
+        }
+      ],
+      "months": [
+        8,
+        9,
+        10,
+        11
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "X01",
+      "reserve": true,
+      "title": "Reset the timer by season",
+      "statement": "Reset the timer by season",
+      "quotes": [
+        "Often, homeowners are unaware that an irrigation system should be adjusted seasonally, and failure to adjust for seasonal changes will usually lead to overwatering."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Watering Your Florida Lawn",
+          "pub_id": "LH025 (ENH9)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH025/pdf",
+          "date_text": "Revised April 2013; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "Its Table 1 (Miami column, nearest to SWFL) shows St. Augustine can go 3-10 days between waterings in winter and 1-4 in summer."
+    },
+    {
+      "id": "X02",
+      "reserve": true,
+      "title": "Shade needs less",
+      "statement": "Shade needs less",
+      "quotes": [
+        "If you choose to grow grass in the shade, you must reduce irrigation to this part of your lawn.",
+        "The grass growing in the shade needs less fertilizer than that growing in full sun."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Watering Your Florida Lawn",
+          "pub_id": "LH025 (ENH9)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH025/pdf",
+          "date_text": "Revised April 2013; reviewed 10/2025"
+        },
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "St. Augustinegrass for Florida Lawns",
+          "pub_id": "LH010 (ENH5)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH010/pdf",
+          "date_text": "Revised July 2024; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "medium",
+      "notes": "Medium (two sources)."
+    },
+    {
+      "id": "X03",
+      "reserve": true,
+      "title": "St. Augustine has no seed",
+      "statement": "St. Augustine has no seed",
+      "quotes": [
+        "St. Augustinegrass is established by vegetative propagation only, which includes sod, plugs, or sprigs."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "St. Augustinegrass for Florida Lawns",
+          "pub_id": "LH010 (ENH5)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH010/pdf",
+          "date_text": "Revised July 2024; reviewed 10/2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "X04",
+      "reserve": true,
+      "title": "Brown bahia is often dormant, not dead",
+      "statement": "Brown bahia is often dormant, not dead",
+      "quotes": [
+        "during extended drought periods, bahiagrass will go into a drought-induced dormancy and turn brown until conditions become favorable for regrowth."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Bahiagrass for Florida Lawns",
+          "pub_id": "LH006 (ENH6)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH006/pdf",
+          "date_text": "revised May 2026"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "X05",
+      "reserve": true,
+      "title": "Soapy water brings mole crickets up",
+      "statement": "Soapy water brings mole crickets up",
+      "quotes": [
+        "If present, the mole crickets will surface in a few minutes."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Bahiagrass for Florida Lawns",
+          "pub_id": "LH006 (ENH6)",
+          "url": "https://edis.ifas.ufl.edu/publication/LH006/pdf",
+          "date_text": "revised May 2026"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "The source gives a detergent-and-water mix; left out per the no-mixing rule. Plain wording only."
+    },
+    {
+      "id": "X06",
+      "reserve": true,
+      "title": "Frizzletop is manganese",
+      "statement": "Frizzletop is manganese",
+      "quotes": [
+        "Manganese deficiency is caused by insufficient Mn in the soil or by high soil pH, which greatly reduces Mn availability",
+        "are particularly susceptible."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "EP267",
+          "pub_id": "EP267 (ENH1015)",
+          "url": "https://edis.ifas.ufl.edu/publication/EP267/pdf",
+          "date_text": "reviewed April 2020"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "tree_shrub",
+      "kind": "plant",
+      "confidence": "high",
+      "notes": "Queen palm is listed among palms that \"are particularly susceptible.\""
+    },
+    {
+      "id": "X07",
+      "reserve": true,
+      "title": "Fertilizer-free zone",
+      "statement": "Fertilizer-free zone",
+      "quotes": [
+        "Fertilizer may not be applied within 10 feet of any water body or wetland.",
+        "Do not apply fertilizer within 10 feet of a pond, stream, canal, or top of a seawall."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS Extension Sarasota County",
+          "title": "Sarasota County's Fertilizer & Landscape Management Codes (brochure)",
+          "pub_id": null,
+          "url": "https://sfyl.ifas.ufl.edu/media/sfylifasufledu/sarasota/documents/pdf/hortres/keydocs/2025_HortRes_brochureSacoFertilizerCodes_FINAL_ADA.pdf",
+          "date_text": "Aug 2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "rule",
+      "confidence": "high",
+      "notes": "First quote: County, City of Sarasota and Venice column. Second quote: North Port column. Longboat Key: 3 feet, or 10 feet with a spreader that has no deflector.",
+      "scope_note": "Sarasota County towns only; Longboat Key and North Port differ (see notes)."
+    },
+    {
+      "id": "X08",
+      "reserve": true,
+      "title": "Mosquitoes breed indoors",
+      "statement": "Mosquitoes breed indoors",
+      "quotes": [
+        "Mosquitoes rest in dark, humid places like under sinks, in showers, in closets, under furniture, or in the laundry room.",
+        "vases or flowerpot saucers"
+      ],
+      "sources": [
+        {
+          "publisher": "CDC",
+          "title": "Mosquito Control at Home",
+          "pub_id": null,
+          "url": "https://www.cdc.gov/mosquitoes/mosquito-control/mosquito-control-at-home.html",
+          "date_text": "April 16, 2024"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "mosquito",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": "The page names \"vases or flowerpot saucers\" as indoor sources."
+    },
+    {
+      "id": "X09",
+      "reserve": true,
+      "title": "White-footed ants do not bite or sting",
+      "statement": "White-footed ants do not bite or sting",
+      "quotes": [
+        "The WFA does not bite or sting, nor has it been reported to cause any structural damage."
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "White-Footed Ant",
+          "pub_id": "IN551 (EENY-273)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN551/pdf",
+          "date_text": "Original Aug 2002; revised April 2016; reviewed April 2019"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "pest",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "X10",
+      "reserve": true,
+      "title": "Mud tubes alone do not prove an active colony",
+      "statement": "Mud tubes alone do not prove an active colony",
+      "quotes": [
+        "While mud tubes and damage can be indicative of subterranean termite activity, the presence of live termites is needed to confirm an active infestation"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Formosan Subterranean Termite",
+          "pub_id": "IN278 (EENY121)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN278/pdf",
+          "date_text": "Original Jan 2000; revised Sept 2025"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "termite",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    },
+    {
+      "id": "X11",
+      "reserve": true,
+      "title": "Chinch bugs march",
+      "statement": "Chinch bugs march",
+      "quotes": [
+        "During relocation, the population may cover over 400 feet in under an hour"
+      ],
+      "sources": [
+        {
+          "publisher": "UF/IFAS EDIS",
+          "title": "Southern Chinch Bug",
+          "pub_id": "IN383 (EENY-226)",
+          "url": "https://edis.ifas.ufl.edu/publication/IN383/pdf",
+          "date_text": "Original Aug 2001; revised June 2024"
+        }
+      ],
+      "months": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "service": "lawn",
+      "kind": "pest",
+      "confidence": "high",
+      "notes": ""
+    }
+  ]
+}
