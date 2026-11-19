@@ -70,6 +70,8 @@ describe('editorial review coverage validation', () => {
     'Last updated: November 2026, when 40% of homes had roaches.',
     'Our [guide](/pest-control/cockroach-types/) says 8 types live here.',
     'Read the [8 types guide](https://example.org/roaches) first.',
+    'Read the [8 Florida species](//example.org/species) list.',
+    'Read the [8 Florida species](/\\example.org/species) list.',
     'EENY-514 says the roach is 1.5 inches long.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBe('claim_kind_mismatch:C1');
@@ -107,6 +109,13 @@ describe('editorial review coverage validation', () => {
   test('holds a supported attributed quote labeled general to the word-for-word rule', () => {
     const sources = [{ excerpt: 'It is often called the stink roach because it produces a foul-smelling fluid.' }];
     expect(validateClaim(QUOTE, { verdict: 'supported', claimKind: 'general', sourceSuitability: 'primary_authoritative', sourceIndex: 0, sourceQuote: 'produces a foul-smelling fluid' }, sources))
+      .toBe('claim_attribution_quote:C1');
+  });
+
+  test('detects an attributed quote of a document code before codes are set aside', () => {
+    const passage = 'The bulletin called it “EENY-514”.';
+    const sources = [{ excerpt: 'The bulletin covers the Florida woods cockroach in detail.' }];
+    expect(validateClaim(passage, { verdict: 'supported', claimKind: 'general', sourceSuitability: 'primary_authoritative', sourceIndex: 0, sourceQuote: 'The bulletin covers the Florida woods' }, sources))
       .toBe('claim_attribution_quote:C1');
   });
 
