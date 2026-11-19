@@ -429,6 +429,12 @@ test('source extraction drops a colon that follows a link', () => {
   expect(evidence.sourceUrls('See https://edis.ifas.ufl.edu/publication/IN917: it lists three names.'))
     .toEqual(['https://edis.ifas.ufl.edu/publication/IN917']);
 });
+test('source extraction keeps a colon inside a link destination or a structured source', () => {
+  expect(evidence.sourceUrls('The [record](https://example.org/record?id=ABC:) lists it.'))
+    .toEqual(['https://example.org/record?id=ABC:']);
+  expect(evidence.sourceUrls('Body.', { required_sources: ['https://example.org/record?id=ABC:'] }))
+    .toEqual(['https://example.org/record?id=ABC:']);
+});
 test('prepareDraft hands the review the competitor pages the writer listed in notes_for_reviewer (Codex r2, r6 on #5191)', async () => {
   reviewer.review.mockResolvedValueOnce(passing());
   await evidence.prepareDraft({ frontmatter: { title: 'How to inspect a door' }, body: "Per Orkin's terms, plans renew yearly.",

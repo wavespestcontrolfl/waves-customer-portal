@@ -70,7 +70,7 @@ function isTrivialNumericInstruction(passage) {
 // A non_external passage may carry a number only where the number makes no outside claim: a trivial
 // instruction, or the visible "Last updated: Month Year" line every brief asks for (content-brief-builder).
 // Any other figure, link text included, is held to the deterministic kind.
-const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)\s*:?[*_\s]*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
+const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)[*_\s]*:?[*_\s]*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
 function numericNonExternalAllowed(passage) {
   const text = String(passage || '').trim();
   return isTrivialNumericInstruction(text) || DATE_STAMP_RE.test(text);

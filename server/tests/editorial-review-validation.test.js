@@ -54,6 +54,7 @@ describe('editorial review coverage validation', () => {
     'Last updated: November 2026',
     '_Updated: March 2027._',
     '**Last updated:** November 2026',
+    '**Last updated**: November 2026',
   ])('allows the date-stamp line as non-external: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
   });

@@ -48,14 +48,20 @@ function domainContextFromDocument(document) {
 // same URL (markdown/parenthetical wrapping, e.g. "(see https://a.org/x)"
 // or the closing paren of a markdown link), so a balanced pair that is part
 // of the URL itself (e.g. ".../report_(2026)") is preserved.
-function trimTrailingUrlNoise(url) {
+// `prose`: the URL was read from article text, where a trailing colon is the
+// sentence's ("[article](https://a.org/x/): the indoor ..." on a live post,
+// 2026-11-19, fetched ".../x/):" and got a 404). Only a colon that comes after
+// everything else is dropped, never one inside a link destination
+// ("[source](https://a.org/r?id=ABC:)") or a structured source list.
+function trimTrailingUrlNoise(url, { prose = false } = {}) {
   let out = url;
+  let insideLink = false;
   for (;;) {
-    if (/[.,;:]$/.test(out)) { out = out.slice(0, -1); continue; }
+    if (/[.,;]$/.test(out) || (prose && !insideLink && out.endsWith(':'))) { out = out.slice(0, -1); continue; }
     if (out.endsWith(')')) {
       const opens = (out.match(/\(/g) || []).length;
       const closes = (out.match(/\)/g) || []).length;
-      if (closes > opens) { out = out.slice(0, -1); continue; }
+      if (closes > opens) { out = out.slice(0, -1); insideLink = true; continue; }
     }
     break;
   }
@@ -89,9 +95,12 @@ function sourceUrls(document, brief = {}, evidenceUrls = []) {
   // Parentheses are allowed inside the match (URLs can legitimately contain
   // them); trimTrailingUrlNoise strips only what's unmatched.
   const evidence = (Array.isArray(evidenceUrls) ? evidenceUrls : []).map(evidenceUrl).filter(Boolean);
-  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
-  return [...new Set((text.match(/https:\/\/[^\s<>"'\]}]+/g) || [])
-    .map(trimTrailingUrlNoise)
+  const urlsIn = (text) => text.match(/https:\/\/[^\s<>"'\]}]+/g) || [];
+  const structured = `${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${evidence.join('\n')}`;
+  return [...new Set([
+    ...urlsIn(fm.parse(document).content).map((url) => trimTrailingUrlNoise(url, { prose: true })),
+    ...urlsIn(structured).map((url) => trimTrailingUrlNoise(url)),
+  ]
     .filter((url) => {
       try {
         const parsed = new URL(url);
