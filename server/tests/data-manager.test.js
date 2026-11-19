@@ -869,6 +869,9 @@ describe('test records, junk leads and the new_customer conversion (owner 2026-1
       const c = mapNewCustomerCandidate(bare);
       expect(c).toMatchObject({ email: 'acct@example.com', phone: '(941) 555-0142', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
       expect(skipReason(c)).toBeNull();
+      // A contact that cannot be uploaded (a blank email, a short phone) is no contact.
+      expect(mapNewCustomerCandidate({ ...bare, email: '   ', phone: '555-01' }))
+        .toMatchObject({ email: 'acct@example.com', phone: '(941) 555-0142', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
       // A lead with a contact of its own keeps it: the customer's is never mixed in.
       expect(mapNewCustomerCandidate({ ...bare, phone: '9415550101' }))
         .toMatchObject({ email: null, phone: '9415550101', firstName: 'Lee', lastName: 'Caller', zip: '34219' });

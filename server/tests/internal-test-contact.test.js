@@ -54,13 +54,6 @@ describe('isInternalTestContact', () => {
     expect(isInternalTestContact({ firstName: 'Shakedown', lastName: 'Smith' })).toBe(false);
   });
 
-  test('metadata.shakedown, object or JSON string', () => {
-    expect(isInternalTestContact({ metadata: { shakedown: true } })).toBe(true);
-    expect(isInternalTestContact({ metadata: '{"shakedown":true}' })).toBe(true);
-    expect(isInternalTestContact({ metadata: '{"shakedown":false}' })).toBe(false);
-    expect(isInternalTestContact({ metadata: 'not json' })).toBe(false);
-  });
-
   test('empty or unrelated contacts are not test records', () => {
     expect(isInternalTestContact()).toBe(false);
     expect(isInternalTestContact({})).toBe(false);

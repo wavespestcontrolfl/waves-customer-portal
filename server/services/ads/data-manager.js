@@ -642,10 +642,10 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
 // former customer coming back, fails that test and is not a new customer.
 function mapNewCustomerCandidate(row) {
   const base = mapLeadCandidate(row);
-  // The event is the customer's, so a won lead with no email or phone of its own
-  // sends the customer's, with that contact's name and ZIP. Consent checks it as
-  // the uploaded contact.
-  const contact = row.email || row.phone ? {} : {
+  // The event is the customer's, so a won lead with no usable email or phone of
+  // its own sends the customer's, with that contact's name and ZIP. Consent
+  // checks it as the uploaded contact.
+  const contact = normalizeEmail(row.email) || normalizePhone(row.phone) ? {} : {
     email: row.customer_email || null,
     phone: row.customer_phone || null,
     ...matchFields.identityForContact({ email: row.customer_email, phone: row.customer_phone }, ...leadIdentitySources(row)),
@@ -803,8 +803,17 @@ function invoiceRollupSubquery() {
 
 async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT } = {}) {
   const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
-  const queryLimit = Math.min(cap * 2, MAX_EVENTS_PER_REQUEST);
   const invoiceRollup = invoiceRollupSubquery();
+  // The limit counts jobs, then every lead joined to a picked job is read: a
+  // limit over the joined rows could keep a job's ordinary lead and cut the
+  // lead that marks it a test record (the dedupe excludes on ANY sibling).
+  const jobIds = db('estimate_actuals as ea')
+    .join('estimates as e', 'e.id', 'ea.estimate_id')
+    .where('ea.service_date', '>=', since)
+    .where('ea.service_date', '<', addDateStringDays(endDate, 1))
+    .select('ea.id')
+    .orderBy('ea.service_date', 'desc')
+    .limit(cap);
 
   const rows = await db('estimate_actuals as ea')
     .join('estimates as e', 'e.id', 'ea.estimate_id')
@@ -820,8 +829,7 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
             .orOn(db.raw("e.estimate_data->>'lead_id' = l.id::text"));
         });
     })
-    .where('ea.service_date', '>=', since)
-    .where('ea.service_date', '<', addDateStringDays(endDate, 1))
+    .whereIn('ea.id', jobIds)
     .select(
       'ea.id',
       'ea.estimate_id',
@@ -859,13 +867,12 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'inv.invoice_status',
       'sr.updated_at as completed_at',
     )
-    .orderBy('ea.service_date', 'desc')
-    .limit(queryLimit);
+    .orderBy('ea.service_date', 'desc');
 
   // Consent must run BEFORE this dedupe (see the invariant on collectCandidates).
   return dedupeCandidatesByTransaction(
     await applyMarketingConsent('completed_job_revenue', rows.map(mapCompletedJobCandidate))
-  ).slice(0, cap);
+  );
 }
 
 // Consent-clean conversion candidates before either lane (Google Data Manager
@@ -1029,27 +1036,37 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
 // new_customer is one per customer, ever, and a customer merge repoints every
 // customer_id column (these rows too) to the surviving customer, whose own
 // transaction id is new: a row under the same customer that skips the upload
-// stands for it, so a merge never sends the acquisition again.
+// stands for it, so a merge never sends the acquisition again. A row under the
+// same winning lead stands for it too: a merge that commits after a run
+// collected the customer leaves that run's row under the retired id, and a
+// lead id never changes.
 async function existingUploads(conversionType, candidates) {
   if (!candidates.length) return new Map();
-  const customerIds = conversionType === 'new_customer'
-    ? [...new Set(candidates.map((c) => c.customerId).filter(Boolean).map(String))]
-    : [];
+  const idsOf = (field) => (conversionType === 'new_customer'
+    ? [...new Set(candidates.map((c) => c[field]).filter(Boolean).map(String))]
+    : []);
+  const customerIds = idsOf('customerId');
+  const leadIds = idsOf('leadId');
   const rows = await db('google_ads_conversion_uploads')
     .where({ conversion_type: conversionType })
     .where((q) => {
       q.whereIn('transaction_id', candidates.map((c) => c.transactionId));
       if (customerIds.length) q.orWhereIn('customer_id', customerIds);
+      if (leadIds.length) q.orWhereIn('lead_id', leadIds);
     })
-    .select('transaction_id', 'customer_id', 'status', 'request_id', 'updated_at');
+    .select('transaction_id', 'customer_id', 'lead_id', 'status', 'request_id', 'updated_at');
   const byTransaction = new Map(rows.map((row) => [row.transaction_id, row]));
-  const skipByCustomer = new Map(rows
-    .filter((row) => customerIds.length && row.customer_id && priorUploadSkipReason(row))
-    .map((row) => [String(row.customer_id), row]));
+  const skipBy = (ids, column) => new Map(rows
+    .filter((row) => ids.length && row[column] && priorUploadSkipReason(row))
+    .map((row) => [String(row[column]), row]));
+  const skipByCustomer = skipBy(customerIds, 'customer_id');
+  const skipByLead = skipBy(leadIds, 'lead_id');
   const history = new Map();
   for (const c of candidates) {
     const own = byTransaction.get(c.transactionId);
-    const row = priorUploadSkipReason(own) ? own : (skipByCustomer.get(String(c.customerId)) || own);
+    const row = priorUploadSkipReason(own)
+      ? own
+      : (skipByCustomer.get(String(c.customerId)) || skipByLead.get(String(c.leadId)) || own);
     if (row) history.set(c.transactionId, row);
   }
   return history;

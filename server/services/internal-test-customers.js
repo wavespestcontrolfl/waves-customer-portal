@@ -33,27 +33,18 @@ function ownerPhoneLast10() {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
-function metadataFlagsShakedown(metadata) {
-  let meta = metadata;
-  if (typeof meta === 'string') {
-    try { meta = JSON.parse(meta); } catch { return false; }
-  }
-  return !!(meta && typeof meta === 'object' && meta.shakedown);
-}
-
 // True when a contact is one of the owner's own test records, so it never
 // reaches an ad platform (conversions, hashed contact lists). Any one signal is
 // enough: a listed customer id, a listed name, a listed email, the owner's cell,
-// a "Shakedown Test" name, or a metadata.shakedown flag. Every field is optional.
-function isInternalTestContact({ customerId, firstName, lastName, email, phone, metadata } = {}) {
+// or a "Shakedown Test" name. Every field is optional.
+function isInternalTestContact({ customerId, firstName, lastName, email, phone } = {}) {
   if (isInternalTestCustomerId(customerId)) return true;
   const fullName = [firstName, lastName].map((p) => String(p || '').trim()).filter(Boolean).join(' ')
     .replace(/\s+/g, ' ').toLowerCase();
   if (fullName && (INTERNAL_TEST_CUSTOMERS.includes(fullName) || fullName.startsWith('shakedown test'))) return true;
   if (isInternalTestEmail(email)) return true;
   const phoneDigits = String(phone || '').replace(/\D/g, '').slice(-10);
-  if (phoneDigits.length === 10 && phoneDigits === ownerPhoneLast10()) return true;
-  return metadataFlagsShakedown(metadata);
+  return phoneDigits.length === 10 && phoneDigits === ownerPhoneLast10();
 }
 
 module.exports = {

@@ -1,7 +1,7 @@
 // CI's DB-gated pass runs this against PostgreSQL: the new_customer conversion
 // collector (services/ads/data-manager.js) — one event per NEW customer, never
-// an existing customer's add-on ask. Fixture tables live in a unique schema
-// dropped after the suite.
+// an existing customer's add-on ask — and the completed-job collector's limit.
+// Fixture tables live in a unique schema dropped after the suite.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -35,7 +35,7 @@ jest.setTimeout(30000);
   let database;
   const schema = `new_customer_${randomUUID().replaceAll('-', '')}`;
   const tables = ['leads', 'customers', 'service_records', 'scheduled_services', 'services', 'lead_sources',
-    'google_ads_conversion_uploads', 'meta_conversion_uploads'];
+    'google_ads_conversion_uploads', 'meta_conversion_uploads', 'estimates', 'estimate_actuals', 'invoices'];
 
   const savedOwnerPhone = process.env.ADAM_PHONE;
   beforeAll(async () => {
@@ -315,17 +315,72 @@ jest.setTimeout(30000);
     expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([keptId]);
     expect([...await existingSent('new_customer', candidates)]).toEqual([]);
 
-    // Other conversions are one per event, not per customer: a customer's sent
-    // job never blocks the next one.
+    // Other conversions are one per event, not per customer or lead: a sent job
+    // never blocks the next one.
     await database('google_ads_conversion_uploads').insert({
-      conversion_type: 'completed_job_revenue', transaction_id: 'waves_completed_job:first', event_name: 'Job', event_timestamp: new Date(), status: 'sent', customer_id: kept.id,
+      conversion_type: 'completed_job_revenue', transaction_id: 'waves_completed_job:first', event_name: 'Job', event_timestamp: new Date(), status: 'sent', customer_id: kept.id, lead_id: won.id,
     });
     await database('meta_conversion_uploads').insert({
-      conversion_type: 'completed_job_revenue', event_id: 'waves_completed_job:first', event_name: 'Purchase', status: 'sent', customer_id: kept.id,
+      conversion_type: 'completed_job_revenue', event_id: 'waves_completed_job:first', event_name: 'Purchase', status: 'sent', customer_id: kept.id, lead_id: won.id,
     });
-    const nextJob = { conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:next', customerId: kept.id };
+    const nextJob = { conversionType: 'completed_job_revenue', transactionId: 'waves_completed_job:next', customerId: kept.id, leadId: won.id };
     expect((await _private.existingUploads('completed_job_revenue', [nextJob])).size).toBe(0);
     expect((await existingSent('completed_job_revenue', [nextJob])).size).toBe(0);
+  });
+
+  test('a merge that commits mid-run never sends the acquisition again: the row left under the retired id counts by its lead, on both platforms', async () => {
+    const { existingSent } = require('../services/ads/meta-data-manager')._private;
+    const retired = await customer({ member_since: null });
+    const kept = await customer({ member_since: null, email: 'pat.two@example.com' });
+    const won = await lead(retired);
+    // The run collected the retired customer, the merge then committed (lead
+    // moved, customer retired), and the run then wrote its rows under the retired id.
+    await database('leads').where({ id: won.id }).update({ customer_id: kept.id });
+    await database('customers').where({ id: retired.id }).update({ deleted_at: new Date() });
+    const sentAs = `waves_new_customer:${retired.id}`;
+    await database('google_ads_conversion_uploads').insert({
+      conversion_type: 'new_customer', transaction_id: sentAs, event_name: 'New customer', event_timestamp: won.converted_at,
+      status: 'sent', validate_only: false, customer_id: retired.id, lead_id: won.id,
+    });
+    await database('meta_conversion_uploads').insert({
+      conversion_type: 'new_customer', event_id: sentAs, event_name: 'Purchase', status: 'sent', customer_id: retired.id, lead_id: won.id,
+    });
+
+    const candidates = await collect();
+    const keptId = `waves_new_customer:${kept.id}`;
+    expect(candidates.map((x) => x.transactionId)).toEqual([keptId]);
+    expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([]);
+    expect([...await existingSent('new_customer', candidates)]).toEqual([keptId]);
+    // Only a row that skips the upload counts: after a failed send it goes again.
+    await database('google_ads_conversion_uploads').update({ status: 'failed' });
+    await database('meta_conversion_uploads').update({ status: 'failed' });
+    expect([...await _private.uploadableTransactionIds('new_customer', candidates, false)]).toEqual([keptId]);
+    expect([...await existingSent('new_customer', candidates)]).toEqual([]);
+  });
+
+  test('completed jobs: the limit counts jobs, so every lead of a picked job is read and a test-record lead is never cut', async () => {
+    const c = await customer({ member_since: '2026-01-01' });
+    const job = async (date, leads) => {
+      const estimateId = randomUUID();
+      const serviceRecordId = randomUUID();
+      await database('estimates').insert({ id: estimateId, estimate_data: JSON.stringify({}) });
+      await database('service_records').insert({ id: serviceRecordId, customer_id: c.id, service_date: date, status: 'completed' });
+      await database('invoices').insert({ id: randomUUID(), service_record_id: serviceRecordId, status: 'paid', total: 180 });
+      await database('estimate_actuals').insert({
+        id: randomUUID(), estimate_id: estimateId, customer_id: c.id, service_record_id: serviceRecordId, service_line: 'pest', service_date: date,
+      });
+      for (const fields of leads) await lead(null, { estimate_id: estimateId, ...fields });
+      return serviceRecordId;
+    };
+    // The newest job has nine ordinary leads and one on the owner's cell.
+    const tested = await job('2026-11-17', [
+      ...Array.from({ length: 9 }, (_, i) => ({ email: `pat${i}@example.com`, phone: `+1941555020${i}` })),
+      { email: null, phone: OWNER_CELL },
+    ]);
+    await job('2026-11-10', [{}]);
+    const out = await _private.collectCandidates('completed_job_revenue', { ...RANGE, limit: 1 });
+    expect(out.map((x) => x.transactionId)).toEqual([`waves_completed_job:${tested}`]);
+    expect(_private.skipReason(out[0])).toBe('internal_test');
   });
 
   test('a completed booking before the lead is an existing customer; a free assessment is not', async () => {
