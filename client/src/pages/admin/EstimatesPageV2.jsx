@@ -49,12 +49,12 @@ import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineCo
 import WinLossSlicesCard from "./WinLossSlicesCard";
 import SourcePerformanceCard from "./SourcePerformanceCard";
 import PipelineAnalytics, {
-  isCallTodayEstimate,
   isFollowUpOverdueEstimate,
   isGoingColdEstimate,
   isPickReasonEstimate,
-  lastEngagementMs,
 } from "./PipelineAnalytics";
+// The Call today rule's one home, shared with the 9 AM push.
+import { isCallTodayEstimate, lastEngagementMs } from "@estimate-call-today";
 import {
   FollowUpModalV2,
   DeclineModalV2,
