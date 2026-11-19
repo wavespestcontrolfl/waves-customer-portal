@@ -3,6 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
+import { CONTROLLER_MODELS, controllerAsksAboutApp } from '@waves/irrigation-runtime';
 import SprinklerTimerCard from './SprinklerTimerCard';
 
 afterEach(cleanup);
@@ -23,14 +24,34 @@ it('records a Rain Bird with no model', () => {
   expect(onChange).toHaveBeenCalledWith({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: null });
 });
 
-it('shows the timer on file with its guide and saves the phone-app answer alone', () => {
+it('shows the timer on file with its guide, and a phone-app answer saves with the timer it was given for', () => {
   const onChange = vi.fn();
-  render(<SprinklerTimerCard brand="hunter" model="x2" app="no" onChange={onChange} />);
+  const { rerender } = render(<SprinklerTimerCard brand="hunter" model="x2" app="no" onChange={onChange} />);
   expect(screen.getByText('Hunter X2')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'How to run it on a Hunter' })).toHaveAttribute('href', 'https://www.wavespestcontrol.com/sprinkler-timers/hunter/');
   expect(screen.getByRole('button', { name: 'No' })).toHaveAttribute('aria-pressed', 'true');
   fireEvent.click(screen.getByRole('button', { name: 'Yes' }));
-  expect(onChange).toHaveBeenCalledWith({ irrigationControllerApp: 'yes' });
+  expect(onChange).toHaveBeenLastCalledWith({ irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' });
+  // Tapping the chosen answer again takes it back; a Rain Bird has no model to send.
+  fireEvent.click(screen.getByRole('button', { name: 'No' }));
+  expect(onChange).toHaveBeenLastCalledWith({ irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: null });
+  rerender(<SprinklerTimerCard brand="rain_bird" model={null} app={null} onChange={onChange} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Not sure' }));
+  expect(onChange).toHaveBeenLastCalledWith({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: null, irrigationControllerApp: 'unknown' });
+});
+
+it('asks the phone-app question for exactly the timers the server takes an answer for', () => {
+  const timers = [...Object.keys(CONTROLLER_MODELS).map((model) => ['hunter', model]), ['rain_bird', null], ['other', null]];
+  for (const [brand, model] of timers) {
+    const { unmount } = render(<SprinklerTimerCard brand={brand} model={model} onChange={vi.fn()} />);
+    expect(!!screen.queryByRole('button', { name: 'Not sure' })).toBe(controllerAsksAboutApp(brand, model));
+    unmount();
+  }
+});
+
+it('says so when the timer did not save', () => {
+  render(<SprinklerTimerCard brand="hunter" model="x2" error="The home on this account changed. Reload, then set the sprinkler timer again." onChange={vi.fn()} />);
+  expect(screen.getByRole('alert')).toHaveTextContent('We could not save your timer. The home on this account changed.');
 });
 
 it('asks no phone-app question for a timer that has no app, or for another brand', () => {

@@ -99,7 +99,8 @@ const PREFS_FIELD_SCHEMAS = {
   irrigationControllerLocation: shortTextMax(200),
   // The sprinkler timer on file: brand, Hunter model, and whether the customer runs it from the maker's phone app.
   // Each is a key from the shared list (@waves/irrigation-runtime); '' or null clears. Not watering inputs: they stay
-  // out of IRRIGATION_INPUT_FIELDS, the revision trigger and the confirmed-fields ledger (settleControllerTimer below).
+  // out of IRRIGATION_INPUT_FIELDS, the revision trigger and the confirmed-fields ledger. The three save as one
+  // record: both writers settle them under their lock (services/controller-timer.js).
   irrigationControllerBrand: enumOrNull(Object.keys(CONTROLLER_BRANDS)),
   irrigationControllerModel: enumOrNull(Object.keys(CONTROLLER_MODELS)),
   irrigationControllerApp: enumOrNull(Object.keys(CONTROLLER_APP_ANSWERS)),
@@ -285,22 +286,31 @@ async function customerQualifiesForLawnInches(customer = {}) {
   return hasIrrigationEmailOptIn(customer.id);
 }
 
-// The timer's three fields describe one box on the wall. A write that names the brand keeps the other two true to
-// it, for every writer: only a Hunter has a model on the list, and no timer on file has no phone-app answer.
-function settleControllerTimer(updates) {
-  if (!('irrigation_controller_brand' in updates)) return;
-  const brand = updates.irrigation_controller_brand;
-  if (brand !== 'hunter') updates.irrigation_controller_model = null;
-  if (brand == null) updates.irrigation_controller_app = null;
+// The render-time home stamp a prefs request carries (codex gh-r43): { sent, ms }. The portal sends
+// confirmed_as_of with every save; the staff form echoes the row's irrigation_home_changed_at as confirmedAsOf.
+function prefsRenderStamp(body) {
+  const raw = body || {};
+  const sent = 'confirmed_as_of' in raw || 'confirmedAsOf' in raw;
+  const value = raw.confirmed_as_of ?? raw.confirmedAsOf ?? null;
+  const ms = value ? new Date(value).getTime() : null;
+  return { sent, ms: Number.isFinite(ms) ? ms : null };
+}
+
+// Was the request rendered against the home on the row now? No move on record always passes; after a move the
+// request must carry the matching stamp (an absent one, an old bundle, fails closed). Read `current` inside the
+// preference lock: the lock orders the writes but says nothing about when the form was rendered.
+function renderedAgainstCurrentHome(current, renderStamp) {
+  const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
+  if (movedAt == null) return true;
+  return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
 }
 
 // Normalizes a snake_case `updates` object (already filtered to an allowed-
-// fields list) for storage: the timer's fields kept coherent (above), irrigation_system_type coerced to an array
+// fields list) for storage: irrigation_system_type coerced to an array
 // (accepts a legacy scalar), and every JSON_FIELDS value stringified
 // so knex sends JSON text rather than a bound object. Mutates and returns
 // the same object; order matters (type coercion before stringification).
 function normalizeUpdatesForStorage(updates) {
-  settleControllerTimer(updates);
   if ('irrigation_system_type' in updates) {
     const v = updates.irrigation_system_type;
     updates.irrigation_system_type = Array.isArray(v) ? v : (v ? [v] : []);
@@ -329,4 +339,6 @@ module.exports = {
   customerHasLawnCare,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
+  prefsRenderStamp,
+  renderedAgainstCurrentHome,
 };

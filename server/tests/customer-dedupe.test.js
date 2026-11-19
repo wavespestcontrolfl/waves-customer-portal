@@ -616,6 +616,33 @@ describe('mergeSingletonPrefRow', () => {
     }
   });
 
+  describe('property_preferences sprinkler timer on file (brand, model, phone-app answer): one record', () => {
+    const TIMER_COLUMNS = ['irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app'];
+    const none = { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null };
+    const x2 = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+    const rainBird = { irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+    const prefs = (customer_id, timer, extra = {}) => ({ id: `p-${customer_id}`, customer_id, ...timer, pet_details: null, created_at: 'x', updated_at: 'x', ...extra });
+    const timerKeys = (updated) => Object.keys(updated || {}).filter((k) => TIMER_COLUMNS.includes(k));
+
+    it('never fills it column by column: a Rain Bird winner does not take the loser\'s Hunter model or answer', async () => {
+      for (const options of [undefined, { copyNewSod: true }]) {
+        const { trx, state } = stubTrx({ winnerRow: prefs('W', rainBird), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
+        await mergeSingletonPrefRow(trx, 'property_preferences', 'customer_id', 'W', 'L', options);
+        expect(state.updated.pet_details).toBe('one dog'); // ordinary fields still fill
+        expect(timerKeys(state.updated)).toEqual([]);
+      }
+    });
+
+    it('SAME home: a winner with no timer takes the loser\'s whole timer; different homes: it takes none of it', async () => {
+      const same = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2) });
+      await mergeSingletonPrefRow(same.trx, 'property_preferences', 'customer_id', 'W', 'L', { copyNewSod: true });
+      expect(same.state.updated).toMatchObject(x2);
+      const different = stubTrx({ winnerRow: prefs('W', none), loserRow: prefs('L', x2, { pet_details: 'one dog' }) });
+      await mergeSingletonPrefRow(different.trx, 'property_preferences', 'customer_id', 'W', 'L');
+      expect(timerKeys(different.state.updated)).toEqual([]);
+    });
+  });
+
   describe('property_preferences new-sod record (sod_laid_on, sod_covers, sod_area, sod_rooted_on)', () => {
     const SOD_COLUMNS = ['sod_laid_on', 'sod_covers', 'sod_area', 'sod_rooted_on'];
     const blank = { sod_laid_on: null, sod_covers: null, sod_area: null, sod_rooted_on: null };

@@ -27,6 +27,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { clearedNewSodColumns } = require('./lawn-sod-holds');
+const { clearedControllerTimer } = require('./controller-timer');
 const {
   formatAddress,
   leadAddressFields,
@@ -191,12 +192,16 @@ function snapshotMatchesLine1(snapshot, line1) {
 // customer merge, and the primary-residence promotion (codex #3565 gh-r26).
 // Never touches the settings themselves. Returns the row count.
 //
-// clearNewSod (default true): also clears the new-sod record (NEW_SOD_COLUMNS) in
-// the same stamp. The customer merge passes false: it has no before-image for the
+// clearNewSod (default true): also clears the facts about the home just left, in
+// the same stamp: the new-sod record (NEW_SOD_COLUMNS) and the sprinkler timer on
+// file (controller-timer.js, the box on that home's wall).
+// The customer merge passes false: it has no before-image for the
 // stamp fields (an undo leaves the stamp in place), so clearing there could not be
 // undone. The merge instead keeps the winner's own record, never copies the loser's
 // (mergeSingletonPrefRow), and clears a moved-whole loser row's record itself with a
-// journaled before-image (executeMerge / revertMerge).
+// journaled before-image (executeMerge / revertMerge). That last step is for the
+// sod record only: a loser row that moves whole keeps its timer, like its other
+// sprinkler settings.
 async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod = true } = {}) {
   if (!customerId) return 0;
   // Same customer-scoped lock the prefs PUT serializes on: an autosave begun
@@ -213,7 +218,7 @@ async function markSprinklerSettingsMoved(customerId, conn = db, { clearNewSod =
   const stamp = {
     irrigation_home_changed_at: new Date(),
     irrigation_confirmed_fields: JSON.stringify([]),
-    ...(clearNewSod ? clearedNewSodColumns() : {}),
+    ...(clearNewSod ? { ...clearedNewSodColumns(), ...clearedControllerTimer() } : {}),
   };
   const n = await conn('property_preferences').where({ customer_id: customerId }).update(stamp);
   if (n) return n;

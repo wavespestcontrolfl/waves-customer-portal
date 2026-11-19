@@ -62,7 +62,12 @@ const {
   customerHasLawnCare,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
+  prefsRenderStamp,
+  renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
+const { settleControllerTimer } = require('../services/controller-timer');
+// The locked write found nothing left to save (the only fields were a rejected sprinkler timer).
+const NOTHING_SAVED = Symbol('nothing saved');
 
 const prefsSchema = Joi.object(PREFS_FIELD_SCHEMAS).unknown(false);
 
@@ -290,10 +295,7 @@ router.put('/preferences', async (req, res, next) => {
     // serialization orders the writes but says nothing about when the form
     // was rendered. The fields themselves still save; only the ledger entry
     // is withheld (fail closed — the customer re-saves after reloading).
-    const stampMs = (v) => (v ? new Date(v).getTime() : null);
-    const bodyRaw = req.body || {};
-    const hasRenderStamp = 'confirmed_as_of' in bodyRaw || 'confirmedAsOf' in bodyRaw;
-    const renderedAgainstMs = stampMs(bodyRaw.confirmed_as_of ?? bodyRaw.confirmedAsOf ?? null);
+    const renderStamp = prefsRenderStamp(req.body);
 
     // The read-then-upsert holds the customer-scoped preference advisory
     // lock (`property-preferences:<customerId>`): a collective series move
@@ -312,8 +314,11 @@ router.put('/preferences', async (req, res, next) => {
       // Rendered against the current home? No move on record always passes;
       // after a move the request must carry the matching stamp (an absent
       // token — an old bundle — fails closed, gh-r43).
-      const requestFresh = stampMs(current?.irrigation_home_changed_at) == null
-        || (hasRenderStamp && renderedAgainstMs === stampMs(current.irrigation_home_changed_at));
+      const requestFresh = renderedAgainstCurrentHome(current, renderStamp);
+      // The sprinkler timer on file is one record about one home: it saves whole, and only from a page rendered
+      // against the current home (a move clears it under this lock). A rejected timer leaves `updates` without it.
+      rejected.push(...settleControllerTimer(updates, { fresh: requestFresh }));
+      if (Object.keys(updates).length === 0) return NOTHING_SAVED;
       // The confirmation union is ONE atomic statement over the row's
       // CURRENT value — an unlocked pre-move read could write a full pre-move
       // set back over the fan-out's reset when an autosave overlaps an
@@ -340,6 +345,10 @@ router.put('/preferences', async (req, res, next) => {
       }
       return current;
     });
+
+    if (existing === NOTHING_SAVED) {
+      return res.status(400).json({ error: [...new Set(rejected.map((r) => r.message))].join('; '), rejected });
+    }
 
     // Return the full updated record
     const prefs = await db('property_preferences')

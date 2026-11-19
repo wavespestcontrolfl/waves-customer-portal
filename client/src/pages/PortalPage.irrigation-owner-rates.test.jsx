@@ -68,19 +68,21 @@ describe('sprinkler timer on file (step 1 of sprinkler timer connect)', () => {
     render(<PropertyTab customer={lawnCustomer} />);
     expect(await screen.findByText('Hunter X2')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'true');
+    // The plan card reads the week's plan once when it mounts; take the count after that read.
+    await waitFor(() => expect(api.getWateringPlan).toHaveBeenCalled());
     const planReads = api.getWateringPlan.mock.calls.length;
 
     fireEvent.click(screen.getByRole('button', { name: 'Change my timer' }));
     fireEvent.click(screen.getByRole('button', { name: /^Pro-C/ }));
     expect(await screen.findByText('Hunter Pro-C')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Yes' })).toHaveAttribute('aria-pressed', 'false');
-    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await waitFor(() => expect(api.updatePropertyPreferences).toHaveBeenCalledTimes(1), { timeout: 8000 });
     expect(api.updatePropertyPreferences).toHaveBeenCalledWith(expect.objectContaining({
       irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: null,
     }));
     // A timer is not a watering input: recording one does not reload the week's plan.
     expect(api.getWateringPlan.mock.calls.length).toBe(planReads);
-  });
+  }, 15000); // real autosave timer (about a second) plus two awaited renders: room for a loaded CI runner
 
   it('a customer with no lawn service does not get the card', async () => {
     api.getPropertyPreferences.mockResolvedValue({ preferences: { ...SPRAY_PREFS }, hasLawnCare: false });

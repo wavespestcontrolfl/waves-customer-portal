@@ -4,11 +4,12 @@
  * then links the Waves guide for that timer. It records and links, nothing more: the portal does not connect to,
  * pause or start a timer, and this card must not say that it can or will.
  *
- * The three values live on property_preferences and save through the Property tab's own autosave (onChange). Keys and
- * labels come from @waves/irrigation-runtime, the list the server validates against.
+ * The three values live on property_preferences and save through the Property tab's own autosave (onChange). They are
+ * one record: every change sends all three together, and the server saves them whole or not at all. Keys, labels and
+ * the rule for who gets the phone-app question come from @waves/irrigation-runtime, which the server uses too.
  */
 import { useState } from 'react';
-import { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } from '@waves/irrigation-runtime';
+import { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS, controllerAsksAboutApp } from '@waves/irrigation-runtime';
 import Icon from '../Icon';
 import { COLORS as B, FONTS, BUTTON_BASE } from '../../theme-brand';
 
@@ -34,17 +35,17 @@ const MODEL_HINTS = {
 };
 
 const HUNTER_GUIDE = { url: `${HUB}hunter/`, cta: 'How to run it on a Hunter', line: 'Our Hunter guide shows how to run this week\'s plan on your timer.' };
-const HYDRAWISE_APP = 'Do you run it from Hunter\'s Hydrawise phone app?';
-// One entry per timer the card can show. An X-Core has no phone app, so it gets no app question.
+// The question's words, by brand. Who is asked is controllerAsksAboutApp: an X-Core has no phone app, so it is not.
+const APP_QUESTIONS = { hunter: 'Do you run it from Hunter\'s Hydrawise phone app?', rain_bird: 'Do you run it from the Rain Bird phone app?' };
+// One entry per timer the card can show.
 const TIMERS = {
-  x2: { name: 'Hunter X2', ...HUNTER_GUIDE, appQuestion: HYDRAWISE_APP },
+  x2: { name: 'Hunter X2', ...HUNTER_GUIDE },
   x_core: { name: 'Hunter X-Core', ...HUNTER_GUIDE },
-  pro_c: { name: 'Hunter Pro-C', ...HUNTER_GUIDE, appQuestion: HYDRAWISE_APP },
-  hydrawise: { name: 'Hunter Hydrawise timer', ...HUNTER_GUIDE, appQuestion: HYDRAWISE_APP },
+  pro_c: { name: 'Hunter Pro-C', ...HUNTER_GUIDE },
+  hydrawise: { name: 'Hunter Hydrawise timer', ...HUNTER_GUIDE },
   rain_bird: {
     name: 'Rain Bird', url: `${HUB}rain-bird/`, cta: 'How to run it on a Rain Bird',
     line: 'Our Rain Bird guide shows how to run this week\'s plan on your timer.',
-    appQuestion: 'Do you run it from the Rain Bird phone app?',
   },
   other: {
     name: 'Another brand', url: HUB, cta: 'See our timer guides',
@@ -123,7 +124,7 @@ function Picker({ startBrand, onPick, onCancel }) {
   );
 }
 
-function OnFile({ timer, app, onApp, onChangeTimer }) {
+function OnFile({ timer, appQuestion, app, onApp, onChangeTimer }) {
   return (
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -132,9 +133,9 @@ function OnFile({ timer, app, onApp, onChangeTimer }) {
         <span style={meta}>On file</span>
       </div>
       <p style={prose}>{timer.line}</p>
-      {timer.appQuestion && (
-        <div role="group" aria-label={timer.appQuestion} style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>{timer.appQuestion}</div>
+      {appQuestion && (
+        <div role="group" aria-label={appQuestion} style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>{appQuestion}</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {Object.entries(CONTROLLER_APP_ANSWERS).map(([key, label]) => (
               <ChoiceChip key={key} active={app === key} onClick={() => onApp(app === key ? null : key)}>{label}</ChoiceChip>
@@ -153,21 +154,31 @@ function OnFile({ timer, app, onApp, onChangeTimer }) {
   );
 }
 
-export default function SprinklerTimerCard({ brand = null, model = null, app = null, onChange }) {
+export default function SprinklerTimerCard({ brand = null, model = null, app = null, error = '', onChange }) {
   const [picking, setPicking] = useState(false);
   const timer = timerOnFile(brand, model);
+  // Only a Hunter has a model on the list.
+  const modelOnFile = brand === 'hunter' ? model : null;
+  // Every change sends the whole timer, so an answer can never land on a timer the customer did not see.
+  const save = (nextBrand, nextModel, nextApp) => onChange({
+    irrigationControllerBrand: nextBrand, irrigationControllerModel: nextModel, irrigationControllerApp: nextApp,
+  });
   // A new timer is a new box: the app answer on file was about the old one.
   const pick = (nextBrand, nextModel) => {
     setPicking(false);
-    if (nextBrand === brand && nextModel === (brand === 'hunter' ? model : null)) return;
-    onChange({ irrigationControllerBrand: nextBrand, irrigationControllerModel: nextModel, irrigationControllerApp: null });
+    if (nextBrand === brand && nextModel === modelOnFile) return;
+    save(nextBrand, nextModel, null);
   };
   return (
     <section data-glass="card" style={cardStyle} aria-label="Your sprinkler timer">
       <h2 style={{ fontSize: 20, margin: '0 0 8px' }}>Your sprinkler timer</h2>
       {timer && !picking
-        ? <OnFile timer={timer} app={app} onApp={(next) => onChange({ irrigationControllerApp: next })} onChangeTimer={() => setPicking(true)} />
+        ? (
+          <OnFile timer={timer} appQuestion={controllerAsksAboutApp(brand, modelOnFile) ? APP_QUESTIONS[brand] : null}
+            app={app} onApp={(next) => save(brand, modelOnFile, next)} onChangeTimer={() => setPicking(true)} />
+        )
         : <Picker startBrand={brand} onPick={pick} onCancel={timer ? () => setPicking(false) : null} />}
+      {error && <p role="alert" style={{ ...meta, margin: '12px 0 0', color: B.red }}>We could not save your timer. {error}</p>}
     </section>
   );
 }

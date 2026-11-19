@@ -9490,6 +9490,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         brand={prefs.irrigationControllerBrand}
         model={prefs.irrigationControllerModel}
         app={prefs.irrigationControllerApp}
+        error={fieldErrors.irrigationControllerBrand || fieldErrors.irrigationControllerModel || fieldErrors.irrigationControllerApp}
         onChange={(fields) => Object.entries(fields).forEach(([field, value]) => updateField(field, value))}
       />}
 

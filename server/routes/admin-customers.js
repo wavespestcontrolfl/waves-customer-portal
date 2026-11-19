@@ -53,7 +53,12 @@ const {
   transformKeys: prefsTransformKeys,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage: normalizePrefsUpdatesForStorage,
+  // The render-time home stamp (the portal's token, codex gh-r43) and its test against the row: one rule for
+  // both preference writers.
+  prefsRenderStamp,
+  renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
+const { CONTROLLER_TIMER_FIELDS, settleControllerTimer } = require('../services/controller-timer');
 const {
   IRRIGATION_INPUT_FIELDS: PREFS_IRRIGATION_INPUT_FIELDS,
   changedSizingFields: prefsChangedSizingFields,
@@ -5302,17 +5307,6 @@ const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
 const SOD_PREFS_INPUT_FIELDS = NEW_SOD_COLUMNS.filter((c) => c !== 'sod_rooted_on');
 const SOD_PREFS_INPUT_CAMEL = ['sodLaidOn', 'sodCovers', 'sodArea'];
 
-// The render-time home stamp a prefs request carries (the portal's token, codex
-// gh-r43): { sent, ms }. The admin form echoes the row's
-// irrigation_home_changed_at back as confirmedAsOf.
-function prefsRenderStamp(body) {
-  const raw = body || {};
-  const sent = 'confirmed_as_of' in raw || 'confirmedAsOf' in raw;
-  const value = raw.confirmed_as_of ?? raw.confirmedAsOf ?? null;
-  const ms = value ? new Date(value).getTime() : null;
-  return { sent, ms: Number.isFinite(ms) ? ms : null };
-}
-
 // A sod record is a fact about one home. A move clears it under the same
 // advisory lock this write takes, so a form rendered BEFORE the move that waits
 // out the lock would re-read the cleared row and write the old home's sod onto
@@ -5329,9 +5323,7 @@ function sodWriteIsFresh(current, sodInput, renderStamp) {
   // faces the same stamp as a set: a form rendered before a move must not delete the new home's record.
   const clears = 'sod_laid_on' in sodInput && sodInput.sod_laid_on == null;
   if (clears && !current?.sod_laid_on) return true;
-  const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
-  if (movedAt == null) return true;
-  return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
+  return renderedAgainstCurrentHome(current, renderStamp);
 }
 
 // The sod record saves whole or not at all: one rejected sod field drops the
@@ -5345,10 +5337,19 @@ function sodRejectedWithNothingSaved(outcome, rejected) {
   return !outcome.written.length;
 }
 
+// The sprinkler timer on file follows the same contract (services/controller-timer.js): a timer the stored row
+// could not accept joins `rejected`; true when it was the only thing in the batch (nothing was written).
+function timerRejectedWithNothingSaved(outcome, rejected) {
+  if (!outcome.timerRejected?.length) return false;
+  rejected.push(...outcome.timerRejected);
+  return !outcome.written.length;
+}
+
 // The field names a prefs write saved, for the audit trail (names only, sorted).
 function savedPrefFieldNames(updates, outcome) {
   return Object.keys(updates)
     .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
+    .filter((f) => !(outcome.timerRejected?.length && CONTROLLER_TIMER_FIELDS.includes(f)))
     .sort();
 }
 
@@ -5388,6 +5389,8 @@ function blackoutPairError(updates) {
 // (resolveSodRecord): a record the stored row cannot accept is dropped from the
 // write and its message reported through `outcome.sodRejected` ({ field, message }); `outcome.written`
 // lists the columns that were written.
+// The sprinkler timer on file is settled here too (settleControllerTimer): it saves whole, and only from a form
+// rendered against the current home; its rejections come back in `outcome.timerRejected`.
 async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null } = {}) {
   return db.transaction(async (trx) => {
     // Same advisory-lock key/order the portal PUT and the customer-edit
@@ -5417,6 +5420,7 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
+    outcome.timerRejected = settleControllerTimer(row, { fresh: renderedAgainstCurrentHome(current, renderStamp) });
     if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
       const sodInput = {};
       for (const f of SOD_PREFS_INPUT_FIELDS) {
@@ -5523,8 +5527,11 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body) }))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    if (sodRejectedWithNothingSaved(outcome, rejected)) {
-      return res.status(400).json({ error: outcome.sodRejected.message, rejected });
+    const sodOnlyRejected = sodRejectedWithNothingSaved(outcome, rejected);
+    const timerOnlyRejected = timerRejectedWithNothingSaved(outcome, rejected);
+    if (sodOnlyRejected || timerOnlyRejected) {
+      const messages = [outcome.sodRejected?.message, outcome.timerRejected[0]?.message].filter(Boolean);
+      return res.status(400).json({ error: messages.join('; '), rejected });
     }
 
     const preferences = await db('property_preferences')

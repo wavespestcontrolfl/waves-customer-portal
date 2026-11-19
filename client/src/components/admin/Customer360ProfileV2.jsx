@@ -160,7 +160,7 @@ import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
 import { NEW_CONSTRUCTION_WARRANTY_TEMPLATE_KEY } from "../../lib/pretreatWarrantyValues";
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
 import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
-import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS, CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } from "@waves/irrigation-runtime";
+import { DAY_ALIASES, DAY_KEYS, HEAD_LABELS, CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS, controllerAsksAboutApp } from "@waves/irrigation-runtime";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -7197,7 +7197,12 @@ const ACCESS_PREFS_COUPLED = {
   awayWatchFrom: ["awayWatchUntil"],
   awayWatchUntil: ["awayWatchFrom"],
   chemicalSensitivityDetails: ["chemicalSensitivities"],
+  // The sprinkler timer on file is one record: the server saves the three together or not at all.
+  irrigationControllerBrand: ["irrigationControllerModel", "irrigationControllerApp"],
+  irrigationControllerModel: ["irrigationControllerBrand", "irrigationControllerApp"],
+  irrigationControllerApp: ["irrigationControllerBrand", "irrigationControllerModel"],
 };
+const ACCESS_PREFS_TIMER_KEYS = ["irrigationControllerBrand", "irrigationControllerModel", "irrigationControllerApp"];
 // The sod fields are NOT coupled: the server merges the sod fields a save sends
 // with the stored record under the customer lock (resolveSodRecord), so each
 // save sends only the sod fields changed in this edit and cannot overwrite
@@ -7379,7 +7384,9 @@ function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo, awayWatchEnabled }) 
       {p.irrigation_controller_brand === "hunter" && (
         <AccessPrefRow label="Timer Model" value={CONTROLLER_MODELS[p.irrigation_controller_model]} />
       )}
-      <AccessPrefRow label="Runs From Phone App" value={CONTROLLER_APP_ANSWERS[p.irrigation_controller_app]} />
+      {controllerAsksAboutApp(p.irrigation_controller_brand, p.irrigation_controller_model) && (
+        <AccessPrefRow label="Runs From Phone App" value={CONTROLLER_APP_ANSWERS[p.irrigation_controller_app]} />
+      )}
       <AccessPrefRow label="Zones" value={p.irrigation_zones} />
       <AccessPrefRow label="Rain Sensor" value={p.rain_sensor ? "Yes" : "No"} />
       <AccessPrefRow label="Irrigation Notes" value={p.irrigation_schedule_notes} />
@@ -7542,20 +7549,25 @@ function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod
   );
 }
 
-// The timer on file. A new brand is a new box: its model and phone-app answer start empty. Only a Hunter has a model.
+// The timer on file. A new brand or a new model is a new box: what was recorded under it starts empty. Only a
+// Hunter has a model, and the phone-app question shows for the timers the customer card asks it for.
 function AccessPrefsTimer({ d, set, setDraft, fieldErrors }) {
   const f = { d, set, fieldErrors };
   const setBrand = () => (brand) =>
     setDraft((prev) => (brand === prev.irrigationControllerBrand
       ? prev
       : { ...prev, irrigationControllerBrand: brand, irrigationControllerModel: "", irrigationControllerApp: "" }));
+  const setModel = () => (model) =>
+    setDraft((prev) => (model === prev.irrigationControllerModel
+      ? prev
+      : { ...prev, irrigationControllerModel: model, irrigationControllerApp: "" }));
   return (
     <>
       <AccessPrefsSelect {...f} set={setBrand} label="Timer Brand" field="irrigationControllerBrand" options={ACCESS_PREFS_TIMER_BRAND_OPTIONS} />
       {d.irrigationControllerBrand === "hunter" && (
-        <AccessPrefsSelect {...f} label="Timer Model" field="irrigationControllerModel" options={ACCESS_PREFS_TIMER_MODEL_OPTIONS} />
+        <AccessPrefsSelect {...f} set={setModel} label="Timer Model" field="irrigationControllerModel" options={ACCESS_PREFS_TIMER_MODEL_OPTIONS} />
       )}
-      {d.irrigationControllerBrand && (
+      {controllerAsksAboutApp(d.irrigationControllerBrand, d.irrigationControllerModel) && (
         <AccessPrefsSelect {...f} label="Runs From Phone App" field="irrigationControllerApp" options={ACCESS_PREFS_TIMER_APP_OPTIONS} />
       )}
     </>
@@ -8109,7 +8121,9 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
   // Resolves to the per-field rejections, or throws when the request failed.
   const submit = async (dirtyKeys) => {
     const body = accessPrefsSavePayload(draft, dirtyKeys);
-    if (ACCESS_PREFS_SOD_KEYS.some((k) => dirtyKeys.includes(k))) {
+    // The sod record and the sprinkler timer are facts about one home: the server takes them only from a form
+    // rendered against the current home.
+    if ([...ACCESS_PREFS_SOD_KEYS, ...ACCESS_PREFS_TIMER_KEYS].some((k) => dirtyKeys.includes(k))) {
       body.confirmedAsOf = renderStampRef.current;
     }
     const response = await adminFetch(

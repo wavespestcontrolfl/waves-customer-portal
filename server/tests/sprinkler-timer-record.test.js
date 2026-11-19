@@ -1,37 +1,76 @@
-// The sprinkler timer on file (step 1 of sprinkler timer connect): three property_preferences fields the customer
-// card and the staff form write through the shared validator, and one read-only count. No database: knex compiles
-// with the pg dialect and every query is captured and answered from a canned list.
+// The sprinkler timer on file (step 1 of sprinkler timer connect): three property_preferences columns that are ONE
+// record about one box on the wall of one home. The customer card and the staff form write it through the shared
+// validator; services/controller-timer.js makes each writer save it whole or not at all. The staff route's cases are
+// in admin-customers-property-preferences-route.test.js, the move in lawn-sod-move.test.js, the merge in
+// customer-dedupe.test.js. No database: one in-memory preference row.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+jest.mock('../middleware/auth', () => ({
+  authenticate: (req, _res, next) => {
+    req.customerId = 'cust-1';
+    req.customer = { id: 'cust-1', waveguard_tier: null, lawn_type: null };
+    next();
+  },
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn().mockResolvedValue(undefined) }));
-const mockQueries = [];
-let mockTimerRows = [];
+jest.mock('../services/termite-stations', () => ({}));
+jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
+jest.mock('../services/irrigation-app-plan', () => ({ appPlanEnabled: jest.fn(() => false), loadCustomerWateringPlan: jest.fn() }));
 jest.mock('../models/db', () => {
-  const knex = require('knex')({ client: 'pg' });
-  knex.client.acquireConnection = async () => ({});
-  knex.client.releaseConnection = async () => {};
-  knex.client._query = async (conn, obj) => {
-    mockQueries.push(obj.sql);
-    obj.response = { rows: mockTimerRows, rowCount: mockTimerRows.length };
-    return obj;
+  const state = { row: null };
+  const table = () => {
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.first = jest.fn(async () => state.row);
+    q.update = jest.fn(async (patch) => { state.row = { ...state.row, ...patch }; return 1; });
+    q.insert = jest.fn(async (data) => { state.row = { id: 'pref-1', created_at: 'x', ...data }; return [1]; });
+    return q;
   };
-  knex.client.processResponse = (obj) => obj.response.rows;
-  return knex;
+  const dbFn = jest.fn((name) => {
+    if (name !== 'property_preferences') throw new Error(`Unexpected table ${name}`);
+    return table();
+  });
+  dbFn.transaction = jest.fn(async (cb) => cb(dbFn));
+  dbFn.raw = jest.fn(async () => undefined);
+  dbFn.fn = { now: jest.fn(() => 'NOW') };
+  dbFn._state = state;
+  return dbFn;
 });
 
-const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } = require('@waves/irrigation-runtime');
-const {
-  PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS, validatePrefsBody, normalizeUpdatesForStorage,
-} = require('../services/property-preferences-schema');
+const express = require('express');
+const db = require('../models/db');
+const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS, controllerAsksAboutApp } = require('@waves/irrigation-runtime');
+const { PREFS_FIELD_SCHEMAS, ALLOWED_FIELDS, validatePrefsBody } = require('../services/property-preferences-schema');
 const { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS } = require('../services/irrigation-schedule-confirmation');
+const { CONTROLLER_TIMER_FIELDS, clearedControllerTimer, settleControllerTimer } = require('../services/controller-timer');
+const AccountMembershipEmail = require('../services/account-membership-email');
 const propertyRouter = require('../routes/property');
-const { executeTool } = require('../services/intelligence-bar/tools');
 
-const TIMER_COLUMNS = ['irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app'];
+const app = express();
+app.use(express.json());
+app.use('/api/property', propertyRouter);
+app.use((_err, _req, res, _next) => res.status(500).json({ error: 'Unavailable' }));
+let server;
+let base;
+beforeAll(async () => {
+  await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
+beforeEach(() => { jest.clearAllMocks(); db._state.row = null; });
 
-beforeEach(() => { mockQueries.length = 0; mockTimerRows = []; });
+async function putPrefs(body) {
+  const response = await fetch(`${base}/api/property/preferences`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+const X2_ON_APP = { irrigationControllerBrand: 'hunter', irrigationControllerModel: 'x2', irrigationControllerApp: 'yes' };
+const timerOf = (row) => CONTROLLER_TIMER_FIELDS.map((column) => row?.[column] ?? null);
+const settle = (updates, options) => ({ rejected: settleControllerTimer(updates, options), left: updates });
 
-describe('timer fields: what a writer may store', () => {
+describe('timer fields: what the validator accepts', () => {
   test('every key on the shared list is accepted, and a clear stores null', () => {
     const body = { irrigationControllerBrand: 'hunter', irrigationControllerModel: 'pro_c', irrigationControllerApp: 'unknown' };
     expect(validatePrefsBody(PREFS_FIELD_SCHEMAS, body)).toMatchObject({ value: body, rejected: [] });
@@ -40,45 +79,111 @@ describe('timer fields: what a writer may store', () => {
     ]) {
       for (const key of Object.keys(labels)) expect(PREFS_FIELD_SCHEMAS[field].validate(key).error).toBeUndefined();
       expect(PREFS_FIELD_SCHEMAS[field].validate('').value).toBeNull();
-      expect(PREFS_FIELD_SCHEMAS[field].validate(null).value).toBeNull();
+      expect(PREFS_FIELD_SCHEMAS[field].validate('Hunter').error).toBeTruthy();
     }
-  });
-
-  test('a value off the list is rejected for that field only, and the rest of the save stands', () => {
-    const { value, rejected } = validatePrefsBody(PREFS_FIELD_SCHEMAS, {
-      irrigationControllerBrand: 'Hunter', irrigationControllerModel: 'esp_tm2', irrigationControllerApp: 'yes',
-    });
-    expect(rejected.map((r) => r.field).sort()).toEqual(['irrigationControllerBrand', 'irrigationControllerModel']);
-    expect(value).toEqual({ irrigationControllerApp: 'yes' });
-  });
-
-  test('both writers may store the three columns', () => {
-    for (const column of TIMER_COLUMNS) expect(ALLOWED_FIELDS).toContain(column);
+    for (const column of CONTROLLER_TIMER_FIELDS) expect(ALLOWED_FIELDS).toContain(column);
   });
 });
 
-describe('timer fields: one box on the wall', () => {
-  test('a brand that is not Hunter drops the model; the app answer stays', () => {
-    expect(normalizeUpdatesForStorage({ irrigation_controller_brand: 'rain_bird', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }))
-      .toEqual({ irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: 'yes' });
+describe('the timer saves whole or not at all', () => {
+  test('the phone-app question exists for a Rain Bird and for the Hunter models that can go on Hydrawise', () => {
+    const asked = [];
+    for (const brand of [null, ...Object.keys(CONTROLLER_BRANDS)]) {
+      for (const model of [null, ...Object.keys(CONTROLLER_MODELS)]) if (controllerAsksAboutApp(brand, model)) asked.push(`${brand}/${model}`);
+    }
+    expect(asked).toEqual(['hunter/x2', 'hunter/pro_c', 'hunter/hydrawise', ...[null, ...Object.keys(CONTROLLER_MODELS)].map((m) => `rain_bird/${m}`)]);
   });
 
-  test('clearing the brand clears the model and the app answer, even when the write names neither', () => {
-    expect(normalizeUpdatesForStorage({ irrigation_controller_brand: null }))
-      .toEqual({ irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null });
+  test('a whole timer that can exist passes untouched, beside other fields', () => {
+    for (const timer of [
+      ['hunter', 'x2', 'yes'], ['hunter', 'hydrawise', null], ['hunter', 'x_core', null], ['hunter', null, null],
+      ['rain_bird', null, 'unknown'], ['other', null, null], [null, null, null],
+    ]) {
+      const updates = { irrigation_zones: 6, irrigation_controller_brand: timer[0], irrigation_controller_model: timer[1], irrigation_controller_app: timer[2] };
+      expect(settle({ ...updates })).toEqual({ rejected: [], left: updates });
+    }
+    expect(settle({ irrigation_zones: 6 }, { fresh: false })).toEqual({ rejected: [], left: { irrigation_zones: 6 } });
   });
 
-  test('a Hunter keeps its model, and a write that does not name the brand is left alone', () => {
-    const hunter = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2' };
-    expect(normalizeUpdatesForStorage({ ...hunter })).toEqual(hunter);
-    expect(normalizeUpdatesForStorage({ irrigation_controller_app: 'no' })).toEqual({ irrigation_controller_app: 'no' });
-    expect(normalizeUpdatesForStorage({ irrigation_zones: 6 })).toEqual({ irrigation_zones: 6 });
+  test('a timer field sent without the other two is rejected: an answer never lands on a timer the writer did not see', () => {
+    const { rejected, left } = settle({ irrigation_controller_app: 'no', irrigation_zones: 6 });
+    expect(left).toEqual({ irrigation_zones: 6 });
+    expect(rejected).toEqual([{ field: 'irrigationControllerApp', message: expect.stringMatching(/saves as one record/) }]);
+    expect(settle({ irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null }).left).toEqual({});
+  });
+
+  test('a timer that cannot exist is rejected whole, with one reason on each field', () => {
+    for (const [timer, reason] of [
+      [['rain_bird', 'x2', null], /Only a Hunter/],
+      [['other', null, 'yes'], /no phone-app question/],
+      [['hunter', 'x_core', 'no'], /no phone-app question/],
+      [['hunter', null, 'yes'], /no phone-app question/],
+      [[null, 'x2', null], /no brand/],
+      [[null, null, 'yes'], /no brand/],
+    ]) {
+      const { rejected, left } = settle({ irrigation_controller_brand: timer[0], irrigation_controller_model: timer[1], irrigation_controller_app: timer[2] });
+      expect(left).toEqual({});
+      expect(rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
+      for (const r of rejected) expect(r.message).toMatch(reason);
+    }
+  });
+
+  test('a write rendered against a home the customer has left is rejected, a clear included', () => {
+    for (const timer of [{ irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' }, clearedControllerTimer()]) {
+      const { rejected, left } = settle({ ...timer }, { fresh: false });
+      expect(left).toEqual({});
+      expect(rejected).toHaveLength(3);
+      expect(rejected[0].message).toMatch(/home on this account changed/);
+    }
+  });
+});
+
+describe('PUT /api/property/preferences: the customer card', () => {
+  test('a whole timer saves, comes back in the response, stamps no irrigation system and sends no email', async () => {
+    const res = await putPrefs(X2_ON_APP);
+    expect(res.status).toBe(200);
+    expect(res.body.preferences).toMatchObject(X2_ON_APP);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
+    expect(db._state.row.irrigation_system).toBeUndefined();
+    expect(db._state.row.irrigation_confirmed_fields).toBeUndefined();
+    expect(AccountMembershipEmail.sendAccountUpdated).not.toHaveBeenCalled();
+  });
+
+  test('an answer sent alone is a 400 that names the field, and nothing is written', async () => {
+    db._state.row = { id: 'pref-1', customer_id: 'cust-1', irrigation_controller_brand: 'rain_bird', irrigation_controller_model: null, irrigation_controller_app: null };
+    const res = await putPrefs({ irrigationControllerApp: 'yes' });
+    expect(res.status).toBe(400);
+    expect(res.body.rejected).toEqual([{ field: 'irrigationControllerApp', message: expect.stringMatching(/saves as one record/) }]);
+    expect(timerOf(db._state.row)).toEqual(['rain_bird', null, null]);
+    expect(db._state.row.updated_at).toBeUndefined();
+  });
+
+  test('a timer that cannot exist is rejected beside a field that saves', async () => {
+    const res = await putPrefs({ irrigationControllerBrand: 'rain_bird', irrigationControllerModel: 'x2', irrigationControllerApp: null, parkingNotes: 'Driveway' });
+    expect(res.status).toBe(200);
+    expect(res.body.rejected.map((r) => r.field)).toEqual(['irrigationControllerBrand', 'irrigationControllerModel', 'irrigationControllerApp']);
+    expect(db._state.row.parking_notes).toBe('Driveway');
+    expect(timerOf(db._state.row)).toEqual([null, null, null]);
+  });
+
+  test('after a move, only a page rendered against the new home may set the timer', async () => {
+    const movedAt = '2026-11-10T15:00:00.000Z';
+    const moved = () => ({ id: 'pref-1', customer_id: 'cust-1', irrigation_home_changed_at: movedAt, ...clearedControllerTimer() });
+    db._state.row = moved();
+    for (const stale of [X2_ON_APP, { ...X2_ON_APP, confirmed_as_of: null }, { ...X2_ON_APP, confirmed_as_of: '2026-09-01T00:00:00.000Z' }]) {
+      const res = await putPrefs(stale);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('The home on this account changed. Reload, then set the sprinkler timer again.');
+      expect(timerOf(db._state.row)).toEqual([null, null, null]);
+    }
+    expect((await putPrefs({ ...X2_ON_APP, confirmed_as_of: movedAt })).status).toBe(200);
+    expect(timerOf(db._state.row)).toEqual(['hunter', 'x2', 'yes']);
   });
 });
 
 describe('timer fields: not a watering input, and no customer email', () => {
   test('recording a timer neither stamps the irrigation system on nor confirms a sizing field', () => {
-    for (const column of TIMER_COLUMNS) {
+    for (const column of CONTROLLER_TIMER_FIELDS) {
       expect(IRRIGATION_INPUT_FIELDS).not.toContain(column);
       expect(IRRIGATION_SIZING_FIELDS).not.toContain(column);
     }
@@ -87,52 +192,8 @@ describe('timer fields: not a watering input, and no customer email', () => {
   test('a timer change adds nothing to the account-updated email', () => {
     const items = propertyRouter._private.propertyChangeItems(
       { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' },
-      { irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null },
+      clearedControllerTimer(),
     );
     expect(items).toEqual([]);
-  });
-});
-
-describe('get_sprinkler_timer_counts', () => {
-  test('counts live customers only, and names no customer', async () => {
-    mockTimerRows = [{ brand: 'hunter', model: 'x2', app: 'yes', homes: '3' }];
-    const result = await executeTool('get_sprinkler_timer_counts', {});
-    expect(mockQueries).toHaveLength(1);
-    expect(mockQueries[0]).toMatch(/from "property_preferences"/);
-    expect(mockQueries[0]).toMatch(/"irrigation_controller_brand" is not null/);
-    // whereLiveCustomer, inside the customer subquery.
-    expect(mockQueries[0]).toMatch(/"customer_id" in \(select "id" from "customers" where .*"deleted_at" is null.*"pipeline_stage" in/s);
-    expect(mockQueries[0]).toMatch(/group by "irrigation_controller_brand", "irrigation_controller_model", "irrigation_controller_app"/);
-    expect(JSON.stringify(result)).not.toMatch(/customer_id|first_name|address/);
-    expect(result.homes_with_a_timer_on_file).toBe(3);
-  });
-
-  test('sorts each recorded timer into where it stands for the Hydrawise app', async () => {
-    mockTimerRows = [
-      { brand: 'hunter', model: 'x2', app: 'yes', homes: '5' },
-      { brand: 'hunter', model: 'x2', app: 'no', homes: '4' },
-      { brand: 'hunter', model: 'x2', app: 'unknown', homes: '2' },
-      { brand: 'hunter', model: 'pro_c', app: null, homes: '1' },
-      { brand: 'hunter', model: 'hydrawise', app: null, homes: '3' },
-      { brand: 'hunter', model: 'x_core', app: null, homes: '6' },
-      { brand: 'hunter', model: null, app: null, homes: '1' },
-      { brand: 'rain_bird', model: null, app: 'yes', homes: '7' },
-      { brand: 'other', model: null, app: null, homes: '2' },
-    ];
-    const result = await executeTool('get_sprinkler_timer_counts', {});
-    expect(result.homes_with_a_timer_on_file).toBe(31);
-    // A Rain Bird on its own app has no Hydrawise route; a Hydrawise touchscreen needs no answer to be on Hydrawise.
-    expect(result.summary).toEqual({ on_hydrawise: 8, needs_wifi_part: 4, no_hydrawise_route: 15, not_answered: 4 });
-    expect(result.by_timer[0]).toEqual({ timer: 'Rain Bird', runs_from_phone_app: 'Yes', standing: 'no_hydrawise_route', homes: 7 });
-    expect(result.by_timer).toContainEqual({ timer: 'Hunter X2', runs_from_phone_app: 'Not sure', standing: 'not_answered', homes: 2 });
-    expect(result.by_timer).toContainEqual({ timer: 'Hunter (model not recorded)', runs_from_phone_app: 'Not answered', standing: 'not_answered', homes: 1 });
-  });
-
-  test('no timer on file yet is an answer, not an error', async () => {
-    expect(await executeTool('get_sprinkler_timer_counts', {})).toEqual({
-      homes_with_a_timer_on_file: 0,
-      summary: { on_hydrawise: 0, needs_wifi_part: 0, no_hydrawise_route: 0, not_answered: 0 },
-      by_timer: [],
-    });
   });
 });

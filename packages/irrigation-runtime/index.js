@@ -62,6 +62,12 @@ const CONTROLLER_BRANDS = Object.freeze({ hunter: 'Hunter', rain_bird: 'Rain Bir
 const CONTROLLER_MODELS = Object.freeze({ x2: 'X2', x_core: 'X-Core', pro_c: 'Pro-C', hydrawise: 'Hydrawise touchscreen' });
 // Whether the customer runs the timer from its maker's phone app. 'unknown' is the customer's "Not sure".
 const CONTROLLER_APP_ANSWERS = Object.freeze({ yes: 'Yes', no: 'No', unknown: 'Not sure' });
+// The phone-app question exists only for a timer whose maker has a phone app for it: a Rain Bird, or a Hunter
+// model that can go on Hydrawise. One rule for the customer card, the staff form and the server.
+const CONTROLLER_APP_MODELS = Object.freeze(['x2', 'pro_c', 'hydrawise']);
+function controllerAsksAboutApp(brand, model) {
+  return brand === 'rain_bird' || (brand === 'hunter' && CONTROLLER_APP_MODELS.includes(model));
+}
 
 const MAX_RUN_MINUTES = 240;
 
@@ -442,6 +448,7 @@ module.exports = {
   CONTROLLER_BRANDS,
   CONTROLLER_MODELS,
   CONTROLLER_APP_ANSWERS,
+  controllerAsksAboutApp,
   MAX_RUN_MINUTES,
   MAX_INCHES_PER_WEEK,
   deriveIrrigationInchesPerWeek,
