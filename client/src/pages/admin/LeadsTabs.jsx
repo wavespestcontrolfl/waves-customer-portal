@@ -3946,6 +3946,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 : undefined
             }
           />{" "}
+          {ov.leadReach?.cohort > 0 && (
+            <>
+              <MetricCard
+                label="Reached in 15 min"
+                value={`${ov.leadReach.reachedWithin} of ${ov.leadReach.cohort}`}
+                sub="First contact by a person: call, text, email or estimate"
+              />{" "}
+              <MetricCard
+                label="Never reached"
+                value={ov.leadReach.neverReached}
+                sub="No call, text, email or estimate on record"
+              />{" "}
+            </>
+          )}
           <MetricCard label="Cost per Acquisition" value={fmtMoney(ov.cpa)} />{" "}
           <MetricCard
             label="Avg Speed to Lead"
