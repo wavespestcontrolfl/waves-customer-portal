@@ -101,26 +101,28 @@ function storedMistingRows(estimateData, options = {}) {
 
 // The stored rows of a one-time termiticide line, pre-slab (a legacy pre_slab_termidor row included) or trenching: the mapped
 // one-time item, its quote-required copy and the raw engine line, from the same authoritative container. Each keeps the product
-// it quoted and what it priced that product with.
-const PRE_SLAB_ROW_SERVICES = new Set(['pre_slab_termiticide', 'pre_slab_termidor']);
-const TRENCHING_ROW_SERVICES = new Set(['trenching']);
-function termiticideRowsIn(container, services) {
+// it quoted and what it priced that product with. The deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate)
+// wrote the same rows with a name and no service, 'Pre-Slab' and 'Trenching': a row of that shape is the line too.
+const PRE_SLAB_ROWS = { services: new Set(['pre_slab_termiticide', 'pre_slab_termidor']), clientName: 'Pre-Slab' };
+const TRENCHING_ROWS = { services: new Set(['trenching']), clientName: 'Trenching' };
+const isLineRow = (row, line) => isRecord(row) && (line.services.has(row.service) || (!row.service && row.name === line.clientName));
+function termiticideRowsIn(container, line) {
   const nested = container.results && container.results.oneTime;
   return [
     container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
     nested && nested.items, nested && nested.specItems,
     container.specItems, container.quoteRequiredItems, container.lineItems,
-  ].filter(Array.isArray).flat().filter((row) => isRecord(row) && services.has(row.service));
+  ].filter(Array.isArray).flat().filter((row) => isLineRow(row, line));
 }
-function storedTermiticideRows(estimateData, options, services) {
+function storedTermiticideRows(estimateData, options, line) {
   const data = parseStoredData(estimateData);
   if (!data) return [];
   const containers = [data.result, data.engineResult].filter(isRecord);
-  if (containers.length && !containers.some((container) => termiticideRowsIn(container, services).length)) return [];
-  return termiticideRowsIn(storedEstimateContainer(data, options) || data, services);
+  if (containers.length && !containers.some((container) => termiticideRowsIn(container, line).length)) return [];
+  return termiticideRowsIn(storedEstimateContainer(data, options) || data, line);
 }
-const storedPreSlabTermiticideRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, PRE_SLAB_ROW_SERVICES);
-const storedTrenchingRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, TRENCHING_ROW_SERVICES);
+const storedPreSlabTermiticideRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, PRE_SLAB_ROWS);
+const storedTrenchingRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, TRENCHING_ROWS);
 
 // The commercial engine ids and their residential label-mapped twins are the SAME charge in two
 // spellings: canonicalized for the duplicate key only (each line keeps its own serviceKey).

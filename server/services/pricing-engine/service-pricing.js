@@ -7072,11 +7072,11 @@ function labelCheckCounts(options, productKey, product) {
 }
 
 // A replayed quote keeps the product surcharge its stored trench line priced with (replay = input.trenchingTermiticidePricingKnobs,
-// set by the server replay paths from estimate-tree-shrub-knob-replay) when it prices the same product, rate and product oz. A
-// custom product cost, oz per gallon or container size on the service prices fresh.
-const TRENCH_CUSTOM_COST_OPTIONS = ['customProductCost', 'customProductOzPerFinishedGallon', 'customContainerOz'];
-function trenchReplaySurcharge(replay, options, priced, surcharge) {
-  if (!replay || typeof replay !== 'object' || TRENCH_CUSTOM_COST_OPTIONS.some((key) => hasValue(options[key]))) return surcharge;
+// set only by the server replay paths from estimate-tree-shrub-knob-replay; a save never carries it) when it prices the same
+// product, rate and product oz. Custom inputs count too: a replay re-prices the stored inputs, and a custom rate, cost or
+// container size still takes the rest of its cost basis from config (a custom cost divides by the configured container oz).
+function trenchReplaySurcharge(replay, priced, surcharge) {
+  if (!replay || typeof replay !== 'object') return surcharge;
   const pinned = Number(replay.productSurcharge);
   const samePricing = replay.productKey === priced.productKey && replay.applicationRate === priced.applicationRate
     && Number(replay.productOz) === priced.productOz;
@@ -7286,7 +7286,7 @@ function priceTrenching(property = {}, options = {}, replay) {
     includedProduct.productOzPerFinishedGallonAtStandardRate *
     (includedProduct.containerCost / includedProduct.containerOz);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
-  const productSurcharge = trenchReplaySurcharge(replay, options, {
+  const productSurcharge = trenchReplaySurcharge(replay, {
     productKey: productResolution.productKey,
     applicationRate: rateResolution.applicationRate,
     productOz: roundMoney(productOz),
@@ -7698,15 +7698,17 @@ function pricePreSlabTermidor(input, volumeDiscount = 'none', extraOptions = {})
     discountInput = extraOptions.volumeDiscount;
   }
 
+  const productKey = options.productKey || 'termidor_sc';
+  // A legacy payload never asked for a label check, so it defaults to one, for fipronil only. Nobody made that default for the
+  // Crosscheck Plus bottle: a bifenthrin legacy quote counts its check only when the caller confirms it, with the bottle mark
+  // (options.labelBottle passes through as sent), as every other path does.
+  const bifenthrin = BIFENTHRIN_TERMITICIDE_KEYS.has(normalizePreSlabTermiticideProduct(productKey, { legacyPayload: true }).productKey);
   return pricePreSlabTermiticide(input, {
     ...options,
     legacyPayload: true,
-    productKey: options.productKey || 'termidor_sc',
+    productKey,
     volumeDiscount: discountInput,
-    // A legacy payload never asked for a label check, so it defaults to one. Nobody made that default for the Crosscheck Plus
-    // bottle, so it carries no bottle mark (options.labelBottle passes through as sent): it counts for fipronil, and a bifenthrin
-    // legacy quote asks for the Crosscheck Plus check, as every other path does.
-    labelConfirmed: hasValue(options.labelConfirmed) ? options.labelConfirmed : true,
+    labelConfirmed: hasValue(options.labelConfirmed) ? options.labelConfirmed : !bifenthrin,
   });
 }
 

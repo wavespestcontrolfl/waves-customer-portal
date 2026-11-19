@@ -12,6 +12,37 @@ const { generateEstimate } = require('../services/pricing-engine/estimate-engine
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 
+// The deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate), bundled as the drift test bundles it, with the
+// pre-swap costs in its source: Talak ($41.57 / 96 oz) on both bifenthrin keys of both lines, and the lower Taurus cost the trench
+// describe below configures ($78 / 78 oz). Its one-time rows carry a name and no service.
+let preSwapClientEstimate;
+function clientEstimate(form) {
+  if (!preSwapClientEstimate) {
+    const fs = require('fs');
+    const path = require('path');
+    const file = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
+    const swap = (source, from, to, count) => {
+      expect(source.split(from).length - 1).toBe(count);
+      return source.split(from).join(to);
+    };
+    let source = fs.readFileSync(file, 'utf8');
+    source = swap(source, 'containerCost: 30.90,\n    containerOz: 128,', 'containerCost: 41.57,\n    containerOz: 96,', 4);
+    source = swap(source, 'containerCost: 95.00, // mirrors SPECIALTY.trenching', 'containerCost: 78.00, // mirrors SPECIALTY.trenching', 1);
+    const out = require('esbuild').buildSync({
+      stdin: { contents: source, resolveDir: path.dirname(file), sourcefile: 'estimateEngine.js', loader: 'js' },
+      bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
+    });
+    const module = { exports: {} };
+    new Function('module', 'exports', 'require', out.outputFiles[0].text)(module, module.exports, require);
+    preSwapClientEstimate = module.exports.calculateEstimate;
+  }
+  return preSwapClientEstimate({
+    homeSqFt: 2400, stories: 1, lotSqFt: 9000, propertyType: 'single_family', urgency: 'NONE', isAfterHours: false, isRecurringCustomer: false,
+    ...form,
+  });
+}
+const REPLAY_DEPS = { needsSync: () => false, syncConstantsFromDB: async () => {}, withTrustedCatalogPricing: async (inputs) => inputs, translateV2CallToV1Input: null };
+
 describe('termite measurement overrides and safeguards', () => {
   test('termite bait keeps existing valid pricing example', () => {
     const result = priceTermiteBait(
@@ -929,6 +960,9 @@ describe('saved bifenthrin label checks follow the bottle on server replay', () 
     expect(legacy({ productKey: 'termidor_sc' })).toMatchObject({ labelConfirmed: true, requiresManualReview: false });
     expect(legacy({})).toMatchObject({ labelConfirmed: false, requiresManualReview: true });
     expect(legacy({}).manualReviewReasons).toContain('pre_slab_label_confirmation_required');
+    // The bottle mark alone is not a check (pre-push audit 8): the caller sent no confirmation.
+    expect(legacy({ labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE })).toMatchObject({ labelConfirmed: false, requiresManualReview: true });
+    expect(legacy({ productKey: 'bifenthrin', labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE }).labelConfirmed).toBe(false);
     expect(legacy({ labelConfirmed: true }).labelConfirmed).toBe(false);
     expect(legacy({ labelConfirmed: true, labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE }).labelConfirmed).toBe(true);
   });
@@ -1035,9 +1069,26 @@ describe('a sent pre-slab quote keeps the container cost it priced with', () => 
     expect(slabLine(generateEstimate(extractEngineInputs(planted))).price).toBe(743);
   });
 
+  // A row the deprecated client engine wrote ('Pre-Slab', no service) holds the same cost basis (pre-push audit 8).
+  test('a quote the client engine priced keeps its container cost on both replay paths', async () => {
+    const quoted = clientEstimate({ svcPreslab: true, preslabSqft: 6832, preslabProductKey: 'talstar_p' });
+    const row = quoted.oneTime.items.find((item) => item.name === 'Pre-Slab');
+    expect(row.service).toBeUndefined();
+    expect(row).toMatchObject({ price: 993, ...TALAK });
+    const stored = { engineInputs: input(), result: quoted };
+    expect(replay.preSlabTermiticideKnobSignalForReplay(stored)).toEqual(TALAK);
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    expect(slabLine(generateEstimate(extractEngineInputs(stored))).price).toBe(993);
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    expect(slabLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(993);
+    // A serviceless row of another name, and a row that names another service, are not this line.
+    const other = { result: { oneTime: { items: [{ ...row, name: 'Bora-Care' }, { ...row, service: 'bora_care' }] } } };
+    expect(replay.preSlabTermiticideKnobSignalForReplay(other)).toBeNull();
+  });
+
   test('the authoritative recompute keeps an old quote only on a declared replay; a posted save prices the new bottle', async () => {
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    const deps = { needsSync: () => false, syncConstantsFromDB: async () => {}, withTrustedCatalogPricing: async (inputs) => inputs, translateV2CallToV1Input: null };
+    const deps = REPLAY_DEPS;
     const stored = { engineInputs: { ...input(), preSlabTermiticidePricingKnobs: TALAK }, engineResult: oldQuote() };
     const replayed = await serverRecomputeFromEstimateData(stored, { ...deps, replaySavedPricingKnobs: true });
     expect(slabLine(replayed.rawEngineResult).price).toBe(993);
@@ -1080,10 +1131,10 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     Object.assign(products.taurus_sc, saved.taurus);
     Object.assign(products.talstar_p, saved.talstar);
   });
-  const sentQuote = () => {
+  const sentQuote = (extra = {}) => {
     Object.assign(products.talstar_p, { label: 'Talak 7.9 F - Bifenthrin', containerCost: 41.57, containerOz: 96 });
     try {
-      return generateEstimate(input());
+      return generateEstimate(input(extra));
     } finally {
       Object.assign(products.talstar_p, saved.talstar);
     }
@@ -1091,14 +1142,44 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
   const PIN = { productKey: 'talstar_p', applicationRate: 'high', productOz: 168, productSurcharge: 8 };
   const priced = (extra, knobs) => trenchLine(generateEstimate({ ...input(extra), trenchingTermiticidePricingKnobs: knobs }));
 
-  test('the engine keeps the stored surcharge for the same product, rate and product oz only; a custom cost prices fresh', () => {
+  test('the engine keeps the stored surcharge for the same product, rate and product oz only', () => {
     expect(trenchLine(sentQuote())).toMatchObject({ price: 4936, productSurcharge: 8, productOz: 168 });
     expect(trenchLine(generateEstimate(input()))).toMatchObject({ price: 4928, productSurcharge: 0 });
     expect(priced({}, PIN).price).toBe(4936);
     expect(priced({}, { ...PIN, productKey: 'bifen_it' }).price).toBe(4928);
     expect(priced({}, { ...PIN, applicationRate: 'standard' }).price).toBe(4928);
     expect(priced({ perimeterLF: 420 }, PIN).productSurcharge).toBe(0);
-    expect(priced({ customProductCost: 30.9 }, PIN).productSurcharge).toBe(0);
+  });
+
+  // A replay re-prices the stored inputs, custom ones included, and each custom input still takes the rest of its cost basis from
+  // config (a custom cost divides by the configured container oz): the swap moves them too (pre-push audit 8: a custom rate of 4 oz a
+  // finished gallon, 336 oz).
+  test.each([
+    ['a custom rate', { applicationRate: 'standard', customProductOzPerFinishedGallon: 4 }, { sent: 4514, fresh: 4420, productOz: 336, productSurcharge: 114 }],
+    ['a custom product cost', { customProductCost: 41.57 }, { sent: 4936, fresh: 4928, productOz: 168, productSurcharge: 8 }],
+    ['a custom container size', { customContainerOz: 96 }, { sent: 4936, fresh: 4928, productOz: 168, productSurcharge: 8 }],
+  ])('a quote with %s keeps its sent surcharge on replay', (_label, extra, want) => {
+    const sent = trenchLine(sentQuote(extra));
+    expect(sent).toMatchObject({ price: want.sent, productOz: want.productOz, productSurcharge: want.productSurcharge });
+    expect(trenchLine(generateEstimate(input(extra))).price).toBe(want.fresh);
+    const pin = { productKey: 'talstar_p', applicationRate: sent.applicationRate, productOz: want.productOz, productSurcharge: want.productSurcharge };
+    expect(priced(extra, pin).price).toBe(want.sent);
+  });
+
+  // A row the deprecated client engine wrote ('Trenching', no service) holds the same four fields (pre-push audit 8).
+  test('a quote the client engine priced keeps its surcharge on both replay paths', async () => {
+    const quoted = clientEstimate({ svcTrenching: true, trenchingPerimeterLF: 400, trenchingProductKey: 'talstar_p', trenchingApplicationRate: 'high' });
+    const row = quoted.oneTime.items.find((item) => item.name === 'Trenching');
+    expect(row.service).toBeUndefined();
+    expect(row).toMatchObject({ price: 4936, ...PIN });
+    const stored = { engineInputs: input(), result: quoted };
+    expect(replay.trenchingKnobSignalForReplay(stored)).toEqual(PIN);
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    expect(trenchLine(generateEstimate(extractEngineInputs(stored))).price).toBe(4936);
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...REPLAY_DEPS, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4936);
+    const other = { result: { oneTime: { items: [{ ...row, name: 'Bora-Care' }, { ...row, service: 'bora_care' }] } } };
+    expect(replay.trenchingKnobSignalForReplay(other)).toBeNull();
   });
 
   test('the signal reads the raw engine line and the mapped one-time item', () => {
@@ -1117,7 +1198,7 @@ describe('a sent trench quote keeps the product surcharge it priced with', () =>
     expect(extractEngineInputs(planted).trenchingTermiticidePricingKnobs).toBeUndefined();
     expect(trenchLine(generateEstimate(extractEngineInputs(planted))).price).toBe(4928);
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
-    const deps = { needsSync: () => false, syncConstantsFromDB: async () => {}, withTrustedCatalogPricing: async (inputs) => inputs, translateV2CallToV1Input: null };
+    const deps = REPLAY_DEPS;
     const stored = { engineInputs: { ...input(), trenchingTermiticidePricingKnobs: PIN }, engineResult };
     expect(trenchLine((await serverRecomputeFromEstimateData(stored, { ...deps, replaySavedPricingKnobs: true })).rawEngineResult).price).toBe(4936);
     expect(trenchLine((await serverRecomputeFromEstimateData(stored, deps)).rawEngineResult).price).toBe(4928);
