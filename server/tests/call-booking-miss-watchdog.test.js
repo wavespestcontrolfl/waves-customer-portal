@@ -247,7 +247,7 @@ describe('a visit the call agent held', () => {
   const missesOf = (calls, booked = []) => computeBookingMisses(calls, booked, { now: NOW });
   const heldMiss = (over = {}, held = decision()) => missesOf([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), live_decision: held, ...over })])[0];
   // A held bell's last step: it asks for no call or text, so it fits every hold reason.
-  const HELD_STEP = "Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or dismiss the call's cards if dispatch shows none.";
+  const HELD_STEP = 'Review the call before booking it.';
 
   test('rings after HELD_GRACE_MINUTES with its reason; an unheld call of the same age still waits GRACE_MINUTES', () => {
     const misses = missesOf([
@@ -337,18 +337,22 @@ describe('a visit the call agent held', () => {
       // not created_at + length (created_at can precede the staff answer): 9, then 11, minutes ago.
       call({ id: 'bridged', created_at: minutesAgo(30), bridged_at: minutesAgo(14), duration_seconds: 5 * 60 }),
       call({ id: 'bridged-done', created_at: minutesAgo(30), bridged_at: minutesAgo(16), duration_seconds: 5 * 60 }),
+      // Pre-push P1 (2026-11-18): a row recording recovery inserted 2 minutes ago, for a call
+      // Twilio stamped as ended 30 minutes ago: the receipt wins over the late created_at.
+      call({ id: 'recovered-row', created_at: minutesAgo(2), duration_seconds: 5 * 60, metadata: { source: 'twilio_recording_status_recovered', ended_at: ended(30) } }),
+      // The same row with no receipt: its created_at is the only end it gives.
+      call({ id: 'recovered-no-receipt', created_at: minutesAgo(2), duration_seconds: 5 * 60, metadata: { source: 'twilio_recording_status_recovered' } }),
     ];
     const misses = missesOf(calls.map((c) => ({ ...c, live_decision: decision() })));
-    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done', 'bridged-done']);
+    expect(misses.map((m) => m.call.id)).toEqual(['long-call-done', 'post-call-row', 'bridge-leg-done', 'bridged-done', 'recovered-row']);
     // An unheld call keeps its wait from created_at.
     expect(missesOf([call({ duration_seconds: 120 * 60 })])).toHaveLength(1);
   });
 
   // Pre-push P1s (2026-11-18): a held visit may not be one to book as agreed (a cancel request, a
-  // visit already on file), so its bell says review and asks staff to check the call first. Done
-  // closes only the one bell, so the step names the call-level closes: the held row's Dismiss,
-  // else the call's cards when Dispatch shows no held row (the strip has its own gate and leaves
-  // out a call whose cards the office closed).
+  // visit already on file), so its bell says review and asks staff to review the call first. The
+  // step names no Dispatch control (rounds 12 to 15: Done, the held row's Dismiss and the call's
+  // cards each had a state where it was the wrong one).
   test('a held bell says review and why, and asks to check the call; an unheld miss keeps "book" and "nothing is on the calendar"', () => {
     const text = bookItAlert(heldMiss(), false);
     expect(text.action).toBe("review Pat Sample's Waves Assessment");
@@ -387,7 +391,7 @@ describe('a visit the call agent held', () => {
     const check = (holdReason) => dateCheckAlert({ name: 'Pat Sample', slot, call: call(), mismatch, service: 'Waves Assessment', holdReason });
     const held = check('the caller asked not to be contacted');
     expect(held.why).toBe('Booked Mon Aug 3 at 9:00 AM; the call agreed Sat Aug 1 at 12:00 PM.');
-    expect(held.detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Check the call in dispatch before you move the visit or contact the caller\.$/);
+    expect(held.detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Review the call before you move the visit or contact the caller\.$/);
     expect(held.detail).not.toContain('confirm the new day with the customer');
     expect(check(null).detail).toMatch(/The visit on the calendar is Mon Aug 3 at 9:00 AM\. Move it to the agreed day, or confirm the new day with the customer, then tap Done\.$/);
   });

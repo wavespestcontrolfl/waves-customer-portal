@@ -129,18 +129,17 @@ const HOLD_REASONS = [
   ['on_file_house_number_conflict', 'a different house number was given'],
 ];
 // A held bell's last step. A held visit may not be one to book as agreed (a cancel request, a
-// visit already on file, a quote first), so staff check the call before booking it. Dismiss on
-// the call's held row on Dispatch (dismissHeldVisit) records that no visit is needed and closes
-// the call's bells. Dispatch can show no held row (the strip has its own gate,
-// GATE_CALL_HELD_VISIT, and leaves out a call whose cards the office closed): then the call's
-// cards are the call-level close (officeClosedCall: once a person closed them all, the bell
-// never repeats), as a repeat bell's own text says. Done closes only the one bell. The step
-// asks for no call or text, so it fits every hold reason.
-const HELD_STEP = "Check the call in dispatch before booking it. If no visit is needed, dismiss its held row there, or dismiss the call's cards if dispatch shows none.";
+// visit already on file, a quote first), so staff review the call before booking it. The step
+// asks for no call or text, so it fits every hold reason, and it names no Dispatch control:
+// which one closes a no-visit call for good depends on gates and on the call's cards (the held
+// row's Dismiss, the cards, Done), and pre-push rounds 12 to 15 each found a state where the
+// named one was wrong. The bell links to Dispatch on the agreed day, where the call's held row
+// offers Book it and Dismiss.
+const HELD_STEP = 'Review the call before booking it.';
 // A held call's date check: a visit is on the calendar on another day. The hold can bear on
-// that visit (an opt-out, a visit on a namesake's account, a cancel request), so staff check
+// that visit (an opt-out, a visit on a namesake's account, a cancel request), so staff review
 // the call before they move the visit or contact anyone.
-const HELD_CHECK_STEP = 'Check the call in dispatch before you move the visit or contact the caller.';
+const HELD_CHECK_STEP = 'Review the call before you move the visit or contact the caller.';
 // A hold the live decision names no listed reason for, and a booking a check held after
 // routing approved it (the row names no reason).
 const HOLD_REASON_FALLBACK = 'the call needs a review';
@@ -302,18 +301,25 @@ function decisionHoldReason(decision) {
   return hit ? hit[1] : HOLD_REASON_FALLBACK;
 }
 
-// When a held call's wait starts: when the call ended, as the latest end the row gives, so the
-// wait never starts early. call-booking-link-text's callEndFor reads an outbound bridge's
-// customer-leg receipt, else bridged_at + length, else start + length; callEndedAt reads
-// Twilio's end stamp, else start + length; a post-call row's created_at is after the call. On a
-// bridge, the row's start can precede the staff answer and its length can count staff ringing,
-// so any one estimate alone can run early.
+// When a held call's wait starts: when the call ended. An end receipt wins over every estimate:
+// Twilio's end stamp (callEndedAt reads it first) or an outbound bridge's customer-leg receipt
+// (callEndFor reads it first), the later of the two. Each helper, handed a row that carries only
+// direction and metadata, returns its receipt or null, with its own checks. A row inserted after
+// the call (a recording recovery) has a created_at long after the call, which the helpers read
+// as its end, so it must not outrank a receipt. With no receipt: the later of the two estimates
+// (bridged_at + length, or start + length, with the start backed out of a post-call row). On a
+// bridge the row's start can precede the staff answer and its length can count staff ringing, so
+// either estimate alone can run early. created_at only when neither exists.
 function heldWaitStart(call, createdAt) {
   const { callEndFor } = require('./call-booking-link-text');
-  const ends = [callEndFor(call), callEndedAt(call), createdAt]
-    .map((d) => (d ? d.getTime() : NaN))
-    .filter((t) => !Number.isNaN(t));
-  return new Date(Math.max(...ends));
+  const latest = (dates) => {
+    const times = dates.map((d) => (d ? d.getTime() : NaN)).filter((t) => !Number.isNaN(t));
+    return times.length ? new Date(Math.max(...times)) : null;
+  };
+  const receiptsOnly = { direction: call.direction, metadata: call.metadata };
+  return latest([callEndedAt(receiptsOnly), callEndFor(receiptsOnly)])
+    || latest([callEndFor(call), callEndedAt(call)])
+    || createdAt;
 }
 
 // Why the call agent held the call (a HOLD_REASONS phrase), or null when nothing proves it did.

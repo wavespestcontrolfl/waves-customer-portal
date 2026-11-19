@@ -375,7 +375,7 @@ describe('close pass', () => {
     expect(result).toMatchObject({ closed: 2, raised: 1 });
     const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Schedule — check Sam Sample's visit date");
-    expect(opts.detail).toMatch(/The call agent held this visit and did not book it, because the address is not confirmed\. Check the call in dispatch before you move the visit or contact the caller\.$/);
+    expect(opts.detail).toMatch(/The call agent held this visit and did not book it, because the address is not confirmed\. Review the call before you move the visit or contact the caller\.$/);
     expect(opts.detail).not.toContain('confirm the new day with the customer');
   });
 

@@ -334,7 +334,7 @@ describe('a later visit on another day', () => {
     const [, title, why, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toBe("Schedule — check Robin Example's visit date");
     expect(why).toBe('Booked Sun Oct 11 at 4:00 PM; the call agreed Sun Oct 4 at 11:00 AM.');
-    expect(opts.detail).toMatch(/The visit on the calendar is Sun Oct 11 at 4:00 PM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Check the call in dispatch before you move the visit or contact the caller\.$/);
+    expect(opts.detail).toMatch(/The visit on the calendar is Sun Oct 11 at 4:00 PM\. The call agent held this visit and did not book it, because the caller asked not to be contacted\. Review the call before you move the visit or contact the caller\.$/);
   });
 
   test('the same-day visit outside the window tolerance also rings the date check', async () => {
