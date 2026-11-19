@@ -106,6 +106,21 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     });
   });
 
+  test.each(['true', 'false'])('a restored stop is attributed only to the route it affects (capacity %s)', async gate => {
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    const onRestoredBooking = jest.fn();
+    const options = { ...f.PIN, dateFrom: f.date, dateTo: f.date, technicianId: f.ids.technician,
+      includeClaimedReservations: true, packEnds: true, includeWeekends: true, durationMinutes: 30,
+      onRestoredBooking, providerTravel: false };
+    const stop = f.baseStop({ technician_id: f.ids.otherTech, reservation_expires_at: f.db.fn.now() });
+    await f.db('scheduled_services').insert(stop);
+    expect((await findAvailableSlots(options)).restored_booking_used).toBe(false);
+    expect(onRestoredBooking).not.toHaveBeenCalled();
+    await f.db('scheduled_services').where({ id: stop.id }).update({ technician_id: null });
+    expect((await findAvailableSlots(options)).restored_booking_used).toBe(true);
+    expect(onRestoredBooking).toHaveBeenCalledWith(f.date, f.ids.technician);
+  });
+
   test('capacity offers use the original road requests when an unassigned office booking occupies the hour', async () => {
     const optimizer = require('../services/route-optimizer');
     const travel = optimizer.createSchedulingTravel({ maxRequests: 0 });
@@ -128,6 +143,34 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     } finally {
       factory.mockRestore();
     }
+  });
+
+  test('the cached estimate page checks a competing hold after an expiry-only extension', async () => {
+    const { getAvailableSlots, invalidateEstimate } = require('../services/estimate-slot-availability');
+    const [estimateId, competitor] = f.ids.estimates;
+    const options = { dateFrom: f.date, dateTo: f.date, includeWeekends: true, maxResults: 50,
+      expanderMaxResults: 0, minimumLeadMinutes: 0, paidCalls: false };
+    const atTen = result => [...result.primary, ...result.expander].some(slot => slot.windowStart === '10:00');
+    await f.db('tech_schedule_blocks').insert([
+      { date: f.date, block_type: 'blocked', start_time: '08:00', end_time: '10:00' },
+      { date: f.date, block_type: 'blocked', start_time: '11:00', end_time: '18:00' },
+    ]);
+    const old = f.db.raw("NOW() - INTERVAL '5 minutes'");
+    const hold = f.baseStop({ status: 'pending', customer_id: null, technician_id: null, window_start: '10:00', window_end: '11:00',
+      source_estimate_id: competitor, reservation_expires_at: old, updated_at: old });
+    await f.db('scheduled_services').insert(hold);
+    const search = () => getAvailableSlots(estimateId, options);
+    try {
+      invalidateEstimate(estimateId);
+      expect(atTen(await search())).toBe(true);
+      await f.db('scheduled_services').where({ id: hold.id })
+        .update({ reservation_expires_at: f.db.raw("NOW() + INTERVAL '5 minutes'") });
+      const occupied = await search();
+      expect(occupied.metadata.cacheHit).toBe(true);
+      expect(atTen(occupied)).toBe(false);
+      await f.db('scheduled_services').where({ id: hold.id }).update({ reservation_expires_at: old });
+      expect(atTen(await search())).toBe(true);
+    } finally { invalidateEstimate(estimateId); }
   });
 
   test.each([false, true])('the estimate page drops a staff-booked opening on refresh and on a fresh search (swept: %s)', async swept => {

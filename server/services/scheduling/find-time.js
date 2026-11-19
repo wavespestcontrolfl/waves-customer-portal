@@ -31,7 +31,7 @@ const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
-const { bookedVisitOrLiveHold, hasRestoredBookedVisit, reservationRoadContext } = require('./reservation-occupancy');
+const { bookedVisitOrLiveHold, restoredBookedVisit, reservationRoadContext } = require('./reservation-occupancy');
 const { customerWindowAdmits } = require('./customer-windows');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
@@ -361,7 +361,7 @@ async function findCapacitySlots(opts) {
       });
       if (!context) continue;
       const roadContext = opts.includeClaimedReservations === true ? reservationRoadContext(context, opts.excludeEstimateId) : context;
-      if (roadContext.rows.length !== context.rows.length) {
+      if (roadContext.restoredOnRoute) {
         restoredBookingUsed = true;
         opts.onRestoredBooking?.(date, tech.id);
       }
@@ -852,7 +852,7 @@ async function resolveCandidateExpectedMinutes({
 // findAvailableSlots' own branching stays in the loop that drives it, not
 // the row-shaping itself.
 function buildDayStops(services, {
-  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+  tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, onRestoredBooking,
 }) {
   const filtered = services.filter((s) => {
     if (excludeSet.has(String(s.id))) return false;
@@ -864,6 +864,7 @@ function buildDayStops(services, {
     // the per-tech route byte-identical.
     return s.technician_id === tech.id || (wantsPackedEnds && s.technician_id == null);
   });
+  if (onRestoredBooking && filtered.some(restoredBookedVisit)) onRestoredBooking(date, tech.id);
   // One resolver per this tech/date's row set (occupancy.js's
   // stopCreditResolver, shared with the commit-side travel probe and
   // listOccupiedWindows) — NOT a plain per-row expectedMinutesSync call
@@ -1110,7 +1111,7 @@ function candidatesForDay(date, tech, params) {
     durationMinutes, dayOpen, dayClose,
   } = params;
   const dayStops = buildDayStops(services, {
-    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit, onRestoredBooking: params.onRestoredBooking,
   });
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
@@ -1295,7 +1296,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   let techQuery = applyAssignable(db('technicians'));
   if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
   const techs = await techQuery.select(techColumns(['id', 'name'], techStartPoints));
-  if (!techs.length) return { techs, services: [], dates: [], absentDays: new Set(), restoredBookingUsed: false };
+  if (!techs.length) return { techs, services: [], dates: [], absentDays: new Set() };
 
   // Loaded once per request, right where the techs are — see
   // findArrivalWindowSlots above. The per-(date,tech) loop below (in
@@ -1370,8 +1371,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1], undefined, { strict: strictBlackout === true });
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
-  return { techs, services, dates, absentDays,
-    restoredBookingUsed: includeClaimedReservations && hasRestoredBookedVisit(services) };
+  return { techs, services, dates, absentDays };
 }
 
 /**
@@ -1422,7 +1422,7 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  const { techs, services, dates, absentDays, restoredBookingUsed } = await loadFindTimeContext({
+  const { techs, services, dates, absentDays } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
     techStartPoints: opts.techStartPoints === true,
     includeClaimedReservations: opts.includeClaimedReservations === true,
@@ -1454,8 +1454,13 @@ async function findAvailableSlots(opts) {
     durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
   };
 
+  let restoredBookingUsed = false;
   const dayParams = {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    onRestoredBooking: opts.includeClaimedReservations === true ? (date, techId) => {
+      restoredBookingUsed = true;
+      opts.onRestoredBooking?.(date, techId);
+    } : null,
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
   };

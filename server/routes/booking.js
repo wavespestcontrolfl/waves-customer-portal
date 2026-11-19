@@ -1779,7 +1779,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     lat,
     lng,
     zoneSlug,
-    includeClaimedReservations: capacityEnabled(),
+    includeClaimedReservations: true,
     onRestoredBooking: (date, techId) => restoredRoutes.add(`${date}|${techId}`),
     durationMinutes: duration,
     serviceTypes: serviceLabels,

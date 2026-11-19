@@ -32,7 +32,7 @@ const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
-const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
+const { capacityEnabled, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1913,21 +1913,34 @@ async function filterCollidingSlots(slots, {
 }
 
 // Capacity offers are arrival promises, not fixed blocks: a normal flexible
-// visit may overlap their displayed hour and still fit sequentially. Only a
-// customer-linked row that still carries a reservation stamp identifies the
-// staff-claim transition this cache repair targets. A cleanup may clear that
-// stamp after the cache was built, so a customer-linked row updated since the
-// build counts too. Re-evaluate just those technician-days with the local
-// arrival model; no road/provider preload.
-async function recheckCachedCapacitySlots(slots, { dateFrom, dateTo, estimateId, coords, durationMinutes, prospective, cachedAt, conn = db }) {
+// visit may overlap their displayed hour and still fit sequentially. Recheck
+// only technician-days changed by a staff claim or by another estimate's new
+// or extended live hold. This estimate's own unclaimed hold remains exempt,
+// and an expired unclaimed hold is free. The local arrival model and the same
+// customer detour policy as cold find-time make the final decision; no
+// road/provider preload.
+async function recheckCachedCapacitySlots(slots, {
+  dateFrom, dateTo, estimateId, coords, durationMinutes, prospective, cachedAt, routeDaySlug, conn = db,
+}) {
   if (!coords) return slots;
   const rows = await conn('scheduled_services')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .andWhere((query) => {
-      query.whereNotNull('scheduled_services.customer_id').andWhere((changed) => {
-        changed.whereNotNull('scheduled_services.reservation_expires_at')
-          .orWhere('scheduled_services.updated_at', '>=', cachedAt);
+      query.where((claimed) => {
+        claimed.whereNotNull('scheduled_services.customer_id').andWhere((changed) => {
+          changed.whereNotNull('scheduled_services.reservation_expires_at')
+            .orWhere('scheduled_services.updated_at', '>=', cachedAt);
+        });
+      }).orWhere((hold) => {
+        hold.whereNull('scheduled_services.customer_id')
+          .whereNotNull('scheduled_services.reservation_expires_at')
+          .whereRaw('scheduled_services.reservation_expires_at > NOW()')
+          // extendReservation updates the expiry alone, and a transaction's
+          // timestamp may predate this cache snapshot. Every currently-live
+          // foreign hold is therefore an affected route; the local model can
+          // cheaply prove that an unchanged flexible promise still fits.
+          .andWhereRaw('scheduled_services.source_estimate_id IS DISTINCT FROM ?', [estimateId]);
       });
     })
     .select('scheduled_services.technician_id', 'scheduled_services.scheduled_date');
@@ -1935,7 +1948,15 @@ async function recheckCachedCapacitySlots(slots, { dateFrom, dateTo, estimateId,
     const date = row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : row.scheduled_date;
     return `${date}|${row.technician_id ?? ''}`;
   }));
+  if (!affected.size) return slots;
   const arrivalRoute = require('./scheduling/arrival-route');
+  // routeDaySlug is the exact zone cold find-time used. The wrapper cache key
+  // already versions the underlying config, so this local read applies the
+  // same per-date/per-technician lift without regenerating offers.
+  const zoneRouteDays = routeDaySlug ? await readZoneRouteDays(conn) : null;
+  const capFor = (date, technicianId) => customerMaxDetourMinutes(zoneRouteDays
+    ? { date, technicianId, zoneSlug: routeDaySlug, zoneRouteDays }
+    : undefined);
   const contexts = new Map();
   const kept = [];
   for (const slot of slots) {
@@ -1971,7 +1992,8 @@ async function recheckCachedCapacitySlots(slots, { dateFrom, dateTo, estimateId,
       dayEndMin: currentDayEndMinutes(),
     });
     const arrivalGrace = require('../utils/slot-offer-token').splitSignedSlotId(slot.slotId)?.arrivalGrace || 0;
-    if (fit?.feasible && !arrivalRoute._internals.arrivalExceedsGrace(fit, arrivalGrace)) kept.push(slot);
+    if (fit?.feasible && !(fit.detourMinutes > capFor(slot.date, slot.techId))
+      && !arrivalRoute._internals.arrivalExceedsGrace(fit, arrivalGrace)) kept.push(slot);
   }
   return kept;
 }
@@ -2633,6 +2655,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
               durationMinutes: cached.occupancyContext?.durationMinutes,
               prospective: cached.occupancyContext?.prospective,
               cachedAt: cached.occupancyContext?.readAt,
+              routeDaySlug: cached.occupancyContext?.routeDaySlug,
             });
           } else {
             // A make-room offer intentionally overlaps the stop its signed
@@ -2648,6 +2671,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
                 dateFrom: cachedDates[0],
                 dateTo: cachedDates[cachedDates.length - 1],
                 coords: cached.occupancyContext?.coords,
+                estimateZone: cached.occupancyContext?.estimateZone,
+                serviceMix: cached.occupancyContext?.serviceMix,
                 candidateExpectedMinutes: cached.occupancyContext?.candidateExpectedMinutes,
                 ownEstimateId: estimateId,
               }),
@@ -3102,6 +3127,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         coords: coords ? { lat: coords.lat, lng: coords.lng } : null,
         durationMinutes: serviceProfile.durationMinutes,
         candidateExpectedMinutes,
+        estimateZone,
+        serviceMix: serviceProfile.reservationServiceMix || null,
+        routeDaySlug,
         prospective: {
           service_type: serviceProfile.services.map(service => service.label || service.service).join(' '),
           ...(serviceProfile.services.length > 1 ? { combined_services: true } : {}),

@@ -39,10 +39,13 @@ jest.mock('../config/feature-gates', () => ({
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
+const featureGates = require('../config/feature-gates');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const { getAvailableSlots } = estimateSlotAvailability;
 const { filterUnchangedMakeRoomSlots } = estimateSlotAvailability._internals;
 let scheduledRows = [];
+let serviceZoneRows = [];
+let systemSettingsRow = null;
 
 /**
  * Wrapper-cache key vs the travel policy (GH codex #3803 r1 P1): reserveSlot
@@ -90,9 +93,13 @@ function mockDb() {
       };
     }
     if (table === 'scheduled_services') {
-      const queryState = { dateRange: null, ids: null, changedSince: null };
+      const queryState = { dateRange: null, ids: null, changedSince: null, ownEstimateId: null };
       const predicate = {
         where(column, operator, value) {
+          if (typeof column === 'function') {
+            column(this);
+            return this;
+          }
           if ((column === 'scheduled_services.updated_at' || column === 'scheduled_services.created_at')
             && operator === '>=') queryState.changedSince = value;
           return this;
@@ -109,7 +116,16 @@ function mockDb() {
         whereNull: jest.fn().mockReturnThis(),
         whereNotNull: jest.fn().mockReturnThis(),
         orWhereRaw: jest.fn().mockReturnThis(),
-        whereNot(callback) { callback(this); return this; },
+        whereRaw: jest.fn().mockReturnThis(),
+        andWhereRaw(sql, bindings) {
+          if (sql.includes('source_estimate_id IS DISTINCT FROM')) queryState.ownEstimateId = bindings?.[0];
+          return this;
+        },
+        orWhereNot(column, value) {
+          if (column === 'scheduled_services.source_estimate_id') queryState.ownEstimateId = value;
+          return this;
+        },
+        whereNot(callback) { if (typeof callback === 'function') callback(this); return this; },
       };
       const builder = {
         where: jest.fn().mockReturnThis(),
@@ -136,7 +152,16 @@ function mockDb() {
           // The cached route query selects the technician/date pairs that passed its
           // stamped-or-recently-updated SQL predicate. The PostgreSQL suite exercises that predicate.
           if (columns.length === 2 && columns[0] === 'scheduled_services.technician_id') {
-            return scheduledRows.filter(row => row.customer_id && (row.reservation_expires_at || row.updated_at));
+            const boundary = new Date(queryState.changedSince).getTime();
+            return scheduledRows.filter((row) => {
+              const date = String(row.scheduled_date || '').slice(0, 10);
+              if (queryState.dateRange && (date < queryState.dateRange[0] || date > queryState.dateRange[1])) return false;
+              const updated = row.updated_at == null ? NaN : new Date(row.updated_at).getTime();
+              if (row.customer_id != null) return row.reservation_expires_at != null || updated >= boundary;
+              const expires = row.reservation_expires_at == null ? NaN : new Date(row.reservation_expires_at).getTime();
+              return expires > Date.now()
+                && String(row.source_estimate_id || '') !== String(queryState.ownEstimateId || '');
+            });
           }
           return scheduledRows.filter((row) => {
             const date = String(row.scheduled_date || '').slice(0, 10);
@@ -155,7 +180,13 @@ function mockDb() {
       return builder;
     }
     if (table === 'service_zones') {
-      return { select: jest.fn().mockResolvedValue([]) };
+      return { select: jest.fn().mockResolvedValue(serviceZoneRows) };
+    }
+    if (table === 'system_settings') {
+      return {
+        where: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue(systemSettingsRow),
+      };
     }
     if (table === 'technician_absences') {
       // buildAsapCapacitySlots' absentTechDays read (technician-eligibility.js)
@@ -172,7 +203,7 @@ function mockDb() {
 }
 
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_CUSTOMER_RAIN_RANK'];
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_SCHEDULING_CAPACITY', 'GATE_MULTI_TECH_CONFIRM', 'GATE_CUSTOMER_RAIN_RANK', 'SCHEDULING_MAX_DETOUR_MINUTES'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 afterAll(() => {
@@ -188,6 +219,9 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     for (const k of ENV_KEYS) delete process.env[k];
     mockDb();
     scheduledRows = [];
+    serviceZoneRows = [];
+    systemSettingsRow = null;
+    featureGates.zoneRouteDaysLive.mockReturnValue(false);
     db.raw = jest.fn((sql) => sql); // gate-on collision filter selects guarded coords
     estimateSlotAvailability._internals.clearCaches();
     jest.useFakeTimers();
@@ -244,6 +278,23 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
       customer_id: 'cust-remote', reservation_expires_at: null, zone: null, customer_city: null,
       lat: 27.75, lng: -82.15, service_type: 'Pest Control', service_key_snapshot: null,
       is_recurring: false, is_callback: false,
+    }];
+    const warm = await getAvailableSlots('est-rain-1', OPTS);
+    expect(warm.metadata.cacheHit).toBe(true);
+    expect([...warm.primary, ...warm.expander].some((slot) => slot.windowStart === '09:00')).toBe(false);
+    expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('a warm fixed-hour list keeps the resolved zone so an unassigned same-zone hold blocks', async () => {
+    serviceZoneRows = [{ id: 'zone-sarasota', zone_name: 'Sarasota / South', cities: ['Sarasota'] }];
+    const first = await getAvailableSlots('est-rain-1', OPTS);
+    expect([...first.primary, ...first.expander].some((slot) => slot.windowStart === '09:00')).toBe(true);
+
+    scheduledRows = [{
+      id: 'same-zone-unassigned', technician_id: null, scheduled_date: '2027-05-20', status: 'pending',
+      window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60,
+      customer_id: null, reservation_expires_at: '2027-05-14T16:00:00Z',
+      source_estimate_id: 'another-estimate', zone: 'sarasota', customer_city: null,
     }];
     const warm = await getAvailableSlots('est-rain-1', OPTS);
     expect(warm.metadata.cacheHit).toBe(true);
@@ -340,6 +391,106 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
       load.mockRestore();
       evaluate.mockRestore();
       delete process.env.GATE_MULTI_TECH_CONFIRM;
+    }
+  });
+
+  test('capacity cache rechecks another estimate live hold but exempts own and expired unclaimed holds', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    findAvailableSlots.mockResolvedValue({
+      slots: [{
+        date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' },
+        detour_minutes: 4, stops_that_day: 3, route_mode: 'arrival_windows',
+      }],
+      evaluated: 1,
+      total_feasible: 1,
+    });
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const load = jest.spyOn(arrivalRoute, 'loadArrivalRouteContext').mockResolvedValue({ rows: [], target: {} });
+    const evaluate = jest.spyOn(arrivalRoute, 'evaluateArrivalPlacement').mockReturnValue({ feasible: false, reason: 'arrival_window' });
+    const hold = {
+      id: 'new-hold', technician_id: 'tech-1', scheduled_date: '2027-05-20', status: 'pending',
+      customer_id: null, reservation_expires_at: '2027-05-14T16:00:00Z',
+      // extendReservation can update only reservation_expires_at while the
+      // transaction timestamp/updated_at remains older than this cache.
+      updated_at: '2027-05-14T14:00:00.000Z',
+    };
+    try {
+      const cold = await getAvailableSlots('est-rain-1', OPTS);
+      expect([...cold.primary, ...cold.expander]).toHaveLength(1);
+
+      scheduledRows = [{ ...hold, source_estimate_id: 'est-rain-1' }];
+      const own = await getAvailableSlots('est-rain-1', OPTS);
+      expect([...own.primary, ...own.expander]).toHaveLength(1);
+      expect(load).not.toHaveBeenCalled();
+
+      scheduledRows = [{
+        ...hold, source_estimate_id: 'another-estimate', reservation_expires_at: '2027-05-14T14:00:00Z',
+      }];
+      const expired = await getAvailableSlots('est-rain-1', OPTS);
+      expect([...expired.primary, ...expired.expander]).toHaveLength(1);
+      expect(load).not.toHaveBeenCalled();
+
+      scheduledRows = [{ ...hold, source_estimate_id: 'another-estimate' }];
+      const taken = await getAvailableSlots('est-rain-1', OPTS);
+      expect([...taken.primary, ...taken.expander]).toEqual([]);
+      expect(load).toHaveBeenCalledWith(expect.objectContaining({
+        date: '2027-05-20', technicianId: 'tech-1', excludeEstimateId: 'est-rain-1',
+      }));
+      expect(evaluate).toHaveBeenCalled();
+      expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+    } finally {
+      load.mockRestore();
+      evaluate.mockRestore();
+    }
+  });
+
+  test('capacity cache reapplies the customer detour cap with the cold zone route-day lift', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.SCHEDULING_MAX_DETOUR_MINUTES = '30';
+    featureGates.zoneRouteDaysLive.mockReturnValue(true);
+    serviceZoneRows = [{
+      id: 'zone-sarasota', zone_name: 'Sarasota / South', cities: ['Sarasota'],
+      center_lat: 27.3364, center_lng: -82.5307,
+    }];
+    systemSettingsRow = { value: {
+      sarasota: { weekdays: [4], max_detour_minutes: 150, technician_id: 'tech-1' },
+    } };
+    findAvailableSlots.mockResolvedValue({
+      slots: [
+        {
+          date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' },
+          detour_minutes: 4, stops_that_day: 3, route_mode: 'arrival_windows',
+        },
+        {
+          date: '2027-05-20', start_time: '10:00', technician: { id: 'tech-2', name: 'Other Tech' },
+          detour_minutes: 4, stops_that_day: 3, route_mode: 'arrival_windows',
+        },
+      ],
+      evaluated: 2,
+      total_feasible: 2,
+    });
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const load = jest.spyOn(arrivalRoute, 'loadArrivalRouteContext').mockResolvedValue({ rows: [], target: {} });
+    const evaluate = jest.spyOn(arrivalRoute, 'evaluateArrivalPlacement')
+      .mockReturnValue({ feasible: true, detourMinutes: 90 });
+    try {
+      const cold = await getAvailableSlots('est-rain-1', OPTS);
+      expect([...cold.primary, ...cold.expander]).toHaveLength(2);
+      scheduledRows = [{
+        id: 'new-unassigned-hold', technician_id: null, scheduled_date: '2027-05-20', status: 'pending',
+        customer_id: null, source_estimate_id: 'another-estimate',
+        reservation_expires_at: '2027-05-14T16:00:00Z', updated_at: '2027-05-14T15:01:00.000Z',
+      }];
+
+      const warm = await getAvailableSlots('est-rain-1', OPTS);
+      expect(warm.metadata.cacheHit).toBe(true);
+      expect([...warm.primary, ...warm.expander].map((slot) => slot.techId)).toEqual(['tech-1']);
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+    } finally {
+      load.mockRestore();
+      evaluate.mockRestore();
     }
   });
 
