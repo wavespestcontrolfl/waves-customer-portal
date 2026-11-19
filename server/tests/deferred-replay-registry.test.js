@@ -2386,4 +2386,28 @@ describe('recruiting_comms_deferred — held job-offer text (GATE_JOB_OFFERS)', 
     db.mockReturnValueOnce(offerApp());
     expect(await recheckDeferredReplay(ENTRY, { ...meta, job_offer_id: null })).toMatchObject({ eligible: false, reason: 'offer-missing' });
   });
+
+  test('an owner reply that pasted offer links gets each real link back, in order, from the offer rows', async () => {
+    gatesOn(['recruitingComms']);
+    const other = 'f'.repeat(64);
+    const reply = {
+      job_application_id: 'app-1', stage: 'owner_reply', ledger_entry_id: 'e-1',
+      offer_links: [{ job_offer_id: 'offer-1', token_hash: hashOf(TOKEN) }, { job_offer_id: 'offer-2', token_hash: hashOf(other) }],
+    };
+    const offers = (rows) => {
+      const q = { whereIn: jest.fn(() => q), select: jest.fn(async () => rows) };
+      return q;
+    };
+    db.mockReturnValueOnce(offerApp()).mockReturnValueOnce(offers([{ id: 'offer-2', token: other }, { id: 'offer-1', token: TOKEN }]));
+    expect(await recheckDeferredReplay(ENTRY, reply)).toEqual({ eligible: true, offerTokens: [TOKEN, other] });
+    // The owner's words go out as written: the offer's own status is not checked here.
+    // A row that is gone, or whose link changed, refuses the text instead of sending a wrong or broken link.
+    db.mockReturnValueOnce(offerApp()).mockReturnValueOnce(offers([{ id: 'offer-1', token: TOKEN }]));
+    expect(await recheckDeferredReplay(ENTRY, reply)).toMatchObject({ eligible: false, reason: 'offer-link-missing' });
+    db.mockReturnValueOnce(offerApp()).mockReturnValueOnce(offers([{ id: 'offer-1', token: TOKEN }, { id: 'offer-2', token: 'a'.repeat(64) }]));
+    expect(await recheckDeferredReplay(ENTRY, reply)).toMatchObject({ eligible: false, reason: 'offer-link-missing' });
+    // An owner reply with no pasted link is unchanged.
+    db.mockReturnValueOnce(offerApp());
+    expect(await recheckDeferredReplay(ENTRY, { ...reply, offer_links: undefined })).toEqual({ eligible: true });
+  });
 });

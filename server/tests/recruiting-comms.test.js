@@ -657,6 +657,38 @@ describe('sendStageComms — a held job-offer text', () => {
   });
 });
 
+describe('sendStageComms — a held owner reply that pastes an offer link', () => {
+  const TOKEN = 'b'.repeat(64);
+  const LINK = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}`;
+  // Any retryable hold the pipeline returns; the queued row must still be able to send the real link later.
+  const HOLD = { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true, nextAllowedAt: '2027-03-17T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED' };
+  const sha256 = (text) => require('crypto').createHash('sha256').update(text).digest('hex');
+
+  function holdReply(offers) {
+    mockSendCustomerMessage.mockResolvedValue(HOLD);
+    const app = baseApp();
+    mockDb.__tables.job_applications.push({ ...app, comms_history: [] });
+    mockDb.__tables.sms_log = [];
+    mockDb.__tables.job_offers = offers;
+    return RecruitingComms.sendStageComms(app, 'owner_reply', { sms: true, email: false, by: 'staff-1', smsBody: `Here is your offer again: ${LINK}` });
+  }
+
+  test('is queued with the link hidden and pins it to its offer, so the replay can put the real link back', async () => {
+    const result = await holdReply([{ id: 'offer-7', token: TOKEN }]);
+    expect(result.sms).toBe('deferred');
+    const queued = mockDb.__tables.sms_log.find((r) => r.status === 'scheduled');
+    expect(queued.message_body).toBe('Here is your offer again: https://portal.wavespestcontrol.com/careers/offer/[link hidden]');
+    expect(JSON.stringify(queued)).not.toContain(TOKEN.slice(0, 40)); // no token anywhere on the row, metadata included
+    expect(JSON.parse(queued.metadata).offer_links).toEqual([{ job_offer_id: 'offer-7', token_hash: sha256(TOKEN) }]);
+  });
+
+  test('a pasted link that matches no offer is not queued, so it never waits with a link it cannot send', async () => {
+    const result = await holdReply([]);
+    expect(result.sms).toBe('blocked');
+    expect(mockDb.__tables.sms_log.filter((r) => r.status === 'scheduled')).toHaveLength(0);
+  });
+});
+
 describe('reconcileCommsHistoryEntryByOutcome', () => {
   test('patches only the entry whose current outcome matches — never downgrades sent/uncertain evidence', async () => {
     mockDb.__tables.job_applications.push({ id: 'app-9', comms_history: [

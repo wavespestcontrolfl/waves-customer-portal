@@ -6,6 +6,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const J = require('../services/job-offers');
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 // 2026-11-19 is a Thursday. Noon ET, so the ET date is the same in every zone.
 const NOW = new Date('2026-11-19T17:00:00Z');
@@ -16,9 +17,9 @@ describe('dates', () => {
     expect(J.stepDateFor('2027-01-04')).toBe('2027-04-05');
     expect(J.dowOf('2027-04-05')).toBe(1);
     // Day 90 landing ON a Monday still steps the Monday after it ("strictly after").
-    expect(J.addDays('2027-01-04', 89)).toBe('2027-04-03');
+    expect(addStaffWorkDays('2027-01-04', 89)).toBe('2027-04-03');
     expect(J.stepDateFor('2027-01-06')).toBe('2027-04-12'); // start Wed: day 90 = Mon Apr 5 -> next Monday Apr 12
-    expect(J.dowOf(J.addDays('2027-01-06', 89))).toBe(1);
+    expect(J.dowOf(addStaffWorkDays('2027-01-06', 89))).toBe(1);
   });
 
   test('the suggested start is the first Monday at least 21 days after today in ET', () => {
@@ -110,7 +111,7 @@ describe('mergeOfferInput', () => {
   });
 
   test('the same start date sent again keeps a negotiated raise date; a different one recomputes it', () => {
-    const negotiated = { ...base, stepEffectiveOn: J.addDays(base.stepEffectiveOn, 7) };
+    const negotiated = { ...base, stepEffectiveOn: addStaffWorkDays(base.stepEffectiveOn, 7) };
     expect(J.mergeOfferInput(negotiated, { startDate: base.startDate, hoursLine: 'Four 10-hour days' }).stepEffectiveOn).toBe(negotiated.stepEffectiveOn);
     expect(J.mergeOfferInput(negotiated, { startDate: '2027-01-04' }).stepEffectiveOn).toBe('2027-04-05');
   });
