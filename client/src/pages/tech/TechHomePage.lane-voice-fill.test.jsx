@@ -4,8 +4,10 @@
 // fire ant, tick, bee & wasp, mud dauber or mosquito visit opens the Fast
 // Complete sheet in its report flow, reading its own record, in place of the
 // project editor; the sheet's Full form opens the visit's own completion form.
-// A visit that completes through a project, a closed visit, or a row whose
-// profile could not be read keeps the old path.
+// A visit that completes through a project keeps the project editor, a closed
+// visit opens nothing, and any other visit the sheet does not take (a row whose
+// profile could not be read included) opens the Dispatch completion form, as
+// admin Dispatch opens it, never the project editor.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -130,11 +132,22 @@ it.each([
   ['the lane switch off', { laneVoiceFillEnabled: false }],
   ['the switch absent (an older payload)', { laneVoiceFillEnabled: undefined }],
   ['the report flow off', { fastCompleteReportEnabled: false }],
-  ['a project-backed profile', { completionProfile: { category: 'specialty', serviceKey: 'fire_ant', projectBacked: true, requiresProject: true } }],
-  ['a profile that could not be read', { completionProfileLookupFailed: true }],
+  // The server sends no profile when its read fails.
+  ['a profile that could not be read', { completionProfileLookupFailed: true, completionProfile: null }],
   ['a linked-project lookup that failed (a project may exist)', { linkedProjectLookupFailed: true }],
-])('%s: the project editor, as before', async (_label, overrides) => {
+])('%s: the Dispatch completion form, as Dispatch opens it, never the project editor', async (_label, overrides) => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', { ...window.location, assign });
   rows = [row('svc-old-path', overrides)];
+  mount();
+  await openFromTools();
+  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-old-path'));
+  expect(screen.queryByText(/Project editor for/)).not.toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('a project-backed profile: the project editor, as before', async () => {
+  rows = [row('svc-old-path', { completionProfile: { category: 'specialty', serviceKey: 'fire_ant', projectBacked: true, requiresProject: true } })];
   mount();
   await openFromTools();
   expect(await screen.findByText('Project editor for svc-old-path')).toBeInTheDocument();

@@ -37,6 +37,9 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
 }));
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
 vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
+vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
+  default: ({ service, catalog }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} />,
+}));
 import TechHomePage from './TechHomePage';
 import { etDateString } from '../../lib/timezone';
 import { ROUTE_SNAPSHOT_KEY } from './routeSnapshot';
@@ -89,6 +92,7 @@ beforeEach(() => {
   }));
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
+    if (path.includes('/admin/dispatch/products/catalog')) return { ok: true, status: 200, json: async () => ({ products: [{ id: 'prod-fixture', name: 'Fixture granular' }] }) };
     return { ok: true, status: 200, json: async () => ({}) };
   }));
 });
@@ -330,7 +334,7 @@ it('a device that cannot store saved completions at all stays quiet (GitHub Code
   expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument();
 });
 
-it('a lawn visit attempt saved on Dispatch opens nothing here and says where to finish it', async () => {
+it('a saved lawn visit attempt reopens the lawn visit sheet here, with the product catalog', async () => {
   // Typed lawn findings, like a lawn re-service body: only the tag tells them apart.
   mocks.attempts.set('svc-lawn', {
     body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
@@ -339,27 +343,23 @@ it('a lawn visit attempt saved on Dispatch opens nothing here and says where to 
   rows = [];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
-  expect(await screen.findByText(/Open the visit on Dispatch to retry or discard it/)).toBeInTheDocument();
+  const sheet = await screen.findByTestId('lawn-visit-sheet');
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn' });
+  expect(JSON.parse(sheet.getAttribute('data-catalog'))).toEqual([{ id: 'prod-fixture', name: 'Fixture granular' }]);
   expect(screen.queryByTestId('lawn-sheet')).not.toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });
 
-it('the Dispatch notice clears once a scan no longer finds that lawn attempt (GitHub Codex P2 on #6001)', async () => {
-  mocks.attempts.set('svc-lawn', {
-    body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
+it('a saved lawn visit attempt on a visit that now reads completed reopens the lawn visit sheet', async () => {
+  mocks.attempts.set('svc-lawn-done', {
+    body: { idempotencyKey: 'lawn-done-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
     summary: 'Lawn visit', sheet: 'lawn_visit',
   });
-  rows = [row('svc-open', { fastCompleteReportEnabled: true })];
+  rows = [row('svc-lawn-done', { status: 'completed', serviceType: 'Lawn Care', completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_6week', projectBacked: false } })];
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  fireEvent.click(await screen.findByText(/Saved completion/));
-  expect(await screen.findByText(/Open the visit on Dispatch/)).toBeInTheDocument();
-  // Finished on Dispatch: the next scan has no such attempt.
-  mocks.attempts.delete('svc-lawn');
-  fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
-  fireEvent.click(await screen.findByText('Fixture svc-open'));
-  fireEvent.click(await screen.findByRole('button', { name: 'Close sheet' }));
-  await waitFor(() => expect(screen.queryByText(/Open the visit on Dispatch/)).not.toBeInTheDocument());
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(JSON.parse((await screen.findByTestId('lawn-visit-sheet')).getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn-done' });
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
 it('a visit with a saved retry the device cannot read now opens nothing (GitHub Codex P2 on 458cc517e5)', async () => {

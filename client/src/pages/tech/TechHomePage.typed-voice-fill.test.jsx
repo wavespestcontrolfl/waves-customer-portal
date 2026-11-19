@@ -184,6 +184,36 @@ it.each([
   }
 });
 
+// GATE_STATION_FAST_COMPLETE, as admin Dispatch routes it: with the map known
+// on, a termite or rodent bait station visit whose row carries the gate opens
+// the sheet, which carries the station checks; a trap check keeps the typed form.
+it.each(STATION_VISITS.slice(0, 2))('with the station map on, %s under GATE_STATION_FAST_COMPLETE opens the sheet with the station checks', async (_label, overrides) => {
+  mocks.stationMap = { enabled: true, ready: true, known: true };
+  rows = [row('svc-station', { ...overrides, stationFastCompleteEnabled: true })];
+  mount();
+  await openFromTools();
+  expect(await sheetService()).toMatchObject({
+    id: 'svc-station', reportFlow: true, typedFlow: true, stationsFlow: true, typedType: overrides.completionProfile.findingsType,
+  });
+  expect(assign).not.toHaveBeenCalled();
+});
+
+it('with the station map on, a trap check keeps the typed form under GATE_STATION_FAST_COMPLETE', async () => {
+  mocks.stationMap = { enabled: true, ready: true, known: true };
+  rows = [row('svc-trap', { ...STATION_VISITS[2][1], stationFastCompleteEnabled: true })];
+  mount();
+  await openFromTools();
+  await vi.waitFor(() => expect(assign).toHaveBeenCalledWith(TYPED_FORM('svc-trap')));
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('with the station map off, a station visit opens the sheet without the station checks', async () => {
+  rows = [row('svc-station', { ...STATION_VISITS[0][1], stationFastCompleteEnabled: true })];
+  mount();
+  await openFromTools();
+  expect(await sheetService()).toMatchObject({ id: 'svc-station', typedFlow: true, stationsFlow: false });
+});
+
 it('a visit without stations opens the sheet with the station map on', async () => {
   mocks.stationMap = { enabled: true, ready: true };
   rows = [row('svc-roach')];

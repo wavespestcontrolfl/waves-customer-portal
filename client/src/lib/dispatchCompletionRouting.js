@@ -165,6 +165,30 @@ export function shouldOpenAssessmentFastComplete(service) {
     && !returningFromPayment(service);
 }
 
+// Whether a visit completes through the Projects flow (the project editor)
+// and not /complete. Admin Dispatch asks it before any sheet, and the Today
+// page asks it for a visit that is neither typed nor pest, so both send the
+// same visits to the project editor.
+// projectBacked covers BOTH special projects (WDO/pre-treat) and the
+// still-project_required one-time types — those must keep routing to the
+// Projects flow or the server 409s them out of /complete. Typed
+// service_report profiles serialize projectBacked:false, so cut-over
+// jobs fall through to CompletionPanel.
+export function isProjectBackedCompletion(service) {
+  const profile = service?.completionProfile;
+  // An explicit profile is authoritative (house review on #2717): cut-over
+  // visits keep their legacy project linked via scheduled_service_id, but
+  // the server's /complete gate reads the PROFILE, not the link — treating
+  // the leftover link as project-backed dead-ended the post-payment punches
+  // (and the row button) on visits the server would happily complete. The
+  // link heuristic only backstops rows whose payload carries no profile
+  // (e.g. week-list rows).
+  if (profile && typeof profile.projectBacked === "boolean") {
+    return !!(profile.projectBacked || profile.requiresProject);
+  }
+  return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
+}
+
 // Which one-screen sheet admin Dispatch opens for a visit, or null for the
 // full form. Order matters: a lawn re-service is a typed lawn visit, so it is
 // asked first (as on the technician home) and no later rule may claim it.

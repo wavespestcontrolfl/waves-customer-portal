@@ -58,6 +58,9 @@ import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeSh
 import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
+import FastCompleteLawnSheet from '../../components/tech/FastCompleteLawnSheet';
+import { isProjectBackedCompletion, shouldOpenLawnFastComplete } from '../../lib/dispatchCompletionRouting';
+import { lawnSheetService } from './lawnSheetService';
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
 import { onSiteTimeOf } from '../../lib/on-site-time';
 import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
@@ -88,7 +91,7 @@ import {
 } from '../../lib/quickMoveResult';
 import {
   closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
-  stationMapKnownOff,
+  stationMapKnownOff, stationMapKnownOn,
 } from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
@@ -392,17 +395,26 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
+  // The lawn visit's own sheet (GATE_LAWN_FAST_COMPLETE), as admin Dispatch
+  // opens it: { service, catalog }. The sheet builds its planned rows (units,
+  // stock) from the product catalog, so it opens with the catalog it was read
+  // with (openLawnSheet below).
+  const [lawnFast, setLawnFast] = useState(null);
+  const lawnFastService = lawnFast?.service;
+  // The one-screen Fast Complete sheets (each null while closed).
+  const fastSheets = [fastCompleteService, treeShrubFastService, lawnReserviceFastService, lawnFastService];
   // The appointment details sheet (quick move, cancel, reschedule, price
   // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
   // the same sheet Dispatch opens, over the same /admin/schedule row.
   const [detailService, setDetailService] = useState(null);
   // A fast sheet left mounted (suspended) behind the details sheet; plain
   // Close returns to it, a change to the visit closes it (owner 2026-10-09).
-  const fastSheetBehindDetails = !!(detailService && (fastCompleteService || treeShrubFastService || lawnReserviceFastService));
+  const fastSheetBehindDetails = !!detailService && fastSheets.some(Boolean);
   const closeFastSheetsBehindDetails = () => {
     setFastCompleteService(null);
     setTreeShrubFastService(null);
     setLawnReserviceFastService(null);
+    setLawnFast(null);
   };
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -437,6 +449,10 @@ export default function TechHomePage({ section = 'today' }) {
   // flag has loaded and is off (isTypedReportEligible).
   const stationMap = useFeatureFlagReady('station-map-v1');
   const stationMapOff = stationMapKnownOff(stationMap);
+  // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
+  // station visit also opens the sheet, which carries the station checks (as
+  // on admin Dispatch).
+  const stationSheetOn = stationMapKnownOn(stationMap);
   // The verified profile's name first: the timecard signature pre-fill must
   // not fall back to a stale or missing stored copy.
   const techName = staff?.name || getAdminDisplayName('Tech');
@@ -663,7 +679,7 @@ export default function TechHomePage({ section = 'today' }) {
   const saved = useSavedFastCompletions({
     operatorId: staffIdForDevice,
     schedule,
-    openSheets: [fastCompleteService, treeShrubFastService, lawnReserviceFastService],
+    openSheets: fastSheets,
   });
   // "Next Stop" = first non-terminal service in the day's route.
   // Skipping past completed/skipped/cancelled/no_show means a tech with
@@ -820,12 +836,41 @@ export default function TechHomePage({ section = 'today' }) {
     }
     openProjectForService(service);
   }, [openProjectForService]);
-  // Every entry point that would open the project editor for a visit: a lane
-  // visit under the lane voice fill opens the report-flow sheet instead.
-  const openProjectOrLane = useCallback((service) => {
+  // Each Report tap (openServiceReport): a lawn sheet still reading its
+  // catalog opens only while no later tap came.
+  const reportTapSeq = useRef(0);
+  // The lawn visit sheet opens with the product catalog read at the tap, as
+  // Dispatch passes it the catalog it read with the route. No catalog, no
+  // sheet: its planned rows would have no units or stock.
+  const openLawnSheet = useCallback(async (service) => {
+    const tap = reportTapSeq.current;
+    let catalog = null;
+    try {
+      const data = await techRequest('/admin/dispatch/products/catalog');
+      if (Array.isArray(data?.products)) catalog = data.products;
+    } catch {
+      // Said below.
+    }
+    if (tap !== reportTapSeq.current) return;
+    if (!catalog) {
+      alert('Could not load the product list. Check your signal, then tap Report again.');
+      return;
+    }
+    setLawnFast({ service, catalog });
+  }, []);
+  // A visit that is neither typed nor pest control, routed as admin Dispatch
+  // routes it (handleComplete): a lane visit under the lane voice fill opens
+  // the report-flow sheet, a visit that completes through a project opens the
+  // project editor, a lawn visit opens the lawn sheet, and any other visit
+  // opens the Dispatch completion form. The project editor is only for a
+  // project-backed visit: for any other, it made a project, not the visit's
+  // own record.
+  const openUntypedVisit = useCallback((service) => {
     if (isLaneReportEligible(service)) setFastCompleteService(service);
-    else openProjectOrContinue(service);
-  }, [openProjectOrContinue]);
+    else if (isProjectBackedCompletion(service)) openProjectOrContinue(service);
+    else if (shouldOpenLawnFastComplete(service)) void openLawnSheet(service);
+    else openTypedCompletion(service);
+  }, [openProjectOrContinue, openLawnSheet]);
   const projectServices = withSavedCompletions((selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
     !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
     || saved.serviceIds.has(String(service.id))
@@ -849,19 +894,22 @@ export default function TechHomePage({ section = 'today' }) {
   const openTypedVisit = useCallback((service) => {
     if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
     else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
-    else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
+    else if (isTypedReportEligible(service, { stationMapOff, stationSheetOn })) setFastCompleteService(service);
     else openTypedCompletion(service);
-  }, [stationMapOff]);
+  }, [stationMapOff, stationSheetOn]);
   // A saved attempt on this device opens the sheet that made it, before any
   // normal eligibility decision: a successful /complete may already have made
   // the row terminal while its saved body still needs the same-key retry.
   const { resolveTap } = saved;
   const openServiceReport = useCallback(async (service) => {
+    reportTapSeq.current += 1;
     const tap = await resolveTap(service);
     if (!tap) return;
     if (tap.kind) {
-      const savedSheet = { tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService }[tap.kind] || setFastCompleteService;
-      savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
+      const savedSheet = {
+        tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService, lawn_visit: openLawnSheet,
+      }[tap.kind] || setFastCompleteService;
+      void savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
       return;
     }
     if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
@@ -869,8 +917,8 @@ export default function TechHomePage({ section = 'today' }) {
     // typed job must not open CreateProjectModal.
     if (usesDispatchCompletion(service)) openTypedVisit(service);
     else if (isPestControlService(service)) openPestCompletion(service);
-    else openProjectOrLane(service);
-  }, [resolveTap, openTypedVisit, openPestCompletion, openProjectOrLane]);
+    else openUntypedVisit(service);
+  }, [resolveTap, openLawnSheet, openTypedVisit, openPestCompletion, openUntypedVisit]);
   const { rescanIfUnread } = saved;
   const handleProjectQuickAction = useCallback(() => {
     rescanIfUnread();
@@ -1111,7 +1159,7 @@ export default function TechHomePage({ section = 'today' }) {
             // GATE_FAST_COMPLETE_REPORT: the report flow, with what its trace
             // step needs from the row (the tracer's map center and whether
             // this visit takes a satellite trace at all).
-            ...reportFlowFields(fastCompleteService, { stationMapOff }),
+            ...reportFlowFields(fastCompleteService, { stationMapOff, stationSheetOn }),
             // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).
@@ -1237,6 +1285,32 @@ export default function TechHomePage({ section = 'today' }) {
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
           onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          suspended={!!detailService}
+        />
+      )}
+
+      {lawnFastService && (
+        <FastCompleteLawnSheet
+          key={lawnFastService.id}
+          service={lawnSheetService(lawnFastService)}
+          request={techRequest}
+          operatorId={staffIdForDevice}
+          catalog={lawnFast.catalog}
+          onClose={(options) => {
+            setLawnFast(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setLawnFast(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" with no catalog go to the full
+          // completion screen (the Dispatch completion deep link).
+          onFullForm={() => {
+            const raw = lawnFastService;
+            setLawnFast(null);
+            openTypedCompletion(raw);
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={() => setDetailService(lawnFastService)}
           suspended={!!detailService}
         />
       )}
