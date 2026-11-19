@@ -19,8 +19,12 @@ const LIQUIDS = ['LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer', 'LESCO
 const TIMES = ['2026-10-21T14:00:00Z', '2026-10-21T20:00:00Z'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const BANNED = /(keep[^.]{0,20}off|stay off|\bwait\b|\bdry\b)[^.]{0,30}\b\d+\s*(h|hour|min)/i;
-const namesOf = (text) => String(text || '').split('\n').map((line) => line.split(' — ')[0].trim())
-  .filter((name) => name && !name.startsWith('Scout visit'));
+// The recipe grammar uses the separator to identify a product line. Bare prose is an
+// inspection step (May and July), not a catalog name and therefore has no watering rule.
+const namesOf = (text) => String(text || '').split('\n')
+  .filter((line) => line.includes(' — '))
+  .map((line) => line.split(' — ')[0].trim())
+  .filter(Boolean);
 
 function visitMixes() {
   const mixes = [];
@@ -45,6 +49,8 @@ function visitMixes() {
 
 test('every product the program names has a valid watering rule', () => {
   const named = new Set(visitMixes().flatMap((mix) => mix.names));
+  expect(named).toContain('Tetrino Insecticide');
+  expect([...named].some((name) => name.startsWith('Scout May'))).toBe(false);
   for (const name of named) {
     expect({ name, valid: validateRule(RULES[name]).valid }).toEqual({ name, valid: true });
   }

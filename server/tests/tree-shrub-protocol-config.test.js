@@ -8,14 +8,12 @@ function visit(month) {
   return protocols.tree_shrub.visits.find((row) => row.month === month);
 }
 
-describe('10/10 SWFL tree and shrub protocol config', () => {
+describe('Southwest Florida tree and shrub protocol config', () => {
   test('is published as the active tree and shrub program', () => {
     const program = protocols.tree_shrub;
 
-    // Display name was refined to "Tree & Shrub Protocol" (#1799); the
-    // version string still pins the 10/10 SWFL program identity.
     expect(program.name).toMatch(/Tree & Shrub Protocol/);
-    expect(program.version).toBe('2026.09-tree-shrub-field-guide');
+    expect(program.version).toBe('2026.11-tree-shrub-protocol-audit');
     expect(program.visits).toHaveLength(12);
     expect(program.notes.join('\n')).toMatch(/IRAC\/FRAC/);
     expect(program.notes.join('\n')).toMatch(/ordinance/i);
