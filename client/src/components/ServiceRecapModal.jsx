@@ -208,7 +208,7 @@ export default function ServiceRecapModal({
         // lib/pest-default-mix — codex P1 on #3611; product list per the
         // 2026-09-26 owner ruling superseding 2026-08-29): a FRESH
         // recurring general-pest, one-time pest, or pest re-service recap
-        // pre-selects Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10
+        // pre-selects Taurus SC, LESCO Crosscheck Plus, and the LESCO 90/10
         // Nonionic Surfactant so the primary field-tech completion starts
         // from the house mix too. Rates seed exactly as a manual tap would; this lane
         // records no amounts, so the 4/4/0.25-oz totals live only on the

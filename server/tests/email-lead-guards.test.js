@@ -469,6 +469,19 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(result.action).toBe('lead_created');
   });
 
+  test('an email that joins an existing lead writes no source evidence to it', async () => {
+    const state = setupDb({ leads: [{ id: 'lead-77' }, { id: 'lead-77' }] });
+
+    const result = await handleLeadInquiry(
+      makeEmail({ to_address: 'contact+gads_home@wavespestcontrol.com' }),
+      makeClassification()
+    );
+
+    expect(result.action).toBe('linked_to_existing_lead');
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(state.updates.filter((u) => u.table === 'leads')).toEqual([]);
+  });
+
   test('existing open lead still links instead of creating (unchanged behavior)', async () => {
     const state = setupDb({ leads: [{ id: 'lead-77' }, { id: 'lead-77' }] });
 

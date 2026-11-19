@@ -11,7 +11,7 @@
 // visit through the existing photo manager and promoted at completion.
 //
 // Records what the application record needs. The HOUSE PEST MIX (Taurus SC,
-// Atticus Talak 7.9 F, LESCO 90/10 surfactant — lib/pest-default-mix.js)
+// LESCO Crosscheck Plus, LESCO 90/10 surfactant — lib/pest-default-mix.js)
 // starts on the sheet; "+ Other product" adds any other catalog product
 // (FastCompleteProductPicker.jsx) with the amount the tech types, in units a
 // truck can measure (lib/fast-complete-products.js: never mL; tsp goes to

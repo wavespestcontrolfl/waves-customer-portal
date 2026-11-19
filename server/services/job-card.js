@@ -944,11 +944,12 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date(), label
     .every((t) => siteRows.some((h) => Date.parse(h.startTime) === t));
   // One table: a label heat line (Celsius: no adjuvant above 90°F) and a label wind line first, then the catalog
   // limits. When two rows of a kind fire, the caution keeps the first, so the label's words show. A wind line for
-  // one kind of job (Cyper TC: on-grade termite sprays) needs a service on the visit that names it.
+  // one kind of job (Cyper TC: on-grade termite sprays) needs a service on the visit that names it; a label with a line
+  // for each use (LESCO Crosscheck Plus: 10 mph on-grade termite, 15 mph else) lists them stricter first.
   const siteLimitChecks = (limits, rule, productId) => {
     const { heat } = rule || {};
     const services = rainRules.services?.[productId] || [];
-    const wind = rule?.wind && (!rule.wind.services || services.some((s) => rule.wind.services.test(s))) ? rule.wind : null;
+    const wind = [].concat(rule?.wind || []).find((line) => !line.services || services.some((s) => line.services.test(s))) || null;
     return [
       ...(heat ? [{ key: 'temperatureF', kind: 'temperature', source: 'label', action: heat.action, value: heat.aboveF, breaks: (v, l) => v > l, text: (v, at) => `${v}°F at ${at} — label: ${heat.text}` }] : []),
       ...(wind ? [{ key: 'windMph', kind: 'wind', source: 'label', value: wind.mph, breaks: wind.orMore ? (v, l) => v >= l : (v, l) => v > l, text: (v, at, dir) => `wind ${v} mph${windFrom(dir)} at ${at} — label: ${wind.text || `no spraying above ${wind.mph} mph`}` }] : []),
@@ -1344,7 +1345,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
       objective: structured.window.goal || null,
-      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products)],
+      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products, gate)],
       steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
@@ -1406,8 +1407,11 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
 // Hide template costs without dropping restrictions elsewhere in the same
 // line (for example, an add-on-only scope beside a minimum office price).
 // The full fertilizer safety block for an N visit (a window with a gated spreader row), as one note.
-function fertilizerSafetyNotes(rows) {
-  const rules = fertilizerSafetyRules(rows);
+function fertilizerSafetyNotes(rows, propertyGate = {}) {
+  const rules = fertilizerSafetyRules(rows, {
+    municipality: propertyGate.municipality,
+    county: propertyGate.county,
+  });
   return rules.length ? [`Fertilizer safety: ${rules.join(' ')}`] : [];
 }
 
@@ -1893,7 +1897,10 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
     issues.push({ kind: 'stock', status: 'hold', label: 'Company stock short' });
   } else if (stock.some(item => item.inventory?.status === 'low')) {
     issues.push({ kind: 'stock', status: 'hold', label: 'Company stock low' });
-  } else if (stock.some(item => item.inventory?.plannedAmountInventoryUnit == null || item.inventory?.onHand == null)) {
+  } else if (stock.some(item => item.inventory?.onHand == null)) {
+    // Only a product with no stock count (owner 2026-11-19: "no stock count, that is a part of that protocol").
+    // A missing planned amount, or a planned unit that does not convert to the stock unit, is the protocol's
+    // to state: the product card still shows the on-hand figure and the unit note (buildProductCards stockNote).
     issues.push({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
   }
   // Not a rig requirement: only when neither a rig nor the protocol window

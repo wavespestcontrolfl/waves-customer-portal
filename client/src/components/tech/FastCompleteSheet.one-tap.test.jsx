@@ -25,7 +25,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
+  { id: 'talstar', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
 ];
 const REGULAR = {
@@ -179,7 +179,7 @@ describe('one-tap: a product at 0 in stock', () => {
     const request = makeRequest({ products: twoOut, context: { oneTap: true, stockAdvisory: true } });
     await openSheet(request);
     expect(screen.getByText('Taurus SC shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
-    expect(screen.getByText('Atticus Talak 7.9 F shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
+    expect(screen.getByText('LESCO Crosscheck Plus shows 0 in stock. You can still send. The office will restock it.')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Check stock' })).toHaveLength(1);
     writeNote();
     tapRating();

@@ -4238,6 +4238,13 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
     copyMapVersion: COPY_MAP_VERSION,
     fields: (config.findingsFields || [])
       .filter((f) => {
+        // The three delegated insect-evidence fields mirror
+        // validatePestTreatmentEvidence, which is dark when its gate is off.
+        // Do not ask a technician for evidence the backend will ignore.
+        if (
+          ['insect_target', 'insect_life_stage', 'insect_preventive_reason'].includes(f.key)
+          && require('../../config/feature-gates').tsPestCheckLive?.() !== true
+        ) return false;
         // companionOnly fields exist for COMPANION sections only (combined
         // visits run no per-line AI assessment, so hand capture stays the
         // condition source there) — the primary slice never serves them.
@@ -4277,6 +4284,10 @@ function findingsSchemaForType(projectType, { serviceKey = null, companion = fal
           ...(COMPANION_EDITABLE_FINDINGS_FIELDS[projectType] || []),
         ].includes(f.key)),
         pesticideOnly: !!f.pesticideOnly,
+        // Which product/evidence predicate makes a pesticide compliance
+        // field applicable. The client uses this same schema metadata for
+        // primary and companion sections; the server remains authoritative.
+        ...(f.pesticideComplianceWhen ? { pesticideComplianceWhen: f.pesticideComplianceWhen } : {}),
         // The state's notice questions: always a tap, never filled from the
         // technician's notes (typed voice fill, visit-typed-facts.js).
         tapOnly: !!f.tapOnly,

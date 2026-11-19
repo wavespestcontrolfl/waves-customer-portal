@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { fieldViewAssetsPlugin } from './src/lib/fieldViewAssets.js';
 import { createRequire } from 'node:module';
 const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
 const coverageFloorFiles = createRequire(import.meta.url)('./coverage-floor-files.json');
@@ -41,7 +42,7 @@ export default defineConfig({
         .sort();
       this.emitFile({ type: 'asset', fileName: 'build-assets.json', source: JSON.stringify(assets) });
     },
-  }, {
+  }, fieldViewAssetsPlugin(), {
     name: 'waves-preview-checkout',
     apply: 'serve',
     configureServer(server) {
