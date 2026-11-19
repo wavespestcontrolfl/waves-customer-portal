@@ -150,6 +150,8 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     'a cited trade association': 'Data from the National Pest Management Association shows termites cost homeowners billions each year.',
     'a university extension citation': 'The University of Florida IFAS Extension recommends inspecting mulch beds near the slab.',
     'a state agency citation': 'The Florida Department of Agriculture and Consumer Services licenses every pest control operator.',
+    'an out-of-state extension citation': 'NC State Extension and Pennsylvania State University Extension both say not to cut a hammerhead worm found in a Sarasota yard.',
+    'a federal agency citation': 'Homeowners in Venice can read what the Federal Trade Commission said about ultrasonic pest devices.',
   };
 
   test.each(Object.entries(PUBLIC))('live: %s passes the check', (_label, body) => {
@@ -200,6 +202,23 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     process.env[GATE] = 'true';
     const r = evalLane(brief, 'The Massey family in Parrish had ants in the kitchen again.');
     expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  test('live: "The Penn family" still holds the draft (Penn State is listed only by its full name)', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'The Penn family in Parrish had ants in the kitchen again.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  // Pre-push audits: a "the federal" pair would clear the first sentence and
+  // a "carolina state" pair the second. Each names a person and no public
+  // body; the agency and extension citations above pass.
+  test.each([
+    'The Federal family in Venice called about rats.',
+    'A homeowner named Carolina State called our Sarasota office.',
+  ])('live: a name that reads like part of a newly cited body still holds the draft: %s', (body) => {
+    process.env[GATE] = 'true';
+    expect(evalLane(brief, body).checks.redaction_passed.ok).toBe(false);
   });
 
   test('live: a customer surname that matches a one-word competitor alias still holds the draft', () => {

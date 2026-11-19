@@ -4145,13 +4145,25 @@ const StripeService = {
         // (customers.auto_apply_account_credit, owner ruling 2026-08-28) —
         // an opted-out balance reads as zero here, so the stale-PI triage,
         // the coverage probe and the apply all leave it untouched.
-        let availableCredit = 0;
+        //
+        let autoCredit = 0;
         if (require('../config/feature-gates').gates.autoApplyAccountCredit && lockedInvoice.customer_id) {
           const creditRow = await trx('customers')
             .where({ id: lockedInvoice.customer_id })
             .first('account_credits', 'auto_apply_account_credit');
-          availableCredit = creditRow?.auto_apply_account_credit === true ? (Number(creditRow?.account_credits) || 0) : 0;
+          autoCredit = creditRow?.auto_apply_account_credit === true ? (Number(creditRow?.account_credits) || 0) : 0;
         }
+        // A promo code the customer entered on this invoice's pay page and
+        // not redeemed yet (GATE_PAY_PROMO_CODE, invoice-promo-code.js) is
+        // credit this setup will post and draw too, whatever their
+        // automatic-credit choice, since they asked for it. It is only READ
+        // here, so the stale-PI triage below clears the way for it; the
+        // redemption and its draw are one step at the apply. Never on a
+        // hold-for-capture setup: the code is not offered there.
+        const promoPending = opts.holdCoverageForCapture
+          ? 0
+          : await require('./invoice-promo-code').pendingPromoCredit(lockedInvoice, trx);
+        const availableCredit = autoCredit + promoPending;
 
         // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice
         // fail-closes on any attached PI, and the recovery path below would
@@ -4167,9 +4179,9 @@ const StripeService = {
         // card intent, continuing here with the dead PI still attached would skip
         // the credit apply and price the replacement at the GROSS total. So on any
         // triage error refuse with a retryable 409 rather than risk an overcharge.
-        if (require('../config/feature-gates').gates.autoApplyAccountCredit
-          && availableCredit > 0
-          && lockedInvoice.stripe_payment_intent_id) {
+        // availableCredit is above zero only with the automatic-credit gate on
+        // and the customer opted in, or for a promo credit just posted.
+        if (availableCredit > 0 && lockedInvoice.stripe_payment_intent_id) {
           let triagedPi = null;
           try {
             const existingPayment = await trx('payments')
@@ -4233,7 +4245,7 @@ const StripeService = {
         // idempotent; fail-closes on an attached PI. Full coverage COMMITS the
         // prepaid transition (return, NOT throw → no rollback) and skips minting
         // a PaymentIntent; settled after the transaction below.
-        if (require('../config/feature-gates').gates.autoApplyAccountCredit && availableCredit > 0) {
+        if (availableCredit > 0) {
           // Required-save signup with nothing chargeable on file: full
           // coverage is only PROBED, never applied (Codex #2507 round-7
           // P1). Applying here transitions the invoice to prepaid before
@@ -4257,9 +4269,20 @@ const StripeService = {
             captureHeld = true;
             return;
           }
-          const { applyAccountCreditToInvoice } = require('./customer-credit');
-          await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
-            logger.warn(`[stripe] pay-page account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          // The promo code first: redeemed and drawn against this invoice as
+          // one step (only its own amount, and only if the invoice takes it;
+          // otherwise nothing is posted and the code stays entered). It
+          // never throws.
+          if (promoPending > 0) {
+            await require('./invoice-promo-code').redeemAndApplyPromoCode(trx, lockedInvoice);
+          }
+          // Then the balance a customer with automatic credit on has chosen
+          // to apply, as before, against whatever is still due.
+          if (autoCredit > 0) {
+            const { applyAccountCreditToInvoice } = require('./customer-credit');
+            await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
+              logger.warn(`[stripe] pay-page account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
+          }
           const recredited = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
           if (recredited) Object.assign(lockedInvoice, recredited);
           if (!(invoiceAmountDue(lockedInvoice) > 0)) {

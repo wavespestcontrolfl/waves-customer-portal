@@ -54,8 +54,18 @@ const CITY_COUNTY = Object.freeze({
 function resolveAddressCounty({ zip = null, city = null } = {}) {
   const zip5 = String(zip || '').trim().slice(0, 5);
   if (SHARED_SERVICE_AREA_ZIPS.has(zip5)) return null;
-  const cCity = String(city || '').trim().toLowerCase();
+  const cCity = String(city || '').trim().toLowerCase().replace(/^city of\s+/, '');
   return ZIP_COUNTY[zip5] || SERVICE_AREA_ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null;
 }
 
-module.exports = { resolveAddressCounty, CITY_COUNTY, ZIP_COUNTY, SERVICE_AREA_ZIP_COUNTY, SHARED_SERVICE_AREA_ZIPS };
+// Customer outlines and crew instructions use the same local fertilizer rule.
+function fertilizerJurisdictionId({ city, county } = {}) {
+  const municipality = String(city || '').trim().toLowerCase().replace(/^city of\s+/, '');
+  if (municipality === 'north port') return 'north_port_fl';
+  const name = String(county || '').trim().toLowerCase().replace(/\s+county$/, '');
+  // Without the city, a Sarasota address could be inside North Port's earlier turf restriction.
+  if (name === 'sarasota' && !municipality) return 'generic_swfl';
+  return ['sarasota', 'manatee', 'charlotte'].includes(name) ? `${name}_county_fl` : 'generic_swfl';
+}
+
+module.exports = { resolveAddressCounty, fertilizerJurisdictionId, CITY_COUNTY, ZIP_COUNTY, SERVICE_AREA_ZIP_COUNTY, SHARED_SERVICE_AREA_ZIPS };

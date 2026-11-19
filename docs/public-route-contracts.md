@@ -4408,7 +4408,17 @@ DELIBERATELY SEPARATE from
 `leads.lead_source_id` / the classified `lead_source` — self-reported, never
 merged into technically-observed attribution, and "unknown" (the field
 omitted or invalid) stores NULL rather than a guess. Separately and
-independently of `heard_about`, the SAME technically-observed attribution
+independently of `heard_about`, website forms, quotes and self-booking can
+send the optional boolean `attribution.observed`. Only literal `true` with
+an empty referrer and no campaign signal can classify an entry as Direct.
+Older payloads may omit the marker. The server derives the staff-facing
+`source_evidence` from the submitted first-touch signals and ignores any
+client-supplied source label. Explicit GBP tags or a Google Maps referrer
+take precedence, followed by Google and Meta click IDs or matching paid
+campaign tags. Under the existing Meta routing rule an `fbclid` or `fbc`
+selects the Meta line. An unpaid social tag alone stays organic.
+
+The same technically-observed attribution
 pipeline both endpoints already run (UTM/click-id/referrer →
 `server/services/lead-source-classify.js`) now also classifies an
 AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,
@@ -5170,6 +5180,13 @@ estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
 `storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
 the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
 it on both paths; the response otherwise describes only the requested parcel).
+While `GATE_CAGE_TWO_SIZES` is on (owner 2026-11-19, "cage 1000"; dark by default), the
+returned and lead-stored `enriched` profile also carries `poolCageLegacySize`, the
+four-size pool cage answer (SMALL/MEDIUM/LARGE/OVERSIZED, or NONE) while
+`poolCageSize` is the two-size answer (MEDIUM or LARGE). It is derived from the same
+county cage area and satellite read already in the payload, so it adds no new data
+and no new field source. With the gate off the key is absent and the profile is
+unchanged. `/api/public/quote/calculate` reads it (see that entry).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
@@ -5264,6 +5281,23 @@ a staff correction) and its prompt are never overwritten. Unknown values are
 silently dropped, the question is never required, and the response is
 unchanged; the pair is staff-only, never part of `extracted_data`, the
 quote text, or any customer-facing copy.
+Pool cage hold (`GATE_CAGE_TWO_SIZES`, owner 2026-11-19, "hold"; dark by default):
+the lookup's `enriched.poolCageLegacySize` (the four-size answer, see the
+property-lookup entry), and the server's own cache-only re-read of the same
+address, decide the cage under the gate state of THIS request, the re-read first
+and the county area first (`server/services/property-lookup/cage-sizes.js`). Gate
+on: the priced size is the two-size answer (Medium up to 1,000 sq ft, Large above),
+and a cage that today's four sizes call Large or Oversized is held
+(`quote_required`, the existing manual-quote answer). A visitor who answers no
+cage (`NO` in any case, or `false`) is not held and not charged; a client with no
+decided cage answer (omitted, `POSSIBLE`, `UNKNOWN` or any other value) takes the
+re-read's decided answer, so it prices like an explicit answer and a partial or
+undecided `enriched` cannot drop a hold. Gate off: a profile that carries
+`poolCageLegacySize` (one from before a rollback) prices the four-size answer, the
+re-read first, with the same rule for an undecided answer; any other profile
+prices its own `poolCageSize`, exactly as before the gate. Either way a Large or
+Oversized cage is held as before. The response
+shape does not change; `quote_required` was already a possible answer.
 `services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
 present tier must be a currently-sold one (`standard`/`enhanced`) or the
 route answers 400 before pricing — `light` (4x/quarterly, retired for new
@@ -6763,13 +6797,49 @@ A non-null token fans out to `/prep/:token`. `en_route` additionally returns liv
 from Bouncie. The `complete` summary additionally hands out secondary bearer
 tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
-to the report / receipt / rate surfaces. Treat the track token and any change
+to the report / receipt / rate surfaces. The top-level `visitChange` is null
+for an ordinary visit. A Quick Move customer-pick handoff returns only its
+approved rain reason, original slot, pick deadline, and whether the customer
+still acts or a replacement is proven booked. The parked handoff date is never
+returned as a booked current slot. A replacement Auto-Dispatch placed follows
+the canonical day-only promise verdict: when its hour is still hidden, both
+`visitChange.current.windowStart` and the top-level `window.start` /
+`window.end` are null, while top-level `window.date` carries the proven placed
+calendar date independently of the optional handoff narrative. Parked and
+office-rebooking rows return `window.date = null`; a customer-selected hour
+remains visible. The durable marker-plus-window row
+shape triggers this verdict even if the optional handoff narrative cannot be
+read; `last_auto_dispatch_at` is best-effort bookkeeping, not display
+authority. Its only action opens signed-in Visits at
+`/?tab=schedule`, where the current schedule response can supply a
+write-capable reschedule link; the tracker also keeps call/text office fallback
+visible. When the durable `customer_pick_by` plus missing-window shape proves
+the visit is still unplaced but its narrative history is missing, unreadable or
+not approved for customer copy, the payload instead uses neutral
+`pending_rebook` office recovery with no reason or picker action. That unplaced
+shape returns no stops count, route progress, approximate vehicle or scheduled
+polling, and the stops-ahead POST does not compute or persist a count for it.
+The track payload never returns or mints a reschedule token. A
+cancelled or missed visit returns only that the office is the next actor. An
+operational `rescheduled` row adds `visitChange.kind = pending_rebook`; its
+public state is `scheduled` with a null window, no vehicle, no stops count and
+no polling while the office chooses a time. The tracker gives office call/text
+actions. An intentional plan skip preserves the existing top-level `cancelled` state for
+older clients and adds `visitChange.kind = skipped`, with the next regular
+date only when the same service and property can be proven; it returns no
+picker action and no make-up promise. The bounded public lookup also floors
+the candidate date at the current ET day, so an overdue open occurrence is
+never announced as the next visit.
+Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
 read-only; it has exactly TWO write companions, both bounded.
 `POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
 ignores its body, and only persists the stops-ahead display-clamp floor
 (monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
-displayable count. `POST /api/public/track/:token/view` — same token format
+displayable count. The floor write and its no-op reread are bound to the exact
+technician/date/window used for the count and recheck that the visit is still
+placed and eligible, so a concurrent Quick Move cannot stamp its parked row.
+`POST /api/public/track/:token/view` — same token format
 gate, expiry fence (unknown / malformed / expired = the same generic 404, no
 write), privacy headers and router rate limit; ignores its body; records ONE
 `customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff
@@ -8949,3 +9019,5 @@ Day-only customer screens (`GATE_DAY_ONLY_PROMISE`, part C1, additive; gate off 
 `/api/estimates/:token/promo-code` (POST, body `{ code }`; the "Have a promo code?" field on the customer estimate page, `GATE_ESTIMATE_PROMO_CODE`, dark in prod, owner 2026-11-18). A valid code saves one `estimate_promo_codes` row for the estimate with the credit amount frozen from the `discounts` row. It changes no price on the estimate, moves no money and sends nothing: the account credit posts once, when the estimate is accepted (`services/estimate-promo-code.js` `redeemPromoCodeForAcceptedEstimate`, called after the customer accept and the office Mark Won commit, and by the hourly `sweepAcceptedPromoCodes` recovery pass; the gate is read again there). Guards: `Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer` stamped before the limiter so its 429 carries them too; the code is saved in a transaction that locks the estimate row and re-checks that it can still be accepted (the accept takes the same lock, so a code is never saved onto an estimate accepted meanwhile); gate with a gate-aware limiter skip (dark = generic 404), `?adminPreview=1` = 404 (staff never enter a code from the preview), token format gate before any DB read, 10/hour keyed per IP and token, the durable call-side linkage verdict, and an estimate that can still be accepted with no price lock; every other row is the generic 404. A refused code answers 400 `{ error }` with `invalid_code` (unknown, inactive, expired, out of uses, not a fixed-dollar code, a code scoped by a rule this path cannot check, or a customer who is not eligible: one answer for all, so a probe learns nothing about why), `code_already_entered` (one code per estimate, enforced by a unique index) or `discount_already_applied` (the estimate carries an office discount). Success answers `{ success, promoCode: { canEnter: false, applied: { code, creditAmount, credited } } }`. Logs carry the estimate id and the error code only, never the token or the typed code. The same `promoCode` block rides `GET /api/estimates/:token/data` and the accept response when the gate is on: `{ canEnter: true, applied: null }` on an estimate that can still be accepted and has no office discount, `{ canEnter: false, applied }` once a code is on it, and absent otherwise (gate off, or a code that was voided at acceptance). Treat the gate, the generic refusal, the one-code-per-estimate and one-mint-per-row indexes and the no-comms rule as security-critical.
 
 Referral code in the same field (`GATE_ESTIMATE_REFERRAL_CODE`, dark in prod, owner 2026-11-18): `POST /api/estimates/:token/promo-code` also takes a referrer's code. The route is live when either gate is on (both off = generic 404, limiter skipped); every guard above is unchanged. Under the estimate row lock the route keeps one code of either kind per estimate (the kind already on it answers), sends a code that is a promo code in admin Discounts to the promo path, and tries anything else as a referral code (`services/estimate-referral-code.js` `enterReferralCode`), which saves one `estimate_referral_codes` row and an activity row. It moves no money and sends nothing. Refusals are the same: `invalid_code` (nobody holds the code, the program is paused, the customer's own household, or a customer with a completed visit; one answer for all) and `code_already_entered`. Success answers `{ success, promoCode: { canEnter: false, applied: { code, referral: true, note } } }`; `code` is the referrer's code as issued and `note` is one sentence written by the server from the live program settings. It carries nothing else about the referrer: no name, id or contact. The `promoCode` block of `GET /api/estimates/:token/data` and the accept response gains, only with this gate on, `acceptsReferral: true` while a referral code can be entered (plus `acceptsPromo: false` when a promo code cannot), and the same `applied` shape once a referral code is on the estimate. With this gate off the block is byte-identical to the promo-only one. The referrer is confirmed later, off the request path (after the accept commits and hourly), through the existing deferred-only inbound confirm, which sends nothing. Treat the no-referrer-identity payload and the generic refusal as security-critical.
+
+`/api/pay/:token/promo-code` (POST, body `{ code }`; the "Have a promo code?" field on the invoice pay page, `GATE_PAY_PROMO_CODE`, dark in prod, owner 2026-11-18). It inherits the `/api/pay` router's baseline (token format gate with the generic 404, `payLimiter`, `noStore` privacy headers) and adds its own limiter, 10/hour keyed per caller and token, skipped while the gate is off so a dark route answers the generic 404 on every probe. Under the invoice row lock it saves one `invoice_promo_codes` row with the amount frozen from the `discounts` row, and an activity row. It changes nothing on the invoice, moves no money and makes no Stripe call. A refused code answers 400 `{ error }`: `invalid_code` (unknown, inactive, expired, out of uses, not a fixed-dollar code, a code scoped by a rule this path cannot check, a customer who is not eligible, or an invoice that takes no code: payer-billed, statement-billed, not collectible, nothing due, or one that must save a payment method first; one answer for all) or `code_already_entered` (one code per invoice, a unique index). Success answers `{ success, promoCode: { canEnter: false, applied: { code, creditAmount, credited } } }` and the page reloads. Logs carry the invoice id and the error code only, never the token or the typed code. `GET /api/pay/:token` gains, only with the gate on, a `promoCode` block: `{ canEnter: true, applied: null }` where a code can be entered, `{ canEnter: false, applied }` once one is on the invoice, absent otherwise; the GET stays a read. `POST /api/pay/:token/setup` is unchanged in request; its response gains, only with the gate on and a code on the invoice, a `promoCode` key: the same `{ canEnter: false, applied }` block once the credit has posted, or `null` when it did not (the code was voided, or the invoice took none of it), so the page drops its note and never promises a credit the payment was not priced with. With the gate on, a code waiting on the invoice is redeemed and its amount applied to the invoice as one all-or-nothing step inside its transaction (`services/invoice-promo-code.js` `redeemAndApplyPromoCode`, in a savepoint that can never fail the setup; the draw is `applyAccountCreditToInvoice` with `customerRequested` and `applyAtMost`; if the invoice takes none of it, nothing is posted and the code stays entered), after any open payment is retired and before the payment is priced, so the PaymentIntent, the invoice's amount due and the webhook-verified amount stay in agreement as they do for automatic credit. Treat the gate, the generic refusal, the one-code-per-invoice and one-mint-per-row indexes, the promo-amount-only draw and the no-Stripe-call rule of the entry route as security-critical.

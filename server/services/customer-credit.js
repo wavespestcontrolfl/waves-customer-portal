@@ -295,11 +295,13 @@ async function unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }
 }
 
 async function spendableAccountCreditForInvoice({ customerId, invoiceId, balance }, dbh) {
+  const accountBalance = round2(balance || 0);
+  if (accountBalance <= 0) return 0;
   const reserved = await unpostedSavedCardCreditForOtherInvoices({ customerId, invoiceId }, dbh);
-  return Math.max(0, round2(round2(balance || 0) - reserved));
+  return Math.max(0, round2(accountBalance - reserved));
 }
 
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, currentChargeAttemptId = null }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, refuseWhenCollectionHold = false, requireNoAppointmentCardLane = false, customerRequested = false, currentChargeAttemptId = null, applyAtMost = null }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -505,7 +507,10 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
       total: invoice.total,
       creditApplied: invoice.credit_applied,
       amountPaid: invoice.amount_paid,
-      balance: spendableBalance,
+      // `applyAtMost` caps the draw: a customer who asked for one credit (a
+      // promo code entered on the pay page) has only that much drawn, never
+      // the rest of a balance they have not chosen to apply.
+      balance: Math.min(spendableBalance, applyAtMost ?? Infinity),
       fullCoverageOnly,
     });
     if (applyAmt <= 0) return { applied: 0, skipped: skipReason || 'nothing_to_apply' };

@@ -30,9 +30,10 @@ beforeEach(() => {
 afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
 const service = { id: 'svc-1', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' };
+const HIGH_SCOUT = { tetrinoTarget: 'chinch', tetrinoCurrentObservations: '12 chinch bugs counted at the damaged edge', tetrinoPressure: 'high' };
 const TRACKS = Object.keys(v13);
 const visitOf = (track, month) => v13[track].visits.find((visit) => visit.month === month);
-const run = (args = {}) => engine.visitNutrientTargets({}, service, { visit: visitOf('st_augustine', 'May'), month: 'May', v13Active: true, ...args });
+const run = (args = {}) => engine.visitNutrientTargets({}, service, { visit: visitOf('st_augustine', 'May'), month: 'May', v13Active: true, scout: HIGH_SCOUT, ...args });
 
 describe('lawnChinchTetrinoRateLive', () => {
   test.each([[undefined, false], ['', false], ['1', false], ['TRUE', false], ['false', false], ['true', true]])('the variable %j gives %s, read at call time', (value, expected) => {
@@ -52,15 +53,30 @@ describe('the rule', () => {
     expect(Math.round(V13_CHINCH_TETRINO.ratePer1000 * 43.56)).toBe(32);
     expect(Math.round(V13_CHINCH_TETRINO.normalRate * 43.56)).toBe(16);
     expect(Object.isFrozen(V13_CHINCH_TETRINO)).toBe(true);
-    expect(CHINCH_TETRINO_NOTE).toBe("Chinch bugs mapped here: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.");
+    expect(CHINCH_TETRINO_NOTE).toBe("High current chinch pressure plus mapped history: Tetrino at the label's high rate, 0.735 fl oz per 1,000 sq ft.");
   });
 
   test.each(TRACKS)('%s: the recipe May line states the rule\'s normal rate in the shape the text rewrite reads', (track) => {
-    expect(visitOf(track, 'May').primary).toMatch(/^Tetrino Insecticide — 0\.367 fl oz per 1,000 sq ft, /);
+    expect(visitOf(track, 'May').secondary).toMatch(/^Tetrino Insecticide — 0\.367 fl oz per 1,000 sq ft, /);
   });
 
   test('one May pass at the raised rate is half the label\'s 64 fl oz per acre a year (1.469 fl oz per 1,000 sq ft)', () => {
     expect(V13_CHINCH_TETRINO.ratePer1000 / (64 / 43.56)).toBeCloseTo(0.5, 2);
+  });
+});
+
+describe('May scouting evidence', () => {
+  test('sunlight or history alone never qualifies; named current chinch evidence uses the normal rate unless pressure is high', () => {
+    expect(engine.tetrinoScoutDecision({ conditionFlags: ['sunny turf', 'chinch mapped last year'] })).toMatchObject({ eligible: false, highRateEligible: false });
+    expect(engine.tetrinoScoutDecision({ tetrinoTarget: 'chinch', tetrinoCurrentObservations: '3 counted at the damaged edge', tetrinoPressure: 'ordinary' }))
+      .toMatchObject({ eligible: true, target: 'chinch', highRateEligible: false, pressure: 'ordinary' });
+    expect(engine.tetrinoScoutDecision(HIGH_SCOUT)).toMatchObject({ eligible: true, target: 'chinch', highRateEligible: true, pressure: 'high' });
+  });
+
+  test('grubs need both current observations and local flight or egg-hatch timing, and never qualify for the chinch high rate', () => {
+    expect(engine.tetrinoScoutDecision({ tetrinoTarget: 'grubs', tetrinoCurrentObservations: 'fresh root feeding' })).toMatchObject({ eligible: false, highRateEligible: false });
+    expect(engine.tetrinoScoutDecision({ tetrinoTarget: 'grubs', tetrinoCurrentObservations: 'fresh root feeding', grubTimingEvidence: 'local peak adult flight logged this week' }))
+      .toMatchObject({ eligible: true, target: 'grubs', grubTimingRecorded: true, highRateEligible: false });
   });
 });
 
@@ -70,8 +86,8 @@ describe('visitNutrientTargets for the May visit', () => {
     expect(found.chinchRate).toBe(0.735);
     expect(found.nitrogenCut).toBeNull();
     expect(found.targets).toEqual(engine.parseVisitNutrientTargets(visitOf(track, 'May').notes));
-    expect(found.visit.primary).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft, sunny turf only.*, chinch bugs mapped$/);
-    expect(found.visit.secondary).toBe(visitOf(track, 'May').secondary);
+    expect(found.visit.primary).toBe(visitOf(track, 'May').primary);
+    expect(found.visit.secondary.split('\n')[0]).toMatch(/^Tetrino Insecticide — 0\.735 fl oz per 1,000 sq ft, .*high current chinch pressure plus mapped history$/);
     expect(mockHasArea).toHaveBeenCalledWith({}, service.property_id, 'chinch', { withinDays: 365 });
   });
 
@@ -106,10 +122,11 @@ describe('visitNutrientTargets for the May visit', () => {
   });
 
   test('a rate already at the raised one is never touched', async () => {
-    const decision = await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.735, v13Active: true });
+    const decision = await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.735, v13Active: true, scout: HIGH_SCOUT });
     expect(decision).toBeNull();
-    expect(await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.9, v13Active: true })).toBeNull();
-    expect(await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.367, v13Active: true })).toBe(0.735);
+    expect(await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.9, v13Active: true, scout: HIGH_SCOUT })).toBeNull();
+    expect(await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.367, v13Active: true, scout: HIGH_SCOUT })).toBe(0.735);
+    expect(await engine.chinchTetrinoRate({}, service, { monthNumber: 5, statedRate: 0.367, v13Active: true, scout: { ...HIGH_SCOUT, tetrinoPressure: 'ordinary' } })).toBeNull();
   });
 
   test('a November fungus cut still returns the old shape (no chinchRate key) and the cut text', async () => {
@@ -128,7 +145,7 @@ describe('the raise needs room under the label limits (chinchRaiseFits)', () => 
   });
   afterEach(() => { capSpy.mockRestore(); limitSpy.mockRestore(); });
   const svc = { ...service, customer_id: 'cust-1', scheduled_date: '2027-05-10' };
-  const decide = (opts = {}) => engine.chinchTetrinoRate({}, svc, { monthNumber: 5, v13Active: true, ...opts });
+  const decide = (opts = {}) => engine.chinchTetrinoRate({}, svc, { monthNumber: 5, v13Active: true, scout: HIGH_SCOUT, ...opts });
 
   test('asks the limit reader about Tetrino only (not Arena), at the raised rate, for the visit date, leaving the visit\'s own rows out', async () => {
     expect(await decide()).toBe(0.735);

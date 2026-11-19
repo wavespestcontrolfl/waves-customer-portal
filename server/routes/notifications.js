@@ -528,8 +528,11 @@ async function appFirstDisplayActive(req) {
   if (req.contactSession || !appFirstAnyDeviceLive() || !appPreferencesAvailable(req)
     || !gateEnvValue('GATE_PUSH_CHANNEL_ROUTING')) return false;
   try {
+    // A phone not opened in 30 days (GATE_APP_FIRST_STALE_TEXT, customerStatus appStale) still
+    // shows App: its app alert still goes, with the text too. So the customer can pick Text,
+    // which saves the explicit choice that stops the app alerts.
     const status = await require('../services/push-notifications').customerStatus(req.customerId, db, { withReachable: true });
-    return status.enabled === true && status.reachable === true;
+    return status.enabled === true && (status.reachable === true || status.appStale === true);
   } catch {
     return false;
   }

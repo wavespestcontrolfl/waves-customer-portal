@@ -20,7 +20,10 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 const mockGate = { on: true };
-jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estimatePromoCode' && mockGate.on }));
+jest.mock('../config/feature-gates', () => ({
+  gates: {},
+  isEnabled: (key) => ['estimatePromoCode', 'payPromoCode'].includes(key) && mockGate.on,
+}));
 
 (SKIP ? describe.skip : describe)('estimate promo code (live Postgres)', () => {
   let db;
@@ -56,6 +59,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     await schema.createTable('customers', (t) => {
       id(t);
       t.decimal('account_credits', 10, 2).defaultTo(0);
+      t.boolean('auto_apply_account_credit').defaultTo(false);
       t.timestamp('updated_at', { useTz: true });
     });
     await schema.createTable('estimates', (t) => {
@@ -87,6 +91,56 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     await schema.createTable('service_records', (t) => {
       id(t);
       t.uuid('customer_id');
+      t.uuid('scheduled_service_id');
+      t.string('status');
+    });
+    await schema.createTable('invoices', (t) => {
+      id(t);
+      t.uuid('customer_id');
+      t.uuid('payer_id');
+      t.uuid('payer_statement_id');
+      t.uuid('service_record_id');
+      t.uuid('scheduled_service_id');
+      t.string('status').defaultTo('sent');
+      t.decimal('total', 10, 2);
+      t.decimal('credit_applied', 10, 2).defaultTo(0);
+      t.decimal('amount_paid', 10, 2).defaultTo(0);
+      t.string('stripe_payment_intent_id');
+      t.string('prepaid_prev_status');
+      t.timestamp('prepaid_at');
+      t.string('prepaid_by');
+      t.timestamp('paid_at');
+      t.timestamp('updated_at', { useTz: true });
+    });
+    await schema.createTable('stripe_invoice_charge_attempts', (t) => {
+      id(t);
+      t.uuid('invoice_id');
+      t.string('status');
+      t.string('decline_code');
+      t.string('stripe_payment_intent_id');
+      t.string('authentication_canceled_intent_id');
+      t.string('idempotency_key');
+      t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
+      t.decimal('credit_applied_total', 12, 2).defaultTo(0);
+      t.timestamp('created_at');
+      t.timestamp('submitted_at');
+      t.timestamp('resolved_at');
+    });
+    await schema.createTable('stripe_orphan_charges', (t) => {
+      t.uuid('invoice_id');
+      t.boolean('resolved');
+      t.string('stripe_payment_intent_id');
+    });
+    await schema.createTable('payments', (t) => {
+      id(t);
+      t.string('status');
+      t.string('stripe_payment_intent_id');
+      t.jsonb('metadata');
+      t.uuid('superseded_by_payment_id');
+    });
+    await schema.createTable('payment_plans', (t) => {
+      id(t);
+      t.uuid('invoice_id');
       t.string('status');
     });
     await schema.createTable('activity_log', (t) => {
@@ -111,6 +165,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     });
     // The real migration: its unique indexes are what the tests below lean on.
     await require('../models/migrations/20261118120000_estimate_promo_codes').up(db);
+    await require('../models/migrations/20261118230000_invoice_promo_codes').up(db);
     promo = require('../services/estimate-promo-code');
   });
 
@@ -317,5 +372,185 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'estim
     expect(await promo.sweepAcceptedPromoCodes()).toEqual({ checked: 0, redeemed: 0 });
     expect(await balanceOf(cust.id)).toBe(0);
     expect((await db('estimate_promo_codes').where({ estimate_id: est.id }).first()).status).toBe('entered');
+  });
+
+  describe('on the invoice pay page (GATE_PAY_PROMO_CODE)', () => {
+    let pay;
+    let credit;
+    beforeAll(() => {
+      pay = require('../services/invoice-promo-code');
+      credit = require('../services/customer-credit');
+    });
+
+    const invoice = async (fields = {}) => (await db('invoices').insert({ total: 100, ...fields }).returning('*'))[0];
+    const enterOn = (inv, rawCode) => pay.enterPromoCodeOnInvoice({ invoice: inv, rawCode });
+    // What the pay page's payment setup does with a code, in its one
+    // transaction under the invoice lock. Returns the amount applied.
+    const setup = (inv) => db.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: inv.id }).forUpdate().first();
+      return pay.redeemAndApplyPromoCode(trx, locked);
+    });
+    const fresh = (inv) => db('invoices').where({ id: inv.id }).first();
+
+    test('a pending card challenge keeps the promo code available until the bank decision', async () => {
+      const cust = await customer();
+      const inv = await invoice({ customer_id: cust.id });
+      const disc = await discount();
+      await enterOn(inv, disc.promo_code);
+      await db('stripe_invoice_charge_attempts').insert({
+        invoice_id: inv.id, status: 'failed', decline_code: 'authentication_required',
+        stripe_payment_intent_id: 'pi_promo_auth', submitted_at: new Date(), resolved_at: new Date(),
+      });
+      expect(await setup(inv)).toBe(0);
+      expect(await usesOf(disc.id)).toBe(0);
+      expect(await ledgerOf(cust.id)).toHaveLength(0);
+      await db('stripe_invoice_charge_attempts').where({ invoice_id: inv.id })
+        .update({ authentication_canceled_intent_id: 'pi_promo_auth' });
+      expect(await setup(inv)).toBe(25);
+      expect(await usesOf(disc.id)).toBe(1);
+    });
+
+    test('entering a code only saves it; the setup that follows posts the credit once and lowers what is due by exactly that', async () => {
+      const cust = await customer();
+      // Credit the customer already had and has not chosen to apply (automatic credit off).
+      await credit.postCreditMovement({ customerId: cust.id, delta: 15, source: 'manual' });
+      const disc = await discount();
+      const inv = await invoice({ customer_id: cust.id });
+
+      expect(await pay.promoCodeViewForInvoice(inv)).toEqual({ canEnter: true, applied: null });
+      expect(await enterOn(inv, disc.promo_code.toLowerCase())).toEqual({
+        ok: true, applied: { code: disc.promo_code, creditAmount: 25, credited: false },
+      });
+      expect(await balanceOf(cust.id)).toBe(15);
+      expect(Number((await fresh(inv)).credit_applied)).toBe(0);
+      expect(await usesOf(disc.id)).toBe(0);
+
+      // Nothing to report before the code is redeemed, or for an invoice with no code.
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id)).toBeNull();
+      expect(await pay.promoCodeVerdictAfterSetup(randomUUID())).toBeUndefined();
+      expect(await setup(inv)).toBe(25);
+      expect(await setup(inv)).toBe(0);
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id))
+        .toEqual({ canEnter: false, applied: { code: disc.promo_code, creditAmount: 25, credited: true } });
+      expect(Number((await fresh(inv)).credit_applied)).toBe(25);
+      // Only the promo amount was drawn: the customer's own $15 is untouched.
+      expect(await balanceOf(cust.id)).toBe(15);
+      expect(await usesOf(disc.id)).toBe(1);
+      expect((await ledgerOf(cust.id).orderBy('created_at').orderBy('delta', 'desc')).map((r) => [r.source, Number(r.delta)]))
+        .toEqual([['manual', 15], ['promo_code', 25], ['invoice_application', -25]]);
+      expect(await pay.promoCodeViewForInvoice(await fresh(inv)))
+        .toEqual({ canEnter: false, applied: { code: disc.promo_code, creditAmount: 25, credited: true } });
+    });
+
+    test('a credit larger than the invoice covers it and leaves the rest on the account', async () => {
+      const cust = await customer();
+      const disc = await discount({ amount: 60 });
+      const inv = await invoice({ customer_id: cust.id, total: 40 });
+      await enterOn(inv, disc.promo_code);
+      expect(await setup(inv)).toBe(40);
+      expect(await fresh(inv)).toMatchObject({ status: 'prepaid', credit_applied: '40.00' });
+      expect(await balanceOf(cust.id)).toBe(20);
+    });
+
+    test('a new-customer-only code works on the first invoice, whose own visit does not count, and not once another visit is done', async () => {
+      const cust = await customer();
+      const disc = await discount({ requires_new_customer: true });
+      const [visit] = await db('service_records').insert({ customer_id: cust.id, status: 'completed' }).returning('*');
+      const first = await invoice({ customer_id: cust.id, service_record_id: visit.id });
+      expect((await enterOn(first, disc.promo_code)).ok).toBe(true);
+
+      const other = await customer();
+      await db('service_records').insert({ customer_id: other.id, status: 'completed' });
+      const [second] = await db('service_records').insert({ customer_id: other.id, status: 'completed' }).returning('*');
+      const later = await invoice({ customer_id: other.id, service_record_id: second.id });
+      expect(await enterOn(later, disc.promo_code)).toEqual({ ok: false, reason: 'invalid_code' });
+    });
+
+    test('no code on a payer-billed, statement-billed, paid or fully covered invoice, and one code per invoice', async () => {
+      const cust = await customer();
+      const disc = await discount();
+      const other = await discount();
+      const refused = [
+        await invoice({ customer_id: cust.id, payer_id: randomUUID() }),
+        await invoice({ customer_id: cust.id, payer_statement_id: randomUUID() }),
+        await invoice({ customer_id: cust.id, status: 'paid' }),
+        await invoice({ customer_id: cust.id, credit_applied: 100 }),
+      ];
+      for (const inv of refused) {
+        expect(await pay.promoCodeViewForInvoice(inv)).toBeNull();
+        expect(await enterOn(inv, disc.promo_code)).toEqual({ ok: false, reason: 'invalid_code' });
+      }
+      const inv = await invoice({ customer_id: cust.id });
+      expect((await enterOn(inv, disc.promo_code)).ok).toBe(true);
+      expect((await enterOn(inv, disc.promo_code)).ok).toBe(true);
+      expect(await enterOn(inv, other.promo_code)).toEqual({ ok: false, reason: 'code_already_entered' });
+      expect(await db('invoice_promo_codes').where({ invoice_id: inv.id })).toHaveLength(1);
+    });
+
+    test('once per customer across the estimate and the pay page', async () => {
+      const cust = await customer();
+      const disc = await discount();
+      const est = await estimate({ customer_id: cust.id });
+      await enter(est, disc.promo_code);
+      const inv = await invoice({ customer_id: cust.id });
+      expect((await enterOn(inv, disc.promo_code)).ok).toBe(true);
+
+      // The pay page redeems first; the estimate accepted afterwards posts nothing.
+      expect(await setup(inv)).toBe(25);
+      expect(await accept(est, cust.id)).toBe('void');
+      expect(await usesOf(disc.id)).toBe(1);
+      expect((await ledgerOf(cust.id).where({ source: 'promo_code' }))).toHaveLength(1);
+
+      // And a later invoice takes no second use of it.
+      expect(await enterOn(await invoice({ customer_id: cust.id }), disc.promo_code)).toEqual({ ok: false, reason: 'invalid_code' });
+    });
+
+    test('a code switched off before the setup posts nothing, says why in the activity log, and the setup carries on', async () => {
+      const cust = await customer();
+      const disc = await discount();
+      const inv = await invoice({ customer_id: cust.id });
+      await enterOn(inv, disc.promo_code);
+      await db('discounts').where({ id: disc.id }).update({ is_active: false });
+      expect(await setup(inv)).toBe(0);
+      expect(await balanceOf(cust.id)).toBe(0);
+      expect(Number((await fresh(inv)).credit_applied)).toBe(0);
+      expect(await db('invoice_promo_codes').where({ invoice_id: inv.id }).first()).toMatchObject({ status: 'void', void_reason: 'code_inactive' });
+      expect(await db('activity_log').where({ customer_id: cust.id, action: 'invoice_promo_code_not_credited' })).toHaveLength(1);
+      expect(await pay.promoCodeViewForInvoice(await fresh(inv))).toBeNull();
+      // The setup tells the page to drop its note: no credit was priced in.
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id)).toBeNull();
+    });
+
+    test('a code is never spent on an invoice it cannot lower: nothing posts and it stays entered for a later setup', async () => {
+      const cust = await customer();
+      const disc = await discount();
+      const inv = await invoice({ customer_id: cust.id });
+      await enterOn(inv, disc.promo_code);
+      // The invoice is on a payment plan, which takes no account credit.
+      const [plan] = await db('payment_plans').insert({ invoice_id: inv.id, status: 'active' }).returning('*');
+      expect(await pay.pendingPromoCredit(inv)).toBe(25);
+      expect(await setup(inv)).toBe(0);
+      expect(await balanceOf(cust.id)).toBe(0);
+      expect(await ledgerOf(cust.id)).toHaveLength(0);
+      expect(await usesOf(disc.id)).toBe(0);
+      expect((await db('invoice_promo_codes').where({ invoice_id: inv.id }).first()).status).toBe('entered');
+      expect(await pay.promoCodeVerdictAfterSetup(inv.id)).toBeNull();
+
+      await db('payment_plans').where({ id: plan.id }).update({ status: 'completed' });
+      expect(await setup(inv)).toBe(25);
+      expect(Number((await fresh(inv)).credit_applied)).toBe(25);
+      expect(await pay.pendingPromoCredit(await fresh(inv))).toBe(0);
+    });
+
+    test('gate off: no field, and a setup redeems nothing', async () => {
+      const cust = await customer();
+      const disc = await discount();
+      const inv = await invoice({ customer_id: cust.id });
+      await enterOn(inv, disc.promo_code);
+      mockGate.on = false;
+      expect(await pay.promoCodeViewForInvoice(inv)).toBeNull();
+      expect(await setup(inv)).toBe(0);
+      expect(await balanceOf(cust.id)).toBe(0);
+    });
   });
 });

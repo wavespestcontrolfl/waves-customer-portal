@@ -13,6 +13,7 @@
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_CARD_DETAILS_SYNC=true (owner 2026-11-05, Stripe audit: Stripe's card account updater renews saved cards and the portal never heard, so Auto Pay skipped a renewed card it read as expired. On, the payment_method.automatically_updated webhook and a daily 8:31 AM ET job re-read the card from Stripe and refresh the stored expiry, last four, brand and funding (services/card-details-sync.js). Sends nothing to a customer. Read at boot; dark by default in production; off = nothing is read or written. Kill switch: unset.)
  *   GATE_APP_FIRST_ANY_DEVICE=true (owner 2026-11-04, Twilio raises US-to-Verizon text prices on 2027-01-01: "if anyone has the app, we would want to prefer to send notifications in the app, rather than text", and "can we just start sending app notifications once they download the app?". With GATE_PUSH_CHANNEL_ROUTING also on, more automated notices go in the app instead of a text: appointment reminders (72 hour and 24 hour), technician arrived, service complete and service report notices without an invoice, the lawn watering notice, plus the already push-first technician on the way and receipts. A customer counts as reachable as soon as the account holder has an active app device, with no check-in within 72 hours. The text still goes whenever no device accepts the push. Notices with a bill to pay, every billing and payment-failure type, review asks, staff-sent texts (except a staff tap whose sender marks it to keep the customer's channel, like a technician's On my way) and secondary contacts stay as they are; a saved Email or Both choice still blocks the app notice. Strict 'true', read at call time via appFirstAnyDeviceLive() in config/feature-gates.js and services/messaging/push-channel-routing.js; dark by default (off = byte-identical routing and the 72 hour rule). Sends nothing on its own; it moves existing automated notices from text to the app.)
+ *   GATE_APP_FIRST_STALE_TEXT=true (owner 2026-11-18, "if the app was not opened in the last 30 days, the text goes too, and the app alert still goes": with GATE_APP_FIRST_ANY_DEVICE also on, an app notice goes by push alone only when the account holder's phone app checked in within the last 30 days; otherwise the text goes too (sent first) and the app alert still goes after it. A customer's explicit App choice is unchanged. Read at call time; dark by default; kill = unset)
  *   GATE_CALL_LIVE_ASSIST=true (owner 2026-11-16 "ok build all, use haiku", live-call suite parts 13 and 14: on the Live call panel, each call shows what the caller is asking for, the price and the next open times. While someone watches the panel, a Claude Haiku 5.5 read of the last 3 minutes runs at most once per 45 seconds and 12 times per call. The price is the pricing engine's own text; the open times come from the booking engine at the customer's account address or the address the caller said, and can call the paid Google geocoder. Text on the staff screen only; nothing reaches a customer. Off = no model call, no lookup, panel unchanged. Kill: unset)
  *   GATE_VISIT_LIVE_ACTIVITY=true (owner 2026-11-11, "do this first Visit day on the Lock Screen": on visit day an iPhone with the Waves app shows one live card on its Lock Screen when the technician goes on the way, and the card follows the visit: on the way, arrived, service complete. The iPhone app reports its Apple start token through POST /api/push/live-activity-token and the server keeps it on that phone's own push registration row (iOS 18 or later, an app version that has the card). The card follows the customer's "technician on the way" notice switch, their choice to get appointment notices themselves, and their app notification switch; it sends no text or email and changes no existing notice. The server starts it when the tracker goes on the way, sends one update at arrival, and ends it at service complete (it stays 15 minutes) or at once when the visit is cancelled, moved or rewound; a 2-minute sweep repairs a missed step and takes a card down when a step outlasts its time limit (services/visit-live-activity.js). VISIT_LIVE_ACTIVITY_CUSTOMER_ALLOWLIST (comma-separated customer ids) narrows it to those customers for the first test. Needs Apple's Broadcast Capability on the app id. Strict === 'true', read at call time by visitLiveActivityLive(); dark by default; off = the route stores nothing, no card starts, and the sweep takes every live card down within 2 minutes. Customer-facing, so the owner flips it.)
  *   GATE_MULTI_HOME_ALL_HOMES=true (owner ruling 2026-08-06, "the 10% applies to EVERY home in a multi-home group"; owner 2026-11-04, homes on separate profiles linked as "Same family" count as one group. Changes prices, so the owner flips it. When a home's recurring plan starts with the Multi-Home Discount (an accepted recurring estimate whose manual discount is the catalog preset multi_home, accepted in the last 14 days, on a profile that is multi-home by its own flag or by the Same family link), a 15-minute job puts the same discount on the upcoming visits of the family's OTHER homes: other properties on the same profile and the plans of every other linked profile. It does what the Edit appointment "This and following" save does, through the same helper and guards (services/multi-home-discount-apply.js): from the series' next upcoming visit on, only for per-application plans whose visits are flat (no add-on lines, no discount yet), and the series template is stamped so later auto-extended visits carry the discount too. Anything else (monthly membership, prepaid year, prepaid money, a live invoice, a card confirmation in flight, a plan on hold, a visit already discounted, a series shape the helper refuses, GATE_EDIT_APPT_PRICE_SERVICE_SCOPE off) holds with a reason, rings one Billing bell per home and reason, and is retried on later runs. Each home is recorded in multi_home_discount_applications (applied | held | already_discounted) and once in audit_log. Sends nothing to a customer. Strict opt-in, read at call time via multiHomeAllHomesLive(); off = the job returns before any query. Kill switch: unset. Discounts already written stay.)
@@ -36,6 +37,7 @@
  *   GATE_NEWSLETTER_AUTO_SEND=true (owner 2026-10-30, option A: the weekly issue sends itself Tuesday at 6:00 AM ET once the automatic checks pass. The Monday proof step queues it and emails the owner an FYI copy; a HOLD reply or Cancel schedule in History skips that week. The inactive-reader check-in email also queues itself. Needs GATE_NEWSLETTER_PROOF_APPROVAL on. Read at call time via newsletterAutoSendLive(), strict 'true', dark by default; off = the issue waits for an APPROVED reply, as before. Emails the list.)
  *   GATE_ESTIMATE_LAWN_LIMITS=true (owner 2026-10-22: a recurring lawn estimate says in writing what the program can and can't fix, and the office can flag other grasses (carpetgrass, bahiagrass, bermudagrass, torpedograss, dallisgrass) and suspected virus streaks on the lawn's turf profile; each flag adds one line to the estimate page, the estimate PDF and the pdfkit fallback. The tech sheet warns when Celsius WG is picked on a carpetgrass lawn. Read at call time via estimateLawnLimitsLive(), strict 'true', dark by default; off = every estimate, turf profile and tech sheet output exactly as before. Sends nothing and prints no prices.)
  *   GATE_CAGE_START_MEDIUM=true (owner 2026-11-17 "both", draft price study: the two office tools start a county-measured pool cage of 601 to 2,000 sq ft at Medium instead of the lookup's Large or Oversized. It covers the call-agent draft and the estimate tool's first fill after a property lookup. With it on, the call-agent draft also drops a cage on a home with no decided pool, as the estimate tool already does. Small, Large and Oversized stay in the estimate tool's list for hand use; a cage over 2,000 sq ft stays Oversized. Not changed: the lookup's own cage size, so the website quote, the website-lead draft and the customer price assistant are as before; the price of each size; any saved estimate. It has a gate because it changes a starting price in the estimate tool. Read at call time via cageStartMediumLive(), strict 'true', dark by default; off or unset = both tools start exactly as before.)
+ *   GATE_CAGE_TWO_SIZES=true (owner 2026-11-19, reply "cage 1000": the pool cage size has two sizes, Medium for a cage up to 1,000 sq ft and Large above, in place of Small, Medium, Large and Oversized. The property lookup sizes a county-measured cage that way, the satellite answer maps Small, Medium and Large to Medium and Oversized to Large, and the estimate tool offers only Medium and Large. The 2,000 sq ft Medium start of GATE_CAGE_START_MEDIUM no longer applies while this is on. Not changed: any saved estimate keeps its saved size and price; the price of each size; the satellite prompt; every automatic customer price (website quote, service-report offer card, restart offer) keeps today's manual-quote hold for a cage that today's four sizes call Large or Oversized. It has a gate because it changes a starting price. Read at call time via cageTwoSizesLive(), strict 'true', dark by default; off or unset = four sizes exactly as before.)
  *   GATE_CALL_BOOKING_LINK_REACH=shadow|true (owner 2026-11-17 "link", page "Call Agent Improvements" idea 3: the booking-link text after a call gets two wider rules. Rule A: a caller who was promised a quote is no longer stopped at once. The text waits its 2 hours (8 AM after a 6 PM call) and then goes only to a caller with no estimate in any state and no visit. Rule B: a caller with an earlier lead record is no longer read as a current customer. The text stops only for a caller whose record is past the lead stages, or who has a visit, an invoice or an estimate. A caller who asked for a WDO report, a rodent inspection or exclusion work is left out (reason fee_visit): those visits carry a fee and the text says free. shadow = RECORDS ONLY: no text goes to these callers, and the call ends with the reason reach_shadow_would_send. true = the text is SENT to them, through the same send path, locks and last-moment checks as every other booking-link text; that flip is the owner's because it texts customers. Every caller today's rules text gets the text exactly as before, in every mode. It has a gate because it decides who gets a customer text. Off = today's rules. Kill = unset, read at call time)
  *   GATE_ACH_FAILURE_EMAIL=true (owner 2026-11-16: a customer whose bank (ACH) payment fails gets one email for the stage the failure reached: the retry notice, the switch to the card on file, or the bank suspension with a link to update the bank account. The three bank-failure texts stay off (owner 2026-09-28) and get no text fallback. One email per payment intent and Stripe event; a replayed event sends it only when it is missing. Strict `=== 'true'`, read at call time via achFailureEmailLive(); dark by default. Off = no email, nothing else changes. Kill: unset)
  *   GATE_SMS_ANY_LANGUAGE_TRIAL=true (test answers to customer texts in another language: the text is translated to English, the normal SMS drafter answers it with every English check, and the reply is translated back and double-checked (numbers, times, prices, links unchanged; a back-translation must say the same thing). Stored in sms_translation_trials for the owner to read; NOTHING is sent and the real reply path for these texts is unchanged. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js; dark by default. Sends nothing to a customer.)
@@ -127,6 +129,7 @@
  *   GATE_PAYROLL_BANK_MATCH=true (basic payroll item 8, owner 2026-10-28, "pay package is still being built, do these": the bank import ties a bank line to the paycheck or payroll tax payment it paid. A debit on a business account equal to a finalized, not-voided paycheck's net pay (pay date minus 3 days to plus 45 days, or plus 7 for a bank transfer) links when exactly one check and one bank line pair up, and a check number printed on the line breaks a tie; an IRS / EFTPS debit equal to a payroll federal deposit calendar row, and a Florida Department of Revenue debit equal to a payroll RT-6 row, link the same way. A linked line is booked as an expense in "Payroll (counted from pay runs)", which the P&L and Schedule C draft leave out. Anything else (two checks with one amount, an amount one cent off, a different check number) stays a suggestion with the paycheck named, and the owner picks. An automatic link is verified right after it commits (a later same-amount line or paycheck puts it back to review, nothing deleted), and a crash leftover is verified at the top of the next pass. It never moves money and never marks a calendar row paid; the Payroll tab shows Bank: matched / not seen yet / needs your pick per check, and the filing calendar shows Seen in the bank on <date>. Voiding a pay run releases the lines matched to its checks. That release, a changed or deleted calendar row and the owner's Unlink never delete or re-price an expense: the expense the match made stays as it is (the next pass finds it as the existing expense), and one it re-categorized gets its category back. Needs GATE_BANK_IMPORT for the bank lines, GATE_PAYROLL for the pay runs and GATE_PNL_PAY_RUN_WAGES (the match does nothing while that gate is off, so no expense is moved into a category the books do not leave out). Read at call time via payrollBankMatchLive(), strict 'true', dark by default; off = the bank import, the books and every response are byte for byte today's; rollback = unset (existing links stay).)
  *   GATE_TECH_PAY_STUBS=true (payroll item 7, owner 2026-10-28, "pay package is still being built, do these"; allowed by the technician allow-list v1 ruling of 2026-10-02, which gives a technician login its own pay. A technician sees a Pay stubs list on the Staff page for their own FINALIZED, not-voided pay checks and can open the stub (the admin stub: hours, earnings, taxes withheld, year to date, net pay; no employer taxes). GET /api/tech/payroll/checks and GET /api/tech/payroll/checks/:id/stub scope by the authenticated technician id; another person's check, a draft run or a voided run answers 404. Read at call time via techPayStubsLive(), strict 'true', dark by default; off = both routes answer 404 before any query and the list does not render. Everything else about payroll stays admin only. Pays, sends and files nothing; rollback = unset.)
  *   GATE_TECH_CARD_ON_FILE=true (owner 2026-11-04, technician visibility audit D4 A: card on file at the visit. A technician may charge a customer's saved card (never a saved bank account) for an invoice bound to its OWN visit scheduled today (ET) that it has completed, and only for the booked visit's own lines (a checkout extra needs the customer at the door); the visit row is re-checked under the charge's own lock, the charge refuses a collections hold or a stopped collection (an admin charge may override both), and it needs the quoted total. The visit payment sheet then shows Card on File to that technician. Read at call time via techCardOnFileLive(), strict 'true', dark by default; off = POST /api/admin/invoices/:id/charge-card and /charge-card-quote stay admin only and the sheet shows no Card on File to a technician. Charges money; the owner flips it. Rollback = unset.)
+ *   GATE_CHECKOUT_TENDER_RECEIPT=true (owner 2026-11-18, after a check paid at the visit got no receipt: the dispatch checkout's Cash and Check sheets queue the paid receipt with the payment (the automatic receipt queue, as for a card payment: the customer's receipt opt-out, email choice, text choice and send window apply, with retries) and record exactly the amount the sheet showed (a balance that moved since is refused). Read at call time via checkoutTenderReceiptLive(), strict 'true', dark by default; texts and emails customers, so the owner flips it; off = the sheets record the payment with no receipt, as before. Rollback = unset.)
  *   GATE_TECH_STAFF_GUARDS=true (census M12 + M6, owner 2026-10-25: (M12) an inbound text or call FROM the phone of an ACTIVE technician (technicians.employment_status 'active') is staff, like the env staff phones: a text to an office line stays in the office inbox (unread, with the owner's usual unknown-sender text forward) but gets no spam screen, estimator draft or new-prospect bell; a call keys no customer or lead and gets no missed-call text-back; a number that is also on a customer record stays a customer. Outbound sends and the owner phone set are unchanged. (M6) a technician's En Route or On Site tap on a booking the office has not reviewed no longer approves it: the tap answers 409 and ONE office notification per visit rings (Schedule, needs-you); an admin login still auto-confirms. Read at call time via techStaffGuardsLive(), strict 'true', dark by default; off = today's behavior byte for byte; rollback = unset. Sends nothing to a customer.)
  *   GATE_TECH_COST_RATES=true (L11a, owner 2026-10-26: "we need real actual calculation, this ($35) was a number I just thought". Job costing charges each visit for its own on-site minutes plus its drive minutes at its technician's worked-hour cost, and for its miles and vehicle time, when a cost card is in effect for that technician on the visit date (technician_cost_cards, vehicle_cost_cards; admin API /api/admin/cost-cards; Cost cards section on Settings > Operating costs). Read at call time via techCostRatesLive(), dark by default; exactly `true`. Off, or no card in effect = the no-card costing: loaded_labor_rate x on-job hours, and the Average Drive Time at that rate for the stop's drive. Customer prices never change. Kill switch: unset.)
  *   GATE_TECH_OPEN_TIME=true (L11b, owner 2026-10-26 "BOTH", build B: each visit carries only its own minutes and miles; the unbooked part of the paid day shows as one open time cost for each technician and day. Needs GATE_TECH_COST_RATES. On: the 01:40 ET job re-costs the visits the trip link just linked (so GPS drive legs reach job costs), GET /api/admin/cost-cards/open-time and the Open time panel in the Cost cards section answer, and the dashboard adjusted-EBITDA bridge adds one open time row. Read at call time via techOpenTimeLive(), dark by default; exactly `true`. Off = every one of those is exactly today's. Customer prices never change. Kill switch: unset.)
@@ -319,6 +322,7 @@
  *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_PROMO_CODE=true (owner 2026-11-18: a "Have a promo code?" field on the customer estimate page + POST /:token/promo-code; a valid fixed-dollar code from admin Discounts is saved on the estimate and posts a one-time account credit when the estimate is accepted, counting one use; the estimate price never changes; dev-open, prod dark; off = no field, the route answers 404 and no accepted estimate posts a credit)
+ *   GATE_PAY_PROMO_CODE=true (owner 2026-11-18: a "Have a promo code?" field on the invoice pay page + POST /api/pay/:token/promo-code; a valid fixed-dollar code from admin Discounts is saved on the invoice, and the payment setup that follows posts its one-time account credit, counts one use, applies that amount to the invoice and re-prices the payment; not offered on payer-billed or statement-billed invoices or ones that must save a payment method first; dev-open, prod dark; off = no field, the route answers 404 and no entered code is redeemed)
  *   GATE_ESTIMATE_REFERRAL_CODE=true (owner 2026-11-18: the estimate page's code field also takes a referrer's code, saved on the estimate as referral evidence; once the estimate is accepted and the customer is on a plan, the code's owner is confirmed as the referrer through the Queue's deferred-only confirm, so nothing is sent and both rewards wait for the first recurring service as for any referral; a card that confirm refuses waits in Referrals → Queue; dev-open, prod dark; off = the field takes no referral code and no typed code is confirmed)
  *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
@@ -522,6 +526,8 @@ const gates = {
   // GATE_CAGE_START_MEDIUM: read at CALL time via cageStartMediumLive(); this entry is for logGateStatus, so the
   // boot log shows the flip.
   cageStartMedium: process.env.GATE_CAGE_START_MEDIUM === 'true',
+  // GATE_CAGE_TWO_SIZES: read at CALL time via cageTwoSizesLive(); this entry is for logGateStatus.
+  cageTwoSizes: process.env.GATE_CAGE_TWO_SIZES === 'true',
   mosquitoMisting: gateEnvValue('GATE_MOSQUITO_MISTING'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
@@ -2531,6 +2537,10 @@ const gates = {
   // (on_site) visit; today only an arrived visit closes, and only on a
   // payment (issuedCloseoutVisitRefusal). Ships DARK; owner flips.
   invoiceIssuedClosesVisit: process.env.GATE_INVOICE_ISSUED_CLOSES_VISIT === 'true',
+  // Checkout cash / check receipt (owner 2026-11-18): the dispatch checkout's Cash and Check sheets queue the receipt with the
+  // payment, through the automatic receipt queue (the customer's receipt choices apply). Read at CALL time
+  // via checkoutTenderReceiptLive() (admin-invoices.js record-payment). Ships DARK; texts and emails customers, so the owner flips.
+  checkoutTenderReceipt: process.env.GATE_CHECKOUT_TENDER_RECEIPT === 'true',
   // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
   // an accept's customers.monthly_rate becomes the SUM of the customer's
   // customer_plan_rates components, so a multi-plan customer's same-family
@@ -3202,6 +3212,12 @@ const gates = {
   // its row and posts nothing. Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_PROMO_CODE=true.
   estimatePromoCode: isProd ? process.env.GATE_ESTIMATE_PROMO_CODE === 'true' : true,
+  // Promo code on the invoice pay page (owner 2026-11-18): gates the
+  // `promoCode` block of GET /api/pay/:token, POST /api/pay/:token/promo-code
+  // and the redemption inside the pay page's payment setup
+  // (services/invoice-promo-code.js). Dev-open, prod dark.
+  // Enable with GATE_PAY_PROMO_CODE=true.
+  payPromoCode: isProd ? process.env.GATE_PAY_PROMO_CODE === 'true' : true,
   // Referral code in the same field (owner 2026-11-18): gates referral
   // codes on POST /:token/promo-code and in the `promoCode` block, and the
   // referrer confirm that follows an accepted estimate
@@ -5339,6 +5355,8 @@ const gates = {
   dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
   // GATE_APP_FIRST_ANY_DEVICE: read at CALL time via appFirstAnyDeviceLive(); this entry is for logGateStatus.
   appFirstAnyDevice: process.env.GATE_APP_FIRST_ANY_DEVICE === 'true',
+  // GATE_APP_FIRST_STALE_TEXT: read at CALL time via appFirstStaleTextLive(); this entry is for logGateStatus.
+  appFirstStaleText: process.env.GATE_APP_FIRST_STALE_TEXT === 'true',
   // GATE_VISIT_LIVE_ACTIVITY: read at CALL time via visitLiveActivityLive(); this entry is for logGateStatus.
   visitLiveActivity: process.env.GATE_VISIT_LIVE_ACTIVITY === 'true',
   // GATE_OWNER_NUDGE_BANNER: read at CALL time via ownerNudgeBannerLive(); this entry is for logGateStatus, so the boot log
@@ -6094,6 +6112,16 @@ function cageStartMediumLive() {
   return process.env.GATE_CAGE_START_MEDIUM === 'true';
 }
 
+// GATE_CAGE_TWO_SIZES read at CALL time — strict `=== 'true'`, dark by default
+// (owner 2026-11-19, "cage 1000"). The pool cage has two sizes: Medium up to
+// 1,000 sq ft and Large above. Writers (the property lookup, the estimate tool's
+// box) emit Medium or Large only; the pricing engine keeps all four sizes so a
+// saved estimate keeps its saved price. It has a gate because it changes a
+// starting price. Off = four sizes exactly as before. Kill = unset.
+function cageTwoSizesLive() {
+  return process.env.GATE_CAGE_TWO_SIZES === 'true';
+}
+
 // GATE_CALL_BOOKING_LINK_REACH read at CALL time: 'shadow', 'true' or 'off' (owner 2026-11-17, "link").
 // services/call-booking-link-text.js runs rules A and B of the booking-link text. 'shadow'
 // (exactly, trimmed, any case) RECORDS what the two rules would send; no text goes to those
@@ -6188,6 +6216,12 @@ function buildingUseTaxLive() {
 // GATE_UNDO_MANUAL_PAYMENT read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`.
 function undoManualPaymentLive() {
   return process.env.GATE_UNDO_MANUAL_PAYMENT === 'true';
+}
+
+// GATE_CHECKOUT_TENDER_RECEIPT read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`. On, a record-payment from the
+// dispatch checkout's Cash / Check sheet (`checkoutTender: true`) queues the receipt and records exactly the amount the sheet showed.
+function checkoutTenderReceiptLive() {
+  return process.env.GATE_CHECKOUT_TENDER_RECEIPT === 'true';
 }
 
 // GATE_PARTIAL_PAYMENTS read at CALL time (so a flip needs no redeploy). Strict `=== 'true'`.
@@ -6666,18 +6700,12 @@ function reservicePhotosLive() {
 function reserviceFoldLive() {
   return process.env.GATE_RESERVICE_FOLD === 'true';
 }
-// GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
-module.exports.reserviceFoldLive = reserviceFoldLive;
-
 // GATE_RESERVICE_FOLD_LINK read at CALL time, strict `=== 'true'`, dark (owner 2026-11-17). It has a gate because it texts a customer
 // (the one "visit moved" text) and moves a regular plan visit from a customer's own tap. Off = POST /api/public/reservice/:token is
 // as before, with no lookup. Independent of GATE_RESERVICE_FOLD (the office path). Kill = unset.
 function reserviceFoldLinkLive() {
   return process.env.GATE_RESERVICE_FOLD_LINK === 'true';
 }
-// GATE_RESERVICE_FOLD_LINK reader, on its own line so gate PRs never conflict.
-module.exports.reserviceFoldLinkLive = reserviceFoldLinkLive;
-
 // GATE_RESERVICE_RANK_AFTER_NEW read at CALL time — the one canonical
 // reader buildBookingAvailability's reservice rank-profile branch uses
 // (server/routes/booking.js). The `reserviceRankAfterNew` gates-map entry
@@ -7298,7 +7326,6 @@ function homeLineLive() {
 function liveCallUpsetAlertLive() {
   return process.env.GATE_LIVE_CALL_UPSET_ALERT === 'true';
 }
-module.exports.liveCallUpsetAlertLive = liveCallUpsetAlertLive;
 
 // GATE_IN_PERSON_CARD read at CALL time — strict `=== 'true'`, dark in every
 // environment. The canonical reader for the in-person card route and the
@@ -8402,6 +8429,14 @@ function callRingFactLive() {
 }
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+// Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
+// (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
+// GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
+module.exports.reserviceFoldLive = reserviceFoldLive;
+// GATE_RESERVICE_FOLD_LINK reader, on its own line so gate PRs never conflict.
+module.exports.reserviceFoldLinkLive = reserviceFoldLinkLive;
+// GATE_LIVE_CALL_UPSET_ALERT reader (bell-banners.js, kind live_call_upset), on its own line so gate PRs never conflict.
+module.exports.liveCallUpsetAlertLive = liveCallUpsetAlertLive;
 module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 // GATE_CALL_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.callHoldLive = callHoldLive;
@@ -8537,6 +8572,8 @@ module.exports.smsLedgerStallFeedLive = smsLedgerStallFeedLive;
 module.exports.publicWateringPlanLive = publicWateringPlanLive;
 // GATE_UNDO_MANUAL_PAYMENT reader, on its own line so gate PRs never conflict.
 module.exports.undoManualPaymentLive = undoManualPaymentLive;
+// GATE_CHECKOUT_TENDER_RECEIPT reader. Below the `module.exports = {` reassignment: an export line above it is wiped.
+module.exports.checkoutTenderReceiptLive = checkoutTenderReceiptLive;
 // GATE_PARTIAL_PAYMENTS reader, on its own line so gate PRs never conflict.
 module.exports.partialPaymentsLive = partialPaymentsLive;
 // GATE_IB_RECORD_PAYMENT_PARTIAL reader, on its own line.
@@ -9225,6 +9262,8 @@ module.exports.invoiceNotOnSparkLive = invoiceNotOnSparkLive;
 module.exports.estimateLawnLimitsLive = estimateLawnLimitsLive;
 // GATE_CAGE_START_MEDIUM reader, on its own line so gate PRs never conflict.
 module.exports.cageStartMediumLive = cageStartMediumLive;
+// GATE_CAGE_TWO_SIZES reader, on its own line so gate PRs never conflict.
+module.exports.cageTwoSizesLive = cageTwoSizesLive;
 // GATE_CALL_BOOKING_LINK_REACH reader, on its own line so gate PRs never conflict.
 module.exports.callBookingLinkReachMode = callBookingLinkReachMode;
 // GATE_LAWN_RECLAIMED_HALF_N reader, on its own line so gate PRs never conflict.
@@ -9413,6 +9452,14 @@ function appFirstAnyDeviceLive() {
 }
 // GATE_APP_FIRST_ANY_DEVICE reader, on its own line so gate PRs never conflict.
 module.exports.appFirstAnyDeviceLive = appFirstAnyDeviceLive;
+// GATE_APP_FIRST_STALE_TEXT read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
+// Owner 2026-11-18: with GATE_APP_FIRST_ANY_DEVICE on, a phone app not opened in 30 days no longer takes the notice alone;
+// the text goes too, and the app alert still goes (services/push-notifications.js appFirstStaleFloor).
+function appFirstStaleTextLive() {
+  return process.env.GATE_APP_FIRST_STALE_TEXT === 'true';
+}
+// GATE_APP_FIRST_STALE_TEXT reader, on its own line so gate PRs never conflict.
+module.exports.appFirstStaleTextLive = appFirstStaleTextLive;
 // GATE_VISIT_LIVE_ACTIVITY read at CALL time (so a flip needs no redeploy); strict `=== 'true'`, dark by default.
 // Owner 2026-11-11: the Lock Screen card for visit day. Off = POST /api/push/live-activity-token stores nothing
 // and no card starts.

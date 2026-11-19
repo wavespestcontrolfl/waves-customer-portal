@@ -45,6 +45,11 @@ const CATALOG = [
   { id: 'orn', name: 'LESCO 13-0-13 60% PolyPlus Landscape', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
   { id: 'palm812', name: 'LESCO 8-0-12 Palm & Tropical', category: 'fertilizer', formulation: 'granular', rate_unit: 'lb', tsFlags: {} },
   { id: 'drench', name: 'Imidacloprid Drench', category: 'insecticide', inventory_unit: 'fl_oz', inventory_on_hand: '0.0000', tsFlags: {} },
+  { id: 'nutriroot', name: 'Arborjet NUTRIROOT 1 gal', category: 'fertilizer', formulation: 'liquid', rate_unit: 'fl_oz', tsFlags: {
+    nutriRoot: true,
+    nutriRootHoldReason: 'NutriRoot 2-2-3 contains phosphorus; use requires a soil test documenting phosphorus-deficient soil',
+    nutriRootSoilTestEligible: true,
+  } },
 ];
 
 const VISIT = {
@@ -192,6 +197,51 @@ describe('products', () => {
     expect(completeButton().disabled).toBe(true);
     enterAmount('Heritage G', 6);
     expect(completeButton().disabled).toBe(false);
+  });
+
+  test('manual NutriRoot stays held until a Manatee P-deficient soil-test basis and report reference are recorded', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'nutriroot' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /NUTRIROOT/ }));
+    expect(tile('Arborjet NUTRIROOT').getAttribute('aria-pressed')).toBe('false');
+    expect(tile('Arborjet NUTRIROOT').textContent).toMatch(/Held:.*soil test documenting phosphorus-deficient soil/);
+    fireEvent.click(tile('Arborjet NUTRIROOT'));
+    enterAmount('Arborjet NUTRIROOT 1 gal', 3);
+    expect(screen.getByText('Record the NutriRoot application basis.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'P-deficient soil documented by soil test' }));
+    expect(screen.getByText('Enter the P-deficient soil-test report date or file reference.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Soil-test report date / file reference'), { target: { value: 'UF report 2026-10-14, customer file' } });
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values).toMatchObject({
+      nutriroot_application_basis: 'P-deficient soil documented by soil test',
+      nutriroot_soil_test_reference: 'UF report 2026-10-14, customer file',
+    });
+    expect(body.products.find((product) => product.productId === 'nutriroot')).toMatchObject({ totalAmount: 3 });
+  });
+
+  test('a restricted-site NutriRoot row offers only the truthful already-applied office-review exception', async () => {
+    const products = CATALOG.map((product) => (product.id === 'nutriroot' ? {
+      ...product,
+      tsFlags: {
+        nutriRoot: true,
+        nutriRootHoldReason: "NutriRoot 2-2-3 has all-soluble nitrogen and does not meet this zone's 50% slow-release nitrogen rule",
+        nutriRootSoilTestEligible: false,
+      },
+    } : product));
+    const request = makeRequest({ context: { ...CONTEXT, products } });
+    await readyVisit(request);
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'nutriroot' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /NUTRIROOT/ }));
+    fireEvent.click(tile('Arborjet NUTRIROOT'));
+    enterAmount('Arborjet NUTRIROOT 1 gal', 3);
+    expect(screen.queryByRole('button', { name: 'P-deficient soil documented by soil test' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Already applied — office review' }));
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.structuredFindings.values.nutriroot_application_basis).toBe('Already applied — office review');
+    expect(body.structuredFindings.values.nutriroot_soil_test_reference).toBeUndefined();
   });
 
   test('a tsp amount goes to the server as fl oz, never mL', async () => {

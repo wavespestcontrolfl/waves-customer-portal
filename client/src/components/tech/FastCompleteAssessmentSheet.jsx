@@ -46,6 +46,11 @@
 // the completion as `expectedVisit`, and the server compares it with the locked
 // visit row, so a visit moved or retyped since the schedule loaded is refused
 // (visit_identity_changed) and the tech reopens it.
+//
+// Admin Dispatch opens the sheet (the Today page reaches it through Dispatch's
+// Complete link). Its saved attempts carry the 'assessment' tag, so the Today
+// page reopens one here, too, to retry or discard it alone (`recoveryOnly`):
+// no fresh form and no Full form there, since its row may hold only the id.
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { isPathAdminOnly } from '../../config/adminNavigation';
@@ -64,7 +69,7 @@ import { estimateLineOf } from '../../lib/assessment-fast-complete';
 import { offersInspectionCredit } from '../../lib/pest-fast-complete';
 import { InspectionCreditToggle, PhotoStripSection, useVisitPhotos } from './FastCompleteReport';
 import {
-  Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, RecoveredCompletion, SavedView, SheetHeader, VisitNote,
+  Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, RecoveredCompletion, RecoveryOnlyView, SavedView, SheetHeader, VisitNote,
   refusalWithoutContext, submissionHolds, toggleInSet, usePhotoManager,
 } from './FastCompleteParts';
 import TechServicePhotosModal from './TechServicePhotosModal';
@@ -180,7 +185,8 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const recorded = useRecordedOutcome(service?.id, request);
-  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
+  // The tag tells this sheet's saved attempt apart (useSavedFastCompletions).
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, sheet: 'assessment' });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
   // A recorded dictation clip still being taken or transcribed: the full form
@@ -222,6 +228,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
         dictationPending={dictationPending}
         submitting={submitting}
         onFullForm={onFullForm}
+        fullFormOffered={!service?.recoveryOnly}
         onViewDetails={onViewDetails}
         onClose={close}
       />
@@ -246,6 +253,7 @@ function SheetBody({ service, request, recorded, submission, locked, photos, dic
   }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  if (service.recoveryOnly) return <RecoveryOnlyView submission={submission} />;
   const noContext = { loading: recorded.loading, loadError: recorded.error, blockedReason: '' };
   const refusal = refusalWithoutContext(submission, noContext);
   if (refusal) return refusal;

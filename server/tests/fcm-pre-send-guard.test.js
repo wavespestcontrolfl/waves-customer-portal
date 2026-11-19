@@ -94,3 +94,14 @@ test('a caller without a guard retains the normal provider send', async () => {
   expect(mockGetAccessToken).toHaveBeenCalledTimes(1);
   expect(mockRequest).toHaveBeenCalledTimes(1);
 });
+
+test('the provider message is built after the guard: a change the guard makes reaches the request', async () => {
+  // tech-visit-notifications relies on this: a recheck error drops the
+  // push's second line (the visit's details) before the device gets it.
+  const notification = { title: 'Visit update', body: 'detail' };
+  const shouldContinue = jest.fn(async () => { notification.body = ''; return true; });
+  await expect(fcm.send('fixture-device', notification, { shouldContinue })).resolves.toEqual({ ok: true });
+  const request = mockRequest.mock.results[0].value;
+  const sent = JSON.parse(request.end.mock.calls[0][0].toString());
+  expect(sent.message.notification).toEqual({ title: 'Visit update', body: '' });
+});

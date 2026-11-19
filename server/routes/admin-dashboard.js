@@ -1136,7 +1136,7 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
 
 // GET /api/admin/dashboard/ops-scoreboard?from=YYYY-MM-DD&to=YYYY-MM-DD
 // Weekly ops scoreboard (owner ruling 2026-09-26): drive minutes/stop,
-// AI call share, bookings without staff, AI route-day adherence. Owner-only
+// AI call share, bookings without staff, customer picker conversion, and AI route-day adherence. Owner-only
 // like /core-kpis above — this router's top-level
 // router.use(adminAuthenticate, requireAdmin) already gates it. Window
 // defaults to the last completed 7-day week (ops-scoreboard.js) and is

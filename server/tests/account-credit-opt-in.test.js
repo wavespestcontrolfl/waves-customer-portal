@@ -18,7 +18,7 @@ const { applyAccountCreditToInvoice, customerAutoApplyEnabled } = require('../se
 
 function chain(rowsFor, calls) {
   const q = {};
-  ['where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw'].forEach((m) => {
+  ['join', 'where', 'whereNot', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderBy', 'orderByRaw'].forEach((m) => {
     q[m] = jest.fn((...a) => {
       calls.push([m, ...a]);
       if (['where', 'orWhere'].includes(m) && typeof a[0] === 'function') a[0].call(q, q);
@@ -32,12 +32,13 @@ function chain(rowsFor, calls) {
   return q;
 }
 const INVOICE = { id: 'inv-1', customer_id: 'c1', status: 'sent', total: '120.00', credit_applied: 0, payer_id: null, stripe_payment_intent_id: null };
-function world({ optIn, balance = '500.00', authHold = null }) {
+function world({ optIn, balance = '500.00', authHold = null, siblingHolds = [] }) {
   const calls = { invoices: [], customers: [], attempts: [], orphans: [], payments: [], plans: [], ledger: [] };
   db.mockImplementation((table) => {
     if (table === 'invoices') return chain([INVOICE], calls.invoices);
     if (table === 'customers') return chain([{ id: 'c1', account_credits: balance, auto_apply_account_credit: optIn }], calls.customers);
     if (table === 'stripe_invoice_charge_attempts') return chain(authHold ? [authHold] : [], calls.attempts);
+    if (table === 'stripe_invoice_charge_attempts as attempt') return chain(siblingHolds, calls.attempts);
     if (table === 'stripe_orphan_charges') return chain([], calls.orphans);
     if (table === 'payments') return chain([], calls.payments);
     if (table === 'payment_plans') return chain([], calls.plans);
@@ -77,6 +78,14 @@ describe('applyAccountCreditToInvoice — customer opt-in gate', () => {
     const result = await applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true });
     expect(result.skipped).not.toBe('customer_opt_out');
     expect(calls.customers.find((c) => c[0] === 'first' && c[1] === 'auto_apply_account_credit')).toBeUndefined();
+  });
+
+  test.each([[10, 10], [50, 35]])('a requested $%i credit draws at most $%i with $25 already reserved', async (cap, applied) => {
+    const calls = world({ optIn: false, balance: 60,
+      siblingHolds: [{ credit_applied_delta: 25, credit_applied_total: 25, credit_applied: 0 }] });
+    await expect(applyAccountCreditToInvoice({ invoiceId: INVOICE.id, customerRequested: true, applyAtMost: cap }))
+      .resolves.toMatchObject({ applied });
+    expect(calls.ledger).toContainEqual(['insert', expect.objectContaining({ delta: -applied })]);
   });
 
   test('a potentially settling authentication-required card payment skips before any credit movement', async () => {

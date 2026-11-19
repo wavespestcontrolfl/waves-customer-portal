@@ -61,6 +61,12 @@
  *      heartbeat floor are dropped for these sends (a device the app
  *      released, or a provider-rejected token, is already inactive). The
  *      fallback is unchanged: when no device accepts the push, the text goes.
+ *      With GATE_APP_FIRST_STALE_TEXT also on (owner 2026-11-18), a device
+ *      counts only if the app checked in within the last 30 days
+ *      (APP_FIRST_STALE_DAYS in push-notifications.js, applied inside customerStatus so the settings
+ *      page and make-room follow it too); for a phone not opened for that long the text
+ *      goes too, and the app alert still goes (stale_app_text: the text first, then the
+ *      push as a companion once Twilio accepted it).
  *   c. Only the customer switches back to text: a stored 'sms' vetoes the app
  *      notice when the customer saved it (the *_channel_explicit marker the
  *      notifications route stamps); the seeded default 'sms' does not. Email
@@ -292,20 +298,57 @@ function decidePushRoute({ gateOn, customerId, messageType, hasMedia, humanAutho
 // push_and_sms is exempt: its SMS goes regardless.
 const { PUSH_HEARTBEAT_HOURS } = require('../push-notifications');
 
-// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with
-// any active device on a configured provider, however long ago it checked in.
-async function hasFreshPushDevice(customerId, knex = db, { anyDevice = false } = {}) {
+// anyDevice (GATE_APP_FIRST_ANY_DEVICE): the holder counts as reachable with any
+// active device on a configured provider, however long ago it checked in. With
+// GATE_APP_FIRST_STALE_TEXT also on, only a phone app that checked in within the
+// last 30 days counts (staleTextFloor): customerStatus applies it itself, so every
+// reachability reader follows it; the legacy query below uses the same floor and
+// phone apps only (a fresh browser subscription must not pass it).
+// One read decides the route (GATE_APP_FIRST_ANY_DEVICE): `fresh` = a holder device counts
+// for this send; `appStale` (any-device sends with the floor on only) = the 30-day floor
+// alone excluded a holder phone app, so the text goes too and the app alert still goes
+// (noPhoneReason, sendCompanionPush staleApp). A holder with no phone app is not stale.
+async function holderPushReach(customerId, knex = db, { anyDevice = false } = {}) {
+  const staleFloor = anyDevice ? staleTextFloor() : null;
   if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) {
     const status = await require('../push-notifications').customerStatus(customerId, undefined, anyDevice ? { withReachable: true } : undefined);
-    return status.enabled && (anyDevice ? status.reachable === true : status.fresh);
+    if (!status.enabled) return { fresh: false, appStale: false };
+    return anyDevice ? { fresh: status.reachable === true, appStale: status.appStale === true } : { fresh: Boolean(status.fresh), appStale: false };
   }
   const query = knex('push_subscriptions')
     .where({ customer_id: customerId, active: true })
     // A contact's device (contact login) is never proof the HOLDER has the app.
     .whereNull('contact_phone_key');
   if (!anyDevice) query.where('updated_at', '>=', heartbeatCutoff());
-  const row = await query.first('id').catch(() => null);
-  return Boolean(row);
+  if (!staleFloor) return { fresh: Boolean(await query.first('id').catch(() => null)), appStale: false };
+  // Floor on: phone apps on a configured provider only, as customerStatus counts them (a
+  // browser-only holder, or a phone whose provider is off, is neither fresh nor stale).
+  const providers = { ios: require('../apns').status().configured, android: require('../fcm').status().configured };
+  const phones = (await query.whereIn('platform', ['ios', 'android']).select('platform', 'updated_at').catch(() => []))
+    .filter((row) => providers[row.platform]);
+  const fresh = phones.some((row) => new Date(row.updated_at).getTime() >= staleFloor.getTime());
+  return { fresh, appStale: !fresh && phones.length > 0 };
+}
+
+// The not-delivered reason: a holder whose phone app the 30-day floor excluded gets the text
+// AND the app alert (twilio.js fires sendCompanionPush staleApp once the text is accepted);
+// no push goes before the text. Any other holder: no_fresh_device, as before.
+function noPhoneReason(appStale) {
+  return appStale === true ? { reason: 'stale_app_text', staleAppCompanion: true } : { reason: 'no_fresh_device' };
+}
+
+// A below-floor holder phone accepted the alert while the fresh phone did not: the text still goes
+// (delivery is false), but the phone that took the alert gets its in-app bell, recorded once with the
+// delivered path's event key. No push proof row (the text's row is the record).
+async function recordStaleAcceptanceBell(staleAccepted, { customerId, messageType, body, notificationEventKey, appointmentId, invoiceId }) {
+  if (staleAccepted) await recordBell(customerId, messageType, body, notificationEventKey, appointmentId, invoiceId);
+}
+
+// The proof row's app_checked_in_at: the check-in of the phone that accepted the push
+// (any-device sends only; unknown = no stamp). Internal log metadata, no customer effect.
+// The daily stale-app check reads it.
+function appCheckedInStamp(anyDevice, acceptedCheckedInAt) {
+  return anyDevice && acceptedCheckedInAt ? { app_checked_in_at: new Date(acceptedCheckedInAt).toISOString() } : {};
 }
 
 // messageType → the LIVE notification_prefs channel column the actual
@@ -489,7 +532,7 @@ async function wantsAppFirst(input) {
 // token fetch + request, web-push request), so the whole sequential
 // fan-out is bounded by construction and the caller simply awaits it: no
 // leg can still be running when the SMS fallback decision is made.
-async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
+async function sendPush(customerId, messageType, body, { shouldContinue, minUpdatedAt, holderMinUpdatedAt, nativeOnly, signedInOnly = false, appointmentId = null, invoiceId = null, eventKey = null } = {}) {
   // signedInOnly (GATE_APP_FIRST_ANY_DEVICE): the tap opens the signed-in app tab, never a report / receipt bearer page.
   const presentation = pushPresentation(messageType);
   const { title, link, category } = signedInOnly ? presentation : await resolvePushDestination(presentation, messageType, { customerId, appointmentId, invoiceId });
@@ -503,8 +546,10 @@ async function sendPush(customerId, messageType, body, { shouldContinue, minUpda
     // The visit this message is about — the push sink resolves its saved
     // property so the app opens that house (GATE_APP_PROPERTY_SCOPE).
     ...(appointmentId ? { appointmentId } : {}),
-  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}) });
-  return { stats, delivered: Number(stats && stats.sent) > 0 };
+  }, { shouldContinue, minUpdatedAt, messageType, ...(nativeOnly ? { nativeOnly: true } : {}), ...(holderMinUpdatedAt ? { holderMinUpdatedAt } : {}) });
+  return { stats, delivered: Number(stats && stats.sent) > 0, acceptedCheckedInAt: stats?.acceptedCheckedInAt || null,
+    // A below-floor holder phone took the push (GATE_APP_FIRST_STALE_TEXT): it never counts as delivery.
+    staleAccepted: Number(stats?.staleHolderDevices?.sent) > 0 };
 }
 
 // The push's collapse tag (APNs apns-collapse-id, hashed when long; the Android
@@ -550,9 +595,22 @@ function anyDeviceSend(explicitPushOnly) {
 // Which devices the push_first fan-out may count as delivery. Any-device sends
 // drop the heartbeat floor but stay on phone apps (customerStatus.reachable
 // counts phone apps only): a stale browser subscription that accepts must never
-// stand in for delivery and skip the text. Otherwise: the 72 hour floor.
+// stand in for delivery and skip the text. Otherwise: the 72 hour floor. With
+// GATE_APP_FIRST_STALE_TEXT the 30-day floor applies to the HOLDER's phones only
+// (holderMinUpdatedAt): every phone still gets the push, but a below-floor holder phone's acceptance
+// never counts as the holder's delivery, so it cannot stand in for the text when the fresh phone failed.
 function fanOutReach(anyDevice) {
-  return anyDevice ? { nativeOnly: true } : { minUpdatedAt: heartbeatCutoff() };
+  if (!anyDevice) return { minUpdatedAt: heartbeatCutoff() };
+  const staleFloor = staleTextFloor();
+  return staleFloor ? { nativeOnly: true, holderMinUpdatedAt: staleFloor } : { nativeOnly: true };
+}
+
+// GATE_APP_FIRST_STALE_TEXT (owner 2026-11-18): the shared floor lives in
+// push-notifications (appFirstStaleFloor, which customerStatus applies too); null
+// while the gate is off, or for a suite that mocks push-notifications without it.
+function staleTextFloor() {
+  const floor = require('../push-notifications').appFirstStaleFloor;
+  return typeof floor === 'function' ? floor() : null;
 }
 
 function heartbeatCutoff() {
@@ -701,7 +759,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // keeps its own path and the 72 hour rule.
     const anyDevice = anyDeviceSend(explicitPushOnly);
     const routedBody = pushBodyFor(anyDevice, body);
-    const fresh = await hasFreshPushDevice(customerId, db, { anyDevice });
+    const { fresh, appStale } = await holderPushReach(customerId, db, { anyDevice });
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49).
@@ -779,12 +837,12 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     }
     // A persisted in-app bell is customer-visible even when no device accepts
     // the push; callers that must not undo a seen notice read bellPersisted.
-    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', reason: 'no_fresh_device', ...bell };
+    if (!fresh && !appNotification?.push?.accepted) return { delivered: false, deliveryOutcome: 'not_sent', ...noPhoneReason(appStale), ...bell };
     // The fan-out itself is restricted to fresh-heartbeat rows — a stale
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
     deliveryOutcome = 'uncertain';
-    const { delivered } = explicitPushOnly
+    const { delivered, acceptedCheckedInAt, staleAccepted } = explicitPushOnly
       ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, routedBody, {
         shouldContinue: windowGuardFrom(preSendCheck),
@@ -802,6 +860,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           retryAfterMs: appNotification.push.retryAfterMs || 60000, ...bell };
       }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
+      await recordStaleAcceptanceBell(staleAccepted, { customerId, messageType, body, notificationEventKey, appointmentId, invoiceId });
       return { delivered: false, deliveryOutcome: 'not_sent', ...bell };
     }
     deliveryOutcome = 'accepted';
@@ -828,6 +887,9 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // history reader can correlate this proof with its keyed ledger
         // episode instead of counting the same contact twice.
         ...(notificationEventKey ? { notificationEventKey } : {}),
+        // The check-in of the phone that accepted the push (any-device sends): what the
+        // daily stale-app check reads, not a guess made afterward.
+        ...appCheckedInStamp(anyDevice, acceptedCheckedInAt),
         // The visit this notice is about, like the SMS path's metadata:
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
@@ -963,10 +1025,15 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
  * accepted the SMS — best-effort, never throws into the send path, and a
  * pipeline retry of a FAILED SMS can never reach it.
  */
-async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null }) {
+async function sendCompanionPush({ customerId, to, body, messageType, preSendCheck, appointmentId = null, staleApp = false, invoiceId = null, notificationEventKey = null }) {
   try {
     if (!(await pushEligibleRuntime(customerId, to, messageType))) return;
-    if (!(await hasFreshPushDevice(customerId))) return;
+    // staleApp (GATE_APP_FIRST_STALE_TEXT): the holder is already known stale, so the freshness
+    // check below would refuse them. The text went; this is the app alert that still goes.
+    // With an event key it goes through the event's bell claim, so the lifecycle bell for the same
+    // event (en-route, completed) can never push a second alert.
+    if (staleApp && notificationEventKey) return await sendClaimedStaleAppAlert({ customerId, messageType, body, preSendCheck, appointmentId, notificationEventKey });
+    if (!staleApp && !(await holderPushReach(customerId)).fresh) return;
     // The companion starts only after Twilio accepted the SMS, but its own
     // fan-out can still cross the cutoff — same per-leg gate. It also
     // applies the SAME heartbeat cutoff, for a different reason than
@@ -975,15 +1042,45 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
     // active row under the signed-out account, and an orphaned device
     // would otherwise keep receiving that account's appointment/billing
     // notices indefinitely. Bounding on the heartbeat retires it.
-    const { delivered } = await sendPush(customerId, messageType, body, {
+    const { delivered } = await sendPush(customerId, messageType, companionBody(staleApp, body), {
       shouldContinue: windowGuardFrom(preSendCheck),
-      minUpdatedAt: heartbeatCutoff(),
+      ...companionReach(staleApp),
       appointmentId,
+      // staleApp without an event key: the invoice keeps its own collapse tag and bell destination.
+      // Unset (push_and_sms) = as before.
+      invoiceId,
     });
-    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId);
+    if (delivered) await recordBell(customerId, messageType, body, undefined, appointmentId, invoiceId);
   } catch (err) {
     logger.warn(`[push-routing] companion push failed (SMS already sent): ${err.message}`);
   }
+}
+
+// The stale-app alert, claimed through the event's bell (notifyCustomer with the event key, like the
+// explicit-App branch of attemptPushFirst): whichever of this and the lifecycle bell (en-route
+// `visit:<id>:en-route:<at>`, completed `scheduled-service:<id>:completed`) runs first claims the key;
+// the other dedupes and sends no push. Same signed-in destination (the presentation link, never a
+// bearer page), link-free body, phone apps only, no floor of any kind, no proof row.
+async function sendClaimedStaleAppAlert({ customerId, messageType, body, preSendCheck, appointmentId, notificationEventKey }) {
+  const { title, link, category } = pushPresentation(messageType);
+  await require('../notification-service').notifyCustomer(customerId, category, title, pushBodyFor(true, body), {
+    link,
+    dedupeKey: notificationEventKey,
+    awaitPush: true,
+    ...(appointmentId ? { appointmentId } : {}),
+    pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), nativeOnly: true, messageType },
+  });
+}
+
+// What the companion sends and to whom. staleApp: the same presentation as an any-device push
+// (signed-in tab, link-free body, phone apps only) with no floor of any kind, so the stale
+// holder phone and eligible contact phones get the alert as they do today. Otherwise: the
+// heartbeat-bounded companion, unchanged.
+function companionBody(staleApp, body) {
+  return staleApp ? pushBodyFor(true, body) : body;
+}
+function companionReach(staleApp) {
+  return staleApp ? { nativeOnly: true, signedInOnly: true } : { minUpdatedAt: heartbeatCutoff() };
 }
 
 module.exports = {

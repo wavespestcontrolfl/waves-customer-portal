@@ -982,6 +982,20 @@ describe('route wiring contracts', () => {
 });
 
 describe('default-product reads keep the current technician assignment boundary', () => {
+  test.each([['34240', 'sarasota_venice', false], ['34202', 'manatee_parrish', true], [null, 'other_unknown', false]])(
+    'the custom completion drawer reads fertilizer eligibility for the booked ZIP %s', async (zip, zone, eligible) => {
+      const visit = { id: 'svc-1', service_type: 'Custom Tree & Shrub Service', scheduled_date: '2026-11-19', service_address_line1: '200 Sample Lane',
+        service_address_city: 'Lakewood Ranch', service_address_zip: zip, city: 'Parrish', zip: '34219', address_line1: '100 First Street' };
+      mockDbCurrent = () => {
+        const q = { where: () => q, leftJoin: () => q, first: async () => visit };
+        return q;
+      };
+      const res = await invoke({ serviceId: 'svc-1' }, { techRole: 'admin' }, '/:serviceId/default-products');
+      expect(res.statusCode).toBe(200);
+      expect(res.body.treeShrubFertilizer).toMatchObject({ ordinanceZone: zone, nutriRootSoilTestEligible: eligible });
+    },
+  );
+
   const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
   const { etDateString, addETDays } = require('../utils/datetime-et');
   test.each([

@@ -120,6 +120,13 @@ describe('loadTruckStops', () => {
     expect(outside).toEqual([]);
   });
 
+  test('a caller may also read the shorter parked gaps; the default stays 5 minutes and each stop carries its length', async () => {
+    const rows = [row(1, event('t1', point(0), point(10))), row(2, event('t2', point(13), point(20))), row(3, event('t3', point(50)))];
+    const window = { fromMs: T0 - 3600000, toMs: T0 + 86400000, maxGapMeters: GAP, now: NOW };
+    expect((await loadTruckStops(fakeConn(rows), 'imei-1', window)).map((s) => s.minutes)).toEqual([30]);
+    expect((await loadTruckStops(fakeConn(rows), 'imei-1', { ...window, minMinutes: 1 })).map((s) => s.minutes)).toEqual([3, 30]);
+  });
+
   test('pages through a long day without loading it at once', async () => {
     const many = [];
     for (let i = 1; i <= 1100; i += 1) many.push(row(i, event('t1', point(i % 10))));

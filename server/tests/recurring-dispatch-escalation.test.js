@@ -16,7 +16,7 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
 const db = require('../models/db');
 const eligibility = require('../services/auto-dispatch/eligibility');
 const notifications = require('../services/notification-service');
-const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
+const { flagUnplacedVisits, namedVisitAction } = require('../services/auto-dispatch/audit');
 const knex = require('knex')({ client: 'pg' });
 
 const retire = jest.fn();
@@ -95,6 +95,7 @@ test('unplaced visits are escalated before the lock window through the existing 
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([{ id: 's1', customer_id: 'c1', recurring_dispatch_due_date: '2026-08-20' }])
     .mockResolvedValue([]);
+  query.first.mockResolvedValue({ id: 's1', scheduled_date: '2026-08-22' });
   notifications.notifyAdmin.mockResolvedValue({ id: 'notice1' });
 
   await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-05T16:00:00Z'));
@@ -103,13 +104,26 @@ test('unplaced visits are escalated before the lock window through the existing 
   expect(notifications.notifyAdmin).toHaveBeenCalledWith(
     'schedule_conflict', 'Schedule — find a time for a recurring visit',
     'The visit is due Aug 20 and has no time yet; check availability and customer preferences in dispatch.',
-    expect.objectContaining({ bell: true, dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true, trx: db }),
+    expect.objectContaining({
+      bell: true,
+      link: '/admin/dispatch?tab=schedule&date=2026-08-22&appointment=s1',
+      dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true, trx: db,
+    }),
   );
-  // A card still in the old words takes the new ones quietly; any other change rings.
+  // Copy/link upgrades preserve acknowledgment; a resolved card reopening or
+  // a genuinely changed instruction still rings.
   const { ringOnRefresh } = notifications.notifyAdmin.mock.calls[0][3];
   expect(ringOnRefresh({ title: 'Recurring visit still needs a time' })).toBe(false);
   expect(ringOnRefresh({ title: 'Recurring placement alert resolved' })).toBe(true);
-  expect(ringOnRefresh({ title: 'Schedule — find a time for a recurring visit' })).toBe(true);
+  expect(ringOnRefresh({
+    title: 'Schedule — find a time for a recurring visit',
+    body: notifications.notifyAdmin.mock.calls[0][2],
+    link: '/admin/dispatch?tab=schedule&date=2026-08-20',
+  })).toBe(false);
+  expect(ringOnRefresh({
+    title: 'Schedule — find a time for a recurring visit',
+    body: 'A materially different placement instruction.',
+  })).toBe(true);
   // A failed notification must fail the pass, rather than reporting a clean run.
   notifications.notifyAdmin.mockResolvedValue(null);
   query.select = jest.fn()
@@ -178,6 +192,57 @@ describe('recurring visit with no arrival time and no due date', () => {
         trx: db,
       }),
     );
+  });
+
+  test('shows the saved series choice and keeps the appointment-focused management link', async () => {
+    scanFindsOnlyWindowless();
+    query.first = jest.fn()
+      .mockResolvedValueOnce({ ...windowless, status: 'pending', window_start: null, recurring_dispatch_due_date: null })
+      .mockResolvedValueOnce({ first_name: 'Sample', last_name: 'Tester' })
+      .mockResolvedValueOnce({ scheduled_date: '2026-01-10', recurring_pattern: 'quarterly' });
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+
+    const opts = notifications.notifyAdmin.mock.calls[0][3];
+    expect(opts.detail).toBe('Series started 2026-01-10 (quarterly). The dispatch due date is missing.');
+    expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-08-20&appointment=s9');
+    const existing = {
+      title: notifications.notifyAdmin.mock.calls[0][1],
+      body: notifications.notifyAdmin.mock.calls[0][2],
+      link: opts.link,
+    };
+    expect(opts.ringOnRefresh(existing)).toBe(false); // detail-only refresh
+    expect(opts.ringOnRefresh({ ...existing, title: 'Recurring visit time alert resolved' })).toBe(true);
+    expect(opts.ringOnRefresh({
+      ...existing,
+      body: 'The Aug 20 visit, 7 days away or less, has no arrival time; set one in dispatch so it can be placed.',
+    })).toBe(true);
+  });
+
+  test('a failed optional series lookup rolls back its savepoint and still records generic detail', async () => {
+    scanFindsOnlyWindowless();
+    query.first = jest.fn()
+      .mockResolvedValueOnce({ ...windowless, status: 'pending', window_start: null, recurring_dispatch_due_date: null })
+      .mockResolvedValueOnce({ first_name: 'Sample', last_name: 'Tester' })
+      .mockRejectedValueOnce(new Error('optional series read failed'));
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+
+    await expect(flagUnplacedVisits({ lockWindowDays: 14 }, now)).resolves.toBe(1);
+
+    expect(db.transaction).toHaveBeenCalledTimes(2); // alert transaction + nested savepoint
+    expect(notifications.notifyAdmin).toHaveBeenCalledWith(
+      'schedule_conflict', expect.any(String), expect.any(String),
+      expect.objectContaining({ detail: 'The dispatch due date is missing.', trx: db }),
+    );
+  });
+
+  test('the no-due-date scan applies the same live customer-pick suppression as the due-date lane', async () => {
+    scanFindsOnlyWindowless();
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, now);
+    const pickPredicates = query.where.mock.calls.filter(([arg]) => arg && arg.name === 'pickWindowClosed');
+    expect(pickPredicates.length).toBeGreaterThanOrEqual(2); // candidate scan + locked recheck
   });
 
   // Dispatch audit Fix 1 (owner 2026-11-08): the words change once, 7 days before the visit, so a
@@ -423,6 +488,20 @@ describe('recurring visit with no arrival time and no due date', () => {
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     expect(retireStatements[1].bindings).toContain('s9');
   });
+});
+
+test.each(['Bracket [VIP]', 'Emoji 🐜 Name'])('an alert-rule-breaking customer name falls back to safe generic copy: %s', async (name) => {
+  const [first_name, ...last] = name.split(' ');
+  const conn = () => ({
+    where() { return this; },
+    first: async () => ({ first_name, last_name: last.join(' ') }),
+  });
+  await expect(namedVisitAction(
+    'customer-1',
+    [(who) => `set a time for ${who}'s visit`],
+    'set a time for a recurring visit',
+    conn,
+  )).resolves.toBe('set a time for a recurring visit');
 });
 
 describe('missing-geo notice close', () => {

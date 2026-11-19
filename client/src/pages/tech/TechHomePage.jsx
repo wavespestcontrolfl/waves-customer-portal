@@ -55,9 +55,13 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import FastCompleteTreeShrubSheet from '../../components/tech/FastCompleteTreeShrubSheet';
-import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-complete';
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
-import { isLawnReserviceFastCompleteEligible } from '../../lib/lawn-fast-complete';
+import FastCompleteLawnSheet from '../../components/tech/FastCompleteLawnSheet';
+import FastCompleteAssessmentSheet from '../../components/tech/FastCompleteAssessmentSheet';
+import {
+  fastCompleteSheetFor, isProjectBackedCompletion, projectReportClosed,
+} from '../../lib/dispatchCompletionRouting';
+import { lawnSheetService } from './lawnSheetService';
 import { carriesAreaAddOnWork } from '../../lib/areaAddOns';
 import { onSiteTimeOf } from '../../lib/on-site-time';
 import { completionBillingFacts, wrapUpSheetFields } from '../../lib/completion-billing-facts';
@@ -87,8 +91,8 @@ import {
   PICK_KEY, customerFirstName, customerLastName, readOptionsAnswer, summarizeCustomerPickResult, summarizeQuickMoveResult, usablePick,
 } from '../../lib/quickMoveResult';
 import {
-  closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, isTypedReportEligible, reportFlowFields,
-  stationMapKnownOff,
+  closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isPestControlService, reportFlowFields,
+  stationMapKnownOff, stationMapKnownOn,
 } from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
@@ -129,6 +133,8 @@ const FIELD = {
 };
 
 const API = import.meta.env.VITE_API_URL || '';
+// What the lawn sheet says in place of its form when the catalog read fails.
+const LAWN_CATALOG_ERROR = 'Could not load the product list. Close this, check your signal, then tap Report again.';
 
 // Fast Complete (PR C, GATE_RESERVICE_FAST_COMPLETE): a pest re-service
 // (free between-visit callback, completionProfile.serviceKey ===
@@ -154,9 +160,10 @@ function isReserviceFastCompleteEligible(service) {
 // rules, and the fields the sheet reads from the row, live in
 // lib/pest-fast-complete.js too, shared with admin Dispatch (owner 2026-10-08).
 
-// Fast Complete for lawn re-services (GATE_LAWN_RESERVICE_FAST_COMPLETE):
-// isLawnReserviceFastCompleteEligible lives in lib/lawn-fast-complete.js, shared
-// with admin Dispatch (owner 2026-10-08).
+// The lawn re-service, tree & shrub, lawn and specialty sheets open by admin
+// Dispatch's own rules (lib/dispatchCompletionRouting.js): the shared rule of
+// each sheet with Dispatch's guards on top (no invoiced visit while
+// GATE_FAST_COMPLETE_INVOICED_VISITS is off, a row with its `propertyId` key).
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
 // findings schema) complete through the Dispatch completion form — neither
@@ -174,14 +181,41 @@ function usesDispatchCompletion(service) {
 // refuse the deep-link (Codex P1): the completion endpoint would accept a
 // re-submission with a fresh idempotency key, minting duplicate
 // artifacts/invoices/SMS.
+// The link opens the full form (a Fast Complete sheet's "Full form" escape).
+// `sheet` adds &completeSheet=1: Dispatch opens the visit as its Complete
+// button does, for the sheet only Dispatch has (the Waves Assessment).
 const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
-function openTypedCompletion(service) {
+function openTypedCompletion(service, { sheet = false } = {}) {
   const status = String(service?.status || "");
   if (TERMINAL_SERVICE_STATUSES.has(status) && !service?.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) {
     alert(`This visit is already ${status} — nothing to complete.`);
     return;
   }
-  window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
+  // On the visit's own day: Dispatch looks for the visit in the day it loads,
+  // and a Today page left open past midnight would send it to the next day.
+  const asComplete = sheet ? '&completeSheet=1' : '';
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&completeService=${encodeURIComponent(service.id)}${asComplete}`);
+}
+
+// The assessment sheet opened here for a saved attempt alone (`recoveryOnly`):
+// a fresh assessment completes on Dispatch's sheet. The retry resends the saved
+// body, which carries the visit it was made for, so only the header is built.
+function assessmentRecoveryService(row) {
+  return {
+    id: row.id,
+    customerName: row.customer_name || row.customerName,
+    serviceType: row.service_type || row.serviceType,
+    address: shortAddress(row.address) || row.address || '',
+    ...accessSheetFields(row),
+    timeLabel: serviceWindowLabel(row) || '',
+    recoveryOnly: true,
+  };
+}
+
+// The day a Dispatch deep link opens for a visit: its own date, else today.
+function dispatchDayOf(service) {
+  const day = String(service?.scheduledDate || '').split('T')[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : etDateString();
 }
 
 // The appointment details sheet's Dispatch-only destinations (edit, checkout,
@@ -189,14 +223,9 @@ function openTypedCompletion(service) {
 // them: ?appointment= is the detail-sheet deep link DispatchPageV2 consumes,
 // on the visit's own day.
 function openDispatchDetails(service) {
-  const date = String(service?.scheduledDate || '').split('T')[0] || etDateString();
-  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(date)}&appointment=${encodeURIComponent(service.id)}`);
+  window.location.assign(`/admin/dispatch?tab=schedule&date=${encodeURIComponent(dispatchDayOf(service))}&appointment=${encodeURIComponent(service.id)}`);
 }
 
-// adminFetch-style helper for the tech portal: bearer-token fetch against
-// /api/* that returns parsed JSON and throws on non-2xx. Lets the shared
-// ServiceRecapModal use the same `request(path, options)` contract as the
-// admin surface (which passes adminFetch).
 // One outcome per route read, so the page decides once:
 //   live     — a usable route payload;
 //   offline  — no usable answer reached the phone: fetch rejected (dead
@@ -220,7 +249,13 @@ async function readRoute(date, token, signal) {
   return { kind: res.status === 401 || res.status === 403 ? 'refused' : 'failed', message };
 }
 
-async function techRequest(path, options = {}) {
+// adminFetch-style helper for the tech portal: bearer-token fetch against
+// /api/* that returns parsed JSON and throws on non-2xx. Lets the shared
+// ServiceRecapModal use the same `request(path, options)` contract as the
+// admin surface (which passes adminFetch). A refusal keeps its body as
+// err.details (the lawn sheet marks a refused product and place from it). A
+// 204 has no body: {}. `strict`: see sheetRequest below.
+async function techRequest(path, options = {}, { strict = false } = {}) {
   const token = getAdminAuthToken();
   const res = await fetch(`${API}/api${path}`, {
     ...options,
@@ -231,14 +266,27 @@ async function techRequest(path, options = {}) {
       ...(options.headers || {}),
     },
   });
-  const data = await res.json().catch(() => ({}));
+  if (res.status === 204) return {};
+  let unreadable = false;
+  const data = await res.json().catch(() => { unreadable = true; return {}; });
   if (!res.ok) {
     const error = new Error(data?.error || `Request failed (${res.status})`);
     error.status = res.status;
     error.code = data?.code;
+    if (!unreadable && data && typeof data === 'object') error.details = data;
     throw error;
   }
+  if (unreadable && strict) throw new Error('The server\'s answer could not be read.');
   return data;
+}
+
+// The request the Fast Complete sheets get, strict as utils/admin-fetch is for
+// them on Dispatch: a 2xx whose body is not JSON (a captive portal page, a body
+// cut off) throws with no status. Its outcome is unknown, so the submit hook
+// keeps the saved attempt for a same-key retry instead of reading {} as saved.
+// The page's other requests read such a body as {}, as before.
+function sheetRequest(path, options) {
+  return techRequest(path, options, { strict: true });
 }
 
 // Same socketOrigin shape as TrackPage / useDispatchBoard. Empty
@@ -392,17 +440,34 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
+  // The lawn visit's own sheet (GATE_LAWN_FAST_COMPLETE), as admin Dispatch
+  // opens it: { service, catalog }. The sheet builds its planned rows (units,
+  // stock) from the product catalog, so it opens with the catalog it was read
+  // with (openLawnSheet below).
+  const [lawnFast, setLawnFast] = useState(null);
+  const lawnFastService = lawnFast?.service;
+  // A saved Waves Assessment attempt, to retry or discard (assessmentRecoveryService).
+  const [assessmentRecovery, setAssessmentRecovery] = useState(null);
+  // The one-screen Fast Complete sheets (each null while closed).
+  const fastSheets = [fastCompleteService, treeShrubFastService, lawnReserviceFastService, lawnFastService, assessmentRecovery];
   // The appointment details sheet (quick move, cancel, reschedule, price
   // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
   // the same sheet Dispatch opens, over the same /admin/schedule row.
   const [detailService, setDetailService] = useState(null);
+  // A sheet's Details pill, for the row the sheet opened on. None on an
+  // off-route saved attempt's row (useSavedFastCompletions): it holds only the
+  // visit id and summary, so the editor would show a blank note, and a note
+  // typed there would replace the stored one.
+  const detailsFor = (row) => (row?.fastCompletionRecoveryOnly ? undefined : () => setDetailService(row));
   // A fast sheet left mounted (suspended) behind the details sheet; plain
   // Close returns to it, a change to the visit closes it (owner 2026-10-09).
-  const fastSheetBehindDetails = !!(detailService && (fastCompleteService || treeShrubFastService || lawnReserviceFastService));
+  const fastSheetBehindDetails = !!detailService && fastSheets.some(Boolean);
   const closeFastSheetsBehindDetails = () => {
     setFastCompleteService(null);
     setTreeShrubFastService(null);
     setLawnReserviceFastService(null);
+    setLawnFast(null);
+    setAssessmentRecovery(null);
   };
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -437,6 +502,10 @@ export default function TechHomePage({ section = 'today' }) {
   // flag has loaded and is off (isTypedReportEligible).
   const stationMap = useFeatureFlagReady('station-map-v1');
   const stationMapOff = stationMapKnownOff(stationMap);
+  // GATE_STATION_FAST_COMPLETE: with the map known ON, a termite or rodent bait
+  // station visit also opens the sheet, which carries the station checks (as
+  // on admin Dispatch).
+  const stationSheetOn = stationMapKnownOn(stationMap);
   // The verified profile's name first: the timecard signature pre-fill must
   // not fall back to a stale or missing stored copy.
   const techName = staff?.name || getAdminDisplayName('Tech');
@@ -663,7 +732,7 @@ export default function TechHomePage({ section = 'today' }) {
   const saved = useSavedFastCompletions({
     operatorId: staffIdForDevice,
     schedule,
-    openSheets: [fastCompleteService, treeShrubFastService, lawnReserviceFastService],
+    openSheets: fastSheets,
   });
   // "Next Stop" = first non-terminal service in the day's route.
   // Skipping past completed/skipped/cancelled/no_show means a tech with
@@ -820,17 +889,54 @@ export default function TechHomePage({ section = 'today' }) {
     }
     openProjectForService(service);
   }, [openProjectForService]);
-  // Every entry point that would open the project editor for a visit: a lane
-  // visit under the lane voice fill opens the report-flow sheet instead.
-  const openProjectOrLane = useCallback((service) => {
-    if (isLaneReportEligible(service)) setFastCompleteService(service);
-    else openProjectOrContinue(service);
-  }, [openProjectOrContinue]);
+  // The lawn visit sheet opens at once, and reads the product catalog at the
+  // tap (Dispatch passes the one it read with the route). The sheet holds its
+  // form until the catalog arrives (its planned rows take units and stock from
+  // it), and says so when the read fails. Its saved-attempt view needs no
+  // catalog, so a same-key retry or a discard never waits on one.
+  const openLawnSheet = useCallback((service) => {
+    const open = { service, catalog: null, catalogError: '' };
+    setLawnFast(open);
+    techRequest('/admin/dispatch/products/catalog')
+      .then((data) => (Array.isArray(data?.products) ? { catalog: data.products } : null))
+      .catch(() => null)
+      // Only onto the sheet this tap opened: not one closed or opened since.
+      .then((read) => setLawnFast((current) => (current === open
+        ? { ...open, ...(read || { catalogError: LAWN_CATALOG_ERROR }) }
+        : current)));
+  }, []);
+  // The one-screen sheet admin Dispatch's own decision picks for a visit
+  // (fastCompleteSheetFor, in handleComplete), opened on this page: the lawn
+  // re-service, tree & shrub and lawn sheets, then the report-flow sheet (a
+  // lane visit, or a typed visit the reader reads, with the station checks
+  // under GATE_STATION_FAST_COMPLETE). The Waves Assessment's sheet is only
+  // on Dispatch: its link asks Dispatch to open the visit as its Complete
+  // button does. No sheet: the Dispatch completion form.
+  const openDispatchChoice = useCallback((service) => {
+    const kind = fastCompleteSheetFor(service, { stationMapOff, stationSheetOn });
+    const open = {
+      lawn_reservice: setLawnReserviceFastService, tree_shrub: setTreeShrubFastService, lawn: openLawnSheet, pest: setFastCompleteService,
+    }[kind];
+    if (open) open(service);
+    else openTypedCompletion(service, { sheet: kind === 'assessment' });
+  }, [stationMapOff, stationSheetOn, openLawnSheet]);
+  // A visit that is neither typed nor pest control, routed as admin Dispatch
+  // routes it (handleComplete): a visit that completes through a project opens
+  // the project editor; any other takes Dispatch's own choice above. The
+  // project editor is only for a project-backed visit: for any other, it made
+  // a project, not the visit's own record.
+  const openUntypedVisit = useCallback((service) => {
+    if (isProjectBackedCompletion(service)) openProjectOrContinue(service);
+    else openDispatchChoice(service);
+  }, [openProjectOrContinue, openDispatchChoice]);
+  // A sent or closed linked report ends only a visit that completes through
+  // its project (isProjectBackedCompletion, as Dispatch asks it): a service-
+  // report visit with a leftover legacy project still opens its own sheet or
+  // form.
   const projectServices = withSavedCompletions((selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
     !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
     || saved.serviceIds.has(String(service.id))
-    || (!TERMINAL_STATUSES_VISIT.has(service.status)
-      && !['sent', 'closed'].includes(service.linkedProject?.status))
+    || (!TERMINAL_STATUSES_VISIT.has(service.status) && !projectReportClosed(service))
   )), { saved, myServices, scheduleError, selectedVisitKey });
   // Shared by every entry point that would otherwise call setRecapService
   // directly: a pest re-service under the gate opens the one-screen Fast
@@ -841,17 +947,14 @@ export default function TechHomePage({ section = 'today' }) {
     if (isLaneReportEligible(service) || isFastCompleteReportEligible(service) || isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
     else setRecapService(service);
   }, []);
-  // Every entry point that would send a typed visit to the Dispatch deep link:
-  // a lawn re-service under its gate, or a tree & shrub visit under its gate and
-  // the tech's flag, opens its Fast Complete sheet first, and a typed visit the
-  // reader reads opens the report-flow sheet; everything else is the deep
-  // link, as before.
+  // A typed visit or a whole-visit closeout, in admin Dispatch's order
+  // (handleComplete): a closeout or a project-backed visit takes the Dispatch
+  // deep link, which handles those first; any other takes Dispatch's own
+  // choice (openDispatchChoice).
   const openTypedVisit = useCallback((service) => {
-    if (isLawnReserviceFastCompleteEligible(service)) setLawnReserviceFastService(service);
-    else if (isTreeShrubFastCompleteEligible(service)) setTreeShrubFastService(service);
-    else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
-    else openTypedCompletion(service);
-  }, [stationMapOff]);
+    if (closesOutAsVisit(service) || isProjectBackedCompletion(service)) openTypedCompletion(service);
+    else openDispatchChoice(service);
+  }, [openDispatchChoice]);
   // A saved attempt on this device opens the sheet that made it, before any
   // normal eligibility decision: a successful /complete may already have made
   // the row terminal while its saved body still needs the same-key retry.
@@ -860,7 +963,10 @@ export default function TechHomePage({ section = 'today' }) {
     const tap = await resolveTap(service);
     if (!tap) return;
     if (tap.kind) {
-      const savedSheet = { tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService }[tap.kind] || setFastCompleteService;
+      const savedSheet = {
+        tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService, lawn_visit: openLawnSheet,
+        assessment: setAssessmentRecovery,
+      }[tap.kind] || setFastCompleteService;
       savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
       return;
     }
@@ -869,8 +975,8 @@ export default function TechHomePage({ section = 'today' }) {
     // typed job must not open CreateProjectModal.
     if (usesDispatchCompletion(service)) openTypedVisit(service);
     else if (isPestControlService(service)) openPestCompletion(service);
-    else openProjectOrLane(service);
-  }, [resolveTap, openTypedVisit, openPestCompletion, openProjectOrLane]);
+    else openUntypedVisit(service);
+  }, [resolveTap, openLawnSheet, openTypedVisit, openPestCompletion, openUntypedVisit]);
   const { rescanIfUnread } = saved;
   const handleProjectQuickAction = useCallback(() => {
     rescanIfUnread();
@@ -1111,7 +1217,7 @@ export default function TechHomePage({ section = 'today' }) {
             // GATE_FAST_COMPLETE_REPORT: the report flow, with what its trace
             // step needs from the row (the tracer's map center and whether
             // this visit takes a satellite trace at all).
-            ...reportFlowFields(fastCompleteService, { stationMapOff }),
+            ...reportFlowFields(fastCompleteService, { stationMapOff, stationSheetOn }),
             // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).
@@ -1122,7 +1228,7 @@ export default function TechHomePage({ section = 'today' }) {
             lat: fastCompleteService.lat ?? null,
             lng: fastCompleteService.lng ?? null,
           }}
-          request={techRequest}
+          request={sheetRequest}
           operatorId={staffIdForDevice}
           // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
           // exact true shows the mic, the Check chips and the office note.
@@ -1148,7 +1254,7 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(fastCompleteService)}
+          onViewDetails={detailsFor(fastCompleteService)}
           suspended={!!detailService}
         />
       )}
@@ -1175,13 +1281,16 @@ export default function TechHomePage({ section = 'today' }) {
             routedPropertyId: 'propertyId' in treeShrubFastService ? treeShrubFastService.propertyId : undefined,
             routedAddress: typeof treeShrubFastService.address === 'string' ? treeShrubFastService.address : null,
           }}
-          request={techRequest}
+          request={sheetRequest}
           operatorId={staffIdForDevice}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) fetchSchedule();
           }}
           onCompleted={() => { setTreeShrubFastService(null); fetchSchedule(); }}
+          // Take payment now on the saved view, as the report sheet offers it:
+          // this page opens no payment prompt of its own (Dispatch does).
+          collectOnSheet
           // "Full form" and "+ Other product" with no catalog go to the full
           // completion screen (the Dispatch typed-completion deep link).
           onFullForm={() => {
@@ -1191,7 +1300,7 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(treeShrubFastService)}
+          onViewDetails={detailsFor(treeShrubFastService)}
           suspended={!!detailService}
         />
       )}
@@ -1218,7 +1327,7 @@ export default function TechHomePage({ section = 'today' }) {
             // GATE_RESERVICE_ASKS rides the same row: only an exact true shows "They told us" on the sheet.
             reserviceAsksEnabled: lawnReserviceFastService.reserviceAsksEnabled === true,
           }}
-          request={techRequest}
+          request={sheetRequest}
           operatorId={staffIdForDevice}
           // One gate for every sheet's voice fill: only an exact true turns it on.
           voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
@@ -1236,8 +1345,51 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          onViewDetails={detailsFor(lawnReserviceFastService)}
           suspended={!!detailService}
+        />
+      )}
+
+      {lawnFastService && (
+        <FastCompleteLawnSheet
+          key={lawnFastService.id}
+          service={lawnSheetService(lawnFastService)}
+          request={sheetRequest}
+          operatorId={staffIdForDevice}
+          catalog={lawnFast.catalog}
+          catalogError={lawnFast.catalogError}
+          // Take payment now on the saved view (as on the tree & shrub sheet above).
+          collectOnSheet
+          onClose={(options) => {
+            setLawnFast(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setLawnFast(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" with no catalog go to the full
+          // completion screen (the Dispatch completion deep link).
+          onFullForm={() => {
+            const raw = lawnFastService;
+            setLawnFast(null);
+            openTypedCompletion(raw);
+          }}
+          // Details opens the appointment details sheet over this visit; the fast
+          // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
+          onViewDetails={detailsFor(lawnFastService)}
+          suspended={!!detailService}
+        />
+      )}
+
+      {assessmentRecovery && (
+        <FastCompleteAssessmentSheet
+          key={assessmentRecovery.id}
+          service={assessmentRecoveryService(assessmentRecovery)}
+          request={sheetRequest}
+          operatorId={staffIdForDevice}
+          onClose={(options) => {
+            setAssessmentRecovery(null);
+            if (options?.refresh) fetchSchedule();
+          }}
+          onCompleted={() => { setAssessmentRecovery(null); fetchSchedule(); }}
         />
       )}
 

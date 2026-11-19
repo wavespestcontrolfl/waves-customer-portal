@@ -1716,8 +1716,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .every((item) => item.status === 'done')).toBe(true);
   });
 
-  test('a Tree & Shrub member scores its assessment from the durable photos on replay', async () => {
-    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'Tree & Shrub Care' });
+  test('a Tree & Shrub member scores its durable photos and flags an already-applied product on replay', async () => {
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      service_type: 'Custom Tree & Shrub Care', service_address_city: 'Lakewood Ranch', service_address_zip: '34240',
+    });
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({ name: 'Fixture NutriRoot 2-2-3', category: 'fertilizer' });
     const config = require('../config');
     const priorBucket = config.s3.bucket;
     config.s3.bucket = 'fixture-photo-bucket';
@@ -1733,6 +1736,12 @@ postgres('visit completion packet records on PostgreSQL', () => {
         pestLifeStage: 'crawler', iracFracLogged: true, snapshotAppliedYtd: 2, fertilizerAppliedYtd: 'January palm fert',
         customerNote: 'Beds treated and palms inspected.' };
     }
+    const { alreadyAppliedBasis } = require('../../shared/tree-shrub-fertilizer-evidence.json').nutriRoot;
+    const applied = input.items[0];
+    applied.body.products = [{ productId: fixture.productId, totalAmount: 1, amountUnit: 'oz' }];
+    applied.body.treeShrubCompletion.nutriroot_application_basis = alreadyAppliedBasis;
+    const officeReviews = () => mockPg('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'limitType' = ? AND metadata->>'customerId' = ?", ['nutriroot_compliance_review', fixture.customerId]);
     const score = require('../services/tree-shrub-assessment').scoreAndStoreTreeShrubAssessment;
     score.mockReset().mockResolvedValue({ id: randomUUID() });
     const stored = jest.spyOn(require('../services/photos'), 'getPhotoBase64').mockResolvedValue({ data: 'Zml4dHVyZQ==', mimeType: 'image/png' });
@@ -1741,9 +1750,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
       saved = await saveVisitCompletionPacket(input);
       expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
       expect(score).not.toHaveBeenCalled();
+      const record = await mockPg('service_records').where({ scheduled_service_id: applied.serviceId }).first('id', 'structured_notes');
+      expect(record.structured_notes.treeShrubCloseout.nutriroot_application_basis).toBe(alreadyAppliedBasis);
+      expect(await mockPg('service_products').where({ service_record_id: record.id, product_id: fixture.productId })).toHaveLength(1);
       expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+      expect((await officeReviews()).map(row => row.metadata)).toEqual([expect.objectContaining({
+        scheduledServiceId: applied.serviceId, serviceRecordId: record.id, productId: fixture.productId,
+        reason: expect.stringContaining('50% slow-release'),
+      })]);
     } finally {
       config.s3.bucket = priorBucket;
+      await officeReviews().del();
     }
     expect(score).toHaveBeenCalledTimes(2);
     for (const [call] of score.mock.calls) {

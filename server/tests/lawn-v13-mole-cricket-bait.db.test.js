@@ -27,6 +27,8 @@ const KEYS = ['fixture_mc_a', 'fixture_mc_b'];
 const TRACKS = Object.keys(v13Recipe);
 const visit = (grass, month) => v13Recipe[grass].visits.find((v) => v.month === month);
 const lines = (text) => String(text || '').split('\n');
+// The recipe names the house bifenthrin LESCO Crosscheck Plus since owner ruling 2026-11-18 (the staged rows below still hold N.TAL).
+const HOUSE_BIFENTHRIN = 'LESCO Crosscheck Plus';
 const lineFor = (text, name) => lines(text).find((line) => line.startsWith(`${name} — `));
 
 describe('recipe: mole cricket nymphs move to June and the July scout visit, with Advion Insect Granule', () => {
@@ -47,8 +49,8 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
 
     expect(lineFor(visit(grass, 'Jul').secondary, N.ACE)).not.toMatch(/mole cricket/);
     // Talak stays where it belongs (chinch bugs, caterpillars) and is gone as the nymph product.
-    expect(lineFor(visit(grass, 'Jul').secondary, N.TAL)).toBe(`${N.TAL} — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours`);
-    expect(lineFor(visit(grass, 'Aug').secondary, N.TAL)).toBeUndefined();
+    expect(lineFor(visit(grass, 'Jul').secondary, HOUSE_BIFENTHRIN)).toBe(`${HOUSE_BIFENTHRIN} — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours`);
+    expect(lineFor(visit(grass, 'Aug').secondary, HOUSE_BIFENTHRIN)).toBeUndefined();
     expect(visit(grass, 'Aug').notes).toMatch(/Mole crickets seen: note them for Dylox 6\.2 G on the next spreader visit/);
     expect(visit(grass, 'Aug').notes).not.toMatch(/Talak/);
     expect(lineFor(visit(grass, 'Oct').secondary, N.DYL)).toBe(`${N.DYL} — grubs or mole crickets, spreader visit only, water in`);
@@ -62,7 +64,7 @@ describe('recipe: mole cricket nymphs move to June and the July scout visit, wit
     expect(notes).toMatch(/Fall adults and bigger mole crickets go to Dylox 6\.2 G/);
     expect(notes).not.toMatch(/Mole cricket nymphs, July and August/);
     const safety = v13Recipe[grass].safety_rules.join('\n');
-    expect(safety).toMatch(/Bifenthrin \(Atticus Talak 7\.9 F\): delay watering 24 hours\.(\n|$)/);
+    expect(safety).toMatch(/Bifenthrin \(LESCO Crosscheck Plus\): delay watering 24 hours; at least 25 ft from water\.(\n|$)/);
     expect(safety).not.toMatch(/waters it in right after application with the hose/);
     expect(safety).toMatch(/Advion Insect Granule \(mole cricket bait, indoxacarb, label EPA Reg\. No\. 100-1483\)/);
     expect(safety).toMatch(/A spot is baited once a year, at 3 lb; label yearly maximum 4\.6 lb per 1,000 sq ft/);

@@ -10,7 +10,7 @@ const { sendInvoiceReceipt } = require('../services/invoice-receipt-resend');
 const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
 const { undoManualPayment, describeManualPaymentUndo } = require('../services/invoice-manual-payment-undo');
-const { undoManualPaymentLive, partialPaymentsLive, techCardOnFileLive } = require('../config/feature-gates');
+const { undoManualPaymentLive, partialPaymentsLive, techCardOnFileLive, checkoutTenderReceiptLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -2902,6 +2902,10 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 //   amount?:      number  — dollars received (owner 2026-10-29). Absent = the whole balance owed, as before. Equal to the balance owed =
 //                 the same. Less = a PART payment, only behind GATE_PARTIAL_PAYMENTS (no receipt, the invoice stays open). More = 400.
 //                 Ignored for the Intelligence Bar card, which records the whole balance only.
+//   checkoutTender?: true  — sent by the dispatch checkout's Cash / Check sheet, with totalSeen (the amount in dollars the sheet showed).
+//                 With GATE_CHECKOUT_TENDER_RECEIPT on it overrides sendReceipt (the receipt goes through the automatic receipt queue,
+//                 which honors the customer's receipt choices) and records exactly that amount as amount + owedSeen (a balance that
+//                 moved since is the usual 409). Cash and check only; ignored for the Intelligence Bar card.
 // }
 //
 // Settlement semantics (refusals, tenders, ledger, receipt) are documented on
@@ -2968,6 +2972,23 @@ const cardPinsOf = (req) => (req.ibApprovedPayment
 const cardResultOf = (req, closeout) => (req.ibApprovedPayment ? { closeout: closeout || null } : {});
 
 // Named so the Intelligence Bar's record_payment card (recordPaymentFromBar, below) runs this very handler.
+// The dispatch checkout's Cash or Check sheet marks its body `checkoutTender: true` with `totalSeen`, the amount owed it showed and the
+// technician took (GATE_CHECKOUT_TENDER_RECEIPT, owner 2026-11-18, after a check paid at the visit got no receipt): the receipt is queued
+// with the payment, and that amount is recorded through the page's own amount + owedSeen fence (checked before any Stripe session is
+// retired and again under the invoice lock), so the receipt never confirms a sum nobody took. Cash and check only (the two tenders the
+// sheets take), never the Intelligence Bar card. The tender also carries requireSelfPay, so a payer assigned while the sheet was
+// open is refused (409) before anything is written. Returns null (not a checkout tender: the body stands, as before), { totalSeenCents },
+// or { invalid: true } (a marked tender with no usable amount, or one that is not a JSON number: refused, nothing recorded).
+const CHECKOUT_TENDER_METHODS = ['cash', 'check'];
+function checkoutTenderOf(req) {
+  const { checkoutTender, method, totalSeen } = req.body || {};
+  if (checkoutTender !== true || !CHECKOUT_TENDER_METHODS.includes(method) || req.ibApprovedPayment || !checkoutTenderReceiptLive()) return null;
+  if (typeof totalSeen !== 'number') return { invalid: true };
+  const totalSeenCents = Math.round(totalSeen * 100);
+  const usable = Number.isFinite(totalSeen) && totalSeenCents > 0 && Math.abs(totalSeen * 100 - totalSeenCents) < 1e-6;
+  return usable ? { totalSeenCents } : { invalid: true };
+}
+
 const recordPaymentHandler = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -3009,6 +3030,12 @@ const recordPaymentHandler = async (req, res, next) => {
       const dollars = Number(owedSeen);
       owedCentsSeen = Number.isFinite(dollars) ? Math.round(dollars * 100) : null;
     }
+    const checkout = checkoutTenderOf(req);
+    if (checkout?.invalid) return res.status(400).json({ error: 'Open the visit again and take the payment again. Nothing was recorded.' });
+    if (checkout) {
+      amountCents = checkout.totalSeenCents;
+      owedCentsSeen = checkout.totalSeenCents;
+    }
     if (sendReceipt && !['email', 'sms', 'both'].includes(via)) {
       return res.status(400).json({ error: "via must be 'email', 'sms', or 'both'" });
     }
@@ -3019,7 +3046,10 @@ const recordPaymentHandler = async (req, res, next) => {
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
     const { invoice, receipt, closeout, partial } = await recordManualPayment(id, {
-      method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
+      method, reference, note, recordedBy, sendReceipt: Boolean(checkout) || sendReceipt, via, recordedByTechnicianId: req.technicianId || null,
+      // requireSelfPay: the checkout refuses in-person collection for a payer-billed visit when it opens, but a Bill-To change
+      // while the sheet is open can keep the same balance. The existing self-pay fence (pre-lock and on the locked row) refuses it.
+      ...(checkout ? { checkoutTender: true, requireSelfPay: true } : {}),
       ...(amountCents != null ? { amountCents, owedCentsSeen } : {}),
       ...cardPinsOf(req),
     });

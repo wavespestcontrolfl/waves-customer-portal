@@ -72,6 +72,19 @@
  * the commit and a swept-and-RECLAIMED worker can never commit a second
  * invoice for one transfer. false → 409, nothing written.
  *
+ * checkoutTender (optional, the dispatch checkout's Cash / Check sheet with GATE_CHECKOUT_TENDER_RECEIPT on, owner 2026-11-18): a
+ * receipt nobody tapped for. It goes through the automatic receipt queue, as for `automated`: the job row is inserted IN the
+ * settlement transaction, and the queue honors the customer's payment_receipt opt-out, the billing email choice, the text channel
+ * choice, the send window and the retries. Staff recorded the payment, so the job is not customer-initiated and its text keeps the
+ * send window. `receipt` then reads { queued: true }. The caller fences the amount with amountCents + owedCentsSeen (the figure the
+ * sheet showed), so the receipt never confirms a sum the technician did not take. The receipt is queued ONLY when this payment
+ * is the invoice's only money (checkoutTenderIsSoleMoney, on the locked row): receipts read earlier money in more than one way
+ * (the text reads the amount due, the receipt page the newest payment row tagged to the invoice), so a part payment, applied
+ * credit, an estimate deposit or another tagged payment row (a visit prepayment applied to it) could make it name a sum the
+ * technician did not take. Nor is it queued when the invoice already holds a receipt job (the enqueue dedupes on invoice_id: a
+ * reopened invoice; that job belongs to the earlier payment). `receipt` then reads { manual: true }: the tender sheet says no
+ * receipt went out for this payment (the paid-visit receipt check flags it too).
+ *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
  * else (DB outage, a sentinel thrown inside the transaction) is rethrown
@@ -91,7 +104,7 @@ const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceDepositCreditCents, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
 const { partialPaymentsLive, ibRecordPaymentPartialLive } = require('../config/feature-gates');
 const { customerOnAutopay } = require('./autopay-eligibility');
 
@@ -185,6 +198,22 @@ function owedChangedMessage(nowCents) {
   return `The amount owed on this invoice changed to $${(nowCents / 100).toFixed(2)} since the page loaded (another payment or an edit). Reload the invoice and check it before you record a payment. Nothing was recorded.`;
 }
 
+// Whether a checkout tender is the invoice's only money (see checkoutTender above), read on the LOCKED row and in the settlement
+// transaction, after this payment's ledger row is inserted (paymentId, excluded). Only money rows count (paid, refunded,
+// processing: the statuses the receipt reader considers); a declined card attempt's failed row is no money. Card details left
+// on the invoice (card_brand / card_last_four: a disputed card payment reopens the invoice and keeps them) are earlier card
+// history the receipt text, PDF and page would print as the payment method, so they count too.
+async function checkoutTenderIsSoleMoney(trx, locked, paymentId) {
+  if (Number(locked.amount_paid) > 0 || Number(locked.credit_applied) > 0 || invoiceDepositCreditCents(locked) > 0) return false;
+  if (locked.card_brand || locked.card_last_four) return false;
+  const other = await trx('payments').where({ customer_id: locked.customer_id })
+    .whereIn('status', ['paid', 'refunded', 'processing'])
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(locked.id)])
+    .whereNot({ id: paymentId })
+    .first('id');
+  return !other;
+}
+
 async function recordManualPayment(id, {
   method,
   reference,
@@ -205,7 +234,13 @@ async function recordManualPayment(id, {
   // Staff user id behind an operator-recorded payment (audit attribution
   // for the invoice-issued closeout); null for automated settlements.
   recordedByTechnicianId = null,
+  // The dispatch checkout's Cash / Check tender (see checkoutTender above): its receipt goes through the automatic receipt queue.
+  checkoutTender = false,
 } = {}) {
+  // A receipt nobody tapped for (the Zelle reconciler, or the dispatch checkout) goes through the automatic receipt queue.
+  const queueReceipt = sendReceipt && (automated || checkoutTender);
+  // Whether the settlement transaction inserted that job (a part-paid checkout tender does not; see checkoutTender above).
+  let receiptQueued = false;
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
   }
@@ -587,12 +622,17 @@ async function recordManualPayment(id, {
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
     await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
-    if (sendReceipt && automated) {
+    if (queueReceipt && (!checkoutTender || await checkoutTenderIsSoleMoney(trx, locked, paymentId))) {
       // Same transaction as the paid flip: the receipt job is durable the
-      // moment the payment is. The customer sent the money themselves (a
-      // Zelle transfer minutes ago), so the receipt is customer-initiated
-      // for the send-window decision.
-      await require('./receipt-delivery-queue').enqueueReceiptDelivery({ invoiceId: id, source: 'zelle_notice_reconciler', customerInitiated: true, database: trx });
+      // moment the payment is. A Zelle transfer is the customer's own act
+      // minutes ago (customer-initiated for the send-window decision); a
+      // checkout tender is recorded by staff, so its text keeps the window.
+      const enqueued = await require('./receipt-delivery-queue').enqueueReceiptDelivery({
+        invoiceId: id, source: automated ? 'zelle_notice_reconciler' : 'dispatch_checkout', customerInitiated: Boolean(automated), database: trx,
+      });
+      // A checkout tender counts only a job it wrote: a deduped enqueue (an older job holds the invoice, from the earlier
+      // payment) queued nothing for this one. The Zelle path reports as it always did.
+      receiptQueued = Boolean(automated) || enqueued?.enqueued === true;
     }
     return row;
   });
@@ -742,11 +782,11 @@ async function recordManualPayment(id, {
   let emailResult = null;
   let smsResult = null;
   let queued = false;
-  if (sendReceipt && automated) {
+  if (receiptQueued) {
     // The job row committed with the payment above; just nudge the drain.
     require('./receipt-delivery-queue').scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
     queued = true;
-  } else if (sendReceipt) {
+  } else if (sendReceipt && !queueReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
     const { claimReceiptJobForOperatorSend, recordOperatorReceiptDelivered, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
     // The payment is already recorded: a claim failure only skips the
@@ -819,7 +859,9 @@ async function recordManualPayment(id, {
   const final = await db('invoices').where({ id }).first();
   return {
     invoice: final,
-    receipt: !sendReceipt ? null : queued ? { queued: true } : { email: emailResult, sms: smsResult },
+    // A checkout tender whose receipt the settlement did not queue (part-paid, or deduped) reads { manual: true }: nothing was
+    // sent or queued, and the sheet says so.
+    receipt: !sendReceipt ? null : (queueReceipt && !receiptQueued) ? { manual: true } : queued ? { queued: true } : { email: emailResult, sms: smsResult },
     // What the post-payment closeout did (the Intelligence Bar card reports it; the Invoices page route does not forward it).
     closeout,
   };

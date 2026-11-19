@@ -364,6 +364,48 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
       body: '## Late Summer Lawn Care\n\nFertilize before the rains taper off.',
     }).ok).toBe(true);
   });
+  test('redaction: "Peat Moss" clears as a lawn term pair, the surname Moss still blocks', () => {
+    // Before this pair was listed, every title or heading with "peat moss"
+    // in it read as a First+Last name and held the draft.
+    expect(checkRedactionPassed({
+      body: '## Peat Moss for Take-All Root Rot\n\nSphagnum peat moss is acidic. Spread it in Bradenton as a thin layer over the lawn.',
+      frontmatter: { title: 'Peat Moss for Take-All Root Rot: A SWFL Answer' },
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## How Much Sphagnum Peat Moss to Use\n\nUF/IFAS says stress relief comes first. Spread the peat in Sarasota as a thin layer.',
+    }).ok).toBe(true);
+    // The attribution the Q03 brief prescribes for its Texas source: this
+    // sentence opening passes the body name scan.
+    expect(checkRedactionPassed({
+      body: 'Texas A&M researchers found that peat moss reduced symptoms. Spread it in Bradenton as a thin layer over the lawn.',
+    }).ok).toBe(true);
+    const kate = checkRedactionPassed({ body: '## Kate Moss\n\nOur treatment schedule is weekly.' });
+    expect(kate.ok).toBe(false);
+    expect(kate.reason).toBe('unredacted_name_in_heading');
+    const body = checkRedactionPassed({ body: 'This is Kate Moss and the ants are back again this week. Call the office in Bradenton.' });
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe('unredacted_name_in_body');
+  });
+  test('redaction: "Hammerhead Worms" and "Mud Daubers" clear as animal name pairs, a first name in front of either still blocks', () => {
+    // A post about hammerhead worms carries the name in its title and in
+    // most headings; unlisted, the pair read as a First+Last name there.
+    expect(checkRedactionPassed({
+      body: '## What Hammerhead Worms Look Like\n\nUF/IFAS calls them land planarians. They turn up in Sarasota after rain.',
+      frontmatter: { title: 'Hammerhead Worms in Southwest Florida Yards: What to Know' },
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Land Planarians and Hammerhead Flatworms\n\nBoth names are in use. They are seen in Bradenton yards.',
+    }).ok).toBe(true);
+    expect(checkRedactionPassed({
+      body: '## Where Mud Daubers Nest\n\nMud daubers build mud nests in sheltered spots. They are common around Venice homes.',
+    }).ok).toBe(true);
+    const worm = checkRedactionPassed({ body: '## Kate Worm\n\nOur treatment schedule is weekly.' });
+    expect(worm.ok).toBe(false);
+    expect(worm.reason).toBe('unredacted_name_in_heading');
+    const dauber = checkRedactionPassed({ body: 'This is Kate Dauber and the wasps are back again this week. Call the office in Bradenton.' });
+    expect(dauber.ok).toBe(false);
+    expect(dauber.reason).toBe('unredacted_name_in_body');
+  });
   test('redaction: compact E.164 customer phones are caught (Codex round 8 — 11-digit runs had no interior boundary to match)', () => {
     const r = checkRedactionPassed({ body: 'Call our Sarasota line at (941) 297-2606 or the customer at +19415551234.' });
     expect(r.ok).toBe(false);

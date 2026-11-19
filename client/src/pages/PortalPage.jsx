@@ -5145,9 +5145,6 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const contactCardEntries = perPropertyTexts
     ? propertyPrefs.filter((p) => p.id === activePropertyId)
     : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
-  // The card's header copy promises the report text once the card has an entry.
-  const contactTexts = contactCardEntries.length > 0 ? CONTACT_TEXTS_COPY : 'appointment texts';
-  const contactReportException = contactCardEntries.length > 0 ? CONTACT_REPORT_EXCEPTION_COPY : '';
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -6153,8 +6150,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     // One profile, several saved houses: contacts and texts are
                     // stored per PROFILE, so a tenant added here hears about
                     // every house — say so (codex #4207 r1c).
-                    ? `Add anyone who should get ${contactTexts} — a spouse, partner, tenant, or property manager.${contactReportException} These contacts and settings apply to every property on this profile.`
-                    : `Add anyone who should get ${contactTexts} for this property — a spouse, partner, tenant, or property manager.${contactReportException}`}
+                    ? `Add up to ${MAX_PROPERTY_CONTACTS} people — a spouse, tenant, or property manager — to get appointment texts. They apply to every property on this profile.`
+                    : `Add up to ${MAX_PROPERTY_CONTACTS} people — a spouse, tenant, or property manager — to get appointment texts for this property.`}
                 </div>
               </>
             )}
@@ -6333,12 +6330,18 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         style={{ width: 20, height: 20, marginTop: 2, accentColor: B.glassNavy, flexShrink: 0 }}
                       />
                       <span style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                        Each person listed with a phone number has agreed to receive automated service and appointment text messages from Waves Pest Control at that number. Message frequency varies and message &amp; data rates may apply. They can reply STOP to any text to opt out, or HELP for help.
+                        Everyone listed with a phone number agreed to get automated service and appointment texts from Waves Pest Control. Msg frequency varies; msg &amp; data rates may apply. Reply STOP to opt out, HELP for help.
                       </span>
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive {CONTACT_TEXTS_COPY} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{CONTACT_REPORT_EXCEPTION_COPY} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        {multiProperty ? 'Want these alerts too? Turn on “Send me appointment alerts.”' : 'You’ll keep getting them too.'}
+                        <details style={{ marginTop: 6 }}>
+                          <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>What they’ll get</summary>
+                          <p style={{ margin: '4px 0 0' }}>
+                            They get {CONTACT_TEXTS_COPY}.{CONTACT_REPORT_EXCEPTION_COPY}
+                          </p>
+                        </details>
                       </div>
                       <button
                         type="button"
@@ -6380,11 +6383,23 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
 const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
 const BILLING_CHANNEL_ORDER = ['email', 'sms', 'push'];
 const BILLING_CHANNEL_FIELDS = [
-  { key: 'invoiceChannels', legacyKey: 'invoiceChannel', label: 'Invoices', description: 'New invoices and follow-up reminders.' },
-  { key: 'paymentIssueChannels', legacyKey: 'paymentIssueChannel', label: 'Payment problems', description: 'Failed payments, retries and bank verification.' },
-  { key: 'billingReminderChannels', legacyKey: 'billingReminderChannel', label: 'Billing reminders', description: 'Upcoming and overdue payments.' },
-  { key: 'paymentConfirmationChannels', legacyKey: 'paymentConfirmationChannel', label: 'Payment receipts', description: 'Confirmation after a payment.' },
+  { key: 'invoiceChannels', legacyKey: 'invoiceChannel', label: 'Invoices', description: 'New invoices and follow-up reminders.', icon: 'document' },
+  { key: 'paymentIssueChannels', legacyKey: 'paymentIssueChannel', label: 'Payment problems', description: 'Failed payments, retries and bank verification.', icon: 'alert' },
+  { key: 'billingReminderChannels', legacyKey: 'billingReminderChannel', label: 'Billing reminders', description: 'Upcoming and overdue payments.', icon: 'clock' },
+  { key: 'paymentConfirmationChannels', legacyKey: 'paymentConfirmationChannel', label: 'Payment receipts', description: 'Confirmation after a payment.', icon: 'checkCircle' },
 ];
+// One dropdown per category, like Service notifications (owner 2026-11-19:
+// the Visits list plus App + email). A stored mix outside this list shows as
+// its own entry until the customer picks another.
+const BILLING_CHANNEL_CHOICES = [
+  { channels: ['sms'], label: 'Text' },
+  { channels: ['email'], label: 'Email' },
+  { channels: ['email', 'sms'], label: 'Both' },
+  { channels: ['push'], label: 'App' },
+  { channels: ['email', 'push'], label: 'App + email' },
+];
+const BILLING_CHANNEL_NAMES = { email: 'Email', sms: 'Text', push: 'App' };
+const billingChoiceValue = (channels) => BILLING_CHANNEL_ORDER.filter((channel) => channels.includes(channel)).join('+');
 
 function normalizeBillingChannels(channels, legacyChannel = 'sms') {
   const fromArray = Array.isArray(channels)
@@ -6399,42 +6414,46 @@ function sameBillingChannels(left, right) {
   return BILLING_CHANNEL_ORDER.every((channel) => left.includes(channel) === right.includes(channel));
 }
 
-function BillingChannelFieldset({ field, channels, available, saving, onToggle, children }) {
+// A billing row in the Service notifications layout: icon, tap-to-explain
+// label, delivery control on the right.
+function BillingNotificationRow({ icon, label, description, last = false, children }) {
   return (
-    <fieldset style={{ margin: '0 0 14px', padding: '14px 16px', background: GLASS_SUBTLE, borderRadius: 8, border: '1px solid rgba(255,255,255,0.7)', minWidth: 0 }}>
-      {/* float + full width pulls the legend inside the box instead of
-          notching it into the top border (native fieldset rendering). */}
-      <legend style={{ float: 'left', width: '100%', padding: 0, fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{field.label}</legend>
-      <div style={{ clear: 'both', fontSize: 16, color: B.grayDark, lineHeight: 1.5, paddingTop: 2 }}>{field.description}</div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 12px', marginTop: 6 }}>
-        {[
-          { value: 'email', label: 'Email' },
-          { value: 'sms', label: 'Text' },
-          { value: 'push', label: 'App' },
-        ].map((option) => {
-          const checked = channels.includes(option.value);
-          const unavailable = !available[option.value];
-          const lastSelected = checked && !channels.some((channel) => channel !== option.value && available[channel]);
-          const disabled = saving || lastSelected || (unavailable && !checked);
-          return (
-            <label key={option.value} style={{ minHeight: 44, display: 'inline-flex', alignItems: 'center', gap: 8, color: B.glassNavy, cursor: disabled ? 'not-allowed' : 'pointer', opacity: unavailable ? 0.58 : 1 }}>
-              <input
-                type="checkbox"
-                checked={checked}
-                disabled={disabled}
-                aria-describedby="billing-channel-instructions"
-                onChange={() => onToggle(field.key, option.value)}
-                className="waves-focus-ring"
-                style={{ width: 20, height: 20, margin: 0, accentColor: B.yellow, flexShrink: 0 }}
-              />
-              <span style={{ fontSize: 16, lineHeight: 1.25 }}>{option.label}</span>
-              {unavailable && <span style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.25 }}>Unavailable now</span>}
-            </label>
-          );
-        })}
+    <div data-billing-row="" style={{
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap',
+      padding: '12px 0', gap: 12, borderBottom: last ? 'none' : '1px solid #E7E2D7',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
+        <GlassTile name={icon} size={34} />
+        <NotificationLabelDisclosure label={label} description={description} />
       </div>
-      {children}
-    </fieldset>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto', marginLeft: 'auto', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
+  const current = billingChoiceValue(channels);
+  const listed = BILLING_CHANNEL_CHOICES.some((choice) => billingChoiceValue(choice.channels) === current);
+  const choices = listed ? BILLING_CHANNEL_CHOICES : [...BILLING_CHANNEL_CHOICES, {
+    channels: BILLING_CHANNEL_ORDER.filter((channel) => channels.includes(channel)),
+    label: BILLING_CHANNEL_ORDER.filter((channel) => channels.includes(channel)).map((channel) => BILLING_CHANNEL_NAMES[channel]).join(' + '),
+  }];
+  return (
+    <CustomerSelect
+      value={current}
+      onChange={(e) => onChange(field.key, choices.find((choice) => billingChoiceValue(choice.channels) === e.target.value).channels)}
+      disabled={saving}
+      aria-label={`Delivery method for ${field.label.toLowerCase()}`}
+    >
+      {choices.map((choice) => {
+        const value = billingChoiceValue(choice.channels);
+        return (
+          <option key={value} value={value} disabled={value !== current && !choice.channels.every(usable)}>{choice.label}</option>
+        );
+      })}
+    </CustomerSelect>
   );
 }
 
@@ -6553,6 +6572,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
   const [billingPrefsLoadError, setBillingPrefsLoadError] = useState(false);
+  const [billingFieldSaving, setBillingFieldSaving] = useState({});
+  const [receiptTextsSaving, setReceiptTextsSaving] = useState(false);
   const compact = useIsMobile(760);
   useEffect(() => {
     if (!loading && focusPaymentMethods) {
@@ -7362,52 +7383,62 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     push: billingApp.ready,
   };
 
-  const toggleBillingChannel = (fieldKey, channel) => {
-    setBillingChannels((previous) => {
-      const current = previous[fieldKey] || [];
-      if (current.includes(channel)) {
-        const next = current.filter((value) => value !== channel);
-        if (!next.some((value) => billingChannelAvailability[value]
-          && (fieldKey !== 'paymentConfirmationChannels' || value !== 'sms' || !paymentSmsOff))) return previous;
-        return { ...previous, [fieldKey]: next };
-      }
-      if (!billingChannelAvailability[channel]) return previous;
-      return { ...previous, [fieldKey]: BILLING_CHANNEL_ORDER.filter((value) => current.includes(value) || value === channel) };
-    });
+  const billingChannelUsable = (fieldKey) => (channel) => billingChannelAvailability[channel]
+    && (fieldKey !== 'paymentConfirmationChannels' || channel !== 'sms' || !paymentSmsOff);
+
+  // Each billing dropdown saves on change, like Service notifications. The
+  // server must echo the requested array back, or the row returns to the
+  // last confirmed choice.
+  const saveBillingChannelChoice = (fieldKey, channels) => {
+    if (billingFieldSaving[fieldKey] || sameBillingChannels(channels, billingChannels[fieldKey] || [])) return;
+    if (!channels.every(billingChannelUsable(fieldKey))) return;
+    const confirmedChannels = savedBillingChannels[fieldKey];
+    setBillingChannels((previous) => ({ ...previous, [fieldKey]: channels }));
+    setBillingFieldSaving((previous) => ({ ...previous, [fieldKey]: true }));
     setBillingPrefsStatus(null);
+    api.updateNotificationPrefs({ [fieldKey]: [...channels] })
+      .then((result) => {
+        const confirmed = (result?.preferences || result || {})[fieldKey];
+        if (!Array.isArray(confirmed) || !sameBillingChannels(confirmed, channels)) throw new Error('Billing delivery preference was not saved');
+        setSavedBillingChannels((previous) => ({ ...previous, [fieldKey]: channels }));
+      })
+      .catch(() => {
+        setBillingChannels((previous) => ({ ...previous, [fieldKey]: confirmedChannels }));
+        setBillingPrefsStatus('error');
+      })
+      .finally(() => setBillingFieldSaving((previous) => ({ ...previous, [fieldKey]: false })));
+  };
+
+  const turnOnReceiptTexts = () => {
+    if (receiptTextsSaving) return;
+    setReceiptTextsSaving(true);
+    setBillingPrefsStatus(null);
+    api.updateNotificationPrefs({ paymentConfirmationSms: true })
+      .then((result) => {
+        if ((result?.preferences || result || {}).paymentConfirmationSms !== true) throw new Error('Receipt text preference was not saved');
+        setPaymentSmsOff(false);
+      })
+      .catch(() => setBillingPrefsStatus('error'))
+      .finally(() => setReceiptTextsSaving(false));
   };
 
   const saveBillingPrefs = () => {
     if (billingPrefsSaving) return;
-    const changedBillingFields = billingChannelsAvailable
-      ? BILLING_CHANNEL_FIELDS.filter((field) => !sameBillingChannels(billingChannels[field.key], savedBillingChannels[field.key]))
-      : [];
+    // With the per-category dropdowns (they save on change) this button only
+    // saves the billing recipient email.
     const leavesEmailWithoutRecipient = BILLING_CHANNEL_FIELDS.some((field) => {
       const channels = billingChannels[field.key] || [];
-      return channels.includes('email') && !channels.some((channel) => channel !== 'email'
-        && billingChannelAvailability[channel]
-        && (field.key !== 'paymentConfirmationChannels' || channel !== 'sms' || !paymentSmsOff));
+      return channels.includes('email') && !channels.some((channel) => channel !== 'email' && billingChannelUsable(field.key)(channel));
     });
     if (billingChannelsAvailable && String(savedBillingEmail).trim() && !String(billingEmail).trim() && !hasBillingEmail && leavesEmailWithoutRecipient) {
       setBillingPrefsStatus('email-required');
       return;
     }
-    if (billingChannelsAvailable && BILLING_CHANNEL_FIELDS.some((field) => !(billingChannels[field.key] || []).length)) {
-      setBillingPrefsStatus('error');
-      return;
-    }
-    if (changedBillingFields.some((field) => !billingChannels[field.key].some((channel) => billingChannelAvailability[channel]
-      && (field.key !== 'paymentConfirmationChannels' || channel !== 'sms' || !paymentSmsOff)))) {
-      setBillingPrefsStatus('channel-required');
-      return;
-    }
     setBillingPrefsSaving(true);
     setBillingPrefsStatus(null);
-    const requestedBillingChannels = Object.fromEntries(changedBillingFields.map((field) => [field.key, [...billingChannels[field.key]]]));
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
       ...(paymentSmsReenabled ? { paymentConfirmationSms: true } : {}),
-      ...requestedBillingChannels,
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
       // SMS-suppressing 'email' choice can't linger with no deliverable
@@ -7420,17 +7451,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       } : {}),
     })
       .then((result) => {
-        const confirmedPreferences = result?.preferences || result || {};
-        if (billingChannelsAvailable && paymentSmsReenabled && confirmedPreferences.paymentConfirmationSms !== true) {
-          throw new Error('Receipt text preference was not saved');
-        }
-        if (billingChannelsAvailable && changedBillingFields.some((field) => (
-          !Array.isArray(confirmedPreferences[field.key])
-          || !sameBillingChannels(confirmedPreferences[field.key], requestedBillingChannels[field.key])
-        ))) {
-          setBillingChannels(savedBillingChannels);
-          throw new Error('Billing delivery preferences were not saved');
-        }
         if (!billingChannelsAvailable && appPreferencesAvailable && (
           (invoiceChannel !== savedInvoiceChannel && result?.preferences?.invoiceChannel !== invoiceChannel)
           || (paymentIssueChannel !== savedPaymentIssueChannel && result?.preferences?.paymentIssueChannel !== paymentIssueChannel)
@@ -7439,9 +7459,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
           throw new Error('Billing delivery preference was not saved');
         }
-        if (billingChannelsAvailable) {
-          setSavedBillingChannels(billingChannels);
-        } else {
+        if (!billingChannelsAvailable) {
           setSavedInvoiceChannel(invoiceChannel);
           setSavedPaymentIssueChannel(paymentIssueChannel);
         }
@@ -7461,7 +7479,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       })
       .catch(() => {
         // A silent failure here left the customer believing prefs were saved.
-        if (billingChannelsAvailable) setBillingChannels(savedBillingChannels);
         if (paymentSmsReenabled) {
           setPaymentSmsOff(true);
           setPaymentSmsReenabled(false);
@@ -8176,7 +8193,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <div data-glass="chip" style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Billing notifications</div>
         <div id="billing-channel-instructions" style={{ marginTop: 4, fontSize: 16, color: muted, lineHeight: 1.5, marginBottom: 14 }}>
-          {billingChannelsAvailable ? 'Choose one or more delivery methods for each category.' : 'Choose how you receive billing updates.'}
+          Choose how you receive each update.
         </div>
 
         {billingPrefsLoadError && (
@@ -8223,162 +8240,91 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         )}
 
         {billingChannelsAvailable && (
-          <div aria-label="Billing notification delivery methods">
-            {BILLING_CHANNEL_FIELDS.map((field) => (
-              <BillingChannelFieldset
-                key={field.key}
-                field={field}
-                channels={billingChannels[field.key]}
-                available={{ ...billingChannelAvailability,
-                  sms: billingChannelAvailability.sms && (field.key !== 'paymentConfirmationChannels' || !paymentSmsOff) }}
-                saving={billingPrefsSaving}
-                onToggle={toggleBillingChannel}
-              >
+          <div aria-label="Billing notification delivery methods" style={{ marginBottom: 14 }}>
+            {BILLING_CHANNEL_FIELDS.map((field, i) => (
+              <BillingNotificationRow key={field.key} icon={field.icon} label={field.label} description={field.description} last={i === BILLING_CHANNEL_FIELDS.length - 1}>
+                <BillingChannelSelect
+                  field={field}
+                  channels={billingChannels[field.key]}
+                  usable={billingChannelUsable(field.key)}
+                  saving={!!billingFieldSaving[field.key] || billingPrefsSaving}
+                  onChange={saveBillingChannelChoice}
+                />
                 {field.key === 'paymentConfirmationChannels' && paymentSmsOff && (
-                  <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                  <div style={{ flex: '1 0 100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap', fontSize: 14, color: muted }}>
                     Text receipts are off.
-                    {billingChannelAvailability.sms && <button type="button" data-glass-accent="" disabled={billingPrefsSaving}
-                      onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); setBillingPrefsStatus(null); }}
-                      style={{ ...secondaryButton, minHeight: 44, marginTop: 6, display: 'block' }}>Turn on receipt texts</button>}
+                    {billingChannelAvailability.sms && <button type="button" data-glass-accent="" disabled={receiptTextsSaving}
+                      onClick={turnOnReceiptTexts}
+                      style={{ ...secondaryButton, minHeight: 44, position: 'relative' }}>{receiptTextsSaving ? 'Turning on…' : 'Turn on receipt texts'}</button>}
                   </div>
                 )}
-              </BillingChannelFieldset>
+              </BillingNotificationRow>
             ))}
           </div>
         )}
 
-        {!billingChannelsAvailable && appPreferencesAvailable && <div data-invoice-channel-row="" style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
-          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
-        }}>
-          <div style={{ minWidth: 0, flex: '1 1 140px' }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Invoices</div>
-            <div style={{ fontSize: 16, color: muted, lineHeight: 1.5, marginTop: 2 }}>New invoices and payment reminders.</div>
-          </div>
-          <div style={{ display: 'flex', flex: '0 0 auto', marginLeft: 'auto', justifyContent: 'flex-end' }}>
-          <select
-            aria-label="Delivery method for invoices"
-            value={invoiceChannel}
-            onChange={(e) => setInvoiceChannel(e.target.value)}
-            style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
-              borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}
-          >
-            <option value="sms">Text</option>
-            <option value="push" disabled={!billingApp.ready}>App</option>
-          </select>
-          </div>
-        </div>}
-
-        {!billingChannelsAvailable && appPreferencesAvailable && <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap',
-          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
-        }}>
-          <div style={{ minWidth: 0, flex: '1 1 140px' }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Payment problems</div>
-            <div style={{ fontSize: 16, color: muted, lineHeight: 1.5, marginTop: 2 }}>Failed payments, retries and bank verification.</div>
-          </div>
-          <div style={{ display: 'flex', flex: '0 0 auto', marginLeft: 'auto', justifyContent: 'flex-end' }}>
-            <select aria-label="Delivery method for payment problems" value={paymentIssueChannel}
-              onChange={(e) => setPaymentIssueChannel(e.target.value)}
-              style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, border: '1px solid #D8D0C0',
-                borderRadius: 8, padding: '7px 10px', minHeight: 44, background: '#fff', fontFamily: 'inherit' }}>
-              <option value="sms">Text</option>
-              <option value="push" disabled={!billingApp.ready}>App</option>
-            </select>
-          </div>
-        </div>}
-
-        {!billingChannelsAvailable && <div data-billing-reminder-row="" style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
-        }}>
-          {/* No on/off toggle (owner ruling 2026-08-01): billing reminders
-              are account-operational — every customer gets them, like
-              receipts. Only the delivery method is a choice; STOP remains
-              the master kill switch. */}
-          <div style={{ minWidth: 0, flex: '1 1 140px' }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Billing reminders</div>
-            <div style={{ fontSize: 16, color: muted, lineHeight: 1.5, marginTop: 2 }}>Upcoming and overdue payments.</div>
-          </div>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
-            marginLeft: 'auto',
-            flex: '0 0 auto',
-            justifyContent: compact ? 'flex-end' : undefined,
-          }}>
-          {(() => {
-            const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
-            const selectable = hasBillingEmail;
-            return (
-              <select
+        {!billingChannelsAvailable && (
+          <div style={{ marginBottom: 14 }}>
+            {appPreferencesAvailable && (
+              <BillingNotificationRow icon="document" label="Invoices" description="New invoices and payment reminders.">
+                <CustomerSelect aria-label="Delivery method for invoices" value={invoiceChannel} onChange={(e) => setInvoiceChannel(e.target.value)}>
+                  <option value="sms">Text</option>
+                  <option value="push" disabled={!billingApp.ready}>App</option>
+                </CustomerSelect>
+              </BillingNotificationRow>
+            )}
+            {appPreferencesAvailable && (
+              <BillingNotificationRow icon="alert" label="Payment problems" description="Failed payments, retries and bank verification.">
+                <CustomerSelect aria-label="Delivery method for payment problems" value={paymentIssueChannel} onChange={(e) => setPaymentIssueChannel(e.target.value)}>
+                  <option value="sms">Text</option>
+                  <option value="push" disabled={!billingApp.ready}>App</option>
+                </CustomerSelect>
+              </BillingNotificationRow>
+            )}
+            {/* No on/off toggle (owner ruling 2026-08-01): billing reminders
+                are account-operational — every customer gets them, like
+                receipts. Only the delivery method is a choice; STOP remains
+                the master kill switch. */}
+            <BillingNotificationRow icon="clock" label="Billing reminders" description="Upcoming and overdue payments.">
+              <CustomerSelect
                 value={hasBillingEmail ? billingReminderChannel : 'sms'}
                 onChange={(e) => setBillingReminderChannel(e.target.value)}
-                disabled={!selectable}
+                disabled={!hasBillingEmail}
                 aria-label="Delivery method for billing reminders"
-                style={{
-                  fontSize: 16, fontWeight: 700, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
-                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
-                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
-                }}
               >
-                {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            );
-          })()}
+                {(hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms')).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </CustomerSelect>
+            </BillingNotificationRow>
+            {/* No on/off switch (owner ruling 2026-08-28): payment
+                confirmations are receipts — every customer gets one; only the
+                delivery method is a choice, like billing reminders. A stored
+                opt-out shows a one-tap way back on. */}
+            <BillingNotificationRow icon="checkCircle" label="Payment receipts" description="Confirmation after a payment." last>
+              {(() => {
+                const emailOptions = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
+                const opts = appPreferencesAvailable ? [...emailOptions, APP_OPTION] : emailOptions;
+                return (
+                  <CustomerSelect
+                    value={paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms'}
+                    onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
+                    disabled={opts.length <= 1}
+                    aria-label="Delivery method for payment confirmations"
+                  >
+                    {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !billingApp.ready}>{o.label}</option>)}
+                  </CustomerSelect>
+                );
+              })()}
+              {paymentSmsOff && (
+                <div style={{ flex: '1 0 100%', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap', fontSize: 14, color: muted }}>
+                  Text receipts are off.
+                  <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 44, position: 'relative', flexShrink: 0 }}>
+                    Turn on
+                  </button>
+                </div>
+              )}
+            </BillingNotificationRow>
           </div>
-        </div>}
-
-        {!billingChannelsAvailable && <div data-payment-confirm-row="" style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
-        }}>
-          <div style={{ minWidth: 0, flex: '1 1 160px' }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Payment receipts</div>
-            <div style={{ fontSize: 16, color: muted, lineHeight: 1.5, marginTop: 2 }}>
-              Confirmation after a payment.{paymentSmsOff ? ' Text receipts are off.' : ''}
-            </div>
-          </div>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
-            marginLeft: compact ? 0 : 'auto',
-            flex: compact && paymentSmsOff ? '1 0 100%' : '0 0 auto',
-            justifyContent: compact ? 'flex-end' : undefined,
-          }}>
-          {(() => {
-            const emailOptions = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
-            const opts = appPreferencesAvailable ? [...emailOptions, APP_OPTION] : emailOptions;
-            const selectable = opts.length > 1;
-            return (
-              <select
-                value={paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms'}
-                onChange={(e) => setPaymentConfirmationChannel(e.target.value)}
-                disabled={!selectable}
-                aria-label="Delivery method for payment confirmations"
-                style={{
-                  fontSize: 16, fontWeight: 700, color: B.glassNavy,
-                  border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
-                  background: '#fff', fontFamily: 'inherit', flexShrink: 0,
-                  cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
-                }}
-              >
-                {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !billingApp.ready}>{o.label}</option>)}
-              </select>
-            );
-          })()}
-          {/* No on/off switch (owner ruling 2026-08-28): payment
-              confirmations are receipts — every customer gets one; only the
-              delivery method is a choice, like billing reminders. A stored
-              opt-out shows a one-tap way back on. */}
-          {paymentSmsOff && (
-            <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 44, position: 'relative', flexShrink: 0 }}>
-              Turn on
-            </button>
-          )}
-          </div>
-        </div>}
+        )}
 
         {!billingChannelsAvailable && appPreferencesAvailable && (
           <details style={{ marginBottom: 14, fontSize: 16, lineHeight: 1.5, color: muted }}>
@@ -8387,21 +8333,25 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           </details>
         )}
 
-        {['error', 'email-required', 'channel-required'].includes(billingPrefsStatus) && (
+        {['error', 'email-required'].includes(billingPrefsStatus) && (
           <div role="alert" style={{ marginBottom: 10, fontSize: 14, fontWeight: 700, color: B.red, background: `${B.red}12`, borderRadius: 8, padding: '10px 14px' }}>
-            {billingPrefsStatus === 'channel-required' ? 'Choose at least one available delivery method for each changed category.' : billingPrefsStatus === 'email-required'
+            {billingPrefsStatus === 'email-required'
               ? 'Add an available Text or App option to each Email-only category before clearing this address.'
               : 'Couldn’t save your billing preferences. Please try again.'}
           </div>
         )}
+        {/* The category dropdowns save on change; the button stays for the
+            older server's scalar controls and for a stored billing email. */}
+        {(!billingChannelsAvailable || String(savedBillingEmail).trim() || billingPrefsStatus === 'saved') && (
         <button type="submit" disabled={billingPrefsSaving} data-glass-accent="" data-glass-size="primary" style={{
           ...primaryButton,
           opacity: billingPrefsSaving ? 0.6 : 1,
           width: '100%',
           cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
-          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save billing preferences'}
+          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : billingChannelsAvailable ? 'Save billing email' : 'Save billing preferences'}
         </button>
+        )}
         </>}
       </form>
       )}
