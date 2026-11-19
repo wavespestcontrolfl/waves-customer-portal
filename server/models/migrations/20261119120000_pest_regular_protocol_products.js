@@ -171,12 +171,20 @@ async function lockUsageTable(knex) {
 
 const keptLog = (what) => console.log(`${LOG} ${what} no longer holds what up() wrote: kept`);
 
-// The one catalog row of a name, or null (logged) when there is none or more than one.
-async function onlyCatalogRow(knex, name) {
-  const rows = await knex('products_catalog').where({ name }).select('id', 'name');
-  if (rows.length === 1) return rows[0];
-  console.log(`${LOG} ${rows.length} catalog rows are named "${name}": skipping the steps that need it`);
-  return null;
+// Each house product's one ACTIVE catalog row (Map of name to row), or null (logged) when any has none or more than one. Both the usage
+// step and the service-list step need all three, so neither writes a name the catalog cannot resolve.
+async function houseProducts(knex) {
+  if (!(await knex.schema.hasTable('products_catalog'))) return null;
+  const found = new Map();
+  for (const name of FULL_MIX) {
+    const rows = await knex('products_catalog').where({ name, active: true }).select('id', 'name');
+    if (rows.length !== 1) {
+      console.log(`${LOG} ${rows.length} active catalog rows are named "${name}": the usage and service-list steps are skipped`);
+      return null;
+    }
+    found.set(name, rows[0]);
+  }
+  return found;
 }
 
 async function productExists(knex, id) {
@@ -205,12 +213,8 @@ function usageMatches(rows, names, expected) {
 async function swapUsage(knex) {
   if (!(await hasTables(knex, ['products_catalog', 'audit_log', 'service_product_usage']))) return;
   await lockUsageTable(knex);
-  const house = new Map();
-  for (const name of FULL_MIX) {
-    const row = await onlyCatalogRow(knex, name);
-    if (!row) return;
-    house.set(name, row);
-  }
+  const house = await houseProducts(knex);
+  if (!house) return;
   for (const [serviceType, expected] of Object.entries(OLD_USAGE)) {
     // Locked until the migration commits, so the audit event holds the row as it was deleted.
     const rows = await knex('service_product_usage').where({ service_type: serviceType }).select('*').forUpdate();
@@ -320,6 +324,7 @@ async function rewriteServiceDefaults(knex, step, plans) {
 }
 
 async function swapServiceDefaults(knex) {
+  if (!(await houseProducts(knex))) return;
   await rewriteServiceDefaults(knex, STEPS.services, Object.entries(OLD_DEFAULTS).map(([key, expected]) => ({
     key,
     decide: (before) => ((expected === null ? before === null : sameList(before, expected)) ? NEW_DEFAULTS[key] : null),
@@ -387,7 +392,7 @@ async function repointRoachUsage(knex) {
         if (changed) await writeAudit(knex, actionFor(STEPS.roachUsage), 'service_product_usage', row.id, { kind: 'repointed', service_type: serviceType, from: String(row.product_id), to: String(live.id) });
       } else if (gentrolIds.has(String(row.product_id)) && row.notes === GENTROL_NOTE_BEFORE) {
         const changed = await knex('service_product_usage').where({ id: row.id, notes: GENTROL_NOTE_BEFORE }).update({ notes: GENTROL_NOTE_AFTER });
-        if (changed) await writeAudit(knex, actionFor(STEPS.roachUsage), 'service_product_usage', row.id, { kind: 'note', service_type: serviceType, before: GENTROL_NOTE_BEFORE, after: GENTROL_NOTE_AFTER });
+        if (changed) await writeAudit(knex, actionFor(STEPS.roachUsage), 'service_product_usage', row.id, { kind: 'note', service_type: serviceType, product_id: String(row.product_id), before: GENTROL_NOTE_BEFORE, after: GENTROL_NOTE_AFTER });
       }
     }
   }
@@ -396,12 +401,13 @@ async function repointRoachUsage(knex) {
 async function restoreRoachUsage(knex) {
   await lockUsageTable(knex);
   for (const event of await pendingEvents(knex, STEPS.roachUsage)) {
-    const { kind, from, to, before, after } = asObject(event.metadata);
+    const { kind, service_type: serviceType, product_id: productId, from, to, before, after } = asObject(event.metadata);
     let restored = 0;
-    if (kind === 'repointed' && from && to && await productExists(knex, from)) {
-      restored = await knex('service_product_usage').where({ id: event.resource_id, product_id: to }).update({ product_id: from });
-    } else if (kind === 'note' && before && after) {
-      restored = await knex('service_product_usage').where({ id: event.resource_id, notes: after }).update({ notes: before });
+    // The row must still be the audited service type and product: the inventory editor can reassign either, keeping the id.
+    if (kind === 'repointed' && serviceType && from && to && await productExists(knex, from)) {
+      restored = await knex('service_product_usage').where({ id: event.resource_id, service_type: serviceType, product_id: to }).update({ product_id: from });
+    } else if (kind === 'note' && serviceType && productId && before && after) {
+      restored = await knex('service_product_usage').where({ id: event.resource_id, service_type: serviceType, product_id: productId, notes: after }).update({ notes: before });
     }
     if (restored) await recordRollback(knex, STEPS.roachUsage, event, 'service_product_usage');
     else keptLog(`usage row ${event.resource_id}`);

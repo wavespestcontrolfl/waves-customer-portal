@@ -88,9 +88,9 @@ const DEMAND_LIST = ['Demand CS', 'Advion Gel', 'Gentrol Complete EC3'];
 const FULL = ['Taurus SC', 'LESCO Crosscheck Plus', 'LESCO 90/10 Nonionic Surfactant'];
 const baseTables = () => ({
   products_catalog: [
-    { id: ID.taurus, name: 'Taurus SC' }, { id: ID.cross, name: 'LESCO Crosscheck Plus' }, { id: ID.surf, name: 'LESCO 90/10 Nonionic Surfactant' },
-    { id: ID.antapex, name: 'Atticus Antapex WSG' }, { id: ID.demand, name: 'Demand CS' }, { id: ID.advionWdg, name: 'Advion WDG Granular' },
-    { id: ID.gentrol, name: 'Gentrol Complete EC3' },
+    { id: ID.taurus, name: 'Taurus SC', active: true }, { id: ID.cross, name: 'LESCO Crosscheck Plus', active: true }, { id: ID.surf, name: 'LESCO 90/10 Nonionic Surfactant', active: true },
+    { id: ID.antapex, name: 'Atticus Antapex WSG', active: true }, { id: ID.demand, name: 'Demand CS', active: true }, { id: ID.advionWdg, name: 'Advion WDG Granular', active: true },
+    { id: ID.gentrol, name: 'Gentrol Complete EC3', active: true },
     { id: ID.oldGel, name: 'Advion Cockroach Gel Bait', active: false }, { id: ID.liveGel, name: 'Advion Evolution Cockroach Gel Bait', active: true },
   ],
   audit_log: [],
@@ -230,16 +230,22 @@ describe('pest regular protocol products migration: up', () => {
     expect(logged(logSpy)).toMatch(/"Quarterly Pest Control" usage rows are not the ones read/);
   });
 
-  test('a missing or duplicated house product leaves the usage rows alone', async () => {
-    const tables = baseTables();
-    tables.products_catalog.push({ id: 'dup', name: 'LESCO Crosscheck Plus' });
-    knex = makeKnex(tables);
-    await migration.up(knex);
-    expect(pestRows(knex)).toEqual(pestRows(makeKnex(baseTables())));
-    tables.products_catalog = tables.products_catalog.filter((row) => row.id !== 'dup' && row.id !== ID.surf);
-    knex = makeKnex(tables);
-    await migration.up(knex);
-    expect(pestRows(knex)).toEqual(pestRows(makeKnex(baseTables())));
+  test('a missing, duplicated or inactive house product leaves the usage rows AND the six service lists alone', async () => {
+    const breaks = [
+      (t) => t.products_catalog.push({ id: 'dup', name: 'LESCO Crosscheck Plus', active: true }),
+      (t) => { t.products_catalog = t.products_catalog.filter((row) => row.id !== ID.surf); },
+      (t) => { t.products_catalog.find((row) => row.id === ID.taurus).active = false; },
+    ];
+    for (const change of breaks) {
+      const tables = baseTables();
+      change(tables);
+      const other = makeKnex(tables);
+      await migration.up(other);
+      expect(pestRows(other)).toEqual(pestRows(makeKnex(tables)));
+      for (const key of Object.keys(migration.OLD_DEFAULTS)) expect(serviceOf(other, key).default_products).toEqual(serviceOf(makeKnex(baseTables()), key).default_products);
+      // The roach steps do not need the house products and still run.
+      expect(serviceOf(other, 'german_roach').default_products).toEqual(['Atticus Antapex WSG', migration.GEL_LIVE, 'Gentrol Complete EC3']);
+    }
   });
 
   test('all six general-pest services take Taurus + Crosscheck + surfactant; the cockroach services never do', async () => {
@@ -482,6 +488,17 @@ describe('pest regular protocol products migration: down', () => {
     await migration.down(knex);
     expect(byId(usageOf(knex, 'General Pest Perimeter'))).toEqual(generalBefore);
     expect(usageOf(knex, 'General Pest Perimeter').map((row) => row.id)).not.toContain('g1');
+  });
+
+  test('a roach row the office reassigned since (another service type or product, same id) is kept: neither the gel nor the note is rolled back onto it', async () => {
+    await migration.up(knex);
+    rowOf(knex, 'c2').service_type = 'Somewhere Else';
+    rowOf(knex, 'c3').product_id = ID.taurus;
+    await migration.down(knex);
+    expect(rowOf(knex, 'c2')).toMatchObject({ service_type: 'Somewhere Else', product_id: ID.liveGel });
+    expect(rowOf(knex, 'c3')).toMatchObject({ product_id: ID.taurus, notes: 'Tank-mixed at 1 oz/gal with the Antapex gallon' });
+    expect(rowOf(knex, 'r1').product_id).toBe(ID.oldGel);
+    expect(rowOf(knex, 'r2').notes).toBe(GENTROL_NOTE);
   });
 
   test('a roach gel row edited since, or a note edited since, is kept', async () => {
