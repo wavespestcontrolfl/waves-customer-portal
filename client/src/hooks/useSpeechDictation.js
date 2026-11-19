@@ -256,13 +256,12 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       const token = readToken();
       if (!token) return;
       setUploading(true);
-      // The round trip can outlive the field: unmounted, or the mic now
-      // belongs to another customer or visit. Never append into the wrong field.
-      const stillWanted = () => mountedRef.current && targetRef.current.key === clip.key;
+      // The round trip can outlive the field: unmounted, the mic now belongs to another customer or
+      // visit, or another tab switched the login. Never append into the wrong field.
+      const stillWanted = () => mountedRef.current && targetRef.current.key === clip.key && readToken() === token;
       // The caller can also say its field can no longer take the words (FocusedBoxMic: the box left
       // the page, locked or filled up), so no paid resend is offered for words with nowhere to go.
-      // The question can wait for the page to come back: a resend needs the same login.
-      const canResend = () => stillWanted() && readToken() === token && resendWantedRef.current?.() !== false;
+      const canResend = () => stillWanted() && resendWantedRef.current?.() !== false;
       try {
         // A send with no answer asks to send the same recording again (null = the person said no).
         const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, canResend);

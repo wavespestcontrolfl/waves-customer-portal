@@ -384,6 +384,20 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(postsTo(fetchMock)).toHaveLength(1);
   });
 
+  it("the login changed while a send was in flight: its words are not put in the box", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const answer = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (url, opts) => {
+      if (opts?.method === "POST") localStorage.setItem("waves_admin_token", "other-staff-jwt");
+      return answer(url, opts);
+    });
+    const result = await recordAndStop(onTranscript);
+    await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
+
   it("a refusal (the server answered) is shown and never offers a resend", async () => {
     const confirm = vi.fn(() => true);
     vi.stubGlobal("confirm", confirm);
