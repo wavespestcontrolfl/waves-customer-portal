@@ -310,7 +310,11 @@ async function checkAnswerPlan(brief, fetched) {
   try {
     context = await tools.editorialPlanContextForBrief(brief);
     if (context.applicable === false) return fetched; // a refresh of a page outside the blog contract
-    if (context.unresolved) return waitResult(PLAN_UNAVAILABLE, 'the title for the answer-plan review could not be resolved; the row looks again later');
+    // No retry can help: the writer pushes a hold (blog-run step 5), which parks the row for a new brief.
+    if (context.unresolved && context.permanent) {
+      return invalidPlan('the answer-plan review has no title to check against (the brief has no title, or the refresh target is gone or has no title). Push a hold with reason brief_unusable that names this check', fetched.revision);
+    }
+    if (context.unresolved) return waitResult(PLAN_UNAVAILABLE, 'the title for the answer-plan review could not be read; the row looks again later');
     if (!fetched.answer_plan) return invalidPlan('answer_plan is missing: this brief needs the answer plan the blog fact check reviews (see answer_plan_shape in the writing pack)', fetched.revision);
     review = await require('./editorial-review').reviewPlan({ title: context.title, sections: fetched.answer_plan.sections });
   } catch (err) {

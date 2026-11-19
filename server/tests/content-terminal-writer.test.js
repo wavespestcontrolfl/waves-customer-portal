@@ -443,8 +443,14 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
 
   test('a refresh whose target page cannot be read waits (not INVALID); a non-blog target needs no plan', async () => {
     asMac();
-    astro.getFile.mockResolvedValue(null);
+    astro.getFile.mockRejectedValue(Object.assign(new Error('Bad Gateway'), { status: 502 }));
     expect(await run(refresh, withPlan())).toMatchObject({ wait: true, code: tw.PLAN_UNAVAILABLE });
+    // A target that is gone, or a brief with no title: no retry helps, so the writer is asked for a hold.
+    astro.getFile.mockReset().mockResolvedValue(null);
+    const gone = await run(refresh, withPlan());
+    expect(gone).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/Push a hold with reason brief_unusable.*\[terminal revision commit-1\]$/) });
+    const untitled = await run({ ...blog, working_title: '', target_keyword: '' }, withPlan());
+    expect(untitled).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/brief_unusable/) });
     astro.getFile.mockImplementation(async (filePath) => (filePath === 'src/content/services/pest-control-venice-fl.md'
       ? { content: '---\ntitle: Pest Control Venice\n---\n\nBody.' } : null));
     expect(await run({ ...refresh, target_url: '/pest-control-venice-fl/' }, good())).toMatchObject({ ok: true });

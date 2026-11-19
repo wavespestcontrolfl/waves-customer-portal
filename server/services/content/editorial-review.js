@@ -218,7 +218,10 @@ async function repair({ document, findings = [], sources = [], title = '', domai
     jsonSchema: REPAIR_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-repair-v1',
     validate: (json) => repairViolation(split.body, json?.body),
   });
-  if (!response?.ok || !response.json) throw new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`);
+  if (!response?.ok || !response.json) {
+    // The model did not answer (a timeout, a limit): the same findings may repair on a retry.
+    throw Object.assign(new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`), { transient: true });
+  }
   const violation = repairViolation(split.body, response.json.body);
   if (violation) throw new Error(`editorial repair rejected: ${violation}`);
   return composeRepairDocument(split.frontmatter, response.json.body, document);

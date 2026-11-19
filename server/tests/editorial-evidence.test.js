@@ -408,6 +408,17 @@ test.each([
   })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE' });
   expect(reviewer.review).not.toHaveBeenCalled();
 });
+test('a repair whose model did not answer is a transient outage; any other repair error is not', async () => {
+  const failed = passing();
+  failed.pass = false;
+  failed.checks[0] = { name: 'answer_first', status: 'fail', findings: [{ passage: 'Inspect', action: 'Answer directly.' }] };
+  reviewer.review.mockResolvedValue(failed);
+  const draft = () => ({ frontmatter: { title: 'How to inspect a door' }, body: 'Inspect' });
+  reviewer.repair.mockRejectedValueOnce(Object.assign(new Error('editorial repair failed: all_providers_failed'), { transient: true }));
+  await expect(evidence.prepareDraft(draft(), { page_type: 'supporting-blog' })).rejects.toMatchObject({ code: 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE', transient: true });
+  reviewer.repair.mockRejectedValueOnce(new Error('editorial repair rejected: body_too_short'));
+  await expect(evidence.prepareDraft(draft(), { page_type: 'supporting-blog' })).rejects.toThrow('editorial repair rejected');
+});
 test('an exhausted repair fails with directives instead of requiring approval', async () => {
   const failed = { ...passing(), pass: false, checks: [{ name: 'source_support', status: 'fail', findings: [{ passage: 'Claim', action: 'Remove unsupported claim.' }] }] };
   reviewer.review.mockResolvedValue(failed);

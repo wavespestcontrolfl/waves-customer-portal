@@ -245,6 +245,13 @@ function notesEvidenceUrls(draft) {
   return [...new Set(urls)];
 }
 
+// A repair whose model did not answer is a review that could not run (transient); any other repair
+// error is thrown as it is (the runner treats it as a review that could not run, not transient).
+function repairError(err) {
+  if (err?.transient !== true) return err;
+  return reviewError({ checks: [{ name: 'editorial_quality', status: 'error', findings: [{ action: `The editorial repair could not run (${err.message}); retry the review.` }] }], transient: true });
+}
+
 async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
   const original = fm.stringify(reviewFrontmatter, draft.body || '');
   let document = original;
@@ -263,7 +270,8 @@ async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
         // document's domain successfully (it throws otherwise), so this is
         // never null here — recomputed rather than threaded through so
         // repair always reviews under the domain the current bytes declare.
-        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: domainContextFromDocument(document) });
+        title: reviewFrontmatter.title || reviewFrontmatter.metaTitle || '', domain: domainContextFromDocument(document) })
+        .catch((err) => { throw repairError(err); });
       document = typeof repaired === 'string' ? repaired : repaired?.document;
       if (!document || JSON.stringify(fm.parse(document).data) !== JSON.stringify(fm.parse(original).data)) throw reviewError(result);
     }

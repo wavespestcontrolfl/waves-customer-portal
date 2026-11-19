@@ -1571,8 +1571,8 @@ class AutonomousRunner {
       if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
         return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
       }
-      // The publish-time review (final evidence) on the Mac: an outage keeps the draft, as before the gates.
-      if (macReviewOutage(err, run)) return this._awaitTerminalReviewer({ queue, opp, run, t0, finalize, claimToken, reason: err.message });
+      // Not the Mac outage wait here: a publish retried later would pay for its images again. The gate
+      // retry is bounded, and the terminal writes its next draft free.
       if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,

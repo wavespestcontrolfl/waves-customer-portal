@@ -101,28 +101,35 @@ async function resolveRefreshEditorialTitle(sessionId, context) {
 //   { applicable: false }        the refresh target is outside the blog contract
 //   { title, partial }           review the plan against this title; `partial` =
 //                                refresh (headings only have to appear)
-//   { title: '', unresolved }    the title is not known (a refresh target that
-//                                cannot be read, or a brief with no title)
+//   { title: '', unresolved, permanent }
+//                                the title is not known; `permanent` when a retry
+//                                cannot help (a brief with no title, a refresh
+//                                target that is gone or has no title), false for
+//                                a read that failed and may pass later
 // A read failure throws nothing: get_existing_page returns an error object.
 async function editorialPlanContextForBrief(brief) {
   const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
   if (!refresh) {
     const title = String(brief?.working_title || brief?.target_keyword || '').trim();
-    return { title, partial: false, ...(title ? {} : { unresolved: true }) };
+    return { title, partial: false, ...(title ? {} : { unresolved: true, permanent: true }) };
   }
   const existing = await readRefreshTarget(brief);
   if (existing.applicable === false) return existing;
-  return { title: existing.title, partial: true, ...(existing.title ? {} : { unresolved: true }) };
+  return { title: existing.title, partial: true, ...(existing.title ? {} : { unresolved: true, permanent: existing.permanent }) };
 }
 
-// The refresh target's existing title ('' when it cannot be read), or
-// { applicable: false } when the target is outside the blog contract.
+// get_existing_page errors that may pass later (GitHub or the parser was not reachable).
+const TEMPORARY_PAGE_READ_RE = /^(?:get_existing_page failed:|github-client \/ frontmatter parser unavailable)/;
+
+// The refresh target's existing title ('' when it cannot be read, with `permanent`),
+// or { applicable: false } when the target is outside the blog contract.
 async function readRefreshTarget(brief) {
   const targetUrl = brief.target_url || brief.page_url || null;
-  const existing = targetUrl ? await executeBriefTool('get_existing_page', { page_url: targetUrl }) : null;
-  if (!existing?.file_path) return { title: '' };
+  if (!targetUrl) return { title: '', permanent: true };
+  const existing = await executeBriefTool('get_existing_page', { page_url: targetUrl });
+  if (!existing?.file_path) return { title: '', permanent: Boolean(existing?.error) && !TEMPORARY_PAGE_READ_RE.test(String(existing.error)) };
   if (!require('../editorial-evidence').applicable(existing.file_path)) return { applicable: false };
-  return { title: String(existing.frontmatter?.title || existing.frontmatter?.metaTitle || '').trim() };
+  return { title: String(existing.frontmatter?.title || existing.frontmatter?.metaTitle || '').trim(), permanent: true };
 }
 
 // Routes each session was SHOWN by check_existing_content. The writer
