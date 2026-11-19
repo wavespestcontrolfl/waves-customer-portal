@@ -3,7 +3,7 @@ const router = express.Router();
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { authenticate, authenticateAllowInactive } = require('../middleware/auth');
+const { authenticate, authenticateAllowInactive, isCancelledCustomerRow } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { raiseAdminAlert, cutAtWord, firstSentence, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -74,10 +74,12 @@ function cancellationConfirmedToCustomer(result) {
   return cancellationCompleted(result) || !!(result && result.churned && onlyStaleVisitErrorsLeft(result));
 }
 
-// accountInactive: the route KNOWS the account is inactive (the inactive-
-// account retry). The retry may replay an older SCOPED request whose result
-// says churned:false, so the reply states the account's real state.
-function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = [], { accountInactive = false } = {}) {
+// accountCancelled: the route KNOWS the account is a processed cancellation
+// (auth's isCancelledCustomerRow: active false + churned). A retry may replay
+// an older SCOPED request whose result says churned:false, so the reply
+// states the account's real state. An account inactive for another reason
+// (not churned) is not reported as churned.
+function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = [], { accountCancelled = false } = {}) {
   let effectiveDate = null;
   try {
     const at = effectiveAt ? new Date(effectiveAt) : new Date();
@@ -98,7 +100,7 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // churned:true, ok:false — the account is already inactive and the
     // portal must refresh its auth snapshot even though the request is
     // parked for office review.
-    churned: !!(result && result.churned) || accountInactive,
+    churned: !!(result && result.churned) || accountCancelled,
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
@@ -429,9 +431,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // A retry is still a truthful outcome (H0): the sweep above is the
         // authority on whether the plan is closed. No confirmation is sent
         // from this branch — the original request's already went out.
-        // An account that went inactive since the original submit says so
-        // (accountInactive), like the inactive-account branch below.
-        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at, [], { accountInactive: !!req.customerInactive }) } : {}),
+        // An account cancelled since the original submit says so
+        // (accountCancelled), like the inactive-account branch below.
+        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at, [], { accountCancelled: isCancelledCustomerRow(req.customer) }) } : {}),
       });
     }
 
@@ -531,7 +533,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           photoCount: 0,
           createdAt: priorCancellation.created_at,
         },
-        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at, [], { accountInactive: true }),
+        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at, [], { accountCancelled: isCancelledCustomerRow(req.customer) }),
       });
     }
 

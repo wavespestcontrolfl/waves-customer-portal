@@ -366,11 +366,13 @@ describe('Screen 2 — reason and resolution', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel Pest Control' }));
   };
 
-  it('a scoped retry reply with the continuing families unknown keeps the partial copy and no account refresh', async () => {
+  it('a scoped retry reply with the continuing families unknown names only what stopped, with no account refresh', async () => {
     const refreshCustomer = vi.fn().mockResolvedValue(undefined);
     renderFlow({ refreshCustomer });
     await submitScopedCancel({ processed: true, churned: false, confirmation: null, confirmationChannels: [], effectiveDate: '2026-08-31', scope: ['pest_control'], remaining: [], tierBefore: null, tierAfter: null });
-    await screen.findByText(/pest control cancelled; your other services continue\. the cancelled visits are off the calendar/i);
+    await screen.findByText(/pest control cancelled\. the cancelled visits are off the calendar/i);
+    // The repair-only retry does not prove another service is still active.
+    expect(screen.queryByText(/continue/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/your plan is cancelled/i)).not.toBeInTheDocument();
     expect(refreshCustomer).not.toHaveBeenCalled();
   });

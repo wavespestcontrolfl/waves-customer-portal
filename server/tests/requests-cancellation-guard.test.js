@@ -12,13 +12,19 @@ jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 // Per-test: the inactive-account retry branch (churned customer, unexpired
 // portal JWT) is entered by flipping this before the request.
 let mockAuthInactive = false;
+// An inactive account's pipeline stage: 'churned' = a processed cancellation.
+let mockAuthStage = 'churned';
 jest.mock('../middleware/auth', () => ({
+  isCancelledCustomerRow: jest.requireActual('../middleware/auth').isCancelledCustomerRow,
   authenticate: (req, _res, next) => {
     req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
     next();
   },
   authenticateAllowInactive: (req, _res, next) => {
-    req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
+    req.customer = {
+      id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000',
+      ...(mockAuthInactive ? { active: false, pipeline_stage: mockAuthStage } : { active: true }),
+    };
     req.customerInactive = mockAuthInactive;
     next();
   },
@@ -160,6 +166,7 @@ function postCancellation(baseUrl, body = {}) {
 
 beforeEach(() => {
   mockAuthInactive = false;
+  mockAuthStage = 'churned';
   mockState = {
     // dupe check + prior-cancellation lookup both read service_requests.
     service_requests: [],
@@ -428,6 +435,21 @@ describe('POST /api/requests cancellation guard', () => {
     expect(res.status).toBe(200);
     expect(body.deduped).toBe(true);
     expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
+
+    // Inactive for another reason (not a processed cancellation): the reply
+    // keeps the run's own churn state and the scoped copy.
+    mockAuthStage = 'won';
+    mockState.service_requests = [{
+      id: 'req-portal-dedupe-inactive-other', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-dedupe-inactive-other', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: false, scope: ['mosquito'] }));
+    mockAuthStage = 'churned';
     mockAuthInactive = false;
 
     // A SCOPED run whose only error is an earlier-day stuck visit is not

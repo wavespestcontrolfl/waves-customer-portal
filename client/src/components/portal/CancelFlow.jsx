@@ -399,8 +399,9 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
     const scoped = outcome.partial;
     // A scope on a reply that is not partial = an inactive account (above).
     const closedAfterScoped = outcome.scope.length > 0 && !scoped;
-    // A repair-only retry names the scope but not the continuing families.
-    const continuing = outcome.remaining.length ? listWords(outcome.remaining) : 'your other services';
+    // A repair-only retry proves the scope's wind-down, not which families
+    // continue (remaining []): then the copy names only what stopped.
+    const continuing = outcome.remaining.length ? `; ${listWords(outcome.remaining)} continue` : '';
     const confirmationLine = channels.includes('sms') && channels.includes('email')
       ? ' A confirmation text and email are on the way.'
       : outcome.confirmation === 'sms' ? ' A confirmation text is on its way.'
@@ -411,7 +412,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         {outcome.processed && closedAfterScoped
           ? 'Your WaveGuard plan is cancelled. Recurring visits and plan billing have stopped — anything still open shows on your Visits and Billing tabs.'
           : outcome.processed
-          ? `${scoped ? `${listWords(outcome.scope)} cancelled; ${continuing} continue${outcome.tierAfter ? ` under WaveGuard ${outcome.tierAfter}` : ''}` : `Your plan is cancelled${outcome.effectiveDate ? ` as of ${fmtDate(outcome.effectiveDate)}` : ''}`}. ${scoped ? 'The cancelled visits are off the calendar.' : 'Upcoming visits are off the calendar and autopay is off.'} Nothing more is charged for ${scoped ? 'the cancelled services' : 'future service'}; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${confirmationLine} Changed your mind? Call ${WAVES_PHONE_DISPLAY} and we will put it back.`
+          ? `${scoped ? `${listWords(outcome.scope)} cancelled${continuing}${outcome.tierAfter ? ` under WaveGuard ${outcome.tierAfter}` : ''}` : `Your plan is cancelled${outcome.effectiveDate ? ` as of ${fmtDate(outcome.effectiveDate)}` : ''}`}. ${scoped ? 'The cancelled visits are off the calendar.' : 'Upcoming visits are off the calendar and autopay is off.'} Nothing more is charged for ${scoped ? 'the cancelled services' : 'future service'}; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${confirmationLine} Changed your mind? Call ${WAVES_PHONE_DISPLAY} and we will put it back.`
           : 'We received your cancellation and are closing out your plan by hand. You will hear from us within 1 business day to confirm exactly what has stopped.'}
       </div>
     );
