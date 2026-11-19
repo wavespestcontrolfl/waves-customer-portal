@@ -1430,3 +1430,34 @@ it("a very large technician row read keeps its keepalive bodies under the browse
   expect(keepaliveBytes).toBeLessThanOrEqual(64 * 1024);
   expect(posts.some(([, init]) => !init.keepalive)).toBe(true);
 });
+
+it("a row read with one failed batch waits for every batch, then says the rest failed", async () => {
+  messages = Array.from({ length: 450 }, (_, i) => ({ ...inbound(`m${i}`, `Text ${i}`), isRead: false, createdAt: new Date(Date.UTC(2024, 6, 1, 12, 0, i)).toISOString() }));
+  const okFetch = fetch.getMockImplementation();
+  let readCalls = 0;
+  let answerLast;
+  fetch.mockImplementation(async (url, init) => {
+    if (String(url).endsWith("/messages/read") && init?.method === "POST") {
+      readCalls += 1;
+      if (readCalls === 2) return response({ error: "boom" }, 500);
+      if (readCalls === 3) return new Promise((resolve) => { answerLast = () => resolve(response({ success: true })); });
+    }
+    return okFetch(url, init);
+  });
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000); await tick(0); await tick(0);
+  expect(readPosts("/messages/read")).toHaveLength(3);
+  const logCallsAfterReads = () => {
+    const firstRead = fetch.mock.calls.findIndex(([u, init]) => String(u).endsWith("/messages/read") && init?.method === "POST");
+    return fetch.mock.calls.slice(firstRead).filter(([u]) => String(u).includes("/communications/log")).length;
+  };
+  // Batch 2 failed, batch 3 is still out: no error and no refresh yet.
+  expect(logCallsAfterReads()).toBe(0);
+  expect(screen.queryByText("The texts were not marked read. Try again.")).not.toBeInTheDocument();
+  await act(async () => { answerLast(); });
+  await tick(0); await tick(0);
+  expect(screen.getByText("The texts were not marked read. Try again.")).toBeInTheDocument();
+  expect(logCallsAfterReads()).toBeGreaterThan(0);
+});

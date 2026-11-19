@@ -1812,6 +1812,8 @@ export function SmsTab({
     if (!pending) return;
     setSendingReads((prev) => [...prev, pending]);
     setPendingRead((current) => (current === pending ? null : current));
+    // The read the server took: all of `pending`, or only the batches that landed.
+    let confirmed = pending;
     try {
       if (pending.all || pending.senderKey) {
         // A row's sender read covers that sender's older texts on pages not loaded.
@@ -1832,7 +1834,9 @@ export function SmsTab({
         for (let i = 0; i < pending.messageIds.length; i += LIST_READ_ID_BATCH) {
           batches.push(pending.messageIds.slice(i, i + LIST_READ_ID_BATCH));
         }
-        await Promise.all(batches.map(async (messageIds) => {
+        // Every batch settles before the page is updated, so a failed one
+        // cannot hide the ones that landed.
+        const results = await Promise.allSettled(batches.map(async (messageIds) => {
           const body = JSON.stringify({ messageIds });
           const keepalive = takeKeepaliveBudget(keepaliveBytesRef, body);
           try {
@@ -1841,12 +1845,15 @@ export function SmsTab({
             if (keepalive) keepaliveBytesRef.current -= body.length;
           }
         }));
+        const landed = batches.filter((_, i) => results[i].status === "fulfilled").flat();
+        if (landed.length < pending.messageIds.length) confirmed = { ...pending, messageIds: landed, partial: true };
       }
       const readAt = new Date().toISOString();
       readCommitSeqRef.current += 1;
-      confirmedReadsRef.current = [...confirmedReadsRef.current, { seq: readCommitSeqRef.current, pending }];
-      setMessages((prev) => prev.map((m) => (!m.isRead && pendingReadCovers(pending, m) ? { ...m, isRead: true, readAt } : m)));
+      confirmedReadsRef.current = [...confirmedReadsRef.current, { seq: readCommitSeqRef.current, pending: confirmed }];
+      setMessages((prev) => prev.map((m) => (!m.isRead && pendingReadCovers(confirmed, m) ? { ...m, isRead: true, readAt } : m)));
       notifyUnreadChanged();
+      if (confirmed.partial) throw new Error("Some read batches failed");
     } catch {
       setListReadError("The texts were not marked read. Try again.");
       loadData(smsSearchRef.current, { refresh: true });
