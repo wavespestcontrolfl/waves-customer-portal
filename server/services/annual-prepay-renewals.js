@@ -3405,12 +3405,143 @@ async function termWasPafDeferred(term, prepayInvoiceId, conn) {
   return !!job && job.deferred_to_first_visit === true && String(job.invoice_id || '') === String(prepayInvoiceId);
 }
 
+// The invoice pay page's plan choice (pay-plan-choice.js, owner 2026-11-19)
+// leaves the accept-minted first invoice (setup fee + first application)
+// payable beside the unpaid prepay it offered. Once that prepay is PAID the
+// year replaces the first invoice, so it is closed here:
+//   - voided through the canonical voidInvoice (PaymentIntent triage, payment
+//     plan and follow-up stop; it refuses an invoice with money on it, which
+//     then stays for the office), carrying the switch's superseded-by marker
+//     so a later void/refund of the prepay re-mints it
+//     (restoreSwitchSupersededInvoicesForPrepay), and
+//   - a first visit that already COMPLETED is stamped as this year's covered
+//     visit ("that visit counts as visit 1"). applyPrepaidCoverageForTerm
+//     never stamps a completed row, and without the stamp the visit reads as
+//     completed-and-unbilled to every billing surface.
+// Only the invoice the prepay's own note names is touched. Idempotent: a
+// closed invoice is no longer open, and a stamped visit is skipped.
+const PLAN_CHOICE_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|First service application)$/;
+
+// The paid term and the ONE open first invoice its prepay names, or null.
+async function acceptInvoiceReplacedByPaidTerm(termId) {
+  const PayPlanChoice = require('./pay-plan-choice');
+  // The committed row: callers hand in snapshots read before activation.
+  const term = await db('annual_prepay_terms').where({ id: termId }).first();
+  if (!term?.source_estimate_id || !term.prepay_invoice_id || !ACTIVE_STATUSES.includes(String(term.status || ''))) return null;
+  const prepay = await db('invoices').where({ id: term.prepay_invoice_id }).first('id', 'status', 'notes');
+  if (!['paid', 'prepaid'].includes(String(prepay?.status || '').toLowerCase())) return null;
+  const open = await db('invoices')
+    .where({ customer_id: term.customer_id })
+    .whereIn('status', PayPlanChoice.OPEN_INVOICE_STATUSES)
+    .whereNull('annual_prepay_term_id')
+    .whereNull('payer_id')
+    .where('notes', 'like', `Auto-generated from accepted estimate #${String(term.source_estimate_id)}%`)
+    .select('id', 'invoice_number', 'scheduled_service_id', 'line_items', 'credit_applied', 'amount_paid');
+  const named = open.filter((inv) => PayPlanChoice.prepayNoteNamesInvoice(prepay.notes, inv.invoice_number));
+  return named.length === 1 ? { term, prepay, first: named[0] } : null;
+}
+
+// Anything beyond this plan's own setup fee and first application (a sibling
+// charge, applied credit, a deposit line, a part payment) is not the year's
+// to erase.
+function invoiceBillsOnlyAcceptedPlan(invoice) {
+  const lines = require('./invoice')._parseInvoiceLineItems(invoice.line_items);
+  return lines.length > 0
+    && lines.every((li) => PLAN_CHOICE_ACCEPT_LINES.test(String(li?.description || '').trim()))
+    && !(Number(invoice.credit_applied || 0) > 0)
+    && !(Number(invoice.amount_paid || 0) > 0);
+}
+
+// A first visit that already completed becomes this year's covered visit, at
+// the share of the year its place in the coverage order carries.
+async function stampCompletedVisitCoveredByTerm(term, scheduledServiceId) {
+  const cols = await scheduledServiceColumns();
+  if (!scheduledServiceId || !cols.prepaid_amount || !cols.prepaid_method || !cols.annual_prepay_term_id) return;
+  const rows = await coverageRowsForTerm(term, db);
+  const index = rows.findIndex((row) => String(row.id) === String(scheduledServiceId));
+  const slices = splitCoverageAmount(Number(term.prepay_amount), normalizeCoverageVisitCount(term.coverage_visit_count));
+  const visitAmount = index === -1 ? 0 : (slices[index] ?? 0);
+  if (!(visitAmount > 0)) return;
+  await db('scheduled_services')
+    .where({ id: scheduledServiceId, customer_id: term.customer_id, status: 'completed' })
+    .whereNull('prepaid_method')
+    .where((q) => q.whereNull('prepaid_amount').orWhere('prepaid_amount', '<=', 0))
+    .update({
+      prepaid_amount: visitAmount,
+      prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD,
+      prepaid_note: `Annual prepaid ${normalizeCoverageServiceType(term.coverage_service_type)} (${index + 1} of ${slices.length})`,
+      prepaid_at: new Date(),
+      annual_prepay_term_id: term.id,
+      ...(cols.updated_at ? { updated_at: new Date() } : {}),
+    });
+}
+
+async function closeAcceptInvoiceReplacedByPaidTerm(termSnapshot) {
+  // Cheap exit for every term no estimate accept produced, before any read.
+  if (!termSnapshot?.id || !termSnapshot.source_estimate_id) return { closed: false };
+  const found = await acceptInvoiceReplacedByPaidTerm(termSnapshot.id);
+  if (!found) return { closed: false };
+  const { term, prepay, first } = found;
+  if (!invoiceBillsOnlyAcceptedPlan(first)) {
+    logger.warn(`[annual-prepay] term ${term.id}: invoice ${first.id} named by the paid prepay carries more than the accepted plan's setup and first application — left open for the office`);
+    return { closed: false };
+  }
+  const InvoiceService = require('./invoice');
+  // Marker BEFORE the void: a void that commits with no marker could never be
+  // restored by a refund of the prepay, while a marker on a still-open
+  // invoice is inert (the restore reads void rows only) and is taken back off
+  // when the void refuses.
+  const marker = `\n${InvoiceService.prepaySwitchSupersededByMarker(prepay.id)}`;
+  await db('invoices')
+    .where({ id: first.id })
+    .whereRaw("coalesce(notes, '') NOT LIKE ?", [`%${marker.trim()}%`])
+    .update({ notes: db.raw('coalesce(notes, ?) || ?', ['', marker]), updated_at: new Date() });
+  try {
+    await InvoiceService.voidInvoice(first.id);
+  } catch (err) {
+    await db('invoices').where({ id: first.id }).whereNot({ status: 'void' })
+      .update({ notes: db.raw('replace(notes, ?, ?)', [marker, '']), updated_at: new Date() });
+    throw err;
+  }
+  await db('activity_log').insert({
+    customer_id: term.customer_id,
+    action: 'invoice_replaced_by_annual_prepay',
+    description: `Invoice ${first.invoice_number} closed: the customer chose annual prepay on its pay page and paid the year`,
+    metadata: JSON.stringify({ invoice_id: first.id, prepay_invoice_id: prepay.id, annual_prepay_term_id: term.id }),
+    created_at: new Date(),
+  }).catch((err) => logger.warn(`[annual-prepay] activity_log insert failed for replaced invoice ${first.id}: ${err.message}`));
+  await stampCompletedVisitCoveredByTerm(term, first.scheduled_service_id);
+  return { closed: true, invoiceId: first.id };
+}
+
+// voidInvoice opens its own global-pool transaction and Stripe triage, so
+// inside a caller transaction the close waits for that commit (the same
+// posture as reconcileBornPaidTerm below); a rollback drops it with the term.
+// A miss is retried by every later payment sync and the daily covered-term
+// sweep, which both reach reconcilePendingWindowCompletions.
+async function closeAcceptInvoiceReplacedByPaidTermAfterCommit(term, conn) {
+  if (conn === db || !conn?.executionPromise) return closeAcceptInvoiceReplacedByPaidTerm(term);
+  conn.executionPromise
+    .then(() => closeAcceptInvoiceReplacedByPaidTerm(term))
+    .catch((err) => logger.warn(`[annual-prepay] replaced-invoice close skipped for term ${term.id}: ${err?.message || 'transaction rolled back'}`));
+  return { closed: false, deferred: true };
+}
+
 async function reconcilePendingWindowCompletions(term, conn = db) {
   const summary = { settled: 0, credited: 0 };
   try {
     const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
     const totalAmount = Number(term?.prepay_amount);
     if (!term?.id || !term.customer_id || !coverageVisitCount || !(totalAmount > 0)) return summary;
+    // First: the first invoice a pay-page plan choice left payable. Closed
+    // here it reads as void to the loop below, whose settle leg would
+    // otherwise refuse it on every run (its lines carry no base client id).
+    try {
+      await closeAcceptInvoiceReplacedByPaidTermAfterCommit(term, conn);
+    } catch (err) {
+      summary.failed = true;
+      logger.warn(`[annual-prepay] replaced-invoice close failed for term ${term.id}: ${err.message} — retried on the next sync`);
+    }
     const rows = await coverageRowsForTerm(term, conn);
     const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
     // Stamp-time price check, completion side (#5387): a visit held out of the
@@ -11729,6 +11860,7 @@ module.exports = {
   soldPriceCentsForVisit,
   recordMintVisitPrices,
   reconcilePendingWindowCompletions,
+  closeAcceptInvoiceReplacedByPaidTerm,
   reconcileDisputeWindowMonthlyDues,
   finishDisputeRecoveryForTerm,
   reversePendingWindowCompletionCredits,
