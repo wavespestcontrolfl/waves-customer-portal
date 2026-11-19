@@ -275,7 +275,6 @@ async function attachCompletionSummary(req, tracker, service) {
       limit: 1,
       completedOnly: true,
       scheduledServiceId: service.id,
-      homeSummary: true,
     });
     // Completion and report publication are separate commits. Keep a pending
     // state so Home can refresh instead of borrowing another visit's report.

@@ -141,7 +141,7 @@ export default function usePortalRead(key, load) {
     try {
       if (cache && navigator.onLine === false) throw new Error('You are offline. Reconnect to update this information.');
       const data = await Promise.race([
-        loadRef.current(),
+        loadRef.current({ isCurrent: () => sequence.current === attempt }),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('The connection is taking too long. Please try again.')), READ_TIMEOUT_MS); }),
       ]);
       if (sequence.current !== attempt) return;
@@ -199,5 +199,10 @@ export default function usePortalRead(key, load) {
     });
   }, [cache, key]);
 
-  return { ...state, refresh, update, invalidate, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
+  const freshnessGuard = useCallback(() => {
+    const expected = sequence.current;
+    return () => sequence.current === expected;
+  }, []);
+
+  return { ...state, refresh, update, invalidate, freshnessGuard, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

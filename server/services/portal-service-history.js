@@ -89,7 +89,7 @@ const ONE_RECORD_PER_APPOINTMENT = `(
 // so an incomplete visit is never shown or described as a completed one and
 // a visit's sibling records never show as extra visits.
 async function listPortalServiceHistory(customerId, {
-  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, scheduledServiceId = null, database = db, historyProperty = null, homeSummary = false,
+  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, scheduledServiceId = null, database = db, historyProperty = null,
 } = {}) {
   let query = database('service_records')
     .where({ 'service_records.customer_id': customerId })
@@ -165,7 +165,7 @@ async function listPortalServiceHistory(customerId, {
     // Re-completing a project can reuse a technician's existing record.
     // Only the project title frozen for the customer report has a known
     // origin on both fresh and reused records. Keep the same fee/code scrub.
-    const notesRecord = isProjectCompletion && homeSummary
+    const notesRecord = isProjectCompletion
       ? { ...svc, technician_notes: projectReportUrl ? structuredNotes.projectTitle || null : null }
       : svc;
     return {

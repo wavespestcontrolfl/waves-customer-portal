@@ -28,6 +28,7 @@ const profileShaped = [{ id: 'cust-1' }];
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   api.getServices.mockResolvedValue({ services: [] });
   api.getSchedule.mockResolvedValue({ upcoming: [] });
 });
@@ -185,6 +186,39 @@ describe('Completed visits by property', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
     expect(await screen.findByText('Verified after conflict')).toBeInTheDocument();
     expect(refreshProperties).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores an older background 409 after a newer pagination read verifies the same scope', async () => {
+    let rejectOlderRefresh;
+    let backgroundRefresh = false;
+    const refreshProperties = vi.fn();
+    api.getServices.mockImplementation(({ offset } = {}) => {
+      if (offset != null) return Promise.resolve({
+        historyProperty: 'pa', historyCustomerId: customer.id, total: 2,
+        services: [{ id: 'second', status: 'completed', date: '2026-01-09', type: 'Lawn', propertyAddress: 'Newer verified page' }],
+      });
+      if (backgroundRefresh) return new Promise((_resolve, reject) => { rejectOlderRefresh = reject; });
+      return Promise.resolve({
+        historyProperty: 'pa', historyCustomerId: customer.id, total: 2,
+        services: [{ id: 'first', status: 'completed', date: '2026-01-10', type: 'Pest', propertyAddress: 'First verified visit' }],
+      });
+    });
+    openCompletedWithCache({ onSavedScopeUnavailable: refreshProperties });
+    expect(await screen.findByText('First verified visit')).toBeInTheDocument();
+
+    backgroundRefresh = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh portal reads' }));
+    await waitFor(() => expect(rejectOlderRefresh).toEqual(expect.any(Function)));
+    fireEvent.click(screen.getByRole('button', { name: 'Load More Visits' }));
+    expect(await screen.findByText('Newer verified page')).toBeInTheDocument();
+
+    await act(async () => {
+      rejectOlderRefresh(Object.assign(new Error('Your selected property changed.'), { status: 409 }));
+    });
+    expect(screen.getByText('First verified visit')).toBeInTheDocument();
+    expect(screen.getByText('Newer verified page')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load service history')).not.toBeInTheDocument();
+    expect(refreshProperties).not.toHaveBeenCalled();
   });
 
   it('does not recover invalidated history from cache after a failed picker refresh, unmount, and offline remount', async () => {

@@ -80,6 +80,10 @@ const PortalGlassContext = createContext(false);
 const usePortalGlass = () => useContext(PortalGlassContext);
 const GLASS_SUBTLE = 'rgba(255,255,255,0.55)';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+function homeReportKey(visitId, report, propertyId) {
+  if (!visitId || !report || report.reportWithheld || report.reportAvailable === false) return null;
+  return JSON.stringify([propertyId, visitId, report.reportUrl, report.reportPdfUrl]);
+}
 const portalHomeReportUrl = (url) => {
   if (!url || !String(url).startsWith('/report/')) return url;
   const join = String(url).includes('?') ? '&' : '?';
@@ -205,36 +209,41 @@ async function fetchAuthedPdfBlob(url) {
 // PDF previews fetch Bearer-only endpoints into a blob URL first. The doc
 // passed in needs { id, title, fileName?, pdfUrl? } — pdfUrl drives the
 // overlay's Save-to-share-sheet button.
-function useReportPreview(onError) {
+function useReportPreview(onError, reportKey) {
   const [preview, setPreview] = useState(null); // { doc, src, blob?, blobUrl?, loading? }
 
-  const closePreview = () => {
+  const closePreview = useCallback(() => {
     setPreview(p => {
       if (p?.blobUrl) URL.revokeObjectURL(p.blobUrl);
       return null;
     });
-  };
+  }, []);
 
-  const openPagePreview = (doc, src) => setPreview({ doc, src });
+  const withdrawn = Boolean(preview && (reportKey === null || preview.reportKey !== reportKey));
+  useEffect(() => {
+    if (withdrawn) closePreview();
+  }, [withdrawn, closePreview]);
+
+  const openPagePreview = (doc, src) => setPreview({ doc, src, reportKey });
 
   const openPdfPreview = (doc, url) => {
-    setPreview({ doc, src: null, loading: true });
+    setPreview({ doc, src: null, loading: true, reportKey });
     fetchAuthedPdfBlob(url)
       .then(blob => {
         const blobUrl = URL.createObjectURL(blob);
         setPreview(p => {
-          if (!p || p.doc.id !== doc.id) { URL.revokeObjectURL(blobUrl); return p; }
-          return { doc, src: blobUrl, blob, blobUrl };
+          if (!p || p.doc !== doc) { URL.revokeObjectURL(blobUrl); return p; }
+          return { doc, src: blobUrl, blob, blobUrl, reportKey };
         });
       })
       .catch(err => {
         console.error(err);
-        setPreview(p => (p && p.doc.id === doc.id ? null : p));
+        setPreview(p => (p?.doc === doc ? null : p));
         onError?.(err);
       });
   };
 
-  return { preview, openPagePreview, openPdfPreview, closePreview };
+  return { preview: withdrawn ? null : preview, openPagePreview, openPdfPreview, closePreview };
 }
 
 // The arrival window quoted to customers is ALWAYS window_start + 2 hours
@@ -2845,9 +2854,6 @@ function rememberPetNameAskDone(customerId) {
 }
 
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
-  const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
-    () => showCustomerAlert('Could not open this report. Please try again.'),
-  );
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
   const dashboardSavedScope = properties.some((p) => p.key);
@@ -2926,6 +2932,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, onOpenPets, pr
   const lastScopeStale = scopeEchoMismatch(lastRead.data?.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed);
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
+  const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
+    () => showCustomerAlert('Could not open this report. Please try again.'),
+    homeReportKey(lastService?.id, lastRead.saved ? null : lastService, activePropertyId),
+  );
   // Misting system card (dark behind GATE_MOSQUITO_MISTING: gate off = { system: null }).
   // A loading or failed read renders nothing.
   const mistingRead = usePortalRead('misting-system', () => api.getMistingSystem());
@@ -3776,18 +3786,22 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
       })
       .catch(() => {});
   };
-  const readPage = async (pagination) => {
+  const readPage = async (pagination, { isCurrent = () => true } = {}) => {
     const requestedScopeKey = historyScopeKey;
+    const requestIsCurrent = () => mountedRef.current
+      && activeHistoryScopeRef.current === requestedScopeKey
+      && isCurrent();
     let result;
     try {
       result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
     } catch (error) {
-      if (historyProperty && (error?.status === 409 || (error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE'))) {
+      if (requestIsCurrent() && historyProperty
+        && (error?.status === 409 || (error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE'))) {
         invalidateHistoryScopeRef.current(requestedScopeKey, error?.message);
       }
       throw error;
     }
-    if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) {
+    if (!requestIsCurrent()) {
       throw new Error('This service-history request is no longer current.');
     }
     if (historyProperty && (result.historyProperty !== historyProperty || result.historyCustomerId !== customerId)) {
@@ -3798,7 +3812,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     }
     return result;
   };
-  const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, () => readPage({ limit: 100 }));
+  const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, ({ isCurrent }) => readPage({ limit: 100 }, { isCurrent }));
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
@@ -3851,7 +3865,10 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     if (loadingMore) return;
     setLoadingMore(true);
     const attempt = ++moreSequence.current;
-    readPage({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
+    const historyIsCurrent = historyRead.freshnessGuard();
+    readPage({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset }, {
+      isCurrent: () => moreSequence.current === attempt && historyIsCurrent(),
+    })
       .then(d => {
         if (moreSequence.current !== attempt) return;
         // The offset runs against a live newest-first query — a visit
@@ -13420,6 +13437,7 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const [reportRefreshing, setReportRefreshing] = useState(false);
   const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
     () => showCustomerAlert('Could not open this report. Please try again.'),
+    homeReportKey(tracker?.id, tracker?.serviceSummary, selectedProperty || currentEntry?.id),
   );
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);

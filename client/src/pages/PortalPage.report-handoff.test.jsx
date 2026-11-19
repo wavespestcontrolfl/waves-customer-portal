@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
+import { PortalReadProvider } from '../hooks/usePortalRead';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -203,6 +204,20 @@ describe('last-visit report handoff on Home', () => {
     expect(screen.getByRole('button', { name: 'View service report' })).toBeInTheDocument();
     expect(api.fetchRaw).not.toHaveBeenCalled();
     expect(saveBlobNative).not.toHaveBeenCalled();
+  });
+
+  it('closes an open native report when the refreshed visit withholds it', async () => {
+    nativeState.enabled = true;
+    nativeState.platform = 'ios';
+    const visit = { id: 'last-record', date: '2026-11-17', type: 'Quarterly Pest Control' };
+    api.getServices.mockResolvedValue({ services: [{ ...visit, reportUrl: '/report/last', reportAvailable: true }] });
+    render(<PortalReadProvider enabled><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: 'View service report' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    api.getServices.mockResolvedValue({ services: [{ ...visit, reportAvailable: false }] });
+    fireEvent(window, new Event('online'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'View service report' })).not.toBeInTheDocument();
   });
 
   it('resolves the configured API origin and previews the last-visit PDF on iOS', async () => {

@@ -69,7 +69,7 @@ router.get('/', async (req, res, next) => {
     // and Home's Last Visit card showed incomplete records as completed
     // visits and a visit's sibling records as extra visits.
     const { services: listed, total } = await listPortalServiceHistory(req.customerId, {
-      limit, offset, type, scope, completedOnly: true, historyProperty, homeSummary: propertyScoped,
+      limit, offset, type, scope, completedOnly: true, historyProperty,
     });
     // A contact the rule withholds from gets no artifact; an allowed contact
     // gets the visit without the public report bearers (the authenticated
