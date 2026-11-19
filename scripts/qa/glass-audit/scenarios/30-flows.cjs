@@ -178,7 +178,10 @@ const rate = {
 let offerStart = addETDays(new Date(), 30);
 while (new Date(`${etDateString(offerStart)}T12:00:00Z`).getUTCDay() !== 1) offerStart = addETDays(offerStart, 1);
 const OFFER_START = etDateString(offerStart);
-const OFFER_STEP = etDateString(addETDays(new Date(), 120));
+// The pay step follows the server's rule (job-offers.js stepDateFor): the first Monday after day 90.
+let offerStep = addETDays(offerStart, 91);
+while (new Date(`${etDateString(offerStep)}T12:00:00Z`).getUTCDay() !== 1) offerStep = addETDays(offerStep, 1);
+const OFFER_STEP = etDateString(offerStep);
 const OFFER_SENT = etDateString(addETDays(new Date(), -1));
 const OFFER_EXPIRES = addETDays(new Date(), 6).toISOString();
 const OFFER_SIGNED = addETDays(new Date(), 1).toISOString();
