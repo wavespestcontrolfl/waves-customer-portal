@@ -103,7 +103,7 @@ const {
 } = require('../utils/service-normalizer');
 const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
-  etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, validCalendarDate, sameDayWindowElapsed,
+  etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
   formatETDay, formatETDate, formatETTime, dateOnlyString,
 } = require('../utils/datetime-et');
@@ -25662,7 +25662,7 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // that visit's own date, so coverage counts it as visit 1; no first-visit
     // promise is recorded for a date that has passed.
     const pastAnchorDate = payPage && !firstVisitDate
-      ? validCalendarDate(input.firstVisitDateRaw, { allowTimeSuffix: true })
+      ? require('../utils/datetime-et').validCalendarDate(input.firstVisitDateRaw, { allowTimeSuffix: true })
       : null;
     const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
     const normalizedWindowStart = firstVisitDate && input.windowStartRaw
