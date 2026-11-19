@@ -93,6 +93,19 @@ describeDb('the v13 plan through PostgreSQL', () => {
   const codes = (result) => result.propertyGate.blocks.map((b) => b.code);
   const tetrinoItem = (result) => result.mixCalculator.items.find((item) => item.product?.name === 'Tetrino Insecticide');
 
+  test('a crew card gets the county of the booked property when both addresses say Lakewood Ranch', async () => {
+    setGates();
+    const visit = await plannedVisit({
+      service_address_line1: '200 Fixture Lane', service_address_city: 'Lakewood Ranch', service_address_zip: '34240',
+    }, { grass_type: 'bermuda', track_key: 'bermuda', county: 'Manatee', municipality: 'Lakewood Ranch' });
+    await knex('customers').where({ id: visit.customer_id }).update({ city: 'Lakewood Ranch', zip: '34202' });
+    const result = await plan(visit);
+    expect(result.propertyGate).toMatchObject({ municipality: 'Lakewood Ranch', county: 'Sarasota' });
+    await knex('scheduled_services').where({ id: visit.id }).update({ service_address_zip: null });
+    const unresolved = await plan(visit);
+    expect(unresolved.propertyGate).toMatchObject({ county: null, ordinanceStatus: 'ordinance_unknown' });
+  });
+
   describe.each(PREREQ)('completion defaults %s, property history %s', (completion, history) => {
     const gates = (v13 = 'on') => setGates({ v13, completion, history });
 

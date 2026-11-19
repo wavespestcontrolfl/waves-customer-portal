@@ -1,3 +1,6 @@
+const { fertilizerJurisdictionId } = require('../config/address-county');
+const { resolveOrdinanceJurisdiction } = require('./fertilizer-jurisdiction');
+
 const TREE_SHRUB_CLOSEOUT_VERSION = 'tree_shrub_closeout_v1';
 const { validatePestTreatmentEvidence } = require('./tree-shrub-pest-check');
 const { isNutriRootName, validateNutriRootEvidence } = require('./tree-shrub-fertilizer-evidence');
@@ -162,31 +165,15 @@ function normalizeOrdinanceZone(value) {
   return '';
 }
 
-// The N/P fertilizer blackout belongs to the property treated, not to the customer's mailing city. A visit row stamps
-// its own service address (service_address_city), and that city wins over the customer city the row carries.
-// The CITY decides the zone: street text ("123 North Port Boulevard") names a road, not a place, so it never
-// overrides a city. Only a row with no city at all falls back to street text, and then only to a blackout zone: a
-// street can add a restriction, never lift one (North Port is the one zone with no summer blackout).
+const TREE_SHRUB_ZONES = {
+  north_port_fl: 'north_port',
+  manatee_county_fl: 'manatee_parrish',
+  sarasota_county_fl: 'sarasota_venice',
+};
+
 function inferTreeShrubOrdinanceZone(service = {}) {
-  const stampedCity = text(service.service_address_city);
-  const cityText = stampedCity
-    ? combinedText(stampedCity)
-    : combinedText(service.city, service.municipality, service.county);
-  const hasCity = Boolean(cityText.trim());
-  const streetText = hasCity ? '' : combinedText(
-    service.service_address_line1,
-    service.address,
-    service.address_line1,
-    service.property_address,
-    service.service_address,
-  );
-  const location = hasCity ? cityText : streetText;
-  if (hasCity && /\bnorth\s*port\b/.test(location)) return 'north_port';
-  if (/\b(parrish|manatee|bradenton|palmetto|ellenton|lakewood\s*ranch)\b/.test(location)) {
-    return 'manatee_parrish';
-  }
-  if (/\b(sarasota|venice|nokomis|osprey|englewood)\b/.test(location)) return 'sarasota_venice';
-  return 'other_unknown';
+  const jurisdiction = resolveOrdinanceJurisdiction(service);
+  return TREE_SHRUB_ZONES[fertilizerJurisdictionId(jurisdiction)] || 'other_unknown';
 }
 
 function normalizePollinatorStatus(value) {

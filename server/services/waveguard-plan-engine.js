@@ -19,7 +19,7 @@ const {
   summarizeProtocolContext,
 } = require('./lawn-protocol-operating-layer');
 const { describeInventoryConversion } = require('./inventory-units');
-const { resolveAddressCounty } = require('../config/address-county');
+const { getApplicableOrdinances, resolveOrdinanceJurisdiction } = require('./fertilizer-jurisdiction');
 const bermudaRemoval = require('./lawn-bermuda-removal');
 const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
@@ -1736,61 +1736,6 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   };
 }
 
-// The ordinance jurisdictions (county + city) one visit is judged under —
-// shared by the plan and the completion path (actualProductBlackoutBlocks).
-// The STAMPED visit address outranks the turf-profile municipality — the 1:1
-// profile describes the primary home, so a visit stamped at a rental in
-// another city must evaluate the treated property's ordinances. Customer
-// city is the last resort. When the stamped city DIVERGES from the profile's
-// context, the profile county is dropped too — the query ORs county and city
-// jurisdictions, so keeping the primary home's county would bolt its blackout
-// onto the rental's rules.
-// A profile with no county (all active profiles today) falls back to the
-// county of the ADDRESS being treated — stamped zip+city when a visit is
-// stamped, else the customer's own zip+city — through the canonical
-// address-county resolver (the table irrigation-restrictions uses). A
-// straddling or unknown ZIP resolves to no county (fail closed, no guessing).
-function resolveOrdinanceJurisdiction(profile, cities = {}) {
-  const stamped = String(cities.stampedCity || '').trim();
-  const stampedZip = String(cities.stampedZip || '').trim();
-  const profileCity = String(profile?.municipality || '').trim();
-  const customerCity = String(cities.customerCity || '').trim();
-  const customerZip = String(cities.customerZip || '').trim();
-  // The county belongs to the PROFILE, so divergence is measured against the
-  // profile's own city context (its municipality, else the customer city as
-  // its implied context): a stamped visit in a different city drops the
-  // profile county even when the CUSTOMER's city happens to match the stamp
-  // (stale-profile case). No known reference city -> keep the county.
-  const countyReferenceCity = profileCity || customerCity;
-  const stampedDiverges = !!stamped && !!countyReferenceCity &&
-    countyReferenceCity.toLowerCase() !== stamped.toLowerCase();
-  const profileCounty = stampedDiverges ? '' : String(profile?.county || '').trim();
-  const addressCounty = (stamped || stampedZip)
-    ? resolveAddressCounty({ zip: stampedZip, city: stamped })
-    : resolveAddressCounty({ zip: customerZip, city: customerCity });
-  return {
-    county: profileCounty || addressCounty || '',
-    city: stamped || profileCity || customerCity,
-  };
-}
-
-async function getApplicableOrdinances(knex, profile, cities = {}) {
-  if (!profile) return [];
-  const { county, city } = resolveOrdinanceJurisdiction(profile, cities);
-  if (!county && !city) return [];
-
-  let query = knex('municipality_ordinances').where({ active: true });
-  query = query.where(function () {
-    if (county) this.orWhere(function () {
-      this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
-    });
-    if (city) this.orWhere(function () {
-      this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
-    });
-  });
-  return query;
-}
-
 async function getLatestAssessment(knex, customerId, { strict = false } = {}) {
   const row = await savepointRead(knex, (k) => k('lawn_assessments')
     .where({ customer_id: customerId })
@@ -2550,18 +2495,9 @@ async function buildPlanForService(serviceId, options = {}) {
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products, { strict });
   const latestAssessment = completionContext ? completionContext.latestAssessment : await getLatestAssessment(knex, service.customer_id, { strict });
   const stressFlags = latestAssessment?.stress_flags || {};
-  // One resolved city for BOTH the ordinance query and the property gate the
-  // panel displays — the restriction must be labeled with the city it was
-  // actually evaluated against (stamped visit address first).
-  const resolvedOrdinanceCity = String(
-    service.service_address_city || profile?.municipality || service.city || '',
-  ).trim() || null;
-  const ordinances = await getApplicableOrdinances(knex, profile, {
-    stampedCity: service.service_address_city,
-    stampedZip: service.service_address_zip,
-    customerCity: service.city,
-    customerZip: service.zip,
-  });
+  const jurisdiction = resolveOrdinanceJurisdiction(service, profile);
+  const resolvedOrdinanceCity = jurisdiction.city || null;
+  const ordinances = profile ? await getApplicableOrdinances(knex, jurisdiction) : [];
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,
@@ -2955,8 +2891,10 @@ async function buildPlanForService(serviceId, options = {}) {
       // turf-profile edit committed in between (Codex #4113 P2).
       turfProfile: { id: profile?.id || null, updatedAt: profile?.updated_at ? new Date(profile.updated_at).toISOString() : null },
       municipality: resolvedOrdinanceCity,
-      county: profile?.county || null,
-      ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
+      county: jurisdiction.county || null,
+      ordinanceStatus: ordinances.length
+        ? (ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout')
+        : 'ordinance_unknown',
       // Restriction windows ACTIVE on this service date, so the closeout can
       // warn about tech-added N/P products the planned-item gate never saw —
       // evaluated here against the property's real ordinances (no client-side
@@ -3118,6 +3056,4 @@ module.exports = {
   itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
-  resolveOrdinanceJurisdiction,
-  getApplicableOrdinances,
 };

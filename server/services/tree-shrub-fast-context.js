@@ -530,9 +530,9 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
   if (ineligibleReason) return { ok: true, eligible: false, reason: ineligibleReason, service };
 
   const visitDate = etCalendarDayOf(svc.scheduled_date);
-  // The ordinance zone comes from the visit's stamped address, falling back to the customer's city. /complete's
-  // typed check reads the same fields through the same function, so the sheet and the server cannot disagree.
-  const zone = inferTreeShrubOrdinanceZone({ ...svc, city: svc.cust_city });
+  const zone = inferTreeShrubOrdinanceZone({
+    ...svc, city: svc.cust_city, zip: svc.cust_zip, address_line1: svc.cust_address_line1,
+  });
   const catalog = await loadRecapCatalogProducts(knex, { extraColumns: CLASSIFIER_COLUMNS }).catch(() => []);
   // A failed read leaves no usable catalog. An empty catalog here would
   // let the sheet record a real application as "Inspection only" with none of

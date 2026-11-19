@@ -600,6 +600,14 @@ describe('current-visit procedure uses the same authority as product resolution'
     expect(sarasota.visitNotes).toEqual(['Spreader visit.', `Fertilizer safety: ${SARASOTA_FERTILIZER_SAFETY_RULES.join(' ')}`]);
     expect(sarasota.visitNotes.join(' ')).toContain('June 1 through September 30');
     expect(sarasota.visitNotes.join(' ')).not.toContain('April 1');
+
+    for (const [municipality, county] of [['Englewood', 'Charlotte'], ['Sarasota', 'Manatee']]) {
+      const procedure = await card({ municipality, county });
+      expect(procedure.visitNotes.join(' ')).toContain(`${county} County restricts fertilizers`);
+      expect(procedure.visitNotes.join(' ')).not.toContain('Sarasota County');
+    }
+    const shared = await card({ municipality: 'Englewood', county: null });
+    expect(shared.visitNotes.join(' ')).toContain('Confirm the fertilizer rules for the service property');
   });
 
   test('an assessment cannot inherit a treatment procedure from its display name', async () => {

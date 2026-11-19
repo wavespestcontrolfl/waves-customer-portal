@@ -67,7 +67,8 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { getApplicableOrdinances, resolveOrdinanceJurisdiction } = require('../services/fertilizer-jurisdiction');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -1379,24 +1380,8 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   // Same jurisdiction resolution as the plan (stamped visit address outranks
   // the profile; a county-less profile falls back to the treated address's
   // county via address-county).
-  const { county, city } = resolveOrdinanceJurisdiction(profile, {
-    stampedCity: svc.service_address_city,
-    stampedZip: svc.service_address_zip,
-    customerCity: svc.city,
-    customerZip: svc.customer_zip,
-  });
-  if (!county && !city) return [];
-
-  const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
-    .where({ active: true })
-    .where(function () {
-      if (county) this.orWhere(function () {
-        this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
-      });
-      if (city) this.orWhere(function () {
-        this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
-      });
-    }), []);
+  const jurisdiction = resolveOrdinanceJurisdiction(svc, profile);
+  const ordinances = await failSoftRead(database, (k) => getApplicableOrdinances(k, jurisdiction), []);
   if (!ordinances.length) return [];
 
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
@@ -3734,7 +3719,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
-        'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
+        'customers.address_line1 as customer_address_line1', 'customers.city', 'customers.zip as customer_zip', 'customers.property_type',
         // Report application-conditions (weather) capture at the TREATED
         // parcel: stamped visit coords first, the primary home only for
         // non-divergent stamps (codex round-10 P2).

@@ -582,6 +582,29 @@ describe('ported closeout compliance (typed path)', () => {
   const product = (id, name, extra = {}) => ({ productId: id, totalAmount: 2, amountUnit: 'oz', name, ...extra });
   const row = (id, name) => ({ id, name });
 
+  test.each([
+    ['Sarasota side', { service_address_city: 'Lakewood Ranch', service_address_zip: '34240' }, false],
+    ['Manatee side', { service_address_city: 'Lakewood Ranch', service_address_zip: '34202' }, true],
+    ['unstamped Sarasota home', { city: 'Lakewood Ranch', customer_zip: '34240' }, false],
+    ['unstamped Manatee home', { city: 'Lakewood Ranch', customer_zip: '34202' }, true],
+    ['unknown part of Lakewood Ranch', { service_address_city: 'Lakewood Ranch' }, false],
+    ['shared postal ZIP', { service_address_city: 'Sarasota', service_address_zip: '34243' }, false],
+    ['county name on a street sign', { service_address_line1: '8 Manatee Avenue' }, false],
+    ['second property with a partial stamp', {
+      address_line1: '1 First Street', city: 'Parrish', customer_zip: '34219',
+      service_address_line1: '2 Second Street',
+    }, false],
+  ])('a soil test qualifies NutriRoot only at a resolved Manatee property (%s)', (_label, service, eligible) => {
+    const { soilTestBasis } = require('../../shared/tree-shrub-fertilizer-evidence.json').nutriRoot;
+    const name = 'Arborjet NutriRoot 2-2-3';
+    const result = validateTreeShrubTypedCompliance({
+      service, serviceDate: '2026-11-19', completionPhotos: photos,
+      values: { nutriroot_application_basis: soilTestBasis, nutriroot_soil_test_reference: 'Fixture soil test' },
+      products: [product('nutrition', name)], productRows: [row('nutrition', name)],
+    });
+    expect(result.blocks.map((block) => block.code)).toEqual(eligible ? [] : ['tree_shrub_nutriroot_evidence_required']);
+  });
+
   test('herbicide chips require a matching product (FDACS ledger, audit 2026-07-18 P2)', () => {
     // A pre-emergent is a pesticide application — completing the chip with
     // no product left service_products / property_application_history empty
@@ -693,7 +716,7 @@ describe('ported closeout compliance (typed path)', () => {
     expect(run({ city: 'North Port', service_address_line1: '1 Test St', service_address_city: 'Bradenton' })).toContain('tree_shrub_np_blackout');
     // A street named for another zone never lifts the customer city's blackout.
     expect(run({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toContain('tree_shrub_np_blackout');
-    // A stamp with no city of its own keeps the customer city.
+    // A street-only stamp without a matching primary address retains the blackout.
     expect(run({ city: 'Bradenton', service_address_line1: '1 Test St' })).toContain('tree_shrub_np_blackout');
     // No stamp at all: the customer city, as before.
     expect(run({ city: 'Bradenton' })).toContain('tree_shrub_np_blackout');

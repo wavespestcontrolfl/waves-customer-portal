@@ -364,9 +364,9 @@ function emptyResult(serviceId) {
 // keeps the conservative Sarasota/Manatee rule (an unknown zone).
 async function propertyOrdinanceZone(db, propertyId) {
   const place = propertyId
-    ? await db('customer_properties').where({ id: propertyId }).first('city', 'address_line1').catch(() => null)
+    ? await db('customer_properties').where({ id: propertyId }).first('city', 'zip').catch(() => null)
     : null;
-  return inferTreeShrubOrdinanceZone({ city: place?.city, address: place?.address_line1 });
+  return inferTreeShrubOrdinanceZone(place || {});
 }
 
 // The route-facing orchestrator: loads the scheduled service + its

@@ -11,7 +11,7 @@ const featureGates = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { parseRawAddress } = require('../utils/address-normalizer');
 const { analysesIn } = require('../utils/fertilizer-analysis');
-const { resolveAddressCounty } = require('../config/address-county');
+const { fertilizerJurisdictionId, resolveAddressCounty } = require('../config/address-county');
 const { CITY_TO_LOCATION } = require('../config/locations');
 const { normalizeProposal, isProposalAuthoredByEditor } = require('./estimate-proposal');
 const { NORTH_PORT_FERTILIZER_SETBACKS } = require('./lawn-fertilizer-safety');
@@ -248,15 +248,10 @@ function resolveJurisdictionId(address) {
   const addressCity = formatted.includes(',') || parsed.state || parsed.zip ? parsed.city : '';
   const firstLine = firstNonEmpty(parsed.line1).toLowerCase().replace(/^city of\s+/, '');
   const cityOnly = parsed.state === 'FL' && Object.hasOwn(CITY_TO_LOCATION, firstLine) ? firstLine : '';
-  const city = firstNonEmpty(place.municipality, place.city, place.locality, place.address_city, addressCity, cityOnly)
-    .toLowerCase().replace(/^city of\s+/, '');
-  if (city === 'north port') return 'north_port_fl';
-  const county = firstNonEmpty(place.county, place.address_county, resolveAddressCounty({
-    zip: firstNonEmpty(place.zip, place.address_zip, parsed.zip), city,
-  })).toLowerCase().replace(/\s+county$/, '');
-  // Sarasota County alone cannot distinguish North Port's April start from the county's June start.
-  if (county === 'sarasota' && !city) return 'generic_swfl';
-  return ['sarasota', 'manatee', 'charlotte'].includes(county) ? `${county}_county_fl` : 'generic_swfl';
+  const city = firstNonEmpty(place.municipality, place.city, place.locality, place.address_city, addressCity, cityOnly);
+  const zip = firstNonEmpty(place.zip, place.address_zip, parsed.zip);
+  const county = firstNonEmpty(place.county, place.address_county, resolveAddressCounty({ city, zip }));
+  return fertilizerJurisdictionId({ city, county });
 }
 
 function outlineServiceAddress(estimate, estimateData) {

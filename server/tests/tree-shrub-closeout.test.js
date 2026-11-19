@@ -53,23 +53,23 @@ describe('Tree/Shrub closeout validation', () => {
   test('the ordinance zone follows the visit stamped address, then the customer city', () => {
     expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_city: 'North Port' })).toBe('north_port');
     expect(inferTreeShrubOrdinanceZone({ city: 'North Port', service_address_city: 'Venice', service_address_line1: '1 Test St' })).toBe('sarasota_venice');
-    expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', service_address_line1: '1 Test St' })).toBe('manatee_parrish');
+    expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', address_line1: '1 Test Street', service_address_line1: '1 Test St' })).toBe('manatee_parrish');
     expect(inferTreeShrubOrdinanceZone({ city: 'Parrish', service_address_city: '  ', service_address_line1: null })).toBe('manatee_parrish');
     expect(inferTreeShrubOrdinanceZone({ city: 'Venice', county: 'Sarasota', service_address_city: 'Unknown Town' })).toBe('other_unknown');
   });
 
-  test('the city decides the zone; street text never overrides it or lifts a blackout', () => {
-    // Stamped street without a stamped city: the customer city decides.
-    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toBe('manatee_parrish');
-    // Unstamped legacy fields: the same.
+  test('a street name cannot establish a fertilizer jurisdiction', () => {
+    // A partial stamp for an unconfirmed property cannot borrow the primary home's city.
+    expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', service_address_line1: '123 North Port Boulevard' })).toBe('other_unknown');
+    // A legacy unstamped primary visit has its own customer city.
     expect(inferTreeShrubOrdinanceZone({ city: 'Bradenton', address_line1: '123 North Port Boulevard' })).toBe('manatee_parrish');
     expect(inferTreeShrubOrdinanceZone({ city: 'Venice', address: '9 Parrish Road' })).toBe('sarasota_venice');
     expect(inferTreeShrubOrdinanceZone({ city: 'North Port', address_line1: '5 Venice Avenue' })).toBe('north_port');
     // A stamped city beats a customer city and any street.
     expect(inferTreeShrubOrdinanceZone({ city: 'North Port', service_address_city: 'Bradenton', service_address_line1: '1 North Port Boulevard' })).toBe('manatee_parrish');
-    // No city anywhere: a street may add a blackout zone, never North Port.
+    // A street named after a city or county still has an unknown jurisdiction.
     expect(inferTreeShrubOrdinanceZone({ service_address_line1: '123 North Port Boulevard' })).toBe('other_unknown');
-    expect(inferTreeShrubOrdinanceZone({ address_line1: '8 Venice Avenue' })).toBe('sarasota_venice');
+    expect(inferTreeShrubOrdinanceZone({ address_line1: '8 Venice Avenue' })).toBe('other_unknown');
   });
 
   test('blocks N/P fertilizer during Sarasota and Manatee landscape blackout', () => {
