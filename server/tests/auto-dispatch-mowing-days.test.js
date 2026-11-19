@@ -561,14 +561,15 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
 
   // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): a far-south stop holds its date only for its
   // own technician's slots; an unassigned far-south stop (STOP_WED carries no technician) holds it for every one.
+  // The switch is the scheduler's tech-scope reader (occupancy.js techScopedConfirmActive), mocked on for this suite.
   describe('per truck (GATE_MULTI_TECH_CONFIRM)', () => {
-    const SAVED_MULTI = process.env.GATE_MULTI_TECH_CONFIRM;
-    afterEach(() => restore('GATE_MULTI_TECH_CONFIRM', SAVED_MULTI));
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    afterEach(() => techScopedConfirmActive.mockImplementation(() => true));
     const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
     const runWith = (stops, service = NORTH) => findValidCandidateSlots(service, plain(), ctx({ db: southDb({ stops }) }));
 
     test('on: another technician\'s far-south stop leaves the date open; the same technician\'s or an unassigned one holds it', async () => {
-      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      techScopedConfirmActive.mockReturnValue(true);
       const other = await runWith(stopOf('t2'));
       expect(other.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
       expect(other.drops.south_day_kept).toBe(0);
@@ -580,7 +581,7 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     });
 
     test('on: the slot\'s technician decides, so an unassigned visit keeps only the other truck\'s slot that day', async () => {
-      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      techScopedConfirmActive.mockReturnValue(true);
       findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '08:00', 't1'), slot(WED, '10:00', 't2')] });
       const out = await runWith(stopOf('t1'), { ...NORTH, technician_id: null });
       expect(out.candidates.map((c) => `${c.date} ${c.technician_id}`)).toEqual([`${WED} t2`]);
@@ -588,7 +589,7 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     });
 
     test('on: a grouped visit is also held by each member\'s current technician, where the unit move commits first', async () => {
-      process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+      techScopedConfirmActive.mockReturnValue(true);
       findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '10:00', 't2')] });
       const offered = async (stops, primaryTech, siblingTech) => {
         const grouped = siblingTech !== undefined;
@@ -612,7 +613,7 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     });
 
     test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
-      delete process.env.GATE_MULTI_TECH_CONFIRM;
+      techScopedConfirmActive.mockReturnValue(false);
       const out = await runWith(stopOf('t2'));
       expect(out.candidates.map((c) => c.date)).toEqual([TUE, THU]);
       expect(out.drops.south_day_kept).toBe(1);
@@ -696,9 +697,9 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
         const err = await guardFor(NORTH)({ trx: southDb({ stops }), technicianId: written }).then(() => null, (e) => e);
         return String(err?.message || '').includes('far-south stop');
       };
-      const saved = process.env.GATE_MULTI_TECH_CONFIRM;
+      const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
       try {
-        process.env.GATE_MULTI_TECH_CONFIRM = 'true';
+        techScopedConfirmActive.mockReturnValue(true);
         await expect(check(stopOf('t2'), ['t1'])).resolves.toBeUndefined();
         await expect(check(stopOf('t2'), ['t2'])).rejects.toMatchObject({ code: 'REFUSED' });
         await expect(check(stopOf('t2'), ['t1', 't2'])).rejects.toMatchObject({ code: 'REFUSED' });
@@ -713,11 +714,11 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
         expect(await guardHeld(stopOf('t1'), 't2')).toBe(true);
         expect(await guardHeld(stopOf('t3'), 't2')).toBe(false);
         // Off: t2's far-south stop holds the date for t1 as well.
-        delete process.env.GATE_MULTI_TECH_CONFIRM;
+        techScopedConfirmActive.mockReturnValue(false);
         await expect(check(stopOf('t2'), ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
         expect(await guardHeld(stopOf('t2'), 't1')).toBe(true);
       } finally {
-        restore('GATE_MULTI_TECH_CONFIRM', saved);
+        techScopedConfirmActive.mockImplementation(() => true);
       }
     });
   });

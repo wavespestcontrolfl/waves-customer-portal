@@ -42,7 +42,8 @@
  *     by slug. Zone-stop matching mirrors filterCollidingSlots exactly (zone
  *     slug OR customer city, both case-insensitive) so the two can't drift.
  *
- * Per truck (GATE_MULTI_TECH_CONFIRM, the tech-aware switch; owner 2026-11-19
+ * Per truck (GATE_MULTI_TECH_CONFIRM, read through occupancy.js
+ * techScopedConfirmActive like every tech-scoped check; owner 2026-11-19
  * "build south"): getZoneFunnelDays also returns each zone day's technicians
  * (techDays), and onZoneDay decides whether a date is a zone day for one
  * technician: a stop of that technician, or an unassigned stop (any truck may
@@ -59,15 +60,17 @@
 
 const logger = require('../logger');
 const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
-const featureGates = require('../../config/feature-gates');
+const { isEnabled } = require('../../config/feature-gates');
 
-const { isEnabled } = featureGates;
-
-// The per-truck switch: GATE_MULTI_TECH_CONFIRM (multiTechConfirmLive), read at call time through the module
-// object, so a suite that mocks feature-gates down to a few functions reads it as off (every zone day the
-// fleet's) instead of failing the zone lookup.
+// The per-truck switch: the scheduler's one technician-scope reader (occupancy.js techScopedConfirmActive,
+// GATE_MULTI_TECH_CONFIRM), read at call time. A read that throws (a suite that mocks occupancy or feature-gates
+// down to a few functions) reads as off, every zone day the fleet's, and never fails the zone lookup.
 function perTruckLive() {
-  return typeof featureGates.multiTechConfirmLive === 'function' && featureGates.multiTechConfirmLive() === true;
+  try {
+    return require('./occupancy').techScopedConfirmActive() === true;
+  } catch {
+    return false;
+  }
 }
 
 // Funneled zone slugs (zoneSlugOf format — 'Venice / North Port' → 'venice').

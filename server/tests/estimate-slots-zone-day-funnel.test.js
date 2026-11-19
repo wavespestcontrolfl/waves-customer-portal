@@ -286,17 +286,19 @@ describe('isFunnelZone / zone matching', () => {
     }
   });
 
-  test('a feature-gates mock without multiTechConfirmLive reads as off: the fleet view, never a failed lookup', async () => {
-    let fresh;
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => true }));
-      fresh = require('../services/scheduling/zone-day-funnel');
+  test('a tech-scope read that throws (a partial occupancy or feature-gates mock) reads as off: never a failed lookup', async () => {
+    const occupancy = require('../services/scheduling/occupancy');
+    const spy = jest.spyOn(occupancy, 'techScopedConfirmActive').mockImplementation(() => {
+      throw new TypeError('multiTechConfirmLive is not a function');
     });
-    jest.dontMock('../config/feature-gates');
-    const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
-    expect(fresh._internals.perTruckLive()).toBe(false);
-    expect(await fresh.getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }))
-      .toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
+    try {
+      const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
+      expect(funnelInternals.perTruckLive()).toBe(false);
+      expect(await getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }))
+        .toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('rowMatchesZone: zone stamp authoritative (legacy slugs by prefix), city decides unstamped rows only', () => {
