@@ -74,12 +74,13 @@ const AUDIENCES = {
     name: 'Waves — Customers (suppression)',
     description: 'Existing Waves customers. Use as an EXCLUSION on prospecting campaigns.',
     collect: collectCustomerMembers,
+    staleLeavingKeys: staleCustomerLeavingKeys,
   },
   unbooked_leads: {
     name: 'Waves — Unbooked leads (retargeting)',
     description: 'Known leads who have not booked. Use as a retargeting audience.',
     collect: collectUnbookedLeadMembers,
-    staleOptOutKeys: staleLeadOptOutKeys,
+    staleLeavingKeys: staleLeadLeavingKeys,
   },
 };
 
@@ -206,29 +207,52 @@ async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAY
   const optOutKeys = kept.filter((m) => m.linkedOptOut).map((m) => m.key);
   const members = kept.filter((m) => !m.linkedOptOut).map(({ internalTest, linkedOptOut, ...member }) => member);
   const opts = { audienceKey: 'unbooked_leads', suppression: sup };
-  return partition
-    ? { ...(await partitionMarketingSuppressed(members, opts)), testKeys, optOutKeys }
-    : filterMarketingSuppressed(members, opts);
+  if (!partition) return filterMarketingSuppressed(members, opts);
+  // A lead the consent pass drops (its own opt-out) leaves the same way: every row
+  // stored for it goes, one sent under an older email too.
+  const split = await partitionMarketingSuppressed(members, opts);
+  return { ...split, testKeys, optOutKeys: [...optOutKeys, ...split.dropped.map((m) => m.key)] };
+}
+
+// The stored member keys with this prefix whose record the collector no longer returns.
+function staleIds(priorEntries, currentMembers, prefix) {
+  const current = new Set(currentMembers.map((m) => m.key));
+  return [...new Set(priorEntries.map((e) => e.k)
+    .filter((k) => typeof k === 'string' && k.startsWith(prefix) && !current.has(k))
+    .map((k) => k.slice(prefix.length)))];
 }
 
 // A lead row held in state whose lead is no longer collected (closed, aged out,
-// deleted or booked) still opts out through its linked customer, deleted or not.
-// The collector checks current leads; this checks the rest of the stored lead
-// keys, and their keys come back so the rows leave even beside a current member.
-async function staleLeadOptOutKeys(priorEntries, currentMembers, sup) {
-  const current = new Set(currentMembers.map((m) => m.key));
-  const ids = [...new Set(priorEntries.map((e) => e.k)
-    .filter((k) => typeof k === 'string' && k.startsWith('lead:') && !current.has(k))
-    .map((k) => k.slice('lead:'.length)))];
+// deleted or booked) still leaves as a test record or an opt-out: its own, or its
+// linked customer's, deleted or not. The collector checks current leads; this
+// checks the rest of the stored lead keys, and their keys come back so the rows
+// leave even beside a current member.
+async function staleLeadLeavingKeys(priorEntries, currentMembers, sup) {
+  const ids = staleIds(priorEntries, currentMembers, 'lead:');
   const leads = [];
   for (let i = 0; i < ids.length; i += 1000) {
-    leads.push(...await db('leads').whereIn('id', ids.slice(i, i + 1000)).whereNotNull('customer_id').select('id', 'customer_id'));
+    leads.push(...await db('leads').whereIn('id', ids.slice(i, i + 1000))
+      .select('id', 'customer_id', 'email', 'phone', 'first_name', 'last_name'));
   }
   const linked = await loadLinkedCustomers(leads.map((r) => r.customer_id));
-  return leads.filter((r) => {
-    const customer = linked.get(String(r.customer_id));
-    return !!customer && sup.isSuppressed(customer);
-  }).map((r) => `lead:${r.id}`);
+  const out = { testKeys: [], optOutKeys: [] };
+  for (const r of leads) {
+    const m = leadMember(r, linked.get(String(r.customer_id)), sup);
+    if (m.internalTest) out.testKeys.push(m.key);
+    else if (m.linkedOptOut || sup.isSuppressed(r)) out.optOutKeys.push(m.key);
+  }
+  return out;
+}
+
+// A customer row held in state whose customer is no longer collected (not live, or
+// deleted) still leaves as a test record. An opt-out stays: this is the prospecting
+// exclusion list.
+async function staleCustomerLeavingKeys(priorEntries, currentMembers) {
+  const customers = await loadLinkedCustomers(staleIds(priorEntries, currentMembers, 'customer:'));
+  const testKeys = [...customers.values()]
+    .filter((c) => isInternalTestContact({ customerId: c.id, firstName: c.first_name, lastName: c.last_name, email: c.email, phone: c.phone }))
+    .map((c) => `customer:${c.id}`);
+  return { testKeys, optOutKeys: [] };
 }
 
 // ── PII hashing → a data row aligned to SCHEMA, or null if no match keys ──
@@ -360,8 +384,9 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     const members = Array.isArray(collected) ? collected : collected.kept;
     const suppressedMembers = Array.isArray(collected) ? [] : collected.dropped;
     // Member keys whose uploaded rows leave whatever they share with a current
-    // member: dropped test records, and leads opted out through a linked customer
-    // (current leads here, stored ones once the state loads: staleOptOutKeys).
+    // member: dropped test records, and opted-out leads (their own opt-out or a
+    // linked customer's). Current records here, stored ones once the state loads
+    // (staleLeavingKeys).
     const testKeys = new Set(collected.testKeys);
     const leavingKeys = new Set([...testKeys, ...(collected.optOutKeys || [])]);
 
@@ -396,7 +421,9 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     const state = await loadState(audienceKey);
     const prior = (Array.isArray(state && state.member_keys) ? state.member_keys : [])
       .filter((e) => e && Array.isArray(e.d) && e.d.length === 2);
-    if (def.staleOptOutKeys) for (const k of await def.staleOptOutKeys(prior, members, suppression)) leavingKeys.add(k);
+    const stale = await def.staleLeavingKeys(prior, members, suppression);
+    for (const k of stale.testKeys) testKeys.add(k);
+    for (const k of [...stale.testKeys, ...stale.optOutKeys]) leavingKeys.add(k);
     // A leaving row is kept out of planAdds: a current member with the same email and
     // phone is then sent with its own name/ZIP, never handed the leaving row's.
     const leaving = prior.filter((e) => leavingKeys.has(e.k));
@@ -590,7 +617,8 @@ module.exports = {
     boolEnv,
     collectCustomerMembers,
     collectUnbookedLeadMembers,
-    staleLeadOptOutKeys,
+    staleLeadLeavingKeys,
+    staleCustomerLeavingKeys,
     unbookedLeadStatusFilter,
     hashMember,
     hashIdentity,

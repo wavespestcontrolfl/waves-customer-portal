@@ -30,7 +30,9 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
-const { collectCustomerMembers, collectUnbookedLeadMembers, staleLeadOptOutKeys } = require('./meta-audiences')._private;
+const {
+  collectCustomerMembers, collectUnbookedLeadMembers, staleLeadLeavingKeys, staleCustomerLeavingKeys,
+} = require('./meta-audiences')._private;
 const { sha256Hex, normalizePhone, cleanNumericId } = require('./data-manager')._private;
 const matchFields = require('./ad-match-fields');
 
@@ -54,12 +56,13 @@ const AUDIENCES = {
     name: 'Customers (suppression)',
     listIdEnv: 'GOOGLE_CM_CUSTOMERS_LIST_ID',
     collect: collectCustomerMembers,
+    staleLeavingKeys: staleCustomerLeavingKeys,
   },
   unbooked_leads: {
     name: 'Unbooked leads (retargeting)',
     listIdEnv: 'GOOGLE_CM_UNBOOKED_LEADS_LIST_ID',
     collect: collectUnbookedLeadMembers,
-    staleOptOutKeys: staleLeadOptOutKeys,
+    staleLeavingKeys: staleLeadLeavingKeys,
   },
 };
 
@@ -351,8 +354,9 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     const collected = await def.collect({ partition: true, suppression });
     const members = collected.kept;
     // Member keys whose uploaded rows leave whatever they share with a current
-    // member: dropped test records, and leads opted out through a linked customer
-    // (current leads here, stored ones once the state loads: staleOptOutKeys).
+    // member: dropped test records, and opted-out leads (their own opt-out or a
+    // linked customer's). Current records here, stored ones once the state loads
+    // (staleLeavingKeys).
     const testKeys = new Set(collected.testKeys);
     const leavingKeys = new Set([...testKeys, ...(collected.optOutKeys || [])]);
 
@@ -399,7 +403,9 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       stillPending = rec.stillPending;
     }
 
-    if (def.staleOptOutKeys) for (const k of await def.staleOptOutKeys(effectivePrior, members, suppression)) leavingKeys.add(k);
+    const stale = await def.staleLeavingKeys(effectivePrior, members, suppression);
+    for (const k of stale.testKeys) testKeys.add(k);
+    for (const k of [...stale.testKeys, ...stale.optOutKeys]) leavingKeys.add(k);
 
     // Identifier hashes of active marketing opt-outs (and wrong_number phones),
     // hashed exactly like uploaded members (canonical email; phone WITH '+').

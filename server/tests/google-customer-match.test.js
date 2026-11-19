@@ -20,7 +20,8 @@ mockDb.fn = { now: () => 'NOW()' };
 
 const mockCollectCustomers = jest.fn();
 const mockCollectLeads = jest.fn();
-const mockStaleOptOuts = jest.fn();
+const mockStaleLeads = jest.fn();
+const mockStaleCustomers = jest.fn();
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -31,7 +32,8 @@ jest.mock('../services/ads/meta-audiences', () => ({
   _private: {
     collectCustomerMembers: async (...a) => mockAsPartition(a[0], await mockCollectCustomers(...a)),
     collectUnbookedLeadMembers: async (...a) => mockAsPartition(a[0], await mockCollectLeads(...a)),
-    staleLeadOptOutKeys: (...a) => mockStaleOptOuts(...a),
+    staleLeadLeavingKeys: (...a) => mockStaleLeads(...a),
+    staleCustomerLeavingKeys: (...a) => mockStaleCustomers(...a),
   },
 }));
 // Faithful Google-formatting helpers so the hashing assertions are meaningful:
@@ -68,7 +70,8 @@ beforeEach(() => {
   inserts.length = 0;
   mockCollectCustomers.mockReset();
   mockCollectLeads.mockReset();
-  mockStaleOptOuts.mockReset().mockResolvedValue([]);
+  mockStaleLeads.mockReset().mockResolvedValue({ testKeys: [], optOutKeys: [] });
+  mockStaleCustomers.mockReset().mockResolvedValue({ testKeys: [], optOutKeys: [] });
   process.env = { ...ENV };
   for (const k of ['GOOGLE_ADS_DATA_MANAGER_SERVICE_ACCOUNT_JSON', 'GOOGLE_SERVICE_ACCOUNT_JSON',
     'GOOGLE_ADS_DATA_MANAGER_CUSTOMER_ID', 'GOOGLE_ADS_CUSTOMER_ID', 'GOOGLE_ADS_DATA_MANAGER_LOGIN_CUSTOMER_ID',
@@ -478,19 +481,30 @@ describe('consent (r2)', () => {
     mockCollectLeads.mockResolvedValue({
       kept: [{ key: 'lead:l2', email: 'house@x.com', phone: '9415550123' }], dropped: [], testKeys: [], optOutKeys: [],
     });
-    mockStaleOptOuts.mockResolvedValue(['lead:l1']);
+    mockStaleLeads.mockResolvedValue({ testKeys: [], optOutKeys: ['lead:l1'] });
     const l1 = { k: 'lead:l1', d: ['h:lead@x.com', 'h:+19415550123'], a: 'h:jo|h:lee|US|34202' };
     stateRow = { member_keys: [l1, { k: 'lead:l2', d: ['h:house@x.com', 'h:+19415550123'] }] };
     const r = await GCM.syncAudience('unbooked_leads', {});
     expect(r).toMatchObject({ toRemove: 1, retained: 0, consentRemovals: 1, testRemovals: 0, deferredReAdds: 1 });
     // The hook reads the stored rows and the current members.
-    const [priorArg, membersArg] = mockStaleOptOuts.mock.calls[0];
+    const [priorArg, membersArg] = mockStaleLeads.mock.calls[0];
     expect(priorArg.map((e) => e.k)).toEqual(['lead:l1', 'lead:l2']);
     expect(membersArg.map((m) => m.key)).toEqual(['lead:l2']);
-    // The customers list has no such hook.
-    mockCollectCustomers.mockResolvedValue([]);
-    await GCM.syncAudience('customers', {});
-    expect(mockStaleOptOuts).toHaveBeenCalledTimes(1);
+    expect(mockStaleCustomers).not.toHaveBeenCalled();
+  });
+
+  test('a stored test customer no longer collected leaves the customers list as a test record, even beside a current member', async () => {
+    configure();
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'real@x.com', phone: '9415550140' }]);
+    mockStaleCustomers.mockResolvedValue({ testKeys: ['customer:c9'], optOutKeys: [] });
+    stateRow = { member_keys: [
+      { k: 'customer:c9', d: ['h:tester@x.com', 'h:+19415550140'] },
+      { k: 'customer:c1', d: ['h:real@x.com', 'h:+19415550140'] },
+    ] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0, testRemovals: 1, consentRemovals: 0, deferredReAdds: 1 });
+    expect(mockStaleCustomers.mock.calls[0][1].map((m) => m.key)).toEqual(['customer:c1']);
+    expect(mockStaleLeads).not.toHaveBeenCalled();
   });
 });
 

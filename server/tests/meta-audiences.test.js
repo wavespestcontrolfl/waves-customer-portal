@@ -491,6 +491,22 @@ describe('internal test records never reach the lists (owner 2026-11-19)', () =>
   });
 });
 
+describe('stored customers no longer collected (owner 2026-11-19)', () => {
+  test('a stored customer no longer collected leaves as a test record; an opt-out stays on this exclusion list', async () => {
+    const { staleCustomerLeavingKeys } = MetaAudiences._private;
+    const rows = [
+      { id: 'c1', email: 'tester@x.com', phone: '9415550140', first_name: 'Shakedown', last_name: 'Test', deleted_at: '2026-11-01T12:00:00Z' },
+      { id: 'c2', email: 'gone@x.com', phone: '9415550141', first_name: 'Pat', last_name: 'Sample' },
+      { id: 'c3', email: 'tester2@x.com', phone: '9415550142', first_name: 'Shakedown', last_name: 'Test' },
+    ];
+    tableData.customers = (ids) => rows.filter((r) => !ids || ids.includes(r.id));
+    tableData.email_suppressions = [{ email: 'gone@x.com' }];
+    const stored = rows.map((r) => ({ k: `customer:${r.id}`, d: [`h:${r.email}`, ''] }));
+    // c3 is still collected, so the collector judges it, not this check.
+    expect(await staleCustomerLeavingKeys(stored, [{ key: 'customer:c3' }])).toEqual({ testKeys: ['customer:c1'], optOutKeys: [] });
+  });
+});
+
 describe('name + ZIP on the Meta list (2b)', () => {
   const NAMED = { id: 'c1', email: 'c1@x.com', phone: '9412975749', first_name: 'Pat', last_name: "O'Neil-Smith", zip: '34219-1234', city: 'Parrish', state: 'FL' };
 
@@ -636,7 +652,31 @@ describe('name + ZIP on the Meta list (2b)', () => {
     expect((await collectUnbookedLeadMembers()).map((m) => m.key)).toEqual(['lead:l2']);
   });
 
-  test('a stored lead no longer collected leaves on its linked customer opt-out too, even beside a current member', async () => {
+  test('a lead opted out at a changed email leaves with the row sent under its old one, even beside a current member', async () => {
+    // l1 was uploaded under its old email, then changed to new@x.com and opted out there.
+    // l2 is a current lead with the same name and ZIP, the only key the old row shares.
+    tableData.email_suppressions = [{ email: 'new@x.com' }];
+    tableData.leads = [
+      { id: 'l1', email: 'new@x.com', phone: null, first_name: 'Jo', last_name: 'Lee', zip: '34202' },
+      { id: 'l2', email: 'house@x.com', phone: null, first_name: 'Jo', last_name: 'Lee', zip: '34202' },
+    ];
+    const collected = await collectUnbookedLeadMembers({ partition: true });
+    expect(collected.kept.map((m) => m.key)).toEqual(['lead:l2']);
+    expect(collected.optOutKeys).toEqual(['lead:l1']);
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUD' });
+    const joX = ['h:jo', 'h:lee', 'h:34202', 'h:us'];
+    stateRow = { meta_audience_id: 'AUD', member_keys: [
+      { k: 'lead:l1', d: ['h:old@x.com', ''], x: joX },
+      { k: 'lead:l2', d: ['h:house@x.com', ''], x: joX },
+    ] };
+    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
+    expect(r).toMatchObject({ toRemove: 1, retained: 0, consentRemovals: 1, deferredReAdds: 1 });
+    const del = global.fetch.mock.calls.find((c) => /\/users$/.test(c[0]) && c[1].method === 'DELETE');
+    expect(JSON.parse(del[1].body).payload.data).toEqual([['h:old@x.com', '', ...joX]]);
+  });
+
+  test("a stored lead no longer collected leaves as an opt-out or a test record (its own or its linked customer's), even beside a current member", async () => {
     tableData.email_suppressions = [{ email: 'jo.lee@x.com' }];
     const stale = { id: 'l1', customer_id: 'c9' };
     const housemate = { id: 'l2', email: 'house@x.com', phone: '9415550123' };
@@ -656,11 +696,28 @@ describe('name + ZIP on the Meta list (2b)', () => {
     const del = global.fetch.mock.calls.find((c) => /\/users$/.test(c[0]) && c[1].method === 'DELETE');
     expect(JSON.parse(del[1].body).payload.data).toEqual([['h:lead@x.com', 'h:19415550123', ...joX]]);
     // Deleted or not, the customer's opt-out holds; a customer who did not opt out keeps the row.
-    const { staleLeadOptOutKeys } = MetaAudiences._private;
+    const { staleLeadLeavingKeys } = MetaAudiences._private;
     const { loadMarketingSuppression } = require('../services/ads/ad-audience-consent');
+    const leavingNow = async (current = []) => staleLeadLeavingKeys(stored, current, await loadMarketingSuppression());
     tableData.customers[0].deleted_at = '2026-11-01T12:00:00Z';
-    expect(await staleLeadOptOutKeys(stored, [{ key: 'lead:l2' }], await loadMarketingSuppression())).toEqual(['lead:l1']);
+    expect(await leavingNow([{ key: 'lead:l2' }])).toEqual({ testKeys: [], optOutKeys: ['lead:l1'] });
     tableData.email_suppressions = [];
-    expect(await staleLeadOptOutKeys(stored, [], await loadMarketingSuppression())).toEqual([]);
+    expect(await leavingNow()).toEqual({ testKeys: [], optOutKeys: [] });
+    // The lead's own opt-out counts as well, linked or not.
+    Object.assign(stale, { customer_id: null, email: 'lead@x.com' });
+    tableData.email_suppressions = [{ email: 'lead@x.com' }];
+    expect(await leavingNow()).toEqual({ testKeys: [], optOutKeys: ['lead:l1'] });
+    tableData.email_suppressions = [];
+    // A test record leaves as one: the lead itself, or its linked customer (deleted or not).
+    Object.assign(stale, { first_name: 'Shakedown', last_name: 'Test' });
+    expect(await leavingNow()).toEqual({ testKeys: ['lead:l1'], optOutKeys: [] });
+    Object.assign(stale, { first_name: null, last_name: null, customer_id: 'c9' });
+    Object.assign(tableData.customers[0], { first_name: 'Shakedown', last_name: 'Test' });
+    expect(await leavingNow()).toEqual({ testKeys: ['lead:l1'], optOutKeys: [] });
+    // The sync counts that row as a test removal.
+    stateRow = { meta_audience_id: 'AUD', member_keys: stored };
+    global.fetch = okFetch({ id: 'AUD' });
+    expect(await MetaAudiences.syncAudience('unbooked_leads', {}))
+      .toMatchObject({ toRemove: 1, retained: 0, testRemovals: 1, consentRemovals: 0 });
   });
 });
