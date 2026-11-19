@@ -1,5 +1,5 @@
 // Pest Insider renderer: escaping, optional blocks, absolute links, dark-mode hooks.
-const { renderIssue, wrapIssueHtml, toolAllowed, FORWARD_LINE } = require('../services/pest-insider/render');
+const { renderIssue, wrapIssueHtml, toolAllowed, droppedBlocks, FORWARD_LINE } = require('../services/pest-insider/render');
 const { bodyIsDarkAware } = require('../services/email-template');
 
 const BASE = {
@@ -54,6 +54,20 @@ describe('renderIssue', () => {
     expect(homeText).toContain('Next visit: January 6, 2027.');
     for (const part of [homeText, homeHtml]) expect(part).not.toMatch(/4512|1234|safe|infestation|42/);
     expect(renderIssue({ ...BASE, tool: { name: 'No link', why: 'x', url: 'http://insecure.example.com' } }).html_body).not.toContain('No link');
+  });
+
+  test('caller text that fails the customer-copy screen is left out, block by block, and reported', () => {
+    const bad = { areaLine: 'Gate code 4512 at the side yard.', tool: { ...DEMO.tool, why: 'A pet-safe spray for ants.' } };
+    const r = renderIssue({ ...BASE, ...bad });
+    expect(r.html_body).not.toContain('Active near you');
+    expect(r.html_body).not.toContain('A tool we&#39;d use');
+    expect(r.text_body).not.toMatch(/4512|pet-safe/);
+    // a count is not an access code
+    expect(renderIssue({ ...BASE, areaLine: '12 homes near you reported ants this month.' }).text_body).toContain('ACTIVE NEAR YOU\n12 homes near you reported ants this month.');
+    expect(droppedBlocks({ ...bad, home: DEMO.home })).toEqual(['area_line_dropped', 'tool_dropped_copy']);
+    expect(droppedBlocks({ tool: { ...DEMO.tool, url: 'https://amzn.to/abc123' } })).toEqual(['tool_dropped_affiliate']);
+    expect(droppedBlocks(DEMO)).toEqual([]);
+    expect(droppedBlocks({ areaLine: '  ', tool: null, home: null })).toEqual([]);
   });
 
   test('optional blocks render when given', () => {

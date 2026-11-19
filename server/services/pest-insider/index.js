@@ -15,7 +15,7 @@
 
 const { planIssue } = require('./plan');
 const { checkIssueCopy } = require('./claim-check');
-const { renderIssue, toolAllowed, homeDetailsDropped } = require('./render');
+const { renderIssue, droppedBlocks } = require('./render');
 const { sendDateET } = require('./facts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 
@@ -65,8 +65,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], blogUrl, are
   diagnostics.problems = copy.problems;
   if (!copy.ok) return { ok: false, reason: copyFailReason(copy), issue: null, diagnostics };
 
-  if (tool && !toolAllowed(tool)) diagnostics.fallbacks.push('tool_dropped_affiliate');
-  if (homeDetailsDropped(home)) diagnostics.fallbacks.push('home_detail_dropped');
+  diagnostics.fallbacks.push(...droppedBlocks({ areaLine, tool, home }));
   const issue = renderIssue({
     subject: copy.subject,
     preview: copy.preview,

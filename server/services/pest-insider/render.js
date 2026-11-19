@@ -78,8 +78,23 @@ function identifierBlock({ idItem }) {
   return { html, text };
 }
 
+// Caller-supplied text (the area line, a tool's words, a visit detail) is
+// not reviewed copy, so it runs the complete customer-copy screen
+// (AGENTS.md) before it renders, and text that fails is left out
+// (pre-push rounds 5 and 6). The screen loads the report-copy modules, so it
+// is required only when such text is given.
+function screenedText(value) {
+  if (typeof value !== 'string') return '';
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const { customerCopyViolations } = require('../service-report/technician-report-copy');
+  return customerCopyViolations(text).length ? '' : text;
+}
+
+const given = (value) => value != null && String(value).trim() !== '';
+
 function areaBlock({ areaLine }) {
-  const line = String(areaLine || '').trim();
+  const line = screenedText(areaLine);
   if (!line) return null;
   return { html: [headingHtml(0, 'Active near you'), paragraph(escapeHtml(line))].join('\n'), text: `ACTIVE NEAR YOU\n${line}` };
 }
@@ -94,40 +109,43 @@ function toolAllowed(tool) {
 }
 
 // tool: { name, why, url, disclosure? }; name, why and an https url are required.
+const toolTextPasses = (tool) => [tool.name, tool.why, tool.disclosure].every((v) => !given(v) || screenedText(v));
+
 function toolBlock({ tool }) {
-  if (!toolAllowed(tool)) return null;
+  if (!toolAllowed(tool) || !toolTextPasses(tool)) return null;
   const url = httpsUrl(tool.url);
-  if (!url || !String(tool.name || '').trim() || !String(tool.why || '').trim()) return null;
-  const disclosure = String(tool.disclosure || '').trim();
+  const name = screenedText(tool.name);
+  const why = screenedText(tool.why);
+  if (!url || !name || !why) return null;
+  const disclosure = screenedText(tool.disclosure);
   const html = [
     headingHtml(1, "A tool we'd use"),
-    box(`<strong>${escapeHtml(tool.name)}</strong><br/>${escapeHtml(tool.why)}<br/>${link(url, `See ${tool.name}`)}`),
+    box(`<strong>${escapeHtml(name)}</strong><br/>${escapeHtml(why)}<br/>${link(url, `See ${name}`)}`),
     disclosure ? small(escapeHtml(disclosure)) : '',
   ].join('\n');
-  const text = ["A TOOL WE'D USE", tool.name, tool.why, url, ...(disclosure ? ['', disclosure] : [])].join('\n');
+  const text = ["A TOOL WE'D USE", name, why, url, ...(disclosure ? ['', disclosure] : [])].join('\n');
   return { html, text };
 }
 
-// A visit detail (an area covered, the next service) is free text from the
-// visit record, so it runs the complete customer-copy screen (AGENTS.md)
-// before it renders, and one that fails is left out. One with a digit is
-// left out too: an area or a service name needs none, and an access code the
-// screen can miss ("gate #1234") always has one (pre-push round 5). The
-// screen loads the report-copy modules, so it is required only when a home
-// block is given.
+// A visit detail (an area covered, the next service) also may not hold a
+// digit: an area or a service name needs none, and an access code the
+// screen can miss ("gate #1234") always has one.
 function homeDetail(value) {
-  if (typeof value !== 'string') return '';
-  const text = value.replace(/\s+/g, ' ').trim();
-  if (!text || /\d/.test(text)) return '';
-  const { customerCopyViolations } = require('../service-report/technician-report-copy');
-  return customerCopyViolations(text).length ? '' : text;
+  const text = screenedText(value);
+  return /\d/.test(text) ? '' : text;
 }
 
-// True when renderIssue leaves a given visit detail out (for the build's diagnostics).
-function homeDetailsDropped(home) {
+// What renderIssue leaves out of the optional inputs a caller gave it, as
+// fallback names for the build's diagnostics.
+function droppedBlocks({ areaLine, tool, home }) {
   const areas = home && home.lastVisit && Array.isArray(home.lastVisit.areas) ? home.lastVisit.areas : [];
   const service = home && home.nextVisit ? [home.nextVisit.service] : [];
-  return [...areas, ...service].some((value) => value != null && String(value).trim() !== '' && !homeDetail(value));
+  return [
+    given(areaLine) && !screenedText(areaLine) && 'area_line_dropped',
+    tool && !toolAllowed(tool) && 'tool_dropped_affiliate',
+    tool && toolAllowed(tool) && !toolTextPasses(tool) && 'tool_dropped_copy',
+    [...areas, ...service].some((v) => given(v) && !homeDetail(v)) && 'home_detail_dropped',
+  ].filter(Boolean);
 }
 
 // home: { lastVisit: { date, areas: [] }, nextVisit: { date, service }, sinceDate, visitCount }
@@ -188,4 +206,4 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-module.exports = { renderIssue, wrapIssueHtml, toolAllowed, homeDetailsDropped, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };
+module.exports = { renderIssue, wrapIssueHtml, toolAllowed, droppedBlocks, escapeHtml, FORWARD_LINE, IDENTIFIER_URL };

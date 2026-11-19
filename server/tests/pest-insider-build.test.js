@@ -71,7 +71,11 @@ describe('buildIssue', () => {
     expect(r.issue.html_body).toContain('Your home');
   });
 
-  test('a visit detail that fails the customer-copy screen is left out and reported', () => {
+  test('caller text that fails the customer-copy screen is left out and reported', () => {
+    const area = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), areaLine: 'Gate code 4512 at the side yard.' });
+    expect(area.ok).toBe(true);
+    expect(area.issue.text_body).not.toContain('4512');
+    expect(area.diagnostics.fallbacks).toEqual(['area_line_dropped']);
     const home = { lastVisit: { date: '2026-11-04', areas: ['lanai', 'gate code 4512'] }, nextVisit: { date: '2027-01-06', service: 'pest control' } };
     const r = buildIssue({ sendDate: '2026-12-03', plan: planOf(A01), home });
     expect(r.ok).toBe(true);
