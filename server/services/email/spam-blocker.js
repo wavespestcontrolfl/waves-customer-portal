@@ -699,7 +699,8 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
   // A government sender is an identity too: a stale AUTOMATIC block on an
   // agency address is removed; a manual admin block still stands.
   const governmentSender = isGovernmentDomain(domain);
-  const identity = isOperationalDomain(domain)
+  const operationalSender = isOperationalDomain(domain);
+  const identity = operationalSender
     || governmentSender
     // Live customers only — a soft-deleted customer is no longer a protected
     // identity (mirrors isKnownSender), so their block stays enforced.
@@ -717,10 +718,14 @@ async function isBlocked(fromAddress, { gmailId = null } = {}) {
       return true;
     }
     if (exactBlocked) await removeStaleAutoBlock(normalized, { untrashGmailId: gmailId });
-    // The government identity only voids AUTOMATIC blocks: an admin's manual
-    // block of the whole domain (validateManualBlockScope accepts fdacs.gov)
-    // stays enforced, as an exact manual block does above (Codex P2, #6668).
-    if (governmentSender) {
+    // An identity by DOMAIN (government or operational) only voids AUTOMATIC
+    // blocks: an admin's manual block of the whole domain stays enforced, as
+    // an exact manual block does above (Codex P2, #6668).
+    // validateManualBlockScope accepts a government domain (fdacs.gov). It
+    // refuses an operational one, so such a row can only be older than the
+    // domain's place in OPERATIONAL_EMAIL_DOMAINS (siteone.com, 2026-11-18):
+    // it stays the admin's to remove.
+    if (governmentSender || operationalSender) {
       const domainBlock = await db('blocked_email_senders')
         .where('domain', domain)
         .whereNull('email_address')

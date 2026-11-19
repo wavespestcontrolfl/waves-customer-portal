@@ -8,8 +8,10 @@
  * lists each deal with its deadline and the products from our own catalog that
  * it names. Zero deals = no bell, one info line.
  *
- * A sender must also pass Gmail's SPF/DKIM check for its own domain (a typed From
- * header proves nothing), and quarantined, SPAM, TRASH or spam rows are skipped.
+ * A sender must also show Gmail's own proof for its domain (aligned SPF or DKIM, or
+ * Google's DMARC pass: the proof the inbox agent asks of a sender it keeps by domain
+ * alone; a typed From header proves nothing), and quarantined, SPAM, TRASH or spam
+ * rows are skipped.
  *
  * Costs $0: plain string and regex rules over rows already in the database. No
  * model call, no paid API, no network. Read-only: it writes nothing but the bell.
@@ -21,7 +23,7 @@
  * finds a different list.
  */
 const logger = require('../logger');
-const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { hasOperationalSenderAuth } = require('../email/inbox-hygiene');
 const { etWeekStart, etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const WINDOW_DAYS = 7;
@@ -111,6 +113,10 @@ function bodyPlainText(email) {
 // message authenticated as the From domain (the strict reader: Google's authserv-id,
 // real method results only; missing or unreadable = no), and (2) a row the sync did
 // not quarantine, label SPAM or TRASH, or classify as spam.
+// The proof in (1) is hasOperationalSenderAuth, for every listed sender: the inbox
+// agent keeps SiteOne mail on that proof (OPERATIONAL_EMAIL_DOMAINS), and a second
+// reading here would drop mail it kept, such as mail whose only readable proof is
+// Google's DMARC pass (quoted SPF sender, DKIM not verified).
 const HELD_LABELS = ['SPAM', 'TRASH'];
 function labelsOf(email) {
   let labels = email.label_ids; // jsonb array; the driver may hand it over as a string
@@ -123,7 +129,7 @@ const isHeldBack = (email) => !!email.quarantined_at
   || email.classification === 'spam'
   || labelsOf(email).some((label) => HELD_LABELS.includes(label));
 const isAuthenticatedSender = (email) => isDealSenderDomain(email.from_address)
-  && hasAlignedAuth(email.authentication_results, senderDomain(email.from_address), { strict: true });
+  && hasOperationalSenderAuth(email.authentication_results, senderDomain(email.from_address));
 
 /**
  * Is this email a SiteOne / maker deal? The sender must be on the list AND
@@ -269,7 +275,7 @@ function dealLine(email, products) {
 /**
  * The candidate rows, narrowed in SQL so a mail flood to the public contact@ address
  * cannot load unbounded bodies into the worker. Every filter here is a SUPERSET of what
- * the JS checks accept (sender domain by substring, a coarse dkim/spf pass, rows not
+ * the JS checks accept (sender domain by substring, a coarse dkim/spf/dmarc pass, rows not
  * obviously held back); isDealEmail stays the authority. Bodies come back as bounded
  * excerpts under their own column names. label_ids is jsonb; jsonb_exists, never the
  * "?" operator, which knex reads as a binding.
@@ -285,7 +291,8 @@ function candidateEmailQuery(conn, since, now) {
     .where('received_at', '>=', since)
     .where('received_at', '<', now)
     .where((qb) => { for (const domain of SENDER_DOMAINS) qb.orWhere('from_address', 'ilike', `%${domain}%`); })
-    .where((qb) => qb.where('authentication_results', 'ilike', '%dkim=pass%').orWhere('authentication_results', 'ilike', '%spf=pass%'))
+    .where((qb) => qb.where('authentication_results', 'ilike', '%dkim=pass%').orWhere('authentication_results', 'ilike', '%spf=pass%')
+      .orWhere('authentication_results', 'ilike', '%dmarc=pass%'))
     .whereNull('quarantined_at')
     .whereRaw("COALESCE(classification, '') NOT IN ('spam', 'vendor_invoice')")
     .whereRaw("NOT jsonb_exists(COALESCE(label_ids::jsonb, '[]'::jsonb), ?)", ['SPAM'])

@@ -466,20 +466,25 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
     expect(increment).toHaveBeenCalledWith('blocked_count', 1);
   });
 
-  test('a MANUAL admin block of a whole government domain still stands (Codex P2, #6668)', async () => {
+  test.each([
+    ['government domain (Codex P2, #6668)', 'licensing@fdacs.gov', 'fdacs.gov'],
+    // validateManualBlockScope refuses this block today, so the row is older than siteone.com's place on the
+    // operational list (2026-11-18). It stays the admin's to remove.
+    ['operational domain', 'marketing@grow.siteone.com', 'grow.siteone.com'],
+  ])('a MANUAL admin block of a whole %s still stands', async (_label, address, blockedDomain) => {
     const increment = jest.fn(async () => {});
     db.mockImplementation((table) => {
       if (table === 'blocked_email_senders') {
         const chain = {
-          where: jest.fn((arg) => {
+          where: jest.fn((arg, value) => {
             if (arg && arg.id === 'gd1') return { increment };
             if (arg === 'email_address') chain.scope = 'exact';
-            if (arg === 'domain') chain.scope = 'domain';
+            if (arg === 'domain') chain.scope = value === blockedDomain ? 'domain' : 'another domain';
             return chain;
           }),
           whereNull: jest.fn(() => chain),
           first: jest.fn(async () => (chain.scope === 'domain'
-            ? { id: 'gd1', reason: 'manual', domain: 'fdacs.gov', email_address: null }
+            ? { id: 'gd1', reason: 'manual', domain: blockedDomain, email_address: null }
             : null)),
         };
         return chain;
@@ -487,8 +492,31 @@ describe('government senders are never auto-blocked (outside review 2026-10-25)'
       return noIdentity(table);
     });
 
-    await expect(isBlocked('licensing@fdacs.gov')).resolves.toBe(true);
+    await expect(isBlocked(address)).resolves.toBe(true);
     expect(increment).toHaveBeenCalledWith('blocked_count', 1);
+  });
+
+  test('an operational sender with no manual block is not blocked; the domain lookup reads its own domain only', async () => {
+    const lookups = [];
+    db.mockImplementation((table) => {
+      if (table === 'blocked_email_senders') {
+        const chain = {
+          where: jest.fn((arg, value) => { lookups.push([arg, value]); return chain; }),
+          whereNull: jest.fn((column) => { lookups.push(['whereNull', column]); return chain; }),
+          first: jest.fn(async () => null),
+        };
+        return chain;
+      }
+      return noIdentity(table);
+    });
+
+    await expect(isBlocked('marketing@grow.siteone.com')).resolves.toBe(false);
+    // The two lookups an operational sender gets: its exact address, then a whole-domain row for its own domain.
+    expect(lookups).toEqual([
+      ['email_address', 'marketing@grow.siteone.com'],
+      ['domain', 'grow.siteone.com'],
+      ['whereNull', 'email_address'],
+    ]);
   });
 
   test.each([

@@ -572,7 +572,8 @@ function hasStrictDmarcPass(authResults, fromDomain) {
 // 'operational', and the same list in shouldSkipAutoAction). It never depends on GATE_EMAIL_AUTH_STRICT: the legacy
 // reader accepts a pass result forged inside a quoted MAIL FROM (#6668). Google's own DMARC pass counts as well,
 // because the strict reader finds nothing where Gmail quotes the whole SPF envelope address and DKIM did not verify
-// (#6904); without it a spam verdict would quarantine that real mail and the sweep would trash it.
+// (#6904); without it a spam verdict would quarantine that real mail and the sweep would trash it. The SiteOne deals
+// digest asks this same proof of its listed senders, so it never drops, for its proof, mail that was kept here.
 function hasOperationalSenderAuth(authResults, fromDomain) {
   return hasAlignedAuth(authResults, fromDomain, { strict: true }) || hasStrictDmarcPass(authResults, fromDomain);
 }

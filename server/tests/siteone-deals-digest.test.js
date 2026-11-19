@@ -18,6 +18,12 @@ const {
 const authFor = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=s1 header.b=abc; spf=pass (google.com: domain of bounce@${domain} designates 192.0.2.1 as permitted sender) smtp.mailfrom=bounce@${domain}; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=${domain}`;
 const SPOOFED = 'mx.google.com; dkim=none; spf=fail (google.com: domain of bounce@attacker.example does not designate 198.51.100.7 as permitted sender) smtp.mailfrom=bounce@attacker.example; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=siteone.com';
 const FORGED_TEXT = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=siteone.com y"@attacker.example designates 198.51.100.7 as permitted sender) smtp.mailfrom="x dkim=pass header.d=siteone.com y"@attacker.example';
+// Gmail quotes the whole SPF sender and DKIM did not verify: the strict SPF/DKIM reader finds nothing, and Google's
+// own DMARC pass for the From domain is the proof (email-auth-strict.test.js, #6904). The inbox agent keeps SiteOne
+// mail on that proof, so the digest must read it too.
+const dmarcOnly = (domain) => `mx.google.com; dkim=permerror (no key for signature) header.i=@${domain} header.s=s1 header.b=abc; spf=pass (google.com: domain of bounces+1-2@em1.${domain} designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.${domain}"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=${domain}`;
+// The sender typed dmarc=pass into a quoted MAIL FROM. Google's own verdict is dmarc=fail.
+const forgedDmarc = (domain) => `mx.google.com; dkim=none; spf=pass (google.com: domain of "x dmarc=pass header.from=${domain} y"@attacker.example designates 198.51.100.7 as permitted sender) smtp.mailfrom="x dmarc=pass header.from=${domain} y"@attacker.example; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=${domain}`;
 
 const email = (over = {}) => ({
   id: 1,
@@ -78,6 +84,16 @@ describe('isDealEmail', () => {
   test('a subdomain sender authenticated by its own domain or the parent is a deal', () => {
     expect(isDealEmail(email({ from_address: 'news@ec.siteone.com', authentication_results: authFor('ec.siteone.com') }))).toBe(true);
     expect(isDealEmail(email({ from_address: 'news@ec.siteone.com', authentication_results: authFor('siteone.com') }))).toBe(true);
+  });
+
+  test("Google's DMARC pass for the From domain is proof enough, the same as for the inbox agent (2026-11-18)", () => {
+    const promo = { from_address: 'marketing@grow.siteone.com', subject: 'Fall Savings Event' };
+    expect(isDealEmail(email({ ...promo, authentication_results: dmarcOnly('grow.siteone.com') }))).toBe(true);
+    expect(isDealEmail(email({ from_address: 'news@mail.basf.com', subject: 'Fall rebate is open', authentication_results: dmarcOnly('mail.basf.com') }))).toBe(true);
+    // A typed dmarc=pass, a DMARC pass for another From domain, and a header that is not Google's prove nothing.
+    expect(isDealEmail(email({ ...promo, authentication_results: forgedDmarc('grow.siteone.com') }))).toBe(false);
+    expect(isDealEmail(email({ ...promo, authentication_results: dmarcOnly('attacker.example') }))).toBe(false);
+    expect(isDealEmail(email({ ...promo, authentication_results: dmarcOnly('grow.siteone.com').replace('mx.google.com', 'mx.attacker.example') }))).toBe(false);
   });
 
   test('quarantined, SPAM, TRASH and spam-classified rows are skipped, even with aligned auth', () => {
@@ -280,6 +296,19 @@ describe('runSiteOneDealsDigest', () => {
     expect(notify.mock.calls[0][2].detail).not.toContain('Note:');
   });
 
+  test("a SiteOne promo email whose only readable proof is Google's DMARC pass reaches the bell", async () => {
+    const received = new Date('2026-10-30T15:00:00Z');
+    const { db } = fakeDb({
+      emails: [
+        email({ id: 31, from_name: 'SiteOne', from_address: 'marketing@grow.siteone.com', subject: 'Fall Savings Event', authentication_results: dmarcOnly('grow.siteone.com'), received_at: received }),
+        email({ id: 32, from_address: 'marketing@grow.siteone.com', subject: 'Fall Savings Event', authentication_results: forgedDmarc('grow.siteone.com'), received_at: received }),
+      ],
+    });
+    const notify = jest.fn().mockResolvedValue({ id: 1 });
+    expect(await runSiteOneDealsDigest({ now, db, notify })).toEqual({ scanned: 2, deals: 1, notified: true });
+    expect(notify.mock.calls[0][2].metadata).toMatchObject({ dealCount: 1, emailIds: [31] });
+  });
+
   test('spoofed, spam-labelled and quarantined mail never reaches the bell', async () => {
     const received = new Date('2026-10-30T15:00:00Z');
     const { db } = fakeDb({
@@ -349,9 +378,10 @@ describe('candidateEmailQuery (SQL shape, built with the real knex builder, noth
     expect(bindings.filter((b) => typeof b === 'string' && b.startsWith('%') && b.endsWith('%') && !b.includes('pass')).length).toBe(20); // siteone.com + 19 makers
   });
 
-  test('keeps the date window, a coarse dkim/spf pass check, and drops held-back rows in SQL', () => {
-    expect(bindings).toEqual(expect.arrayContaining([since, until, '%dkim=pass%', '%spf=pass%', 'SPAM', 'TRASH']));
-    expect(normalized).toContain('("authentication_results" ilike');
+  test('keeps the date window, a coarse dkim/spf/dmarc pass check, and drops held-back rows in SQL', () => {
+    // A superset of what isDealEmail accepts: a DMARC pass alone must reach the JS check too.
+    expect(bindings).toEqual(expect.arrayContaining([since, until, '%dkim=pass%', '%spf=pass%', '%dmarc=pass%', 'SPAM', 'TRASH']));
+    expect(normalized).toMatch(/\("authentication_results" ilike \$\d+ or "authentication_results" ilike \$\d+ or "authentication_results" ilike \$\d+\)/);
     expect(normalized).toContain('"quarantined_at" is null');
     expect(normalized).toContain("COALESCE(classification, '') NOT IN ('spam', 'vendor_invoice')");
     expect(normalized.match(/NOT jsonb_exists\(COALESCE\(label_ids::jsonb, '\[\]'::jsonb\), \$\d+\)/g)).toHaveLength(2);
