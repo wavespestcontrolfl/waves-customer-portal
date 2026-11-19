@@ -1203,18 +1203,19 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   const LAWN = { name: 'Lawn Care', mo: 69.75 };
   const PEST = { name: 'Pest Control', mo: 45 };
 
-  // A legacy plan split across the two recurring blocks: the page's fee reader sees one block and shows the $99
-  // setup fee, accept reads both and bills none. Which reader is right is the owner's ruling (CLAUDE.md rule 22), so
-  // the multi-service veto leaves such a page as it was (closing prepay would make that fee read as due).
-  test('the server-rendered page: a second service in the root block beside a fee leaves the page as it was', () => {
+  // A legacy plan split across the two recurring blocks: accept counts two units and refuses prepay, so the page offers
+  // none. The page's fee reader sees one block and still shows the $99 setup fee accept never bills; which reader is
+  // right is a separate ruling for the owner (CLAUDE.md rule 22), so the fee line stays as built.
+  test('the server-rendered page: a second service in the root block closes prepay; the fee line stays as built', () => {
     const control = renderPage('prepay-ssr-fee', lead(), data([{ name: 'Pest Control', mo: 45 }]), null);
     const split = renderPage('prepay-ssr-fee', lead(), {
       ...data([{ name: 'Pest Control', mo: 45 }]),
       recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 69.75 }] },
     }, null);
-    expect(control).toContain('<span>WaveGuard Membership Setup</span>');
+    expect(control).toContain('data-payment-setup="prepay_annual"');
+    expect(split).not.toContain('data-payment-setup="prepay_annual"');
+    expect(split).not.toContain('data-pay-pref="prepay_annual"');
     expect(split).toContain('<span>WaveGuard Membership Setup</span>');
-    expect(split.includes('data-payment-setup="prepay_annual"')).toBe(control.includes('data-payment-setup="prepay_annual"'));
   });
 
   test('the server-rendered page offers it for one service and not for two', () => {
@@ -1267,25 +1268,25 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   // two-service cases here offer no one-time choice.
   const NO_ONE_TIME_CHOICE = { show_one_time_option: false };
 
-  test('a mosquito ladder with pest in the root block shows a fee accept never bills: the veto leaves the bundle as built', async () => {
+  test('a mosquito ladder with a second service in the root recurring block offers no tier prepay', async () => {
     // Control: solo mosquito reaches the tier stamp, its monthly tier can prepay, and it carries the setup fee.
     const solo = await buildPricingBundle(mosquitoEstimate('solo'));
     expect(offersPrepay(solo)).toBe(true);
     expect(JSON.stringify(solo)).toContain('"waveguard_setup"');
-    // The fee reader sees the mosquito block alone; accept reads mosquito and pest (two units, no fee). The owner
-    // rules which is right (rule 22); until then the veto changes nothing here.
     const legacy = await buildPricingBundle(mosquitoEstimate('with-root-pest', ROOT_PEST, NO_ONE_TIME_CHOICE));
+    // Accept counts two units, so no frequency or tier lets the customer pick prepay, and nothing promises "waived
+    // when you pay the year". The fee line itself stays as built (the separate rule-22 question).
+    expect(offersPrepay(legacy)).toBe(false);
+    expect(JSON.stringify(legacy)).not.toContain('"waivedWithPrepay":true');
     expect(JSON.stringify(legacy)).toContain('"waveguard_setup"');
-    expect(offersPrepay(legacy)).toBe(offersPrepay(solo));
   });
 
-  test('a priced engine line beside the stored rows: accept counts two services, the fee reader one, so the veto leaves the bundle as built', async () => {
-    const solo = await buildPricingBundle(mosquitoEstimate('solo-engine-control'));
+  test('a priced engine line beside the stored rows counts as a second service, as the converter reads it', async () => {
     const withEngineLawn = await buildPricingBundle(mosquitoEstimate('with-engine-lawn', {
       engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 900, monthly: 75 }] },
     }));
-    expect(JSON.stringify(withEngineLawn)).toContain('"waveguard_setup"');
-    expect(offersPrepay(withEngineLawn)).toBe(offersPrepay(solo));
+    expect(offersPrepay(withEngineLawn)).toBe(false);
+    expect(JSON.stringify(withEngineLawn)).not.toContain('"waivedWithPrepay":true');
   });
 
   // An estimate that also offers a one-time pest visit: a recurring choice keeps only the pest rows (accept persists
@@ -1351,13 +1352,17 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       expect(out.hiddenLawnFrequencies).toEqual([{ key: 'lawn_6', annualPrepayEligible: false }]);
     });
 
-    test('a bundle showing a setup fee accept never bills comes back as it was', () => {
+    test('a split plan showing a setup fee: prepay closes everywhere, the fee row stays, its waiver line goes', () => {
       const shown = bundle({
         firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
         hiddenLawnFrequencies: [{ key: 'lawn_6', annualPrepayEligible: true }],
       });
       const split = { result: { recurring: { services: [pestRow] } }, recurring: { services: [lawnRow] } };
-      expect(withMultiServicePrepayClosed(shown, split, NO_CHOICE)).toBe(shown);
+      const out = withMultiServicePrepayClosed(shown, split, NO_CHOICE);
+      expect(out.annualPrepayEligible).toBe(false);
+      expect(out.frequencies).toEqual([{ key: 'quarterly', annualPrepayEligible: false }]);
+      expect(out.hiddenLawnFrequencies).toEqual([{ key: 'lawn_6', annualPrepayEligible: false }]);
+      expect(out.firstVisitFees).toEqual([{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: false }]);
     });
   });
 });

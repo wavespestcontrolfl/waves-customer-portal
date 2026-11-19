@@ -6430,13 +6430,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // lawn plan) are not a sellable incentive — treat them like the at-floor
   // case and hide the prepay option instead of advertising ~$0 savings.
   // A plan with more than one recurring service cannot prepay: accept and the
-  // converter refuse it (withMultiServicePrepayClosed, same unit count). A page
-  // that shows a setup fee accept never bills is left as it was
-  // (acceptBillsNoSetupFee).
-  const multiServicePrepayClosed = multiServicePrepayUnits(estData, estimate) > 1
-    && !(membershipFee > 0 && acceptBillsNoSetupFee(estData, estimate));
+  // converter refuse it (withMultiServicePrepayClosed, same unit count).
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && !multiServicePrepayClosed
+    && !(multiServicePrepayUnits(estData, estimate) > 1)
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -28398,28 +28394,14 @@ function multiServicePrepayUnits(estData, estimate) {
   } catch { return 0; }
 }
 
-// The page's setup-fee readers each see one recurring block (and its supplements); accept reads the plan it bills
-// (planRecurringRowsAsAccepted). On a legacy plan split across the blocks they can disagree, and the page shows a $99
-// WaveGuard setup fee that accept never bills. Which reader is right is the owner's ruling (CLAUDE.md rule 22), so
-// the prepay veto leaves such a page as it was: closing prepay there would turn that waivable fee into one that reads
-// as due.
-function acceptBillsNoSetupFee(estData, estimate) {
-  return !require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData, estimate));
-}
-
-function bundleShowsSetupFee(payload) {
-  const isSetupRow = (row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {});
-  return (Array.isArray(payload.firstVisitFees) && payload.firstVisitFees.some(isSetupRow))
-    || payload.setupFee?.service === 'waveguard_setup'
-    || (Array.isArray(payload.oneTimeBreakdown?.items) && payload.oneTimeBreakdown.items.some(isSetupRow));
-}
-
+// Prepay only. The fee lines are left as each builder made them: on a legacy plan split across the two recurring
+// blocks, the page's fee readers see one block and can show a $99 WaveGuard setup fee that accept, reading both, never
+// bills. Which reader is right is a separate ruling for the owner (CLAUDE.md rule 22); with prepay closed, that fee
+// just no longer says it is waived when you pay the year.
 function withMultiServicePrepayClosed(payload, estData, estimate) {
   const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
   const multi = multiServicePrepayUnits(estData, estimate) > 1;
   if (!combos.length && !multi) return payload;
-  if (bundleShowsSetupFee(payload) && acceptBillsNoSetupFee(estData, estimate)) return payload;
   const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
   // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
   const noWaiver = (fee) => (fee && fee.waivedWithPrepay === true ? { ...fee, waivedWithPrepay: false } : fee);
