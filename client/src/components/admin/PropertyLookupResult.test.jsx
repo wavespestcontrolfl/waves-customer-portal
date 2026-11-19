@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import PropertyLookupResult from "./PropertyLookupResult";
 
@@ -264,5 +264,90 @@ describe("PropertyLookupResult — campus parcel context", () => {
     renderPanel({ profile: flagged, form: { address: "950 Example Park Blvd" }, meta: meta({}) });
     expect(screen.getByText(/The county roll has no record for this house number/)).toBeInTheDocument();
     expect(screen.queryByText(/Buildings on the county parcel/)).not.toBeInTheDocument();
+  });
+});
+
+// A business in one space of a shared building, after staff answered "Just
+// their space": the server puts the suite's own size on the profile
+// (suiteSize + homeSqFt). The record's evidence and missing-field list still
+// describe the county record: none here, or the whole building's.
+describe("PropertyLookupResult — a sized commercial suite", () => {
+  const suiteProfile = (suiteSize, extra = {}) => ({
+    homeSqFt: suiteSize.value,
+    lotSqFt: 0,
+    stories: 1,
+    storiesSource: "default",
+    propertyType: "Commercial",
+    suiteSize,
+    fieldEvidence: {},
+    propertyDataQuality: { missingCriticalFields: ["squareFootage", "lotSize", "stories"] },
+    fieldVerifyFlags: [{ field: "address", priority: "HIGH", reason: "No county record for this house number" }],
+    ...extra,
+  });
+  const form = { address: "120 Example Plaza Dr, Examplecity, FL 00000", isCommercial: "YES", homeSqFt: "2500", lotSqFt: "", stories: "1" };
+  const sizeRow = () => within(screen.getByText("Suite area").closest("div"));
+
+  it("shows the suite's size and where it came from, not \"Not found\"", () => {
+    renderPanel({ profile: suiteProfile({ value: 2500, source: "suite_type_default" }), form });
+    expect(screen.queryByText("Building area")).not.toBeInTheDocument();
+    expect(sizeRow().getByText("2,500 sq ft")).toBeInTheDocument();
+    expect(sizeRow().getByText("Estimate, not measured")).toBeInTheDocument();
+    expect(sizeRow().getByText("Typical size for this business type")).toBeInTheDocument();
+    expect(sizeRow().queryByText("Not found")).not.toBeInTheDocument();
+    expect(sizeRow().queryByText("No matching source returned")).not.toBeInTheDocument();
+    // The lot row still reports the record: a suite has no lot of its own.
+    expect(within(screen.getByText("Lot area").closest("div")).getByText("Not found")).toBeInTheDocument();
+  });
+
+  it("never credits the suite's size to the building's county record", () => {
+    renderPanel({
+      profile: suiteProfile({ value: 1500, source: "suite_type_default" }, {
+        fieldEvidence: {
+          squareFootage: { value: 58940, sourceType: "county", sourceLabel: "county record", winningSource: "https://county.example/parcel/1" },
+        },
+        propertyDataQuality: { missingCriticalFields: [] },
+        fieldVerifyFlags: [],
+      }),
+      form: { ...form, homeSqFt: "1500" },
+    });
+    expect(sizeRow().getByText("1,500 sq ft")).toBeInTheDocument();
+    expect(sizeRow().getByText("Estimate, not measured")).toBeInTheDocument();
+    expect(sizeRow().queryByText("county record")).not.toBeInTheDocument();
+    expect(sizeRow().queryByText("Sourced")).not.toBeInTheDocument();
+    expect(sizeRow().queryByRole("link", { name: "View source" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Verify suite area: 1,500 sq ft" })).toBeInTheDocument();
+  });
+
+  it("links a listing size to its listing and keeps it to confirm", () => {
+    renderPanel({
+      profile: suiteProfile({ value: 1840, source: "listing_verified_text", url: "https://listing.example/suite-4" }),
+      form: { ...form, homeSqFt: "1840" },
+    });
+    expect(sizeRow().getByText("1,840 sq ft")).toBeInTheDocument();
+    expect(sizeRow().getByText("From a listing, needs confirmation")).toBeInTheDocument();
+    expect(sizeRow().getByRole("link", { name: "View source" })).toHaveAttribute("href", "https://listing.example/suite-4");
+  });
+
+  it("names the seat count behind a license-based size", () => {
+    renderPanel({ profile: suiteProfile({ value: 2100, source: "license_seats", seats: 84 }), form: { ...form, homeSqFt: "2100" } });
+    expect(sizeRow().getByText("Estimated from licensed seats")).toBeInTheDocument();
+    expect(sizeRow().getByText("State restaurant license (84 seats)")).toBeInTheDocument();
+  });
+
+  it("a size staff verified in this session still wins", () => {
+    renderPanel({
+      profile: suiteProfile({ value: 2500, source: "suite_type_default" }, { fieldVerifyFlags: [] }),
+      form: { ...form, homeSqFt: "2210" },
+      verification: { squareFootage: "saved" },
+    });
+    expect(sizeRow().getByText("2,210 sq ft")).toBeInTheDocument();
+    expect(sizeRow().getByText("Verified by you")).toBeInTheDocument();
+    expect(sizeRow().queryByText("Estimate, not measured")).not.toBeInTheDocument();
+  });
+
+  it("an open scope question (no suite size yet) leaves the row as it was", () => {
+    renderPanel({ profile: suiteProfile({ value: 0, source: null }, { homeSqFt: 0, suiteSize: null }), form: { ...form, homeSqFt: "" } });
+    expect(screen.queryByText("Suite area")).not.toBeInTheDocument();
+    expect(within(screen.getByText("Building area").closest("div")).getByText("Not found")).toBeInTheDocument();
   });
 });

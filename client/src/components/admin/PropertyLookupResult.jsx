@@ -2,6 +2,7 @@ import React from "react";
 import { Button } from "../ui";
 import { formatETDateTime } from "../../lib/timezone";
 import { subdivisionMedianPrefillSqFt, permitPlanPrefillSqFt, homeSqFtIsUnverifiedPlatMedian } from "../../lib/lookupPrefill";
+import { COMMERCIAL_SUITE_SOURCE_LABELS, sizedSuite } from "../../lib/commercialSuiteSize";
 
 const FIELDS = [
   { key: "squareFootage", formKey: "homeSqFt", label: "Home living area", unit: "sq ft" },
@@ -11,6 +12,36 @@ const FIELDS = [
 ];
 
 const VERIFICATION_LABELS = { saving: "Saving…", saved: "Verification saved", error: "Save failed — retry" };
+
+// How far a suite's size can be trusted, by where it came from. Only a
+// measurement reads as settled; every other source is a size to confirm.
+const SUITE_SIZE_STATUS = {
+  suite_type_default: "Estimate, not measured",
+  license_seats: "Estimated from licensed seats",
+  listing_verified_text: "From a listing, needs confirmation",
+  verified: "Verified measurement",
+};
+
+function suiteSizeSourceLine(suite) {
+  const label = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || String(suite.source || "");
+  const seats = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}${seats}`;
+}
+
+// One measurement of the card: label, value, how far to trust it, its source.
+function MeasurementRow({ label, value, status, source, sourceUrl }) {
+  return (
+    <div className="min-w-0 py-3">
+      <dt className="text-sm text-ink-secondary">{label}</dt>
+      <dd className="mt-1 text-base font-medium text-zinc-900 break-words">{value}</dd>
+      <dd className="mt-1 text-sm text-ink-secondary">{status}</dd>
+      <dd className="mt-1 text-sm text-ink-secondary break-words">
+        {source}
+        {sourceUrl && <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="ml-2 underline text-zinc-900">View source</a>}
+      </dd>
+    </div>
+  );
+}
 
 function PropertyMeasurement({ field, profile, form, addressIssue, verification }) {
   const evidence = (profile.fieldEvidence || {})[field.key] || {};
@@ -46,19 +77,34 @@ function PropertyMeasurement({ field, profile, form, addressIssue, verification 
   const shown = value || permitPlan || platMedian;
 
   return (
-    <div className="min-w-0 py-3">
-      <dt className="text-sm text-ink-secondary">{field.label}</dt>
-      <dd className="mt-1 text-base font-medium text-zinc-900 break-words">
-        {shown ? [shown.toLocaleString("en-US"), field.unit].filter(Boolean).join(" ") : "—"}
-      </dd>
-      <dd className="mt-1 text-sm text-ink-secondary">{status}</dd>
-      <dd className="mt-1 text-sm text-ink-secondary break-words">
-        {saved ? "Field verification saved" : permitPlan ? permitPlanSourceLine(profile.permitBuildingFacts, permitPlan)
-          : permitStories ? permitStoriesSourceLine(profile.permitBuildingFacts)
-          : platMedian ? platMedianSourceLine(profile.subdivisionMedian) : evidence.sourceLabel || "No matching source returned"}
-        {sourceUrl && <a href={sourceUrl} target="_blank" rel="noopener noreferrer" className="ml-2 underline text-zinc-900">View source</a>}
-      </dd>
-    </div>
+    <MeasurementRow
+      label={field.label}
+      value={shown ? [shown.toLocaleString("en-US"), field.unit].filter(Boolean).join(" ") : "—"}
+      status={status}
+      source={saved ? "Field verification saved" : permitPlan ? permitPlanSourceLine(profile.permitBuildingFacts, permitPlan)
+        : permitStories ? permitStoriesSourceLine(profile.permitBuildingFacts)
+        : platMedian ? platMedianSourceLine(profile.subdivisionMedian) : evidence.sourceLabel || "No matching source returned"}
+      sourceUrl={sourceUrl}
+    />
+  );
+}
+
+// The lookup sized ONE suite of a larger building. The size is the suite's
+// own (profile.suiteSize), while the record's evidence and its missing-field
+// list still describe the county record: none, or the whole building's. So
+// this row reports the suite and where its size came from, never the record
+// (owner report 2026-11-19: the row read "Not found" beside a filled size).
+function SuiteSizeMeasurement({ label, suite }) {
+  // A suite's only link is its own listing; the record's link is the building's.
+  const sourceUrl = suite.source === "listing_verified_text" && /^https?:\/\//i.test(suite.url) ? suite.url : null;
+  return (
+    <MeasurementRow
+      label={label}
+      value={`${Number(suite.value).toLocaleString("en-US")} sq ft`}
+      status={SUITE_SIZE_STATUS[suite.source] || "Needs confirmation"}
+      source={suiteSizeSourceLine(suite)}
+      sourceUrl={sourceUrl}
+    />
   );
 }
 
@@ -168,7 +214,9 @@ function platMedianSourceLine(median) {
 }
 
 export default function PropertyLookupResult({ profile, form, meta, refreshing, onRefresh, onEditAddress, onVerify, verification }) {
-  const fields = [{ ...FIELDS[0], label: form.isCommercial === "YES" ? "Building area" : "Home living area" }, ...FIELDS.slice(1)];
+  const suite = sizedSuite(profile);
+  const sizeLabel = suite ? "Suite area" : form.isCommercial === "YES" ? "Building area" : "Home living area";
+  const fields = [{ ...FIELDS[0], label: sizeLabel }, ...FIELDS.slice(1)];
   const addressIssue = profile.fieldVerifyFlags?.some((flag) => flag?.field === "address");
   const checkedAt = Number.isNaN(Date.parse(meta?.checkedAt))
     ? null : formatETDateTime(meta.checkedAt);
@@ -191,8 +239,11 @@ export default function PropertyLookupResult({ profile, form, meta, refreshing, 
       <CampusParcelBuildings campus={meta?.campusParcel} />
       <dl className="mt-2 grid grid-cols-1 divide-y divide-zinc-200 sm:grid-cols-2 sm:gap-x-6">
         {fields.map((field) => (
-          <PropertyMeasurement key={field.key} field={field} profile={profile} form={form}
-            addressIssue={addressIssue} verification={verification} />
+          // A size staff verified in this session wins over the suite's own row.
+          field.key === "squareFootage" && suite && verification.squareFootage !== "saved"
+            ? <SuiteSizeMeasurement key={field.key} label={field.label} suite={suite} />
+            : <PropertyMeasurement key={field.key} field={field} profile={profile} form={form}
+              addressIssue={addressIssue} verification={verification} />
         ))}
       </dl>
       <p className="mt-2 text-sm text-ink-secondary">Enter corrections in the property fields below. Save only measurements you have checked for this address.</p>
