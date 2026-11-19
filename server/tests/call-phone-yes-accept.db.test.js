@@ -285,6 +285,11 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
         { service: 'pest_control', perApp: 45, annual: 180, visitsPerYear: 4 }, { service: 'pest_control', perApp: 60, annual: 240, visitsPerYear: 4 },
       ] } })) },
     }, 'not_pest_plan'],
+    ['the estimate maps two pest rows', {
+      estimateOver: { estimate_data: JSON.stringify(planData({ result: { ...planData().result, recurring: { ...planData().result.recurring, services: [
+        ...planData().result.recurring.services, { name: 'Pest Control', service: 'pest_control', mo: 20, visitsPerYear: 4, perTreatment: 60 },
+      ] } } })) },
+    }, 'not_pest_plan'],
     // The estimate's own manual accept refuses these (estimate-manual-acceptance.js), so an automatic one would too.
     ['the estimate still needs a manager approval', {
       estimateOver: { estimate_data: JSON.stringify(planData({ approvals: [{ requiresManagerApproval: true }] })) },
@@ -592,6 +597,16 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
     const [card] = await cards(bookingCallId);
     expect(payloadOf(card)).toMatchObject({ yes_heard: false, caller_words: null, auto_would_accept: false });
+  });
+
+  // A resend claims 'sending', then restores the status: a sweep in between keeps the card and its link.
+  test('an estimate being sent again keeps the card open', async () => {
+    const { est, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'sending' });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'open', related_estimate_id: est.id });
   });
 
   test('a card that names its estimate stays open when a second estimate opens', async () => {

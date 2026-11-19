@@ -46,8 +46,9 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
 const CALENDAR_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'];
 const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed'];
-// An estimate a card keeps naming: open, or lapsed (the office can extend it and accept).
-const CARD_ESTIMATE_STATUSES = ['sent', 'viewed', 'expired'];
+// An estimate a card keeps naming: open, lapsed (the office can extend it and accept), or being sent again (a resend
+// claims 'sending' and then restores its status, admin-estimates.js; a sweep in between must not close the card).
+const CARD_ESTIMATE_STATUSES = ['sent', 'viewed', 'expired', 'sending'];
 // The one one-time line a standard accept of a pest plan may carry: the setup fee, which the first visit bills by
 // hand (estimate-accept-effects membershipFeeLine; one-time work rows never carry this name).
 const MEMBERSHIP_FEE_LINE_NAME = 'WaveGuard membership fee';
@@ -177,11 +178,12 @@ async function estimateProblem(conn, estimate) {
   const EstimateConverter = require('./estimate-converter');
   const lines = require('../routes/estimate-public').acceptanceServiceLists(data).recurringSvcList || [];
   if (lines.length !== 1 || EstimateConverter.recurringServiceKey(lines[0]) !== 'pest_control') return 'not_pest_plan';
-  // Two separately priced pest lines coalesce into that one row; the engine's own lines tell them apart (the duplicate
-  // rule acceptanceServiceLists applies with preserveDuplicates, read from its same source container).
+  // Two separately priced pest lines coalesce into that one row. Each list that holds lines tells them apart: the
+  // engine's own lines (the duplicate rule acceptanceServiceLists applies with preserveDuplicates) and each mapped
+  // recurring list. Each list is counted on its own, so one row mirrored in two lists is still one line.
   const source = data.result || data.engineResult || data;
-  const pestLines = (Array.isArray(source.lineItems) ? source.lineItems : []).filter((row) => EstimateConverter.recurringServiceKey(row) === 'pest_control');
-  if (pestLines.length > 1) return 'not_pest_plan';
+  const pestRows = (rows) => (Array.isArray(rows) ? rows : []).filter((row) => EstimateConverter.recurringServiceKey(row) === 'pest_control').length;
+  if ([source.lineItems, source.recurring?.services, source.results?.recurring?.services].some((rows) => pestRows(rows) > 1)) return 'not_pest_plan';
   const AcceptEffects = require('./estimate-accept-effects');
   const oneTime = AcceptEffects.oneTimeLineEffects(estimate, EstimateConverter, { billingTerm: 'standard' });
   if (oneTime.refusal || oneTime.lines.some((line) => line.name !== MEMBERSHIP_FEE_LINE_NAME)) return 'one_time_items';
