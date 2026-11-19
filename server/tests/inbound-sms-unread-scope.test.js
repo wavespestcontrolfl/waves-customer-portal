@@ -2,7 +2,6 @@
 const mockQueries = [];
 let mockCountRows = [];
 let mockPluck = () => [];
-let mockDistinct = () => [];
 jest.mock('../models/db', () => {
   const knex = require('knex')({ client: 'pg' });
   const db = (table) => {
@@ -12,7 +11,7 @@ jest.mock('../models/db', () => {
       mockQueries.push(compiled);
       const result = compiled.method === 'update' ? 0
         : compiled.method === 'pluck' ? mockPluck(compiled)
-          : (compiled.sql.startsWith('select distinct') ? mockDistinct(compiled) : { conversations: 2, messages: 5 });
+          : (compiled.sql.startsWith('select distinct') ? [] : { conversations: 2, messages: 5 });
       return Promise.resolve(result).then(resolve, reject);
     };
     return query;
@@ -28,7 +27,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
 const { countUnreadInboundSms, markInboundSmsRead, markAllInboundSmsRead } = require('../services/inbound-sms-read');
-beforeEach(() => { mockQueries.length = 0; mockCountRows = []; mockPluck = () => []; mockDistinct = () => []; });
+beforeEach(() => { mockQueries.length = 0; mockCountRows = []; mockPluck = () => []; });
 test('global count dedupes actionable endpoint threads by peer and ignores read state', async () => {
   mockCountRows = [
     { peer: '9415550100', endpoint: '9415550190', message_body: 'Can you call me?' },
@@ -113,61 +112,22 @@ test('Mark all read selects unread inbound texts up to the boundary, never recru
   expect(read.bindings).toEqual(expect.arrayContaining(['m-1', 'm-2', 'admin-1']));
 });
 
-test('Mark all read sends a long backlog to the writer in batches of 500, rechecking every rule before a later batch', async () => {
+test('Mark all read sends a long backlog to the writer in batches of 500', async () => {
   const ids = Array.from({ length: 1201 }, (_, i) => `m-${i}`);
-  // A later batch's recheck finds one text out of scope (say, a route change while the backlog ran).
-  const idBindings = (compiled) => compiled.bindings.filter((b) => typeof b === 'string' && b.startsWith('m-'));
-  mockPluck = (compiled) => {
-    // The writer's own scope check (a technician's customers) keeps the batch it was handed.
-    if (compiled.sql.startsWith('select "id" from "messages" where "id" in')) return idBindings(compiled);
-    if (!compiled.sql.includes('"messages" as "m"')) return [];
-    if (!compiled.sql.includes('"m"."id" in')) return ids;
-    return idBindings(compiled).filter((b) => b !== 'm-700');
-  };
-  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'technician', customerIds: ['owned-customer'] });
-  const rechecks = mockQueries.filter((q) => q.method === 'pluck' && q.sql.includes('"m"."id" in'));
-  expect(rechecks).toHaveLength(2);
-  for (const q of rechecks) expect(q.sql).toContain('"c"."customer_id" in (?)');
-  // The write itself carries the technician's customers, not only the selection before it.
-  const reads0 = mockQueries.filter((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
-  for (const q of reads0) expect(q.sql).toContain('"conversation_id" in (select "id" from "conversations" where "customer_id" in (?))');
+  mockPluck = (compiled) => (compiled.sql.includes('"messages" as "m"') ? ids : []);
+  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'admin' });
   const reads = mockQueries.filter((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
-  expect(reads.map((q) => q.bindings.filter((b) => typeof b === 'string' && b.startsWith('m-')).length)).toEqual([500, 499, 201]);
-  expect(reads[1].bindings).not.toContain('m-700');
+  expect(reads.map((q) => q.bindings.filter((b) => typeof b === 'string' && b.startsWith('m-')).length)).toEqual([500, 500, 201]);
 });
 
-test('Mark all read never reaches past now, and a technician scope reads only its own customers', async () => {
+test('Mark all read never reaches past now; nothing unread means no write', async () => {
   const future = new Date(Date.now() + 86400000);
-  await markAllInboundSmsRead({ readBefore: future, role: 'technician', customerIds: ['owned-customer'] });
+  await markAllInboundSmsRead({ readBefore: future, role: 'admin' });
   const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
-  expect(select.sql).toContain('inner join "conversations" as "c" on "c"."id" = "m"."conversation_id"');
-  expect(select.sql).toContain('"c"."customer_id" in (?)');
   const boundary = select.bindings.find((b) => b instanceof Date);
   expect(boundary.getTime()).toBeLessThanOrEqual(Date.now() + 1);
-  // Nothing unread: no write at all.
   expect(mockQueries.some((q) => q.method === 'update')).toBe(false);
   await expect(markAllInboundSmsRead({ readBefore: new Date('nope'), role: 'admin' })).rejects.toThrow('readBefore required');
-});
-
-test("a technician's read checks its customers inside the write and inside each bell step, not from the id snapshot", async () => {
-  mockPluck = (compiled) => {
-    if (compiled.sql.startsWith('select "id" from "messages" where "id" in')) return ['m-1'];
-    if (compiled.sql.startsWith('select "twilio_sid" from "messages"')) return ['SM-1'];
-    return [];
-  };
-  mockDistinct = (compiled) => (compiled.sql.includes('"conversation_id"') ? [{ conversation_id: 'conv-1' }] : []);
-  await markInboundSmsRead({ messageIds: ['m-1'], role: 'technician', customerIds: ['owned-customer'] });
-  const owned = '"conversation_id" in (select "id" from "conversations" where "customer_id" in (?))';
-  expect(mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?')).sql).toContain(owned);
-  expect(mockQueries.find((q) => q.sql.includes('"conversations" as "cv"')).sql).toContain('"cv"."customer_id" in (?)');
-  // The legacy mirror write carries the technician's customers inside the statement.
-  const ownedSids = '"twilio_sid" in (select "twilio_sid" from "messages" where "twilio_sid" is not null and "conversation_id" in (select "id" from "conversations" where "customer_id" in (?)))';
-  expect(mockQueries.find((q) => q.method === 'update' && q.sql.startsWith('update "sms_log" set "is_read"')).sql).toContain(ownedSids);
-  // Bells use the SIDs still on its customers when reconciliation starts.
-  expect(mockQueries.some((q) => q.sql.startsWith('select "twilio_sid" from "messages" where "twilio_sid" in (?) and "conversation_id" in (select "id" from "conversations" where "customer_id" in (?))'))).toBe(true);
-  // The backlog-marker strip's customer list.
-  expect(mockQueries.find((q) => /^select distinct "customer_id".* from "conversations" where "id" in/.test(q.sql)).sql)
-    .toContain('and "customer_id" in (?)');
 });
 
 test("a row's Mark read reads one sender's texts by the inbox's sender identity, recruiting replies included", async () => {
@@ -179,8 +139,8 @@ test("a row's Mark read reads one sender's texts by the inbox's sender identity,
   await expect(markAllInboundSmsRead({ readBefore: new Date(), role: 'admin', contactPhone: 'front desk' })).rejects.toThrow('contactPhone');
 });
 
-test("a technician's row read never selects a recruiting reply, even for one sender", async () => {
-  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'technician', contactPhone: '+19415550100', customerIds: ['owned-customer'] });
+test("a non-admin office role's row read never selects a recruiting reply, even for one sender", async () => {
+  await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'office', contactPhone: '+19415550100' });
   const select = mockQueries.find((q) => q.method === 'pluck' && q.sql.includes('"messages" as "m"'));
   expect(select.sql).toContain('("m"."message_type" is null or "m"."message_type" not like ?)');
 });

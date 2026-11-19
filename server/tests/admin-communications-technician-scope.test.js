@@ -147,7 +147,7 @@ describe('routes', () => {
     expect((await call('POST', '/api/admin/communications/messages/read', 'admin', { messageIds: ['m1'] })).status).toBe(200);
   });
 
-  test('POST /messages/read-all needs a boundary; a technician reads only its own customers, an admin every text', async () => {
+  test('POST /messages/read-all needs a boundary and is office-only; a technician reads thread by thread', async () => {
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', {})).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 'nope' })).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 'front desk' })).status).toBe(400);
@@ -158,15 +158,16 @@ describe('routes', () => {
     mockMarkAllRead.mockClear();
     expect(mockMarkAllRead).not.toHaveBeenCalled();
     const readBefore = '2026-11-19T12:00:00.000Z';
+    // A technician is refused before any read: one thread at a time, through the scoped /messages/read check.
     const tech = await call('POST', '/api/admin/communications/messages/read-all', 'tech', { readBefore });
-    expect(tech).toEqual({ status: 200, body: { success: true, updated: 3, notificationsCleared: 1 } });
-    expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({
-      readBefore: new Date(readBefore), role: 'technician', adminUserId: 'tech-1', customerIds: 'SCOPED_CUSTOMER_IDS',
+    expect(tech.status).toBe(403);
+    expect(mockMarkAllRead).not.toHaveBeenCalled();
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore })).status).toBe(200);
+    expect(mockMarkAllRead).toHaveBeenLastCalledWith({
+      readBefore: new Date(readBefore), role: 'admin', adminUserId: 'admin-1', contactPhone: null,
       // The inbox log's internal-phone exclusion rides along.
       excludePhones: expect.arrayContaining([expect.stringMatching(/^\+1\d{10}$/)]),
-    }));
-    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore })).status).toBe(200);
-    expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({ role: 'admin', customerIds: null }));
+    });
   });
 
   describe('GET /unread-count', () => {

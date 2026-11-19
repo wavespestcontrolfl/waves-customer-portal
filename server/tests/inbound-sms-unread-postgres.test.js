@@ -189,26 +189,6 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     expect(reset).toEqual({ is_read: true, metadata: {} });
   });
 
-  test("a technician's Mark all read writes only texts of the customers in its scope, checked inside the write", async () => {
-    await readColumns();
-    const own = randomUUID();
-    const other = randomUUID();
-    await mockPg('customers').insert([{ id: own, phone: '+19415550110' }, { id: other, phone: '+19415550111' }]);
-    const ownText = await text('own customer', { phone: '+19415550110', customerId: own, sid: 'SM-own' });
-    const otherText = await text('another route', { phone: '+19415550111', customerId: other, sid: 'SM-other' });
-    const office = await text('no customer', { phone: '+19415550112' });
-    const scope = () => mockPg('customers').select('id').where({ id: own });
-    const result = await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'technician', customerIds: scope() });
-    expect(result.updated).toBe(1);
-    expect(logger.warn).not.toHaveBeenCalled();
-    const read = await readIds();
-    expect([ownText, otherText, office].map((id) => read.has(id))).toEqual([true, false, false]);
-    // The writer itself refuses a text outside the scope, even when a caller hands it the id.
-    const { markInboundSmsRead } = require('../services/inbound-sms-read');
-    expect(await markInboundSmsRead({ messageIds: [otherText], role: 'technician', customerIds: scope() })).toEqual({ updated: 0, notificationsCleared: 0 });
-    expect((await readIds()).has(otherText)).toBe(false);
-  });
-
   test("a row's Mark read reads that sender on every line, never a second phone sharing the thread; a digitless block hides no contactless text", async () => {
     await readColumns();
     const customerId = randomUUID();

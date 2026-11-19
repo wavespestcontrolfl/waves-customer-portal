@@ -1358,3 +1358,29 @@ it("a background refresh that started before the read was confirmed does not bri
   await tick(0);
   expect(screen.queryByLabelText("Unread")).not.toBeInTheDocument();
 });
+
+it("a technician gets no Mark all read; its row Mark read sends the row's texts through the scoped id read", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active />} /></Route></Routes></MemoryRouter>);
+  await tick();
+  expect(screen.queryByRole("button", { name: "Mark all read" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mark +19415550100 read" }));
+  await tick(5000);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  const [[, init]] = readPosts("/messages/read");
+  expect(JSON.parse(init.body)).toEqual({ messageIds: ["a"] });
+});
+
+it("a second Mark all read tap during the Undo window is ignored, so Undo still takes the first back", async () => {
+  messages = [{ ...inbound("a", "Please check the gate"), isRead: false }];
+  setup(); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  expect(screen.getByRole("button", { name: "Mark all read" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
+  await tick(0);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  await tick(6000);
+  expect(readPosts("/messages/read-all")).toHaveLength(0);
+  expect(screen.getByLabelText("Unread")).toBeInTheDocument();
+});

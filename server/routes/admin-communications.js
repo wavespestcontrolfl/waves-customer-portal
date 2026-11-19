@@ -2617,11 +2617,13 @@ router.post('/messages/read', async (req, res, next) => {
 });
 
 // POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19), and with
-// contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore (the newest text the caller's list showed), through the one read
-// writer. Internal admin-phone traffic stays out, as in /log. A technician reads only texts from the customers on its
-// own route.
+// contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore
+// (the newest text the caller's list showed), through the one read writer. Internal admin-phone traffic stays out,
+// as in /log. Office roles only: a technician reads one thread at a time through /messages/read, which checks each
+// text against its own customers.
 router.post('/messages/read-all', async (req, res, next) => {
   try {
+    if (isTechnicianRequest(req)) return res.status(403).json({ error: 'Mark all read is for the office' });
     const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
     if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required' });
     // contactPhone: one inbox row's Mark read (that sender's texts only).
@@ -2634,7 +2636,6 @@ router.post('/messages/read-all', async (req, res, next) => {
       readBefore,
       adminUserId: req.technicianId || null,
       role: req.techRole,
-      customerIds: isTechnicianRequest(req) ? technicianCustomerIdsSubquery(req, db) : null,
       excludePhones: ADMIN_PHONES,
       contactPhone,
     });

@@ -156,7 +156,7 @@ async function resolveUnknownSenderPhoneMembership(scopedSids) {
   return { unknownSenderSids, phones, promotedSids };
 }
 
-async function clearBacklogResetMarkers({ scope, ids, convs, customerIds = null }) {
+async function clearBacklogResetMarkers({ scope, ids, convs }) {
   try {
     const marked = () => db('messages').where({ channel: 'sms', direction: 'inbound' })
       .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')").andWhere(scope);
@@ -167,7 +167,7 @@ async function clearBacklogResetMarkers({ scope, ids, convs, customerIds = null 
         .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
         .update({ metadata: db.raw("metadata - 'backlog_reset'") });
     }
-    const custs = await customerIdsInScope(ids, convs, customerIds);
+    const custs = await customerIdsInScope(ids, convs);
     if (custs.length) {
       await db('notifications').where({ category: 'inbound_sms' })
         .whereRaw("split_part(link, '&message=', 1) = ANY(?)", [custs.map((cid) => `/admin/communications?thread=${cid}`)])
@@ -193,18 +193,9 @@ async function clearBacklogResetMarkers({ scope, ids, convs, customerIds = null 
 // its bell as soon as it rings.
 async function markInboundSmsRead({
   messageIds = [], conversationIds = [], applicationId = null, replyMessageIds = null, replyEntryIds = [],
-  readBefore = null, adminUserId = null, role, customerIds = null,
+  readBefore = null, adminUserId = null, role,
 } = {}) {
-  // `customerIds` (a subquery of customer ids; Mark all read for a
-  // technician) is checked inside every statement below, the write included,
-  // so a route change after the caller's selection never reads another
-  // technician's customer texts or reconciles their bells.
-  const ownedConversations = () => db('conversations').select('id').whereIn('customer_id', customerIds);
-  const ownedSids = () => db('messages').select('twilio_sid').whereNotNull('twilio_sid').whereIn('conversation_id', ownedConversations());
-  const ids = customerIds
-    ? await db('messages').whereIn('id', messageIds.filter((id) => typeof id === 'string' && id.trim()))
-      .whereIn('conversation_id', ownedConversations()).pluck('id')
-    : messageIds.filter((id) => typeof id === 'string' && id.trim());
+  const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
   if (!ids.length && !convs.length && !applicationId) return { updated: 0, notificationsCleared: 0 };
   if ((convs.length || applicationId) && !(readBefore instanceof Date && !Number.isNaN(readBefore.getTime()))) {
@@ -217,7 +208,7 @@ async function markInboundSmsRead({
   const appEntryIds = applicationId ? (replyEntryIds || []).filter((id) => typeof id === 'string' && id.trim()) : [];
   if (!ids.length && !convs.length && applicationId && !appReplyIds.length) return { updated: 0, notificationsCleared: 0 };
   const now = new Date();
-  const requested = function requested() {
+  const scope = function scope() {
     if (ids.length) this.whereIn('id', ids);
     if (convs.length) this.orWhere(function conv() { this.whereIn('conversation_id', convs).where('created_at', '<=', readBefore); });
     if (applicationId && appReplyIds.length) {
@@ -229,14 +220,11 @@ async function markInboundSmsRead({
       });
     }
   };
-  const scope = customerIds
-    ? function ownedScope() { this.where(requested).whereIn('conversation_id', ownedConversations()); }
-    : requested;
 
   // 1. Strip backlog-reset markers across the request scope regardless of
   //    read state (rows the reset already read are exactly the ones a human
   //    is now looking at), on messages, legacy twins, and the thread's bells.
-  await clearBacklogResetMarkers({ scope, ids, convs, customerIds });
+  await clearBacklogResetMarkers({ scope, ids, convs });
 
   // 2. The read itself (+ legacy mirror by twilio_sid).
   // A technician's read scope never touches hidden recruiting rows (PR
@@ -255,24 +243,17 @@ async function markInboundSmsRead({
   try {
     await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
       .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
-      // A technician's mirror write rechecks its customers inside the statement.
-      .modify((m) => { if (customerIds) m.whereIn('twilio_sid', ownedSids()); })
       .update({ is_read: true });
   } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
 
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
   //    existed at entry, through the notification service.
   let notificationsCleared = 0;
-  // A technician's bells: the SIDs still on its customers now, not the list
-  // read before the write.
-  const bellSids = customerIds && scopedSids.length
-    ? (await db('messages').whereIn('twilio_sid', scopedSids).whereIn('conversation_id', ownedConversations()).pluck('twilio_sid')).filter(Boolean)
-    : scopedSids;
   // Reconcile generic sender bells separately from customer-linked bells.
   let knownSids = [];
   try {
-    const membership = await resolveUnknownSenderPhoneMembership(bellSids);
-    knownSids = bellSids.filter((sid) => !membership.unknownSenderSids.has(sid));
+    const membership = await resolveUnknownSenderPhoneMembership(scopedSids);
+    knownSids = scopedSids.filter((sid) => !membership.unknownSenderSids.has(sid));
     // Promoted SIDs can own both bell types. Clear only their customer
     // link here; the generic bell remains protected by the phone lock.
     for (const [customerId, twilioSids] of membership.promotedSids) {
@@ -287,7 +268,7 @@ async function markInboundSmsRead({
   try {
     notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
   } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
-  notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role, customerIds });
+  notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role });
   if (applicationId && appReplyIds.length) {
     try {
       // Only the bells of the replies in the snapshot: their SIDs (the
@@ -308,13 +289,13 @@ async function markInboundSmsRead({
 // showed, never later than now), through the one writer above, so the legacy
 // mirror, backlog-marker strip and bell clear are the same as a thread read.
 // The client's stamp is millisecond-rounded, so the cutoff takes the whole
-// millisecond (PostgreSQL keeps microseconds). `customerIds` (a subquery of
-// customer ids) limits a technician to its own customers; a text with no
-// customer is office work and stays unread for them. `excludePhones` is the
+// millisecond (PostgreSQL keeps microseconds). Office roles only: the route
+// refuses a technician, who reads one thread at a time through the scoped
+// /messages/read check. `excludePhones` is the
 // inbox log's own internal-phone exclusion (either side of the thread, or the
 // customer's phone). Recruiting replies are read on the Recruiting page, never
 // by an inbox-wide read.
-async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, customerIds = null, excludePhones = [], contactPhone = null } = {}) {
+async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, excludePhones = [], contactPhone = null } = {}) {
   if (!(readBefore instanceof Date) || Number.isNaN(readBefore.getTime())) {
     throw new Error('readBefore required when marking every text read');
   }
@@ -332,12 +313,11 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
   // inbox's per-text identity (/log): the linked legacy row's sender first,
   // as a customer's two phones can share one conversation.
   const address = canonicalSmsAddressProjectionSql({ messageAlias: 'm', conversationAlias: 'c', customerAlias: 'cu', legacyAlias: 'legacy' });
-  const eligible = () => db('messages as m')
+  const ids = await db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
     .leftJoin('customers as cu', 'cu.id', 'c.customer_id')
     .joinRaw(`LEFT JOIN LATERAL (${canonicalSmsLegacyLinkSql({ messageAlias: 'm', conversationAlias: 'c' })}) legacy ON true`)
     .joinRaw(receipt.joinSql)
-    .modify((q) => { if (customerIds) q.whereIn('c.customer_id', customerIds); })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
     // A backlog reset read a text and tagged it for rollback; the writer strips
     // that tag, so a later rollback cannot reopen a text staff marked read.
@@ -347,8 +327,8 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
     })
     .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])
     // An inbox-wide read leaves recruiting replies for the Recruiting page; one
-    // sender's row reads them as opening the thread does (the writer still
-    // hides them from a technician).
+    // sender's row reads them as opening the thread does, for the roles that
+    // see them.
     .modify((q) => {
       if (!senderKey) excludeRecruitingSmsLog(q, 'm.message_type');
       else hideRecruitingThreadsFromNonAdmin(q, { techRole: role }, 'm.message_type');
@@ -365,19 +345,13 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, cus
       // A digitless legacy block normalizes to '' like a text with no number; it blocks nothing (as on screen).
       this.select(1).from('blocked_numbers as b').whereRaw(`${phoneIdentitySql('b.number')} <> ''`)
         .whereRaw(`${phoneIdentitySql('b.number')} = ${address.peerSql}`);
-    });
-  const ids = await eligible().pluck('m.id');
+    })
+    .pluck('m.id');
   // The writer binds each id (and its SIDs); batches keep a long backlog
-  // under PostgreSQL's bind-parameter limit. A later batch rechecks every
-  // rule first, and the writer checks a technician's customers inside its
-  // own statements, so a route change mid-run never reads a former
-  // customer's texts or reconciles their bells.
+  // under PostgreSQL's bind-parameter limit.
   const total = { updated: 0, notificationsCleared: 0 };
   for (let i = 0; i < ids.length; i += MARK_ALL_BATCH) {
-    const chunk = ids.slice(i, i + MARK_ALL_BATCH);
-    const batch = i === 0 ? chunk : await eligible().whereIn('m.id', chunk).pluck('m.id');
-    if (!batch.length) continue;
-    const done = await markInboundSmsRead({ messageIds: batch, adminUserId, role, customerIds });
+    const done = await markInboundSmsRead({ messageIds: ids.slice(i, i + MARK_ALL_BATCH), adminUserId, role });
     total.updated += done.updated;
     total.notificationsCleared += done.notificationsCleared;
   }
@@ -390,7 +364,7 @@ const MARK_ALL_BATCH = 500;
 // Separated from the by-SID clear above — this scope is every conversation
 // touched by the read, not just the unknown-sender ones that already went
 // through their own lock-protected decision.
-async function clearCustomerThreadCrossBells({ ids, convs, now, role, customerIds = null }) {
+async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
   try {
     const convIds = new Set(convs);
     if (ids.length) {
@@ -399,8 +373,6 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role, customerId
     if (!convIds.size) return 0;
     const threads = await db('conversations as cv')
       .whereIn('cv.id', [...convIds]).whereNotNull('cv.customer_id')
-      // A technician's read reconciles bells of its own customers only, checked here, not from the id snapshot.
-      .modify((q) => { if (customerIds) q.whereIn('cv.customer_id', customerIds); })
       .whereNotExists(function stillUnread() {
         this.select(1).from('messages as m').join('conversations as c2', 'c2.id', 'm.conversation_id')
           .whereRaw('c2.customer_id = cv.customer_id').where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
@@ -432,15 +404,13 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role, customerId
 // Retain the API-facing name while the badge and pending inbox share one query.
 const { countPendingSmsConversations: countUnreadInboundSms } = require('./sms-pending-conversations');
 
-async function customerIdsInScope(ids, convs, customerIds = null) {
+async function customerIdsInScope(ids, convs) {
   const convIds = new Set(convs);
   if (ids.length) {
     for (const r of await db('messages').whereIn('id', ids).whereNotNull('conversation_id').distinct('conversation_id')) convIds.add(r.conversation_id);
   }
   if (!convIds.size) return [];
-  return db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id')
-    .modify((q) => { if (customerIds) q.whereIn('customer_id', customerIds); })
-    .distinct('customer_id').pluck('customer_id');
+  return db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
 }
 
 module.exports = { markInboundSmsRead, markAllInboundSmsRead, countUnreadInboundSms, retargetOrClearUnknownSenderBell };

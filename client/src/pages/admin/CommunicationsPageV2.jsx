@@ -1852,15 +1852,18 @@ export function SmsTab({
     const { unreadIds, readBefore } = threadReadScope(thread);
     if (!unreadIds.length) return;
     // The row is one sender: read by that phone (not the conversation, which a
-    // customer's second phone can share), up to the row's newest text.
+    // customer's second phone can share), up to the row's newest text. A
+    // technician reads the row's loaded texts through the scoped id read.
     const senderKey = smsThreadKey(thread.contactPhone);
-    if (senderKey !== "unknown" && readBefore) {
+    if (!smsIsTechnicianRole && senderKey !== "unknown" && readBefore) {
       startListRead({ senderKey, contactPhone: thread.contactPhone, readBefore, label: "Marked read" });
     } else {
       startListRead({ messageIds: unreadIds, label: "Marked read" });
     }
   };
   const markAllReadFromList = () => {
+    // A second tap during the Undo window would send the first and leave Undo nothing to take back.
+    if (pendingReadRef.current?.all) return;
     // The cutoff comes from the whole list only, never from search or Unanswered results still on screen.
     if (smsLoadedSearchRef.current !== "" || smsLoadedStatusFilterRef.current === "unanswered") return;
     const readBefore = newestCreatedAt(messages);
@@ -4314,12 +4317,14 @@ export function SmsTab({
             </div>{" "}
             {/* Mark all read covers every text, including older ones not loaded yet, so it
                 shows on the whole list only, whatever the loaded rows hold. */}
-            {messages.length > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread")
+            {/* Office only: a technician reads one thread at a time. */}
+            {!smsIsTechnicianRole && messages.length > 0 && !smsSearch.trim() && smsFilter === "all" && (statusFilter === "all" || statusFilter === "unread")
               && smsLoadedScope?.search === "" && smsLoadedScope.statusFilter !== "unanswered" && (
               <button
                 type="button"
                 onClick={markAllReadFromList}
-                className="u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-50"
+                disabled={!!pendingRead?.all}
+                className="u-focus-ring rounded-sm border-hairline border-zinc-300 bg-white px-3 min-h-[44px] md:min-h-[32px] text-14 text-zinc-900 hover:bg-zinc-50 disabled:opacity-50 disabled:hover:bg-white"
               >
                 Mark all read
               </button>

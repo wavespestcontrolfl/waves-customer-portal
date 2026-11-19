@@ -40,7 +40,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/communications/link-library` | admin-communications |
 | GET | `/api/admin/communications/log` | admin-communications |
 | POST | `/api/admin/communications/messages/read` | admin-communications |
-| POST | `/api/admin/communications/messages/read-all` | admin-communications |
 | POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
@@ -389,6 +388,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/communications/compliance-export` | admin-communications |
 | POST | `/api/admin/communications/contact-compliance-checks` | admin-communications |
 | POST | `/api/admin/communications/messages/:id/like` | admin-communications |
+| POST | `/api/admin/communications/messages/read-all` | admin-communications |
 | POST | `/api/admin/communications/schedule-sms` | admin-communications |
 | GET | `/api/admin/communications/scheduled` | admin-communications |
 | DELETE | `/api/admin/communications/scheduled/:id` | admin-communications |
