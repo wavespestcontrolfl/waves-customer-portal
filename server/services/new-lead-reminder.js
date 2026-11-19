@@ -19,27 +19,35 @@
  * - "Reached" (reachedLeads) is judged on the lead, whatever the close gates of admin-alert-relevance.js say, and NOT
  *   only after the bell: a "New call lead" bell is written minutes after a call a person already answered. Reached =
  *   the lead is deleted or in a settled status (won, lost, ... or an estimate sent); the call that made the lead was
- *   answered by a person; a person's text or call, or a Gmail send, or a visit booked, reached the lead's customer or
- *   phone since 5 minutes before the lead came in; or an estimate was sent to the lead (sent_at, as the new-lead class of
- *   admin-alert-relevance.js reads it) or handed off to the customer. A lead row that is
+ *   answered by a person (only for the bell raised with the lead itself, within 15 minutes of its creation: a later bell,
+ *   such as a form sent again on an old call lead, is a fresh inquiry); a person's text or call, or a Gmail send, or a visit
+ *   booked, reached the lead's customer or phone since 5 minutes before that bell's inquiry began (for a bell raised with
+ *   the lead: the earlier of the bell and the lead's first_contact_at, else created_at; for a later bell: the bell itself);
+ *   a person's email to the lead's own address since the same moment; or an estimate was sent to the lead (sent_at, as the
+ *   new-lead class of admin-alert-relevance.js reads it) or handed off to the customer. A lead needs a customer, a 10-digit
+ *   phone or an email address to be judged: an email-only lead is judged on email and estimate evidence. A lead row that is
  *   missing, or a witness read that fails, is no verdict: nothing is sent.
+ * - The scan, stamp, open-row recheck and push are the shared steps of lead-reminder-sweep.js, which also carries a capped
+ *   scan across sweeps, so old reached bells cannot hide a due one.
  * - Sends nothing to a lead or a customer. Never throws into the sweep.
  *
  * Runs inside the alert-relevance sweep (every 10 minutes), after its closes. Read-only apart from its stamp.
  */
 
 const db = require('../models/db');
-const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
+const logger = require('./logger');
+const sweep = require('./lead-reminder-sweep');
 
-const TRIGGER_KEY = 'lead_call_reminder';
+const LABEL = 'new-lead-reminder';
 const PUSH_STAMP = 'newLeadRealertAt';
 const PUSH_AFTER_MINUTES = 15;
 const PUSH_LATE_MINUTES = 120;
 const WINDOW_MS = 48 * 60 * 60 * 1000;
 const WITNESS_SLACK_MS = 5 * 60 * 1000;
-const PAGE_SIZE = 100;
-const MAX_PAGES = 5;
+// A bell written within this long of the lead's creation was raised with the lead itself (the intake bell, or the call
+// lead's bell minutes after the call); a later one is a fresh inquiry on a lead already on file.
+const INTAKE_BELL_MS = 15 * 60 * 1000;
 const OPEN_HOUR = 8;
 const CLOSE_HOUR = 18;
 // Monday to Saturday: a closed day is a Sunday (staffedDeadline asks `.has(date)` for each ET date).
@@ -51,7 +59,6 @@ const OFFICE = Object.freeze({
 const SETTLED_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate', 'unresponsive', 'handled', 'estimate_sent', 'estimate_viewed']);
 
 const relevance = () => require('./admin-alert-relevance');
-const safeError = (err) => require('./notification-service').safeErrorSummary(err);
 
 // Monday to Saturday, 8:00 AM up to 6:00 PM Eastern, read in America/New_York for the instant given.
 function inBusinessHours(date) {
@@ -69,20 +76,9 @@ function dueNow(askedAt, now, afterMinutes, lateMinutes) {
   return due.getTime() <= now.getTime() && businessDueAt(due, lateMinutes).getTime() >= now.getTime();
 }
 
-// Open, unpushed new-lead bell rows whose latest event is in the last 48 hours, one keyset page after
-// `cursor` ({ createdAt, id }; createdAt as the database's own text, so no microsecond is lost).
-function candidateQuery(since, cursor, pageSize) {
-  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
-  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin', category: 'new_lead' }))
-    .whereNull('done_at')
-    .whereRaw("metadata->'retired' IS NULL")
-    .whereRaw(`metadata->>'${PUSH_STAMP}' IS NULL`)
-    .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()]))
-    .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
-    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(pageSize)
-    .select('id', 'title', 'body', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
-}
+// The open, unpushed new-lead bell rows: the shared read (lead-reminder-sweep.js) with this reminder's category.
+const KIND = { category: 'new_lead', stamp: PUSH_STAMP };
+const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(KIND, since, cursor, pageSize);
 
 // The rows with a push due now: { row, meta, askedAt, leadId }. A row that names no lead (a tracking-line
 // text) cannot be judged, so it sends nothing.
@@ -100,60 +96,78 @@ function dueItems(rows, now) {
   return items;
 }
 
+const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+// The lead's own email address as a mailbox address, or '' (the shared parser the Gmail linkage uses).
+const leadEmail = (lead) => require('./email/email-customer-link').extractEmailAddresses(lead.email)[0] || '';
+
+// When the inquiry this bell reports began, and whether the bell was raised with the lead itself. The bell for the lead's
+// own intake looks back to the lead's first contact (an email lead's first_contact_at is the message's receipt time, before
+// the classification that created the lead), and the call that made the lead counts only for that bell. A later bell (a form
+// sent again on a lead already on file) is a fresh inquiry: evidence counts only from the bell itself.
+function inquiryOf({ askedAt, lead }) {
+  const intake = askedAt.getTime() - new Date(lead.created_at).getTime() <= INTAKE_BELL_MS;
+  const from = intake ? Math.min(askedAt.getTime(), new Date(lead.first_contact_at || lead.created_at).getTime()) : askedAt.getTime();
+  return { intake, anchor: new Date(from - WITNESS_SLACK_MS) };
+}
+
 // The leads that still wait on a person, each item with `lead` and `customerId`. Throws when a read fails: no verdict.
 async function reachedLeads(items) {
-  const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
   const leadIds = [...new Set(items.map((item) => item.leadId))];
   const leads = new Map((await db('leads').whereIn('id', leadIds)
-    .select('id', 'customer_id', 'phone', 'first_name', 'last_name', 'status', 'deleted_at', 'created_at', 'twilio_call_sid', 'estimate_id', 'email'))
+    .select('id', 'customer_id', 'phone', 'first_name', 'last_name', 'status', 'deleted_at', 'created_at', 'first_contact_at', 'twilio_call_sid', 'estimate_id', 'email'))
     .map((lead) => [String(lead.id).toLowerCase(), lead]));
+  // A lead is judged when it has a customer, a phone or an email address: an email-only lead has the address alone.
   const open = items
     .map((item) => ({ ...item, lead: leads.get(item.leadId) }))
-    .filter(({ lead }) => lead && !lead.deleted_at && !SETTLED_STATUSES.has(String(lead.status || '')) && (lead.customer_id || lastTen(lead.phone).length === 10));
+    .filter(({ lead }) => lead && !lead.deleted_at && !SETTLED_STATUSES.has(String(lead.status || ''))
+      && (lead.customer_id || lastTen(lead.phone).length === 10 || leadEmail(lead)))
+    .map((item) => ({ ...item, ...inquiryOf(item) }));
   if (!open.length) return [];
-  // The call that made the lead, when a person answered it: the bell is written after that call, so the witnesses below
-  // (judged after the lead came in) cannot see it.
-  const sids = open.map(({ lead }) => lead.twilio_call_sid).filter(Boolean);
+  // The call that made the lead, when a person answered it: its bell is written after that call, so the witnesses below
+  // (judged after the lead came in) cannot see it. It says nothing about a later bell on the same lead.
+  const sids = open.filter((item) => item.intake).map(({ lead }) => lead.twilio_call_sid).filter(Boolean);
   const answered = new Set((sids.length
     ? await db('call_log').whereIn('twilio_call_sid', sids).where({ direction: 'inbound', status: 'completed', answered_by: 'human' }).select('twilio_call_sid')
     : []).map((call) => call.twilio_call_sid));
-  const waiting = open.filter(({ lead }) => !answered.has(lead.twilio_call_sid));
+  const waiting = open.filter((item) => !(item.intake && answered.has(item.lead.twilio_call_sid)));
   if (!waiting.length) return [];
   const { loadContactBundles } = require('./admin-alert-contact-witnesses');
   const { reached, estimateHandedOff } = require('./lead-call-reminder').__private;
-  const anchorOf = ({ askedAt, lead }) => new Date(Math.min(askedAt.getTime(), new Date(lead.created_at).getTime()) - WITNESS_SLACK_MS);
   // Kind 'customer', as lead-call-reminder does: it also reads a person's Gmail send to the customer's own address.
   const bundles = await loadContactBundles(
-    waiting.map((item) => ({ id: item.row.id, kind: 'customer', bellAt: anchorOf(item), refs: { customerId: item.lead.customer_id || null, phone: item.lead.phone || null } })),
+    waiting.map((item) => ({ id: item.row.id, kind: 'customer', bellAt: item.anchor, refs: { customerId: item.lead.customer_id || null, phone: item.lead.phone || null } })),
     { conn: db, bookedVisits: (ids) => relevance().bookedVisitsByCustomer(db, ids) },
   );
   const sent = await estimatesSent(waiting);
   const emailed = await personEmailed(waiting);
   const still = [];
   for (const item of waiting) {
-    const bundle = bundles.get(String(item.row.id));
+    // The witnesses return no bundle for a lead with no customer and no phone of its own (an email-only lead): its text,
+    // call and visit evidence is empty, and the email and estimate checks below judge it.
+    const bundle = bundles.get(String(item.row.id)) || { anchor: item.anchor, textAt: null, backAt: null, inAt: null, replyAt: null, visitAt: null };
     const customerId = item.lead.customer_id || null;
-    if (!bundle || reached(bundle) || sent(item, bundle.anchor) || emailed(item, bundle.anchor)) continue;
+    if (reached(bundle) || sent(item, bundle.anchor) || emailed(item, bundle.anchor)) continue;
     if (customerId && await estimateHandedOff(customerId, bundle.anchor)) continue;
     still.push({ ...item, customerId });
   }
   return still;
 }
 
-// An email a person sent to the lead's own address since `anchor` (a Gmail SENT row): the witnesses read only a
-// customer's address, and a lead that came in by email may have no customer yet. Returns the test for one item.
+// An email a person sent to the lead's own address since the item's anchor (a Gmail SENT row): the witnesses read only a
+// customer's address, and a lead that came in by email may have no customer yet. The read starts at the earliest anchor of
+// these items, so a reply inside an old lead's own window is never cut off. Returns the test for one item.
 async function personEmailed(items) {
   const { personSentFilter, extractEmailAddresses } = require('./email/email-customer-link');
-  const addressOf = (lead) => String(lead.email || '').trim().toLowerCase();
-  const addresses = [...new Set(items.map(({ lead }) => addressOf(lead)).filter(Boolean))];
+  const addresses = [...new Set(items.map(({ lead }) => leadEmail(lead)).filter(Boolean))];
+  const earliest = new Date(Math.min(...items.map((item) => item.anchor.getTime())));
   const rows = addresses.length
     ? await db('emails as er').whereRaw(personSentFilter('er'))
-      .where('er.received_at', '>', new Date(Date.now() - WINDOW_MS - 24 * 60 * 60 * 1000))
+      .where('er.received_at', '>', earliest)
       .whereRaw("EXISTS (SELECT 1 FROM unnest(?::text[]) AS a(addr) WHERE strpos(LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)), a.addr) > 0)", [addresses])
       .select('er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at')
     : [];
   const sentTo = rows.map((r) => ({ at: new Date(r.received_at).getTime(), to: new Set(extractEmailAddresses([r.to_address, r.cc_address, r.bcc_address].filter(Boolean).join(','))) }));
-  return ({ lead }, anchor) => !!addressOf(lead) && sentTo.some((m) => m.at > anchor.getTime() && m.to.has(addressOf(lead)));
+  return ({ lead }, anchor) => !!leadEmail(lead) && sentTo.some((m) => m.at > anchor.getTime() && m.to.has(leadEmail(lead)));
 }
 
 // A quote sent to the lead since `anchor`: the lead's own estimate or any estimate to its customer with a sent_at, the way
@@ -171,87 +185,19 @@ async function estimatesSent(items) {
     && ((lead.customer_id && String(e.customer_id) === String(lead.customer_id)) || (lead.estimate_id && String(e.id) === String(lead.estimate_id))));
 }
 
-// The one stamp: this row, still open and unchanged since it was read. Returns true when it landed.
-async function stampOnce(item, now) {
-  const mark = { [PUSH_STAMP]: now.toISOString() };
-  const landed = await db('notifications')
-    .where({ id: item.row.id, recipient_type: 'admin' })
-    .whereNull('done_at')
-    .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(item.meta)])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(mark)]) });
-  return Number(landed) === 1;
-}
-
-// Still open just before the send. A lookup that fails reads as closed: nothing is sent (the bell row stays).
-async function rowStillOpen(id) {
-  try {
-    const stored = await db('notifications').where({ id, recipient_type: 'admin' }).first('done_at');
-    return !!stored && !stored.done_at;
-  } catch (err) {
-    logger.warn(`[new-lead-reminder] open check failed for notification ${id}: ${safeError(err)}`);
-    return false;
-  }
-}
-
-// The push, with the row's own words. alertRowId gives it its own push tag per bell row. Never throws.
-async function sendPush({ row, customerId }) {
-  try {
-    const { triggerNotification } = require('./notification-triggers');
-    return await triggerNotification(TRIGGER_KEY, {
-      alertRowId: row.id, alertTitle: row.title, alertBody: row.body || null, alertLink: row.link || null,
-      ...(customerId ? { customerId } : {}),
-    }, {
-      // bellAuthorized: the bell row exists, so the push keeps that answer. pushOnly: the row is not rewritten.
-      pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: () => rowStillOpen(row.id),
-    });
-  } catch (err) {
-    logger.warn(`[new-lead-reminder] push failed for notification ${row.id}: ${safeError(err)}`);
-    return null;
-  }
-}
-
 /**
  * One pass. Returns { skipped, reason } or { skipped: false, due, pushed, sends }; `sends` are the push sends, never
- * awaited here (tests await them). Throws only when the first page cannot be read; the sweep catches it.
+ * awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it.
  */
-async function runNewLeadReminder({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
+async function runNewLeadReminder({ now = new Date(), pageSize } = {}) {
   if (!inBusinessHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const since = new Date(now.getTime() - WINDOW_MS);
-  const total = { due: 0, pushed: 0 };
-  const sends = [];
-  let cursor = null;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const rows = await candidateQuery(since, cursor, pageSize);
-    if (!rows.length) break;
-    const last = rows[rows.length - 1];
-    cursor = { createdAt: last.created_at_token, id: last.id };
-    const due = dueItems(rows, now);
-    total.due += due.length;
-    let waiting = [];
-    try {
-      waiting = await reachedLeads(due);
-    } catch (err) {
-      logger.warn(`[new-lead-reminder] contact witnesses failed to load, nothing sent on this page: ${safeError(err)}`);
-    }
-    for (const item of waiting) {
-      try {
-        if (!(await stampOnce(item, now))) continue;
-        total.pushed += 1;
-        sends.push(sendPush(item));
-      } catch (err) {
-        logger.warn(`[new-lead-reminder] notification ${item.row.id} not pushed: ${safeError(err)}`);
-      }
-    }
-    if (rows.length < pageSize) break;
-    if (page === MAX_PAGES - 1) logger.warn(`[new-lead-reminder] stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
-  }
-  if (total.pushed) logger.info(`[new-lead-reminder] queued ${total.pushed} push(es): a new lead nobody has reached`);
-  return { skipped: false, ...total, sends };
+  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: reachedLeads }, { now, pageSize });
+  if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} push(es): a new lead nobody has reached`);
+  return { skipped: false, due: out.due, pushed: out.sent, sends: out.sends };
 }
 
 module.exports = {
   runNewLeadReminder,
   PUSH_STAMP,
-  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, stampOnce, sendPush, candidateQuery, SETTLED_STATUSES },
+  __private: { inBusinessHours, businessDueAt, dueNow, dueItems, reachedLeads, inquiryOf, candidateQuery, SETTLED_STATUSES },
 };

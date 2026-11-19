@@ -28,21 +28,23 @@
  *   a send that fails after the stamp is lost, never repeated.
  * - Sends nothing to a lead or a customer. Never throws into the sweep.
  *
+ * The paged scan, its cursor across capped sweeps, the stamp, the open-row recheck and the push are shared with
+ * new-lead-reminder.js (lead-reminder-sweep.js); the bells, the clock, the hours and "reached" are this file's own.
+ *
  * Runs inside the alert-relevance sweep (every 10 minutes), after its closes. Read-only apart from the stamp.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
+const sweep = require('./lead-reminder-sweep');
 
-const TRIGGER_KEY = 'lead_call_reminder';
+const { TRIGGER_KEY } = sweep;
+const LABEL = 'lead-call-reminder';
 const STAMP = 'leadCallReminderAt';
 // The bells this reminds about, by their writers' dedupe keys. Plain text: no LIKE wildcard in either.
 const KEY_PREFIXES = Object.freeze(['lead-call-reply-missed:', 'lead-call-text-followup:']);
 const WINDOW_MS = 24 * 60 * 60 * 1000;
-const PAGE_SIZE = 100;
-// Pages read per sweep: 500 open call requests in a day is far past a busy day. The next sweep reads the rest.
-const MAX_PAGES = 5;
 const SEND_FROM_HOUR = 8;
 const SEND_UNTIL_HOUR = 20;
 // A lead a person settled: the closed set customer-address-fanout.js and estimate-clarify-asks.js use.
@@ -50,7 +52,6 @@ const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'disqualified', 'duplicate'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const relevance = () => require('./admin-alert-relevance');
-const safeError = (err) => require('./notification-service').safeErrorSummary(err);
 const uuidOrNull = (value) => {
   const text = value == null ? '' : String(value).trim();
   return UUID_RE.test(text) ? text.toLowerCase() : null;
@@ -77,24 +78,9 @@ function dueAtFor(askedAt) {
   return require('./followup-sla-watcher').followUpDueAt(askedAt);
 }
 
-// Open, unreminded call-request bell rows whose latest event is in the last 24 hours, one keyset page after `cursor`
-// ({ createdAt, id }; createdAt as the database's own text, so no microsecond is lost). A refreshed bell keeps its
-// first created_at and carries its latest ring in metadata.rungAt, so either may be recent.
-function candidateQuery(since, cursor, pageSize) {
-  const { excludeActivityOnlyFromBell } = require('./notification-service')._private;
-  return excludeActivityOnlyFromBell(db('notifications').where({ recipient_type: 'admin', category: 'lead' }))
-    .whereNull('done_at')
-    .whereRaw("metadata->'retired' IS NULL")
-    .whereRaw(`metadata->>'${STAMP}' IS NULL`)
-    .where((q) => q.where('created_at', '>', since).orWhereRaw("metadata->>'rungAt' > ?", [since.toISOString()]))
-    .where((q) => {
-      for (const prefix of KEY_PREFIXES) q.orWhereRaw("metadata->>'dedupeKey' LIKE ?", [`${prefix}%`]);
-    })
-    .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?::timestamptz, ?::uuid)', [cursor.createdAt, cursor.id]); })
-    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-    .limit(pageSize)
-    .select('id', 'title', 'body', 'link', 'metadata', 'created_at', db.raw('created_at::text AS created_at_token'));
-}
+// The open, unreminded call-request bell rows: the shared read (lead-reminder-sweep.js) with this reminder's bells.
+const KIND = { category: 'lead', stamp: STAMP, keyPrefixes: KEY_PREFIXES };
+const candidateQuery = (since, cursor, pageSize) => sweep.__private.candidateQuery(KIND, since, cursor, pageSize);
 
 // The rows that are due now: { row, meta, askedAt, leadId, customerId }. A row that names neither a lead nor a
 // customer cannot be judged, so it sends nothing.
@@ -166,83 +152,21 @@ async function stillWaiting(items) {
   return waiting;
 }
 
-// The one stamp: this row, still open and unchanged since it was read. Returns true when it landed.
-async function stampReminder({ row, meta }, now) {
-  const landed = await db('notifications')
-    .where({ id: row.id, recipient_type: 'admin' })
-    .whereNull('done_at')
-    .whereRaw('metadata IS NOT DISTINCT FROM ?::jsonb', [JSON.stringify(meta)])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [STAMP]: now.toISOString() })]) });
-  return Number(landed) === 1;
-}
-
-// Still open just before the push goes. A lookup that fails reads as closed: no banner (the bell row stays).
-async function rowStillOpen(id) {
-  try {
-    const stored = await db('notifications').where({ id, recipient_type: 'admin' }).first('done_at');
-    return !!stored && !stored.done_at;
-  } catch (err) {
-    logger.warn(`[lead-call-reminder] open check failed for notification ${id}: ${safeError(err)}`);
-    return false;
-  }
-}
-
-// The banner, with the row's own words. alertRowId gives the banner its own push tag per bell row. Never throws.
-async function sendReminder({ row, customerId }) {
-  try {
-    const { triggerNotification } = require('./notification-triggers');
-    return await triggerNotification(TRIGGER_KEY, {
-      alertRowId: row.id, alertTitle: row.title, alertBody: row.body || null, alertLink: row.link || null,
-      ...(customerId ? { customerId } : {}),
-    }, {
-      // bellAuthorized: the bell row's writer rang it (bell: true), so the banner keeps that answer.
-      pushOnly: true, adminOnly: true, bellAuthorized: true,
-      beforePush: () => rowStillOpen(row.id),
-    });
-  } catch (err) {
-    logger.warn(`[lead-call-reminder] banner failed for notification ${row.id}: ${safeError(err)}`);
-    return null;
-  }
-}
+// The shared once-only stamp and push, under this reminder's own stamp key and log label.
+const stampReminder = (item, now) => sweep.__private.stampOnce(STAMP, item, now);
+const rowStillOpen = (id) => sweep.__private.rowStillOpen(id, LABEL);
+const sendReminder = (item) => sweep.__private.sendPush(item, LABEL);
 
 /**
  * One pass. Returns { skipped, reason } or { skipped: false, due, reminded, sends }; `sends` are the banner sends,
- * never awaited here (tests await them). Throws only when the first page cannot be read; the sweep catches it.
+ * never awaited here (tests await them). Throws only when a page cannot be read; the sweep catches it.
  */
-async function runLeadCallReminder({ now = new Date(), pageSize = PAGE_SIZE } = {}) {
+async function runLeadCallReminder({ now = new Date(), pageSize } = {}) {
   if (!reminderLive()) return { skipped: true, reason: 'gate_off' };
   if (!inSendHours(now)) return { skipped: true, reason: 'quiet_hours' };
-  const since = new Date(now.getTime() - WINDOW_MS);
-  const total = { due: 0, reminded: 0 };
-  const sends = [];
-  let cursor = null;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const rows = await candidateQuery(since, cursor, pageSize);
-    if (!rows.length) break;
-    const last = rows[rows.length - 1];
-    cursor = { createdAt: last.created_at_token, id: last.id };
-    const due = dueItems(rows, now);
-    total.due += due.length;
-    let waiting = [];
-    try {
-      waiting = await stillWaiting(due);
-    } catch (err) {
-      logger.warn(`[lead-call-reminder] contact witnesses failed to load, nothing sent on this page: ${safeError(err)}`);
-    }
-    for (const item of waiting) {
-      try {
-        if (!(await stampReminder(item, now))) continue;
-        total.reminded += 1;
-        sends.push(sendReminder(item));
-      } catch (err) {
-        logger.warn(`[lead-call-reminder] notification ${item.row.id} not stamped: ${safeError(err)}`);
-      }
-    }
-    if (rows.length < pageSize) break;
-    if (page === MAX_PAGES - 1) logger.warn(`[lead-call-reminder] stopped after ${MAX_PAGES} pages; the next sweep reads the rest`);
-  }
-  if (total.reminded) logger.info(`[lead-call-reminder] queued ${total.reminded} reminder banner(s): a lead's call request is still open after 1 business hour`);
-  return { skipped: false, ...total, sends };
+  const out = await sweep.runSweep({ ...KIND, label: LABEL, windowMs: WINDOW_MS, dueItems, waiting: stillWaiting }, { now, pageSize });
+  if (out.sent) logger.info(`[${LABEL}] queued ${out.sent} reminder banner(s): a lead's call request is still open after 1 business hour`);
+  return { skipped: false, due: out.due, reminded: out.sent, sends: out.sends };
 }
 
 module.exports = {

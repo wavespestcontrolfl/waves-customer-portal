@@ -621,11 +621,18 @@ so a row gets at most one. The owner turns it off in Push Settings (Leads & Sale
 call"). "Reached" is judged on the lead, whatever the close gates say, and not only after the bell (a "New call lead" bell
 is written minutes after a call a person already answered): a deleted lead, or a lead in a settled status (won, lost,
 disqualified, duplicate, unresponsive, handled, estimate_sent, estimate_viewed); the call that made the lead answered by a
-person (`answered_by = 'human'`); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone
-since 5 minutes before the lead came in (the shared contact witnesses, kind `customer`); a person's email to the lead's own
-address; or an estimate sent to the lead (`sent_at`, as `newLeadMovedOn` reads it) or handed off. A missing lead row, or a
-read that fails, sends nothing. The quiet 72 h close and the 21-day staleness are unchanged. Sends nothing to a lead or a
-customer.
+person (`answered_by = 'human'`; only for the bell written within 15 minutes of the lead's creation, never for a later bell
+on the same lead); a person's text, call or Gmail send, or a visit booked, for the lead's customer or phone since 5 minutes
+before the bell's inquiry began (the shared contact witnesses, kind `customer`; for the bell written with the lead, the
+earlier of the bell and the lead's `first_contact_at`, else `created_at`; for a later bell, such as a form sent again on a
+lead made days ago, the bell itself); a person's email to the lead's own address since that moment; or an estimate sent to
+the lead (`sent_at`, as `newLeadMovedOn` reads it) or handed off. A lead needs a customer, a 10-digit phone or an email
+address to be judged, so a lead from email intake with no phone is judged on email and estimate evidence. A missing lead
+row, or a read that fails, sends nothing. The quiet 72 h close and the 21-day staleness are unchanged. Sends nothing to a
+lead or a customer. The scan, the once-only stamp, the open-row recheck and the push are shared with the lead call-back
+reminder above (`server/services/lead-reminder-sweep.js`). A sweep reads at most 5 pages of 100 bells; one that stops at the
+cap remembers where (a module variable, as the relevance sweep's own cursor) and the next sweep resumes after it, so old
+reached bells cannot hide a due one. A restart starts again from the oldest bell.
 
 Existing raw `notifyAdmin` call sites keep working. They are converted by Area in later
 changes, and the ratchet's numbers only fall.

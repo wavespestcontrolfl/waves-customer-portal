@@ -6,7 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockState = {};
 const resetState = () => Object.assign(mockState, {
-  rows: [], leads: [], answered: [], estimates: [], emails: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false,
+  rows: [], leads: [], answered: [], estimates: [], emails: [], handedOff: null, customer: null, stampResults: [], open: {}, calls: [], failLeads: false, failOpen: false, pages: null,
 });
 resetState();
 jest.mock('../models/db', () => {
@@ -26,16 +26,20 @@ jest.mock('../models/db', () => {
       if (mockState.failOpen) throw new Error('open read failed');
       return Object.prototype.hasOwnProperty.call(mockState.open, state.id) ? mockState.open[state.id] : { done_at: null };
     }
+    if (mockState.pages) return mockState.pages.shift() || [];
     return mockState.rows;
   };
   const db = jest.fn((table) => {
-    const state = { table, verb: 'select', id: null, update: null };
+    const state = { table, verb: 'select', id: null, update: null, wheres: [], raws: [] };
     const chain = new Proxy({}, {
       get(_, prop) {
         if (prop === 'then') return (res, rej) => Promise.resolve().then(() => handle(state)).then(res, rej);
         return (...args) => {
           if (prop === 'update' || prop === 'first') state.verb = prop;
           if (prop === 'update') [state.update] = args;
+          if (prop === 'where') state.wheres.push(args);
+          if (prop === 'modify') args[0](chain);
+          if (prop === 'whereRaw') state.raws.push(args);
           if (prop === 'where' && args[0] && typeof args[0] === 'object' && args[0].id) state.id = args[0].id;
           return chain;
         };
@@ -54,7 +58,8 @@ const mockBundles = { byId: {}, fail: false };
 jest.mock('../services/admin-alert-contact-witnesses', () => ({
   loadContactBundles: jest.fn(async (items) => {
     if (mockBundles.fail) throw new Error('witnesses failed');
-    return new Map(items.map((i) => [String(i.id), {
+    // Like the real witnesses: no bundle for an item with no customer and no phone to name it.
+    return new Map(items.filter((i) => i.refs.customerId || i.refs.phone).map((i) => [String(i.id), {
       anchor: i.bellAt, textAt: null, backAt: null, inAt: null, replyAt: null, visitAt: null, ...(mockBundles.byId[i.id] || {}),
     }]));
   }),
@@ -66,6 +71,7 @@ jest.mock('../services/call-commitments', () => ({
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: false, push: { sent: 1 } })) }));
 const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
+const sweepShared = require('../services/lead-reminder-sweep');
 const { runNewLeadReminder, PUSH_STAMP, __private: { inBusinessHours, businessDueAt } } = require('../services/new-lead-reminder');
 
 // Eastern wall-clock times in November 2026 (EST, UTC-5). Mon Nov 9, Sat Nov 7, Sun Nov 8.
@@ -98,6 +104,7 @@ const PUSH_NOW = est('09', '10:20');
 beforeEach(() => {
   jest.clearAllMocks();
   resetState();
+  sweepShared.__private.resumeAfter.clear();
   Object.assign(mockState, { rows: [row('n-1')], leads: [lead()], customer: { id: CUST, first_name: 'Pat', last_name: 'Sample', phone: '+19415550100' } });
   Object.assign(mockBundles, { byId: {}, fail: false });
 });
@@ -269,8 +276,28 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
   });
 
-  test('a lead with no customer and no phone cannot be judged: nothing is sent', async () => {
+  test('a lead with no customer, no phone and no email cannot be judged: nothing is sent', async () => {
+    mockState.leads = [lead({ customer_id: null, phone: null, email: null })];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
+    mockState.leads = [lead({ customer_id: null, phone: null, email: 'not an address' })];
+    expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
+  });
+
+  test('an email-only lead (no phone, no customer) nobody answered pushes; one a person emailed back does not', async () => {
     mockState.leads = [lead({ customer_id: null, phone: null })];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    const [[items]] = loadContactBundles.mock.calls;
+    expect(items[0].refs).toEqual({ customerId: null, phone: null });
+    updates().length = 0;
+    triggerNotification.mockClear();
+    mockState.emails = [{ to_address: 'Pat Sample <pat@example.invalid>', cc_address: null, bcc_address: null, received_at: est('09', '10:05') }];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 0 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('an email-only lead whose estimate was sent does not push', async () => {
+    mockState.leads = [lead({ customer_id: null, phone: null, estimate_id: 'e-9' })];
+    mockState.estimates = [{ id: 'e-9', customer_id: null, sent_at: est('09', '10:05') }];
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
   });
 
@@ -303,6 +330,33 @@ describe('"reached" is judged on the lead, whatever the close gates say', () => 
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 1 });
   });
 
+  test('an email lead looks back to when the message came in, not only to when classification made the lead', async () => {
+    mockState.rows = [row('n-1', { createdAt: est('09', '10:03') })];
+    mockState.leads = [lead({ customer_id: null, phone: null, created_at: est('09', '10:02'), first_contact_at: est('09', '09:40') })];
+    mockState.emails = [{ to_address: 'pat@example.invalid', cc_address: null, bcc_address: null, received_at: est('09', '09:50') }];
+    expect(await run(est('09', '10:20'))).toMatchObject({ due: 1, pushed: 0 });
+    const [[items]] = loadContactBundles.mock.calls;
+    expect(items[0].bellAt).toEqual(est('09', '09:35'));
+  });
+
+  test('a fresh form on a lead made days ago is judged from its own bell: the earlier contact and the old call do not suppress it', async () => {
+    const old = est('06', '10:00');
+    mockState.rows = [row('n-1', { createdAt: est('09', '10:00') })];
+    mockState.leads = [lead({ created_at: old, twilio_call_sid: CALL_SID })];
+    mockState.answered = [{ twilio_call_sid: CALL_SID }];
+    expect(await run(PUSH_NOW)).toMatchObject({ due: 1, pushed: 1 });
+    const [[items]] = loadContactBundles.mock.calls;
+    expect(items[0].bellAt).toEqual(est('09', '09:55'));
+    expect(mockState.calls.filter((c) => c.table === 'call_log')).toEqual([]);
+  });
+
+  test('the email read starts at the earliest anchor of the batch, not a fixed cutoff', async () => {
+    mockState.leads = [lead({ customer_id: null, phone: null })];
+    await run(PUSH_NOW);
+    const query = mockState.calls.find((c) => c.table === 'emails as er');
+    expect(query.wheres).toContainEqual(['er.received_at', '>', est('09', '09:55')]);
+  });
+
   test('a failed witness read or lead read is no verdict: nothing is sent or stamped', async () => {
     mockBundles.fail = true;
     expect(await run(PUSH_NOW)).toMatchObject({ pushed: 0 });
@@ -318,6 +372,26 @@ describe('what it never does', () => {
   test('the push goes to admin users only: no customer or lead text, email or call is sent here', () => {
     const source = require('fs').readFileSync(require.resolve('../services/new-lead-reminder'), 'utf8');
     expect(source).not.toMatch(/sendSMS|sendEmail|twilio\.messages|sendCustomerMessage/);
-    expect(source).toMatch(/adminOnly: true/);
+    expect(require('fs').readFileSync(require.resolve('../services/lead-reminder-sweep'), 'utf8')).toMatch(/adminOnly: true/);
+  });
+});
+
+describe('a capped scan resumes: old settled bells cannot hide a due one', () => {
+  test('a sweep that reads 5 full pages remembers where it stopped; the next one starts after that row', async () => {
+    // pageSize 1, five rows that are not yet due (a bell 10 minutes old), then a due bell on the next sweep.
+    const fresh = (n) => row(`new-${n}`, { createdAt: new Date(est('09', '10:10').getTime() + n * 1000) });
+    mockState.pages = [[fresh(1)], [fresh(2)], [fresh(3)], [fresh(4)], [fresh(5)]];
+    expect(await runNewLeadReminder({ now: PUSH_NOW, pageSize: 1 })).toMatchObject({ due: 0, pushed: 0 });
+    expect(sweepShared.__private.resumeAfter.get(PUSH_STAMP)).toEqual({ createdAt: fresh(5).created_at_token, id: 'new-5' });
+
+    mockState.pages = [[row('n-due')]];
+    mockState.calls.length = 0;
+    const second = await runNewLeadReminder({ now: PUSH_NOW, pageSize: 1 });
+    await Promise.all(second.sends);
+    expect(second).toMatchObject({ due: 1, pushed: 1 });
+    const firstQuery = mockState.calls.find((c) => c.table === 'notifications' && c.verb === 'select');
+    expect(firstQuery.raws).toContainEqual(['(created_at, id) > (?::timestamptz, ?::uuid)', [fresh(5).created_at_token, 'new-5']]);
+    // The due row fills a page of one, so the scan went on; an empty page ended it and the cursor starts over.
+    expect(sweepShared.__private.resumeAfter.has(PUSH_STAMP)).toBe(false);
   });
 });
