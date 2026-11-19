@@ -433,6 +433,11 @@ export default function TechHomePage({ section = 'today' }) {
   // edit) a Fast Complete sheet's Details pill opens (owner 2026-10-09):
   // the same sheet Dispatch opens, over the same /admin/schedule row.
   const [detailService, setDetailService] = useState(null);
+  // A sheet's Details pill, for the row the sheet opened on. None on an
+  // off-route saved attempt's row (useSavedFastCompletions): it holds only the
+  // visit id and summary, so the editor would show a blank note, and a note
+  // typed there would replace the stored one.
+  const detailsFor = (row) => (row?.fastCompletionRecoveryOnly ? undefined : () => setDetailService(row));
   // A fast sheet left mounted (suspended) behind the details sheet; plain
   // Close returns to it, a change to the visit closes it (owner 2026-10-09).
   const fastSheetBehindDetails = !!detailService && fastSheets.some(Boolean);
@@ -1218,7 +1223,7 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(fastCompleteService)}
+          onViewDetails={detailsFor(fastCompleteService)}
           suspended={!!detailService}
         />
       )}
@@ -1261,7 +1266,7 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(treeShrubFastService)}
+          onViewDetails={detailsFor(treeShrubFastService)}
           suspended={!!detailService}
         />
       )}
@@ -1306,7 +1311,7 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(lawnReserviceFastService)}
+          onViewDetails={detailsFor(lawnReserviceFastService)}
           suspended={!!detailService}
         />
       )}
@@ -1333,7 +1338,7 @@ export default function TechHomePage({ section = 'today' }) {
           }}
           // Details opens the appointment details sheet over this visit; the fast
           // sheet stays mounted (suspended) so its entries survive (owner 2026-10-09).
-          onViewDetails={() => setDetailService(lawnFastService)}
+          onViewDetails={detailsFor(lawnFastService)}
           suspended={!!detailService}
         />
       )}

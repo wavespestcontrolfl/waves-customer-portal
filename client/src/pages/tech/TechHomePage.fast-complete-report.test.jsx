@@ -30,15 +30,17 @@ vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: () => 
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
+// `data-details`: whether the page offers the sheet a Details pill (onViewDetails).
+const details = (onViewDetails) => (onViewDetails ? 'yes' : 'no');
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service, onClose }) => (
-    <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}<button type="button" onClick={() => onClose?.()}>Close sheet</button></div>
+  default: ({ service, onClose, onViewDetails }) => (
+    <div data-testid="sheet" data-service={JSON.stringify(service)} data-details={details(onViewDetails)}>Fast Complete sheet for {service.id}<button type="button" onClick={() => onClose?.()}>Close sheet</button></div>
   ),
 }));
-vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
-vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
+vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: ({ onViewDetails }) => <div data-testid="tree-sheet" data-details={details(onViewDetails)} /> }));
+vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: ({ onViewDetails }) => <div data-testid="lawn-sheet" data-details={details(onViewDetails)} /> }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
-  default: ({ service, catalog, catalogError }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} />,
+  default: ({ service, catalog, catalogError, onViewDetails }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} data-details={details(onViewDetails)} />,
 }));
 import TechHomePage from './TechHomePage';
 import { etDateString } from '../../lib/timezone';
@@ -371,6 +373,22 @@ it('a saved lawn visit attempt opens with no product catalog: its same-key retry
   expect(JSON.parse(screen.getByTestId('lawn-visit-sheet').getAttribute('data-catalog'))).toBeNull();
 });
 
+// An off-route saved attempt's row holds only the visit id and summary: no
+// sheet offers its Details pill there, whose appointment editor would show a
+// blank note and could replace the stored one.
+it.each([
+  ['report', { idempotencyKey: 'k-report', reportDraftBase: {} }, undefined, 'sheet'],
+  ['tree & shrub', { idempotencyKey: 'k-ts', structuredFindings: { type: 'tree_shrub', values: {} } }, undefined, 'tree-sheet'],
+  ['lawn re-service', { idempotencyKey: 'k-lr', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } }, undefined, 'lawn-sheet'],
+  ['lawn visit', { idempotencyKey: 'k-lv', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } }, 'lawn_visit', 'lawn-visit-sheet'],
+])('an off-route saved %s attempt opens its sheet with no Details pill', async (_label, body, sheet, testId) => {
+  mocks.attempts.set('svc-off', { body, summary: 'Saved visit', ...(sheet ? { sheet } : {}) });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(await screen.findByTestId(testId)).toHaveAttribute('data-details', 'no');
+});
+
 it('a saved lawn visit attempt on a visit that now reads completed reopens the lawn visit sheet', async () => {
   mocks.attempts.set('svc-lawn-done', {
     body: { idempotencyKey: 'lawn-done-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
@@ -379,8 +397,10 @@ it('a saved lawn visit attempt on a visit that now reads completed reopens the l
   rows = [row('svc-lawn-done', { status: 'completed', serviceType: 'Lawn Care', completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_6week', projectBacked: false } })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
-  // On the route: the sheet has the routed row, so a discard leaves a fresh form.
-  expect(JSON.parse((await screen.findByTestId('lawn-visit-sheet')).getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn-done', recoveryOnly: false });
+  // On the route: the sheet has the routed row, so a discard leaves a fresh form, and Details reads the real visit.
+  const sheet = await screen.findByTestId('lawn-visit-sheet');
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn-done', recoveryOnly: false });
+  expect(sheet).toHaveAttribute('data-details', 'yes');
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
