@@ -623,6 +623,45 @@ jest.setTimeout(30000);
       expect(metadata.missed_call_push_retries).toBeUndefined();
     });
 
+    // The quiet stamp re-checks the call: a write that lands after the repeat
+    // check read the call, before the stamp, leaves the stamp unwritten, and
+    // the push goes (pre-push audit r13).
+    test.each([
+      ['a staff note', { notes: 'called back, it was a person' }],
+      ['a customer link', { customer_id: '00000000-0000-4000-8000-000000000611' }],
+    ])('%s that lands after the repeat check read the call lets the push go (pre-push audit r13)', async (label, late) => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      // The record check's text read is its last read: the late write lands as
+      // that read runs (only the one-argument form recordIsSilent uses).
+      const reservation = require('../services/messaging/review-ask-reservation');
+      const original = reservation.excludeUnresolvedSendReservations;
+      let landed = false;
+      const spy = jest.spyOn(reservation, 'excludeUnresolvedSendReservations').mockImplementation((query, ...rest) => {
+        const read = original(query, ...rest);
+        if (landed || rest.length) return read;
+        landed = true;
+        const run = read.then.bind(read);
+        read.then = (resolve, reject) => database('call_log').where({ id: row.id }).update(late).then(() => run(resolve, reject), reject);
+        return read;
+      });
+      try {
+        reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+        expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+        expect(landed).toBe(true);
+        const [, payload, opts] = triggerNotification.mock.calls[0];
+        expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+        expect(await opts.beforePush({ dispatching: true })).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+      const after = await stored(row);
+      expect(after).toMatchObject(late);
+      expect(after.metadata.missed_call_spam_wave).toBeUndefined();
+    });
+
     test('gate off: the call rings as before, titled unknown caller, stamped for the shadow read', async () => {
       isEnabled.mockImplementation((name) => name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);

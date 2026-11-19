@@ -726,8 +726,12 @@ async function quietRobodialerPush(row, fenced) {
   if (quietAs) stamps.missed_call_spam_wave = quietAs;
   if (!Object.keys(stamps).length) return false;
   // Quiet only when the marker is durable: the re-push recognises a quiet call by
-  // it. A failed or empty stamp write fails open (the push goes as usual).
-  const stamped = await fenced().update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => 0);
+  // it. A failed or empty stamp write fails open (the push goes as usual). A
+  // repeat quiet is written only while the call is still a silent call: a
+  // customer link, a staff note or an answer that lands after the repeat
+  // check read the call matches no row, and the push goes (pre-push audit r13).
+  const write = quietAs === 'repeat_quiet' ? fenced().whereRaw(...silentCallSql()) : fenced();
+  const stamped = await write.update({ metadata: db.raw('metadata || ?::jsonb', [JSON.stringify(stamps)]) }).catch(() => 0);
   return Boolean(quietAs) && stamped === 1;
 }
 
