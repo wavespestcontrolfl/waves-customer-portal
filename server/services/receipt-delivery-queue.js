@@ -225,11 +225,8 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
 // follows what the summary text actually did: receipt_sms_sent_at is stamped only when it was
 // accepted. A summary that is deferred or was suppressed delivered nothing, so neither channel has.
 // The alert is closed when the summary text is later accepted (visit-completion-summary.js).
-// The key of that alert, and the last_error of an operator send whose outcome is unknown (parked as failed, below):
-// exported for the paid-visit receipt check, which must neither ring a second bell beside this alert nor ask for a
-// resend the customer may already have.
+// The key of that alert: exported for the paid-visit receipt check, which must not ring a second bell beside it.
 const CARRIED_RECEIPT_ALERT_PREFIX = 'summary-carried-receipt-email:';
-const RECONCILIATION_HOLD_ERROR = 'operator receipt send outcome unknown — held for reconciliation, not retried automatically';
 async function alertCarriedReceiptEmail(job, reason) {
   try {
     const accepted = Boolean((await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at);
@@ -671,7 +668,7 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
           status: 'failed',
           sms_result: smsResult,
           email_result: emailResult,
-          last_error: RECONCILIATION_HOLD_ERROR,
+          last_error: 'operator receipt send outcome unknown — held for reconciliation, not retried automatically',
           ...unlock,
         }), 'held_for_reconciliation');
       }
@@ -740,7 +737,6 @@ module.exports = {
   resumeDeferredReceiptDelivery,
   TEXT_CARRIED_BY_SUMMARY,
   CARRIED_RECEIPT_ALERT_PREFIX,
-  RECONCILIATION_HOLD_ERROR,
   _internals: {
     recoverStaleLocks,
     actionableSmsFailure,

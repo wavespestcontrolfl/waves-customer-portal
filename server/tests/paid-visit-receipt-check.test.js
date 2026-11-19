@@ -109,9 +109,10 @@ describe('raising', () => {
     const out = await run();
     const [bell] = raised();
     expect(bell.category).toBe('billing');
-    expect(bell.headline).toBe("Billing — send Pat Tester's receipt");
+    // One wording, true even when an earlier send's outcome is unknown (it may have reached the customer).
+    expect(bell.headline).toBe('Billing — confirm Pat Tester got a receipt');
     // The figure is the invoice's total, not the tender (a last check can settle a part-paid invoice).
-    expect(bell.why).toBe('The $125.00 invoice was paid by check at the Nov 18 visit; no receipt has gone out.');
+    expect(bell.why).toBe('The $125.00 invoice was paid by check at the Nov 18 visit; no sent receipt is on record.');
     expect(bell.opts).toMatchObject({
       dedupeKey: keyOf(A), bell: true, link: `/admin/invoices?invoice=${A}`,
       metadata: expect.objectContaining({ invoiceId: A, customerId: 'cust-1', severity: 'needs-you', subject: { type: 'invoice', id: A }, who: 'person', doneWhen: 'receipt_sent' }),
@@ -151,6 +152,16 @@ describe('raising', () => {
     expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
   });
 
+  test('a job still running that already delivered its email, or a customer who turned receipts off, is final before "in flight"', async () => {
+    candidates = [];
+    invoices = [{ id: A, customer_id: 'cust-1', status: 'paid', receipt_sent_at: null, archived_at: null }, { id: B, customer_id: 'cust-2', status: 'paid', receipt_sent_at: null, archived_at: null }];
+    jobs = { [A]: { status: 'retry_scheduled', email_result: { ok: true } }, [B]: { status: 'queued' } };
+    prefs = { 'cust-2': { payment_receipt: false } };
+    episodes.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => (prefix === 'paid-visit-no-receipt:' ? [keyOf(A), keyOf(B)] : []));
+    await run();
+    expect(closed().map((c) => [c.keys[0], c.reason])).toEqual([[keyOf(A), 'receipt delivered'], [keyOf(B), 'receipts turned off']]);
+  });
+
   test('a receipt job still in flight rings nothing; a completed or failed job with no receipt stamp rings', async () => {
     const C = '33333333-3333-4333-8333-333333333333';
     const D = '44444444-4444-4444-8444-444444444444';
@@ -172,17 +183,6 @@ describe('raising', () => {
     expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
   });
 
-  test('an operator send parked for reconciliation (outcome unknown) asks to check before sending again', async () => {
-    const { RECONCILIATION_HOLD_ERROR } = require('../services/receipt-delivery-queue');
-    candidates = [row(A)];
-    jobs = { [A]: { status: 'failed', last_error: RECONCILIATION_HOLD_ERROR } };
-    await run();
-    const [bell] = raised();
-    expect(bell.headline).toBe('Billing — check that Pat Tester got the receipt');
-    expect(bell.why).toBe('The $125.00 invoice was paid by check at the Nov 18 visit; an earlier receipt send may have gone out.');
-    expect(bell.opts.dedupeKey).toBe(keyOf(A));
-  });
-
   test('an accepted receipt email (any sender, keyed invoice_receipt:<id>) rings nothing; a failed one does not count', async () => {
     candidates = [row(A), row(B)];
     emails = { [`invoice_receipt:${A}`]: { id: 'm-1', status: 'delivered' }, [`invoice_receipt:${B}`]: { id: 'm-2', status: 'failed' } };
@@ -197,23 +197,17 @@ describe('raising', () => {
     expect(raised()).toEqual([]);
   });
 
-  test('the bell refreshes its words quietly when they change (send to check), keeping its read and Done state', async () => {
-    await run();
-    expect(raised()[0].opts).toMatchObject({ refreshOnDedupe: true });
-    expect(raised()[0].opts.ringOnRefresh()).toBe(false);
-  });
-
   test('a customer with no real name still gets a bell', async () => {
     candidates = [row(A, { first_name: null, last_name: null, payment_method: null })];
     await run();
-    expect(raised()[0].headline).toBe("Billing — send a customer's receipt");
-    expect(raised()[0].why).toBe('The $125.00 invoice was paid at the Nov 18 visit; no receipt has gone out.');
+    expect(raised()[0].headline).toBe('Billing — confirm a customer got a receipt');
+    expect(raised()[0].why).toBe('The $125.00 invoice was paid at the Nov 18 visit; no sent receipt is on record.');
   });
 
   test('a name that breaks the alert rules becomes "a customer"', async () => {
     candidates = [row(A, { first_name: 'Pat 😀', last_name: 'T.' })];
     await run();
-    expect(raised()[0].headline).toBe("Billing — send a customer's receipt");
+    expect(raised()[0].headline).toBe('Billing — confirm a customer got a receipt');
   });
 
   test('a suppressed write (test customer) is not counted as raised', async () => {
