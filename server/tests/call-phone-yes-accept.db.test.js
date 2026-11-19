@@ -279,6 +279,14 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       estimateOver: { onetime_total: 85, estimate_data: JSON.stringify(planData({ result: { ...planData().result, oneTime: { items: [{ name: 'Wasp Nest Removal', price: 85 }], membershipFee: 0 } } })) },
     }, 'one_time_items'],
     ['the estimate has a one-time total no line itemizes', { estimateOver: { onetime_total: 85 } }, 'one_time_items'],
+    // The estimate's own manual accept refuses these (estimate-manual-acceptance.js), so an automatic one would too.
+    ['the estimate still needs a manager approval', {
+      estimateOver: { estimate_data: JSON.stringify(planData({ approvals: [{ requiresManagerApproval: true }] })) },
+    }, 'accept_refused'],
+    ['the estimate offers a one-time option', { estimateOver: { show_one_time_option: true } }, 'accept_refused'],
+    ['the estimate is held for a re-price', {
+      estimateOver: { estimate_data: JSON.stringify(planData({ estimatorEngine: { reprice_pending_at: '2026-11-19T10:00:00.000Z' } })) },
+    }, 'accept_refused'],
   ])('a yes the accept would refuse (%s): ONE card, auto would accept no, with the reason', async (_name, setup, reason) => {
     const { est, bookingCallId } = await phoneYes(setup);
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
@@ -447,10 +455,20 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     let [card] = await cards(bookingCallId);
     expect(card).toMatchObject({ status: 'open', related_estimate_id: null });
     expect(payloadOf(card).estimate_ids.sort()).toEqual([est.id, other.id].sort());
+    // Nothing changed: the card keeps its version (Resolve and Dismiss are bound to it).
+    await sweep();
+    expect((await cards(bookingCallId))[0].updated_at).toEqual(card.updated_at);
+    // An estimate that leaves loses its link, and the card's version moves.
     await trx('estimates').where({ id: est.id }).update({ status: 'declined', declined_at: new Date() });
     await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const filed = card;
+    [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ estimate_ids: [other.id], yes_heard: true, caller_words: WORDS });
+    expect(card.summary).toBe(filed.summary);
+    expect(new Date(card.updated_at).getTime()).toBeGreaterThan(new Date(filed.updated_at).getTime());
     await trx('estimates').where({ id: other.id }).update({ status: 'expired', expires_at: new Date(Date.now() - 3600000) });
     await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    expect(payloadOf((await cards(bookingCallId))[0]).estimate_ids).toEqual([other.id]);
     await trx('estimates').where({ id: other.id }).update({ status: 'declined', declined_at: new Date() });
     await expect(sweep()).resolves.toMatchObject({ closed: 1 });
     [card] = await cards(bookingCallId);
@@ -513,6 +531,30 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ closed: 0 });
     const [card] = await cards(bookingCallId);
     expect(card.status).toBe('open');
+  });
+
+  // A call after a newer estimate was sent (one sent after the booking call) may be about that estimate.
+  test("a newer estimate's calls are not this card's: a yes there never shows here, a cancel there never closes it", async () => {
+    const { customerId, yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await estimate(customerId, { sent_at: new Date(Date.now() - 3600000) });
+    await call(customerId, 'per_application', { created_at: new Date(Date.now() - 1800000) });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: yesCallId });
+    await call(customerId, null, { created_at: new Date(Date.now() - 600000) }, 'cancellation_request');
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+  });
+
+  test("a yes after a newer estimate was sent is not the card's at filing either", async () => {
+    const { customerId, bookingCallId } = await phoneYes({ yesChoice: null });
+    await estimate(customerId, { sent_at: new Date(Date.now() - 3600000) });
+    await call(customerId, 'per_application', { created_at: new Date(Date.now() - 1800000) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, caller_words: null, auto_would_accept: false });
   });
 
   test('a card that names its estimate stays open when a second estimate opens', async () => {

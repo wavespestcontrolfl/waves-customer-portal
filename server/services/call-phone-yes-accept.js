@@ -11,9 +11,11 @@
  * per_application on that call or an earlier one since the estimate was sent, and its evidence quote is found word for
  * word in a caller turn of that call's recording transcript; the card shows the caller's whole latest turn that says it.
  * "No yes heard" says only that: the card never claims a yes that did not happen. The caller's word is read by
- * call-phone-yes-word.js (one copy, shared with the later steps); it judges no words, the call reader does. The
- * caller's billing_choice is never consent on its own (the extraction schema says so), so a person decides every
- * accept. Each sweep re-reads an open card's yes, so a call that is re-read or moved never leaves a stale quote on it.
+ * call-phone-yes-word.js (one copy, shared with the later steps); it judges no words, the call reader does. A call
+ * that began after a newer estimate was sent (one sent after the booking call) gives the card no word: it may be about
+ * that estimate. The caller's billing_choice is never consent on its own (the extraction schema says so), so a person
+ * decides every accept. Each sweep re-reads an open card's yes, so a call that is re-read or moved never leaves a stale
+ * quote on it.
  * Each card also records a shadow verdict for the later automatic step, as of its filing: would an automatic accept go
  * ahead, and if not, the first reason (the accept's own checks, then the caller's word).
  *
@@ -72,6 +74,7 @@ const REASONS = {
   no_recurring_price: 'The estimate has no recurring price.',
   not_pest_plan: 'The estimate is not one residential pest control plan.',
   one_time_items: 'The estimate has a one-time charge that the office must bill.',
+  accept_refused: "The estimate's own accept refuses it now (for example, it still needs a manager's approval). Open the estimate to see why.",
   estimate_has_visits: 'A visit is already linked to the estimate.',
   visit_already_linked: 'The booked visit is already linked to an estimate.',
   visit_not_one_off: 'The booked visit is already part of a series or a reservation.',
@@ -100,6 +103,21 @@ function sentAnchorOf(estimate) {
   return Number.isNaN(at.getTime()) ? new Date(0) : at;
 }
 const earliestSentAnchor = (estimates) => new Date(Math.min(...estimates.map((e) => sentAnchorOf(e).getTime())));
+
+// When the customer was first sent an estimate the card does not name after the booking call began (timestamptz as
+// text, or null). From then on a call may be about that newer estimate, so its word is not this card's: a yes to it
+// never shows here and a cancel of it never closes this card (callerWord's `until`). An estimate settled before the
+// booking call (a lawn quote accepted online) bounds nothing: the call booked the visit with the card's ones open.
+async function newerEstimateSentAt(conn, { customerId, cardIds, bookingCallId }) {
+  const startOfBooking = `(SELECT ${require('./sms-pending-conversations').callStartedAtSql('anchor')} FROM call_log anchor WHERE anchor.id = ?)`;
+  const row = await conn('estimates')
+    .where({ customer_id: customerId })
+    .whereNotIn('id', cardIds)
+    .whereNotNull('sent_at')
+    .whereRaw(`sent_at > ${startOfBooking}`, [bookingCallId])
+    .first(conn.raw('min(sent_at)::text AS at'));
+  return row?.at || null;
+}
 
 // An archived estimate keeps its status but is closed to the customer (the public routes refuse it): never open here.
 async function openEstimatesOf(conn, customerId, now) {
@@ -146,7 +164,21 @@ async function estimateProblem(conn, estimate) {
   // A one-time total that no line itemizes (legacy quotes): the office must see the charge (the carded accept's rule).
   if (AcceptEffects.unitemizedOneTimeRefusal(estimate, oneTime.lines)) return 'one_time_items';
   if (await Manual.estimateLinkedVisitsQuery(conn, estimate.id).first('id')) return 'estimate_has_visits';
+  if (await acceptRefused(conn, estimate, data)) return 'accept_refused';
   return null;
+}
+
+// True when the estimate's own manual accept refuses it, read as the Intelligence Bar's accept card reads it
+// (estimate-accept-tools.js pageRefusal; the manual accept throws the same under its locks): a manager's
+// approval still owed, a gated add-on, a one-time option or invoice mode, a re-price hold, or a call-linkage quarantine.
+async function acceptRefused(conn, estimate, data) {
+  const Manual = require('./estimate-manual-acceptance');
+  if (Manual.oneTapPurchaseRefusal(estimate) || Manual.manualAcceptRowRefusal(estimate) || Manual.manualAcceptLockedRowRefusal(estimate)) return true;
+  const eng = data.estimatorEngine;
+  if (require('./estimate-clarify-asks').repricePendingActive(eng)) return true;
+  if (eng?.callLogId && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+  return !!(await callSideBlockForEstimateData(conn, data, { estimateStatus: estimate.status }));
 }
 
 // What is wrong with the booked visit for an accept from the call, or null.
@@ -217,7 +249,8 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   const since = earliestSentAnchor(answerable);
   // Every call since the send, the booking call included, is read first: an unread one may hold the yes or take it back.
   if (await Word.unreadCallSince(conn, { customerId, since })) return skip('call_still_processing');
-  const heard = await Word.callerWord(conn, { customerId, since });
+  const until = await newerEstimateSentAt(conn, { customerId, cardIds: answerable.map((e) => e.id), bookingCallId: callLogId });
+  const heard = await Word.callerWord(conn, { customerId, since, until });
   if (heard.skip) return skip(heard.skip);
   const { yes } = heard;
   const later = await Word.laterWordProblem(conn, { customerId, yes, booking: call });
@@ -331,8 +364,8 @@ function cardEstimateIds(card) {
   return Array.isArray(ids) ? ids.map(String) : [];
 }
 
-// Why an open card closes ({ close: note }), its yes fields when they changed ({ refresh: yes, rechecking? }), or null
-// to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
+// Why an open card closes ({ close: note }), what changed ({ refresh: yes, rechecking? } for its yes fields, keepYes
+// when only its estimate links changed, estimateIds when they did), or null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
 // still open or lapsed: an expiry alone never closes it, and neither does another estimate's accept (the card may
 // still be about the one left open). While a call in its window still owes a read, the card waits as it is.
 async function cardState(card) {
@@ -353,14 +386,26 @@ async function cardState(card) {
     : [];
   const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status) && !e.archived_at);
   if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
-  const since = earliestSentAnchor(kept);
+  // A card with more than one estimate links only the ones still open or lapsed, in the card's own order (a set
+  // compare: a row order that differs is no change, so the card's version moves only when an estimate leaves).
+  const keptSet = new Set(kept.map((e) => String(e.id)));
+  const keptIds = ids.filter((id) => keptSet.has(id));
+  const linksChanged = !card.related_estimate_id && keptIds.length !== ids.length;
+  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(kept) });
+  if (state?.close || !linksChanged) return state;
+  return { ...(state || { keepYes: true }), estimateIds: keptIds };
+}
+
+// The card's yes fields, read again: { close: note }, { refresh: yes, rechecking? } when they changed, or null.
+async function yesState(card, { customerId, ids, since }) {
   // The yes the card shows, checked first, also while other calls are read: never words that no longer hold.
   const p = parseJson(card.payload);
   const yesCall = await yesCallState(p, customerId);
   if (yesCall === 'owed') return p.yes_rechecking === true ? null : { refresh: null, rechecking: p.yes_call_log_id };
   if (yesCall === 'gone' || yesCall === 'changed') return { refresh: null };
   if (await Word.unreadCallSince(db, { customerId, since })) return null;
-  const heard = await Word.callerWord(db, { customerId, since });
+  const until = await newerEstimateSentAt(db, { customerId, cardIds: ids, bookingCallId: card.call_log_id });
+  const heard = await Word.callerWord(db, { customerId, since, until });
   if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
   // The yes the card shows must be the customer's latest word, from the same call with the same words.
   const now = heardFields(heard.yes);
@@ -386,8 +431,12 @@ async function applyCardState(card, state) {
       return true;
     }
     await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-      payload: JSON.stringify({ ...parseJson(row.payload), ...heardFields(state.refresh, { recheckingCallId: state.rechecking }) }),
-      summary: cardSummary({ yes: state.refresh, rechecking: !!state.rechecking }),
+      payload: JSON.stringify({
+        ...parseJson(row.payload),
+        ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking })),
+        ...(state.estimateIds ? { estimate_ids: state.estimateIds } : {}),
+      }),
+      ...(state.keepYes ? {} : { summary: cardSummary({ yes: state.refresh, rechecking: !!state.rechecking }) }),
       updated_at: stamp,
     });
     return false;

@@ -285,6 +285,21 @@ describeDb("the caller's word (PostgreSQL)", () => {
     });
   });
 
+  // `until`: from a newer estimate's send on, a call may be about that estimate (the cards pass it).
+  test('until: only calls that began before it give the word; a later yes or cancel is not this word', async () => {
+    const customerId = await customer();
+    const yesCallId = await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    const until = (await trx.raw("SELECT (now() - interval '3 hours')::text AS at")).rows[0].at;
+    await call(customerId, null, { created_at: hoursAgo(1) }, 'cancellation_request');
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
+    await expect(callerWord(trx, { customerId, since: since(), until })).resolves.toEqual({
+      yes: { callLogId: yesCallId, at: expect.any(Date), quote: WORDS }, noYes: null,
+    });
+    const other = await customer();
+    await call(other, 'per_application', { created_at: hoursAgo(1) });
+    await expect(callerWord(trx, { customerId: other, since: since(), until })).resolves.toEqual({ yes: null, noYes: 'no_yes_heard' });
+  });
+
   test("a condition in the caller's turn stays in front of the office: the yes carries the whole turn", async () => {
     const customerId = await customer();
     const yesCallId = await call(customerId, 'per_application', {

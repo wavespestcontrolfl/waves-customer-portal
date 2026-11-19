@@ -137,13 +137,15 @@ function wordOfCall(row) {
 // wordOfCall gives it, or null. SQL keeps only rows that name a word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation,
 // so voicemails never hide the last word. Each page starts after the last row read (start time, then id), never at an
 // offset: a row that leaves the set between pages (a re-read starts) cannot shift another row past a page. The start
-// time is carried as text, so no microsecond is lost. Sandbox calls do not count.
-async function latestBillingChoice(conn, { customerId, since }) {
+// time is carried as text, so no microsecond is lost. Sandbox calls do not count. `until` (a timestamptz as text, or
+// null) keeps only calls that began before it: from then on a call may be about another estimate.
+async function latestBillingChoice(conn, { customerId, since, until = null }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { BILLING_CHOICES } = require('./call-prepay-choice');
   const query = conn('call_log')
     .where({ customer_id: customerId, processing_status: 'processed', v2_extraction_status: 'valid' })
     .whereRaw(`${startedSql()} >= ?`, [since])
+    .modify((qb) => { if (until) qb.whereRaw(`${startedSql()} < ?::timestamptz`, [until]); })
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .where((qb) => qb
       .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...BILLING_CHOICES]])
@@ -256,12 +258,12 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
   return later ? 'newer_call' : null;
 }
 
-// The customer's word since `since`, as the cards read it: a reason for no card ({ skip: 'took_back' |
+// The customer's word since `since` (and before `until`, when given), as the cards read it: a reason for no card ({ skip: 'took_back' |
 // 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
 // 'yes_without_words' | 'caller_not_account_holder' | 'caller_declined_price' }). A yes is the call reader's pay-per-application choice WITH the
 // caller's own words ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
-async function callerWord(conn, { customerId, since }) {
-  const word = await latestBillingChoice(conn, { customerId, since });
+async function callerWord(conn, { customerId, since, until = null }) {
+  const word = await latestBillingChoice(conn, { customerId, since, until });
   if (word?.notHolder) return { yes: null, noYes: 'caller_not_account_holder' };
   if (word?.contrary) return { skip: 'took_back' };
   if (word?.declined) return { yes: null, noYes: 'caller_declined_price' };
