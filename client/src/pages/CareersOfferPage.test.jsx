@@ -183,6 +183,56 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/This offer was updated/)).toBeInTheDocument();
   });
 
+  it('shows a retry message when the refresh after a 409 fails', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not open', code: 'NOT_OPEN' }, 409))
+      .mockResolvedValueOnce(jsonResponse({}, 500));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    expect(await screen.findByText(/We could not refresh this offer/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled();
+  });
+
+  it('locks the other panel while the accept request is pending', async () => {
+    let finish;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+    fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Yes, decline' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    finish(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' }));
+    expect(await screen.findByText(/You signed this offer/)).toBeInTheDocument();
+  });
+
+  it('blocks signing until the text consent choice is saved', async () => {
+    let finish;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true })))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled());
+    finish(jsonResponse({ textConsent: false }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeEnabled());
+    expect(screen.getByLabelText('Text me about this offer')).not.toBeChecked();
+  });
+
+  it('shows the signing date in Eastern time', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-13T00:00:00.000Z' })));
+    renderPage();
+    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\./)).toBeInTheDocument();
+  });
+
   it('keeps the form and shows an error when the connection drops', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))

@@ -3,6 +3,7 @@ import {
   dateRequestProblem,
   formatExpiry,
   formatLongDate,
+  formatLongInstant,
   formatSentOn,
   payLine,
   signedNameValid,
@@ -24,6 +25,7 @@ describe('offerFormat', () => {
     // 2026-12-19 03:30Z is still Fri Dec 18 in Eastern time.
     expect(formatExpiry('2026-12-19T03:30:00.000Z')).toBe('Fri, Dec 18');
     expect(formatLongDate('2026-12-13T02:00:00.000Z')).toBe('Sat, Dec 12, 2026');
+    expect(formatLongInstant('2026-12-13T00:00:00.000Z')).toBe('Sat, Dec 12, 2026');
   });
 
   it('needs two words to sign', () => {

@@ -29,6 +29,7 @@ import {
   dateRequestProblem,
   formatExpiry,
   formatLongDate,
+  formatLongInstant,
   formatSentOn,
   payLine,
   signedNameValid,
@@ -104,6 +105,8 @@ const ERROR_BANNER_STYLE = {
   lineHeight: 1.5,
 };
 
+const REFRESH_ERROR = 'We could not refresh this offer. Check your connection and try again.';
+const NOT_SAVED_ERROR = 'That did not go through. Please try again.';
 const CONNECTION_ERROR = 'Could not save that. Check your connection and try again.';
 
 function ownerFirstName(data) {
@@ -205,7 +208,7 @@ function ClosedState({ data }) {
 function resultMessage(data) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
-    const when = formatLongDate(data.signedAt);
+    const when = formatLongInstant(data.signedAt);
     return `You signed this offer${when ? ` on ${when}` : ''}. Welcome to Waves. ${who} will contact you about your first day.`;
   }
   if (data.state === 'date_requested') {
@@ -292,7 +295,7 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial }) {
+function TextConsent({ token, initial, onPending, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -300,6 +303,7 @@ function TextConsent({ token, initial }) {
   const toggle = async (next) => {
     setChecked(next);
     setSaving(true);
+    onPending(true);
     setError('');
     try {
       const res = await postJson(token, '/text-consent', { consent: next });
@@ -310,6 +314,7 @@ function TextConsent({ token, initial }) {
       setError(CONNECTION_ERROR);
     } finally {
       setSaving(false);
+      onPending(false);
     }
   };
 
@@ -319,7 +324,7 @@ function TextConsent({ token, initial }) {
         <input
           type="checkbox"
           checked={checked}
-          disabled={saving}
+          disabled={saving || locked}
           onChange={(e) => toggle(e.target.checked)}
           style={{ width: 24, height: 24, flex: '0 0 auto', accentColor: 'var(--brand, #04395E)' }}
         />
@@ -361,15 +366,20 @@ function useOfferAction({ token, onApplied, onReload, onInvalid }) {
     try {
       const res = await postJson(token, suffix, payload);
       if (res.status === 404) return onInvalid();
-      if (res.status === 409) return onReload();
+      if (res.status === 409) {
+        const after = await onReload();
+        if (after === 'failed') setError(REFRESH_ERROR);
+        else if (after === 'open') setError(NOT_SAVED_ERROR);
+        return;
+      }
       if (!res.ok) {
         setError(res.body?.error || 'We could not save that. Please check what you entered and try again.');
         return;
       }
       onApplied(res.body);
     } catch {
-      const settled = await onReload();
-      if (!settled) setError(CONNECTION_ERROR);
+      const after = await onReload();
+      if (after !== 'changed') setError(CONNECTION_ERROR);
     } finally {
       setBusy(false);
     }
@@ -378,7 +388,7 @@ function useOfferAction({ token, onApplied, onReload, onInvalid }) {
   return { busy, error, setError, run };
 }
 
-function DateRequestPanel({ onSubmit, onCancel, busy, error }) {
+function DateRequestPanel({ onSubmit, onCancel, busy, locked, error }) {
   const [date, setDate] = useState('');
   const [note, setNote] = useState('');
   const [touched, setTouched] = useState(false);
@@ -398,9 +408,9 @@ function DateRequestPanel({ onSubmit, onCancel, busy, error }) {
       <NoteField id="offer-date-note" label="Note (optional)" value={note} onChange={setNote} />
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
       <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
-        <BrandButton variant="secondary" disabled={busy} onClick={onCancel}>Cancel</BrandButton>
+        <BrandButton variant="secondary" disabled={locked} onClick={onCancel}>Cancel</BrandButton>
         <BrandButton
-          disabled={busy || Boolean(problem)}
+          disabled={locked || Boolean(problem)}
           onClick={() => onSubmit({ requestedStartDate: date, ...(note.trim() ? { note: note.trim() } : {}) })}
         >
           {busy ? 'Sending…' : 'Send this date'}
@@ -410,7 +420,7 @@ function DateRequestPanel({ onSubmit, onCancel, busy, error }) {
   );
 }
 
-function DeclinePanel({ onSubmit, onCancel, busy, error }) {
+function DeclinePanel({ onSubmit, onCancel, busy, locked, error }) {
   const [reason, setReason] = useState('');
   return (
     <div role="group" aria-label="Decline this offer" style={{ marginTop: 16, padding: 14, border: '1px solid var(--border-strong, #C7D7E2)', borderRadius: 'var(--radius-md, 10px)' }}>
@@ -418,8 +428,8 @@ function DeclinePanel({ onSubmit, onCancel, busy, error }) {
       <NoteField id="offer-decline-reason" label="Reason (optional)" value={reason} onChange={setReason} />
       {error && <div style={ERROR_BANNER_STYLE} role="alert">{error}</div>}
       <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
-        <BrandButton variant="secondary" disabled={busy} onClick={onCancel}>Cancel</BrandButton>
-        <BrandButton disabled={busy} onClick={() => onSubmit(reason.trim() ? { reason: reason.trim() } : {})}>
+        <BrandButton variant="secondary" disabled={locked} onClick={onCancel}>Cancel</BrandButton>
+        <BrandButton disabled={locked} onClick={() => onSubmit(reason.trim() ? { reason: reason.trim() } : {})}>
           {busy ? 'Sending…' : 'Yes, decline'}
         </BrandButton>
       </div>
@@ -454,7 +464,8 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
   const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onReload, onInvalid });
   const dateReq = useOfferAction({ token, onApplied, onReload, onInvalid });
   const decline = useOfferAction({ token, onApplied, onReload, onInvalid });
-  const anyBusy = accept.busy || dateReq.busy || decline.busy;
+  const [consentPending, setConsentPending] = useState(false);
+  const anyBusy = accept.busy || dateReq.busy || decline.busy || consentPending;
 
   return (
     <Column>
@@ -470,7 +481,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} locked={accept.busy || dateReq.busy || decline.busy} />
         <SignBlock
           name={name}
           onName={setName}
@@ -491,6 +502,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         {panel === 'date' && (
           <DateRequestPanel
             busy={dateReq.busy}
+            locked={anyBusy}
             error={dateReq.error}
             onCancel={() => setPanel('none')}
             onSubmit={(payload) => dateReq.run('/date-request', payload)}
@@ -499,6 +511,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         {panel === 'decline' && (
           <DeclinePanel
             busy={decline.busy}
+            locked={anyBusy}
             error={decline.error}
             onCancel={() => setPanel('none')}
             onSubmit={(payload) => decline.run('/decline', payload)}
@@ -562,17 +575,18 @@ export default function CareersOfferPage() {
   }, [token, loadAttempt]);
 
   // The offer changed on the server (409) or a reply was lost: read it again.
-  // Resolves true when the page now shows a state other than open.
+  // Resolves 'changed' when the page now shows a state other than open,
+  // 'open' when the offer is still open, 'failed' when it could not be read.
   const reload = useCallback(async () => {
     const mine = ++seq.current;
     try {
       const body = await readOffer(token);
-      if (mine !== seq.current) return false;
+      if (mine !== seq.current) return 'changed';
       setData(body);
-      return body.state !== 'open';
+      return body.state === 'open' ? 'open' : 'changed';
     } catch (err) {
       if (mine === seq.current && err.notFound) setError('notfound');
-      return false;
+      return 'failed';
     }
   }, [token]);
 

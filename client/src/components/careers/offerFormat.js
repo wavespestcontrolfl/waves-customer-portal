@@ -27,6 +27,15 @@ export function formatLongDate(value) {
   return formatDay(value, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// 'Sat, Dec 12, 2026' from an instant, always read in Eastern time (an instant at
+// 00:00 UTC is still the evening before in Eastern time).
+export function formatLongInstant(value) {
+  if (!value) return '';
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return String(value);
+  return formatETDate(d, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 // 'Apr 5' from a date value.
 export function formatShortDate(value) {
   return formatETDateOnly(value, { month: 'short', day: 'numeric' });
