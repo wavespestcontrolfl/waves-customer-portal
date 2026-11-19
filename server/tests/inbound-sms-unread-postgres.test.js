@@ -9,8 +9,9 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
+const mockBellClear = jest.fn(async () => 0);
 jest.mock('../services/notification-service', () => ({
-  markInboundSmsReadAdmin: async () => 0, markApplicantRepliesReadAdmin: async () => 0, scopeAdminFeedToRole: (query) => query,
+  markInboundSmsReadAdmin: (...args) => mockBellClear(...args), markApplicantRepliesReadAdmin: async () => 0, scopeAdminFeedToRole: (query) => query,
 }));
 const { randomUUID } = require('node:crypto');
 const { createSmsResponseTables } = require('./fixtures/sms-response-postgres');
@@ -207,6 +208,26 @@ postgres('public SMS needs-response count (PostgreSQL)', () => {
     expect((await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T11:30:00Z'), role: 'admin' })).updated).toBe(2);
     read = await readIds();
     expect([fromSecond, contactless].map((id) => read.has(id))).toEqual([true, true]);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a Mark all read retry finishes the bell of a text an earlier read left live', async () => {
+    await readColumns();
+    mockBellClear.mockClear();
+    const customerId = randomUUID();
+    await mockPg('customers').insert({ id: customerId, phone: '+19415550130' });
+    const belled = await text('read, bell still live', { phone: '+19415550130', customerId, sid: 'SM-belled', read: true });
+    await text('read, bell done', { phone: '+19415550131', customerId, sid: 'SM-done', read: true });
+    await mockPg('notifications').insert({
+      id: randomUUID(), recipient_type: 'admin', category: 'inbound_sms', link: `/admin/communications?thread=${customerId}`, read_at: null,
+      metadata: { payload: { twilioSid: 'SM-belled' } },
+    });
+    const result = await markAllInboundSmsRead({ readBefore: new Date('2026-11-19T12:00:00Z'), role: 'admin' });
+    expect(result.updated).toBe(0);
+    const sids = mockBellClear.mock.calls.flatMap(([args]) => args.twilioSids || []);
+    expect(sids).toContain('SM-belled');
+    expect(sids).not.toContain('SM-done');
+    expect((await readIds()).has(belled)).toBe(true);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 });

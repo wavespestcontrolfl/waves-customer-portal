@@ -2626,9 +2626,11 @@ router.post('/messages/read-all', async (req, res, next) => {
     if (isTechnicianRequest(req)) return res.status(403).json({ error: 'Mark all read is for the office' });
     const readBefore = req.body?.readBefore ? new Date(req.body.readBefore) : null;
     if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required' });
-    // contactPhone: one inbox row's Mark read (that sender's texts only).
-    const contactPhone = req.body?.contactPhone ?? null;
-    if (contactPhone !== null && (typeof contactPhone !== 'string' || !phoneIdentityKey(contactPhone))) {
+    // contactPhone: one inbox row's Mark read (that sender's texts only). Only a request without the field reads the
+    // whole inbox; a present but empty or invalid phone is refused, never widened.
+    const hasSender = Object.prototype.hasOwnProperty.call(req.body || {}, 'contactPhone');
+    const contactPhone = hasSender ? req.body.contactPhone : null;
+    if (hasSender && (typeof contactPhone !== 'string' || !phoneIdentityKey(contactPhone))) {
       return res.status(400).json({ error: 'contactPhone must be a phone number' });
     }
     const { markAllInboundSmsRead } = require('../services/inbound-sms-read');

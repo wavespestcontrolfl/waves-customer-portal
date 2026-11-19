@@ -152,6 +152,9 @@ describe('routes', () => {
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: 'nope' })).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 'front desk' })).status).toBe(400);
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: 4155550100 })).status).toBe(400);
+    // A present but empty phone is refused, never widened to the whole inbox.
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: null })).status).toBe(400);
+    expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: '' })).status).toBe(400);
     expect(mockMarkAllRead).not.toHaveBeenCalled();
     expect((await call('POST', '/api/admin/communications/messages/read-all', 'admin', { readBefore: new Date().toISOString(), contactPhone: '+19415550100' })).status).toBe(200);
     expect(mockMarkAllRead).toHaveBeenLastCalledWith(expect.objectContaining({ contactPhone: '+19415550100' }));

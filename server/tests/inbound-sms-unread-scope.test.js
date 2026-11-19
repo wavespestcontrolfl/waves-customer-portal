@@ -107,6 +107,8 @@ test('Mark all read selects unread inbound texts up to the boundary, never recru
   expect(select.sql).toMatch(/not exists \(select 1 from "blocked_numbers" as "b" where .*b\.number.*<> ''/s);
   // A backlog-reset tagged row joins the scope so the writer strips its rollback tag.
   expect(select.sql).toContain(`or jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')`);
+  // A read text with a live bell joins too, so a retry finishes its bell.
+  expect(select.sql).toContain(`or "m"."twilio_sid" in (select n.metadata->'payload'->>'twilioSid' from "notifications" as "n" where "n"."recipient_type" = ? and "n"."category" = ? and "n"."read_at" is null)`);
   const read = mockQueries.find((q) => q.method === 'update' && q.sql.includes('"read_by_admin_user_id" = ?'));
   expect(read.sql).toContain('"id" in (?, ?)');
   expect(read.bindings).toEqual(expect.arrayContaining(['m-1', 'm-2', 'admin-1']));

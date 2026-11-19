@@ -320,10 +320,16 @@ async function markAllInboundSmsRead({ readBefore, adminUserId = null, role, exc
     .joinRaw(receipt.joinSql)
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
     // A backlog reset read a text and tagged it for rollback; the writer strips
-    // that tag, so a later rollback cannot reopen a text staff marked read.
-    .andWhere(function unreadOrResetTagged() {
+    // that tag, so a later rollback cannot reopen a text staff marked read. A
+    // read text whose bell is still live (an earlier read committed, then its
+    // bell step failed) joins too, so a retry finishes that bell.
+    .andWhere(function unreadOrUnfinished() {
       this.where({ 'm.is_read': false }).orWhereNull('m.is_read')
-        .orWhereRaw("jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')");
+        .orWhereRaw("jsonb_exists(COALESCE(m.metadata, '{}'::jsonb), 'backlog_reset')")
+        .orWhereIn('m.twilio_sid', function liveBells() {
+          this.select(db.raw("n.metadata->'payload'->>'twilioSid'")).from('notifications as n')
+            .where({ 'n.recipient_type': 'admin', 'n.category': 'inbound_sms' }).whereNull('n.read_at');
+        });
     })
     .whereRaw(`${receipt.effectiveCreatedAtSql} < ?`, [cutoff])
     // An inbox-wide read leaves recruiting replies for the Recruiting page; one
