@@ -249,7 +249,7 @@ describe('regenerate-image publish guard (codex r10)', () => {
     expect(calls.updates.at(-1).updates.featured_image_url).toBe('data:image/png;base64,QUJD');
   });
 
-  test('a post type changed while the picture was made refuses the save; the check is null-safe (pre-push audit P1 on 5608d79a6a)', async () => {
+  test('a post type changed while the picture was made refuses the save, and an unsaved type selection that changes the picture rules is refused before the image call; both checks are null-safe (pre-push audit P1s on 5608d79a6a and 9395fddc43)', async () => {
     const AstroPublisher = require('../services/content-astro/astro-publisher');
     AstroPublisher.generatePlannedImage.mockResolvedValue({ dataUrl: 'data:image/png;base64,QUJD', model: 'gpt-image-2', plan: { style: 'cartoon', setting: 'in a backyard, dew on the grass' }, screen: { checked: true, ok: true, reasons: [] } });
     // The fake reads `readRow` and checks the save's post_type predicate against
@@ -285,6 +285,19 @@ describe('regenerate-image publish guard (codex r10)', () => {
     expect(await send()).toBe(200);
     fakeDb(untyped, { ...untyped, post_type: 'diagnostic' });
     expect(await send()).toBe(409);
+    // The editor's unsaved selection (pre-push audit P1 on 9395fddc43): one that
+    // changes the identification rules is refused BEFORE the paid image call;
+    // one that does not, or the saved type, goes on.
+    const sendWith = async (row, postType) => { fakeDb(row, row); return (await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID }, body: { post_type: postType } })); };
+    AstroPublisher.generatePlannedImage.mockClear();
+    const refused = await sendWith(typed, 'diagnostic');
+    expect(refused.statusCode).toBe(409);
+    expect(refused.payload.error).toMatch(/Save the post type change first/);
+    expect((await sendWith({ ...typed, post_type: 'diagnostic' }, '')).statusCode).toBe(409);
+    expect(AstroPublisher.generatePlannedImage).not.toHaveBeenCalled();
+    expect((await sendWith(typed, 'location')).statusCode).toBe(200);
+    expect((await sendWith({ ...typed, post_type: 'diagnostic' }, 'diagnostic')).statusCode).toBe(200);
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledTimes(2);
   });
 });
 

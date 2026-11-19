@@ -759,6 +759,16 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
     if (post.publish_status === 'publishing' || publishClaimActive(post)) {
       return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
     }
+    // The picture is planned from the SAVED row. The editor sends the post
+    // type it has selected: one that changes the identification rules but is
+    // not saved yet would buy a hero planned under the old rules, which an
+    // identification post's publish then refuses. Refuse before the image
+    // call. (A caller that sends no post_type, e.g. a tab opened before this
+    // change, skips this check; the publish-time marker check still holds.)
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'post_type')
+        && isIdentificationPost({ ...post, post_type: req.body.post_type || null }) !== isIdentificationPost(post)) {
+      return res.status(409).json({ error: 'Save the post type change first: the picture is planned from the saved post type.' });
+    }
 
     const url = await generateFeaturedImage({
       title: post.title,
