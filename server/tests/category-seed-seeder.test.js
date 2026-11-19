@@ -670,6 +670,18 @@ describe('customer-question manifest 2026-11-18', () => {
     expect(waves).not.toMatch(/inspect/i);
   });
 
+  // CQ03 gives no Waves waiting time (no fetched source documents one), but a
+  // cleaner still needs an endpoint: the waits for vacuuming droppings and
+  // wet-mopping cabinet insides point to the prep guide the visit sent, not
+  // to "right away" (pre-push audit).
+  test('CQ03 gives the vacuum and wet-mop waits an endpoint', () => {
+    const b = manifest.briefs.find((brief) => brief.id === 'CQ03');
+    expect([b.thesis, ...b.outline].join(' ')).not.toMatch(/(?:vacuum|mop)[^;.]*right away/i);
+    const cleaner = b.outline.find((item) => item.startsWith('If you have a house cleaner:'));
+    expect(cleaner).toContain('show them the waiting times in your prep guide for vacuuming dead roaches and droppings and for wet-mopping the insides of cabinets');
+    expect(b.verify_notes.join(' ')).toContain('give an endpoint without a number');
+  });
+
   // The topic-ownership check reads a new post's title, slug, keywords and
   // headings, and two live posts own "Norway" there, so CQ05 names Norway
   // rats in body prose only (pre-push audit).
