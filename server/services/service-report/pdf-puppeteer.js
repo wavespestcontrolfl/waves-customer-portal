@@ -61,6 +61,11 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
     params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
     if (planPin) params.push(`plan=${encodeURIComponent(planPin)}`);
   }
+  // A PDF render names the writer-rules state its PDF key is computed under:
+  // /data refuses the render on a process in the other state
+  // (technician-report-copy renderWriterRulesMismatch). Other modes (the SMS
+  // preview image) key nothing on it and send none.
+  if (mode === 'pdf') params.push(`wr=${require('./technician-report-copy').renderWriterRulesState()}`);
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;
 }

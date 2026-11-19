@@ -3016,7 +3016,13 @@ payload, the PDF key (`summaryCopySignature`) and the visit notes on the other
 surfaces (`customerSafeVisitNotes`). The PDF key of a record whose printed
 card (the primary card or an `auto_send` companion) has a four-section body
 also ends in `-fson` or `-fsoff`, by the gate, so a flip either way re-renders
-its cached PDF.
+its cached PDF. The browser that renders a PDF fetches this payload itself, so
+a server render names the state its key was computed under: the report page URL
+carries `wr=on` or `wr=off`, the page forwards it to `/api/reports/:token/data`,
+and that route answers 409 (fixed copy, before it builds the report) when its
+own state differs, as in a rolling restart's overlap. The render then fails and
+nothing is stored. A request with no `wr` (a customer's own page) is never
+refused. The SMS preview image URL carries no `wr`.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the

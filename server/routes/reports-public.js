@@ -169,7 +169,7 @@ const {
   applicatorIdentityPdfSignature,
   applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature, renderWriterRulesMismatch } = require('../services/service-report/technician-report-copy');
 const { treeShrubTechParagraphPdfSignature } = require('../services/service-report/tree-shrub-tech-paragraph-gate');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
@@ -2371,6 +2371,18 @@ router.get('/:token/map.svg', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ?wr=on|off: the GATE_REPORT_WRITER_RULES state a server PDF render's key
+// was computed under (pdf-puppeteer serviceReportViewerUrl). A process in the
+// other state (a rolling restart's overlap) answers 409 before the report is
+// built, so the render fails and nothing is stored under that key. A request
+// with no wr (a customer's own page) is never refused. True = refused.
+function refusedOtherWriterRulesRender(req, res, serviceRecordId) {
+  if (!renderWriterRulesMismatch(req.query.wr)) return false;
+  logger.warn(`[reports-public] render for the other writer-rules state refused for service_record ${serviceRecordId || 'unknown'}`);
+  res.status(409).json({ error: 'This report is being updated. Try again shortly.' });
+  return true;
+}
+
 // GET /api/reports/:token/data — JSON report data (for the branded viewer page)
 router.get('/:token/data', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -2448,6 +2460,8 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
+      // ?wr=on|off: a server PDF render for the other writer-rules state.
+      if (refusedOtherWriterRulesRender(req, res, serviceRecordId)) return;
       // ?assessment=<id> pins which lawn assessment this render shows (#3168).
       // The headless PDF render passes it so the attachment provably carries
       // the copy the send fence sealed — the renderer navigates to this page

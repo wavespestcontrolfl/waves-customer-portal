@@ -10963,8 +10963,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   );
 }
 
-function reportDataUrl(token, mode, pinnedAssessment) {
+function reportDataUrl(token, mode, pinnedAssessment, renderWriterRules) {
   return `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+    // A server render's writer-rules state: the server refuses a render on a
+    // process in the other state, so a cached PDF never carries the wrong one.
+    + (renderWriterRules ? `&wr=${encodeURIComponent(renderWriterRules)}` : '')
     + (pinnedAssessment
       ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
         + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
@@ -11057,11 +11060,18 @@ export default function ReportViewPage({ previewServiceId = null } = {}) {
   // reader has since navigated away from must not touch the new one.
   // Every preview shares one placeholder token, so the previewed visit is part of the identity.
   const reportKey = `${token}|${previewServiceId || ''}|${mode}`;
+  // The writer-rules state a server render was keyed under (wr=on|off on the
+  // renderer's URL), forwarded to /data. A customer's own page has none.
+  const renderWriterRules = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const value = new URLSearchParams(window.location.search).get('wr');
+    return value === 'on' || value === 'off' ? value : null;
+  }, []);
   const dataUrlFor = useCallback(
     () => (isPreview
       ? `${API_BASE}/admin/report-preview/${encodeURIComponent(previewServiceId)}/data`
-      : reportDataUrl(token, mode, pinnedAssessment)),
-    [isPreview, previewServiceId, token, mode, pinnedAssessment],
+      : reportDataUrl(token, mode, pinnedAssessment, renderWriterRules)),
+    [isPreview, previewServiceId, token, mode, pinnedAssessment, renderWriterRules],
   );
   const currentReportKey = useRef(reportKey);
   currentReportKey.current = reportKey;

@@ -355,9 +355,7 @@ function technicianReportCustomerCopy(notes) {
 // summary does. Such a record's key ends '-fson' or '-fsoff', so a flip
 // changes the key both ways, and neither state matches a key stored before
 // this suffix existed (that render's state is unknown). Every other record
-// keeps its key. Env only, read when the key is computed, like the V2 report
-// gates' components: a render in a rolling restart's overlap can land under
-// the other state's key until the record's next key change.
+// keeps its key.
 function darkFourSectionCardSuffix(serviceData = {}) {
   const cards = [
     serviceData.typedReportSnapshot,
@@ -369,6 +367,23 @@ function darkFourSectionCardSuffix(serviceData = {}) {
     && snap.todaysResult?.bodyFormat === 'four_section');
   if (!printsFourSectionCard) return '';
   return reportWriterRulesLive() ? '-fson' : '-fsoff';
+}
+
+// The writer-rules state a server render's PDF key is computed under. The
+// browser that renders a PDF fetches its own /data from the web process, so
+// the render URL carries this state as `wr` (pdf-puppeteer
+// serviceReportViewerUrl), the report page forwards it, and /data refuses a
+// render on a process in the other state (renderWriterRulesMismatch): in a
+// rolling restart's overlap the render fails, and no PDF lands under the key
+// of a state it was not rendered in.
+function renderWriterRulesState() {
+  return reportWriterRulesLive() ? 'on' : 'off';
+}
+
+// True when a render asked for the other writer-rules state. A request that
+// names none (a customer's own page) is never refused.
+function renderWriterRulesMismatch(requested) {
+  return (requested === 'on' || requested === 'off') && requested !== renderWriterRulesState();
 }
 
 function summaryCopySignature(service = {}) {
@@ -418,6 +433,8 @@ function customerCopyViolations(text) {
 
 module.exports = {
   technicianReportCustomerCopy,
+  renderWriterRulesState,
+  renderWriterRulesMismatch,
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,
