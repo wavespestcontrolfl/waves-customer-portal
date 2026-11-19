@@ -60,22 +60,28 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // Every tab on this phone saves to the same record. A change applies to the
   // newest saved settings (this tab's own when storage cannot be read), so a
   // tab that missed another tab's change never writes an old value back. A
-  // write can fail while reads still work (full storage): until a write
-  // succeeds, this tab's unsaved settings stay the base, so a later change
-  // keeps them. The read and the write stay outside the state update:
-  // StrictMode runs a queued update twice in development, and a second pin
-  // toggle would undo the first.
+  // write can fail while reads still work (full storage). A pin or group
+  // change then stays in this tab as the base for the next change, until a
+  // write succeeds or another tab's save arrives. The Field view switch never
+  // changes unsaved (onlyIfSaved): the shell remounts on every page change
+  // and a cold open reads storage, so an unsaved switch would turn itself
+  // off. The read and the write stay outside the state update: StrictMode
+  // runs a queued update twice in development, and a second pin toggle would
+  // undo the first. Returns true when the change reached storage.
   const unsaved = useRef(null);
-  const updatePreferences = (update) => {
+  const updatePreferences = (update, { onlyIfSaved = false } = {}) => {
     const next = update(unsaved.current || (user?.id && readSavedPreferences(user.id)) || preferences);
-    unsaved.current = next;
+    let saved = false;
     if (user?.id) {
       try {
         localStorage.setItem(preferenceKey(user.id), JSON.stringify({ ...next, version: PREFERENCE_VERSION }));
-        unsaved.current = null;
-      } catch { /* full or blocked storage: this tab's change stays the base */ }
+        saved = true;
+      } catch { /* full or blocked storage */ }
     }
+    if (!saved && onlyIfSaved) return false;
+    unsaved.current = saved ? null : next;
     setPreferences(next);
+    return saved;
   };
   // Another tab's save shows here at once: pins, groups and the switch the
   // tabs and the /admin landing read. It is newer than anything this tab
@@ -104,8 +110,10 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   });
 
   // Only an admin login has Field view; any other role never sees it applied.
+  // The switch moves only when this phone saved it; false tells the Settings
+  // row the save failed, so the row can say why the switch did not move.
   const fieldView = user?.role === 'admin' && preferences.fieldView === true;
-  const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }));
+  const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }), { onlyIfSaved: true });
 
   return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>
     {children}

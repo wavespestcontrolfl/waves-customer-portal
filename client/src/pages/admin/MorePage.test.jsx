@@ -147,6 +147,21 @@ describe("MorePage — the mobile Settings tab", () => {
       expect(JSON.parse(localStorage.getItem("waves_admin_navigation:fixture")).fieldView).toBe(false);
     });
 
+    // Pre-push P1 (round 4): a switch this phone could not save does not move.
+    it("says why the switch did not move when this phone cannot save it", () => {
+      renderMore("admin");
+      const setItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = () => { throw new Error("QuotaExceededError"); };
+      try {
+        fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      } finally { Storage.prototype.setItem = setItem; }
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByText("Not saved on this phone: its storage is full or blocked. Field view stays off.")).toHaveAttribute("role", "alert");
+      fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
+      expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.queryByText(/Not saved on this phone/)).not.toBeInTheDocument();
+    });
+
     it("never shows for a technician or with no navigation context", () => {
       renderMore("technician");
       expect(screen.queryByRole("switch", { name: "Field view" })).not.toBeInTheDocument();

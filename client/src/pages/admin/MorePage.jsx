@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { clearStaffDeviceData } from "../../lib/adminAuth";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
@@ -47,6 +48,9 @@ export default function MorePage() {
   const outletContext = useOutletContext();
   const currentRole = outletContext?.user?.role || null;
   const navigation = useAdminNavigation();
+  // The switch moves only when this phone saved it (setFieldView returns
+  // false when it could not), so the row says why it did not move.
+  const [fieldViewNotSaved, setFieldViewNotSaved] = useState(false);
 
   if (!isMobile) return <Navigate to="/admin" replace />;
 
@@ -103,8 +107,9 @@ export default function MorePage() {
               <div className="min-w-0 flex-1">
                 <div id="field-view-label" className="text-14 text-zinc-900">Field view</div>
                 <div id="field-view-hint" className="text-14 text-zinc-500">Opens on Today. Today takes the Dashboard tab.</div>
+                {fieldViewNotSaved && <div role="alert" className="text-14 text-alert-fg">Not saved on this phone: its storage is full or blocked. Field view stays {fieldView ? "on" : "off"}.</div>}
               </div>
-              <Switch checked={fieldView} onChange={navigation.setFieldView} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
+              <Switch checked={fieldView} onChange={(on) => setFieldViewNotSaved(navigation.setFieldView(on) === false)} aria-labelledby="field-view-label" aria-describedby="field-view-hint" />
             </li>
           </ul>
         </section>

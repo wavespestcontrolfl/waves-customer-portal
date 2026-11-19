@@ -93,19 +93,48 @@ describe('Field view preference', () => {
     expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['customers'] });
     expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['customers']);
   });
-  // Pre-push P1 (round 3): full storage still reads, but every write fails.
-  it("keeps this tab's unsaved change when the phone's storage is full", () => {
-    mount({ id: 'acct-1', role: 'admin' });
+  // Pre-push P1 (rounds 3 and 4): full storage still reads, but every write
+  // fails. The shell remounts this provider on every page change, and a cold
+  // open reads storage, so the switch moves only when the phone saved it.
+  const withFullStorage = (run) => {
     const setItem = Storage.prototype.setItem;
     Storage.prototype.setItem = () => { throw new Error('QuotaExceededError'); };
-    try {
-      act(() => navigation.setFieldView(true));
+    try { run(); } finally { Storage.prototype.setItem = setItem; }
+  };
+  it('with full storage the switch stays as saved, also after the shell remounts', () => {
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, fieldView: false }));
+    mount({ id: 'acct-1', role: 'admin' });
+    let result;
+    withFullStorage(() => {
       act(() => navigation.togglePin('today'));
+      act(() => { result = navigation.setFieldView(true); });
       act(() => { navigation.togglePin('customers'); navigation.toggleGroup(navigation.groups[0].id); });
-    } finally { Storage.prototype.setItem = setItem; }
-    expect(navigation.fieldView).toBe(true);
+    });
+    expect(result).toBe(false);
+    expect(navigation.fieldView).toBe(false);
+    // Pins and groups still change in this tab until the next page.
     expect(navigation.pinnedItems.map(({ id }) => id)).toEqual(['today', 'customers']);
-    expect(saved('acct-1')).toBeNull();
+    expect(saved('acct-1')).toEqual({ version: 2, fieldView: false });
+    cleanup();
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(navigation.fieldView).toBe(false);
+  });
+  it('with full storage the switch cannot turn off either', () => {
+    localStorage.setItem('waves_admin_navigation:acct-1', JSON.stringify({ version: 2, fieldView: true }));
+    mount({ id: 'acct-1', role: 'admin' });
+    let result;
+    withFullStorage(() => { act(() => { result = navigation.setFieldView(false); }); });
+    expect(result).toBe(false);
+    expect(navigation.fieldView).toBe(true);
+  });
+  it("when saving works again, the switch saves with this tab's unsaved pins", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    withFullStorage(() => { act(() => navigation.togglePin('today')); });
+    let result;
+    act(() => { result = navigation.setFieldView(true); });
+    expect(result).toBe(true);
+    expect(navigation.fieldView).toBe(true);
+    expect(saved('acct-1')).toMatchObject({ fieldView: true, pins: ['today'] });
   });
   it("another tab's pins show here at once", () => {
     mount({ id: 'acct-1', role: 'admin' });
