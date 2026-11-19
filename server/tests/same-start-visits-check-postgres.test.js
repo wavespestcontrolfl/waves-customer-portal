@@ -5,6 +5,8 @@
 // rolled back after every test (same harness as prepay-coverage-bell-refresh-postgres.test.js).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
+// Each lifecycle step runs the whole watchdog against Postgres: well past the 5 s default on a loaded runner.
+jest.setTimeout(60000);
 jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
   db.raw = (...args) => db.connection.raw(...args);
@@ -70,6 +72,8 @@ postgres('same-start visits check on Postgres', () => {
     const live = await customer();
     const inactive = await customer({ active: false });
     const deleted = await customer({ deleted_at: new Date('2040-01-01T12:00:00Z') });
+    // Churned out of band, still flagged active: the churned-live-work class says to cancel its visits.
+    const churned = await customer({ pipeline_stage: 'churned' });
     const counted = [
       // The same technician; pending and confirmed both count. A booked visit with a
       // leftover hold stamp still counts: a hold has no customer (slot-reservation.js).
@@ -102,8 +106,9 @@ postgres('same-start visits check on Postgres', () => {
     await pair(live, { scheduled_date: '2040-01-26', track_state: 'complete' }, { track_state: 'scheduled' });
     await pair(inactive, { scheduled_date: '2040-01-15' });
     await pair(deleted, { scheduled_date: '2040-01-15' });
+    await pair(churned, { scheduled_date: '2040-01-15' });
 
-    const mine = new Set([live, inactive, deleted]);
+    const mine = new Set([live, inactive, deleted, churned]);
     const rows = (await _findSameStartVisits(TODAY)).filter((r) => mine.has(String(r.customer_id)));
     expect(ids(rows)).toEqual(ids([...counted, ...foundNoGroup]));
 

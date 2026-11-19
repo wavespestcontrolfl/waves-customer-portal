@@ -26,8 +26,10 @@
  * legacy visit group (one visit_id, visit-groups.js) are
  * one stop that shares its start by design: they never pair with each other,
  * and beside a separate visit at that start they count as one. A visit with no
- * arrival time is the no-window notice's (auto-dispatch/audit.js), and a
- * deleted or inactive customer's work is not checked here.
+ * arrival time is the no-window notice's (auto-dispatch/audit.js). A deleted or
+ * inactive customer's work is not checked here, nor a former customer's (a
+ * churned, past or dormant stage): the churned-live-work class says to cancel
+ * it.
  *
  * GROUPS: the visits at one start are one group per technician with two or
  * more of them there. An unassigned visit joins the one technician at its
@@ -71,6 +73,7 @@ const DETAIL_DAYS = 10;
 // technician, so the groups keep two technicians' pairs apart.
 function findSameStartVisits(todayET) {
   const { TERMINAL_TRACK_STATES } = require('./customer-lifecycle-guard');
+  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
   return db('scheduled_services as a')
     .join('scheduled_services as b', function sameCustomerDayAndStart() {
       this.on('b.customer_id', '=', 'a.customer_id')
@@ -84,6 +87,10 @@ function findSameStartVisits(todayET) {
     .where('a.scheduled_date', '>', todayET)
     .whereNull('c.deleted_at')
     .where(function activeCustomer() { this.where('c.active', true).orWhereNull('c.active'); })
+    // A former customer's leftover work is the churned-live-work alert's
+    // (cancel it), never a split here: the combined-booking check skips the
+    // same stages (customer-stages.js).
+    .where(function currentCustomer() { this.whereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES).orWhereNull('c.pipeline_stage'); })
     .where(function oneTechnician() {
       this.whereNull('a.technician_id').orWhereNull('b.technician_id').orWhereRaw('a.technician_id = b.technician_id');
     })
