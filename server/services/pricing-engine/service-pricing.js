@@ -1300,6 +1300,10 @@ function calculatePestProductionDiagnostics(property) {
   else if (lotSqFt > (cfg.manualReviewLotSqFt || 20000)) manualReviewReasons.push('large_lot');
   if (poolCageSize === 'oversized') lowConfidenceReasons.push('oversized_pool_cage');
   else if (poolCageSize === 'large') manualReviewReasons.push('large_pool_cage');
+  // GATE_CAGE_TWO_SIZES website hold: the public quote sets f.poolCageReview
+  // when today's four sizes call the cage Large or Oversized but the lookup now
+  // says Medium. The engine reads no gate; nothing else sets this flag.
+  else if (f.poolCage && f.poolCageReview === true) manualReviewReasons.push('large_pool_cage');
   // Tree density is excluded from pest entirely (owner directive 2026-07-30,
   // extending the 2026-07-16 price retirement to production diagnostics) —
   // only shrubs trigger the heavy-vegetation review flag now.
