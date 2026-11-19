@@ -100,6 +100,24 @@ test('two failed payments map to their own invoices instead of the oldest accoun
   expect(recovery.get('pay-b')).toEqual({ payUrl: '/pay/tok-b', amountDue: 60, invoiceNumber: 'WPC-200' });
 });
 
+test('recovery enrichment is capped to the ten newest failed rows', async () => {
+  const ids = Array.from({ length: 11 }, (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
+  const payments = ids.map((id, index) => ({
+    id: `pay-${index + 1}`, status: 'failed',
+    metadata: { invoice_id: id }, stripe_payment_intent_id: `pi-${index + 1}`,
+  }));
+  const invoices = ids.map((id, index) => invoice({
+    id, token: `tok-${index + 1}`, invoice_number: `WPC-${index + 1}`,
+    stripe_payment_intent_id: `pi-${index + 1}`,
+  }));
+
+  const recovery = await recoveryInvoiceIndexFor('cust-1', payments, reader(invoices));
+
+  expect(recovery.size).toBe(10);
+  expect(recovery.has('pay-11')).toBe(false);
+  expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledTimes(10);
+});
+
 test('combined ACH shares keep their invoice-specific recovery links after a bounce', async () => {
   const second = invoice({
     id: INV_B, token: 'tok-b', invoice_number: 'WPC-200', total: '60.00',

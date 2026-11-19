@@ -18,6 +18,15 @@ function reader(failure) {
     return query;
   };
 }
+function emptyReader() {
+  return () => {
+    const query = {};
+    for (const method of ['where', 'whereNull', 'whereRaw', 'whereIn', 'count']) query[method] = () => query;
+    query.first = async () => ({ count: 1 });
+    query.select = async () => [];
+    return query;
+  };
+}
 beforeEach(() => {
   stripe.getPaymentHistory.mockClear();
   stripe.getPaymentHistory.mockResolvedValue([{
@@ -45,6 +54,22 @@ test('an ordinary scoped receipt lookup failure remains best effort', async () =
   const result = await listPortalPayments('customer-1', { database: reader(new Error('lookup failed')) });
   expect(result.payments).toHaveLength(1);
   expect(result.payments[0].receiptUrl).toBeNull();
+});
+
+test('later history pages keep the fallback without starting recovery enrichment', async () => {
+  stripe.getPaymentHistory.mockResolvedValueOnce([{
+    id: 'payment-failed', amount: 50, status: 'failed',
+    metadata: { invoice_id: '11111111-1111-4111-8111-111111111111' },
+    stripe_payment_intent_id: 'pi_failed',
+  }]);
+  const database = jest.fn(emptyReader());
+
+  const result = await listPortalPayments('customer-1', {
+    database, cursor: 100, includeRecoveryInvoices: true,
+  });
+
+  expect(result.payments[0].recoveryInvoice).toBeNull();
+  expect(database.mock.calls.filter(([table]) => table === 'invoices')).toHaveLength(1);
 });
 
 test('cancellation on the first payer read cannot start count or payment queries', async () => {

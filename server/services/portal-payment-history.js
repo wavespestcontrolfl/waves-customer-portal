@@ -48,6 +48,7 @@ const RECOVERY_INVOICE_COLUMNS = [
   'payer_id', 'payer_statement_id', 'scheduled_send_error', 'notes', 'line_items',
   'stripe_payment_intent_id', 'stripe_charge_id',
 ];
+const RECOVERY_PAYMENT_LIMIT = 10;
 
 // The Waves receipt (token) for each visible payment's invoice, indexed by
 // every linkage a payment row can carry.
@@ -137,7 +138,11 @@ async function recoveryInvoiceAvailableNow(invoice, database) {
 // absent, conflicting, payer-owned, settled, withdrawn, or fully covered.
 async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
   const failedPayments = visiblePayments.filter((p) => String(p.status || '').toLowerCase() === 'failed'
-    && !isParkedOrSupersededAttempt(p) && !isNeverAttemptedDeferral(p));
+    && !isParkedOrSupersededAttempt(p) && !isNeverAttemptedDeferral(p))
+    // Checkout parity requires several read-only fences per candidate. Keep
+    // that work bounded to the newest failures; every other row retains the
+    // safe "View open invoices" fallback.
+    .slice(0, RECOVERY_PAYMENT_LIMIT);
   const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const invoiceIds = [...new Set(failedPayments.flatMap(paymentInvoiceIds).filter((id) => UUID_SHAPE.test(id)))];
   const intentIds = [...new Set(failedPayments.map((p) => p.stripe_payment_intent_id).filter(Boolean))];
@@ -392,7 +397,10 @@ async function listPortalPayments(customerId, {
   const { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber } = await receiptIndexFor(customerId, visiblePayments, database);
   // Ownership could not be established means the invoice might belong to an
   // AP payer. Withhold every recovery link until that read succeeds.
-  const recoveryByPaymentId = !includeRecoveryInvoices || payerLookupFailed
+  // BillingTab follows every history cursor before rendering. Enrich only its
+  // first page so a long ledger cannot multiply the per-invoice fence reads
+  // across as many as 50 sequential requests.
+  const recoveryByPaymentId = !includeRecoveryInvoices || payerLookupFailed || Number(requestedCursor) !== 0
     ? new Map()
     : await recoveryInvoiceIndexFor(customerId, visiblePayments, database);
 
