@@ -228,52 +228,56 @@ function withDeadline(promise, ms, fallback) {
   return Promise.race([Promise.resolve(promise).catch(() => fallback), deadline]).finally(() => clearTimeout(timer));
 }
 
+// Opt-in cookie carry for ONE fetchPage call's redirect chain. EDIS now
+// redirects through ask.ifas.ufl.edu, which answers 307 to itself until its
+// locale cookie comes back. Origin-only: a cookie goes back only to the exact
+// scheme, host and port that set it; Domain, Path and Expires are ignored.
+const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_COOKIES_PER_ORIGIN = 20;
+const MAX_COOKIE_HEADER = 4096;
+
+function readSetCookies(res) {
+  const h = res.headers;
+  if (!h) return [];
+  let raw = null;
+  if (typeof h.getSetCookie === 'function') raw = h.getSetCookie();
+  else if (typeof h.get === 'function') raw = h.get('set-cookie');
+  if (typeof raw === 'string') return [raw];
+  return Array.isArray(raw) ? raw.filter((v) => typeof v === 'string') : [];
+}
+
+function storeCookies(jar, origin, res) {
+  if (!jar) return;
+  for (const line of readSetCookies(res)) {
+    const pair = line.split(';')[0];
+    const eq = pair.indexOf('=');
+    if (eq < 1) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (!COOKIE_NAME_RE.test(name) || /[\r\n;]/.test(value)) continue;
+    let cookies = jar.get(origin);
+    if (!cookies) { cookies = new Map(); jar.set(origin, cookies); }
+    if (!cookies.has(name) && cookies.size >= MAX_COOKIES_PER_ORIGIN) continue;
+    cookies.set(name, value);
+  }
+}
+
+function cookieHeaderFor(jar, origin) {
+  const cookies = jar && jar.get(origin);
+  if (!cookies) return null;
+  let out = '';
+  for (const [name, value] of cookies) {
+    const next = out ? `${out}; ${name}=${value}` : `${name}=${value}`;
+    if (next.length > MAX_COOKIE_HEADER) break;
+    out = next;
+  }
+  return out || null;
+}
+
 async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2, resolveOnly = false, carryCookies = false } = {}) {
   let current = url;
   let redirectHops = 0;
-  // Opt-in cookie carry for ONE call's redirect chain (EDIS now redirects
-  // through ask.ifas.ufl.edu, which loops until its locale cookie comes back).
-  // Host-only: a cookie goes back only to the exact host that set it; Domain,
-  // Path and Expires are ignored. Off by default: no Cookie header is ever sent.
-  const jar = new Map(); // host -> Map(name -> value)
-  const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-  const MAX_COOKIES_PER_HOST = 20;
-  const MAX_COOKIE_HEADER = 4096;
-  const readSetCookies = (res) => {
-    const h = res.headers;
-    if (!h) return [];
-    let raw = null;
-    if (typeof h.getSetCookie === 'function') raw = h.getSetCookie();
-    else if (typeof h.get === 'function') raw = h.get('set-cookie');
-    if (typeof raw === 'string') return [raw];
-    return Array.isArray(raw) ? raw.filter((v) => typeof v === 'string') : [];
-  };
-  const storeCookies = (host, res) => {
-    for (const line of readSetCookies(res)) {
-      const pair = line.split(';')[0];
-      const eq = pair.indexOf('=');
-      if (eq < 1) continue;
-      const name = pair.slice(0, eq).trim();
-      const value = pair.slice(eq + 1).trim();
-      if (!COOKIE_NAME_RE.test(name) || /[\r\n;]/.test(value)) continue;
-      let cookies = jar.get(host);
-      if (!cookies) { cookies = new Map(); jar.set(host, cookies); }
-      if (!cookies.has(name) && cookies.size >= MAX_COOKIES_PER_HOST) continue;
-      cookies.set(name, value);
-    }
-  };
-  const cookieHeaderFor = (host) => {
-    const cookies = jar.get(host);
-    if (!cookies) return null;
-    let out = '';
-    for (const [n, v] of cookies) {
-      const part = `${n}=${v}`;
-      const next = out ? `${out}; ${part}` : part;
-      if (next.length > MAX_COOKIE_HEADER) break;
-      out = next;
-    }
-    return out || null;
-  };
+  const jar = carryCookies ? new Map() : null; // origin -> Map(name -> value); null = send no Cookie header
   const fail = (status, blocked, error) => ({ status, finalUrl: null, redirectHops, html: null, blocked, truncated: false, contentType: null, error });
   const headerOf = (res, name) => (res.headers && typeof res.headers.get === 'function' && res.headers.get(name)) || null;
   for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -294,10 +298,8 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const reqHeaders = { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' };
-    if (carryCookies) {
-      const cookie = cookieHeaderFor(u.host);
-      if (cookie) reqHeaders.Cookie = cookie;
-    }
+    const cookie = cookieHeaderFor(jar, u.origin);
+    if (cookie) reqHeaders.Cookie = cookie;
     try {
       const res = await fetchFn(current, {
         redirect: 'manual',
@@ -309,7 +311,7 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
       if (res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
         const loc = res.headers.get('location');
         if (!loc) return fail(res.status, false, 'redirect_without_location');
-        if (carryCookies) storeCookies(u.host, res);
+        storeCookies(jar, u.origin, res);
         current = new URL(loc, current).toString(); // re-validated on next loop
         redirectHops++;
         continue;

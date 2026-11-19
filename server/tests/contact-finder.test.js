@@ -290,6 +290,18 @@ describe('fetchPage carryCookies (EDIS redirects through ask.ifas.ufl.edu)', () 
     expect(seen.map((s) => s.cookie)).toEqual([undefined, undefined, 'sid=secret']);
   });
 
+  test('a cookie set over https is not sent to the same host over http', async () => {
+    const seen = [];
+    const fetchFn = async (url, opts) => {
+      seen.push(opts.headers.Cookie);
+      if (url === 'https://a.example.com/') return redir(302, 'http://a.example.com/plain', ['sid=secret; Path=/; Secure']);
+      return page('ok');
+    };
+    const r = await fetchPage('https://a.example.com/', { fetchFn, resolveHostFn: async () => true, maxRedirects: 3, carryCookies: true });
+    expect(r.status).toBe(200);
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
   test('option off: no request carries a Cookie header even when a redirect sets one', async () => {
     const seen = [];
     const fetchFn = async (url, opts) => {
@@ -318,7 +330,7 @@ describe('fetchPage carryCookies (EDIS redirects through ask.ifas.ufl.edu)', () 
     expect(seen).toEqual([undefined, 'good=1; also_good=3', 'good=1; also_good=3; single=9']);
   });
 
-  test('caps: 20 cookies per host and a 4096-character Cookie header', async () => {
+  test('caps: 20 cookies per origin and a 4096-character Cookie header', async () => {
     const seen = [];
     const many = Array.from({ length: 30 }, (_, i) => `c${i}=v`);
     const big = ['a=' + 'x'.repeat(3000), 'b=' + 'y'.repeat(3000)];
