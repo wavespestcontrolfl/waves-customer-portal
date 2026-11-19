@@ -3,7 +3,10 @@
  * rain_out_customer_pick_v1): the hand-off tells the customer the visit is moved and parks it windowless until they
  * pick. The detector must read that text as the newest promise (an unknown window), so it raises no "promised
  * arrival" card for the old window, and it resolves a card it raised before the text went out. A time the customer
- * picks afterwards is a new promise again. Real PostgreSQL, the real sweep. Synthetic data only.
+ * picks afterwards is a new promise again. The text WITHDRAWS the old time: the night told-lock (auto-dispatch
+ * told-visits.js, apply.js assertNotToldOnMove) must not freeze the visit, so the night run can book it once the
+ * pick-by time passes; the levels reader still answers 'hour' (fail closed). Real PostgreSQL, the real sweep.
+ * Synthetic data only.
  */
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
@@ -64,19 +67,21 @@ postgres('the no-show detector reads the pick-a-day hand-off text as the newest 
   const handOffText = (visitId, minutesAgo) => sendText(visitId, { purpose: 'appointment', minutesAgo,
     metadata: { original_message_type: 'rain_out_customer_pick_v1', scheduled_service_id: visitId } });
 
-  // A confirmed visit, assigned, whose confirmed window opened 180 minutes ago (stage 2), confirmed a day earlier.
-  async function seedVisit() {
+  // A confirmed visit, assigned, whose window opened 3 to 4 hours ago on the hour (stage 2), confirmed a day earlier.
+  // `told: false` = no earlier text at all.
+  async function seedVisit({ told = true } = {}) {
     const { etDateString } = require('../utils/datetime-et');
     const customerId = randomUUID(); const visitId = randomUUID(); const techId = randomUUID();
     await knex('customers').insert({ id: customerId, first_name: 'Fixture', phone: '+19415550100' });
     await knex('technicians').insert({ id: techId, name: 'Fixture Tech', employment_status: 'active', field_dispatchable: true });
     const start = new Date(Date.now() - 180 * 60 * 1000);
+    start.setUTCMinutes(0, 0, 0);   // window_start is always HH:00:00 (Eastern offsets are whole hours)
     const hhmm = start.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour12: false });
     await knex('scheduled_services').insert({
       id: visitId, customer_id: customerId, technician_id: techId, scheduled_date: etDateString(start), window_start: hhmm,
       service_type: 'pest_control', status: 'confirmed', customer_confirmed: false,
     });
-    await sendText(visitId, { purpose: 'appointment_confirmation', minutesAgo: 24 * 60, metadata: { rendered_slot_ms: start.getTime() } });
+    if (told) await sendText(visitId, { purpose: 'appointment_confirmation', minutesAgo: 24 * 60, metadata: { rendered_slot_ms: start.getTime() } });
     Object.assign(made, { customers: [...made.customers, customerId], techs: [...made.techs, techId], visits: [...made.visits, visitId] });
     return { visitId, start };
   }
@@ -108,5 +113,49 @@ postgres('the no-show detector reads the pick-a-day hand-off text as the newest 
     const rows = await openAlerts(visitId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ type: 'tech_late', severity: 'critical' });
+  });
+
+  // The hand-off's own row shape: off the route, no window, due in 8 days, pick-by time passed (the night run's turn).
+  async function expireHandOff(visitId) {
+    const { etDateString } = require('../utils/datetime-et');
+    const due = etDateString(new Date(Date.now() + 8 * 24 * 3600 * 1000));
+    await knex('scheduled_services').where({ id: visitId }).update({ scheduled_date: due, recurring_dispatch_due_date: due,
+      window_start: null, window_end: null, customer_pick_by: new Date(Date.now() - 3600 * 1000) });
+  }
+  const refuse = (id, why) => new Error(`refused ${id}: ${why}`);
+  const nightMoveCheck = (id) => knex.transaction((trx) => require('../services/auto-dispatch/apply')
+    .assertNotToldOnMove(trx, { id }, { dayOnlyPromise: true }, refuse));
+
+  test('an expired hand-off is not frozen by the night told-lock, with the day-only setting too', async () => {
+    const told = require('../services/auto-dispatch/told-visits');
+    const { visitId } = await seedVisit();
+    // Control: before the hand-off text, the confirmed time freezes the visit.
+    expect((await told.loadToldVisitIds(knex, [visitId], new Date(), { anyPromise: true })).has(visitId)).toBe(true);
+    await handOffText(visitId, 25 * 60 - 120);
+    await expireHandOff(visitId);
+    expect((await told.loadToldVisitIds(knex, [visitId], new Date(), { anyPromise: true })).has(visitId)).toBe(false);
+    expect((await told.loadToldVisitIds(knex, [visitId], new Date())).has(visitId)).toBe(false);
+    await expect(nightMoveCheck(visitId)).resolves.toBeUndefined();
+    // The levels reader stays fail closed: an unknown window reads 'hour'.
+    expect((await told.loadPromiseLevels(knex, [visitId], new Date())).get(visitId)).toBe('hour');
+  });
+
+  test('a hand-off with no earlier text is not frozen either', async () => {
+    const told = require('../services/auto-dispatch/told-visits');
+    const { visitId } = await seedVisit({ told: false });
+    await handOffText(visitId, 25 * 60);
+    await expireHandOff(visitId);
+    expect((await told.loadToldVisitIds(knex, [visitId], new Date(), { anyPromise: true })).has(visitId)).toBe(false);
+    await expect(nightMoveCheck(visitId)).resolves.toBeUndefined();
+  });
+
+  test('a time the customer picked after the hand-off freezes the visit again', async () => {
+    const told = require('../services/auto-dispatch/told-visits');
+    const { visitId } = await seedVisit();
+    await handOffText(visitId, 6 * 60);
+    await sendText(visitId, { purpose: 'appointment_confirmation', minutesAgo: 5 * 60,
+      metadata: { rendered_slot_ms: Date.now() + 4 * 24 * 3600 * 1000 } });
+    expect((await told.loadToldVisitIds(knex, [visitId], new Date(), { anyPromise: true })).has(visitId)).toBe(true);
+    await expect(nightMoveCheck(visitId)).rejects.toThrow(/already told/);
   });
 });
