@@ -800,6 +800,8 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
       await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
       expect(calls.paymentsQuery.whereRaw).toHaveBeenCalledWith("metadata::jsonb ->> 'invoice_id' = ?", ['inv-1']);
+      // Money rows only: a declined card attempt (a failed row tagged to the invoice) before the cash or check is no money.
+      expect(calls.paymentsQuery.whereIn).toHaveBeenCalledWith('status', ['paid', 'refunded', 'processing']);
       expect(calls.paymentsQuery.whereNot).toHaveBeenCalledWith({ id: 'pay-1' });
       expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledTimes(1);
     });
