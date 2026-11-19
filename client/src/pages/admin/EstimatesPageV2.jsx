@@ -286,23 +286,29 @@ const CALL_LIST_MATCHERS = {
 // filter change, a refresh, or leaving and coming back is not pinned to it. The effect watches the URL, so the link
 // also works on a list that is already open. The third value counts the links taken: the list clears its search, date
 // filter and page when it changes (useClearControlsOnCallTodayLink), so nothing left from earlier hides a row the push
-// counted.
+// counted. The fourth value counts only the links taken on a list that was already open: each one reloads the rows
+// (with the filter already on Call today, the filter alone would not), while the link a list opens on is loaded by
+// the mount's own fetch, so the first tap never loads the pipeline twice.
 function useCallTodayLinkFilter() {
   const [searchParams, setSearchParams] = useSearchParams();
   const linked = searchParams.get("view") === "call_today";
   const [filter, setFilter] = useState(linked ? "call_today" : "all");
   const [linksTaken, setLinksTaken] = useState(0);
+  const [linkReloads, setLinkReloads] = useState(0);
+  const openedByLink = useRef(linked);
   useEffect(() => {
     if (!linked) return;
     setFilter("call_today");
     setLinksTaken((n) => n + 1);
+    if (openedByLink.current) openedByLink.current = false;
+    else setLinkReloads((n) => n + 1);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("view");
       return next;
     }, { replace: true });
   }, [linked, setSearchParams]);
-  return [filter, setFilter, linksTaken];
+  return [filter, setFilter, linksTaken, linkReloads];
 }
 // Each Call today link the list takes clears the controls that narrow it beyond the filter. Called after the paging
 // hook, with the state setters (stable) and the paging page setter (stable, a useState setter).
@@ -2079,7 +2085,7 @@ function EstimatePipelineViewV2({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [customerPanelId, setCustomerPanelId] = useState(null);
-  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
+  const [filter, setFilter, callTodayLinksTaken, callTodayLinkReloads] = useCallTodayLinkFilter();
   const [dateRange, setDateRange] = useState("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("newest");
@@ -2159,14 +2165,14 @@ function EstimatePipelineViewV2({
     estimates,
     refresh: refreshEstimates,
   });
-  // A Call today link the list takes (callTodayLinksTaken) loads it fresh too: with the filter already selected, the
-  // filter alone does not change, and the rows the push counted may have moved since the last load.
+  // A Call today link taken on the open list (callTodayLinkReloads) loads it fresh too: with the filter already
+  // selected, the filter alone does not change, and the rows the push counted may have moved since the last load.
   useEffect(() => {
     refreshEstimates();
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinkReloads]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -4157,7 +4163,7 @@ function EstimatesMobileListView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
-  const [filter, setFilter, callTodayLinksTaken] = useCallTodayLinkFilter();
+  const [filter, setFilter, callTodayLinksTaken, callTodayLinkReloads] = useCallTodayLinkFilter();
   const [dateFilter, setDateFilter] = useState("all");
   const [customerPanelId, setCustomerPanelId] = useState(null);
   const [auditTarget, setAuditTarget] = useState(null);
@@ -4200,8 +4206,8 @@ function EstimatesMobileListView({
     return () => {
       estimatesRequestRef.current += 1;
     };
-    // A Call today link the list takes loads it fresh, as on desktop.
-  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinksTaken]);
+    // A Call today link taken on the open list loads it fresh, as on desktop.
+  }, [filter, refreshEstimates, estimatesRefresh, callTodayLinkReloads]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked.

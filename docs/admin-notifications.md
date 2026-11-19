@@ -640,7 +640,7 @@ day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>
 is not made up). The banner expires with its day: it carries `expiresAt` (the next ET midnight, `pushExpiryFor` in
 `notification-triggers.js`), which web push sends as its TTL, APNs as `apns-expiration` and FCM as `android.ttl`, so a
 phone offline past the day never shows an old count. The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
-(a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). The dispatcher marks a
+(a later run may try); after a device failure, no result at all, or any result it does not recognize, it is kept (no second banner). A device the push service skipped because its provider has no credentials (APNs, FCM or web push not configured) is a failure, not a skip: its claim is released and the run reports `push_not_configured`, so job health shows a banner lost for want of keys. The dispatcher marks a
 throw in its push path (`pushFailed`; it leaves `push: null`, like a push that is off): a throw in its recipient lookup, or in the push
 block before the first device's banner is built (the subscription lookup), reached no provider, so its claim is released; a throw after a
 device send began may have reached a phone, so its claim is kept. Both are failures. A count, claim or delivery failure

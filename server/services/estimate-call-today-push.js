@@ -107,6 +107,14 @@ async function releaseDay(day) {
 // push reached a provider (PRE_HANDOFF_FAILURES) releases the claim, so a same-day rerun may send once the database
 // recovers; a thrown push dispatch after a device send began may have reached a phone, so its claim stays. A claim
 // release that fails is reported as claim_release_failed, never as a released claim. The log lines are fixed text.
+// A device the push service skipped because its provider has no credentials (APNs, FCM or web push not configured) is
+// a delivery failure, not a quiet skip: with every phone on an unconfigured provider, each day's banner would be lost
+// while the job reads healthy. The claim is released (nothing reached a provider), and the run reports an error.
+const PROVIDER_NOT_CONFIGURED = new Set(['apns_not_configured', 'fcm_not_configured', 'push_not_configured']);
+function providerNotConfigured(push) {
+  return Array.isArray(push?.results) && push.results.some((r) => r?.skipped && PROVIDER_NOT_CONFIGURED.has(r.reason));
+}
+
 function isRecognizedNoDelivery(push) {
   if (push === null) return true;
   if (!push || typeof push !== 'object' || push.sent !== 0) return false;
@@ -148,6 +156,10 @@ async function settle(day, count, result) {
     if (!(await releaseDay(day))) {
       logger.error(`[estimate-call-today] ${day}: banner skipped (push off or no device to send to) but the claim release failed; claim kept`);
       return { count, sent: false, error: 'claim_release_failed' };
+    }
+    if (providerNotConfigured(push)) {
+      logger.error(`[estimate-call-today] ${day}: banner not delivered (a push provider is not configured); claim released`);
+      return { count, sent: false, error: 'push_not_configured' };
     }
     logger.warn(`[estimate-call-today] ${day}: banner skipped (push off or no device to send to); claim released`);
     return { count, sent: false, skipped: 'no_push_delivered' };

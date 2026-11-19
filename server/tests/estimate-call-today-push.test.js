@@ -286,6 +286,32 @@ describe('the banner', () => {
       expect(mockTrigger).toHaveBeenCalledTimes(1);
     });
 
+    // Phones exist but their provider has no credentials: the push service skips each device (sent 0, failed 0). That
+    // is a lost banner, not a quiet day: the run reports an error so job health shows it, and the claim is released so a
+    // rerun after the fix may send.
+    test.each(['apns_not_configured', 'fcm_not_configured', 'push_not_configured'])(
+      'a device skipped because its provider is not configured (%s): an error, the claim is released',
+      async (reason) => {
+        mockTrigger.mockResolvedValue({
+          bellWritten: false,
+          push: { subscriptions: 2, sent: 0, expired: 0, failed: 0, skipped: 2,
+            results: [{ sent: false, skipped: true, reason }, { sent: false, skipped: true, reason: 'superseded' }] },
+        });
+        await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'push_not_configured' });
+        expect([...claimed]).toEqual([]);
+        expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: banner not delivered (a push provider is not configured); claim released');
+      },
+    );
+
+    test('devices skipped for another reason (superseded) stay a skip', async () => {
+      mockTrigger.mockResolvedValue({
+        bellWritten: false,
+        push: { subscriptions: 1, sent: 0, expired: 0, failed: 0, skipped: 1, results: [{ sent: false, skipped: true, reason: 'superseded' }] },
+      });
+      await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });
+      expect([...claimed]).toEqual([]);
+    });
+
     test('a recognized policy skip (sent 0 with a skipped reason): a skip, the claim is released', async () => {
       mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' } });
       await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });

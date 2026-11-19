@@ -204,6 +204,23 @@ it.each([
   await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
 });
 
+// The link a list opens on is loaded by the mount's own fetch: a second load would rerun the whole pipeline batch
+// (sent, draft pricing-risk and, on desktop, archived wins) for nothing. Each load reads the draft list once.
+it.each([
+  ["desktop", 1440],
+  ["mobile", 390],
+])("(%s) a list opened by the link loads the pipeline once", async (_label, width) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  await waitFor(() => expect(routerProbe.search).toBe("?tab=estimates"));
+  const draftReads = () => globalThis.fetch.mock.calls.filter(([url, init = {}]) => {
+    const parsed = new URL(String(url), "http://fixture.invalid");
+    return parsed.pathname === "/api/admin/estimates" && init.method !== "PATCH" && parsed.searchParams.get("status") === "draft";
+  }).length;
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  expect(draftReads()).toBe(1);
+});
+
 // With Call today already selected, a new link changes no filter: the list must still load fresh rows, or it keeps
 // showing an estimate another admin has called since (or misses one viewed since).
 it.each([
