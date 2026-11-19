@@ -417,34 +417,32 @@ async function ledgerFactsFor(recordId, knex) {
   }
 }
 
+/** One ledger row's facts the Taurus warning reads (quantity with its unit, dilution, application date). */
+function ledgerRowFacts(row) {
+  const dilution = String(row.dilution_rate ?? '').trim();
+  const appliedOn = dateOnlyString(row.application_date);
+  return {
+    ...(Number(row.quantity_applied) > 0 && row.quantity_unit
+      ? { quantity: Number(row.quantity_applied), quantity_unit: row.quantity_unit } : {}),
+    ...(dilution ? { dilution_rate: dilution } : {}),
+    ...(appliedOn ? { application_date: appliedOn } : {}),
+  };
+}
+
 /**
- * The compliance ledger's facts on each recorded product, for the Taurus yearly-limit warning on a reopened
- * recap: its quantity (a recap save replaces its product rows without amounts, but the ledger keeps it), its
- * dilution (no recap writes it, so a save keeps it, and it decides the count) and its date. The yearly count
- * reads the ledger. Fail-soft (no facts, no warning input).
+ * The compliance ledger's rows on each recorded product, for the Taurus yearly-limit warning on a reopened
+ * recap: their quantity (a recap save replaces its product rows without amounts, but the ledger keeps it), their
+ * dilution (no recap writes it, so a save keeps it, and it decides the count) and their date. A record can hold
+ * several active rows for one product, and the yearly count reads it at its strongest, so every row goes: the
+ * ones linked to the product row (a legacy row with no product_id is reachable only that way) and the ones of
+ * its catalog id. Fail-soft (no rows, no warning input).
  */
 async function attachLedgerFacts(recordId, products, knex) {
   const ledgerRows = await ledgerFactsFor(recordId, knex);
-  // By the row's own link first (a legacy ledger row with no product_id is reachable only through it),
-  // then by catalog id.
-  const byServiceProduct = new Map(ledgerRows.filter((row) => row.service_product_id != null)
-    .map((row) => [String(row.service_product_id), row]));
-  const byProduct = new Map(ledgerRows.filter((row) => row.product_id != null).map((row) => [String(row.product_id), row]));
+  const same = (a, b) => a != null && b != null && String(a) === String(b);
   for (const sp of products) {
-    // Each fact from the first matching row that records it.
-    const rows = [
-      sp.service_product_id != null ? byServiceProduct.get(String(sp.service_product_id)) : null,
-      sp.product_id != null ? byProduct.get(String(sp.product_id)) : null,
-    ].filter(Boolean);
-    const quantity = rows.find((row) => Number(row.quantity_applied) > 0 && row.quantity_unit);
-    if (quantity) {
-      sp.ledger_quantity = Number(quantity.quantity_applied);
-      sp.ledger_quantity_unit = quantity.quantity_unit;
-    }
-    const dilution = rows.map((row) => String(row.dilution_rate ?? '').trim()).find(Boolean);
-    if (dilution) sp.ledger_dilution_rate = dilution;
-    const appliedOn = rows.map((row) => dateOnlyString(row.application_date)).find(Boolean);
-    if (appliedOn) sp.ledger_application_date = appliedOn;
+    const rows = ledgerRows.filter((row) => same(row.service_product_id, sp.service_product_id) || same(row.product_id, sp.product_id));
+    if (rows.length) sp.ledger_rows = rows.map(ledgerRowFacts);
   }
 }
 

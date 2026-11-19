@@ -74,15 +74,15 @@ function fmtTime(ts) {
   } catch { return ''; }
 }
 
-// The ledger's facts on a recorded product (the recap's own rows keep no amounts): its quantity with its unit,
-// its dilution and its application date, as the Taurus yearly-limit warning reads a row. The yearly count reads them.
-function recordedLedgerFacts(rp) {
-  return {
-    ...(Number(rp.ledger_quantity) > 0 && rp.ledger_quantity_unit
-      ? { totalAmount: Number(rp.ledger_quantity), amountUnit: rp.ledger_quantity_unit } : {}),
-    ...(rp.ledger_dilution_rate ? { dilution: rp.ledger_dilution_rate } : {}),
-    ...(rp.ledger_application_date ? { applicationDate: rp.ledger_application_date } : {}),
-  };
+// The ledger's rows on a recorded product (the recap's own rows keep no amounts), as the Taurus yearly-limit
+// warning reads a row: quantity with its unit, dilution, application date. The yearly count reads them, and a
+// record with several rows for one product at its strongest, so each row is checked.
+function recordedLedgerRows(rp) {
+  return (Array.isArray(rp.ledger_rows) ? rp.ledger_rows : []).map((row) => ({
+    ...(Number(row?.quantity) > 0 && row.quantity_unit ? { totalAmount: Number(row.quantity), amountUnit: row.quantity_unit } : {}),
+    ...(row?.dilution_rate ? { dilution: row.dilution_rate } : {}),
+    ...(row?.application_date ? { applicationDate: row.application_date } : {}),
+  }));
 }
 
 export default function ServiceRecapModal({
@@ -112,8 +112,8 @@ export default function ServiceRecapModal({
   const [selected, setSelected] = useState(() => new Set());
   // The house mix was pre-selected on open (so a Taurus left off it for the label limit is worth saying).
   const [houseMixSeeded, setHouseMixSeeded] = useState(false);
-  // The ledger's facts on a reopened recap, by catalog id (amount, dilution, application date): this lane edits
-  // none of them, but the Taurus yearly-limit warning reads them as the ledger count does.
+  // The ledger's rows on a reopened recap, by catalog id (amount, dilution, application date of each): this lane
+  // edits none of them, but the Taurus yearly-limit warning reads them as the ledger count does.
   const [recordedLedger, setRecordedLedger] = useState(() => ({}));
   // productId -> { rate: string, unit: string }. Seeded from the rate
   // already recorded on the visit (reopen) or the catalog prefill
@@ -189,8 +189,8 @@ export default function ServiceRecapModal({
               return;
             }
             preselect.add(cat.id);
-            const ledger = recordedLedgerFacts(rp);
-            if (Object.keys(ledger).length) seededLedger[cat.id] = ledger;
+            const ledgerRows = recordedLedgerRows(rp);
+            if (ledgerRows.length) seededLedger[cat.id] = [...(seededLedger[cat.id] || []), ...ledgerRows];
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
@@ -290,7 +290,11 @@ export default function ServiceRecapModal({
 
   // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
   // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
-  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), ...recordedLedger[id], rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].flatMap((id) => {
+    // One row per ledger row, so any 0.06% row warns, as the count reads the record at its strongest.
+    const row = { ...productById.get(id), rate: rates[id]?.rate, rateUnit: rates[id]?.unit };
+    return recordedLedger[id]?.length ? recordedLedger[id].map((facts) => ({ ...row, ...facts })) : [row];
+  }), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({

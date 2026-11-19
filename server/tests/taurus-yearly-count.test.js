@@ -104,6 +104,10 @@ describe('applicationConcentration', () => {
     expect(applicationConcentration(row({ application_rate: 0.025, rate_unit: 'gal' }))).toBe('high');
     expect(applicationConcentration(row({ quantity_applied: 94.6, quantity_unit: 'ml' }))).toBe('high'); // 3.2 fl oz
     expect(applicationConcentration(row({ quantity_applied: 47.3, quantity_unit: 'ml' }))).toBe('low'); // 1.6 fl oz
+    // The ledger keeps 3 decimals in the amount's unit: 0.0125 gal is saved as 0.013 gal (1.664 fl oz), still the house mix.
+    expect(applicationConcentration(row({ quantity_applied: '0.013', quantity_unit: 'gal' }))).toBe('low');
+    expect(applicationConcentration(row({ quantity_applied: '0.014', quantity_unit: 'gal' }))).toBe('high');
+    expect(applicationConcentration(row({ quantity_applied: '1.602', quantity_unit: 'fl_oz' }))).toBe('high');
     // A per-gallon rate in mL: 23.7 mL/gal = 0.8 fl oz/gal.
     expect(applicationConcentration(row({ application_rate: '23.7', rate_unit: 'ml/gal' }))).toBe('high');
     expect(applicationConcentration(row({ application_rate: '11.8', rate_unit: 'ml/gal' }))).toBe('low');

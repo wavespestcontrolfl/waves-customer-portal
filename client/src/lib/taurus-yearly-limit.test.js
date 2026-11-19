@@ -152,6 +152,8 @@ describe('isHighTaurusRate (the same rule the server applies to a saved ledger r
     expect(isHighTaurusRate({ rate: 0.025, rateUnit: 'gal' })).toBe(true);
     expect(isHighTaurusRate({ totalAmount: 94.6, amountUnit: 'ml' })).toBe(true);
     expect(isHighTaurusRate({ rate: '23.7', rateUnit: 'ml/gal' })).toBe(true); // 0.8 fl oz/gal
+    // 0.0125 gal entered is saved as 0.013 gal (the ledger keeps 3 decimals): both read as the house mix.
+    expect(isHighTaurusRate({ totalAmount: 0.013, amountUnit: 'gal' })).toBe(false);
     expect(isHouseTaurusAmount(0.0125, 'gal')).toBe(true);
     expect(isHouseTaurusAmount(9.6, 'tsp')).toBe(true);
     expect(isHouseTaurusAmount(1.6)).toBe(true);
