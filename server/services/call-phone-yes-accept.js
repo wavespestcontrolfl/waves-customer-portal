@@ -346,6 +346,9 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
     visit,
     estimateIds: cardIds.map(String),
     noYes: heard.noYes,
+    // The window the caller's word was read in, so the tap can read it again under its lock.
+    wordSince: since,
+    wordUntil: until,
     acceptProblem: problem,
     autoProblem: problem || (await yesProblem(conn, { customerId, yes, call, cardIds, estimate })) || heard.noYes,
   };
@@ -705,6 +708,10 @@ const TAP_UNAVAILABLE = {
   estimate_being_sent: "One of the customer's estimates is being sent. Reload in a minute.",
   call_still_processing: 'A call since the estimate was sent is still being read. Reload in a few minutes.',
   chose_annual_prepay: 'The caller chose annual prepay on the booking call. Use the annual prepay card.',
+  estimate_not_on_card: 'The estimate it would accept is not one this card names. Accept it from the estimate.',
+  card_out_of_date: "The card's details changed since it was last updated. It updates within 10 minutes. Reload then.",
+  card_changed: 'The card changed or was closed since it loaded. Reload and look again.',
+  word_changed: "The caller's word changed since the card loaded. Reload and look again.",
   accept_failed: 'The accept failed. Try again, or accept it from the estimate.',
 };
 const whyNot = (reason) => TAP_UNAVAILABLE[reason] || REASONS[reason] || TAP_UNAVAILABLE.accept_failed;
@@ -729,23 +736,51 @@ function tapPreviewTokenOf(evaluation) {
   return require('crypto').createHash('sha256').update(JSON.stringify(facts)).digest('hex').slice(0, 32);
 }
 
+// The caller's word as one comparable string: the card's yes fields (the ones the sweep compares, yesState).
+const WORD_FIELDS = ['yes_heard', 'yes_rechecking', 'yes_call_log_id', 'caller_words', 'no_yes_reason'];
+const wordKeyOf = (f) => JSON.stringify(WORD_FIELDS.map((k) => (k === 'yes_heard' || k === 'yes_rechecking' ? f[k] === true : (f[k] ?? null))));
+// The word the evaluation read, and its window, for the tap to read again under its lock.
+function tapWordOf(evaluation) {
+  return { since: evaluation.wordSince, until: evaluation.wordUntil, key: wordKeyOf(heardFields(evaluation.yes, { noYes: evaluation.noYes })) };
+}
+
+// What the list stamp and the tap both check first. { ok: true, evaluation, customerId }, or { ok: false, reason, note }
+// (note: the card's text before any tap). No tap has run yet, so a note never says "Nothing was accepted" (the office
+// may have accepted the estimate by hand).
+async function tapCheck(shown, { now }) {
+  const note = (why) => `The tap cannot accept this one. ${why}`;
+  // A list row carries the card's payload and version as shown, but not its links (the customer and the estimate it was
+  // filed for, which the sweep never rewrites): those come from the card's own row.
+  const links = 'related_customer_id' in shown && 'related_estimate_id' in shown ? shown
+    : await db('triage_items').where({ id: shown.id }).first('related_customer_id', 'related_estimate_id');
+  if (!links) return { ok: false, reason: 'card_changed', note: note(TAP_UNAVAILABLE.card_changed) };
+  const card = { ...shown, related_customer_id: links.related_customer_id, related_estimate_id: links.related_estimate_id };
+  const customerId = parseJson(card.payload).customer_id || card.related_customer_id || null;
+  const evaluation = await evaluatePhoneYes({ callLogId: card.call_log_id, customerId, now });
+  if (!evaluation.card) return { ok: false, reason: evaluation.reason, note: note(whyNot(evaluation.reason)) };
+  if (evaluation.acceptProblem) {
+    const why = REASONS[evaluation.acceptProblem] || 'The accept would not go ahead.';
+    return { ok: false, reason: evaluation.acceptProblem, note: note(`${why} Accept it from the estimate.`) };
+  }
+  // The estimate the accept would take must be one the card names: an estimate that reopened since is not.
+  if (!cardEstimateIds(card).includes(String(evaluation.estimate.id))) {
+    return { ok: false, reason: 'estimate_not_on_card', note: note(TAP_UNAVAILABLE.estimate_not_on_card) };
+  }
+  // The card must show what the sweep would show now (cardState: nothing to rewrite or close): the caller's word, the
+  // estimate links and the accepted state as they stand. A tap never acts on words the card no longer holds.
+  if (await cardState(card)) return { ok: false, reason: 'card_out_of_date', note: note(TAP_UNAVAILABLE.card_out_of_date) };
+  return { ok: true, evaluation, customerId };
+}
+
 /**
  * What the tap on an open card can do now, read live: the server decides, so the screen holds no copy of the rule.
  * @returns {{can_accept:true, preview_token, estimate_id, visit_id, visit_date, message:null}
  *   |{can_accept:false, preview_token:null, message}}
  */
 async function tapStateOf(card, { now = new Date() } = {}) {
-  const payload = parseJson(card.payload);
-  const evaluation = await evaluatePhoneYes({
-    callLogId: card.call_log_id, customerId: payload.customer_id || card.related_customer_id || null, now,
-  });
-  // No tap has run yet: the card says why the tap is not offered, never "Nothing was accepted" (the office may have
-  // accepted the estimate by hand).
-  if (!evaluation.card) return { can_accept: false, preview_token: null, message: `The tap cannot accept this one. ${whyNot(evaluation.reason)}` };
-  if (evaluation.acceptProblem) {
-    const why = REASONS[evaluation.acceptProblem] || 'The accept would not go ahead.';
-    return { can_accept: false, preview_token: null, message: `The tap cannot accept this one. ${why} Accept it from the estimate.` };
-  }
+  const check = await tapCheck(card, { now });
+  if (!check.ok) return { can_accept: false, preview_token: null, message: check.note };
+  const { evaluation } = check;
   const { dateOnlyString } = require('../utils/datetime-et');
   return {
     can_accept: true,
@@ -758,14 +793,30 @@ async function tapStateOf(card, { now = new Date() } = {}) {
 }
 
 // Step 1, inside the accept's transaction before the conversion: lock and read again every fact the tap read outside it
-// (the call, the booked visit and the call's other visits, the estimate's links, the customer's other open estimates and
-// plan), then link the visit to the estimate.
-function linkVisitStep({ visit, customerId, bookingCallId }) {
+// (the card, the call and the caller's word, the booked visit and the call's other visits, the estimate's links, the
+// customer's other open estimates and plan), then link the visit to the estimate.
+function linkVisitStep({ visit, customerId, bookingCallId, cardId, expectedUpdatedAt, word }) {
   const Manual = require('./estimate-manual-acceptance');
   const pin = Manual.bookedVisitsPinOf([visit]);
   return async (trx, { estimate }) => {
+    // The call's triage lock first, the order every card writer takes (advisory call lock, then rows): no sweep rewrites
+    // or closes the card, and no other action settles it, until this accept commits or rolls back.
+    await lockTriageCall(trx, bookingCallId);
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
-    if (!(await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forShare().first('id'))) throw stop('customer_changed');
+    // FOR UPDATE, as the sweep's filing takes it: no read of the call changes until the commit, and the card's Resolve
+    // (transitionCore, same transaction) needs no lock upgrade.
+    if (!(await trx('call_log').where({ id: bookingCallId, customer_id: customerId }).forUpdate().first('id'))) throw stop('customer_changed');
+    // The card, locked: still open, the version the office saw, and naming this estimate.
+    const card = await trx('triage_items').where({ id: cardId }).forUpdate().first('status', 'updated_at', 'related_estimate_id', 'payload');
+    if (!card || !['open', 'in_progress'].includes(card.status) || !expectedUpdatedAt
+      || new Date(card.updated_at).getTime() !== new Date(expectedUpdatedAt).getTime()) throw stop('card_changed');
+    if (!cardEstimateIds(card).includes(String(estimate.id))) throw stop('estimate_not_on_card');
+    // The caller's word, read again under the lock in the same window: a call still being read, an annual prepay choice
+    // now on the booking call (the prepay card's), or any other change since the check refuses.
+    if (await Word.unreadCallSince(trx, { customerId, since: word.since })) throw stop('call_still_processing');
+    const heard = await Word.callerWord(trx, { customerId, since: word.since, until: word.until });
+    if (heard.noYes === 'caller_chose_annual_prepay' && String(heard.callLogId) === String(bookingCallId)) throw stop('chose_annual_prepay');
+    if (wordKeyOf(heardFields(heard.yes, { noYes: heard.noYes })) !== word.key) throw stop('word_changed');
     // The locked visit passes the evaluation's own visit checks again (family, property, price, add-ons, series and
     // assessment flags), not only the pin.
     const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
@@ -824,16 +875,15 @@ function tapErrorRefusal(err) {
 }
 
 /**
- * The tap on an open card. The caller (the route) has checked the gate, the admin, the card and its version.
+ * The tap on an open card. The caller (the route) has checked the gate, the admin, the card and its version, and hands
+ * in the card's Resolve (resolveCard(trx) -> 'ok' | another outcome), which runs inside the accept's transaction.
  * Reads the card's call again, checks the token, then runs the office's own accept with the two steps above.
  * @returns {{ok:true, estimateId, visitId, seriesIds, amount, warnings}|{ok:false, reason, message}}
  */
-async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = null, now = new Date() }) {
-  const payload = parseJson(item.payload);
-  const customerId = payload.customer_id || item.related_customer_id || null;
-  const evaluation = await evaluatePhoneYes({ callLogId: item.call_log_id, customerId, now });
-  if (!evaluation.card) return tapRefusal(evaluation.reason);
-  if (evaluation.acceptProblem) return tapRefusal(evaluation.acceptProblem);
+async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = null, expectedUpdatedAt = null, resolveCard = null, now = new Date() }) {
+  const check = await tapCheck(item, { now });
+  if (!check.ok) return tapRefusal(check.reason);
+  const { evaluation, customerId } = check;
   if (!previewToken || previewToken !== tapPreviewTokenOf(evaluation)) return tapRefusal('changed_since_check');
   const Manual = require('./estimate-manual-acceptance');
   const { estimate, visit } = evaluation;
@@ -845,8 +895,15 @@ async function acceptPhoneYesCard({ item, adminUserId = null, previewToken = nul
       // Checked inside the accept's transaction before the claim: the estimate row and the booked visit as read, with
       // no add-on line. A change since refuses (preview_changed) before anything is written.
       expected: { ...Manual.estimateRowPin(estimate), bookedVisits: { ids: [visit.id], pin: Manual.bookedVisitsPinOf([visit]), noAddons: true } },
-      beforeConvert: linkVisitStep({ visit, customerId, bookingCallId: item.call_log_id }),
-      beforeCommit: priceSeriesStep({ customerId, visit, seen }),
+      beforeConvert: linkVisitStep({
+        visit, customerId, bookingCallId: item.call_log_id, cardId: item.id, expectedUpdatedAt, word: tapWordOf(evaluation),
+      }),
+      beforeCommit: async (trx, ctx) => {
+        await priceSeriesStep({ customerId, visit, seen })(trx, ctx);
+        // The card closes with the accept, in its transaction: a card another admin closed or changed since rolls the
+        // whole accept back.
+        if (resolveCard && (await resolveCard(trx)) !== 'ok') throw stop('card_changed');
+      },
       bookedAppointmentIds: [visit.id],
       adminUserId,
       source: ACCEPT_SOURCE,
@@ -882,6 +939,6 @@ module.exports = {
   _private: {
     fileCardForTest: fileCard, applyCardStateForTest: applyCardState,
     // The tap's two steps inside the accept, driven directly.
-    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep,
+    linkVisitStepForTest: linkVisitStep, priceSeriesStepForTest: priceSeriesStep, tapWordOfForTest: tapWordOf,
   },
 };

@@ -488,6 +488,8 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
   // button.
   const live = phoneYes || {};
   const tap = !isOpenView ? null : !isAdmin ? "admin" : live.can_accept ? "accept" : "refused";
+  // A card that names more than one estimate says which one the tap accepts (the server checks it is one of them).
+  const acceptsNth = estimateIds.length > 1 ? estimateIds.map(String).indexOf(String(live.estimate_id)) : -1;
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       {/* A closed card (resolved, or dismissed when the estimate was accepted) shows its evidence as history. */}
@@ -511,7 +513,7 @@ export function PhoneYesEvidence({ payload, isOpenView, isAdmin = false, busy = 
       {tap === "accept" && (
         <>
           <div className="mt-1 text-14 text-ink-secondary">
-            {`The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
+            {`${acceptsNth >= 0 ? `It accepts estimate ${acceptsNth + 1}. ` : ""}The visit on ${live.visit_date} becomes the plan's first visit, and the plan's next visits are booked. The customer gets what Mark accepted sends (the membership email). No text goes out.`}
           </div>
           <Button size="sm" variant="primary" className="mt-2" disabled={busy} onClick={onAcceptPhoneYes}
             title="Accepts the customer's estimate as pay per application, as Mark accepted does, and books the plan from the visit this call booked.">

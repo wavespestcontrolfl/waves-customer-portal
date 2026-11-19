@@ -2139,9 +2139,9 @@ router.post('/:id/accept-call-prepay', requireAdmin, async (req, res) => {
 // Accept as pay per application (GATE_CALL_PHONE_YES_ACCEPT, call_phone_yes cards): the call booked a pest visit while the
 // customer had an open estimate. Runs the office's own accept (markEstimateManuallyAccepted, standard billing, as Mark
 // accepted does), links the visit the call booked to the estimate inside it so the plan is booked from that visit, prices
-// the plan's visits at the per-visit amount, then resolves the card. The customer gets what Mark accepted sends (the
-// membership email), nothing more. Every refusal is a plain message and changes nothing. Admin only; the version the screen
-// showed must still be the card's (409 otherwise).
+// the plan's visits at the per-visit amount, and resolves the card in the same transaction. The customer gets what Mark
+// accepted sends (the membership email), nothing more. Every refusal is a plain message and changes nothing. Admin only;
+// the version the screen showed must still be the card's (409 otherwise), checked here and again under the card's lock.
 router.post('/:id/accept-call-phone-yes', requireAdmin, async (req, res) => {
   try {
     must(require('../config/feature-gates').callPhoneYesAcceptLive?.() === true, 404, 'Not found');
@@ -2153,21 +2153,23 @@ router.post('/:id/accept-call-phone-yes', requireAdmin, async (req, res) => {
     must(req.body?.expected_updated_at && new Date(req.body.expected_updated_at).getTime() === new Date(item.updated_at).getTime(),
       409, 'Card changed since it was displayed — reload and review the latest', 'STALE_CARD_VERSION');
     const out = await require('../services/call-phone-yes-accept').acceptPhoneYesCard({
-      item, adminUserId: req.technicianId || null, previewToken: typeof req.body?.preview_token === 'string' ? req.body.preview_token : null,
+      item,
+      adminUserId: req.technicianId || null,
+      previewToken: typeof req.body?.preview_token === 'string' ? req.body.preview_token : null,
+      expectedUpdatedAt: req.body.expected_updated_at,
+      // The card's own Resolve, inside the accept's transaction (a savepoint): a card another admin closed or changed since
+      // this screen loaded rolls the whole accept back, so no plan starts from a card that is no longer open.
+      resolveCard: async (trx) => (await transitionCore({
+        id: item.id, nextStatus: 'resolved', note: 'accepted as pay per application', assignedTo: req.technicianId,
+        expectedUpdatedAt: req.body.expected_updated_at, requireVersion: true, conn: trx,
+      })).outcome,
     });
     if (!out.ok) return res.status(409).json({ error: out.message, code: out.reason });
-    // The accept is done: close the card. Another admin who closed it first leaves it closed, and the answer still says the accept ran.
-    const result = await transitionCore({
-      id: item.id, nextStatus: 'resolved', note: 'accepted as pay per application', assignedTo: req.technicianId, expectedUpdatedAt: req.body.expected_updated_at,
-    }).catch((e) => {
-      logger.warn(`[admin-triage] accept-call-phone-yes card ${item.id} not closed after the accept: ${e.code || e.name || 'error'}`);
-      return { outcome: 'not_closed' };
-    });
     // How long the card waited for a person: the measure the later automatic step is judged on.
     const openMinutes = Math.round((Date.now() - new Date(item.created_at).getTime()) / 60000);
-    logger.info(`[admin-triage] accept-call-phone-yes card=${item.id} call=${item.call_log_id} estimate=${out.estimateId} plan_visits=${out.seriesIds.length} card_open_min=${openMinutes} card_closed=${result.outcome === 'ok'}`);
+    logger.info(`[admin-triage] accept-call-phone-yes card=${item.id} call=${item.call_log_id} estimate=${out.estimateId} plan_visits=${out.seriesIds.length} card_open_min=${openMinutes}`);
     return res.json({
-      ok: true, id: item.id, status: result.outcome === 'ok' ? 'resolved' : item.status, estimate_id: out.estimateId, visit_id: out.visitId,
+      ok: true, id: item.id, status: 'resolved', estimate_id: out.estimateId, visit_id: out.visitId,
       plan_visits: out.seriesIds.length, amount: out.amount, warnings: out.warnings,
     });
   } catch (err) {

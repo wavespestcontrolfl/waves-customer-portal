@@ -45,7 +45,7 @@ const { sendMembershipStarted } = require('../services/account-membership-email'
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { notifyAdmin } = require('../services/notification-service');
 const {
-  runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, _private: PhoneYesPrivate,
+  runCallPhoneYesSweep, evaluatePhoneYes, REASON_CODE, REASONS, ACCEPT_SOURCE, TAP_REFUSALS, acceptPhoneYesCard, _private: PhoneYesPrivate,
 } = require('../services/call-phone-yes-accept');
 
 const GATE = 'GATE_CALL_PHONE_YES_ACCEPT';
@@ -1070,6 +1070,51 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
       expect((await trx('scheduled_services').where({ id: ctx.visitId }).first()).source_estimate_id).toBeNull();
     });
 
+    test('a later call takes the yes back before the sweep updates the card: no tap from the old words; once updated, the person decides', async () => {
+      const ctx = await filed();
+      const before = await listed(ctx.card.id);
+      expect(before.call_phone_yes.can_accept).toBe(true);
+      await call(ctx.customerId, null, { created_at: new Date() }, 'cancellation_request');
+      const row = await listed(ctx.card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: false, preview_token: null });
+      expect(row.call_phone_yes.message).toBe(`The tap cannot accept this one. ${TAP_REFUSALS.card_out_of_date.replace(/^Nothing was accepted\. /, '')}`);
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: before.call_phone_yes.preview_token });
+      expect(out).toMatchObject({ status: 409, body: { code: 'card_out_of_date', error: TAP_REFUSALS.card_out_of_date } });
+      await unchanged(ctx);
+      // The sweep shows the new word on the card (no yes, the word named); the tap is offered again, from what it shows.
+      await sweep();
+      const updated = await listed(ctx.card.id);
+      expect(payloadOf(updated)).toMatchObject({ yes_heard: false, no_yes_reason: 'caller_took_back' });
+      expect(updated.call_phone_yes.can_accept).toBe(true);
+    });
+
+    test('an estimate the card does not name is never the one the tap accepts', async () => {
+      const ctx = await filed();
+      // The card's estimate lapses, and another estimate sent before the call is open (it reopened).
+      await trx('estimates').where({ id: ctx.est.id }).update({ expires_at: new Date(Date.now() - 3600000) });
+      const other = await estimate(ctx.customerId, { sent_at: new Date(Date.now() - 3 * DAY) });
+      const row = await listed(ctx.card.id);
+      expect(row.call_phone_yes).toMatchObject({ can_accept: false, preview_token: null });
+      expect(row.call_phone_yes.message).toContain('not one this card names');
+      const out = await post(`${ctx.card.id}/accept-call-phone-yes`, { expected_updated_at: ctx.card.updated_at, preview_token: 'tok' });
+      expect(out).toMatchObject({ status: 409, body: { code: 'estimate_not_on_card', error: TAP_REFUSALS.estimate_not_on_card } });
+      expect(await statusOf('estimates', other.id)).toBe('sent');
+      await unchanged(ctx);
+    });
+
+    test('a card closed by another admin during the accept rolls the whole accept back', async () => {
+      const ctx = await filed();
+      const row = await listed(ctx.card.id);
+      const out = await acceptPhoneYesCard({
+        item: ctx.card, previewToken: row.call_phone_yes.preview_token, expectedUpdatedAt: ctx.card.updated_at, resolveCard: async () => 'conflict',
+      });
+      expect(out).toEqual({ ok: false, reason: 'card_changed', message: TAP_REFUSALS.card_changed });
+      await unchanged(ctx);
+      expect(await trx('scheduled_services').where({ recurring_parent_id: ctx.visitId }).first('id')).toBeUndefined();
+      expect((await trx('customers').where({ id: ctx.customerId }).first('billing_mode')).billing_mode).not.toBe('per_application');
+      expect(reminderSpy).not.toHaveBeenCalled();
+    });
+
     test('a non-admin, a stale card, a card of another reason, a closed card and a gate that is off all refuse and accept nothing', async () => {
       const spy = jest.spyOn(acceptance, 'markEstimateManuallyAccepted');
       try {
@@ -1097,25 +1142,51 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
 
     // The two steps inside the accept read every fact again under their locks (a change between the list and the
     // accept's locks). Driven directly here, each inside its own savepoint.
-    test('the link step reads the call, the visit, the estimate links, the other open estimates and the plan again, then links', async () => {
-      const { customerId, est, bookingCallId, visitId } = await phoneYes();
+    test('the link step locks the card, then reads the call, the caller\'s word, the visit, the estimate links, the other open estimates and the plan again, then links', async () => {
+      const { customerId, est, bookingCallId, visitId, card } = await filed();
       const ev = await evaluatePhoneYes({ callLogId: bookingCallId, customerId });
       expect(ev).toMatchObject({ card: true, acceptProblem: null });
-      const run = (visitRow) => trx.transaction((t) => PhoneYesPrivate.linkVisitStepForTest({ visit: visitRow, customerId, bookingCallId })(t, { estimate: est }));
+      const version = async () => (await trx('triage_items').where({ id: card.id }).first('updated_at')).updated_at;
+      const step = (over = {}) => PhoneYesPrivate.linkVisitStepForTest({
+        visit: ev.visit, customerId, bookingCallId, cardId: card.id, expectedUpdatedAt: card.updated_at, word: PhoneYesPrivate.tapWordOfForTest(ev), ...over,
+      });
+      const run = async (over = {}, estimateRow = est) => {
+        const expectedUpdatedAt = await version();
+        return trx.transaction((t) => step({ expectedUpdatedAt, ...over })(t, { estimate: estimateRow }));
+      };
+      // The card: another version than the screen showed, closed by another admin, or not naming this estimate.
+      await expect(run({ expectedUpdatedAt: new Date(Date.now() - DAY) })).rejects.toMatchObject({ phoneYesRefusal: 'card_changed' });
+      await trx('triage_items').where({ id: card.id }).update({ status: 'dismissed' });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'card_changed' });
+      await trx('triage_items').where({ id: card.id }).update({ status: 'open' });
+      await expect(run({}, { ...est, id: randomUUID() })).rejects.toMatchObject({ phoneYesRefusal: 'estimate_not_on_card' });
+      // The caller's word, read again under the lock: the booking call now says annual prepay (the prepay card's), a
+      // later call takes the yes back, or a call is still being read.
+      await trx('call_log').where({ id: bookingCallId })
+        .update({ ai_extraction_enriched: JSON.stringify(extractionWith('annual_prepay')), transcription: transcriptWith('annual_prepay') });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'chose_annual_prepay' });
+      await trx('call_log').where({ id: bookingCallId })
+        .update({ ai_extraction_enriched: JSON.stringify(extractionWith(null)), transcription: transcriptWith(null) });
+      const cancelCall = await call(customerId, null, { created_at: new Date() }, 'cancellation_request');
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'word_changed' });
+      await trx('call_log').where({ id: cancelCall }).del();
+      const unreadCall = await call(customerId, null, { created_at: new Date(Date.now() - 3600000), processing_status: 'processing' });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'call_still_processing' });
+      await trx('call_log').where({ id: unreadCall }).del();
       // The visit as read no longer matches the row.
-      await expect(run({ ...ev.visit, window_start: '08:00' })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
+      await expect(run({ visit: { ...ev.visit, window_start: '08:00' } })).rejects.toMatchObject({ phoneYesRefusal: 'changed_since_check' });
       // Another estimate was opened.
       const second = await estimate(customerId, { sent_at: new Date() });
-      await expect(run(ev.visit)).rejects.toMatchObject({ phoneYesRefusal: 'more_than_one_estimate' });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'more_than_one_estimate' });
       await trx('estimates').where({ id: second.id }).update({ status: 'declined' });
       // The call moved to another customer.
       const otherCustomer = await customer();
       await trx('call_log').where({ id: bookingCallId }).update({ customer_id: otherCustomer });
-      await expect(run(ev.visit)).rejects.toMatchObject({ phoneYesRefusal: 'customer_changed' });
+      await expect(run()).rejects.toMatchObject({ phoneYesRefusal: 'customer_changed' });
       await trx('call_log').where({ id: bookingCallId }).update({ customer_id: customerId });
       // Nothing was linked by a refused run; a clean run links the visit.
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBeNull();
-      await run(ev.visit);
+      await run();
       expect((await trx('scheduled_services').where({ id: visitId }).first()).source_estimate_id).toBe(est.id);
     });
 

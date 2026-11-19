@@ -1481,14 +1481,23 @@ describe('call_phone_yes card tap', () => {
   it("a 409 refusal reloads the list and shows the server's message", async () => {
     adminFetch.mockImplementation(async (url) => {
       if (String(url).includes('/accept-call-phone-yes')) {
-        throw Object.assign(new Error('The estimate, the visit or the call changed since the card loaded. Reload and look again. Nothing was accepted.'), { status: 409 });
+        throw Object.assign(new Error('Nothing was accepted. The estimate, the visit or the call changed since the card loaded. Reload and look again.'), { status: 409 });
       }
       return { items: [tapCard], counts: { open: 1, resolved: 0, dismissed: 0 } };
     });
     render(<TriageInboxTabV2 isAdmin />);
     const el = (await screen.findByText('Pat Sampleton')).closest('.py-4');
     fireEvent.click(within(el).getByRole('button', { name: 'Accept as pay per application' }));
-    expect(await screen.findByText(/changed since the card loaded\. Reload and look again\. Nothing was accepted\./)).toBeInTheDocument();
+    expect(await screen.findByText(/Nothing was accepted\. The estimate, the visit or the call changed since the card loaded\./)).toBeInTheDocument();
+  });
+
+  it('a card that names more than one estimate says which one the tap accepts; a card with one says nothing extra', () => {
+    const two = JSON.stringify({ ...JSON.parse(tapCard.payload), estimate_id: null, estimate_ids: ['est-6', 'est-7'] });
+    render(<PhoneYesEvidence payload={two} phoneYes={tapCard.call_phone_yes} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText(/^It accepts estimate 2\. The visit on 2026-12-01 becomes the plan's first visit/)).toBeInTheDocument();
+    cleanup();
+    render(<PhoneYesEvidence payload={tapCard.payload} phoneYes={tapCard.call_phone_yes} isOpenView isAdmin onAcceptPhoneYes={() => {}} />);
+    expect(screen.getByText(/^The visit on 2026-12-01 becomes the plan's first visit/)).toBeInTheDocument();
   });
 
   it('a non-admin gets no button, only the note; a closed card offers nothing', () => {
