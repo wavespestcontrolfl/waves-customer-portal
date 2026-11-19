@@ -350,6 +350,40 @@ describe('Screen 2 — reason and resolution', () => {
     expect(api.createRequest).toHaveBeenCalledWith(expect.objectContaining({ families: ['pest_control'], subject: 'Cancel Pest Control (WaveGuard Silver)' }));
   });
 
+  // Walks the flow to the final "Cancel Pest Control" button with Lawn Care kept.
+  const submitScopedCancel = async (reply) => {
+    await openReview();
+    api.cancelResolutionPreview.mockResolvedValue({
+      kind: 'none', reasonCode: null, scope: ['pest_control'],
+      impact: impact({ remaining: [{ key: 'lawn_care', label: 'Lawn Care', monthlyBefore: 89, monthlyAfter: 89 }] }),
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: /lawn care/i }));
+    await screen.findByRole('heading', { name: 'Review cancelling Pest Control' });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByRole('heading', { name: /what's driving this change/i });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    api.createRequest.mockResolvedValue({ success: true, deduped: true, cancellation: reply });
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel Pest Control' }));
+  };
+
+  it('a scoped retry reply with the continuing families unknown keeps the partial copy and no account refresh', async () => {
+    const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+    renderFlow({ refreshCustomer });
+    await submitScopedCancel({ processed: true, churned: false, confirmation: null, confirmationChannels: [], effectiveDate: '2026-08-31', scope: ['pest_control'], remaining: [], tierBefore: null, tierAfter: null });
+    await screen.findByText(/pest control cancelled; your other services continue\. the cancelled visits are off the calendar/i);
+    expect(screen.queryByText(/your plan is cancelled/i)).not.toBeInTheDocument();
+    expect(refreshCustomer).not.toHaveBeenCalled();
+  });
+
+  it('a scoped reply on an inactive account (inactive-account retry) gets the whole-plan copy and refreshes', async () => {
+    const refreshCustomer = vi.fn().mockResolvedValue(undefined);
+    renderFlow({ refreshCustomer });
+    await submitScopedCancel({ processed: true, churned: true, confirmation: null, confirmationChannels: [], effectiveDate: '2026-08-31', scope: ['pest_control'], remaining: [], tierBefore: null, tierAfter: null });
+    await screen.findByText(/your plan is cancelled/i);
+    expect(screen.queryByText(/continue/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshCustomer).toHaveBeenCalledTimes(1));
+  });
+
   it('hold card asks for a resume date and sends it as params.resumeDate', async () => {
     renderFlow();
     await openReview();

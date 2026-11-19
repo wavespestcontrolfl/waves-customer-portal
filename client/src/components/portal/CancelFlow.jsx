@@ -250,13 +250,21 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         if (item && typeof item === 'object') return item.label || String(item.key || '');
         return families.find((f) => f.key === item)?.label || String(item || '');
       };
+      const scope = Array.isArray(c.scope) ? c.scope.map(label).filter(Boolean) : [];
+      const remaining = Array.isArray(c.remaining) ? c.remaining.map(label).filter(Boolean) : [];
+      // A scope alone marks a partial cancel: a retry the first attempt
+      // already wound down names the scope with the continuing families
+      // unknown (remaining []). An inactive account is never partial: the
+      // inactive-account retry can replay an older scoped request.
+      const partial = scope.length > 0 && c.churned !== true;
       setOutcome({
         processed: c.processed === true,
         confirmation: ['sms', 'email'].includes(c.confirmation) ? c.confirmation : null,
         channels: Array.isArray(c.confirmationChannels) ? c.confirmationChannels.filter((ch) => ['sms', 'email'].includes(ch)) : [],
         effectiveDate: /^\d{4}-\d{2}-\d{2}$/.test(c.effectiveDate || '') ? c.effectiveDate : null,
-        scope: Array.isArray(c.scope) ? c.scope.map(label).filter(Boolean) : [],
-        remaining: Array.isArray(c.remaining) ? c.remaining.map(label).filter(Boolean) : [],
+        partial,
+        scope,
+        remaining,
         tierAfter: c.tierAfter || null,
       });
       setStage('done');
@@ -271,7 +279,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
       // whole-account cancel whose later sweep step parked for office
       // review reports churned:true with processed:false — the account is
       // already inactive and the live-plan UI would 401 on its loaders.
-      if ((c.churned === true || c.processed === true) && !(Array.isArray(c.remaining) && c.remaining.length)) {
+      if ((c.churned === true || c.processed === true) && !partial) {
         try { await refreshCustomer?.(); } catch { /* stale until reload; the server state is already correct */ }
       }
     } catch (err) {
@@ -385,7 +393,9 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
     const channels = outcome.channels;
     // Partial cancel confirmed by the server: name what stopped and what
     // continues, from the commit response itself.
-    const scoped = outcome.scope.length > 0 && outcome.remaining.length > 0;
+    const scoped = outcome.partial;
+    // A repair-only retry names the scope but not the continuing families.
+    const continuing = outcome.remaining.length ? listWords(outcome.remaining) : 'your other services';
     const confirmationLine = channels.includes('sms') && channels.includes('email')
       ? ' A confirmation text and email are on the way.'
       : outcome.confirmation === 'sms' ? ' A confirmation text is on its way.'
@@ -394,7 +404,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
     return (
       <div role="status" style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 700, lineHeight: 1.5 }}>
         {outcome.processed
-          ? `${scoped ? `${listWords(outcome.scope)} cancelled; ${listWords(outcome.remaining)} continue${outcome.tierAfter ? ` under WaveGuard ${outcome.tierAfter}` : ''}` : `Your plan is cancelled${outcome.effectiveDate ? ` as of ${fmtDate(outcome.effectiveDate)}` : ''}`}. ${scoped ? 'The cancelled visits are off the calendar.' : 'Upcoming visits are off the calendar and autopay is off.'} Nothing more is charged for ${scoped ? 'the cancelled services' : 'future service'}; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${confirmationLine} Changed your mind? Call ${WAVES_PHONE_DISPLAY} and we will put it back.`
+          ? `${scoped ? `${listWords(outcome.scope)} cancelled; ${continuing} continue${outcome.tierAfter ? ` under WaveGuard ${outcome.tierAfter}` : ''}` : `Your plan is cancelled${outcome.effectiveDate ? ` as of ${fmtDate(outcome.effectiveDate)}` : ''}`}. ${scoped ? 'The cancelled visits are off the calendar.' : 'Upcoming visits are off the calendar and autopay is off.'} Nothing more is charged for ${scoped ? 'the cancelled services' : 'future service'}; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${confirmationLine} Changed your mind? Call ${WAVES_PHONE_DISPLAY} and we will put it back.`
           : 'We received your cancellation and are closing out your plan by hand. You will hear from us within 1 business day to confirm exactly what has stopped.'}
       </div>
     );

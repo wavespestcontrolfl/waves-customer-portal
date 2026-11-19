@@ -393,7 +393,7 @@ describe('POST /api/requests cancellation guard', () => {
   }));
 
   test('a clean SCOPED wind-down completed on retry closes the original row too — dedupe and inactive-account paths', () => withServer(async (baseUrl) => {
-    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
+    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], remaining: ['pest_control'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
 
     // Short-window dedupe: the original row is 10s old, its committed scope recoverable.
@@ -410,6 +410,9 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The retry reply names what stopped and what stays, like the first
+    // reply — without them the screen read a one-service cancel as whole-plan.
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: false, scope: ['mosquito'], remaining: ['pest_control'] }));
 
     // A SCOPED run whose only error is an earlier-day stuck visit is not
     // promoted on the portal (the stale-visit rule is whole-plan only here):
@@ -444,6 +447,10 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The route knows this account is inactive: the reply says so even though
+    // the replayed SCOPED run reports churned:false, so the screen refreshes
+    // and never claims other services continue.
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
   }));
 
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {

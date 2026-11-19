@@ -74,7 +74,10 @@ function cancellationConfirmedToCustomer(result) {
   return cancellationCompleted(result) || !!(result && result.churned && onlyStaleVisitErrorsLeft(result));
 }
 
-function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
+// accountInactive: the route KNOWS the account is inactive (the inactive-
+// account retry). The retry may replay an older SCOPED request whose result
+// says churned:false, so the reply states the account's real state.
+function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = [], { accountInactive = false } = {}) {
   let effectiveDate = null;
   try {
     const at = effectiveAt ? new Date(effectiveAt) : new Date();
@@ -95,11 +98,18 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // churned:true, ok:false — the account is already inactive and the
     // portal must refresh its auth snapshot even though the request is
     // parked for office review.
-    churned: !!(result && result.churned),
+    churned: !!(result && result.churned) || accountInactive,
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
     effectiveDate,
+    // Scoped cancels report exactly what stopped and what stays, on EVERY
+    // reply: a dedupe retry without them rendered a one-service cancel as
+    // "your plan is cancelled". A repair-only retry knows the scope but not
+    // the continuing families (remaining []).
+    scope: Array.isArray(result?.scope) ? result.scope : [],
+    remaining: Array.isArray(result?.remaining) ? result.remaining : [],
+    ...(result?.tierAfter !== undefined ? { tierBefore: result.tierBefore, tierAfter: result.tierAfter } : {}),
   };
 }
 const {
@@ -519,7 +529,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           photoCount: 0,
           createdAt: priorCancellation.created_at,
         },
-        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at),
+        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at, [], { accountInactive: true }),
       });
     }
 
@@ -967,18 +977,12 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // account is already churned when `processed` is true.
       ...(isCancellation
         ? {
-            cancellation: {
-              ...cancellationOutcome(
-                cancellationResult,
-                confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-                request.created_at,
-                [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
-              ),
-              // Scoped cancels report exactly what stopped and what stays.
-              scope: Array.isArray(cancellationResult?.scope) ? cancellationResult.scope : [],
-              remaining: Array.isArray(cancellationResult?.remaining) ? cancellationResult.remaining : [],
-              ...(cancellationResult?.tierAfter !== undefined ? { tierBefore: cancellationResult.tierBefore, tierAfter: cancellationResult.tierAfter } : {}),
-            },
+            cancellation: cancellationOutcome(
+              cancellationResult,
+              confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
+              request.created_at,
+              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
+            ),
           }
         : {}),
     });
