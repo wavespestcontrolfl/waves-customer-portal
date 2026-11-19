@@ -238,10 +238,20 @@ and 3.
   it was not given and cannot establish.
 - **Rain check, automatic.** The plan's own rule is that half an inch of
   rain before a run skips that run. Before each run the worker reads the
-  observed rain for the home's water area, the figure the daily
-  property-alerts sweep already uses (`rainRuleCandidates`,
-  `server/services/property-alerts.js:89`), and skips at half an inch or
-  more.
+  rain at the home from the ladder Monday's plan already uses
+  (`fetchServiceWeekWeather`, called in
+  `server/services/irrigation-weekly-email.js`): NOAA radar rainfall at the
+  home's coordinates first, Open-Meteo second (owner ruling 2026-07-30,
+  `server/services/mrms-qpe.js`). It skips at half an inch or more.
+- **A reading can be missing.** Both rungs are outside services, and the
+  radar rung is a free university relay with no uptime promise. On
+  2026-11-02 both failed for one home in 45.
+  - Missing on Monday: there is no plan for that home that week, as today,
+    so nothing runs. The office already gets a bell for it
+    (`server/services/irrigation-rain-unknown-alert.js`). For a home on
+    automatic runs that bell has to say the lawn will not be watered until
+    someone decides.
+  - Missing at run time: open, decision 8.
 - **After a treatment.** A run that falls inside a pause waits for the
   pause to end and still has to land in a permitted slot. Otherwise it is
   dropped, the rule the report already applies (`renderWeekPlanNotBefore`,
@@ -345,10 +355,12 @@ established.
 6. **Who installs a module** when a customer wants one: the customer, or an
    irrigation contractor Waves refers.
 7. **The pilot list** after the bench test.
-8. **Step 4.** Whether Waves may start watering on a schedule at all; that
-   the customer, not Waves, sets the day and time; and what a missing
-   rain reading does (recommended: the run goes ahead, because skipping on
-   missing data leaves a lawn dry week after week).
+8. **Step 4.** Decided by the owner 2026-11-19: Waves may start watering
+   on a schedule once the customer has switched that on, and the customer
+   sets the day and time. Still open: what a run does when no rain reading
+   can be had at run time. Recommended: retry through the allowed window,
+   then run, because Monday's plan already found the lawn needs water and
+   skipping on missing data leaves it dry.
 
 ## Risks and unknowns
 
