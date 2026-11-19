@@ -35,6 +35,7 @@ const row = (id, extra = {}) => ({
 
 let candidates;
 let invoices;
+let emails;
 let jobs;
 let prefs;
 let failing;
@@ -43,13 +44,19 @@ function chain(table) {
   const q = { calls: [], filter: null };
   const rec = (name) => (...args) => { q.calls.push([name, ...args]); return q; };
   Object.assign(q, {
-    join: rec('join'), joinRaw: rec('joinRaw'), leftJoin: rec('leftJoin'), whereNull: rec('whereNull'), whereNotIn: rec('whereNotIn'),
+    join: rec('join'), joinRaw: rec('joinRaw'), leftJoin: rec('leftJoin'), whereNull: rec('whereNull'), whereNotIn: rec('whereNotIn'), whereIn: rec('whereIn'),
     where: (...args) => { q.calls.push(['where', ...args]); if (args[0] && typeof args[0] === 'object') q.filter = args[0]; return q; },
     select: async (...cols) => { sqlCalls.push({ table, calls: q.calls, cols }); return candidates; },
     first: async () => {
       if (failing?.table === table) throw Object.assign(new Error('boom: secret-token'), { code: 'XX000' });
       const id = q.filter?.id ?? q.filter?.invoice_id;
-      if (table === 'invoices') return invoices.find((r) => r.id === id);
+      // The pre-raise re-read finds the candidate itself unless a test gives the invoice a newer state.
+      if (table === 'invoices') return invoices.find((r) => r.id === id) ?? candidates.find((r) => r.id === id);
+      if (table === 'email_messages') {
+        const where = q.calls.find(([name]) => name === 'whereIn');
+        const msg = emails[q.filter.trigger_event_id];
+        return msg && where[2].includes(msg.status) ? msg : undefined;
+      }
       if (table === 'receipt_delivery_jobs') return jobs[id] || undefined;
       if (table === 'notification_prefs') return prefs[q.filter.customer_id] || undefined;
       return undefined;
@@ -67,6 +74,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   candidates = [row(A)];
   invoices = [];
+  emails = {};
   jobs = {};
   prefs = {};
   failing = null;
@@ -175,6 +183,26 @@ describe('raising', () => {
     expect(bell.opts.dedupeKey).toBe(keyOf(A));
   });
 
+  test('an accepted receipt email (any sender, keyed invoice_receipt:<id>) rings nothing; a failed one does not count', async () => {
+    candidates = [row(A), row(B)];
+    emails = { [`invoice_receipt:${A}`]: { id: 'm-1', status: 'delivered' }, [`invoice_receipt:${B}`]: { id: 'm-2', status: 'failed' } };
+    await run();
+    expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
+  });
+
+  test('a receipt stamped after the batch read (an SMS-only send leaves no job) rings nothing', async () => {
+    candidates = [row(A)];
+    invoices = [{ ...row(A), receipt_sms_sent_at: new Date('2026-11-18T19:49:00Z') }];
+    expect(await run()).toMatchObject({ candidates: 1, raised: 0, failed: 0 });
+    expect(raised()).toEqual([]);
+  });
+
+  test('the bell refreshes its words quietly when they change (send to check), keeping its read and Done state', async () => {
+    await run();
+    expect(raised()[0].opts).toMatchObject({ refreshOnDedupe: true });
+    expect(raised()[0].opts.ringOnRefresh()).toBe(false);
+  });
+
   test('a customer with no real name still gets a bell', async () => {
     candidates = [row(A, { first_name: null, last_name: null, payment_method: null })];
     await run();
@@ -227,6 +255,7 @@ describe('closing', () => {
     ['invoice archived', { archived_at: new Date('2026-11-18T18:00:00Z') }, 'Invoice archived', null],
     ['receipts turned off', {}, 'Receipts turned off', () => { prefs = { 'cust-1': { payment_receipt: false } }; }],
     ['receipt delivered', {}, 'Receipt delivered', () => { jobs = { [A]: { status: 'completed', email_result: { ok: true } } }; }],
+    ['receipt emailed', {}, 'Receipt emailed', () => { emails = { [`invoice_receipt:${A}`]: { id: 'm-1', status: 'sent' } }; }],
     ['the visit text alert covers it', {}, 'The visit text alert covers it', () => { jobs = { [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } } }; }],
   ])('%s closes the bell with a one-line resolution', async (why, change, resolution, arrange) => {
     candidates = [];
