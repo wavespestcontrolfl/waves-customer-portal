@@ -7142,7 +7142,9 @@ function priceTrenching(property = {}, options = {}, replay) {
     : defaultTrenchingWarrantyTier(product);
   const warrantyConfig = cfg.warrantyTiers?.[warrantyTier] || cfg.warrantyTiers?.none || {};
   const labelConfirmed = labelCheckCounts(options, productResolution.productKey, product);
-  const labelConfirmationRequiredForPayload = !legacyTrenchingPayload;
+  // A bifenthrin bottle always needs its label confirmed, a legacy payload's configured default included (the bottle changed
+  // 2026-11-18; pre-push audit 13). Other legacy payloads keep main's exemption.
+  const labelConfirmationRequiredForPayload = !legacyTrenchingPayload || BIFENTHRIN_TERMITICIDE_KEYS.has(productResolution.productKey);
   const warningList = [
     ...(product.warnings || []),
     ...productResolution.warnings,

@@ -6,6 +6,7 @@
  */
 const migration = require('../models/migrations/20261119020000_bifenthrin_option_crosscheck');
 const constants = require('../services/pricing-engine/constants');
+const { calculateInventoryCost } = require('../services/inventory-cost');
 
 // The inventory price handler's recalculation (routes/admin-inventory recalcBestPrice), which Step P runs after it corrects the
 // SiteOne row. Simulated on the fake rows, all 1 gal packs: the cheapest active, approved, unexpired row wins, scaled to the catalog
@@ -145,9 +146,14 @@ const PRESLAB_REWRITTEN = { margin_divisor: 0.5294, product_oz_per_10_sqft: 1, .
 const TRENCH_REWRITTEN = {
   product_oz_per_finished_gallon_at_high_rate: 2, product_oz_per_finished_gallon_at_standard_rate: 1, ...CROSSCHECK_TRENCH,
 };
-// The stale mark: what recalcBestPriceLocked writes when it keeps a catalog price it cannot trust. The price itself stays.
+// The stale mark: what recalcBestPriceLocked writes when it keeps a catalog price it cannot trust. The price itself stays, and job
+// costing leaves it uncosted: calculateInventoryCost skips a needs_pricing package price, as the estimate links do (pre-push audit 13).
 const STALE_WARNING = /marked needs pricing \(stale\) and quotes use \$30\.90/;
-const expectMarked = (row) => expect(row).toMatchObject({ needs_pricing: true, best_price_status: 'stale', best_price: '58.42' });
+const expectMarked = (row) => {
+  expect(row).toMatchObject({ needs_pricing: true, best_price_status: 'stale', best_price: '58.42' });
+  expect(calculateInventoryCost({ product: row, deductedAmount: 16, inventoryUnit: 'fl_oz', amount: 16, amountUnit: 'fl_oz' }))
+    .toEqual({ unitCost: null, costUsed: null });
+};
 const auditKeys = (db) => db.pricing_config_audit.map((r) => r.config_key).sort();
 const OPTIONS = ['talstar_p', 'bifen_it'];
 

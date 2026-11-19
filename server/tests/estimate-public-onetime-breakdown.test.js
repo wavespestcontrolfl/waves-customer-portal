@@ -115,7 +115,8 @@ describe('public estimate one-time breakdown', () => {
           trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true, warrantyTier },
         },
       } };
-      const estimate = { id: `ask-recurring-trench-${warrantyTier}`, status: 'draft',
+      // A draft row carries both publication columns, null: a fixture without them reads as issued (estimateNeverIssued).
+      const estimate = { id: `ask-recurring-trench-${warrantyTier}`, status: 'draft', sent_at: null, viewed_at: null,
         show_one_time_option: false, monthly_total: 55, onetime_total: 2400, estimate_data: data };
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const pricing = await buildPricingBundle(estimate, { monthlyBilled: true });
@@ -2991,6 +2992,54 @@ describe('public estimate one-time breakdown', () => {
       amount: payload.anchorOneTimePrice,
     }));
     expect(payload.oneTimeBreakdown.total).toBe(payload.anchorOneTimePrice);
+  });
+
+  // The termiticide pins come only from stored rows (owner 2026-11-18 bottle swap), so an engineInputs-only estimate cannot replay
+  // the bottle it was quoted with: a 6,832 sq ft bifenthrin slab issued at $993 under the Talak bottle replays $743. Issued, it goes
+  // to review on every money gate's resolver; at its issued total, or never issued, it prices live (pre-push audit 13).
+  test('an issued engineInputs-only slab quote whose replayed total moved goes to review', async () => {
+    const slabQuote = (extra) => ({
+      id: `estimate-public-inputs-only-slab-${extra.onetime_total}-${extra.status}`,
+      estimate_data: {
+        engineInputs: {
+          propertyType: 'single_family',
+          homeSqFt: 1800,
+          lotSqFt: 7000,
+          stories: 1,
+          serviceZone: 'A',
+          nearWater: 'NO',
+          features: {},
+          services: { preSlabTermiticide: { slabSqFt: 6832, productKey: 'talstar_p' } },
+        },
+      },
+      waveguard_tier: 'Bronze',
+      sent_at: extra.status === 'draft' ? null : '2026-11-10T15:00:00Z',
+      viewed_at: null,
+      ...extra,
+    });
+    const issuedEarlier = slabQuote({ onetime_total: 993, status: 'sent' });
+    const moved = await buildPricingBundle(issuedEarlier);
+    expect(moved.source).toBe('engine_invocation');
+    expect(moved.oneTimeBreakdown.total).toBe(743);
+    expect(moved).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote' });
+    expect(resolveEstimateQuoteRequirement(moved, issuedEarlier.estimate_data))
+      .toMatchObject({ quoteRequired: true, reason: 'termiticide_price_changed_requote' });
+    for (const extra of [{ onetime_total: 743, status: 'sent' }, { onetime_total: 993, status: 'draft' }]) {
+      const quote = slabQuote(extra);
+      const live = await buildPricingBundle(quote);
+      expect(live.oneTimeBreakdown.total).toBe(743);
+      expect(resolveEstimateQuoteRequirement(live, quote.estimate_data).quoteRequired).toBe(false);
+    }
+    // A stored row pins the slab (an agent draft's engineResult): it replays its sent $993, and a total that moved elsewhere is
+    // never a termiticide hold.
+    const pinned = slabQuote({ id: 'estimate-public-inputs-only-slab-pinned', onetime_total: 1000, status: 'sent' });
+    pinned.estimate_data.engineResult = { lineItems: [{
+      service: 'pre_slab_termiticide', productKey: 'talstar_p', containerCost: 41.57, containerOz: 96, price: 993,
+    }] };
+    const kept = await buildPricingBundle(pinned);
+    expect(kept.oneTimeBreakdown.total).toBe(993);
+    expect(kept.quoteRequiredReason).not.toBe('termiticide_price_changed_requote');
+    expect(resolveEstimateQuoteRequirement(kept, pinned.estimate_data).quoteRequired).toBe(false);
   });
 
   test('detects nested legacy one-time-only estimates for acceptance flow', () => {

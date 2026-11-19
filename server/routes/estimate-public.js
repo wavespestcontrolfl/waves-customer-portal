@@ -134,6 +134,7 @@ const {
   WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 const {
+  moneyMatches,
   pricingBundleMatchesEstimateTotals,
   resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
@@ -3661,6 +3662,8 @@ const FRIENDLY_QUOTE_REASONS = {
     'This estimate’s lawn plan uses a retired schedule — call Waves and we’ll refresh your quote with the current lawn plan options.',
   legacy_lawn_pricing_requote:
     'Our lawn care programs have been updated since this quote was sent — call Waves and we’ll refresh your lawn plan with current pricing.',
+  termiticide_price_changed_requote:
+    'Our termite treatment pricing has been updated since this quote was sent — call Waves and we’ll refresh your quote with current pricing.',
   retired_tree_shrub_cadence_requote:
     'Our tree & shrub programs have been updated since this quote was sent — call Waves and we’ll refresh your tree & shrub plan with current pricing.',
   retired_tree_shrub_cadence_selection:
@@ -20573,6 +20576,24 @@ function extractEngineInputs(estData) {
   return out;
 }
 
+// Termiticide pins (owner 2026-11-18 bottle swap): savedFloorReplayOverrides below sets a slab or trench pin only from a stored
+// row, so an issued estimate with none (an engineInputs-only estimate keeps no stored row) cannot replay the product cost it was
+// quoted with. When its replayed one-time total no longer matches the issued one, the quote goes to review instead of selling a
+// moved price. A never-issued draft prices live (pre-push audit 13).
+const TERMITICIDE_PIN_KEYS = new Map([
+  ['pre_slab_termiticide', 'preSlabTermiticidePricingKnobs'],
+  ['trenching', 'trenchingTermiticidePricingKnobs'],
+]);
+function termiticideRequoteNeeded(estData, estimate, engineInputs, engineResult, replayedOneTimeTotal) {
+  const issued = Number(estimate?.onetime_total);
+  if (estData?.[UNISSUED_ESTIMATE] === true || !(issued > 0) || moneyMatches(replayedOneTimeTotal, issued)) return false;
+  const lines = Array.isArray(engineResult?.lineItems) ? engineResult.lineItems : [];
+  return lines.some((line) => {
+    const pinKey = TERMITICIDE_PIN_KEYS.get(line?.service);
+    return !!pinKey && !engineInputs?.[pinKey];
+  });
+}
+
 // Input-level floor overrides for an engine replay of this stored estimate.
 // Only keys with an actual saved signal are set (absence = replay live).
 function savedFloorReplayOverrides(estData) {
@@ -30146,7 +30167,10 @@ async function buildPricingBundleInner(estimate) {
     });
   }
 
+  const termiticideRequote = termiticideRequoteNeeded(estData, estimate, engineInputs, anchorEngineResult,
+    generatedOneTimeBreakdown.total);
   const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
+    ...(termiticideRequote ? { quoteRequired: true, quoteRequiredReason: 'termiticide_price_changed_requote' } : {}),
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,

@@ -13,3 +13,9 @@ describe("area add-on custom-quote reasons read in plain words", () => {
     expect(humanizeQuoteReason("Already plain.")).toBe("Already plain.");
   });
 });
+
+describe("a termite quote re-priced since it was sent", () => {
+  it("asks the customer to call instead of showing the moved price", () => {
+    expect(humanizeQuoteReason("termiticide_price_changed_requote")).toBe("Our termite treatment pricing has been updated since this quote was sent — call Waves and we’ll refresh your quote with current pricing.");
+  });
+});

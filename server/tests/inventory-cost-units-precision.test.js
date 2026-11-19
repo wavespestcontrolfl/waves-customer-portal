@@ -81,4 +81,14 @@ describe('unit conversions keep their precision', () => {
     expect(costUsed).toBe(0.0264);
     expect(costUsed * 100).toBeCloseTo(2.64, 6);
   });
+
+  // A package price the inventory cannot trust (needs_pricing, what the estimate bridge's catalog links skip too) is never a job
+  // cost: it stays uncosted like a product with no price, and a per-unit cost still prices the amount.
+  test('a package price marked needs_pricing stays uncosted; a per-unit cost still prices the amount', () => {
+    const pkg = { best_price: 58.42, unit_size_oz: 128 };
+    const cost = (product) => calculateInventoryCost({ product, deductedAmount: 16, inventoryUnit: 'fl_oz', amount: 16, amountUnit: 'fl_oz' });
+    expect(cost({ ...pkg, needs_pricing: false })).toEqual({ unitCost: 0.4564, costUsed: 7.3025 });
+    expect(cost({ ...pkg, needs_pricing: true })).toEqual({ unitCost: null, costUsed: null });
+    expect(cost({ ...pkg, needs_pricing: true, cost_per_unit: 0.2414, cost_unit: 'fl_oz' })).toEqual({ unitCost: 0.2414, costUsed: 3.8624 });
+  });
 });

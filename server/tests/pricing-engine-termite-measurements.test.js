@@ -300,6 +300,17 @@ describe('termite measurement overrides and safeguards', () => {
 
     const legacyPayload = priceTrenching({ perimeter: 100 });
     expect(legacyPayload.manualReviewReasons || []).not.toContain('label_confirmation_required');
+    // A bifenthrin bottle always needs its label confirmed, a legacy payload's configured default included (pre-push audit 13).
+    const trenchCfg = require('../services/pricing-engine/constants').SPECIALTY.trenching;
+    const savedDefault = trenchCfg.defaultProductKey;
+    trenchCfg.defaultProductKey = 'bifen_it';
+    try {
+      const legacyBifenthrin = priceTrenching({ perimeterLF: 200 }, {});
+      expect(legacyBifenthrin).toMatchObject({ productKey: 'bifen_it', labelConfirmed: false, requiresManualReview: true });
+      expect(legacyBifenthrin.manualReviewReasons).toContain('label_confirmation_required');
+    } finally {
+      trenchCfg.defaultProductKey = savedDefault;
+    }
 
     const depthOverride = priceTrenching({ perimeter: 100 }, {
       trenchDepthFt: 1.5,
