@@ -38,6 +38,7 @@ const tableResults = {
   unpaidTotal: '0',
   recentAttempts: [],
   linkedNonDraftInvoices: [],
+  linkedInvoiceLookupError: null,
   // Rows the open-invoice (Pay now) query returns. That query is the only
   // invoices read that combines whereNull with a list terminal (no .first()),
   // which is how the mock below routes to it.
@@ -79,10 +80,20 @@ jest.mock('../models/db', () => {
       // Pay-now open-invoice list: whereNull filters, list terminal.
       if (calls.some(([m]) => m === 'whereNull')) {
         tableResults.lastOpenInvoicesCalls = calls;
-        return tableResults.openInvoiceRows;
+        const failedDraftIds = new Set(calls
+          .filter(([m, args]) => m === 'whereIn' && args[0] === 'id')
+          .flatMap(([, args]) => args[1]).map(String));
+        return tableResults.openInvoiceRows.filter((row) => (
+          row.status == null
+          || ['sent', 'viewed', 'overdue'].includes(row.status)
+          || (row.status === 'draft' && failedDraftIds.has(String(row.id)))
+        ));
       }
       // failed-row status lookup (whereIn('id', …) + whereNot draft)
-      if (calls.some(([m]) => m === 'whereIn')) return tableResults.linkedNonDraftInvoices;
+      if (calls.some(([m]) => m === 'whereIn')) {
+        if (tableResults.linkedInvoiceLookupError) throw tableResults.linkedInvoiceLookupError;
+        return tableResults.linkedNonDraftInvoices;
+      }
       return tableResults.unpaidTotal;
     }
     if (table === 'payments') {
@@ -94,6 +105,10 @@ jest.mock('../models/db', () => {
     throw new Error(`Unexpected table ${table}`);
   }));
   dbFn.raw = (sql) => sql;
+  const trxFn = jest.fn((table) => dbFn(table));
+  trxFn.raw = dbFn.raw;
+  dbFn.__balanceTrx = trxFn;
+  dbFn.transaction = jest.fn((callback) => callback(trxFn));
   return dbFn;
 });
 
@@ -122,6 +137,7 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     tableResults.unpaidTotal = '0';
     tableResults.recentAttempts = [];
     tableResults.linkedNonDraftInvoices = [];
+    tableResults.linkedInvoiceLookupError = null;
     tableResults.openInvoiceRows = [];
     tableResults.lastOpenInvoicesCalls = null;
     isEnabled.mockImplementation(() => true);
@@ -174,15 +190,54 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     tableResults.linkedNonDraftInvoices = []; // draft → not balance-carrying
     tableResults.recentAttempts = [{ status: 'failed', metadata: null }];
     tableResults.openInvoiceRows = [
-      { token: 'tok-draft', invoice_number: 'INV-DRAFT-1', due_date: null, total: '89.00', credit_applied: null },
+      { id: draftId, status: 'draft', token: 'tok-draft', invoice_number: 'INV-DRAFT-1', due_date: null, total: '89.00', credit_applied: null },
     ];
 
     const body = await getBalance();
     expect(body.currentBalance).toBe(89);
-    expect(tableResults.lastOpenInvoicesCalls).toContainEqual(['orWhereIn', ['id', [draftId]]]);
+    expect(tableResults.lastOpenInvoicesCalls).toEqual(expect.arrayContaining([
+      ['where', [{ status: 'draft' }]],
+      ['whereIn', ['id', [draftId]]],
+    ]));
     expect(body.lastPaymentFailed).toBe(true);
     expect(body.openInvoices).toEqual([
       { payUrl: '/pay/tok-draft', amountDue: 89, invoiceNumber: 'INV-DRAFT-1', dueDate: null },
+    ]);
+  });
+
+  test('the failed-id shortcut rechecks draft status before returning a bearer token', async () => {
+    const retiredId = 'de27b36a-3054-4c64-93e4-0d15b785bb34';
+    tableResults.failedRows = [{ amount: '31.00', metadata: { invoice_id: retiredId } }];
+    tableResults.openInvoiceRows = [
+      { id: retiredId, status: 'void', token: 'retired-token', invoice_number: 'INV-VOID', total: '31.00' },
+    ];
+
+    const body = await getBalance();
+
+    expect(tableResults.lastOpenInvoicesCalls).toEqual(expect.arrayContaining([
+      ['where', [{ status: 'draft' }]],
+      ['whereIn', ['id', [retiredId]]],
+    ]));
+    expect(body.openInvoices).toEqual([]);
+  });
+
+  test('an unresolved failed-invoice status cannot mint a shortcut for a retired invoice; ordinary open rows remain', async () => {
+    const failedId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
+    tableResults.failedRows = [{ amount: '89.00', metadata: { invoice_id: failedId.toUpperCase() } }];
+    tableResults.linkedInvoiceLookupError = new Error('status lookup unavailable');
+    tableResults.openInvoiceRows = [
+      { id: failedId, status: 'paid', token: 'retired-token', invoice_number: 'INV-PAID', total: '89.00' },
+      { id: 'de27b36a-3054-4c64-93e4-0d15b785bb34', status: 'sent', token: 'open-token', invoice_number: 'INV-OPEN', total: '31.00' },
+    ];
+
+    const body = await getBalance();
+
+    expect(body.currentBalance).toBe(0);
+    expect(tableResults.lastOpenInvoicesCalls).not.toEqual(expect.arrayContaining([
+      ['whereIn', ['id', [failedId.toUpperCase()]]],
+    ]));
+    expect(body.openInvoices).toEqual([
+      { payUrl: '/pay/open-token', amountDue: 31, invoiceNumber: 'INV-OPEN', dueDate: undefined },
     ]);
   });
 

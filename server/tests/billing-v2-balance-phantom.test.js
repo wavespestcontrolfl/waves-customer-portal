@@ -85,15 +85,16 @@ jest.mock('../models/db', () => {
       // unpaidInvoices uses whereIn('status', …) but terminates with .first();
       // the failed-row status lookup uses whereIn('id', …) with no .first().
       if (wantFirst) return { total: tableResults.unpaidTotal };
-      if (calls.some(([m, args]) => m === 'whereIn' && args[0] === 'id')) return tableResults.linkedNonDraftInvoices;
       // Pay-now open-invoice list (status filter lives in a where-group, so
-      // it is keyed off its whereNull payer filters).
+      // it is keyed off its whereNull payer filters). Check this before the
+      // status lookup: the failed-draft rescue now has its own whereIn('id').
       if (calls.some(([m]) => m === 'whereNull')) {
         const excluded = new Set(calls
           .filter(([m, args]) => m === 'whereNotIn' && args[0] === 'id')
           .flatMap(([, args]) => args[1]).map(String));
         return tableResults.openInvoices.filter((row) => !excluded.has(String(row.id)));
       }
+      if (calls.some(([m, args]) => m === 'whereIn' && args[0] === 'id')) return tableResults.linkedNonDraftInvoices;
       return tableResults.unpaidTotal;
     }
     if (table === 'payments') {
@@ -107,6 +108,18 @@ jest.mock('../models/db', () => {
     throw new Error(`Unexpected table ${table}`);
   }));
   dbFn.raw = (sql) => sql;
+  const trxFn = jest.fn((table) => dbFn(table));
+  trxFn.raw = dbFn.raw;
+  dbFn.__balanceTrx = trxFn;
+  dbFn.__snapshotActive = false;
+  dbFn.transaction = jest.fn(async (callback, options) => {
+    dbFn.__snapshotActive = true;
+    try {
+      return await callback(trxFn);
+    } finally {
+      dbFn.__snapshotActive = false;
+    }
+  });
   return dbFn;
 });
 
@@ -124,7 +137,8 @@ async function getBalance() {
     customer: { id: 'cust-1', monthly_rate: '55.00', waveguard_tier: 'silver' },
   };
   let body = null;
-  const res = { json: (payload) => { body = payload; } };
+  const database = require('../models/db');
+  const res = { json: (payload) => { body = payload; getBalance.publishedDuringSnapshot = database.__snapshotActive; } };
   let error = null;
   await handler(req, res, (err) => { error = err; });
   if (error) throw error;
@@ -144,6 +158,7 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     tableResults.openInvoices = [];
     tableResults.liveOwnedInvoices = [];
     tableResults.linkedNonDraftInvoices = [];
+    getBalance.publishedDuringSnapshot = null;
     mockLoadLivePayerLinkage.mockImplementation(async () => {
       if (tableResults.payerInvoices instanceof Error) {
         return { failed: true, payerInvoiceIds: new Set(), liveOwnedIds: new Set(), liveOwnedRows: [], isPayerLinked: () => false };
@@ -158,13 +173,39 @@ describe('GET /balance — phantom failed-row exclusion', () => {
     });
   });
 
+  test('every ownership, amount, status and token read shares one repeatable-read snapshot, committed before publish', async () => {
+    mockPortalPayNow = true;
+    await getBalance();
+
+    const database = require('../models/db');
+    expect(database.transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: 'repeatable read', readOnly: true },
+    );
+    expect(mockLoadLivePayerLinkage).toHaveBeenCalledWith('cust-1', database.__balanceTrx);
+    expect(database.__balanceTrx.mock.calls.map(([table]) => table)).toEqual([
+      'payments', // failed facts
+      'payments', // upcoming amount
+      'invoices', // unpaid sum
+      'payments', // latest-attempt banner
+      'invoices', // Pay-now tokens
+    ]);
+    expect(getBalance.publishedDuringSnapshot).toBe(false);
+  });
+
   test('the latest attempt excludes direct and invoice-linked payer rows before choosing the homeowner’s payment', async () => {
-    tableResults.payerInvoices = [{ id: 'payer-invoice', stripe_charge_id: 'ch_payer' }];
+    const payerInvoiceId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
+    const homeownerInvoiceId = 'de27b36a-3054-4c64-93e4-0d15b785bb34';
+    tableResults.payerInvoices = [{ id: payerInvoiceId, stripe_charge_id: 'ch_payer' }];
     tableResults.recentAttempts = [
       { id: 'direct', status: 'failed', payer_id: 'third-party' },
       { id: 'stamped', status: 'failed', metadata: JSON.stringify({ payer_id: 'third-party' }) },
       { id: 'linked', status: 'failed', stripe_charge_id: 'ch_payer' },
-      { id: 'alias', status: 'failed', metadata: { waves_invoice_id: 'payer-invoice' } },
+      {
+        id: 'alias',
+        status: 'failed',
+        metadata: { invoice_id: homeownerInvoiceId, waves_invoice_id: payerInvoiceId.toUpperCase() },
+      },
     ];
     const payerRows = tableResults.recentAttempts.map((row) => ({ ...row, amount: '99.00' }));
     tableResults.failedRows = [...payerRows, { amount: '12.00' }];

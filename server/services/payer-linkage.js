@@ -48,7 +48,11 @@ const descriptionInvoiceNumberOf = (p) => {
 // Build the predicate from the customer's payer-owned invoice rows
 // ({ id, stripe_payment_intent_id, stripe_charge_id, invoice_number }).
 function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
-  const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+  // invoices.id is a UUID, so PostgreSQL's canonical form is lowercase even
+  // when a historical payment stamp preserved uppercase input. Compare every
+  // invoice reference on the payment after the same normalization: one stale
+  // self-pay alias must not hide a second alias that names payer-owned debt.
+  const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id).toLowerCase()));
   const payerIntentIds = new Set(payerInvRows.map((r) => r.stripe_payment_intent_id).filter(Boolean));
   const payerChargeIds = new Set(payerInvRows.map((r) => r.stripe_charge_id).filter(Boolean));
   const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
@@ -56,8 +60,7 @@ function buildPayerLinkage(payerInvRows, { failed = false } = {}) {
     // A row the ledger stamps as the payer's directly (payments.payer_id, or metadata.payer_id on statement refunds and
     // disputes) is the payer's whatever it links to.
     if (p.payer_id != null || metadataOf(p)?.payer_id != null) return true;
-    const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
-    if (invId && payerInvoiceIds.has(invId)) return true;
+    if (paymentInvoiceIds(p).some((invId) => payerInvoiceIds.has(invId))) return true;
     if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;
     if (p.stripe_charge_id && payerChargeIds.has(p.stripe_charge_id)) return true;
     const num = descriptionInvoiceNumberOf(p);
