@@ -114,23 +114,34 @@ export function isStaleWrite(err) {
 }
 
 // A write whose answer was lost: no reply, a 5xx, or a reply that could not be
-// read. The server may have done it, so the form re-reads before it offers the
+// read. The server may have done it, so the screen re-reads before it offers the
 // write again. A 4xx answer is a refusal: nothing was written.
 export function isLostAnswer(err) {
   const status = Number(err?.status);
   return !(status >= 400 && status < 500);
 }
 
-// After a lost answer, the re-read showed the draft as it was: nothing was written.
+// GATE_JOB_OFFERS off: every offer endpoint answers exactly 404 { enabled: false }.
+export function isGateOffAnswer(err) {
+  return err?.status === 404 && err?.body?.enabled === false;
+}
+
+// After a lost answer the re-read still showed the old state. The write may still
+// finish on the server. If it did, a repeat is refused (the server locks the offer
+// and checks its state), so nothing happens twice. No text claims an outcome the
+// screen cannot know.
 export const LOST_ANSWER_TEXT = {
-  save: "The save got no answer, and the draft did not change, so nothing was saved. Try again.",
-  send: "The send got no answer, and the offer is still a draft, so it did not go out. Try again.",
+  save: "The save got no answer. The draft still reads as before, but the save may still finish. If it did, saving again is refused and this form shows the newer version.",
+  send: "The send got no answer. The offer still reads as a draft, but it may still go out. If it did, sending again is refused, so it cannot go out twice.",
+  card: "No answer came back. The card shows the offer as it reads now, but the action may still finish. If it did, a repeat is refused.",
 };
 
 export function money(value) {
   const n = Number(value);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : "";
 }
+
+const OFFERS_OFF_TEXT = "Job offers are turned off, so this did not go through. The plain Offer move works as before.";
 
 const ERROR_TEXT = {
   TERMS_NOT_ISSUED: "The shared Technician Terms are not issued yet. Issue them in Staff Documents first.",
@@ -147,6 +158,7 @@ const ERROR_TEXT = {
 
 // err = the Error the offer API helper throws (err.body.code on a 409).
 export function offerErrorMessage(err) {
+  if (isGateOffAnswer(err)) return OFFERS_OFF_TEXT;
   const code = err?.body?.code || err?.code;
   return ERROR_TEXT[code] || err?.message || "Something went wrong. Try again.";
 }

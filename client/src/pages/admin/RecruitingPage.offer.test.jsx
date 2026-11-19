@@ -1087,6 +1087,44 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(calls.filter((c) => c.method === 'GET' && c.path === '/admin/careers/app-1').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('a withdraw whose answer is lost re-reads: the confirm closes and the card shows the offer as it reads now', async () => {
+    let current = offerRecord({ status: 'sent', timeline: [] });
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { current = offerRecord({ status: 'withdrawn', timeline: [] }); return res(502, { error: 'Bad gateway' }); } },
+      { offer: () => res(200, offerPayload({ current })), detail: detailFixture({ status: 'offer' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull());
+    const after = screen.getByTestId('offer-card');
+    expect(within(after).getByText('No answer came back. The card shows the offer as it reads now, but the action may still finish. If it did, a repeat is refused.')).toBeInTheDocument();
+    await waitFor(() => expect(within(screen.getByTestId('offer-card')).getByText('Withdrawn')).toBeInTheDocument());
+    expect(within(screen.getByTestId('offer-card')).queryByRole('button', { name: 'Withdraw offer' })).toBeNull();
+    expect(screen.queryByText('Bad gateway')).toBeNull();
+  });
+
+  it('a withdraw answered gate-off turns the offer card off and brings back the plain stage moves', async () => {
+    let off = false;
+    setupFetch(
+      { 'POST /admin/careers/app-1/offer/offer-1/withdraw': () => { off = true; return res(404, { enabled: false }); } },
+      { offer: () => (off ? res(404, { enabled: false }) : res(200, offerPayload({ current: offerRecord({ status: 'sent', timeline: [] }) }))), detail: detailFixture({ status: 'offer' }) },
+    );
+    render(<MemoryRouter><RecruitingPage /></MemoryRouter>);
+    fireEvent.click(await screen.findByText(CONTACT.name));
+    const card = await screen.findByTestId('offer-card');
+    fireEvent.click(within(card).getByRole('button', { name: 'Withdraw offer' }));
+    const dialog = (await screen.findByText(/Withdraw this offer for Jordan/)).closest('[role="dialog"]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+    await waitFor(() => expect(screen.queryByTestId('offer-card')).toBeNull());
+    expect(screen.queryByText(/Withdraw this offer for Jordan/)).toBeNull();
+    expect(screen.queryByText('HTTP 404')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Hired' })).not.toBeDisabled();
+  });
+
   it('OFFER_NOT_WITHDRAWABLE (the offer expired meanwhile) closes the confirm, says so and shows the offer as closed', async () => {
     let current = offerRecord({ status: 'sent', timeline: [] });
     setupFetch(
@@ -1126,7 +1164,8 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
     const confirm = (await screen.findByText(/Send this offer to Jordan/)).closest('[role="dialog"]');
     fireEvent.click(within(confirm).getByRole('button', { name: 'Send offer' }));
-    expect(await screen.findByText('The send got no answer, and the offer is still a draft, so it did not go out. Try again.')).toBeInTheDocument();
+    // The draft still reads as before, but the send may still finish on the server: no claim either way.
+    expect(await screen.findByText('The send got no answer. The offer still reads as a draft, but it may still go out. If it did, sending again is refused, so it cannot go out twice.')).toBeInTheDocument();
     expect(screen.queryByText(/Send this offer to Jordan/)).toBeNull();
     expect(screen.getByLabelText('Hourly rate ($)')).not.toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Send offer' }));
@@ -1148,10 +1187,26 @@ describe('RecruitingPage offer flow: guarded save, busy close and send outcome',
     expect(screen.getByLabelText('Hours')).toBeDisabled();
     failRead = false;
     fireEvent.click(within(form).getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByText('The save got no answer, and the draft did not change, so nothing was saved. Try again.')).toBeInTheDocument();
+    expect(await screen.findByText('The save got no answer. The draft still reads as before, but the save may still finish. If it did, saving again is refused and this form shows the newer version.')).toBeInTheDocument();
     expect(screen.getByLabelText('Hours')).toHaveValue('Mon to Thu, 8 hours');
     expect(screen.getByLabelText('Hours')).not.toBeDisabled();
     expect(saves).toHaveLength(1);
+  });
+
+  it('a save answered gate-off closes the form and brings back the status-only Offer move', async () => {
+    let off = false;
+    await openDraftForm(
+      { 'POST /admin/careers/app-1/offer': () => { off = true; return res(404, { enabled: false }); } },
+      () => (off ? res(404, { enabled: false }) : res(200, offerPayload({ current: offerRecord() }))),
+    );
+    fireEvent.change(screen.getByLabelText('Hours'), { target: { value: 'Mon to Thu, 8 hours' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+    await waitFor(() => expect(screen.queryByLabelText('Hours')).toBeNull());
+    expect(screen.queryByText('HTTP 404')).toBeNull();
+    const offerButton = screen.getByRole('button', { name: 'Offer' });
+    await waitFor(() => expect(offerButton).not.toBeDisabled());
+    fireEvent.click(offerButton);
+    expect(await screen.findByRole('heading', { name: 'Move to Offer' })).toBeInTheDocument();
   });
 
   it('a re-read that finds the gate off closes the form and brings back the status-only Offer move', async () => {

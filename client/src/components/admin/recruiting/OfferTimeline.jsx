@@ -16,7 +16,16 @@ import {
 } from "../../ui";
 import SafeMarkdown from "../../SafeMarkdown";
 import { fetchSignedCopy, reviseOffer, withdrawOffer } from "./offerApi";
-import { formatDay, formatTimelineTime, isStaleWrite, money, offerErrorMessage } from "./offerLogic";
+import {
+  formatDay,
+  formatTimelineTime,
+  isGateOffAnswer,
+  isLostAnswer,
+  isStaleWrite,
+  LOST_ANSWER_TEXT,
+  money,
+  offerErrorMessage,
+} from "./offerLogic";
 
 const STATUS_LABEL = {
   draft: "Draft",
@@ -248,18 +257,23 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
   const stale = Boolean(refreshError);
   const canAct = ownerActions === true && !stale;
 
-  // A refused stale write changed nothing: re-read so the card shows what is true now.
-  const act = async (work) => {
+  // A failed write re-reads so the card shows what is true now: a stale refusal
+  // changed nothing, a lost answer (no reply, a 5xx) may have gone through, and a
+  // gate-off answer means offers are off. If that read fails, the section's Try
+  // again stays and the write actions stay off (refreshError). Reads (the signed
+  // copy) pass write: false and only show their error.
+  const act = async (work, { write = true } = {}) => {
     setBusy(true);
     setError(null);
     try {
       await work();
       return "ok";
     } catch (err) {
-      setError(offerErrorMessage(err));
-      if (!isStaleWrite(err)) return "failed";
+      const lost = write && isLostAnswer(err);
+      setError(lost ? LOST_ANSWER_TEXT.card : offerErrorMessage(err));
+      if (!write || !(lost || isStaleWrite(err) || isGateOffAnswer(err))) return "failed";
       await onChanged();
-      return "stale";
+      return "settled";
     } finally {
       setBusy(false);
     }
@@ -280,14 +294,17 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
       await withdrawOffer(applicationId, closing.id, expectedState(closing));
       await onChanged();
     });
-    // A refused stale write also closes the confirm: the card now shows the truth.
+    // A refused or unanswered write also closes the confirm: the card now shows the truth.
     if (outcome !== "failed") setClosing(null);
   };
 
   const viewSigned = (target) =>
-    act(async () => {
-      setSigned(await fetchSignedCopy(applicationId, target.id));
-    });
+    act(
+      async () => {
+        setSigned(await fetchSignedCopy(applicationId, target.id));
+      },
+      { write: false },
+    );
 
   return (
     <div className="border-hairline border border-zinc-200 rounded p-3 mb-4" data-testid="offer-card">

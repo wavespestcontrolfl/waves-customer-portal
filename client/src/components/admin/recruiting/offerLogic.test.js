@@ -6,6 +6,8 @@ import {
   formatDay,
   formatIssued,
   formatTimelineTime,
+  isGateOffAnswer,
+  isLostAnswer,
   isStaleWrite,
   isStartWeekday,
   isValidDay,
@@ -62,6 +64,14 @@ describe('offer helpers', () => {
       expect(isStaleWrite({ body: { code } })).toBe(true);
     }
     for (const code of ['TERMS_NOT_ISSUED', 'NO_CONTACT', 'OWNER_ONLY', undefined]) expect(isStaleWrite({ body: { code } })).toBe(false);
+  });
+
+  it('reads no reply, a 5xx or an unreadable reply as a lost answer, and only 404 enabled:false as offers turned off', () => {
+    for (const err of [new TypeError('Failed to fetch'), { status: 500 }, { status: 502 }, { status: 503 }, {}]) expect(isLostAnswer(err)).toBe(true);
+    for (const status of [400, 401, 403, 404, 409]) expect(isLostAnswer({ status })).toBe(false);
+    expect(isGateOffAnswer({ status: 404, body: { enabled: false } })).toBe(true);
+    for (const err of [{ status: 404, body: { error: 'Not found' } }, { status: 404, body: null }, { status: 409, body: { enabled: false } }]) expect(isGateOffAnswer(err)).toBe(false);
+    expect(offerErrorMessage({ status: 404, body: { enabled: false } })).toBe('Job offers are turned off, so this did not go through. The plain Offer move works as before.');
   });
 
   it('accepts real calendar dates only', () => {

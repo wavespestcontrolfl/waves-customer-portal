@@ -5,6 +5,7 @@
  * the page keeps today's status-only Offer button.
  */
 import { adminFetch } from "../../../lib/adminFetch";
+import { isGateOffAnswer } from "./offerLogic";
 
 async function offerRequest(path, options = {}) {
   const r = await adminFetch(path, options);
@@ -31,7 +32,7 @@ export async function fetchOffer(applicationId) {
     if (body?.enabled !== true) throw new Error("The offer screen sent an unexpected answer.");
     return body;
   } catch (err) {
-    if (err.status === 404 && err.body?.enabled === false) return { enabled: false };
+    if (isGateOffAnswer(err)) return { enabled: false };
     throw err;
   }
 }

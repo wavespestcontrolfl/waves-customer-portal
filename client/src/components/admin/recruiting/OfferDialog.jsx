@@ -24,6 +24,7 @@ import {
   describeSend,
   expiryLabel,
   formatIssued,
+  isGateOffAnswer,
   isLostAnswer,
   isStartWeekday,
   isStaleWrite,
@@ -389,6 +390,8 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
     if (isLostAnswer(err)) return lostWrite(kind);
     setError(offerErrorMessage(err));
     if (isStaleWrite(err)) await staleWrite();
+    // Offers were turned off: the re-read turns the flow off, and that closes this form.
+    else if (isGateOffAnswer(err)) await onChanged();
   };
 
   const adoptLatest = () => {
