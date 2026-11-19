@@ -67,6 +67,7 @@ jest.mock('../services/estimate-follow-up', () => ({
     estimateEmailPayload: jest.fn((est, firstName, url) => ({ first_name: firstName, estimate_url: url })),
     mintStageLinks: jest.fn(async () => ({ smsUrl: 'url', emailUrl: 'url' })),
     hasRepliedRecently: jest.fn(async () => false),
+    estimateMidCheckout: jest.fn(async () => false),
     wasRecentlyOpened: jest.fn(() => false),
     bumpFollowupCounters: jest.fn(async () => {}),
     repairFollowupCounters: jest.fn(async () => null),
@@ -240,6 +241,7 @@ beforeEach(() => {
   followupShared.claimFollowupSend.mockResolvedValue(true);
   followupShared.sendDualChannel.mockResolvedValue(true);
   followupShared.hasRepliedRecently.mockResolvedValue(false);
+  followupShared.estimateMidCheckout.mockResolvedValue(false);
   followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
   followupShared.repairFollowupCounters.mockResolvedValue(null);
   probeGoneQuietConsultation.mockResolvedValue(null);
@@ -917,6 +919,47 @@ describe('processDueJobs', () => {
     const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(defer.payload.status).toBeUndefined();
     expect(defer.payload.due_at).toBeInstanceOf(Date);
+  });
+
+  // return_visit_hot / dark_then_return / multi_view_high_intent
+  // fire ~1 minute after a page view, and 8 of 176 emails since Aug 28 went out
+  // 1-3 minutes before the customer accepted: a follow-up to someone who had
+  // just signed up. A live visit-time hold or a card step touched in the last 20
+  // minutes holds the email, even for the hold-exempt rules.
+  test.each(['return_visit_hot', 'dark_then_return', 'multi_view_high_intent'])(
+    '%s: a customer who is booking right now (live hold or card step) is deferred, never emailed',
+    async (ruleKey) => {
+      followupShared.estimateMidCheckout.mockResolvedValue(true);
+      enqueueProcessorHappyPath({
+        job: pendingJob({ rule_key: ruleKey }),
+        est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+        rules: RULE_ROWS,
+      });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      expect(followupShared.estimateMidCheckout).toHaveBeenCalledWith('est-1');
+      expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      // Held, not dropped: still pending, due again after the 15-minute defer.
+      const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+      expect(defer.payload.status).toBeUndefined();
+      expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
+    },
+  );
+
+  test('once the customer is no longer booking, the same job sends', async () => {
+    followupShared.estimateMidCheckout.mockResolvedValue(false);
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(1);
+    expect(followupShared.claimFollowupSend).toHaveBeenCalled();
   });
 
   test('engaged-moment rules are hold-exempt — the email sends while they are still on the page (owner 2026-07-21)', async () => {

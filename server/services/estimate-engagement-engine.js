@@ -657,6 +657,16 @@ async function processDueBatch(now = new Date()) {
         await markJob(job.id, 'skipped', 'customer-replied');
         continue;
       }
+      // Signing up right now (a live visit-time hold, or the card step touched
+      // in the last 20 minutes): hold the email and look again. Applies to the
+      // engaged-moment rules too, whose point is a customer who is reading but
+      // has not decided; a customer who is booking has. Once they accept, the
+      // estimate-inactive check above ends the job; if they walk away, the
+      // email goes after the hold lapses.
+      if (await followupShared.estimateMidCheckout(est.id)) {
+        await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'mid-checkout');
+        continue;
+      }
       // Sibling budget: an engine send from the same dedupe group already
       // covered this concept (the atomic claim re-checks this too).
       const siblings = dedupeGroup(rule.rule_key).filter((k) => k !== rule.rule_key);

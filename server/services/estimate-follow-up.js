@@ -92,6 +92,35 @@ function wasRecentlyOpened(est, hours = 2, nowMs = Date.now()) {
   return nowMs - ts < hours * 3600000;
 }
 
+// "They are signing up right now": the customer holds a visit time for this
+// estimate (the 15-minute hold, live) or touched its card step in the last
+// CHECKOUT_ACTIVE_MINUTES. An "any questions?" nudge that lands then reads as a
+// follow-up to someone who has already signed up: 8 of 176 follow-up emails
+// since Aug 28 went out 1-3 minutes before the customer accepted (return-visit,
+// multi-view and dark-then-return rules, which fire ~1 minute after a page
+// view, on purpose, while the customer is reading). The email is held, never
+// dropped: the callers send it later if the customer does not finish. A lookup
+// failure fails OPEN, like the reply-pause check beside it (a held email only
+// delays; this guard must not stop every follow-up on a database error).
+const CHECKOUT_ACTIVE_MINUTES = 20;
+async function estimateMidCheckout(estimateId) {
+  try {
+    const hold = await db("scheduled_services")
+      .where({ source_estimate_id: estimateId })
+      .whereRaw("reservation_expires_at > NOW()")
+      .first("id");
+    if (hold) return true;
+    const card = await db("estimate_checkout_events")
+      .where({ estimate_id: estimateId })
+      .whereRaw("updated_at > NOW() - make_interval(mins => ?)", [CHECKOUT_ACTIVE_MINUTES])
+      .first("id");
+    return !!card;
+  } catch (e) {
+    logger.warn(`[est-followup] mid-checkout check skipped for estimate ${estimateId}: ${(e && (e.code || e.name)) || "error"}`);
+    return false;
+  }
+}
+
 // SMS arm of the reply-pause: an inbound text (conversation matched by
 // customer_id or phone) inside the window.
 async function hasInboundSmsSince(est, cutoff) {
@@ -244,6 +273,9 @@ async function safetyGate(est, now = new Date(), { replay = false } = {}) {
     return { skip: true, reason: `customer-converted:${conv.reason}` };
   if (await hasRepliedRecently(est, 14, { throwOnError: replay }))
     return { skip: true, reason: "customer-replied-recently" };
+  // Mid-checkout: held for later, not dropped (see estimateMidCheckout).
+  if (await estimateMidCheckout(est.id))
+    return { skip: true, reason: "customer-mid-checkout" };
   return { skip: false };
 }
 
@@ -1668,4 +1700,6 @@ module.exports._private = {
   mintStageLinks,
   hasRepliedRecently,
   wasRecentlyOpened,
+  estimateMidCheckout,
+  CHECKOUT_ACTIVE_MINUTES,
 };
