@@ -85,9 +85,10 @@ describe('physical stops and reads', () => {
     const legacy = (id, time_window) => ({ ...sibling(id), visit_id: 'visit-1', window_start: null, window_end: null, time_window });
     expect(rc.physicalStops([legacy('v1', '9:00 AM'), legacy('v2', '3:00 PM')])).toHaveLength(2);
     expect(rc.physicalStops([legacy('v1', '9:00 AM'), legacy('v2', '10:00 AM')])).toHaveLength(1); // 9-11 and 10-12 connect
-    // On a stale route the noon stop runs between them, as with windowed services.
+    // Their promises do not overlap, so dispatch cannot run them as one stop: the day is not simulated.
     const noon = stop('n1', '12:00:00', '13:00:00', { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    expect(rc.routeOrder([legacy('v1', '9:00 AM'), legacy('v2', '3:00 PM'), noon]).map((r) => r.id)).toEqual(['v1', 'n1', 'v2']);
+    const legacyDay = [legacy('v1', '9:00 AM'), legacy('v2', '3:00 PM'), noon].map((r) => ({ ...r, technician_id: TECH }));
+    expect(rc.measureTechDay({ ...open, rows: legacyDay })).toEqual({ stops: 3, skip: 'GROUP_UNMODELED' });
   });
 
   test('a read inside the snapshot runs in its own savepoint; outside a transaction it reads directly', async () => {
@@ -111,20 +112,20 @@ describe('one tech-day', () => {
     expect(fig.slots).toBe(fig.openings.reduce((n, o) => n + o.slots, 0));
   });
 
-  test("a visit's afternoon service runs at its own time, after another customer's noon stop", () => {
+  test("a visit's morning and afternoon services are two stops; apart in the order, dispatch cannot group them", () => {
     const am = stop('v1', '09:00:00', '10:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
     const pm = stop('v2', '15:00:00', '16:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
     const noon = stop('n1', '12:00:00', '13:00:00', { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    // Two stops of one visit, in window order: the noon stop runs between them, and the day ends with the 3 PM service.
-    expect(rc.routeOrder([am, pm, noon]).map((r) => r.id)).toEqual(['v1', 'n1', 'v2']);
-    expect(rc.measureTechDay({ ...open, rows: [am, pm, noon] }).endMin).toBeLessThanOrEqual(960);
+    // Counted as 3 stops; not simulated (arrival-route.js groupRouteStops: one visit's services apart in the order).
+    expect(rc.measureTechDay({ ...open, rows: [am, pm, noon] })).toEqual({ stops: 3, skip: 'GROUP_UNMODELED' });
   });
 
   test("the stored route order when it is a real plan, else each stop at its own promised time", () => {
     const a = stop('a', '09:00:00', '12:00:00', { route_order: 2 });
     const b = stop('b', '09:00:00', '12:00:00', { route_order: 1, customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    expect(rc.routeOrder([a, b]).map((r) => r.id)).toEqual(['b', 'a']);
-    expect(rc.routeOrder([{ ...a, route_order: null }, b]).map((r) => r.id)).toEqual(['a', 'b']); // a null: clock order
+    const ids = (rows) => rc.simulateBookedDay(rows, { origin: HQ, departureMin: 480, blocks: [], date: MONDAY }).sim.arrivals.map((x) => x.id);
+    expect(ids([a, b])).toEqual(['b', 'a']);
+    expect(ids([{ ...a, route_order: null }, b])).toEqual(['a', 'b']); // a null: promised-window order
   });
 
   test('a schedule block takes its time out of the openings', () => {
@@ -143,25 +144,29 @@ describe('one tech-day', () => {
     expect(rc.measureTechDay({ ...open, rows: [service('v1'), service('v2', { lat: null })] })).toMatchObject({ stops: 1, skip: 'STOP_WITHOUT_COORDINATES' });
   });
 
-  test("a visit's services split by a block or by another stop leave the day unmeasured (SPLIT_VISIT); back to back, it is measured", () => {
+  test("dispatch's grouping: a visit's services are one stop, and a block moves the whole visit, never splits it", () => {
     // Open-ended windows: each service's work is its 45-minute estimate (a window's span would count as work).
     const service = (id, extra) => stop(id, '09:00:00', null, { visit_id: 'visit-1', customer_id: 'cust-1', ...extra });
-    const together = [service('v1'), service('v2')];
-    // One arrival at 9:00, then 45 + 45 minutes of work: dispatch's one stop, the same timeline.
-    const measured = rc.measureTechDay({ ...open, rows: together });
-    expect(measured).toMatchObject({ stops: 1, openings: expect.any(Array) });
-    expect(measured.skip).toBeUndefined();
-    // A block at 9:45-10:30 lands inside the visit: the simulator would run the second service after it.
-    expect(rc.measureTechDay({ ...open, rows: together, blocks: [{ startMin: 585, endMin: 630 }] })).toEqual({ stops: 1, skip: 'SPLIT_VISIT' });
-    // Another stop driven between the two services splits the visit too; back to back, it does not.
-    const other = stop('x1', '09:00:00', null, { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    const physical = rc.physicalStops([...together, other]);
-    const leg = (arrivalMin, departureMin) => ({ arrivalMin, departureMin });
-    expect(rc.visitSplit(physical, [together[0], other, together[1]], { arrivals: [leg(540, 585), leg(595, 640), leg(650, 695)] })).toBe(true);
-    expect(rc.visitSplit(physical, [together[0], together[1], other], { arrivals: [leg(540, 585), leg(585, 630), leg(640, 685)] })).toBe(false);
-    // Two stops of one visit (disconnected windows) are two stops, never a split visit.
-    const pm = stop('v3', '15:00:00', '16:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
-    expect(rc.measureTechDay({ ...open, rows: [service('v1', { window_end: '10:00:00' }), pm] }).skip).toBeUndefined();
+    const visit = [service('v1'), service('v2')];
+    // One arrival at 9:00, then 45 + 45 minutes: done at 10:30.
+    expect(rc.measureTechDay({ ...open, rows: visit })).toMatchObject({ stops: 1, endMin: 630 });
+    // A block at 9:45-10:30 moves the whole 90 minutes past it: done at 12:00.
+    expect(rc.measureTechDay({ ...open, rows: visit, blocks: [{ startMin: 585, endMin: 630 }] })).toMatchObject({ stops: 1, endMin: 720 });
+    // One visit's services at two places: dispatch cannot run them as one stop, so the day is not simulated.
+    expect(rc.measureTechDay({ ...open, rows: [service('v1'), service('v2', { lat: 27.45, lng: -82.4 })] }).skip).toBe('GROUP_UNMODELED');
+  });
+
+  test("dispatch's grouping: a version-2 allocation's services are one stop at one arrival, their work summed", () => {
+    const member = (id, extra) => stop(id, '09:00:00', null, {
+      visit_id: null, customer_id: 'cust-1', scheduled_date: MONDAY, estimated_duration_minutes: 30, service_address_line1: '1 Test St', ...extra,
+    });
+    const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
+    const allocated = [member('a1', { reservation_service_mix: mix }), member('a2', { reservation_service_mix: mix })];
+    const day = (rows, blocks = []) => rc.simulateBookedDay(rows, { origin: HQ, departureMin: 480, blocks, date: MONDAY }).sim.arrivals;
+    expect(day(allocated)).toEqual([expect.objectContaining({ id: 'a1', arrivalMin: 540, departureMin: 600 })]);
+    // A block inside it moves all 60 minutes; co-visit siblings with no allocation run around the block instead.
+    expect(day(allocated, [{ startMin: 570, endMin: 600 }])).toEqual([expect.objectContaining({ arrivalMin: 600, departureMin: 660 })]);
+    expect(day([member('a1'), member('a2')], [{ startMin: 570, endMin: 600 }]).at(-1).departureMin).toBe(630);
   });
 
   test('after the day closes there is no opening', () => {
@@ -349,6 +354,23 @@ describe('runRouteCheck', () => {
     expect(result.status).toBe('completed_with_errors');
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
+    replan.loadBlocks.mockResolvedValue([]);
+  });
+
+  test("a version-2 allocation's services are one stop: its allocation comes from the occupancy read", async () => {
+    const mix = { version: 2, allocatedServiceIds: ['a1', 'a2'] };
+    const member = (id) => stop(id, '09:00:00', null, {
+      visit_id: null, customer_id: 'cust-1', scheduled_date: '2026-11-20', estimated_duration_minutes: 30, service_address_line1: '1 Test St',
+    });
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [member('a1'), member('a2')] : []));
+    replan.loadBlocks.mockImplementation(async (_c, date) => (date === '2026-11-20' ? [{ startMin: 570, endMin: 600 }] : []));
+    listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-20'
+      ? ['a1', 'a2'].map((id) => ({ ...member(id), reservation_service_mix: mix, startMin: 540, endMin: 600 })) : []));
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    // One stop: its 60 minutes move whole past the 9:30 block, done at 11:00 (not split around it, done at 10:30).
+    expect(JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20')).toMatchObject({ stops: 1, endMin: 660 });
+    listOccupiedWindows.mockResolvedValue([]);
     replan.loadBlocks.mockResolvedValue([]);
   });
 

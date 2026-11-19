@@ -26,9 +26,10 @@
  * staff placement's own reading of the stop under way (scheduling/arrival-route.js) and leaves every state it cannot
  * read unmeasured. The /book page's first day is advance_days_min days out (1 by default), so the room an ad click can
  * book online starts after today too.
- * Each day is measured as booked, from the start point at the departure minute, the way the 04:40 re-plan measures it
- * (close-gaps openTime). Drive minutes come from the scheduling drive clock (no paid map call). It runs every hour, so a
- * booking or a cancellation made during the day shows at the next hour.
+ * Each day is measured as booked, from the start point at the departure minute, as dispatch's capacity model simulates
+ * it (simulateBookedDay: its grouping, its order rule, its work minutes and the free scheduling drive clock, with no
+ * paid map call). Its open time is found the way the 04:40 re-plan finds it (close-gaps openBlocks). It runs every
+ * hour, so a booking or a cancellation made during the day shows at the next hour.
  *
  * Which tech-days count (the 07:05 notice's own rules, open-blocks-alert.js): an assignable technician who is not
  * marked absent (absences and weekly days off), on a day that is not a blackout day. A Sunday counts only when the
@@ -40,8 +41,10 @@ const logger = require('../logger');
 const { etDateString, addETDays, etParts } = require('../../utils/datetime-et');
 const { _internals: replan } = require('./index');
 const { SLOT_MIN, serviceBlocks, _internals: gaps } = require('./close-gaps');
-const { simulate, coVisitGroups } = require('./app-sim');
-const { promisedWindowOrder, currentOrder, staleOrderReasons, effectiveWindowRange } = require('../route-reorder-window-fit');
+const { coVisitGroups } = require('./app-sim');
+const RouteOptimizer = require('../route-optimizer');
+const { _internals: { groupRouteStops, storedOrderStale, clockOrder } } = require('../scheduling/arrival-route');
+const { promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute } = require('../route-reorder-window-fit');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
@@ -117,15 +120,32 @@ function hourSlots(o) {
 }
 
 /**
- * The order the technician drives (pure), the app's own rule (arrival-route.js, the 04:40 re-plan's stored baseline):
- * the stored route_order when it is a real plan (staleOrderReasons finds none), else each physical stop at its own
- * promised start, each stop's rows together.
+ * The booked day as dispatch's capacity model simulates it (pure; the baseline of arrival-route.js
+ * evaluateArrivalPlacement). Dispatch runs that model with the scheduling gate on, and with it off for a version-2
+ * booking and for find-time's arrival search (preserveCapacity):
+ *   - its grouping (groupRouteStops): a visit's or a version-2 allocation's services are one stop at one arrival,
+ *     their work summed;
+ *   - its order rule: the stored order, or promised-window order when the stored one is stale (storedOrderStale);
+ *   - each stop's work as that model charges it (a grouped stop's raw estimate is its summed work);
+ *   - the free scheduling drive clock with no requests (createSchedulingTravel: the conservative model; lookup never
+ *     fetches).
+ * Hour mode charges no stop more work or drive than this: it runs a visit's services one by one, sums co-visit
+ * siblings' raw estimates and drives on the plain model. So no opening comes from a stop charged less than dispatch
+ * charges it. Pre-push audit rounds 26, 28 and 29 each found a grouping of the check's own that charged less.
+ * { skip: 'GROUP_UNMODELED' } when dispatch cannot group the day either (its own code: a visit's services apart in the
+ * order or at two places, or promises that do not overlap); { skip: 'NO_SIMULATION' } when the simulation fails.
  */
-function routeOrder(rows) {
-  if (rows.length && !staleOrderReasons(rows, rows, { futureDay: true }).length) return currentOrder(rows);
-  const startOf = (stop) => Math.min(...stop.flat().map((r) => promisedStart(r) ?? Infinity));
-  return physicalStops(rows).map((stop, i) => ({ stop, i })).sort((a, b) => startOf(a.stop) - startOf(b.stop) || a.i - b.i)
-    .flatMap(({ stop }) => stop.flat());
+function simulateBookedDay(rows, { origin, departureMin, blocks, date }) {
+  const grouped = groupRouteStops(rows);
+  if (!grouped) return { skip: 'GROUP_UNMODELED' };
+  const order = storedOrderStale(grouped, rows) ? clockOrder(grouped) : currentOrder(grouped);
+  const travel = RouteOptimizer.createSchedulingTravel({ maxRequests: 0 });
+  const sim = simulateArrivalRoute(RouteOptimizer, (row) => row.arrivalRange || effectiveWindowRange(row),
+    order.map((stop) => ({ ...stop, raw_estimate_minutes: stop.estimated_duration_minutes })), {
+      startMin: departureMin, origin, end: origin, reportLate: true, blockedIntervals: serviceBlocks(blocks),
+      legMinutes: (from, to, departMin) => travel.lookup({ date, from, to, departureMin: departMin }).minutes,
+    });
+  return sim ? { sim } : { skip: 'NO_SIMULATION' };
 }
 
 /**
@@ -179,37 +199,19 @@ function unmeasurable(rows) {
 }
 
 /**
- * One tech-day's openings (pure). rows: the day's stops, in any order (they run in the order the technician drives,
- * routeOrder); blocks: the technician's schedule blocks; held: booked time, as intervals; origin: the start point,
+ * One tech-day's openings (pure). rows: the day's stops, in any order (they run in dispatch's order,
+ * simulateBookedDay); blocks: the technician's schedule blocks; held: booked time, as intervals; origin: the start point,
  * where the van sets off and returns. slots: jobs that start on the hour after their drive (hourSlots);
  * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
  */
-/**
- * True when the simulation splits one visit (pure). Dispatch runs a visit's services at one stop back to back from
- * one arrival, their work summed (scheduling/arrival-route.js groupRouteStops). The app simulator runs each service
- * on its own, so a schedule block, a later promised start or another stop can open a gap inside the visit, and the
- * day's openings would not be dispatch's. When no gap opens, the two timelines are the same: one arrival, then each
- * service's work in turn (a zero-distance leg is 0 minutes).
- */
-function visitSplit(physical, seq, sim) {
-  const at = new Map(seq.map((row, i) => [String(row.id), sim.arrivals[i]]));
-  // A stop of one group is a lone row or co-visit siblings, which the simulator already runs as one stay.
-  return physical.filter((stop) => stop.length > 1).some((stop) => {
-    const legs = stop.flat().map((r) => at.get(String(r.id))).sort((a, b) => a.arrivalMin - b.arrivalMin);
-    return legs.some((leg, i) => i > 0 && leg.arrivalMin > legs[i - 1].departureMin);
-  });
-}
-
-function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin }) {
+function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin, date }) {
   // Physical stops, not services: one visit's services at one place are one stop (physicalStops).
-  const physical = physicalStops(rows);
-  const stops = physical.length;
+  const stops = physicalStops(rows).length;
   const skip = unmeasurable(rows);
   if (skip) return { stops, skip };
-  const seq = routeOrder(rows);
-  const sim = simulate(seq, { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
-  if (!sim) return { stops, skip: 'NO_SIMULATION' };
-  if (visitSplit(physical, seq, sim)) return { stops, skip: 'SPLIT_VISIT' };
+  const booked = simulateBookedDay(rows, { origin, departureMin, blocks, date });
+  if (booked.skip) return { stops, skip: booked.skip };
+  const { sim } = booked;
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
@@ -338,13 +340,18 @@ const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map
 /** One technician on one date, as booked. Never throws. */
 async function measureOne(conn, env, { day, techId, rows, occupancy }) {
   try {
-    const own = rows.filter((r) => String(r.technician_id) === techId);
+    // groupRouteStops reads each row's version-2 allocation (visit-capacity allocationKey). Dispatch's row read and the
+    // occupancy read select it; the shared stops read does not (a booking path reads that one too, so it stays).
+    const mixById = new Map(occupancy.filter((r) => r.reservation_service_mix != null).map((r) => [String(r.id), r.reservation_service_mix]));
+    const own = rows.filter((r) => String(r.technician_id) === techId)
+      .map((r) => (r.reservation_service_mix == null && mixById.has(String(r.id)) ? { ...r, reservation_service_mix: mixById.get(String(r.id)) } : r));
     const blocks = await recoverable(conn, (c) => replan.loadBlocks(c, day, techId));
     // Time held for this technician: every booked span the booking surfaces count, exact to the minute
     // (listOccupiedWindows: make-room destinations included; a window may end off the hour).
     const held = heldSpans(occupancy, techId, env.techBlind);
     return measureTechDay({
       rows: own, blocks, held, origin: homeFromMap(env.homes, techId), departureMin: env.departureMin, openMin: DAY_OPEN, closeMin: DAY_CLOSE,
+      date: day,
     });
   } catch (err) {
     logger.warn(`[route-check] ${day} tech ${techId}: measure failed (${err.message})`);
@@ -443,7 +450,7 @@ async function measureRun(conn, now) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    recoverable, physicalStops, heldSpans, hourSlots, routeOrder, measureTechDay, visitSplit, staffed, datesToMeasure, summarize,
+    recoverable, physicalStops, heldSpans, hourSlots, simulateBookedDay, measureTechDay, staffed, datesToMeasure, summarize,
     unmeasurable,
     STAFFED_DAYS, DEMAND_DAYS,
   },
