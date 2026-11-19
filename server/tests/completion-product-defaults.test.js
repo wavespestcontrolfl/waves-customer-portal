@@ -349,12 +349,12 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
 
   test('cockroach visit 1 carries the roach defaults with their interior protocol methods', () => {
     const cockroachVisit1 = realProtocols.cockroach.visits.find((v) => v.visit === 1);
-    expect(cockroachVisit1.completionDefaultProducts).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Cockroach Gel Bait']);
+    expect(cockroachVisit1.completionDefaultProducts).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Evolution Cockroach Gel Bait']);
     expect(resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Cockroach Control Service' }).methodsByName)
       .toEqual({
         'atticus antapex wsg': 'spot_treatment',
         'gentrol complete ec3': 'spot_treatment',
-        'advion cockroach gel bait': 'bait_placement',
+        'advion evolution cockroach gel bait': 'bait_placement',
       });
   });
 
@@ -369,7 +369,7 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
       const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType });
       expect(result.programKey).toBe('cockroach');
       expect(result.matchedVisit.visit).toBe(1);
-      expect(result.names).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Cockroach Gel Bait']);
+      expect(result.names).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Evolution Cockroach Gel Bait']);
     }
   });
 
@@ -393,7 +393,7 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect(result.programKey).toBe('cockroach');
     expect(result.matchedVisit.visit).toBe(1);
     expect(result.source).toBe('protocol_visit');
-    expect(result.names).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Cockroach Gel Bait']);
+    expect(result.names).toEqual(['Atticus Antapex WSG', 'Gentrol Complete EC3', 'Advion Evolution Cockroach Gel Bait']);
   });
 
   test('other curated-less programs (pest visit 1, mosquito, termite) carry no field yet', () => {

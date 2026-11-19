@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { FIELD_VIEW_ASSETS_ID } from './lib/fieldViewAssets';
 
 const source = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
 
@@ -176,6 +177,17 @@ const serveBuild = (shellAssets, owns = shellAssets) => async (request) => {
 const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/')).sort();
 
 describe('customer service-worker update contract', () => {
+  // Field view writes Today's files into index.html for the page to warm
+  // (src/lib/fieldViewAssets.js). The worker must not read that list as the
+  // shell's own files, or every phone would download Today with each deploy.
+  it('does not read the Field view file list in index.html as shell files', () => {
+    const worker = loadWorker(fakeCache());
+    const files = ['/assets/TodayShell-b2.js', '/assets/TechHomePage-d4.css'];
+    const html = '<head><script type="module" crossorigin src="/assets/index-a1.js"></script>'
+      + `<script type="application/json" id="${FIELD_VIEW_ASSETS_ID}">${JSON.stringify(files)}</script></head>`;
+    expect([...worker.shellAssetUrls(html)]).toEqual(['/assets/index-a1.js']);
+  });
+
   it('reloads shell assets and finishes their writes before replacing the shell or activating', async () => {
     const cache = fakeCache();
     const previous = shellHtml(['/assets/index-OLD.js']);

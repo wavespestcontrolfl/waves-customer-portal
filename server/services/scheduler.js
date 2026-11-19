@@ -6021,6 +6021,8 @@ function initScheduledJobs() {
           // a reply. Each deferral entry point registers its own recheck;
           // a read failure is retryable-ineligible (fail closed on both
           // sides of the attempt cap — never send unverified state).
+          // The deferred recheck's answer, kept for the real text this replay sends (replayBodyFor).
+          let deferredRecheck = null;
           {
             const { recheckDeferredReplay, runTerminalHookDurably, requiresTerminalHook } = require('./messaging/deferred-replay-registry');
             // Same enrichment the finalize call gets below: several
@@ -6038,6 +6040,7 @@ function initScheduledJobs() {
               to_phone: claimMeta.to_phone || msg.to_phone || null,
             };
             const recheck = await recheckDeferredReplay(claimMeta.entry_point, recheckMeta);
+            deferredRecheck = recheck;
             if (recheck && recheck.eligible === false) {
               // A recheck that names its own retry time (a customer quiet
               // window with a known end) reschedules straight to it and
@@ -6648,6 +6651,14 @@ function initScheduledJobs() {
           // The review spacing guard may durably strip a bundled ask before
           // invoking this callback. Build both replay arguments at that point
           // so the provider receives the rewritten completion body/linkage.
+          // A held job-offer text is stored without its link token: the text it really sends is rebuilt with the token the
+          // recheck above just read from the offer row (in memory only, never written back). Every other entry point
+          // sends its stored body unchanged. A text that should carry a link and has none is never sent.
+          {
+            const replayBody = require('./messaging/deferred-replay-registry').replayBodyFor(claimMeta.entry_point, deferredRecheck, msg.message_body);
+            if (replayBody === null) throw new Error('held job-offer text has no live offer link to send');
+            if (replayBody !== msg.message_body) msg.replay_body = replayBody;
+          }
           const sendReplay = () => {
           const replayDispatchMeta = {
             ...claimMeta,
@@ -6660,7 +6671,8 @@ function initScheduledJobs() {
             to_phone: msg.to_phone || null };
           const replayInput = {
             to: toPhone,
-            body: msg.message_body,
+            // msg.replay_body: set above for a held job-offer text (its real link); every other row sends its stored body.
+            body: msg.replay_body ?? msg.message_body,
             channel: 'sms',
             audience: claimMeta.audience === 'applicant' ? 'applicant' : (msg.customer_id ? 'customer' : 'lead'),
             purpose,
@@ -10358,6 +10370,23 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`[call-prepay-choice] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 10 MIN — a call that BOOKED a pest visit while the customer had an open estimate (GATE_CALL_PHONE_YES_ACCEPT,
+  // checked each tick): files ONE admin card so the office accepts the estimate, and closes the cards that stopped being
+  // true. It accepts nothing and sends nothing. See server/services/call-phone-yes-accept.js.
+  cron.schedule('9,19,29,39,49,59 * * * *', async () => {
+    if (!require('../config/feature-gates').callPhoneYesAcceptLive()) return;
+    try {
+      await runExclusive('call-phone-yes', async () => {
+        const result = await require('./call-phone-yes-accept').runCallPhoneYesSweep();
+        if (result.filed > 0 || result.closed > 0) {
+          logger.info(`[call-phone-yes] scanned=${result.scanned} filed=${result.filed} closed=${result.closed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[call-phone-yes] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

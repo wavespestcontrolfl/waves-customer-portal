@@ -4,6 +4,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
+const { redactOfferLinks } = require("../utils/offer-link-redaction");
 const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
 const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
@@ -1132,7 +1133,7 @@ const TwilioService = {
         direction: "outbound",
         from_phone: fromNumber,
         to_phone: to,
-        message_body: body,
+        message_body: redactOfferLinks(body),
         twilio_sid: message.sid,
         status: "sent",
         created_at: handoffAt,
@@ -1740,7 +1741,7 @@ const TwilioService = {
           ourEndpointId: fromNumber,
           contactPhone: to,
           direction: "outbound",
-          body,
+          body: redactOfferLinks(body),
           authorType: options.adminUserId ? "admin" : "system",
           adminUserId: options.adminUserId || null,
           twilioSid: message.sid,
