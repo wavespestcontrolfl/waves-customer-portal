@@ -315,6 +315,13 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onInvalid
   // survives a failed read and the Try again that follows.
   const wanted = useRef(null);
 
+  // A fresh read of the offer (another tab changed the choice, or an action
+  // re-read the offer) carries the stored choice. Show it, unless a choice
+  // made here is still waiting for its answer.
+  useEffect(() => {
+    if (wanted.current === null) setChecked(Boolean(initial));
+  }, [initial]);
+
   // After a write whose reply was lost, ask the server what it stored. Signing
   // stays locked until that read works. If the stored choice is not the one the
   // applicant made, the box shows what is stored and the page says the change
@@ -330,7 +337,7 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onInvalid
       setError(wanted.current !== null && stored !== wanted.current ? CONSENT_NOT_CONFIRMED : '');
       wanted.current = null;
       onPending(false);
-      if (body.state !== 'open') onSnapshot(body);
+      onSnapshot(body);
     } catch (err) {
       if (err.notFound) onInvalid();
       else setUnconfirmed(true);
@@ -359,9 +366,14 @@ function TextConsent({ token, initial, onPending, onStale, onSnapshot, onInvalid
     }
     // A definite answer: the server took the choice or refused it.
     wanted.current = null;
-    if (res.ok) setChecked(Boolean(res.body.textConsent));
-    else setChecked(!next);
+    if (res.ok) {
+      const stored = Boolean(res.body.textConsent);
+      setChecked(stored);
+      onSnapshot({ textConsent: stored }); // the page's copy follows, so a later read can correct the box
+    } else setChecked(!next);
     if (res.status === 404) onInvalid();
+    // A closed offer comes back whole in the 409: show it now, with no re-read.
+    else if (res.status === 409 && isClosedAnswer(res.body)) onSnapshot(res.body);
     else if (res.status === 409 && (await onStale()) === 'failed') {
       // The offer changed but the new state could not be read: stay locked.
       setUnconfirmed(true);
@@ -430,6 +442,9 @@ function useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown }) {
       if (res.status === 404) return onInvalid();
       if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: re-read below
       if (res.status === 409) {
+        // A closed offer comes back whole in the 409: show it now. A re-read
+        // could fail and leave the old pay and terms on screen.
+        if (isClosedAnswer(res.body)) return onApplied(res.body);
         const after = await onReload();
         if (after === 'failed') onUnknown();
         else if (after === 'open') setError(NOT_SAVED_ERROR);
@@ -617,6 +632,10 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
 // ── Page ──────────────────────────────────────────────────────────────────
 
 const CLOSED_STATES = ['expired', 'withdrawn', 'superseded'];
+
+// A refused action on a closed offer (withdrawn, expired, replaced) answers 409
+// with the closed page itself: { state, message, contactPhone }.
+const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.state) && typeof body.message === 'string';
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
 async function readOffer(token) {

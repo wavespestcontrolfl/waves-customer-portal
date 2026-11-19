@@ -231,6 +231,43 @@ describe('CareersOfferPage — open state', () => {
     expect(JSON.parse(fetchMock.mock.calls[4][1].body)).toEqual({ consent: false });
   });
 
+  it('shows a closed offer straight from the 409, with no re-read, for an action and for the text choice', async () => {
+    const closed = { state: 'withdrawn', message: 'This offer is no longer open. Please call Sam.', contactPhone: '(941) 297-5749' };
+    for (const act of ['sign', 'consent']) {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(jsonResponse(openPayload()))
+        .mockResolvedValueOnce(jsonResponse(closed, 409))
+        .mockRejectedValueOnce(new Error('offline')); // a re-read would fail
+      globalThis.fetch = fetchMock;
+      const { unmount } = renderPage();
+      if (act === 'sign') {
+        fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+      } else {
+        fireEvent.click(await screen.findByLabelText('Text me about this offer'));
+      }
+      expect(await screen.findByText('This offer is no longer open. Please call Sam.')).toBeInTheDocument();
+      expect(screen.queryByText(/an hour/)).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      unmount();
+    }
+  });
+
+  it('the text box follows a fresh read of the open offer, such as a choice made in another tab', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: false })))
+      .mockResolvedValueOnce(jsonResponse({}, 502)) // sign: no answer
+      .mockResolvedValueOnce(jsonResponse(openPayload({ textConsent: true }))); // the re-read: still open, texts on
+    globalThis.fetch = fetchMock;
+    renderPage();
+    const box = await screen.findByLabelText('Text me about this offer');
+    expect(box).not.toBeChecked();
+    fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).toBeChecked());
+  });
+
   it('re-reads the offer when a successful sign reply cannot be read', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
