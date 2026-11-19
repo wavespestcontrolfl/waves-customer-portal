@@ -1,11 +1,14 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
-const { renderIssue, wrapIssueHtml } = require('../services/pest-insider/render');
+const { renderIssue, wrapIssueHtml, POST_LINK_TEXT } = require('../services/pest-insider/render');
+const { POST_URLS } = require('../services/pest-insider/posts');
 const { bodyIsDarkAware } = require('../services/email-template');
 
+// A reviewed post URL (posts.js): the only kind of blog link the body carries.
+const [POST] = [...POST_URLS];
 const BASE = {
   subject: '🦟 Mosquito eggs wait 8 months dry',
   preview: 'Dry does not mean gone.',
-  lead: { headline: 'Dry eggs, wet future', sentences: [{ text: 'The CDC says eggs survive 8 months.' }, { text: 'They stick to container walls.' }] },
+  lead: { headline: 'Dry eggs, wet future', sentences: [{ text: 'The CDC says eggs survive 8 months.' }, { text: 'They stick to container walls.' }], postUrl: POST },
   idItem: { text: 'It raises a generation in about a week.', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
 };
 
@@ -20,10 +23,27 @@ describe('renderIssue', () => {
     expect(r.html_body).toContain('href="https://www.wavespestcontrol.com/pest-identifier/aedes-mosquito/"');
     expect(r.html_body).toContain('href="https://www.wavespestcontrol.com/pest-identifier/"');
     expect(r.text_body).toContain('https://www.wavespestcontrol.com/pest-identifier/aedes-mosquito/');
+    // the lead links its reviewed post, after the lead sentences
+    expect(r.html_body).toContain(`href="${POST}"`);
+    expect(r.html_body).toContain(`>${POST_LINK_TEXT}</a>`);
+    expect(r.text_body).toContain(`container walls.\n\n${POST_LINK_TEXT}: ${POST}\n`);
     // A forwarded copy would carry the subscriber's own unsubscribe link (pre-push round 11).
     for (const part of [r.html_body, r.text_body]) expect(part).not.toMatch(/forward/i);
     const hrefs = [...r.html_body.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
-    hrefs.forEach((h) => expect(h).toMatch(/^https:\/\/www\.wavespestcontrol\.com\/pest-identifier\//));
+    expect(hrefs.filter((h) => h === POST)).toHaveLength(1);
+    hrefs.filter((h) => h !== POST).forEach((h) => expect(h).toMatch(/^https:\/\/www\.wavespestcontrol\.com\/pest-identifier\//));
+  });
+
+  test('the lead link must be a reviewed post URL: any other link is refused, and so is none', () => {
+    for (const postUrl of [
+      'https://www.example.com/post/',
+      `${POST}?email=resident@example.com`,
+      POST.replace('https://www.', 'https://'),
+      `${POST}{{unsubscribe_url}}`,
+      undefined,
+    ]) {
+      expect(() => renderIssue({ ...BASE, lead: { ...BASE.lead, postUrl } })).toThrow(/reviewed post URL/);
+    }
   });
 
   test('the shared body takes no caller text or link (pre-push rounds 5 to 10)', () => {
@@ -45,7 +65,7 @@ describe('renderIssue', () => {
     const hostile = '<script>alert("x")</script> & <img src=x onerror=1>';
     const r = renderIssue({
       ...BASE,
-      lead: { headline: hostile, sentences: [{ text: hostile }, { text: 'ok' }] },
+      lead: { headline: hostile, sentences: [{ text: hostile }, { text: 'ok' }], postUrl: POST },
       idItem: { text: hostile, species: { slug: 'aedes-mosquito', name: hostile } },
     });
     expect(r.html_body).not.toContain('<script');

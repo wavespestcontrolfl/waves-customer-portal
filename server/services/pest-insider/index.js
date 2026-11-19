@@ -11,6 +11,10 @@
  * bank's `lead` sentences and title, and the identifier species entry's
  * fact. A fact marked recheck_before_send leads only when the caller names
  * it in `recheckedFactIds` (a person re-read its source for this send).
+ * Every issue links the lead fact's reviewed blog post (posts.js), so a fact
+ * leads only when the caller names it in `livePostFactIds`: the facts whose
+ * post answered as live for this send (posts.checkLivePosts). With no list,
+ * no issue builds.
  * Returns { ok, reason, issue, diagnostics } where `issue` is
  * { subject, preview, html_body, text_body } when ok.
  */
@@ -20,6 +24,7 @@ const { planIssue } = require('./plan');
 const { checkIssueCopy } = require('./claim-check');
 const { renderIssue } = require('./render');
 const { sendDateET } = require('./facts');
+const { postUrl } = require('./posts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 
 // The Pest Insider's newsletter type key: the send path, the proof kill
@@ -44,10 +49,10 @@ function sendGateErrors(issue) {
 
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
- *   recheckedFactIds?: string[] }} input   The issue is one email for every subscriber and
- *   takes no caller text (render.js says why).
+ *   recheckedFactIds?: string[], livePostFactIds?: string[] }} input   The issue is one
+ *   email for every subscriber and takes no caller text (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [] }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [] }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, problems: [] };
 
@@ -56,12 +61,19 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [] }) {
     recentFactIds: recent.factIds || [],
     recentSpeciesSlugs: recent.speciesSlugs || [],
     recheckedFactIds,
+    livePostFactIds,
   });
   diagnostics.factId = leadFact ? leadFact.id : null;
   diagnostics.speciesSlug = idItem ? idItem.slug : null;
   if (!leadFact || !idItem) return { ok: false, reason, issue: null, diagnostics };
   if (leadFact.recheck_before_send && !recheckedFactIds.includes(leadFact.id)) {
     return { ok: false, reason: `recheck_needed: ${leadFact.id}`, issue: null, diagnostics };
+  }
+  // The planner leads only with a fact whose post is live; one it returns
+  // anyway is refused, like a fact that still needs its recheck.
+  const post = postUrl(leadFact.id);
+  if (!post || !livePostFactIds.includes(leadFact.id)) {
+    return { ok: false, reason: `no_live_post: ${leadFact.id}`, issue: null, diagnostics };
   }
 
   const copy = checkIssueCopy({ leadFact, species: idItem });
@@ -71,7 +83,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [] }) {
   const issue = renderIssue({
     subject: copy.subject,
     preview: copy.preview,
-    lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })) },
+    lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post },
     idItem: { text: copy.idText, species: idItem },
   });
 
