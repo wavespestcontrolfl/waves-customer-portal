@@ -317,7 +317,6 @@ function buildPlaces(rows) {
     const place = {
       key: `home-${places.length + 1}`,
       customerId: String(first.customer_id),
-      geo: ordered.find((e) => e.geo)?.geo || null,
       pins: [...new Map(ordered.filter((e) => e.geo).map((e) => [`${e.geo.lat},${e.geo.lng}`, e.geo])).values()],
       unplaced,
       name: shortName(first),
@@ -382,7 +381,7 @@ function homeDays(place) {
       date: visits[0].date,
       visits,
       lead,
-      pin: lead.geo || visits.find((v) => v.geo)?.geo || place.geo, // the stop's own pin
+      pin: lead.geo || visits.find((v) => v.geo)?.geo || null, // that day's own pin, never another day's
       anchor: [...visits].sort(bookedFirst)[0].id,
       done: visits.every((v) => v.done),
     };
@@ -441,38 +440,58 @@ function stopsBetween(route, a, b, pair) {
   return new Set(between.map((s) => s.home).filter((home) => home !== pair.a.key && home !== pair.b.key)).size;
 }
 
-// How two homes' stops sit on the calendar, with the two services that show it.
-// A null split is not one to report: together (one day, one route, back to back) or
-// not judged (no time yet, or neither visit on a route yet). Two days: each stop's
-// lead service. One day: the two homes' nearest open services on one route decide,
-// counted on the route as the board runs it, so a home's second trip that day never
-// hides a back-to-back pair and a stop in a tied hour counts where the route puts it.
-// A same-day split is reported for any two customers: the 4:40 AM day re-plan keeps
-// most stops at their hours (a told time, a first visit, a staff pick, 24 hours out),
-// so it cannot be left to join them.
+// How two homes' stops sit on the calendar, with the two services that show it and
+// their distance, or null when those services' own pins are not next door (or near,
+// for one customer's homes), or a stop has no pin that day. A null split is not one
+// to report: together (one day, one route, back to back) or not judged (no time yet,
+// or neither visit on a route yet). Two days: each stop's lead service. One day: the
+// two homes' nearest open services on one route decide, counted on the route as the
+// board runs it, so a home's second trip that day never hides a back-to-back pair
+// and a stop in a tied hour counts where the route puts it. A same-day split is
+// reported for any two customers: the 4:40 AM day re-plan keeps most stops at their
+// hours (a told time, a first visit, a staff pick, 24 hours out), so it cannot be
+// left to join them.
 function splitOf(x, y, pair, routes) {
-  if (x.date !== y.date) {
-    const [first, second] = [x.lead, y.lead].sort(visitOrder);
-    return { first, second, split: { gap: daysBetween(first.date, second.date) } };
-  }
-  let near = null;
-  let twoTechs = null;
-  for (const a of x.visits) {
-    for (const b of y.visits) {
-      if (a.done || b.done || !a.windowStart || !b.windowStart || (!a.tech && !b.tech)) continue;
-      const [first, second] = [a, b].sort(visitOrder);
-      if (a.tech && b.tech && a.tech !== b.tech) {
-        twoTechs = twoTechs || { first, second };
-        continue;
-      }
-      const between = stopsBetween(routeFor(routes, a, b), a, b, pair);
-      if (!near || between < near.between) near = { first, second, between };
-    }
-  }
-  if (near) return { first: near.first, second: near.second, split: near.between === 0 ? null : { between: near.between } };
-  if (twoTechs) return { ...twoTechs, split: { twoTechs: true } };
+  return x.date !== y.date ? twoDaySplit(x, y, pair) : sameDaySplit(x, y, pair, routes);
+}
+
+function twoDaySplit(x, y, pair) {
+  if (!x.pin || !y.pin || milesApart(x.pin, y.pin) > pair.limit) return null;
   const [first, second] = [x.lead, y.lead].sort(visitOrder);
-  return { first, second, split: null };
+  return { first, second, miles: milesApart(x.pin, y.pin), split: { gap: daysBetween(first.date, second.date) } };
+}
+
+// Two services one day can be judged when both are open and timed and one is on a route.
+const judgeable = (a, b) => !a.done && !b.done && !!a.windowStart && !!b.windowStart && !!(a.tech || b.tech);
+
+function sameDaySplit(x, y, pair, routes) {
+  const near = x.visits
+    .flatMap((a) => y.visits.map((b) => ({ a, b, miles: a.geo && b.geo ? milesApart(a.geo, b.geo) : Infinity })))
+    .filter((c) => c.miles <= pair.limit); // each pair of services on its own two pins
+  if (!near.length) return null;
+  const judged = nearestOnRoute(near.filter((c) => judgeable(c.a, c.b)), pair, routes);
+  if (judged) return judged;
+  // Next door but not judged yet (no time, or neither on a route): the stops pair as together.
+  const [first, second] = [x.lead, y.lead].sort(visitOrder);
+  return { first, second, miles: Math.min(...near.map((c) => c.miles)), split: null };
+}
+
+// Of the same-day service pairs next door, the one with the fewest stops between on
+// one route; else a pair on two routes; else none.
+function nearestOnRoute(near, pair, routes) {
+  let best = null;
+  let twoTechs = null;
+  for (const { a, b, miles } of near) {
+    const [first, second] = [a, b].sort(visitOrder);
+    if (a.tech && b.tech && a.tech !== b.tech) {
+      twoTechs = twoTechs || { first, second, miles };
+      continue;
+    }
+    const between = stopsBetween(routeFor(routes, a, b), a, b, pair);
+    if (!best || between < best.between) best = { first, second, miles, between };
+  }
+  if (best) return { first: best.first, second: best.second, miles: best.miles, split: best.between === 0 ? null : { between: best.between } };
+  return twoTechs ? { ...twoTechs, split: { twoTechs: true } } : null;
 }
 
 const gapOf = (p) => p.gap ?? 0;
@@ -487,15 +506,14 @@ function pairSplits(pair, routes) {
   const candidates = [];
   for (const x of homeDays(pair.a)) {
     for (const y of homeDays(pair.b)) {
-      const miles = milesApart(x.pin, y.pin); // the two stops' own pins decide
-      if (miles > pair.limit) continue;
+      const hit = splitOf(x, y, pair, routes);
+      if (!hit) continue; // not next door on the pins of the services that show it
       candidates.push({
-        miles,
         keys: [x.key, y.key],
         key: [x.anchor, y.anchor].sort().join('|'),
         done: x.done || y.done,
         days: Math.abs(daysBetween(x.date, y.date)),
-        ...splitOf(x, y, pair, routes),
+        ...hit,
       });
     }
   }

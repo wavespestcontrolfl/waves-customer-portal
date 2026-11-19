@@ -181,6 +181,40 @@ describe('part 1: next-door stops booked apart', () => {
     expect(findApartPairs([at(HOME_A, '2027-02-10', 'completed'), at(far, '2027-03-01'), neighbor])).toEqual([]);
   });
 
+  test("a stop with no pin that day never borrows another day's pin", () => {
+    const home = (date, status = 'pending') => stop({ customer: 'c-a', at: HOME_A, date, street: '100 Sample Way', status, plan: true });
+    const unpinned = { ...home('2027-03-01'), lat: null, lng: null, customer_latitude: null, customer_longitude: null };
+    const neighbor = stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true });
+    // Last month's served visit carries the home's pin; this month's visit has none.
+    expect(findApartPairs([home('2027-02-10', 'completed'), unpinned, neighbor])).toEqual([]);
+  });
+
+  test('one day: next door but not timed yet pairs as together, so no other day reports it', () => {
+    const homeA = (pin, start, date = '2027-03-01') => stop({ customer: 'c-a', at: pin, date, start, street: '100 Sample Way' });
+    const rows = [
+      homeA(north(1, HOME_A), '09:00'), // the lead service, a mile from the neighbor
+      homeA(HOME_A, null), // next door, no time yet
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '12:00' }),
+      homeA(HOME_A, '09:00', '2027-03-04'),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
+  test("one day: only services whose own pins are next door are judged, and the line shows their distance", () => {
+    const route = (row, order) => ({ ...row, route_order: order });
+    const homeA = (pin, start) => stop({ customer: 'c-a', at: pin, date: '2027-03-01', start, street: '100 Sample Way' });
+    const rows = [
+      route(homeA(HOME_A, '09:00'), 1),
+      route(stop({ customer: 'c-x', at: north(20), date: '2027-03-01', start: '10:00' }), 2),
+      route(homeA(north(1, HOME_A), '11:00'), 3),
+      route(stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-01', start: '12:00' }), 4),
+    ];
+    // The 11:00 service sits beside the neighbor on the route but carries a pin a mile away.
+    const pairs = findApartPairs(rows);
+    expect(pairs).toEqual([expect.objectContaining({ between: 1, first: expect.objectContaining({ id: rows[0].id }) })]);
+    expect(pairs[0].miles).toBeLessThan(0.1);
+  });
+
   test('a split keeps its key when another service at the same stop comes first', () => {
     const home = stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true });
     const pest = { ...stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', start: '09:00', plan: true }), created_at: '2027-01-01T12:00:00Z' };
