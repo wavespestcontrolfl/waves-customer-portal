@@ -34,7 +34,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('new_customer conversion collector on PostgreSQL', () => {
   let database;
   const schema = `new_customer_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['leads', 'customers', 'service_records', 'lead_sources'];
+  const tables = ['leads', 'customers', 'service_records', 'scheduled_services', 'services', 'lead_sources'];
 
   const savedOwnerPhone = process.env.ADAM_PHONE;
   beforeAll(async () => {
@@ -220,21 +220,67 @@ jest.setTimeout(30000);
     expect(out.map((x) => x.eventTimestamp)).toEqual(['2026-11-22T15:00:00.000Z']);
   });
 
-  test('an upload run pages past customers its destination already has', async () => {
+  test('an upload run pages until it holds `limit` sendable customers', async () => {
     const ids = [];
     for (const day of ['20', '18', '16']) {
       const c = await customer({ member_since: null });
       await lead(c, { converted_at: new Date(`2026-11-${day}T15:00:00Z`) });
       ids.push(`waves_new_customer:${c.id}`);
     }
-    const sentOf = (sent) => async (batch) => new Set(batch.filter((id) => sent.includes(id)));
+    // sendable = what the destination would send now (here: not already sent).
+    const notSent = (sent) => async (batch) => new Set(batch.map((x) => x.transactionId).filter((id) => !sent.includes(id)));
     const tx = (out) => out.map((x) => x.transactionId);
-    // Readiness (no sent check) reads one page.
+    // Readiness (no sendable check) reads one page.
     expect(tx(await collect({ limit: 1 }))).toEqual([ids[0]]);
-    // An upload run returns the sent ones too, and at most `limit` unsent ones.
-    expect(tx(await collect({ limit: 1, sentTransactionIds: sentOf([ids[0]]) }))).toEqual([ids[0], ids[1]]);
-    expect(tx(await collect({ limit: 1, sentTransactionIds: sentOf([ids[0], ids[1]]) }))).toEqual(ids);
-    expect(tx(await collect({ limit: 1, sentTransactionIds: sentOf(ids) }))).toEqual(ids);
+    // An upload run returns the unsendable ones too, and at most `limit` sendable ones.
+    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0]]) }))).toEqual([ids[0], ids[1]]);
+    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent([ids[0], ids[1]]) }))).toEqual(ids);
+    expect(tx(await collect({ limit: 1, sendableTransactionIds: notSent(ids) }))).toEqual(ids);
+  });
+
+  test('a newest test record takes no slot from an older sendable customer', async () => {
+    const test = await customer({ member_since: null, phone: OWNER_CELL });
+    await lead(test, { phone: OWNER_CELL, converted_at: new Date('2026-11-20T15:00:00Z') });
+    const real = await customer({ member_since: null });
+    await lead(real, { converted_at: new Date('2026-11-18T15:00:00Z') });
+    const sendable = async (batch) => new Set(batch.filter((x) => !_private.skipReason(x)).map((x) => x.transactionId));
+    const out = await collect({ limit: 1, sendableTransactionIds: sendable });
+    expect(out.map((x) => [x.transactionId, _private.skipReason(x)])).toEqual([
+      [`waves_new_customer:${test.id}`, 'internal_test'],
+      [`waves_new_customer:${real.id}`, null],
+    ]);
+  });
+
+  test('a completed booking before the lead is an existing customer; a free assessment is not', async () => {
+    const booked = await customer({ member_since: null });
+    await database('scheduled_services').insert({
+      id: randomUUID(), customer_id: booked.id, status: 'completed', service_type: 'General Pest Control',
+      scheduled_date: '2026-06-01', completed_at: null,
+    });
+    await lead(booked);
+    const assessed = await customer({ member_since: null });
+    await database('scheduled_services').insert({
+      id: randomUUID(), customer_id: assessed.id, status: 'completed', service_type: 'Waves Assessment',
+      scheduled_date: '2026-10-20', completed_at: new Date('2026-10-20T15:00:00Z'),
+    });
+    await lead(assessed);
+    const out = await collect();
+    expect(out.map((x) => x.transactionId)).toEqual([`waves_new_customer:${assessed.id}`]);
+  });
+
+  test('a later lead with no converted_at never takes a time before it existed', async () => {
+    const c = await customer({ member_since: '2026-11-01' });
+    await lead(c, {
+      first_contact_at: new Date('2026-11-01T14:00:00Z'), created_at: new Date('2026-11-01T14:00:00Z'),
+      converted_at: new Date('2026-11-12T15:00:00Z'), gclid: 'g-first',
+    });
+    await lead(c, {
+      first_contact_at: new Date('2026-11-20T14:00:00Z'), created_at: new Date('2026-11-20T14:00:00Z'),
+      converted_at: null, gclid: 'g-addon',
+    });
+    const out = await collect();
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ eventTimestamp: '2026-11-12T15:00:00.000Z', gclid: 'g-first' });
   });
 
   test("an opted-out email on the customer's deleted or open lead strips the upload", async () => {

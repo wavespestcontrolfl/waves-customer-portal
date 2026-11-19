@@ -18,6 +18,7 @@ const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-
 const matchFields = require('./ad-match-fields');
 const { isInternalTestContact } = require('../internal-test-customers');
 const { NON_ENGAGED_LEAD_STATUSES } = require('../lead-statuses');
+const { excludeAssessmentBookings } = require('../assessment-booking');
 
 let _googleapis;
 function getGoogle() {
@@ -680,9 +681,12 @@ async function linkedLeadContacts(customerIds) {
   return byCustomer;
 }
 
-async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT, sentTransactionIds = null } = {}) {
+async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT, sendableTransactionIds = null } = {}) {
   const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
-  const eventTimestampSql = "COALESCE(l.converted_at, ((c.member_since + time '12:00') AT TIME ZONE 'America/New_York'), l.created_at)";
+  // A win with no converted_at falls back to member_since at noon ET, but never
+  // earlier than the lead itself: an intake-stamped member_since must not give
+  // a later lead a time before it existed (GREATEST skips a NULL member_since).
+  const eventTimestampSql = "COALESCE(l.converted_at, GREATEST(((c.member_since + time '12:00') AT TIME ZONE 'America/New_York'), l.created_at))";
   const ownContactDateSql = "((COALESCE(l.first_contact_at, l.created_at)) AT TIME ZONE 'America/New_York')::date";
   // A prospect's customer row can be stamped member_since at its first form or
   // call (lead-webhook), so member_since is judged against the customer's first
@@ -702,12 +706,22 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     // converted_at, so the status decides, never converted_at alone.
     .whereRaw("LOWER(COALESCE(l.status, '')) IN ('won', 'converted')")
     .whereRaw(`(c.member_since IS NULL OR c.member_since >= ${customerFirstContactSql} - ?::int)`, [NEW_CUSTOMER_SLACK_DAYS])
-    // A completed visit before this lead's own first contact = an existing or former customer.
+    // A completed visit before this lead's own first contact = an existing or
+    // former customer: a completed service record (imported history lives only
+    // there) or a completed booking (completed_at, else its visit date, as an ET
+    // date). A free Waves Assessment is a consultation, not a sale, so it is not one.
     .whereNotExists(function hadEarlierVisit() {
       this.select(db.raw('1')).from('service_records as sr')
         .whereRaw('sr.customer_id = c.id')
         .where('sr.status', 'completed')
         .whereRaw(`sr.service_date < ${ownContactDateSql} - ?::int`, [NEW_CUSTOMER_SLACK_DAYS]);
+    })
+    .whereNotExists(function hadEarlierCompletedBooking() {
+      excludeAssessmentBookings(this.select(db.raw('1')).from('scheduled_services as ss')
+        .leftJoin('services as sv', 'sv.id', 'ss.service_id')
+        .whereRaw('ss.customer_id = c.id')
+        .where('ss.status', 'completed')
+        .whereRaw(`COALESCE((ss.completed_at AT TIME ZONE 'America/New_York')::date, ss.scheduled_date) < ${ownContactDateSql} - ?::int`, [NEW_CUSTOMER_SLACK_DAYS]), 'ss', 'sv');
     })
     .select('l.id')
     .orderBy('l.customer_id')
@@ -724,10 +738,11 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
     .offset(offset);
 
   // One row per customer, newest first. Readiness reads one page. An upload run
-  // passes sentTransactionIds (what its destination already has) and pages on
-  // until `cap` customers are still unsent or the window ends, so no customer
-  // ages out behind ones already sent. Sent ones come back too (reported as
-  // already sent); at most `cap` unsent ones do.
+  // passes sendableTransactionIds (what its destination would send now: no skip
+  // reason, not on its history) and pages on until `cap` customers are
+  // sendable or the window ends, so no customer ages out behind ones already
+  // sent or unsendable. Those come back too (reported as skipped); at most
+  // `cap` sendable ones do.
   const out = [];
   let room = cap;
   for (let offset = 0; ; offset += cap) {
@@ -744,10 +759,10 @@ async function collectNewCustomerCandidates({ since, endDate, limit = MAX_LIMIT,
         suppressionIdentifiers: siblings.map((x) => ({ email: x.email || null, phone: x.phone || null })),
       };
     }));
-    if (!sentTransactionIds) return candidates;
-    const sent = await sentTransactionIds(candidates.map((c) => c.transactionId));
+    if (!sendableTransactionIds) return candidates;
+    const sendable = await sendableTransactionIds(candidates);
     for (const c of candidates) {
-      if (sent.has(c.transactionId)) out.push(c);
+      if (!sendable.has(c.transactionId)) out.push(c);
       else if (room > 0) { out.push(c); room -= 1; }
     }
     if (room === 0 || rows.length < cap) return out;
@@ -1001,10 +1016,13 @@ async function existingUploads(conversionType, transactionIds) {
   return new Map(rows.map((row) => [row.transaction_id, row]));
 }
 
-// The ids an upload run skips on its history (sent, pending, partial success).
-async function uploadedTransactionIds(conversionType, transactionIds) {
-  const prior = await existingUploads(conversionType, transactionIds);
-  return new Set(transactionIds.filter((id) => priorUploadSkipReason(prior.get(id))));
+// The candidates an upload run would send: no skip reason and, unless forced,
+// nothing on the history that skips it (sent, pending, partial success).
+async function uploadableTransactionIds(conversionType, candidates, force) {
+  const prior = force ? new Map() : await existingUploads(conversionType, candidates.map((c) => c.transactionId));
+  return new Set(candidates
+    .filter((c) => !skipReason(c) && !priorUploadSkipReason(prior.get(c.transactionId)))
+    .map((c) => c.transactionId));
 }
 
 async function buildReadiness({ periodDays = 30, limit = MAX_LIMIT } = {}) {
@@ -1155,8 +1173,8 @@ async function uploadConversionsLocked({
     await collectCandidates(conversionType, {
       ...range,
       limit: cappedLimit,
-      // The new-customer collector pages past these; a forced run re-sends the newest page.
-      sentTransactionIds: (ids) => (force ? new Set() : uploadedTransactionIds(conversionType, ids)),
+      // The new-customer collector pages until it holds `limit` of these.
+      sendableTransactionIds: (batch) => uploadableTransactionIds(conversionType, batch, force),
     })
   );
   const existing = await existingUploads(conversionType, candidates.map((c) => c.transactionId));

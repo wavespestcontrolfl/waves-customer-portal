@@ -188,6 +188,12 @@ async function sendEvents(events, { testCode, fetchImpl = global.fetch } = {}) {
   return data; // { events_received, messages, fbtrace_id }
 }
 
+// The candidates this run would send: no skip reason and, unless forced, not sent before.
+async function sendableEventIds(conversionType, candidates, force) {
+  const sent = force ? new Set() : await existingSent(conversionType, candidates.map((c) => c.transactionId));
+  return new Set(candidates.filter((c) => !skipReason(c) && !sent.has(c.transactionId)).map((c) => c.transactionId));
+}
+
 async function existingSent(conversionType, eventIds) {
   if (!eventIds.length) return new Set();
   const rows = await db('meta_conversion_uploads')
@@ -259,8 +265,8 @@ async function uploadConversions({ conversionType = 'completed_job_revenue', per
     const candidates = await collectCandidates(conversionType, {
       ...range,
       limit: cap,
-      // The new-customer collector pages past these; a forced run re-sends the newest page.
-      sentTransactionIds: (ids) => (force ? new Set() : existingSent(conversionType, ids)),
+      // The new-customer collector pages until it holds `limit` of these.
+      sendableTransactionIds: (batch) => sendableEventIds(conversionType, batch, force),
     });
     const alreadySent = force ? new Set() : await existingSent(conversionType, candidates.map((c) => c.transactionId));
 
