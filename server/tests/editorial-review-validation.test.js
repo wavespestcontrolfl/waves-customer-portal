@@ -33,7 +33,7 @@ describe('editorial review coverage validation', () => {
   });
 
   test('allows numeric instructions to be classified as non-external', () => {
-    const passage = 'Check 2 containers near your door.';
+    const passage = 'Check 2 traps near your door.';
     expect(validateClaim(passage, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' })).toBeNull();
   });
 
@@ -77,6 +77,7 @@ describe('editorial review coverage validation', () => {
     'Homes need a MERV-13 filter.',
     'Look for larvae that hatch in 3 days.',
     'Remove 2 ounces of bait from each station.',
+    'Remove 2 bags of mulch from the bed.',
     'Check 3 days later for new droppings.',
     'Check 2 traps, since 40% of roaches hide there.',
   ])('still rejects a figure outside those cases as non-external: %s', (passage) => {

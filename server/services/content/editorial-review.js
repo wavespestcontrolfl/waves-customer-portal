@@ -19,7 +19,7 @@ const {
   splitFrontmatter,
 } = require('./editorial-review-inventory');
 const { fetchSources } = require('./editorial-review-sources');
-const { validatePlanJson, validateReviewJson } = require('./editorial-review-validation');
+const { validatePlanJson, validateReviewJson, holdUnsourcedFigures } = require('./editorial-review-validation');
 
 function firstPassage(document, title) {
   const body = splitFrontmatter(document).body;
@@ -140,7 +140,7 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   try {
     response = await createDeepMessage(null, payload, {
       jsonSchema: REVIEW_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-review-v1',
-      validate: (json) => validateReviewJson(json, analysis, document, title, evidence.records),
+      validate: (json) => validateReviewJson(holdUnsourcedFigures(json), analysis, document, title, evidence.records),
     });
   } catch (err) {
     return errorResult(document, title, `Editorial model dispatch failed: ${err.message}`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
@@ -148,10 +148,11 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   if (!response?.ok || !response.json || !String(response.model || '').trim()) {
     return errorResult(document, title, `Editorial model did not return a complete valid review (${response?.reason || 'invalid response'}).`, 'Retry the complete editorial review; do not publish this unreviewed document.', evidence.records, reviewedAt);
   }
-  const validationError = validateReviewJson(response.json, analysis, document, title, evidence.records);
+  const reviewed = holdUnsourcedFigures(response.json);
+  const validationError = validateReviewJson(reviewed, analysis, document, title, evidence.records);
   if (validationError) return errorResult(document, title, `Editorial response failed validation: ${validationError}.`, 'Retry the complete editorial review; do not publish from partial coverage.', evidence.records, reviewedAt);
 
-  const checks = addOperationalFindings(response.json.checks, analysis, evidence.errors, document, title);
+  const checks = addOperationalFindings(reviewed.checks, analysis, evidence.errors, document, title);
   return {
     pass: checks.every((check) => check.status === 'pass'),
     checks,

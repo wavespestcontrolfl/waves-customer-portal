@@ -63,11 +63,12 @@ function exactQuotedPhrases(passage) {
   return phrases;
 }
 
-// An instruction whose only number counts things the reader handles ("Check 2 containers by the door"):
-// the number sits right after the verb and counts one of a closed list of objects, never a time, a size
-// or an amount ("Look for larvae that hatch in 3 days", "Remove 2 ounces of bait"), and no other figure
-// follows in the sentence. Anything else states a fact and needs a source.
-const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?:containers?|traps?|stations?|spots?|areas?|corners?|rooms?|doors?|windows?|sides?|bins?|pots?|saucers?|buckets?|drains?|vents?|bags?|boxes?|piles?|plants?|cans?|gutters?)\b/i;
+// An instruction whose only number counts places the reader checks ("Check 2 traps by the door"): the
+// number sits right after the verb and counts one of a closed list of places, never a time, a size, an
+// amount or a package ("Look for larvae that hatch in 3 days", "Remove 2 ounces of bait", "2 bags"), and
+// no other figure follows in the sentence. A missed form costs a repair, not the review: see
+// holdUnsourcedFigures.
+const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?:traps?|stations?|spots?|areas?|corners?|rooms?|doors?|windows?|sides?|pots?|saucers?|drains?|vents?|plants?|gutters?)\b/i;
 function isTrivialNumericInstruction(passage) {
   const text = String(passage || '').trim();
   const match = text.match(COUNT_INSTRUCTION_RE);
@@ -111,6 +112,40 @@ function validateClaimEvidence(claim, sources) {
   if (deterministicKind && !allowedNumber) return `claim_kind_mismatch:${claim.claimId}`;
   if (claim.claimKind !== 'non_external' || claim.sourceSuitability !== 'not_applicable') return `claim_non_external_shape:${claim.claimId}`;
   return null;
+}
+
+// A figure or an attributed quote the model marked non_external has no source behind it. That used to
+// fail the whole answer (claim_kind_mismatch), so one label lost a complete review (Mac test 2026-11-19).
+// Such a claim is now held as unsupported, with a source_support finding on its exact passage: the review
+// fails on it, and the repair step gets the passage to cite or remove. It only ever makes a review
+// stricter. Runs before validateReviewJson, which still rejects a mislabel it did not convert.
+const UNSOURCED_ACTION = 'Cite a fetched source that states this figure or quote, or remove it.';
+function holdUnsourcedFigures(json) {
+  if (!json || !Array.isArray(json.claims) || !Array.isArray(json.checks)) return json;
+  const held = json.claims.filter((claim) => {
+    if (claim?.verdict !== 'non_external') return false;
+    const kind = deterministicClaimKind(claim.passage);
+    return Boolean(kind) && !(kind === 'quantitative' && numericNonExternalAllowed(claim.passage));
+  });
+  if (!held.length) return json;
+  const heldIds = new Set(held.map((claim) => claim.claimId));
+  const claims = json.claims.map((claim) => (!heldIds.has(claim.claimId) ? claim : {
+    ...claim, verdict: 'unsupported', claimKind: deterministicClaimKind(claim.passage),
+    sourceSuitability: 'unsuitable', sourceIndex: -1, sourceQuote: '', action: UNSOURCED_ACTION,
+  }));
+  const checks = json.checks.map((check) => {
+    if (check?.name !== 'source_support' || !Array.isArray(check.findings)) return check;
+    const passages = new Set(check.findings.map((item) => item?.passage));
+    const added = [];
+    for (const claim of held) {
+      if (passages.has(claim.passage)) continue;
+      passages.add(claim.passage);
+      added.push({ passage: claim.passage, detail: 'This passage states a figure or an attributed quote with no fetched source behind it.',
+        action: UNSOURCED_ACTION, sourceIndexes: [], sourceQuote: '' });
+    }
+    return { ...check, status: 'fail', findings: [...check.findings, ...added] };
+  });
+  return { ...json, claims, checks };
 }
 
 function validateClaims(claims, analysis, document, sources) {
@@ -172,4 +207,4 @@ function validatePlanJson(json, sections) {
   return null;
 }
 
-module.exports = { validatePlanJson, validateReviewJson };
+module.exports = { validatePlanJson, validateReviewJson, holdUnsourcedFigures };
