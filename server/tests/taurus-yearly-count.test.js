@@ -6,7 +6,7 @@
 jest.mock('../models/db', () => ({ raw: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { taurusYearlyCount, etYearBounds, TAURUS_YEARLY_LIMIT } = require('../services/taurus-yearly-count');
+const { taurusYearlyCount, etYearBounds, TAURUS_YEARLY_LIMIT, TAURUS_NAME_PATTERN } = require('../services/taurus-yearly-count');
 
 const fakeKnex = (rows) => ({ raw: jest.fn().mockResolvedValue({ rows }) });
 const VISIT = { id: 'visit-1', customer_id: 'cust-1', property_id: 'prop-1' };
@@ -40,7 +40,7 @@ describe('taurusYearlyCount', () => {
     const [sql, bindings] = knex.raw.mock.calls[0];
     expect(bindings).toEqual({
       customerId: 'cust-1', propertyId: 'prop-1', visitId: 'visit-1',
-      yearStart: '2026-01-01', nextYearStart: '2027-01-01', productName: 'Taurus SC',
+      yearStart: '2026-01-01', nextYearStart: '2027-01-01', namePattern: TAURUS_NAME_PATTERN,
     });
     // Read only: no row lock, no write.
     expect(sql).not.toMatch(/FOR\s+(UPDATE|SHARE)|INSERT|UPDATE\s|DELETE/i);

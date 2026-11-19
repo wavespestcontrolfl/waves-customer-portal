@@ -17,8 +17,8 @@
  *
  * Count = distinct visits (the scheduled visit, else the service record) with a
  * Taurus SC product row on a non-cancelled service_record in the calendar year
- * (the active catalog row named exactly "Taurus SC" by product_id, or an older
- * row by product_name), leaving out the visit being completed. Two visits on
+ * (the active catalog row named Taurus SC by product_id, or an older row by
+ * product_name; the match is the picker's: case and spacing are ignored), leaving out the visit being completed. Two visits on
  * one day are two applications. Read only, one query, no row locks.
  */
 const db = require('../models/db');
@@ -26,7 +26,9 @@ const logger = require('./logger');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 
 const TAURUS_YEARLY_LIMIT = 4;
-const TAURUS_PRODUCT_NAME = 'Taurus SC';
+// The close-out picker's own identity rule (client lib/taurus-yearly-limit.js: /^taurus\s*sc\b/i on the trimmed name),
+// so history and the picker agree on 'TAURUS SC', ' taurus sc ' and a suffixed name.
+const TAURUS_NAME_PATTERN = '^\\s*taurus\\s*sc\\M';
 
 const COUNT_SQL = `
   SELECT COUNT(DISTINCT COALESCE(sr.scheduled_service_id, sr.id))::int AS count
@@ -45,10 +47,10 @@ const COUNT_SQL = `
       OR COALESCE(pah.property_id, ss.property_id) IS NULL
     )
     AND (
-      sp.product_name = :productName
+      sp.product_name ~* :namePattern
       OR sp.product_id IN (
         SELECT pc.id FROM products_catalog pc
-        WHERE pc.name = :productName AND pc.active = true
+        WHERE pc.name ~* :namePattern AND pc.active = true
       )
     )
 `;
@@ -82,7 +84,7 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
       visitId: visit.id || null,
       yearStart,
       nextYearStart,
-      productName: TAURUS_PRODUCT_NAME,
+      namePattern: TAURUS_NAME_PATTERN,
     });
     const count = Number(result?.rows?.[0]?.count);
     return Number.isFinite(count) ? { count, limit: TAURUS_YEARLY_LIMIT, year } : null;
@@ -93,4 +95,4 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
   }
 }
 
-module.exports = { taurusYearlyCount, etYearBounds, TAURUS_YEARLY_LIMIT, TAURUS_PRODUCT_NAME };
+module.exports = { taurusYearlyCount, etYearBounds, TAURUS_YEARLY_LIMIT, TAURUS_NAME_PATTERN };

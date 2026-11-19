@@ -38,6 +38,9 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     const product = { id: randomUUID(), service_record_id: srId };
     if (taurus === 'id') await db('service_products').insert({ ...product, product_name: 'Taurus SC (renamed)', product_id: taurusId });
     if (taurus === 'name') await db('service_products').insert({ ...product, product_name: 'Taurus SC', product_id: null });
+    if (taurus === 'upper') await db('service_products').insert({ ...product, product_name: '  TAURUS SC  ', product_id: null });
+    if (taurus === 'suffixed') await db('service_products').insert({ ...product, product_name: 'Taurus SC 9.7%', product_id: null });
+    if (taurus === 'lookalike') await db('service_products').insert({ ...product, product_name: 'Taurus SCX', product_id: null });
     if (taurus === 'none') await db('service_products').insert({ ...product, product_name: 'LESCO Crosscheck Plus', product_id: otherId });
     if (ledgerProperty) await db('property_application_history').insert({ service_product_id: product.id, property_id: ledgerProperty });
     return { ssId, srId };
@@ -69,6 +72,9 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
   it('counts distinct service dates of Taurus records at the home this ET year', async () => {
     await visit({ property: propA, date: '2026-02-01' });
     await visit({ property: propA, date: '2026-05-01', taurus: 'name' }); // older row, by name
+    await visit({ property: propA, date: '2026-06-01', taurus: 'upper' }); // legacy casing and spacing
+    await visit({ property: propA, date: '2026-06-15', taurus: 'suffixed' });
+    await visit({ property: propA, date: '2026-06-20', taurus: 'lookalike' }); // another product
     await visit({ property: propA, date: '2026-08-01', taurus: 'none' }); // no Taurus
     await visit({ property: propA, date: '2026-09-01', status: 'cancelled' });
     await visit({ property: propB, date: '2026-06-01' }); // another home
@@ -76,8 +82,8 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await visit({ property: propA, date: '2027-01-01' }); // next year
     const current = await visit({ property: propA, date: '2026-11-19' });
     const out = await taurusYearlyCount({ id: current.ssId, customer_id: customer, property_id: propA }, { knex: db, now: NOW });
-    // 02-01 and 05-01; the current visit's own record is left out.
-    expect(out).toEqual({ count: 2, limit: 4, year: 2026 });
+    // 02-01, 05-01 (by name), 06-01 (upper case) and 06-15 (suffixed); the lookalike product and the current visit are left out.
+    expect(out).toEqual({ count: 4, limit: 4, year: 2026 });
   });
 
   it('counts two visits on the same day as two applications, and two records of one visit as one', async () => {
