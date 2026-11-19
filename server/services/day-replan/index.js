@@ -62,6 +62,9 @@ const MOVABLE_STATUSES = ['pending', 'confirmed'];
 const EXCLUDED_STATUSES = ['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show'];
 const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const PLAN_TABLE = 'day_replan_plans';
+// Canonical booking occupancy: only a customer-NULL row can be an expiring hold. A customer-linked committed visit
+// remains live even when a stale reservation_expires_at stamp is non-null or already past.
+const LIVE_OCCUPANCY_SQL = '(scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())';
 
 function daysAhead() {
   const raw = Number.parseInt(process.env.DAY_REPLAN_DAYS_AHEAD, 10);
@@ -112,7 +115,7 @@ const TOLD_LOCK_SELECT = [
 ];
 
 async function loadDayStops(conn, dateStr) {
-  const { _internals, CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
+  const { CUSTOMER_PREMISE_ALIASES } = require('../route-reorder');
   return dayStopsQuery(conn, {
     dateStr,
     excludeStatuses: EXCLUDED_STATUSES,
@@ -140,7 +143,7 @@ async function loadDayStops(conn, dateStr) {
       ...guardedCoordSelects(conn),
       ...TOLD_LOCK_SELECT,
     ],
-  }).whereRaw(_internals.LIVE_HOLD_SQL);
+  }).whereRaw(LIVE_OCCUPANCY_SQL);
 }
 
 /** Ids whose 24-hour reminder is recorded as sent. Throws when the read fails (the caller skips the day). */
@@ -795,11 +798,10 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
 
 /** Locks every live row of the date (in id order) before the day is read again: the scheduling fence's row locks. */
 async function lockDayRows(conn, dateStr) {
-  const { _internals } = require('../route-reorder');
   return conn('scheduled_services')
     .where('scheduled_date', dateStr)
     .whereNotIn('status', EXCLUDED_STATUSES)
-    .whereRaw(_internals.LIVE_HOLD_SQL)
+    .whereRaw(LIVE_OCCUPANCY_SQL)
     .orderBy('id')
     .forUpdate()
     .select('id');

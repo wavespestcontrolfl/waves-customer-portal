@@ -30,6 +30,7 @@ const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
+const { INTERNAL_TEST_CUSTOMER_IDS } = require('../internal-test-customers');
 
 const KEY_PREFIX = 'open-blocks:';
 const DAYS = 7;
@@ -246,8 +247,10 @@ function matchingHour(offers, blocks) {
 async function matchEstimates(conn, blocks, now) {
   const { offerableEstimateSlots } = require('../../routes/estimate-slots-public')._internals;
   const { OFFER_RANK } = require('./booking-fit');
-  const candidates = await conn('estimates').whereIn('status', ['viewed', 'sent']).whereNull('archived_at')
-    .whereNotNull('customer_id').where(q => q.whereNull('expires_at').orWhere('expires_at', '>', now))
+  const candidatesQuery = conn('estimates').whereIn('status', ['viewed', 'sent']).whereNull('archived_at')
+    .whereNotNull('customer_id').where(q => q.whereNull('expires_at').orWhere('expires_at', '>', now));
+  if (INTERNAL_TEST_CUSTOMER_IDS.length) candidatesQuery.whereNotIn('customer_id', INTERNAL_TEST_CUSTOMER_IDS);
+  const candidates = await candidatesQuery
     .orderBy('created_at', 'desc').orderBy('id').limit(20).select('id', 'customer_id', 'customer_name');
   const dates = blocks.map(b => b.day).sort();
   const dispatchWindow = { dateFrom: dates[0], dateTo: dates[dates.length - 1], dispatchCalendar: new Map() };

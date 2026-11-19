@@ -237,6 +237,27 @@ function stopsForTechDay(stops, technicianId, dateStr) {
     && (s.technician_id == null || String(s.technician_id) === String(technicianId)));
 }
 
+// The same constraints apply when scoring and committing. Load them across the candidate dates in a batch.
+async function loadPositionConstraints(conn, dates, technicianIds) {
+  const dayList = [...new Set(dates)];
+  const techList = [...new Set(technicianIds)];
+  if (!dayList.length || !techList.length) return { unpricedDays: new Set(), blocks: [] };
+  const hidden = conn('scheduled_services').whereIn('scheduled_date', dayList).whereIn('technician_id', techList)
+    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled', 'no_show'])
+    .where(q => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', conn.fn.now()))
+    .where(q => q.whereNull('window_start').orWhereIn('status', ['completed', 'en_route', 'on_site']))
+    .distinct('scheduled_date', 'technician_id');
+  const calendar = conn('tech_schedule_blocks').whereIn('date', dayList).whereNot('block_type', 'available')
+    .where(q => q.whereIn('technician_id', techList).orWhereNull('technician_id')).select('date', 'technician_id', 'start_time', 'end_time');
+  const [rows, calendarRows] = await Promise.all([hidden, calendar]);
+  return {
+    unpricedDays: new Set(rows.map(r => `${r.technician_id}|${toDateStr(r.scheduled_date)}`)),
+    blocks: calendarRows.map(r => ({ dateStr: toDateStr(r.date), technician_id: r.technician_id,
+      startMin: hhmmToMin(r.start_time), endMin: hhmmToMin(r.end_time) }))
+      .filter(r => Number.isFinite(r.startMin) && Number.isFinite(r.endMin) && r.endMin > r.startMin),
+  };
+}
+
 // A single tech-day (computeCurrentPlacement's current day); a null
 // technicianId reads the unassigned rows alone.
 async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
@@ -540,14 +561,14 @@ function candidateRouteOrder(service, cand) {
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
-function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ, ctx = {}) {
+function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ, ctx = {}, blocks = []) {
   const moved = movedSiblings(siblings, placement, cand);
   const target = { ...service, technician_id: cand.technician_id, window_start: cand.start_time, window_end: cand.end_time,
     lat: geo.lat, lng: geo.lng, geo };
   const otherDay = toDateStr(service.scheduled_date) !== cand.date || service.technician_id !== cand.technician_id;
   const position = otherDay && !siblings.length && service.technician_id && service.window_start
     ? positionFor(stops, target, {
-      origin: home, departureMin: ctx.departureMinutes ?? DAY_OPEN, dayEndMin: DAY_CLOSE, sourceStamp: ctx.sourceRouteStamp,
+      origin: home, departureMin: ctx.departureMinutes ?? DAY_OPEN, dayEndMin: DAY_CLOSE, sourceStamp: ctx.sourceRouteStamp, blocks,
     })
     : undefined;
   if (position === null) return null;
@@ -578,14 +599,9 @@ async function verifyScoredPosition(trx, service, date, technicianId, window, po
   const source = stopsForTechDay(others, service.technician_id, sourceDate);
   const targetDay = stopsForTechDay(others, technicianId, date);
   const changed = () => Object.assign(new Error('Dispatch route changed after scoring'), { code: 'ROUTE_CHANGED', statusCode: 409 });
-  if (!moving || moving.visit_id || routeStamp(source) !== position.sourceStamp || routeStamp(targetDay) !== position.destinationStamp) throw changed();
-  // The scorer prices timed, active stops. Never number over a visit outside that read.
-  const hidden = await trx('scheduled_services').where({ scheduled_date: date, technician_id: technicianId })
-    .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled', 'no_show'])
-    .where(q => q.whereNull('reservation_expires_at').orWhere('reservation_expires_at', '>', trx.fn.now()))
-    .where(q => q.whereNull('window_start').orWhereIn('status', ['completed', 'en_route', 'on_site'])).first('id');
-  if (hidden) throw changed();
-  const blocks = await require('../day-replan')._internals.loadBlocks(trx, date, technicianId);
+  if (!moving || moving.visit_id || routeStamp(source, moving) !== position.sourceStamp || routeStamp(targetDay) !== position.destinationStamp) throw changed();
+  const { unpricedDays, blocks } = await loadPositionConstraints(trx, [date], [technicianId]);
+  if (unpricedDays.size) throw changed();
   const target = { ...moving, technician_id: technicianId, window_start: window.start, window_end: window.end };
   if (targetStamp(target) !== position.targetStamp
       || !routeFits([...targetDay, target], position.order, {
@@ -604,9 +620,11 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
   const group = { members: unitMembers(service, siblings), visitWindowStart };
   const dates = candidates.map((c) => c.date);
-  const [occupiedByDate, dayStops] = await Promise.all([
+  const technicianIds = candidates.map(c => c.technician_id).filter(Boolean);
+  const [occupiedByDate, dayStops, constraints] = await Promise.all([
     loadOccupiedSpansByDate(ctx.db, dates, excludeIds),
-    loadDayStopRows(ctx.db, { technicianIds: candidates.map((c) => c.technician_id), dates, excludeIds }),
+    loadDayStopRows(ctx.db, { technicianIds, dates, excludeIds }),
+    ctx.sourceRouteStamp && !siblings.length ? loadPositionConstraints(ctx.db, dates, technicianIds) : null,
   ]);
   await loadStartPoints(ctx, candidates.map((c) => c.technician_id));
   const stopsByTechDay = new Map();
@@ -619,8 +637,9 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    const scored = scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id), ctx);
-    if (scored) kept.push(scored);
+    const blocks = constraints ? stopsForTechDay(constraints.blocks, cand.technician_id, cand.date) : [];
+    const scored = scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id), ctx, blocks);
+    if (scored && !(scored[ROUTE_POSITION] && constraints?.unpricedDays.has(key))) kept.push(scored);
     else if (drops) drops.route_window = (drops.route_window || 0) + 1;
   }
   return kept;
@@ -843,7 +862,7 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category)
   const { excludeIds, siblings } = await groupContextFor(service, ctx);
   const dayTechs = await currentDayTechs(service, ctx, dateStr, category);
   const days = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, { technicianId, dateStr, excludeIds })));
-  if (service.technician_id && !siblings.length) ctx.sourceRouteStamp = routeStamp(days[0]);
+  if (service.technician_id && !siblings.length) ctx.sourceRouteStamp = routeStamp(days[0], service);
   await loadStartPoints(ctx, dayTechs);
   const startMin = hhmmToMin(service.window_start) ?? DAY_OPEN;
   return leastDrive(dayTechs.map((dayTech, i) => {

@@ -5,7 +5,8 @@ const { coVisitGroups, simulate } = require('./app-sim');
 const { preferredFit, fitOfferedHour } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
-const { techScopedConfirmActive } = require('../scheduling/occupancy');
+const { DEFAULT_EXCLUDE_STATUSES, liveMakeRoomDestinations, techScopedConfirmActive } = require('../scheduling/occupancy');
+const { isHoldStop } = require('../scheduling/travel-gap');
 const { etDateString } = require('../../utils/datetime-et');
 
 const OFFER_RANK = Symbol('dispatch offer ranking');
@@ -16,12 +17,15 @@ const hasPin = r => r?.lat != null && r?.lng != null && Number.isFinite(Number(r
 
 // loadDayStops has already removed expired holds. A public picker may be re-reading the hour held by this same
 // estimate, so remove only that known hold; committed rows and every other estimate's live hold remain occupancy.
+const isOwnEstimateHold = (row, ownEstimateId) => !!ownEstimateId && row.source_estimate_id != null
+  && String(row.source_estimate_id) === String(ownEstimateId) && isHoldStop(row);
+
 function withoutOwnEstimateHold(rows, ownEstimateId) {
   if (!ownEstimateId) return rows;
-  return rows.filter(row => !(row.reservation_expires_at
-    && row.source_estimate_id != null
-    && String(row.source_estimate_id) === String(ownEstimateId)));
+  return rows.filter(row => !isOwnEstimateHold(row, ownEstimateId));
 }
+
+const sameTech = (row, techId) => row.technician_id != null && String(row.technician_id) === String(techId);
 
 // All inputs are stored appointments, pins and local drive estimates. One read of the route per date and
 // one of the calendar blocks per technician-date. Candidates come from the caller's own admitted hours.
@@ -51,19 +55,28 @@ async function assessOfferedHours(conn, offered, target, {
   const techBlind = !techScopedConfirmActive();
   const fits = [];
   for (const [date, techs] of byDate) {
-    const rows = withoutOwnEstimateHold(
-      (await read(date, () => replan.loadDayStops(conn, date))).filter(r => r.id !== target.id),
-      ownEstimateId,
-    );
+    const loaded = await read(date, () => replan.loadDayStops(conn, date));
+    const excludedIds = loaded.filter(row => String(row.id) === String(target.id)
+      || isOwnEstimateHold(row, ownEstimateId))
+      .map(row => String(row.id));
+    const rows = withoutOwnEstimateHold(loaded.filter(r => String(r.id) !== String(target.id)), ownEstimateId);
+    // Use the booking writer's shared occupancy reader for reversible make-room destinations. The excluded ids
+    // remove this prospective target and this estimate's own genuine holds; expiry and mode semantics stay canonical.
+    const destinationKey = `make-room|${date}|${excludedIds.slice().sort().join(',')}`;
+    const destinations = (await read(destinationKey, () => liveMakeRoomDestinations(conn, {
+      dateFrom: date, dateTo: date, excludeIds: excludedIds, excludeStatuses: DEFAULT_EXCLUDE_STATUSES, scopeTechId: null,
+    }))).map(destination => destination.row);
+    const occupancyRows = [...rows, ...destinations];
     for (const [techId, slots] of techs) {
-      const own = rows.filter(r => r.technician_id === techId && !r.reservation_expires_at);
+      // A linked appointment with a leftover reservation stamp is committed, not a hold: route and simulate it.
+      const own = rows.filter(r => sameTech(r, techId) && !isHoldStop(r));
       if (own.some(r => !r.window_start || !hasPin(r) || !['confirmed', 'pending'].includes(r.status))) continue;
       const ordered = currentOrder(own);
       if (ordered.some((r, i) => i && effectiveWindowRange(r).startMin < effectiveWindowRange(ordered[i - 1]).startMin)) continue;
       const groups = coVisitGroups(ordered);
       const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
-      const blockedHours = [...new Set([...replan.blockedHoursFor(rows, techId, techBlind),
-        ...rows.filter(r => r.technician_id === techId && r.reservation_expires_at).flatMap(replan.rowHours)])];
+      const blockedHours = [...new Set([...replan.blockedHoursFor(occupancyRows, techId, techBlind),
+        ...occupancyRows.filter(r => sameTech(r, techId) && isHoldStop(r)).flatMap(replan.rowHours)])];
       const unavailable = [...blocks, ...blockedHours.map(h => ({ startMin: h * 60, endMin: h * 60 + 60 }))];
       const origin = homeFromMap(homes, techId);
       const before = simulate(ordered, { origin, departureMin });

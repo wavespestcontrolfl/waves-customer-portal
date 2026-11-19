@@ -14,7 +14,10 @@ jest.mock('../services/technician-eligibility', () => ({
   applyAssignable: jest.fn((q) => q), absentTechDays: jest.fn(async () => new Set()),
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
-jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  DEFAULT_EXCLUDE_STATUSES: ['cancelled', 'skipped', 'no_show', 'rescheduled'],
+  techScopedConfirmActive: jest.fn(() => false), liveMakeRoomDestinations: jest.fn(async () => []),
+}));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/admin-alert-episodes', () => ({
   openAdminAlertKeys: jest.fn(async () => []), closeAdminAlertKeys: jest.fn(async (_c, keys) => keys.length),
@@ -42,21 +45,26 @@ const wait = (start, min) => ({ kind: 'wait', start, min, before: 'v1' });
 // count's schedule rows and schedule blocks.
 function fakeConn({ run = { run_id: 'run-1' }, rows = [], techs = [{ id: TECH, name: 'Pat Tester' }], assignable = [], services = [], blocks = [], estimates = [] } = {}) {
   const calls = [];
+  let estimateRows = estimates;
   const conn = (table) => {
     const q = {
       where(...args) { calls.push([table, 'where', args]); return q; },
       whereNotNull() { return q; },
       whereNull() { return q; },
-      limit() { return q; },
+      limit(...args) { calls.push([table, 'limit', args]); return q; },
       whereIn() { return q; },
-      whereNotIn() { return q; },
+      whereNotIn(...args) {
+        calls.push([table, 'whereNotIn', args]);
+        if (table === 'estimates' && args[0] === 'customer_id') estimateRows = estimateRows.filter((r) => !args[1].includes(String(r.customer_id)));
+        return q;
+      },
       whereNot() { return q; },
       whereBetween(...args) { calls.push([table, 'whereBetween', args]); return q; },
-      orderBy() { return q; },
+      orderBy(...args) { calls.push([table, 'orderBy', args]); return q; },
       first: async () => run,
       select: async (first) => {
         if (table === 'technicians') return first === 'technicians.id' ? assignable : techs;
-        if (table === 'estimates') return estimates;
+        if (table === 'estimates') return estimateRows;
         if (table === 'scheduled_services') return services;
         if (table === 'tech_schedule_blocks') return blocks;
         return rows;
@@ -156,14 +164,70 @@ test('a matching estimate needs its two-hour arrival promise, stored window and 
 
 test('booking fit removes only the trusted estimate\'s hold; absent and unknown ids remove nothing', () => {
   const { _internals: fit } = require('../services/day-replan/booking-fit');
-  const own = { id: 'hold-own', source_estimate_id: 'estimate-own', reservation_expires_at: '2097-01-01' };
-  const rival = { id: 'hold-rival', source_estimate_id: 'estimate-rival', reservation_expires_at: '2097-01-01' };
-  const unscoped = { id: 'hold-unscoped', source_estimate_id: null, reservation_expires_at: '2097-01-01' };
+  const own = { id: 'hold-own', customer_id: null, source_estimate_id: 'estimate-own', reservation_expires_at: '2097-01-01' };
+  const rival = { id: 'hold-rival', customer_id: null, source_estimate_id: 'estimate-rival', reservation_expires_at: '2097-01-01' };
+  const unscoped = { id: 'hold-unscoped', customer_id: null, source_estimate_id: null, reservation_expires_at: '2097-01-01' };
   const committed = { id: 'visit-own', source_estimate_id: 'estimate-own', reservation_expires_at: null };
-  const rows = [own, rival, unscoped, committed];
-  expect(fit.withoutOwnEstimateHold(rows, 'estimate-own')).toEqual([rival, unscoped, committed]);
+  const linkedWithExpiry = { id: 'visit-linked', customer_id: 'customer-1', source_estimate_id: 'estimate-own', reservation_expires_at: '2097-01-01' };
+  const rows = [own, rival, unscoped, committed, linkedWithExpiry];
+  expect(fit.withoutOwnEstimateHold(rows, 'estimate-own')).toEqual([rival, unscoped, committed, linkedWithExpiry]);
   expect(fit.withoutOwnEstimateHold(rows, 'estimate-unknown')).toEqual(rows);
   expect(fit.withoutOwnEstimateHold(rows, null)).toBe(rows);
+});
+
+test('booking fit blocks live make-room destinations with the writer reader and its technician scope', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  const destination = (technicianId) => ({
+    id: 'make-room-hold', customer_id: null, technician_id: technicianId, date,
+    window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 60,
+    reservation_expires_at: '2097-01-01', source_estimate_id: 'estimate-rival',
+    conflict_reason: 'make_room_destination',
+  });
+  const calendar = () => new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, []], [`${date}|${tech}`, []],
+  ]);
+
+  occupancy.liveMakeRoomDestinations.mockResolvedValueOnce([{ row: destination(tech) }]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() })).resolves.toEqual([]);
+  expect(occupancy.liveMakeRoomDestinations).toHaveBeenLastCalledWith(expect.any(Function), {
+    dateFrom: date, dateTo: date, excludeIds: [], excludeStatuses: occupancy.DEFAULT_EXCLUDE_STATUSES, scopeTechId: null,
+  });
+
+  occupancy.techScopedConfirmActive.mockReturnValueOnce(true);
+  occupancy.liveMakeRoomDestinations.mockResolvedValueOnce([{ row: destination('tech-2') }]);
+  await expect(assessOfferedHours(jest.fn(), [slot], target, { now: NOW, calendar: calendar() }))
+    .resolves.toEqual([expect.objectContaining({ slot })]);
+});
+
+test('booking fit asks occupancy to exclude only this estimate\'s genuine hold and its destinations', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  const { assessOfferedHours } = require('../services/day-replan/booking-fit');
+  const RouteOptimizer = require('../services/route-optimizer');
+  const date = '2026-11-20';
+  const tech = 'tech-1';
+  const own = { id: 'hold-own', customer_id: null, technician_id: tech, source_estimate_id: 'estimate-own',
+    reservation_expires_at: '2097-01-01', window_start: '10:00', window_end: '11:00' };
+  const linked = { id: 'visit-linked', customer_id: 'customer-1', technician_id: tech, source_estimate_id: 'estimate-own',
+    reservation_expires_at: '2097-01-01', status: 'confirmed', window_start: '09:00', window_end: '10:00',
+    estimated_duration_minutes: 60, lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng };
+  const calendar = new Map([
+    ['homes', new Map()], ['departure', 8 * 60], [date, [own, linked]], [`${date}|${tech}`, []],
+  ]);
+  occupancy.liveMakeRoomDestinations.mockImplementationOnce(async (_conn, { excludeIds }) => {
+    expect(excludeIds).toEqual(['hold-own']);
+    return [];
+  });
+  const slot = { date, techId: tech, windowStart: '10:00', windowEnd: '11:00' };
+  const target = { lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 };
+  await expect(assessOfferedHours(jest.fn(), [slot], target, {
+    now: NOW, calendar, ownEstimateId: 'estimate-own',
+  })).resolves.toEqual([expect.objectContaining({ slot })]);
 });
 
 test('a route-aware alternate preserves the first card, technician, day, rain priority and five-minute driving limit', () => {
@@ -192,6 +256,31 @@ describe('runOpenBlocksAlert', () => {
     const notice = raiseAdminAlert.mock.calls.at(-1)[2];
     expect(notice.detail).toContain('Test Customer (#estimate), Thu Nov 19 at 10:00 AM with Pat');
     expect(notice.metadata.estimateMatches).toEqual([{ id: estimate.id, date: day, start: 600, techId: TECH }]);
+  });
+
+  test('internal test customer estimates are excluded before the newest-20 candidate limit', async () => {
+    const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    const day = '2026-11-19';
+    const internal = { id: 'estimate-demo', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0], customer_name: 'Demo' };
+    const real = { id: 'estimate-real', customer_id: '00000000-0000-4000-8000-000000000099', customer_name: 'Real Customer' };
+    const { conn, calls } = fakeConn({
+      rows: [{ day, technician_id: TECH, close_gaps: rec([tail(600, 120)]) }],
+      assignable: [{ id: TECH }],
+      estimates: [internal, real],
+    });
+    offerableEstimateSlots.mockResolvedValue({});
+
+    await runOpenBlocksAlert({ conn, now: NOW });
+
+    expect(offerableEstimateSlots).toHaveBeenCalledTimes(1);
+    expect(offerableEstimateSlots).toHaveBeenCalledWith(real.id, real.customer_id, expect.any(Object));
+    const estimateCalls = calls.filter(([table]) => table === 'estimates');
+    expect(estimateCalls).toContainEqual(['estimates', 'whereNotIn', ['customer_id', INTERNAL_TEST_CUSTOMER_IDS]]);
+    expect(estimateCalls.findIndex(([, method]) => method === 'whereNotIn'))
+      .toBeLessThan(estimateCalls.findIndex(([, method]) => method === 'orderBy'));
+    expect(estimateCalls.findIndex(([, method]) => method === 'whereNotIn'))
+      .toBeLessThan(estimateCalls.findIndex(([, method]) => method === 'limit'));
   });
 
   test('a morning row that is not written fails the tick and leaves the earlier rows open', async () => {

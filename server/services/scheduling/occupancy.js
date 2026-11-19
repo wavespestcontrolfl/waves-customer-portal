@@ -1063,6 +1063,7 @@ module.exports = {
   findConflictingVisits,
   findInterviewConflicts,
   listOccupiedWindows,
+  liveMakeRoomDestinations,
   windowsOverlap,
   occupiedRows,
   stopCreditResolver,
