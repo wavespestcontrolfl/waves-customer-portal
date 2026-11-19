@@ -360,6 +360,21 @@ describe('llm-dispatch-metrics', () => {
       expect(lowRate).toHaveLength(0);
     });
 
+    it('does not flag a single fallback on a low-volume policy, but flags two', () => {
+      const { detectExceptions, FALLBACK_MIN_COUNT } = load();
+      expect(FALLBACK_MIN_COUNT).toBe(2);
+      // 1 of 5 = 20%: one slow primary answer the fallback covered.
+      const one = detectExceptions([{ policy: 'estimateVision', total: 5, fallbacks: 1, failed: 0 }], []);
+      expect(one).toHaveLength(0);
+      const two = detectExceptions([{ policy: 'estimateVision', total: 7, fallbacks: 2, failed: 0 }], []);
+      expect(two).toHaveLength(1);
+      expect(two[0].kind).toBe('fallback_rate');
+      expect(two[0].detail).toMatch(/answered 2 of 7 calls/);
+      // The floor never hides a failure: a both-providers miss still reports.
+      const failed = detectExceptions([{ policy: 'estimateVision', total: 5, fallbacks: 1, failed: 1 }], []);
+      expect(failed.map((e) => e.kind)).toEqual(['all_providers_failed']);
+    });
+
     it('flags a previously busy policy that went silent, but not quiet ones', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       // Yesterday must show SOME traffic: one policy going quiet is only
