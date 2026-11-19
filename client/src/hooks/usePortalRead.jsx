@@ -149,10 +149,14 @@ export default function usePortalRead(key, load) {
       cache?.set(key, next);
       setState(next);
     } catch (error) {
-      if (sequence.current !== attempt) return;
       // An explicit access denial must not leave cached customer details behind.
       const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
       if (denied) cache?.clear();
+      // Auth/session denial is provider-wide and remains authoritative even
+      // when this reader unmounted while the request was in flight. Local UI
+      // state is still guarded by the sequence below, but the shared cache
+      // must not resurrect revoked details on an offline remount.
+      if (sequence.current !== attempt) return;
       setState(previous => ({
         ...previous,
         ...(denied ? { data: undefined, updatedAt: null } : {}),
@@ -200,10 +204,18 @@ export default function usePortalRead(key, load) {
     });
   }, [cache, key]);
 
+  const evict = useCallback(({ clearAll = false } = {}) => {
+    // Direct pagination reads do not flow through refresh's catch, and may
+    // finish after their reader unmounts. Let those callers remove shared
+    // cached data without attempting to publish state to a dead component.
+    if (clearAll) cache?.clear();
+    else cache?.delete(key);
+  }, [cache, key]);
+
   const freshnessGuard = useCallback(() => {
     const expected = sequence.current;
     return () => sequence.current === expected;
   }, []);
 
-  return { ...state, refresh, update, invalidate, freshnessGuard, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
+  return { ...state, refresh, update, invalidate, evict, freshnessGuard, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

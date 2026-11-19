@@ -235,6 +235,25 @@ describe('customer portal reads', () => {
     expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
   });
 
+  it.each([401, 403])('evicts a saved result when an in-flight denial settles after the reader unmounts (%s)', async status => {
+    const denied = deferred();
+    const load = vi.fn()
+      .mockResolvedValueOnce({ title: 'Visit A' })
+      .mockReturnValueOnce(denied.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Visit A');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+
+    rerender(<App load={load} show={false} />);
+    await act(async () => denied.reject(Object.assign(new Error('Denied'), { status })));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    rerender(<App load={load} />);
+
+    expect(screen.queryByText('Visit A')).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it('prevents an older read from overwriting a confirmed result', async () => {
     const pending = deferred();
     const load = vi.fn().mockResolvedValueOnce({ title: 'Pending' }).mockReturnValueOnce(pending.promise);

@@ -7,7 +7,7 @@ import useModalFocus from '../hooks/useModalFocus';
 import usePortalActivity from '../hooks/usePortalActivity';
 import api from '../utils/api';
 import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
-import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS } from '../hooks/usePortalRead';
+import usePortalRead, { PortalReadProvider, READ_TIMEOUT_MS, usePortalRefresh } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
@@ -3762,6 +3762,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const activeHistoryScopeRef = useRef(historyScopeKey);
   const scopeRefreshRequestedRef = useRef(null);
   const invalidateHistoryScopeRef = useRef(() => {});
+  const evictHistoryCacheRef = useRef(() => {});
   if (activeHistoryScopeRef.current !== historyScopeKey) {
     activeHistoryScopeRef.current = historyScopeKey;
     scopeRefreshRequestedRef.current = null;
@@ -3798,6 +3799,10 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
       const authorizationDenied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
       const propertyUnavailable = historyProperty && error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE';
       const propertyConflict = historyProperty && error?.status === 409;
+      // Pagination bypasses usePortalRead.refresh. A denial that arrives after
+      // Completed unmounts must still evict the provider cache, or an offline
+      // remount can resurrect the previously authorized rows and actions.
+      if (authorizationDenied) evictHistoryCacheRef.current({ clearAll: true });
       if (requestIsCurrent() && (authorizationDenied || propertyConflict)) {
         invalidateHistoryScopeRef.current(requestedScopeKey, error?.message, {
           clearAll: authorizationDenied,
@@ -3821,6 +3826,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     return result;
   };
   const historyRead = usePortalRead(`service-history:${historyProperty || 'profile'}`, ({ isCurrent }) => readPage({ limit: 100 }, { isCurrent }));
+  evictHistoryCacheRef.current = historyRead.evict;
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
@@ -13448,8 +13454,12 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
 
 function ServiceTracker({ currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const [tracker, setTracker] = useState(null);
+  const trackerRef = useRef(null);
+  trackerRef.current = tracker;
   const [loading, setLoading] = useState(true);
   const [reportRefreshing, setReportRefreshing] = useState(false);
+  const reportRefreshAttemptRef = useRef(0);
+  const { register: registerPortalRead } = usePortalRefresh() || {};
   const { preview: reportPreview, openPagePreview: openReportPage, openPdfPreview: openReportPdf, closePreview: closeReportPreview } = useReportPreview(
     () => showCustomerAlert('Could not open this report. Please try again.'),
     homeReportKey(tracker?.id, tracker?.serviceSummary, selectedProperty || currentEntry?.id),
@@ -13535,6 +13545,74 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     return () => clearInterval(interval);
   }, [trackerPhase, fetchTracker]);
 
+  const withdrawCompletionReport = useCallback((displayedTrackerId) => {
+    setTracker(current => {
+      if (!current?.serviceSummary || String(current.id) !== String(displayedTrackerId)) return current;
+      // Keep the completed-stop status, but discard every report-derived
+      // field immediately. homeReportKey then closes an open native preview.
+      return {
+        ...current,
+        serviceSummary: {
+          customerSummary: null,
+          reportUrl: null,
+          reportPdfUrl: null,
+          reportPending: false,
+          reportWithheld: true,
+          reportAvailable: false,
+        },
+      };
+    });
+  }, []);
+
+  const revalidateCompletedTracker = useCallback(({ preserveOnMissing = false, showBusy = false } = {}) => {
+    const displayedTracker = trackerRef.current;
+    if (!displayedTracker || displayedTracker.currentStep !== 7 || displayedTracker.state !== 'complete') {
+      return Promise.resolve();
+    }
+    const displayedTrackerId = displayedTracker.id;
+    const seq = ++trackerSeqRef.current;
+    const busyAttempt = showBusy ? ++reportRefreshAttemptRef.current : null;
+    if (showBusy) setReportRefreshing(true);
+    let timer;
+    return Promise.race([
+      api.getTodayTracker(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Report refresh timed out')), READ_TIMEOUT_MS);
+      }),
+    ])
+      .then(d => {
+        if (seq !== trackerSeqRef.current) return;
+        const { entry, saved, named, refresh } = scopeRef.current;
+        if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
+          setTracker(null);
+          if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
+          return;
+        }
+        if (!d?.tracker || String(d.tracker.id) !== String(displayedTrackerId)) {
+          if (!preserveOnMissing) withdrawCompletionReport(displayedTrackerId);
+          return;
+        }
+        setTracker(d.tracker);
+      })
+      .catch(error => {
+        if (seq !== trackerSeqRef.current) return;
+        const denied = error?.status === 401 || error?.status === 403 || error?.sessionExpired;
+        if (denied) withdrawCompletionReport(displayedTrackerId);
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        if (showBusy && busyAttempt === reportRefreshAttemptRef.current) setReportRefreshing(false);
+      });
+  }, [withdrawCompletionReport]);
+
+  // Terminal trackers stop the 15-second poll, but report permission can
+  // still change while Home remains mounted. Join the portal refresh cycle so
+  // reconnect/focus/pull refreshes withdraw stale excerpts, links and previews.
+  useEffect(() => {
+    if (typeof registerPortalRead !== 'function') return undefined;
+    return registerPortalRead(() => revalidateCompletedTracker());
+  }, [registerPortalRead, revalidateCompletedTracker]);
+
   const lastReportedAt = tracker?.techPosition?.lastReportedAt || tracker?.techPosition?.updatedAt;
   const lastUpdated = useLastUpdated(lastReportedAt);
 
@@ -13549,39 +13627,10 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
   const notes = tracker.liveNotes || [];
   const summary = tracker.serviceSummary;
   const refreshPendingReport = () => {
-    const displayedTrackerId = tracker.id;
-    const seq = ++trackerSeqRef.current;
-    setReportRefreshing(true);
     // Completion lives on /today after /active stops returning terminal
     // visits. Only refresh the report for the stop already on screen: a
     // different or missing visit must not swap or clear the completed card.
-    let timer;
-    Promise.race([
-      api.getTodayTracker(),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Report refresh timed out')), READ_TIMEOUT_MS);
-      }),
-    ])
-      .then(d => {
-        if (seq !== trackerSeqRef.current) return;
-        const { entry, saved, named, refresh } = scopeRef.current;
-        if (scopeEchoMismatch(d?.propertyScope, entry, saved, named)) {
-          // The server honored another property (or stopped scoping). Drop
-          // the stale completed card immediately, exactly like adoptTracker;
-          // a picker refresh failure must not leave house A's report under
-          // house B's label.
-          setTracker(null);
-          if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
-          return;
-        }
-        if (!d?.tracker || String(d.tracker.id) !== String(displayedTrackerId)) return;
-        setTracker(d.tracker);
-      })
-      .catch(() => {})
-      .finally(() => {
-        clearTimeout(timer);
-        if (seq === trackerSeqRef.current) setReportRefreshing(false);
-      });
+    void revalidateCompletedTracker({ preserveOnMissing: true, showBusy: true });
   };
   const serviceDescription = tracker.service?.summary;
   const office = tracker.office || { name: 'Waves Pest Control', phone: '(941) 297-5749', area: 'Southwest Florida' };

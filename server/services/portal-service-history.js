@@ -14,6 +14,7 @@ const { applyPropertyPredicate } = require('./account-properties');
 const { customerCopyViolations } = require('./service-report/technician-report-copy');
 const { readReportIdentitySnapshot } = require('./service-report/report-identity-snapshot');
 const { formatAddress } = require('../utils/address-normalizer');
+const { effectiveServiceAddress, stampedAddressDiverges } = require('./stamped-address');
 
 // Saved-property scope (GATE_APP_PROPERTY_SCOPE) on a service-record query
 // that LEFT JOINs the visit: the shared predicate's "every property retired"
@@ -30,10 +31,19 @@ function historyAddress(record, customerId) {
   const frozen = readReportIdentitySnapshot(record)?.address;
   if (frozen && typeof frozen === 'object') return formatAddress(frozen) || null;
   if (String(record.visit_customer_id) !== String(customerId)) return null;
-  const address = record.service_address_line1
-    ? { line1: record.service_address_line1, line2: record.service_address_line2, city: record.service_address_city }
-    : { line1: record.property_line1, line2: record.property_line2, city: record.property_city };
-  return formatAddress(address) || null;
+  const stamp = record.service_address_line1?.trim() ? {
+    service_address_line1: record.service_address_line1,
+    service_address_line2: record.service_address_line2?.trim() || null,
+    service_address_city: record.service_address_city?.trim() || null,
+    service_address_zip: record.service_address_zip,
+  } : {};
+  const diverges = stampedAddressDiverges({
+    ...stamp, customer_address_line1: record.property_line1, customer_city: record.property_city, customer_zip: record.property_zip,
+  });
+  const address = effectiveServiceAddress(stamp, diverges ? {} : {
+    address_line1: record.property_line1, address_line2: record.property_line2, city: record.property_city,
+  });
+  return formatAddress({ line1: address.line1, line2: address.line2, city: address.city }) || null;
 }
 
 function parseJsonObject(value) {
@@ -127,8 +137,8 @@ async function listPortalServiceHistory(customerId, {
         .andOn('visit_property.customer_id', '=', 'service_records.customer_id');
     }).select(
       'scheduled_services.customer_id as visit_customer_id',
-      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2', 'scheduled_services.service_address_city',
-      'visit_property.address_line1 as property_line1', 'visit_property.address_line2 as property_line2', 'visit_property.city as property_city',
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2', 'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+      'visit_property.address_line1 as property_line1', 'visit_property.address_line2 as property_line2', 'visit_property.city as property_city', 'visit_property.zip as property_zip',
     );
   }
   if (completedOnly) query = query.whereRaw(COMPLETED_RECORD).whereRaw(ONE_RECORD_PER_APPOINTMENT);

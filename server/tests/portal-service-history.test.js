@@ -111,6 +111,21 @@ test('history uses the address frozen on the report before later property data',
   expect(services[0].propertyAddress).toBe('300 Report Road, Sample');
 });
 
+test.each([
+  [{ service_address_line1: '100 Palm Rd', service_address_line2: '', service_address_city: ' ' }, '100 Palm Rd, Unit 4, Sarasota'],
+  [{ service_address_line1: '100 Palm Rd Apt 2' }, '100 Palm Rd Apt 2, Sarasota'],
+  [{ service_address_line1: '200 Other Road' }, '200 Other Road'],
+  [{ service_address_line1: '100 Palm Rd', service_address_zip: '34205' }, '100 Palm Rd'],
+])('legacy history labels only inherit missing details at a matching property (%j)', async (stamp, expected) => {
+  wire({ service_records: [{
+    id: 'legacy', customer_id: 'homeowner', visit_customer_id: 'homeowner',
+    property_line1: '100 Palm Road', property_line2: 'Unit 4', property_city: 'Sarasota', property_zip: '34236',
+    ...stamp,
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
+  expect(services[0].propertyAddress).toBe(expected);
+});
+
 test.each([['Door inspection', 'Door inspection'], ['This treatment is completely safe', null], [undefined, null]])('Completed history project notes use only the attached report title (%s)', async (projectTitle, expected) => {
   const { customerSafeVisitNotes } = require('../services/context-aggregator');
   customerSafeVisitNotes.mockImplementationOnce((record) => record.technician_notes);

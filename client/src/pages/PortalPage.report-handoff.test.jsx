@@ -97,6 +97,45 @@ describe('completed visit report handoff on Home', () => {
     expect(api.fetchRaw).not.toHaveBeenCalled();
   });
 
+  it('closes an open tracker report when a portal refresh withdraws contact access', async () => {
+    nativeState.enabled = true;
+    nativeState.platform = 'ios';
+    todayTracker = completeTracker({
+      customerSummary: 'Reviewed closeout.',
+      reportUrl: '/report/report-native', reportPdfUrl: '/api/reports/report-native', reportPending: false,
+    });
+    render(<PortalReadProvider enabled><ServiceTracker /></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: "View today's report" }));
+    expect(screen.getByRole('dialog', { name: 'Visit Report — Quarterly Pest Control' })).toBeInTheDocument();
+
+    todayTracker = completeTracker({
+      customerSummary: null, reportUrl: null, reportPdfUrl: null,
+      reportPending: false, reportWithheld: true,
+    });
+    fireEvent(window, new Event('online'));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByText('Reviewed closeout.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Service summary')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: "View today's report" })).not.toBeInTheDocument();
+  });
+
+  it.each([401, 403])('withdraws the completed tracker report when portal revalidation is denied (%s)', async status => {
+    todayTracker = completeTracker({
+      customerSummary: 'Contact-visible closeout.',
+      reportUrl: '/report/contact-report', reportPdfUrl: null, reportPending: false,
+    });
+    render(<PortalReadProvider enabled><ServiceTracker /></PortalReadProvider>);
+    expect(await screen.findByText('Contact-visible closeout.')).toBeInTheDocument();
+    api.getTodayTracker.mockRejectedValueOnce(Object.assign(new Error('Denied'), { status }));
+
+    fireEvent(window, new Event('online'));
+
+    await waitFor(() => expect(screen.queryByText('Contact-visible closeout.')).not.toBeInTheDocument());
+    expect(screen.queryByText('Service summary')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: "View today's report" })).not.toBeInTheDocument();
+  });
+
   it('refreshes a completion whose report row has not committed yet', async () => {
     todayTracker = completeTracker({ reportPending: true });
     render(<ServiceTracker />);
