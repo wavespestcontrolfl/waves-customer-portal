@@ -655,6 +655,37 @@ describe('customer-question manifest 2026-11-18', () => {
     }
   });
 
+  // Every source URL is a required citation the writer is told to cite, and
+  // a cited source is usually a link. A link the publish guardrails refuse
+  // (an "&" or "%" in the address is UNSUPPORTED_BODY_SYNTAX) parks the
+  // draft, so each one is linked here under the runner's own options.
+  test('linking any required source adds no blocking guardrail finding', () => {
+    const contentGuardrails = require('../services/content/content-guardrails');
+    const { deriveSyncGuardrailOptions, OPERATOR_INTERCEPT_BUCKET } = require('../services/content/guardrail-options');
+    const failures = [];
+    const base = 'Guidance for homes in Sarasota and Bradenton.';
+    const withLink = (url) => `${base} The [cited source](${url}) says so.`;
+    let blockingCodes = null;
+    for (const id of ids) {
+      const brief = composeSeedBrief(manifest, id);
+      const options = deriveSyncGuardrailOptions({ bucket: OPERATOR_INTERCEPT_BUCKET, service: brief.service }, brief);
+      blockingCodes = (body) => new Set((contentGuardrails.evaluate({ body, frontmatter: {} }, options).findings || [])
+        .filter((f) => f.severity === 'P0' || f.severity === 'P1')
+        .map((f) => f.code));
+      const before = blockingCodes(base);
+      const urls = brief.voice_constraints.operator_brief.required_sources;
+      expect(urls.length).toBeGreaterThan(0);
+      for (const url of urls) {
+        const added = [...blockingCodes(withLink(url))].filter((code) => !before.has(code));
+        if (added.length) failures.push(`${id} ${added.join(',')}: ${url}`);
+      }
+    }
+    expect(failures).toEqual([]);
+    // Control: the statute address form these briefs first used still parks.
+    expect(blockingCodes(withLink('https://www.leg.state.fl.us/statutes/index.cfm?App_mode=Display_Statute&URL=0000-0099/0083/Sections/0083.51.html')))
+      .toContain('UNSUPPORTED_BODY_SYNTAX');
+  });
+
   test.each(['CQ01', 'CQ02', 'CQ03', 'CQ04', 'CQ05', 'CQ06', 'CQ07', 'CQ08', 'CQ09', 'CQ10', 'CQ11', 'CQ12'])('%s composes as a regional post with a hub link the gate accepts, a CTA route and the series rule', (id) => {
     const brief = composeSeedBrief(manifest, id);
     expect(brief.city).toBeNull();
