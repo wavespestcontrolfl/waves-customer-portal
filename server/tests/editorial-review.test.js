@@ -313,6 +313,26 @@ describe('editorial section-answer plan review', () => {
     );
   });
 
+  test('the model call times out at 60 s on the server and 15 min in the Mac job (CONTENT_EDITORIAL_REVIEW_RUNNER=mac)', async () => {
+    const saved = process.env.CONTENT_EDITORIAL_REVIEW_RUNNER;
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      model: 'test-deep-model',
+      json: { pass: true, findings: [], sectionCoverage: sections.map((_, sectionIndex) => ({ sectionIndex, status: 'pass' })) },
+    });
+    try {
+      for (const [runner, expected] of [[undefined, 60000], ['true', 60000], ['mac', 900000]]) {
+        if (runner === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER; else process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = runner;
+        mockDispatch.mockClear();
+        await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });
+        expect(mockDispatch.mock.calls[0][2].timeoutMs).toBe(expected);
+      }
+      expect(editorial.LIMITS.timeoutMs).toBe(60000);
+    } finally {
+      if (saved === undefined) delete process.env.CONTENT_EDITORIAL_REVIEW_RUNNER; else process.env.CONTENT_EDITORIAL_REVIEW_RUNNER = saved;
+    }
+  });
+
   test('fails closed on missing coverage or provider failure', async () => {
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     const result = await editorial.reviewPlan({ title: 'Stop Mosquito Breeding', sections });

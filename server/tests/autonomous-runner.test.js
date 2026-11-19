@@ -1735,6 +1735,107 @@ describe('runDaily takes the rows whose terminal draft is written first (owner r
     });
   });
 
+  describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)', () => {
+    const mac = ({ host = 'mac', runner } = {}) => {
+      for (const [k, v] of [['CONTENT_EDITORIAL_REVIEW_HOST', host], ['CONTENT_EDITORIAL_REVIEW_RUNNER', runner]]) {
+        if (v == null) delete process.env[k]; else process.env[k] = v;
+      }
+    };
+    const rows = () => [
+      row('no_draft_90', 90), row('no_draft_70', 70),
+      row('written_a', 60, { outcome: 'completed_pending_review' }), row('written_b', 55, { outcome: 'completed_pending_review' }),
+      row('held_a', 40, { outcome: 'deferred_terminal_hold' }),
+    ];
+
+    test('the server (host mac, not the runner) skips both terminal passes and keeps written and held rows out of every claim', async () => {
+      mac();
+      const { runner, order } = queueRunner(rows(), { written: ['written_a', 'written_b'], held: ['held_a'] });
+      await runner.runDaily({ limit: 3 });
+      // Only the rows still waiting for a draft are claimed, by score; no scoped pass, no hold flag.
+      expect(order).toEqual(['no_draft_90', 'no_draft_70']);
+      const excluded = ['written_a', 'written_b', 'held_a'];
+      expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { excludeIds: excluded }, { excludeIds: excluded }, { excludeIds: excluded },
+      ]);
+    });
+
+    test('the blog catch-up keeps the same exclusion in its lane', async () => {
+      mac();
+      const blog = (id, score, over = {}) => row(id, score, { action_type: 'new_supporting_blog', ...over });
+      const { runner, order } = queueRunner([blog('no_draft_80', 80), blog('written_blog', 50)], { written: ['written_blog'] });
+      await runner._runDailyInner({ limit: 2, actionType: 'new_supporting_blog' });
+      expect(order).toEqual(['no_draft_80']);
+      expect(runner.runNext.mock.calls[0][0]).toEqual({ excludeIds: ['written_blog'], actionType: 'new_supporting_blog' });
+    });
+
+    test.each([
+      ['switches unset', { host: null }],
+      ['the Mac job itself', { runner: 'mac' }],
+      ['runner set without the host', { host: null, runner: 'mac' }],
+    ])('%s: the terminal-first passes run as before', async (_label, env) => {
+      mac(env);
+      const { runner, order } = queueRunner(rows(), { written: ['written_a'], held: ['held_a'] });
+      await runner.runDaily({ limit: 3 });
+      expect(order).toEqual(['written_a', 'held_a', 'no_draft_90', 'no_draft_70']);
+      expect(runner.runNext.mock.calls[0][0]).toEqual({ excludeIds: [], onlyIds: ['written_a'] });
+    });
+
+    test.each([
+      ['switches unset', { host: null }],
+      ['the host only (the server)', { host: 'mac' }],
+      ['the runner only', { host: null, runner: 'mac' }],
+      ['not exactly "mac"', { host: 'mac', runner: 'true' }],
+    ])('runTerminalDrafts refuses off the Mac and writes nothing: %s', async (_label, env) => {
+      mac(env);
+      const { runner } = queueRunner(rows(), { written: ['written_a'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      await expect(runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'skipped_not_mac', skipped: true, count: 0, runs: [] });
+      expect(runner._withEngineLock).not.toHaveBeenCalled();
+      expect(runner._terminalFirstIds).not.toHaveBeenCalled();
+      expect(runner.runNext).not.toHaveBeenCalled();
+      expect(runner.settleTerminalWork).not.toHaveBeenCalled();
+    });
+
+    test('runTerminalDrafts on the Mac takes only terminal rows (written, then held), sends no digest and settles the work', async () => {
+      mac({ runner: 'mac' });
+      const { runner, order } = queueRunner(rows(), { written: ['written_a', 'written_b'], held: ['held_a'] });
+      runner._withEngineLock = jest.fn((label, fn) => fn());
+      runner._sendDailyDigestSms = jest.fn(async () => {});
+      runner._reportBlogDrought = jest.fn(async () => {});
+      const result = await runner.runTerminalDrafts({ limit: 5 });
+      expect(runner._withEngineLock).toHaveBeenCalledWith('runTerminalDrafts', expect.any(Function));
+      // No score claim for no_draft_90 / no_draft_70; the hold gives its slot back.
+      expect(order).toEqual(['written_a', 'written_b', 'held_a']);
+      expect(runner.runNext.mock.calls.map(([args]) => args)).toEqual([
+        { excludeIds: [], onlyIds: ['written_a', 'written_b'] },
+        { excludeIds: [], onlyIds: ['written_b'] },
+        { excludeIds: [], onlyIds: ['held_a'], terminalHoldPass: true },
+      ]);
+      expect(runner._sendDailyDigestSms).not.toHaveBeenCalled();
+      expect(runner._reportBlogDrought).not.toHaveBeenCalled();
+      expect(runner._sendBlogDroughtSms).not.toHaveBeenCalled();
+      expect(runner._appendToDailyDigest).not.toHaveBeenCalled();
+      expect(runner.settleTerminalWork).toHaveBeenCalledWith(result.runs);
+      expect(result).toMatchObject({ outcome: 'deferred_terminal_hold', count: 3, limit: 5, failures: 0 });
+    });
+
+    test('runTerminalDrafts with nothing written still settles and reports no opportunity; the limit and the failure stop hold', async () => {
+      mac({ runner: 'mac' });
+      const empty = queueRunner(rows());
+      empty.runner._withEngineLock = (label, fn) => fn();
+      await expect(empty.runner.runTerminalDrafts()).resolves.toMatchObject({ outcome: 'skipped_no_opportunity', count: 0 });
+      expect(empty.runner.runNext).not.toHaveBeenCalled();
+      expect(empty.runner.settleTerminalWork).toHaveBeenCalledWith([]);
+
+      const failing = ['f1', 'f2', 'f3'].map((id, i) => row(id, 90 - i, { outcome: 'failed' }));
+      const { runner, order } = queueRunner(failing, { written: ['f1', 'f2', 'f3'] });
+      runner._withEngineLock = (label, fn) => fn();
+      const result = await runner.runTerminalDrafts({ limit: 5 });
+      expect(order).toEqual(['f1', 'f2']); // two consecutive failures stop the pass
+      expect(result).toMatchObject({ count: 2, failures: 2 });
+    });
+  });
+
   describe('_terminalFirstIds', () => {
     const spy = (s) => { spies.push(s); return s; };
     const tw = () => require('../services/content/terminal-writer');

@@ -96,6 +96,35 @@ async function resolveRefreshEditorialTitle(sessionId, context) {
   return true;
 }
 
+// The brief-level twin of registerSessionEditorial + resolveRefreshEditorialTitle,
+// for a terminal draft (no agent session): what reviewPlan needs for this brief.
+//   { applicable: false }        the refresh target is outside the blog contract
+//   { title, partial }           review the plan against this title; `partial` =
+//                                refresh (headings only have to appear)
+//   { title: '', unresolved }    the title is not known (a refresh target that
+//                                cannot be read, or a brief with no title)
+// A read failure throws nothing: get_existing_page returns an error object.
+async function editorialPlanContextForBrief(brief) {
+  const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
+  if (!refresh) {
+    const title = String(brief?.working_title || brief?.target_keyword || '').trim();
+    return { title, partial: false, ...(title ? {} : { unresolved: true }) };
+  }
+  const existing = await readRefreshTarget(brief);
+  if (existing.applicable === false) return existing;
+  return { title: existing.title, partial: true, ...(existing.title ? {} : { unresolved: true }) };
+}
+
+// The refresh target's existing title ('' when it cannot be read), or
+// { applicable: false } when the target is outside the blog contract.
+async function readRefreshTarget(brief) {
+  const targetUrl = brief.target_url || brief.page_url || null;
+  const existing = targetUrl ? await executeBriefTool('get_existing_page', { page_url: targetUrl }) : null;
+  if (!existing?.file_path) return { title: '' };
+  if (!require('../editorial-evidence').applicable(existing.file_path)) return { applicable: false };
+  return { title: String(existing.frontmatter?.title || existing.frontmatter?.metaTitle || '').trim() };
+}
+
 // Routes each session was SHOWN by check_existing_content. The writer
 // prompt mandates linking the existing post when writing a differentiated
 // angle, so these are legitimate link targets — the dispatcher hands them
@@ -206,6 +235,19 @@ function planSectionMismatch(plan, body, { partial }) {
   const extra = h2.filter((heading) => !planNormalized.includes(heading.normalized) && !NON_PLAN_HEADING_RE.test(heading.normalized))
     .map((heading) => heading.raw);
   return (missing.length || extra.length) ? { missing, extra } : null;
+}
+
+// The directive text for a planSectionMismatch result (emit_draft and the
+// terminal writer's plan check say the same thing).
+function planMismatchDirectives(mismatch) {
+  const directives = [];
+  if (mismatch.missing.length) {
+    directives.push(`The approved answer-plan section(s) are missing from the body as headings: ${mismatch.missing.join('; ')}. Add each as its own heading matching the plan.`);
+  }
+  if (mismatch.extra.length) {
+    directives.push(`These H2 section(s) are not part of the approved answer plan: ${mismatch.extra.join('; ')}. Remove them, fold them into a covered section, or call validate_answer_plan again with the complete section set.`);
+  }
+  return directives;
 }
 
 // GATE_CONTENT_PII_ALL_LANES: a brief saved before the gate flipped still
@@ -570,16 +612,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       // refresh session (registerSessionEditorial) — see planSectionMismatch.
       if (editorialContext && editorialContext.plan) {
         const mismatch = planSectionMismatch(editorialContext.plan, cleanBody, { partial: !!editorialContext.requiresExistingTitle });
-        if (mismatch) {
-          const directives = [];
-          if (mismatch.missing.length) {
-            directives.push(`The approved answer-plan section(s) are missing from the body as headings: ${mismatch.missing.join('; ')}. Add each as its own heading matching the plan.`);
-          }
-          if (mismatch.extra.length) {
-            directives.push(`These H2 section(s) are not part of the approved answer plan: ${mismatch.extra.join('; ')}. Remove them, fold them into a covered section, or call validate_answer_plan again with the complete section set.`);
-          }
-          return { draft_rejected: true, directives };
-        }
+        if (mismatch) return { draft_rejected: true, directives: planMismatchDirectives(mismatch) };
       }
       // W1 in-loop self-lint: run the PURE guardrails evaluator at capture,
       // with the SAME options gate 3c derives (registered by the dispatcher
@@ -981,6 +1014,9 @@ module.exports = {
   clearDraft,
   registerSessionLint,
   registerSessionEditorial,
+  editorialPlanContextForBrief,
+  planSectionMismatch,
+  planMismatchDirectives,
   // exposed for tests:
   _internals: { sessionDrafts, sessionCheckedRoutes, sessionLintOptions, sessionLintAttempts, urlToAstroPath, parseJsonbColumns },
 };

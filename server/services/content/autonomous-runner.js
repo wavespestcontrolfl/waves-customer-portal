@@ -1977,6 +1977,66 @@ class AutonomousRunner {
     }
   }
 
+  // The batch's terminal lists. On the server in Mac mode the Mac job takes
+  // every terminal draft and hold, so the batch's own lists are empty and the
+  // listed rows are returned to keep out of its claims.
+  async _terminalClaimPlan(actionType) {
+    const terminalWriter = require('./terminal-writer');
+    const listed = await this._terminalFirstIds(actionType);
+    if (!(terminalWriter.editorialReviewOnMac() && !terminalWriter.runningOnMac())) return { terminalFirst: listed, macOwnedIds: [] };
+    return { terminalFirst: { written: [], held: [] }, macOwnedIds: [...listed.written, ...listed.held] };
+  }
+
+  /**
+   * The Mac job's pass (CONTENT_EDITORIAL_REVIEW_HOST=mac and
+   * CONTENT_EDITORIAL_REVIEW_RUNNER=mac, both strict): takes the terminal rows
+   * only, written drafts first and then the held rows, as _runDailyInner's
+   * terminal-first passes do (same claim scope, same consecutive-failure stop).
+   * No score claims, no backfill slots, no digest and no drought alert. It
+   * refuses anywhere else and writes nothing then. Model calls made while it
+   * runs (the answer-plan review, the editorial review) ride the Mac's plan.
+   */
+  async runTerminalDrafts({ limit = null } = {}) {
+    const terminalWriter = require('./terminal-writer');
+    if (!(terminalWriter.editorialReviewOnMac() && terminalWriter.runningOnMac())) {
+      return { outcome: 'skipped_not_mac', skipped: true, reason: 'not_the_mac_job', count: 0, runs: [] };
+    }
+    return this._withEngineLock('runTerminalDrafts', () => this._runTerminalDraftsInner({ limit }));
+  }
+
+  async _runTerminalDraftsInner({ limit = null } = {}) {
+    const batchLimit = dailyBatchLimit(limit);
+    const maxConsecutiveFailures = envInt('AUTONOMOUS_CONTENT_MAX_CONSECUTIVE_FAILURES', 2);
+    const runs = [];
+    const failedOppIds = [];
+    let streak = 0;
+    const terminalFirst = await this._terminalFirstIds();
+    for (let i = 0; i < batchLimit; i += 1) {
+      const scope = terminalFirstScope(terminalFirst);
+      if (!scope) break;
+      const run = await this.runNext({ excludeIds: [...failedOppIds], ...terminalScopeArgs(scope) });
+      takeFromTerminalScope(terminalFirst, scope, run);
+      if (run.outcome === 'skipped_no_opportunity') { i -= 1; continue; }
+      runs.push(run);
+      if (run.outcome === require('./terminal-writer').HOLD_OUTCOME) { i -= 1; streak = 0; continue; }
+      if (!String(run.outcome).startsWith('failed')) { streak = 0; continue; }
+      streak += 1;
+      if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
+      if (streak >= maxConsecutiveFailures) {
+        logger.warn(`[autonomous-runner] runTerminalDrafts halting after ${streak} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
+        break;
+      }
+    }
+    await this.settleTerminalWork(runs);
+    return {
+      outcome: runs[runs.length - 1]?.outcome || 'skipped_no_opportunity',
+      count: runs.length,
+      limit: batchLimit,
+      failures: runs.filter((r) => String(r.outcome).startsWith('failed')).length,
+      runs,
+    };
+  }
+
   async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
@@ -2052,7 +2112,12 @@ class AutonomousRunner {
     // Then the rows whose terminal hold is pushed (owner 2026-11-02), in a
     // pass of their own so a hold never outranks a written draft; a run that
     // parks a held row gives its slot back (nothing is written or published).
-    const terminalFirst = await this._terminalFirstIds(actionType);
+    // Blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST=mac): the server
+    // neither consumes nor defers a written draft or a hold. It skips both
+    // passes and keeps those rows out of every claim; runTerminalDrafts, run
+    // by the Mac job, takes them. Rows still waiting for a draft are claimed
+    // and deferred as before.
+    const { terminalFirst, macOwnedIds } = await this._terminalClaimPlan(actionType);
     for (let i = 0; i < slotBudget; i += 1) {
       const scope = terminalFirstScope(terminalFirst);
       const reserve = !scope && reservedLeft > 0 && !scopedActionType;
@@ -2061,7 +2126,7 @@ class AutonomousRunner {
       // through to claimNext; spread conditionally so the unscoped daily
       // batch's claim args stay byte-identical.
       const run = await this.runNext({
-        excludeIds: [...failedOppIds],
+        excludeIds: [...failedOppIds, ...macOwnedIds],
         ...(scopedActionType ? { actionType: scopedActionType } : {}),
         ...terminalScopeArgs(scope),
         ...(reserve ? { bucket: CITABILITY_BACKFILL_BUCKET } : {}),

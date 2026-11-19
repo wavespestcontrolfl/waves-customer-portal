@@ -19,6 +19,12 @@ const {
   splitFrontmatter,
 } = require('./editorial-review-inventory');
 const { fetchSources } = require('./editorial-review-sources');
+
+// The Mac job (CONTENT_EDITORIAL_REVIEW_RUNNER=mac) answers these calls with
+// `claude -p`, which needs far more than the server's LIMITS.timeoutMs for one
+// review of a long post (a live test aborted at 60 s). Read at call time.
+const MAC_RUNNER_TIMEOUT_MS = 15 * 60 * 1000;
+const modelTimeoutMs = () => (process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac' ? MAC_RUNNER_TIMEOUT_MS : LIMITS.timeoutMs);
 const { validatePlanJson, validateReviewJson } = require('./editorial-review-validation');
 
 function firstPassage(document, title) {
@@ -139,7 +145,7 @@ async function review({ document, title, domain, sourceUrls = [], factsPack = nu
   let response;
   try {
     response = await createDeepMessage(null, payload, {
-      jsonSchema: REVIEW_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-review-v1',
+      jsonSchema: REVIEW_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-review-v1',
       validate: (json) => validateReviewJson(json, analysis, document, title, evidence.records),
     });
   } catch (err) {
@@ -203,7 +209,7 @@ async function repair({ document, findings = [], sources = [], title = '', domai
     system: repairSystemPrompt(),
     messages: [{ role: 'user', content: text }],
   }, {
-    jsonSchema: REPAIR_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-repair-v1',
+    jsonSchema: REPAIR_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-repair-v1',
     validate: (json) => repairViolation(split.body, json?.body),
   });
   if (!response?.ok || !response.json) throw new Error(`editorial repair failed: ${response?.reason || 'invalid response'}`);
@@ -245,7 +251,7 @@ async function reviewPlan({ sections, title = '' } = {}) {
       max_tokens: 5000,
       system,
       messages: [{ role: 'user', content: `TITLE:\n${String(title).trim()}\n\nSECTION-ANSWER PLAN:\n${JSON.stringify(normalized)}` }],
-    }, { jsonSchema: PLAN_SCHEMA, timeoutMs: LIMITS.timeoutMs, promptVersion: 'editorial-plan-review-v1',
+    }, { jsonSchema: PLAN_SCHEMA, timeoutMs: modelTimeoutMs(), promptVersion: 'editorial-plan-review-v1',
       validate: (json) => validatePlanJson(json, normalized) });
   } catch (err) {
     response = { ok: false, reason: err.message || 'dispatch_error' };
@@ -276,4 +282,5 @@ module.exports = {
   reviewPlan,
   CHECK_NAMES,
   LIMITS,
+  MAC_RUNNER_TIMEOUT_MS,
 };

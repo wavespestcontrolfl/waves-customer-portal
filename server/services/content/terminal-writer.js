@@ -47,6 +47,22 @@
  * the environment), so only an account with push access can supply a draft.
  * The file is still untrusted input: it is size-bounded, shape-checked and
  * then judged by the same gates as an agent draft.
+ *
+ * Blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST=mac, owner
+ * 2026-11-19). With GATE_EDITORIAL_EVIDENCE on, an agent session must get its
+ * answer plan approved (validate_answer_plan) before it can emit a draft, and a
+ * draft file used to be unable to carry that approval, so supporting-blog,
+ * customer-question and refresh briefs stayed on the paid agent. In Mac mode
+ * the file carries the plan as `answer_plan: { sections: [...] }` (the
+ * validate_answer_plan input) and those briefs stay in the terminal. The
+ * server leaves EVERY terminal draft and hold to the Mac job (it reads no
+ * GitHub branch and consumes nothing: draftSourceFor waits with
+ * terminal_draft_awaits_mac). The Mac job runs this module with
+ * CONTENT_EDITORIAL_REVIEW_RUNNER=mac, where its model calls ride the Claude
+ * plan: fetchTerminalDraft only shape-checks the plan (it never calls a
+ * model; the listing reads every waiting row), and draftSourceFor reviews it
+ * (editorial-review reviewPlan) and binds it to the body headings, as emit_draft
+ * does for an agent. Both variables are strict `=== 'mac'`; unset = no change.
  */
 
 const crypto = require('crypto');
@@ -102,16 +118,31 @@ function terminalWriterLive() {
   return process.env.GATE_CONTENT_WRITER_TERMINAL === 'true';
 }
 
+// Config, not gates (owner 2026-11-19). Read at call time, strict.
+// HOST: Railway sets it; the Mac job takes the drafts that need the fact check.
+const editorialReviewOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_HOST === 'mac';
+// RUNNER: only the Mac job sets it ("this process is the Mac job").
+const runningOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac';
+const AWAITS_MAC = 'terminal_draft_awaits_mac';
+const PLAN_UNAVAILABLE = 'terminal_plan_review_unavailable';
+// editorial-review LIMITS.sections (read lazily: that module loads the model layer).
+const MAX_PLAN_SECTIONS = 80;
+const MAX_PLAN_REASON_CHARS = 700;
+
 // Briefs the editorial-evidence gate covers (the same test as
 // brief-driven-tools.js registerSessionEditorial). With that gate on, the
 // agent session must get its answer plan approved and its headings are
-// checked against the plan before a draft is captured. A terminal draft
-// cannot carry that approval, so those briefs stay on the agent.
-function needsEditorialPlan(brief) {
+// checked against the plan before a draft is captured.
+function editorialPlanRequired(brief) {
   if (!require('./editorial-evidence').enabled()) return false;
   const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
   return refresh || ['supporting-blog', 'customer-question'].includes(brief?.page_type);
 }
+
+// A terminal draft file normally cannot carry that approval, so those briefs
+// stay on the agent. In Mac mode the file carries the plan and the Mac job
+// reviews it, so the terminal keeps them.
+const needsEditorialPlan = (brief) => !editorialReviewOnMac() && editorialPlanRequired(brief);
 
 // A title/meta rewrite is a different, tiny draft shape with its own agent
 // and its own handler; it stays on the agent. Everything else the dispatch
@@ -136,6 +167,15 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
   if (parsed.schema != null && !isObject(parsed.schema)) return 'schema must be an object';
   if (parsed.claims_ledger != null && !Array.isArray(parsed.claims_ledger)) return 'claims_ledger must be an array';
   if (parsed.notes_for_reviewer != null && typeof parsed.notes_for_reviewer !== 'string') return 'notes_for_reviewer must be text';
+  return answerPlanProblem(parsed.answer_plan);
+}
+
+// Shape only (no model): the validate_answer_plan input, when the file has one.
+function answerPlanProblem(plan) {
+  if (plan == null) return null;
+  if (!isObject(plan) || !Array.isArray(plan.sections) || !plan.sections.length || plan.sections.length > MAX_PLAN_SECTIONS) {
+    return `answer_plan must be an object with one to ${MAX_PLAN_SECTIONS} sections`;
+  }
   return null;
 }
 
@@ -210,7 +250,45 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
   // draft (brief-driven-tools.js) and what the publisher's canPublishRefresh /
   // canPublishDraftBrief require. Set here, never read from the file.
   const draft = { type: 'draft', ...Object.fromEntries(DRAFT_FIELDS.filter((f) => parsed[f] != null).map((f) => [f, parsed[f]])) };
-  return result({ ok: true, draft, brief_id: expectedBriefId, revision });
+  return result({ ok: true, draft, brief_id: expectedBriefId, revision, ...(parsed.answer_plan != null ? { answer_plan: parsed.answer_plan } : {}) });
+}
+
+const waitResult = (code, reason) => ({ ok: false, wait: true, code, reason, agent_id: TERMINAL_AGENT_ID, session_id: null });
+const invalidPlan = (why) => waitResult(INVALID, `terminal draft rejected: ${why}`.slice(0, MAX_PLAN_REASON_CHARS + 60));
+
+// The reviewer's own findings, in a bounded sentence.
+function planFindingsText(findings) {
+  const text = (Array.isArray(findings) ? findings : []).map((f) => `section ${Number(f?.sectionIndex) + 1}: ${f?.detail || ''} ${f?.action || ''}`.trim()).join(' | ');
+  return text.slice(0, MAX_PLAN_REASON_CHARS);
+}
+
+/**
+ * Mac mode, a brief the fact check covers: the plan the draft file carries must
+ * pass the reviewer and match the body (the same two steps an agent's
+ * validate_answer_plan + emit_draft make). Takes a fetched ok result; returns
+ * it, or a wait: INVALID when the draft is wrong (the terminal rewrites it),
+ * PLAN_UNAVAILABLE when the check could not run (the row retries and the draft
+ * stays). Runs only where a model call is free (the Mac job).
+ */
+async function checkAnswerPlan(brief, fetched) {
+  const tools = require('./agents/brief-driven-tools');
+  let context;
+  let review;
+  try {
+    context = await tools.editorialPlanContextForBrief(brief);
+    if (context.applicable === false) return fetched; // a refresh of a page outside the blog contract
+    if (context.unresolved) return waitResult(PLAN_UNAVAILABLE, 'the title for the answer-plan review could not be resolved; the row looks again later');
+    if (!fetched.answer_plan) return invalidPlan('answer_plan is missing: this brief needs the answer plan the blog fact check reviews (see answer_plan_shape in the writing pack)');
+    review = await require('./editorial-review').reviewPlan({ title: context.title, sections: fetched.answer_plan.sections });
+  } catch (err) {
+    return waitResult(PLAN_UNAVAILABLE, `the answer-plan review could not run: ${err.message}`);
+  }
+  // reviewPlan fails closed with no model when it could not reach one.
+  if (review?.pass !== true && !review?.model) return waitResult(PLAN_UNAVAILABLE, 'the answer-plan reviewer was unavailable; the row looks again later');
+  if (review?.pass !== true) return invalidPlan(`the answer plan failed review: ${planFindingsText(review?.findings)}`);
+  const mismatch = tools.planSectionMismatch(fetched.answer_plan.sections, fetched.draft.body, { partial: context.partial });
+  if (mismatch) return invalidPlan(`the body does not match the answer plan. ${tools.planMismatchDirectives(mismatch).join(' ')}`);
+  return fetched;
 }
 
 /**
@@ -231,9 +309,14 @@ function draftSourceFor(opportunityId, brief, { handed = false, dryRun = false, 
   if (dryRun || !writesInTerminal(brief)) return null;
   return {
     async runWithBrief() {
+      // Mac mode: the Mac job takes every terminal draft and hold. The server
+      // reads no branch and takes nothing, so nothing is consumed here.
+      if (editorialReviewOnMac() && !runningOnMac()) {
+        return waitResult(AWAITS_MAC, 'the Mac job takes terminal drafts; this row waits for it');
+      }
       const fetched = await fetchTerminalDraft(opportunityId, { ...(gh ? { gh } : {}), expectedBriefId: handed ? brief.id : null })
         .catch((err) => ({ ok: false, code: UNREADABLE, reason: `terminal draft could not be read: ${err.message}`, agent_id: TERMINAL_AGENT_ID, session_id: null }));
-      if (fetched.ok) return fetched;
+      if (fetched.ok) return editorialPlanRequired(brief) ? checkAnswerPlan(brief, fetched) : fetched;
       return fetched.code === HELD ? { ...fetched, held: true } : { ...fetched, wait: true };
     },
   };
@@ -583,9 +666,10 @@ async function syncHoldQuestions({ now = new Date(), deps = {} } = {}) {
 }
 
 module.exports = {
-  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
+  terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
+  AWAITS_MAC, PLAN_UNAVAILABLE,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };
