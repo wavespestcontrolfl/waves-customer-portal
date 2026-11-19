@@ -404,10 +404,15 @@ function rowReader(conn) {
   };
 }
 
+// The rows dispatch's capacity model keeps (arrival-route.js loadArrivalRouteContext): a window start, a time window, or
+// work done or under way. Any other row is a placeholder, inert to that model and so to the check: it is not a stop, it
+// staffs no Sunday and it holds no time (pre-push audit round 39).
+const dispatchKeeps = (r) => Boolean(r.window_start || r.time_window || ['completed', 'en_route', 'on_site'].includes(r.status));
 // A booked stop: not an unclaimed hold (no customer yet, a live expiry). Only a booked stop staffs a Sunday, as the 07:05
 // notice counts Sundays only with stops booked (pre-push audit round 38); a hold still holds its time on a staffed route.
 const bookedStop = (r) => r.customer_id != null || r.reservation_expires_at == null;
-const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id && bookedStop(r)).map((r) => String(r.technician_id)));
+const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id && bookedStop(r) && dispatchKeeps(r))
+  .map((r) => String(r.technician_id)));
 
 /**
  * Work this technician's count must hold but cannot, or null (pre-push audit rounds 35 and 36). Its date is left
@@ -421,8 +426,7 @@ const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id && b
  *   with only a legacy time window has no span in the occupancy read (listOccupiedWindows needs window_start).
  */
 function unheldWork(rows, techId, techBlind) {
-  const kept = (r) => r.window_start || r.time_window || ['en_route', 'on_site'].includes(r.status);
-  if (rows.some((r) => r.technician_id == null && r.status !== 'completed' && kept(r))) {
+  if (rows.some((r) => r.technician_id == null && r.status !== 'completed' && dispatchKeeps(r))) {
     return 'UNASSIGNED_WORK';
   }
   const elsewhere = (r) => r.technician_id != null && String(r.technician_id) !== String(techId);
@@ -436,7 +440,7 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
     // groupRouteStops reads each row's version-2 allocation (visit-capacity allocationKey). Dispatch's row read and the
     // occupancy read select it; the shared stops read does not (a booking path reads that one too, so it stays).
     const mixById = new Map(occupancy.filter((r) => r.reservation_service_mix != null).map((r) => [String(r.id), r.reservation_service_mix]));
-    const own = rows.filter((r) => String(r.technician_id) === techId)
+    const own = rows.filter((r) => String(r.technician_id) === techId && dispatchKeeps(r))
       .map((r) => (r.reservation_service_mix == null && mixById.has(String(r.id)) ? { ...r, reservation_service_mix: mixById.get(String(r.id)) } : r));
     const unheld = unheldWork(rows, techId, env.techBlind);
     if (unheld) return { stops: physicalStops(own).length, skip: unheld };
