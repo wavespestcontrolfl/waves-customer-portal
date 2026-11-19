@@ -359,7 +359,13 @@ async function yesProblem(conn, { customerId, yes, call, cardIds, estimate }) {
 
 // The card's headline, by state. Only a yes the call reader recorded is called a yes; while the call that gave it is
 // read again, the card says so instead of showing words it cannot check.
-const ACCEPTED_SUMMARY = 'The estimate was accepted, but the visit this call booked is not linked to it yet.';
+const ACCEPTED_SUMMARY = 'An estimate on this card was accepted, but the visit this call booked is not linked to it yet.';
+
+// The headline for a card's fields as they now stand.
+function summaryOf(p) {
+  if (p.estimate_accepted === true) return ACCEPTED_SUMMARY;
+  return cardSummary({ yes: p.yes_heard === true, rechecking: p.yes_rechecking === true });
+}
 
 function cardSummary({ yes, rechecking = false }) {
   if (yes) return 'Caller said yes to pay per application on the call. The estimate is not accepted yet.';
@@ -460,9 +466,10 @@ function cardEstimateIds(card) {
 }
 
 // Why an open card closes ({ close: note }), what changed ({ refresh: yes, rechecking? } for its yes fields, keepYes
-// when only its estimate links changed, estimateIds when they did), or null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
-// still open or lapsed: an expiry alone never closes it, and neither does another estimate's accept (the card may
-// still be about the one left open). While a call in its window still owes a read, the card waits as it is.
+// when they did not, estimateIds when its estimate links changed, estimateAccepted when its accepted state did), or
+// null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of
+// its estimates is still open, lapsed or accepted: an expiry alone never closes it, and neither does an accept (the
+// visit is still unlinked). While a call in its window still owes a read, the card shows nothing new.
 // Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
 // site or done), by the call's id and a source_action only a call writes.
 function callVisitsOnCalendar(conn, callLogId, customerId) {
@@ -488,22 +495,29 @@ async function cardState(card, conn = db) {
     ? await conn('estimates').whereIn('id', ids).where({ customer_id: customerId })
       .select('id', 'status', 'sent_at', 'created_at', 'archived_at', conn.raw(`${handoffSql()} AS handoff_at`))
     : [];
-  const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status) && !e.archived_at);
-  if (!kept.length) {
-    // Accepted while a pest visit this call booked is still unlinked (checked above): the office's Mark accepted links no
-    // visit (skipAutoSchedule), so the visit still lacks the plan's price and series. The card stays until the visit is
-    // linked or leaves the calendar; the estimate being settled answers only half of its ask.
-    if (estimates.some((e) => e.status === 'accepted')) return parseJson(card.payload).estimate_accepted === true ? null : { acceptedVisitUnlinked: true };
-    return { close: MOOT_NOTES.estimate_closed };
-  }
-  // A card with more than one estimate links only the ones still open or lapsed, in the card's own order (a set
+  // An archived estimate is closed to the customer, whatever its status.
+  const live = estimates.filter((e) => !e.archived_at);
+  const kept = live.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status));
+  // An accepted estimate keeps the card while a pest visit this call booked is unlinked (checked above): the office's
+  // Mark accepted links no visit (skipAutoSchedule), so the visit still lacks the plan. The accept answers only half of
+  // the card's ask, so the card stays, says so and keeps that estimate's link.
+  const accepted = live.filter((e) => e.status === 'accepted');
+  if (!kept.length && !accepted.length) return { close: MOOT_NOTES.estimate_closed };
+  // A card with more than one estimate links the ones still open, lapsed or accepted, in the card's own order (a set
   // compare: a row order that differs is no change, so the card's version moves only when an estimate leaves).
-  const keptSet = new Set(kept.map((e) => String(e.id)));
-  const keptIds = ids.filter((id) => keptSet.has(id));
+  const stays = [...kept, ...accepted];
+  const staySet = new Set(stays.map((e) => String(e.id)));
+  const keptIds = ids.filter((id) => staySet.has(id));
   const linksChanged = !card.related_estimate_id && keptIds.length !== ids.length;
-  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(kept) }, conn);
-  if (state?.close || !linksChanged) return state;
-  return { ...(state || { keepYes: true }), estimateIds: keptIds };
+  const acceptedChanged = (accepted.length > 0) !== (parseJson(card.payload).estimate_accepted === true);
+  // The yes is read again in every state, an accepted one too: the card never shows words that no longer hold.
+  const state = await yesState(card, { customerId, ids, since: earliestSentAnchor(stays) }, conn);
+  if (state?.close || (!linksChanged && !acceptedChanged)) return state;
+  return {
+    ...(state || { keepYes: true }),
+    ...(linksChanged ? { estimateIds: keptIds } : {}),
+    ...(acceptedChanged ? { estimateAccepted: accepted.length > 0 } : {}),
+  };
 }
 
 // The card's yes fields, read again: { close: note }, { refresh: yes, rechecking? } when they changed, or null.
@@ -549,21 +563,14 @@ async function applyCardState(card, state) {
       await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
       return true;
     }
-    if (state.acceptedVisitUnlinked) {
-      await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-        payload: JSON.stringify({ ...parseJson(row.payload), estimate_accepted: true }), summary: ACCEPTED_SUMMARY, updated_at: stamp,
-      });
-      return false;
-    }
-    await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-      payload: JSON.stringify({
-        ...parseJson(row.payload),
-        ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking, noYes: state.noYes })),
-        ...(state.estimateIds ? { estimate_ids: state.estimateIds } : {}),
-      }),
-      ...(state.keepYes ? {} : { summary: cardSummary({ yes: state.refresh, rechecking: !!state.rechecking }) }),
-      updated_at: stamp,
-    });
+    const payload = {
+      ...parseJson(row.payload),
+      ...(state.keepYes ? {} : heardFields(state.refresh, { recheckingCallId: state.rechecking, noYes: state.noYes })),
+      ...(state.estimateIds ? { estimate_ids: state.estimateIds } : {}),
+      ...(state.estimateAccepted === undefined ? {} : { estimate_accepted: state.estimateAccepted }),
+    };
+    await trx('triage_items').where({ id: card.id, status: 'open' })
+      .update({ payload: JSON.stringify(payload), summary: summaryOf(payload), updated_at: stamp });
     return false;
   });
 }

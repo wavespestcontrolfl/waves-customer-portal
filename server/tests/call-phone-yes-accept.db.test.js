@@ -862,6 +862,49 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     expect(card.resolution_note).toContain('linked to an estimate');
   });
 
+  test('after an accept the yes is still read again: a re-read that drops it clears it, and the card stays', async () => {
+    const { est, yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'accepted', accepted_at: new Date() });
+    await sweep();
+    await trx('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: JSON.stringify(extractionWith(null, 'cancellation_request')) });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ estimate_accepted: true, yes_heard: false, caller_words: null, no_yes_reason: 'caller_took_back' });
+    expect(card.summary).toMatch(/accepted, but the visit this call booked is not linked/);
+  });
+
+  test('two estimates: an accepted one keeps its link, so a later decline of the other leaves the card open', async () => {
+    const { customerId, est, bookingCallId, visitId } = await phoneYes();
+    const other = await estimate(customerId);
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'accepted', accepted_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(payloadOf(card)).toMatchObject({ estimate_accepted: true });
+    expect(payloadOf(card).estimate_ids.sort()).toEqual([est.id, other.id].sort());
+    await trx('estimates').where({ id: other.id }).update({ status: 'declined', declined_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    expect(payloadOf(card)).toMatchObject({ estimate_accepted: true, estimate_ids: [est.id] });
+    await trx('scheduled_services').where({ id: visitId }).update({ source_estimate_id: est.id });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+  });
+
+  test('an accepted estimate that is then archived closes the card', async () => {
+    const { est, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'accepted', accepted_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    await trx('estimates').where({ id: est.id }).update({ archived_at: new Date() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
+    expect(card.resolution_note).toContain('archived');
+  });
+
   test('gate off: no card', async () => {
     const { bookingCallId } = await phoneYes();
     delete process.env[GATE];

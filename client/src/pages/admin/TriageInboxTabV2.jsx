@@ -476,7 +476,7 @@ export function PhoneYesEvidence({ payload, isOpenView }) {
     : p.yes_rechecking === true ? "The call with the yes is being read again" : noYes;
   // Accepted, but the visit the call booked is still unlinked: the card stays until the visit is linked.
   const openHeading = p.estimate_accepted === true
-    ? "The estimate is accepted. The visit this call booked is not linked to it yet" : "The estimate is not accepted yet";
+    ? "An estimate on this card is accepted. The visit this call booked is not linked to it yet" : "The estimate is not accepted yet";
   const rows = [
     ["On the call", heard],
     ["Caller's words", p.yes_heard === true && p.caller_words ? `\u201c${p.caller_words}\u201d` : null],

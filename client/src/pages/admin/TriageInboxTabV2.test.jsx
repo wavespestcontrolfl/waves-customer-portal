@@ -1428,7 +1428,7 @@ describe('call_phone_yes card', () => {
 
   it('an accepted estimate whose visit is still unlinked: the heading says so', () => {
     render(<PhoneYesEvidence isOpenView payload={JSON.stringify({ flag: 'call_phone_yes', yes_heard: false, estimate_id: 'est-7', estimate_accepted: true })} />);
-    expect(screen.getByText('The estimate is accepted. The visit this call booked is not linked to it yet')).toBeInTheDocument();
+    expect(screen.getByText('An estimate on this card is accepted. The visit this call booked is not linked to it yet')).toBeInTheDocument();
     expect(screen.queryByText('The estimate is not accepted yet')).toBeNull();
   });
 
