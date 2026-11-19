@@ -1401,21 +1401,38 @@ async function buildCustomerPricingResponse({
     property: summarizeProperty(propertyContext),
     currentMonthly: currentMonthly || null,
     options,
-    // Hint only (GATE_PORTAL_PLAN_START): the card may offer "See my price and book" for an
-    // account with no current or owned recurring service that is not cancelled. The
-    // start-plan route re-decides under its locks; absent when the gate is off or the
-    // account does not qualify, so every other response stays byte-identical.
-    ...planStartHint(customer, currentServiceKeys, ownedServiceKeys),
+    // Hint only (GATE_PORTAL_PLAN_START): the options the card may offer as "See my price
+    // and book". The start-plan route re-decides under its locks; absent when the gate is
+    // off or nothing qualifies, so every other response stays byte-identical.
+    ...(await planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys)),
   };
 }
 
-// The pricing answer's plan-start fields: { planStart: { available: true } }, or none.
-function planStartHint(customer, currentServiceKeys, ownedServiceKeys) {
+// The pricing answer's plan-start fields: { planStart: { optionIds } }, the options the
+// start-plan route can book for this account, or none. It mirrors the mint's bar without
+// its locks: an account with no plan (planStartAccountOpen) and no live recurring service
+// of any kind, and per option a service the route accepts, an id on today's ladder (the
+// mint prices that exact id), a monthly price and no review marker.
+async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys) {
   // Optional call: hundreds of suites mock feature-gates whole; a bare mock reads as off.
   if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
-  if (customer.active === false || customer.pipeline_stage === 'churned') return {};
-  if (currentServiceKeys.length || ownedServiceKeys.length) return {};
-  return { planStart: { available: true } };
+  const restart = require('./cancellation-resolution/restart');
+  if (!restart.planStartAccountOpen(customer) || currentServiceKeys.length || ownedServiceKeys.length) return {};
+  const optionIds = options
+    .filter((option) => restart.PLAN_START_SERVICE_KEYS.includes(option.serviceKey)
+      && Number(option.monthly) > 0 && option.manualReview !== true
+      && variantsForService(option.serviceKey, '', false).some((variant) => variant?.id === option.id))
+    .map((option) => option.id);
+  if (!optionIds.length) return {};
+  try {
+    // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
+    // term still covering today owns a plan: no offer.
+    if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
+  } catch (err) {
+    logger.warn(`[customer-pricing-ai] plan-start ownership read failed — no offer: ${err.message}`);
+    return {};
+  }
+  return { planStart: { optionIds } };
 }
 
 function summarizeProperty(context) {

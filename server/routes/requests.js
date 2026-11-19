@@ -1144,10 +1144,18 @@ router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, 
 // { error, code } for a member, a cancelled account, an option or price that
 // changed, or anything that cannot be priced online (the card then files its
 // ordinary request).
+// `shown` carries every amount the card displayed for the option (the mint
+// compares each with today's price, to the cent); null = not shown.
+const shownAmount = Joi.number().min(0).max(100000).allow(null);
 const startPlanSchema = Joi.object({
   serviceKey: Joi.string().valid('pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite').required(),
   optionId: Joi.string().trim().max(60).required(),
-  shownMonthly: Joi.number().greater(0).max(100000).required(),
+  shown: Joi.object({
+    monthly: Joi.number().greater(0).max(100000).required(),
+    perVisit: shownAmount,
+    dueAtStart: shownAmount,
+    oneTime: shownAmount,
+  }).required(),
 });
 
 router.post('/start-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
@@ -1163,7 +1171,7 @@ router.post('/start-plan', authenticate, cancelResolutionLimiter, async (req, re
         customer: req.customer,
         serviceKey: value.serviceKey,
         optionId: value.optionId,
-        shownMonthly: value.shownMonthly,
+        shown: value.shown,
       });
     } catch (err) {
       if (err && err.restartUnavailable) {

@@ -20,7 +20,7 @@ function makeChain(table) {
     log(method, args) { recorded.push({ table: this.table, method, args }); return this; },
   };
   const methods = ['leftJoin', 'where', 'andWhere', 'orWhere', 'whereNot', 'orWhereNot', 'whereRaw', 'orWhereRaw',
-    'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull',
+    'whereIn', 'orWhereIn', 'whereNotIn', 'orWhereNotIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull',
     'whereBetween', 'select', 'groupBy', 'orderBy', 'limit', 'sum', 'count', 'modify'];
   for (const m of methods) {
     chain[m] = (...args) => {
@@ -40,13 +40,14 @@ jest.mock('../models/db', () => mockDb);
 
 const { executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 
-test('estimates_sent keeps source-NULL rows and DELIVERED plan_restart quotes; drops only undelivered restart mints', async () => {
+test('estimates_sent keeps source-NULL rows and DELIVERED self-serve quotes; drops only undelivered plan_restart and plan_start mints', async () => {
   recorded.length = 0;
   await executeDashboardTool('compare_periods', { period_a: 'this_month', period_b: 'last_month', metrics: ['estimates_sent'] });
   const estimateCalls = recorded.filter((r) => String(r.table).includes('estimates'));
   expect(estimateCalls.length).toBeGreaterThan(0);
   const nullArms = estimateCalls.filter((r) => r.method === 'whereNull' && r.args[0] === 'e.source');
-  const notRestartArms = estimateCalls.filter((r) => r.method === 'orWhereNot' && r.args[0] === 'e.source' && r.args[1] === 'plan_restart');
+  const notRestartArms = estimateCalls.filter((r) => r.method === 'orWhereNotIn' && r.args[0] === 'e.source'
+    && JSON.stringify(r.args[1]) === JSON.stringify(['plan_restart', 'plan_start']));
   const deliveredArms = estimateCalls.filter((r) => r.method === 'orWhereRaw'
     && String(r.args[0]).includes("e.estimate_data #>> '{deliveryState,firstDeliveredAt}'") && String(r.args[0]).includes('IS NOT NULL'));
   // One grouped predicate per period, all three arms OR'd together.

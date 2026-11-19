@@ -11007,14 +11007,27 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [startingPlan, setStartingPlan] = useState(false);
   const [planStartUrl, setPlanStartUrl] = useState('');
   const planStartTimer = useRef(null);
-  useEffect(() => () => { if (planStartTimer.current) clearTimeout(planStartTimer.current); }, []);
+  // Bumped whenever the answer or the option changes, and when the card goes away: a start still
+  // in flight for the old one is dropped, never opened (codex pre-push P1).
+  const planStartSeq = useRef(0);
+  const dropPendingPlanStart = () => {
+    planStartSeq.current += 1;
+    clearTimeout(planStartTimer.current);
+    setPlanStartUrl('');
+    setStartingPlan(false);
+  };
+  useEffect(() => () => {
+    planStartSeq.current += 1;
+    clearTimeout(planStartTimer.current);
+  }, []);
+  useEffect(dropPendingPlanStart, [selectedId]);
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const options = result?.options || [];
   const selected = options.find((option) => option.id === selectedId) || options[0] || null;
   // GATE_PORTAL_PLAN_START: a customer with no recurring plan books through a real estimate instead of
-  // filing a request. The server hint only offers it; the start-plan route decides.
-  const canStartPlan = result?.planStart?.available === true && Number(selected?.monthly) > 0 && selected.manualReview !== true;
+  // filing a request. The server hint lists the options it can book; the start-plan route decides.
+  const canStartPlan = (result?.planStart?.optionIds || []).includes(selected?.id);
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();
@@ -11022,9 +11035,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     setLoading(true);
     setError('');
     setRequested(false);
-    if (planStartTimer.current) clearTimeout(planStartTimer.current);
-    setPlanStartUrl('');
-    setStartingPlan(false);
+    dropPendingPlanStart();
     try {
       const data = await api.queryCustomerPricing(cleanPrompt);
       setResult(data);
@@ -11055,15 +11066,19 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   // today's request, so the customer never hits a dead end.
   const startPlan = async () => {
     if (startingPlan || requesting || !selected) return;
+    const seq = planStartSeq.current;
     setStartingPlan(true);
     try {
-      const out = await api.startPlan({ serviceKey: selected.serviceKey, optionId: selected.id, shownMonthly: selected.monthly });
+      const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime } = selected;
+      const out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime } });
+      if (seq !== planStartSeq.current) return; // another option or a new answer took over
       if (!out?.url) throw new Error('No estimate was returned.');
       // Same hand-off as the cancelled-plan restart: a beat on screen, plus a link if navigation is blocked.
       setPlanStartUrl(out.url);
       planStartTimer.current = setTimeout(() => window.location.assign(out.url), 1500);
       return;
     } catch {
+      if (seq !== planStartSeq.current) return;
       setStartingPlan(false);
     }
     await submitRequest();

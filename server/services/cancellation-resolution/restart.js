@@ -42,6 +42,12 @@ const RESTARTABLE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shr
 const PLAN_START_SOURCE = 'plan_start';
 const PLAN_START_SERVICE_KEYS = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite'];
 const HAND_PRICED_PLAN_START = 'This plan needs to be priced by hand — please call or text us and we will take care of it.';
+// Billing lanes that are a plan (a row in hand resolves through billing-lane's resolveBillingLane).
+const PLAN_BILLING_LANES = ['monthly_membership', 'per_application', 'annual_prepay'];
+// Every amount the portal card shows for an option (customer-pricing-ai quoteAmountFromLine). The
+// plan-start offer check compares each one in cents.
+const PLAN_START_SHOWN_KEYS = ['monthly', 'perVisit', 'dueAtStart', 'oneTime'];
+const toCents = (value) => Math.round(Number(value || 0) * 100);
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
 
@@ -387,20 +393,16 @@ async function prepayTermFamilyKeys(dbh, customerId, dateStr, { historical = fal
   return keys;
 }
 
-// The families with residual LIVE recurring obligations on this account —
-// two kinds of evidence, matching cancellation-eligibility's own view of a
-// live obligation: (a) non-terminal recurring rows, and (b) a series anchor
+// The LIVE recurring rows on this account, any family — two kinds of
+// evidence, matching cancellation-eligibility's own view of a live
+// obligation: (a) non-terminal recurring rows, and (b) a series anchor
 // re-armed with recurring_ongoing=true (staff can restore a family on a
 // completed anchor before its next occurrence exists, and that family is
 // owned, not restartable). The pricing-ai ownership loaders deliberately
 // answer [] for an inactive customer (loadActiveRecurringServiceRows), so
-// the churned lanes read the residual rows directly — same family detection
-// as the cancelled-family recovery. Throws when the rows cannot be read;
-// every caller FAILS CLOSED on that.
-async function ownedResidualFamilies(dbh, customerId) {
-  const {
-    detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
-  } = require('../self-booking-plan-sync');
+// the churned lanes read the residual rows directly. Throws when the rows
+// cannot be read; every caller FAILS CLOSED on that.
+async function liveRecurringRows(dbh, customerId) {
   const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
   // TERMINAL_STATUSES is a COVERAGE view: it lists 'rescheduled' because a
   // phantom reschedule row must not count toward tier/coverage. For
@@ -445,8 +447,20 @@ async function ownedResidualFamilies(dbh, customerId) {
       }),
     residualBase().where('s.recurring_ongoing', true),
   ]);
+  return [...nonTerminalRows, ...ongoingAnchorRows];
+}
+
+// The families with residual live recurring obligations: liveRecurringRows
+// minus commercial and rodent-led rows (not restartable families), plus
+// prepay terms still covering today — same family detection as the
+// cancelled-family recovery.
+async function ownedResidualFamilies(dbh, customerId) {
+  const {
+    detectWaveGuardPlanKeys, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
+  } = require('../self-booking-plan-sync');
+  const { etDateString } = require('../../utils/datetime-et');
   const residualKeys = [];
-  for (const row of [...nonTerminalRows, ...ongoingAnchorRows]) {
+  for (const row of await liveRecurringRows(dbh, customerId)) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) if (!residualKeys.includes(key)) residualKeys.push(key);
   }
@@ -459,6 +473,30 @@ async function ownedResidualFamilies(dbh, customerId) {
     if (!residualKeys.includes(key)) residualKeys.push(key);
   }
   return uniqueServiceFamilies(residualKeys);
+}
+
+// Plan start's ownership bar (codex pre-push P0): ANY live recurring row owns
+// a plan, rodent-led and commercial rows included (the restart residual skips
+// both because they are not restartable families), and so does an annual
+// prepay term still covering today. Same reads and rebook rule as the
+// residual. Throws when the rows cannot be read; every caller FAILS CLOSED.
+async function ownsAnyRecurringService(dbh, customerId) {
+  if ((await liveRecurringRows(dbh, customerId)).length) return true;
+  const { coveredTermsAsOf } = require('../annual-prepay-renewals');
+  const { etDateString } = require('../../utils/datetime-et');
+  const terms = await coveredTermsAsOf(dbh, etDateString()).where('t.customer_id', customerId).select('t.id');
+  return terms.length > 0;
+}
+
+// A plan start is for an account with no plan (codex pre-push P0): active, not
+// cancelled, and no plan membership on the row: a real WaveGuard tier, a plan
+// billing lane, or a legacy monthly rate. The card hint, the mint and the
+// accept re-check all read this one predicate.
+function planStartAccountOpen(row) {
+  if (!row || row.active === false || row.pipeline_stage === 'churned') return false;
+  const { isMembershipTier, resolveBillingLane } = require('../billing-lane');
+  if (isMembershipTier(row.waveguard_tier)) return false;
+  return !PLAN_BILLING_LANES.includes(resolveBillingLane(row).mode) && !(Number(row.monthly_rate || 0) > 0);
 }
 
 // A prior restart estimate the customer can still open (same liveness the
@@ -734,9 +772,9 @@ async function mintPricedEstimate({
   const onetimeTotal = Number(totals.onetimeTotal || 0);
   const serverTier = recomputed.rawEngineResult?.waveGuard?.tier
     || recomputed.rawEngineResult?.waveGuard?.label || null;
-  // Source-specific offer check on the SERVER's own totals (plan_start: the
-  // price the customer was shown must still be today's price).
-  if (assertOffer) assertOffer({ monthlyTotal, annualTotal, onetimeTotal });
+  // Source-specific offer check on the SERVER's own totals and engine result
+  // (plan_start: every price the customer was shown must still be today's).
+  if (assertOffer) assertOffer({ monthlyTotal, annualTotal, onetimeTotal, rawEngineResult: raw });
 
   // Reuse decision — only NOW, with today's property context resolved,
   // the commercial / verified-override / review-marker gates passed, and
@@ -984,12 +1022,13 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
 // (the route maps it to 409 { error, code }). `shownMonthly` is only COMPARED
 // with the server's own recompute (offer_changed on drift) — never persisted.
 async function mintPlanStartEstimate({
-  customer, serviceKey, optionId, shownMonthly, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
+  customer, serviceKey, optionId, shown, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
 }) {
   if (!customer || !customer.id) throw new Error('mintPlanStartEstimate requires a customer row');
   const notEligible = () => new RestartUnavailableError('not_eligible', 'This plan cannot be priced online right now.');
-  const shown = Number(shownMonthly);
-  if (!PLAN_START_SERVICE_KEYS.includes(serviceKey) || !Number.isFinite(shown) || !(shown > 0)) throw notEligible();
+  // `shown` = the amounts the card displayed (PLAN_START_SHOWN_KEYS); a plan has a monthly price.
+  const shownMonthly = Number(shown?.monthly);
+  if (!PLAN_START_SERVICE_KEYS.includes(serviceKey) || !Number.isFinite(shownMonthly) || !(shownMonthly > 0)) throw notEligible();
   const mintDeps = resolveMintDeps(deps);
   // The exact option the card showed: only a member of today's offered ladder
   // is priced (never the generic first one, never a client-shaped option).
@@ -1004,30 +1043,31 @@ async function mintPlanStartEstimate({
     // Same lock order as the restart mint and the public accept (contract §1).
     await lockCustomerComms(trx, customer.id);
     const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
-    // A churned account restarts; an inactive or unreadable one goes by hand.
-    if (!fresh || fresh.active === false || fresh.pipeline_stage === 'churned') throw notEligible();
+    // A churned account restarts; an inactive, unreadable or member account goes by hand.
+    if (!planStartAccountOpen(fresh)) throw notEligible();
 
     const logTag = 'plan-start';
     const assertNotCommercial = makeCommercialGuard(fresh, deps, { logTag, handMessage: HAND_PRICED_PLAN_START });
     assertNotCommercial({ propertyType: fresh.property_type }, 'stored');
 
-    // Ownership — FAIL CLOSED, and ANY live recurring family refuses (members
-    // keep the request flow): the same residual read the accept re-runs.
-    let ownedFamilies;
+    // Ownership — FAIL CLOSED, and ANY live recurring service refuses (members
+    // keep the request flow): the same read the accept re-runs.
+    let ownsPlan;
     try {
-      ownedFamilies = await ownedResidualFamilies(trx, fresh.id);
+      ownsPlan = await ownsAnyRecurringService(trx, fresh.id);
     } catch (err) {
-      logger.warn(`[${logTag}] residual ownership lookup failed for ${fresh.id} — refusing: ${err.message}`);
+      logger.warn(`[${logTag}] recurring ownership lookup failed for ${fresh.id} — refusing: ${err.message}`);
       throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
     }
-    if (ownedFamilies.length) throw notEligible();
+    if (ownsPlan) throw notEligible();
 
     return mintPricedEstimate({
       trx,
       fresh,
       source: PLAN_START_SOURCE,
       families: [family],
-      ownedFamilies,
+      // No live recurring service (checked above), so the option prices standalone.
+      ownedFamilies: [],
       optionFor: () => option,
       estimateBlock: {
         key: 'planStart',
@@ -1041,8 +1081,17 @@ async function mintPlanStartEstimate({
       // Reuse only the quote for THIS option (the core adds today's-offer equality).
       matchesLive: (liveData) => liveData?.planStart?.serviceKey === serviceKey
         && liveData?.planStart?.optionId === option.id,
-      assertOffer: ({ monthlyTotal }) => {
-        if (Math.abs(Number(monthlyTotal) - shown) > 0.005) {
+      // Every amount the card showed, to the cent (codex pre-push P0; AGENTS.md:
+      // the recompute matches the shown price or the mint refuses): the
+      // estimate's monthly total, and the card's own derivation
+      // (quoteAmountFromLine) on TODAY's engine line for this service. Runs
+      // before both a fresh mint and a reuse.
+      assertOffer: ({ monthlyTotal, rawEngineResult }) => {
+        const { quoteAmountFromLine, findLineItem } = mintDeps.pricingAi;
+        const today = quoteAmountFromLine(findLineItem(rawEngineResult, serviceKey));
+        const drifted = toCents(monthlyTotal) !== toCents(shownMonthly)
+          || PLAN_START_SHOWN_KEYS.some((key) => toCents(today[key]) !== toCents(shown[key]));
+        if (drifted) {
           throw new RestartUnavailableError('offer_changed', 'The price changed since you last looked. Please check the new price.');
         }
       },
@@ -1177,7 +1226,7 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   };
   let quoted;
   let fresh;
-  let ownedFamilies;
+  let ownsPlan;
   try {
     const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
     const planStart = parseJson(row?.estimate_data, {})?.planStart;
@@ -1186,9 +1235,10 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
     // customers row FOR UPDATE, then the reads.
     await lockCustomerComms(trx, row?.customer_id);
     fresh = row?.customer_id
-      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'active', 'pipeline_stage')
+      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate()
+        .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'billing_mode', 'monthly_rate')
       : null;
-    ownedFamilies = fresh ? await ownedResidualFamilies(trx, fresh.id) : [];
+    ownsPlan = fresh ? await ownsAnyRecurringService(trx, fresh.id) : false;
   } catch (err) {
     logger.warn(`[plan-start] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
     throw refuse('We could not re-verify this estimate just now — please try again in a moment.');
@@ -1196,8 +1246,9 @@ async function assertPlanStartAcceptEligible(trx, estimate) {
   const changed = () => refuse('This account changed since this estimate was created — please go back to your portal for a current price.');
   // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
   if (!quoted || !quoted.length || !fresh) throw changed();
-  if (fresh.active === false || fresh.pipeline_stage === 'churned') throw changed();
-  if (ownedFamilies.length) throw changed();
+  // The mint's bar again (the price was standalone): no plan membership on the
+  // row and no live recurring service of any kind.
+  if (!planStartAccountOpen(fresh) || ownsPlan) throw changed();
 }
 
 module.exports = {
@@ -1209,6 +1260,9 @@ module.exports = {
   assertRestartAcceptEligible,
   PLAN_START_SOURCE,
   PLAN_START_SERVICE_KEYS,
+  PLAN_START_SHOWN_KEYS,
+  planStartAccountOpen,
+  ownsAnyRecurringService,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   _test: { liveRestartEstimate, ownedResidualFamilies },

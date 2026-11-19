@@ -2115,34 +2115,64 @@ describe('r9: field-confident tree counts, story evidence, authoritative types, 
 });
 
 describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
-  const ask = (customer, db = null) => buildCustomerPricingResponse({
+  const restart = require('../services/cancellation-resolution/restart');
+  const ask = (customer, db = null, prompt = 'I am interested in adding lawn care') => buildCustomerPricingResponse({
     db,
     propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
-    prompt: 'I am interested in adding lawn care',
+    prompt,
     customer,
   });
-  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; });
+  // A plain account: no plan membership on the row (propertyCustomer defaults to a Bronze member).
+  const plain = (overrides = {}) => propertyCustomer({
+    id: 'cust-lead', active: true, pipeline_stage: 'new_lead', waveguard_tier: null, monthly_rate: null, ...overrides,
+  });
+  let owns;
+  beforeEach(() => { owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false); });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); });
 
-  test('present only when the gate is on and the account has no recurring service and is not cancelled', async () => {
+  test('lists the options the route can book, only when the gate is on and the account has no plan', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
-    const result = await ask(propertyCustomer({ id: 'cust-lead', active: true, pipeline_stage: 'new_lead' }));
+    const result = await ask(plain());
     expect(result.ok).toBe(true);
-    expect(result.planStart).toEqual({ available: true });
+    const bookable = result.options.filter((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview).map((o) => o.id);
+    expect(bookable.length).toBeGreaterThan(0);
+    expect(result.planStart).toEqual({ optionIds: bookable });
+    // The account-wide read (rodent and commercial rows, prepay terms) runs only for a plain account.
+    expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
   });
 
   test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
-    const result = await ask(propertyCustomer({ id: 'cust-lead', active: true, pipeline_stage: 'new_lead' }));
+    const result = await ask(plain());
     expect('planStart' in result).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
   });
 
-  test('absent for a member (a current or owned recurring service) and for a churned account', async () => {
+  test('absent for a member (a current or owned recurring service), a member by the row, and a churned account', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
     const member = propertyCustomer({ id: 'cust-member', active: true, pipeline_stage: 'active_customer' });
     const owned = await ask(member, activePlanDb(member.id, ['Quarterly Pest Control']));
     expect(owned.ok).toBe(true);
     expect('planStart' in owned).toBe(false);
-
-    const churned = await ask(propertyCustomer({ id: 'cust-gone', active: false, pipeline_stage: 'churned' }));
+    for (const membership of [{ waveguard_tier: 'Silver' }, { billing_mode: 'annual_prepay' }, { monthly_rate: 45 }]) {
+      expect('planStart' in await ask(plain(membership))).toBe(false);
+    }
+    const churned = await ask(plain({ id: 'cust-gone', active: false, pipeline_stage: 'churned' }));
     expect('planStart' in churned).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('absent when a row the pricing loaders skip (rodent, commercial) or a prepay term owns a plan, or the read fails', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    owns.mockResolvedValueOnce(true);
+    expect('planStart' in await ask(plain())).toBe(false);
+    owns.mockRejectedValueOnce(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('a service the route cannot book (rodent bait) is never offered', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, 'Can you add rodent bait stations?');
+    expect(result.options.every((o) => o.serviceKey === 'rodent_bait')).toBe(true);
+    expect('planStart' in result).toBe(false);
   });
 });

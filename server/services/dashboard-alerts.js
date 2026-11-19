@@ -648,14 +648,15 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
       .whereNull('e.archived_at')
       .whereIn('e.status', ['sent', 'viewed'])
       .whereRaw("e.expires_at >= NOW() AND e.expires_at <= NOW() + INTERVAL '3 days'")
-      // plan_restart quotes publish 'sent' with NOTHING delivered and carry a
+      // plan_restart quotes — and plan_start quotes (GATE_PORTAL_PLAN_START),
+      // same mint — publish 'sent' with NOTHING delivered and carry a
       // zero-follow-up contract (C4, codex GH #3671 r28 P1) — prompting
       // staff to call before one expires is exactly the follow-up it
       // forbids. Excluded unless an operator really delivered it
       // (deliveryState.firstDeliveredAt, the admin send path's witness);
       // NULL-aware so legacy source-NULL rows stay in.
-      .where(function notUndeliveredPlanRestart() {
-        this.whereNull('e.source').orWhereNot('e.source', 'plan_restart')
+      .where(function notUndeliveredSelfServeMint() {
+        this.whereNull('e.source').orWhereNotIn('e.source', ['plan_restart', 'plan_start'])
           .orWhereRaw("(e.estimate_data #>> '{deliveryState,firstDeliveredAt}') IS NOT NULL");
       });
     if (INTERNAL_TEST_CUSTOMERS.length) {
