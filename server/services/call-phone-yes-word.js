@@ -12,11 +12,11 @@
  * plain-statement screen (quoteIsPlainStatement) as it is, whole: a turn is the unit the grounding tools trust, so no
  * sentence split decides it. A choice that fails is no yes (yes_not_plain): any "if", "when", "not" or question in
  * those turns fails closed, and the office reads the call. A later word that does not repeat the quote is the call
- * reader's to judge (billing_choice reads the whole call). And it waits for any call the processor still owes a read,
- * by the processor's own rules (owedReadSql).
+ * reader's to judge (billing_choice reads the whole call). And it waits, for a bounded time, for any recent call that
+ * is not read yet (owedReadSql).
  */
 
-const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
+const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
 
 const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
 // A call's columns for its word: the extraction and the transcript come from one row read.
@@ -29,31 +29,27 @@ const CHOICE_SCAN_LIMIT = 50;
 // visit instead of the plan. It is the latest word even with no billing choice.
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
 
-// A call the pipeline still owes a read: a pass holds it now, or the processor's sweep will (re)read it, by the
-// processor's own rules (pendingCandidatesQuery without its 10-minute settle gates; the retry budget in
-// config/call-extraction-retry): a recording over 10 seconds that is not started, queued, waiting for its transcript,
-// or failed with retries left; or a masked transcript (card-number quarantine) not started, queued or failed with
-// retries left. A row the processor will not read again is never waited on: a 'processed' row waiting for its
-// transcript is selected by the sweep, but processRecording's dedup guard skips it. The DB test holds this to
-// pendingCandidatesQuery, less those rows, row for row. Never NULL, so NOT owed is the read calls exactly.
+// How long a call can still be read for the first time or retried: the processor reads a call within minutes, its
+// retries come 10 minutes apart, and a call with no recording is recovered from its live text soon after it ends.
+const OWED_READ_HOURS = 2;
+
+// A call that still owes a read: a recent call (OWED_READ_HOURS) not in a final state, or one a pass holds now. Final:
+// read ('processed'), judged not a conversation ('voicemail', 'spam'), or failed at its retry cap (the
+// exhaustedExtractionSql rule in call-commitments; its 7-day window never applies inside 2 hours). Bounded in time on
+// purpose, so no processor path is copied here: a row no pass will finish (a missed call with nothing to read, a dead
+// claim) delays a card by at most OWED_READ_HOURS and never blocks it. Never NULL, so NOT owed is exact.
 function owedReadSql(t) {
-  const underCap = `COALESCE(${t}.extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
-  const failedRetry = `(${t}.processing_status = 'extraction_failed' AND ${underCap}`
-    + ` AND ${t}.created_at > now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')`;
-  const masked = `(${t}.transcription_metadata::jsonb ->> 'pan_detected') = 'true'`;
-  const unstarted = `(${t}.processing_status IS NULL OR ${t}.processing_status = 'pending')`;
-  const recorded = `(COALESCE(${t}.recording_url, '') <> ''`
-    + ` AND (COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) > 10 OR ${masked})`
-    + ` AND (${unstarted} OR (${t}.transcription_status = 'pending' AND ${t}.transcription IS NULL`
-    + ` AND ${t}.processing_status IS DISTINCT FROM 'processed')`
-    + ` OR (${t}.processing_status = 'no_transcription' AND ${underCap}) OR ${failedRetry}))`;
-  const quarantined = `(${masked} AND ${t}.transcription IS NOT NULL AND (${unstarted} OR ${failedRetry}))`;
-  return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
+  const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
+  const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam')`
+    + ` OR (${t}.processing_status IN ('extraction_failed', 'no_transcription') AND ${atCap}))`;
+  const recent = (column) => `${t}.${column} > now() - interval '${OWED_READ_HOURS} hours'`;
+  return `COALESCE((((${t}.processing_status IS NULL OR NOT ${final}) AND ${recent('created_at')})`
+    + ` OR (${t}.processing_status = 'processing' AND ${recent('updated_at')})), false)`;
 }
 
 const wordsOf = (text) => [...String(text || '').matchAll(/[a-z0-9]+/gi)].map((m) => ({ w: m[0].toLowerCase(), at: m.index, end: m.index + m[0].length }));
 
-// Where a turn first says the quote, as [start, end] in its text, or null.
+// Where a turn first says the quote, as [start, end] in its text, or null (then the excerpt starts at the turn's start).
 function spanOf(text, quote) {
   const tokens = wordsOf(text);
   const q = wordsOf(quote).map((t) => t.w);
@@ -84,16 +80,18 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
     .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
   if (!quotes.length) return null;
-  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
+  const { parseTurns, turnsHolding, normalize } = require('./call-reschedule-agreement').groundingTools;
   const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
   const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length);
+  // The grounding tools' own normalization ("9am" = "9 a.m."), so a turn that says the quote is always found.
+  const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => ({ quote: e.quote, ns: normalize(e.quote) }));
   const held = [];
   for (const turn of turns.filter((t) => !t.agent)) {
+    const hit = grounded.find((g) => g.ns && ` ${turn.ns} `.includes(` ${g.ns} `));
+    if (!hit) continue;
     const text = String(turn.raw || '');
-    const quote = grounded.find((e) => spanOf(text, e.quote));
-    if (quote) held.push({ words: excerptOf(text, spanOf(text, quote.quote)), plain: quoteIsPlainStatement(text) });
+    held.push({ words: excerptOf(text, spanOf(text, hit.quote) || [0, 0]), plain: quoteIsPlainStatement(text) });
   }
   if (!held.length) return null;
   return held.find((h) => !h.plain) || held[held.length - 1];

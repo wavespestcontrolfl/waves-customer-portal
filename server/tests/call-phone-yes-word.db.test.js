@@ -1,6 +1,6 @@
 /**
  * The caller's word for the phone-yes cards (call-phone-yes-word.js) through PostgreSQL: which calls still owe a read
- * (held to the processor's own candidate query row for row), the customer's latest word since the send, and what
+ * (recent and not final, bounded in time), the customer's latest word since the send, and what
  * stands between it and the booking call. Runs inside a rolled-back transaction. Synthetic names and numbers only.
  * Skips without DATABASE_URL.
  */
@@ -82,48 +82,44 @@ describeDb("the caller's word (PostgreSQL)", () => {
   const since = () => new Date(Date.now() - 2 * DAY);
   const rowOf = (id) => trx('call_log').where({ id }).first(require('../services/call-phone-yes-word').CALL_COLUMNS);
 
-  test("owed is exactly what the processor's sweep would read again", async () => {
-    const processor = require('../services/call-recording-processor');
+  test('owed: a recent call not in a final state, or one a pass holds now; never a row no pass will finish', async () => {
     const customerId = await customer();
-    const settled = new Date(Date.now() - 20 * 60000); // past the processor's 10-minute settle window
-    const masked = { transcription_metadata: JSON.stringify({ pan_detected: true }) };
-    const states = [
-      { processing_status: null, ...RECORDED }, { processing_status: null }, { processing_status: null, ...RECORDED, recording_duration_seconds: 8 },
-      { processing_status: 'pending', ...RECORDED }, { processing_status: 'processed', ...RECORDED },
-      { processing_status: 'processed', transcription_status: 'pending', transcription: null, ...RECORDED },
-      { processing_status: 'no_transcription', extraction_attempts: 1, ...RECORDED }, { processing_status: 'no_transcription', extraction_attempts: 1 },
-      { processing_status: 'no_transcription', extraction_attempts: 3, ...RECORDED },
-      { processing_status: 'extraction_failed', extraction_attempts: 1, ...RECORDED }, { processing_status: 'extraction_failed', extraction_attempts: 3, ...RECORDED },
-      { processing_status: 'extraction_failed', extraction_attempts: 1, ...RECORDED, created_at: new Date(Date.now() - 8 * DAY) },
-      { processing_status: null, ...masked }, { processing_status: 'pending', ...masked }, { processing_status: null, ...masked, transcription: null },
-      { processing_status: 'extraction_failed', extraction_attempts: 1, ...masked }, { processing_status: 'no_transcription', extraction_attempts: 1, ...masked },
-      { processing_status: 'processed', ...masked },
+    const recent = hoursAgo(1);
+    const old = hoursAgo(3);
+    const cases = [
+      // [state, owed]
+      [{ processing_status: null, created_at: recent }, true],
+      [{ processing_status: 'pending', created_at: recent }, true],
+      [{ processing_status: 'processing', created_at: recent }, true],
+      [{ processing_status: 'no_transcription', extraction_attempts: 1, created_at: recent }, true],
+      [{ processing_status: 'extraction_failed', extraction_attempts: 2, created_at: recent }, true],
+      [{ processing_status: 'processed', created_at: recent }, false],
+      [{ processing_status: 'processed', transcription_status: 'pending', transcription: null, created_at: recent }, false],
+      [{ processing_status: 'voicemail', created_at: recent }, false],
+      [{ processing_status: 'spam', created_at: recent }, false],
+      [{ processing_status: 'no_transcription', extraction_attempts: 3, created_at: recent }, false],
+      [{ processing_status: 'extraction_failed', extraction_attempts: 3, created_at: recent }, false],
+      // Past the bound: a row no pass finished never holds a card back.
+      [{ processing_status: null, created_at: old, updated_at: old }, false],
+      [{ processing_status: 'extraction_failed', extraction_attempts: 1, created_at: old, updated_at: old }, false],
+      [{ processing_status: 'processing', created_at: old, updated_at: old }, false],
+      // An old call a pass holds now (a re-read of replaced audio) is owed.
+      [{ processing_status: 'processing', created_at: old, updated_at: recent }, true],
     ];
     const ids = [];
-    for (const state of states) ids.push(await call(customerId, null, { created_at: settled, updated_at: settled, ...state }));
-    const owed = await trx('call_log').whereIn('id', ids).whereRaw(owedReadSql('call_log')).pluck('id');
-    const read = await trx('call_log').whereIn('id', ids).whereRaw(`NOT ${owedReadSql('call_log')}`).pluck('id');
-    // The sweep also selects a 'processed' row waiting for its transcript, but processRecording skips it (dedup guard).
-    const candidates = await processor.pendingCandidatesQuery().whereIn('id', ids)
-      .whereRaw("processing_status IS DISTINCT FROM 'processed'").pluck('id');
-    expect(candidates.length).toBeGreaterThan(5);
-    expect([...owed].sort()).toEqual([...candidates].sort());
-    expect(owed.length + read.length).toBe(states.length);
+    for (const [state] of cases) ids.push(await call(customerId, null, state));
+    const owed = new Set(await trx('call_log').whereIn('id', ids).whereRaw(owedReadSql('call_log')).pluck('id'));
+    const read = new Set(await trx('call_log').whereIn('id', ids).whereRaw(`NOT ${owedReadSql('call_log')}`).pluck('id'));
+    expect(cases.map(([state], n) => [state, owed.has(ids[n])])).toEqual(cases);
+    expect(owed.size + read.size).toBe(cases.length);
   });
 
-  test("a 'processed' call waiting for its transcript is not owed: the processor will not read it again", async () => {
+  test('a call being read holds the customer back; a read one does not', async () => {
     const customerId = await customer();
-    await call(customerId, null, { processing_status: 'processed', transcription_status: 'pending', transcription: null, ...RECORDED });
-    await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(false);
-  });
-
-  test('a call being read is owed; so is one inside the settle window', async () => {
-    const customerId = await customer();
-    await call(customerId, null, { processing_status: 'processing' });
+    const callId = await call(customerId, null, { processing_status: 'processing' });
     await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(true);
-    const other = await customer();
-    await call(other, null, { processing_status: null, ...RECORDED, updated_at: new Date() });
-    await expect(unreadCallSince(trx, { customerId: other, since: since() })).resolves.toBe(true);
+    await trx('call_log').where({ id: callId }).update({ processing_status: 'processed' });
+    await expect(unreadCallSince(trx, { customerId, since: since() })).resolves.toBe(false);
   });
 
   test('an owed call before the window, or a sandbox call, does not count', async () => {

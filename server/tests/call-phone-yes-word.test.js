@@ -67,6 +67,9 @@ describe("the caller's words", () => {
     expect(callerWordsOf(evidence(choice('Per application')), twice('Per application.', 'Actually, not per application.')))
       .toEqual(notPlain('Actually, not per application.'));
     expect(callerWordsOf(evidence(choice('Per application')), twice('I guess so.', 'Actually, not per application.'))).toBeNull();
+    // The grounding tools' own spelling rule: "9am" and "9 a.m." are the same words.
+    expect(callerWordsOf(evidence(choice('bill me each time at 9am')), twice('Bill me each time at 9am.', "Don't bill me each time at 9 a.m.")))
+      .toEqual(notPlain("Don't bill me each time at 9 a.m."));
   });
 
   test('a quote across two sentences is screened with both', () => {
