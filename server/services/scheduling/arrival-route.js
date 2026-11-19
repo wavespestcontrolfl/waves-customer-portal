@@ -285,7 +285,7 @@ async function loadArrivalRouteContext({
   // participates in every feasibility check. Its new legs may use a cached
   // answer or the local model, without suppressing other stops' road checks.
   const hasChangedRoads = dayRows.some(row => row.customer_id != null && row.reservation_expires_at != null
-    && (row.technician_id == null || row.technician_id === techId)
+    && (row.technician_id == null || row.technician_id === techId || (!capacity && !multiTechConfirmLive()))
     && (row.hold_lapsed || !capacity || (excludeEstimateId && row.source_estimate_id === excludeEstimateId)));
   const previousRoadRows = hasChangedRoads ? dayRows
     .filter(row => !row.hold_lapsed && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at))

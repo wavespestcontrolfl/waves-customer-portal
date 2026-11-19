@@ -30,6 +30,7 @@
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { gateEnvValue } = require('../config/feature-gates');
+const { liveServiceOrHoldSql } = require('./scheduling/reservation-occupancy');
 
 const STOPS_AHEAD_DISPLAY_CAP = 3;
 
@@ -211,7 +212,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
                 AND (s.id = tr.id
                      OR (s.status NOT IN (${routeExcl})
                          AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
-                         AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())))
+                         AND ${liveServiceOrHoldSql('s')}))
               ORDER BY COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id
               LIMIT 1
            ) g ON TRUE
@@ -225,7 +226,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND s.scheduled_date = t.scheduled_date
             AND NOT (s.customer_id = t.customer_id
                      AND s.window_start IS NOT DISTINCT FROM t.window_start)
-            AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
+            AND ${liveServiceOrHoldSql('s')}
             AND s.status NOT IN (${routeExcl})
             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
        ),

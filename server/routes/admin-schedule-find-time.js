@@ -44,7 +44,7 @@ const { bookingRainPlan } = require('../services/scheduling/rain-fit');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
-const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { findAvailableSlots, RESTORED_CALENDAR } = require('../services/scheduling/find-time');
 const {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
 } = require('../services/scheduling/find-time-hints');
@@ -519,7 +519,7 @@ router.post('/', trackRoadLimit, async (req, res) => {
       rainSpan: rainPlan.rainSpan,
       // The chips' Google prices are staff-only and counted against the
       // staff user who asked (Codex #6881 security).
-      paidRoads, roadSpender: req.technicianId,
+      paidRoads, cacheOnlyRoads: result[RESTORED_CALENDAR] === true, roadSpender: req.technicianId,
     });
     const pickedOut = built.picked;
     // The staff line for a stopped spending limit. Nothing refused: no field.

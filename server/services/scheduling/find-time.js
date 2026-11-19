@@ -68,6 +68,7 @@ const DEFAULT_SERVICE_MIN = 60;
 // re-prices the shown legs on real roads (find-time-hints.js). Symbol-keyed
 // so JSON never carries stop coordinates to a client; spreads keep it.
 const GAP_LEGS = Symbol('gapLegs');
+const RESTORED_CALENDAR = Symbol('restoredCalendar');
 
 function hasCoords(stop) {
   return stop != null && stop.lat != null && stop.lng != null;
@@ -1490,12 +1491,15 @@ async function findAvailableSlots(opts) {
     evaluated,
     total_feasible: candidates.length,
     searched_dates: searchedDates,
+    // Changing one gap can replace both the day and week chips, including a
+    // chip with unchanged endpoints. Keep this response on cached road times.
+    ...(services.some(row => row.road_pricing_eligible === false) ? { [RESTORED_CALENDAR]: true } : {}),
   };
 }
 
 module.exports = {
   findAvailableSlots,
-  GAP_LEGS,
+  GAP_LEGS, RESTORED_CALENDAR,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.
   DAY_START_HOUR,

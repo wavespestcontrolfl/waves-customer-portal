@@ -578,7 +578,7 @@ function publicChip(chip) {
  */
 async function buildBestRows(days, {
   pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, rainSpan = null,
-  paidRoads, roadSpender, deps = {},
+  paidRoads, cacheOnlyRoads = false, roadSpender, deps = {},
 }) {
   const rainLookup = deps.hourlyRain || boundedHourlyRain;
   // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
@@ -608,7 +608,7 @@ async function buildBestRows(days, {
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
   // Staff only, counted against the staff user who asked (Codex #6881 security).
-  const [priced, hourly] = await Promise.all([priceChips(chips, { paid: paidRoads, spender: roadSpender }), forecast]);
+  const [priced, hourly] = await Promise.all([priceChips(chips, { paid: paidRoads, ...(cacheOnlyRoads ? { cacheOnly: true } : {}), spender: roadSpender }), forecast]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
   const nWeek = rows.week.length;
@@ -720,7 +720,7 @@ const OPEN_TIMES_SLOW_MS = 3000;
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
   rejectionsByDate, startedAt, closedDates, offDates, lastResortDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
-  serviceTypes = [], rainSpan = null, paidRoads = false, roadSpender = null,
+  serviceTypes = [], rainSpan = null, paidRoads = false, cacheOnlyRoads = false, roadSpender = null,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates, lastResortDates });
@@ -734,7 +734,7 @@ async function buildHintSummary(plan, everyStart, {
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
     pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes, rainSpan,
-    paidRoads, roadSpender,
+    paidRoads, cacheOnlyRoads, roadSpender,
   }) : null;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {

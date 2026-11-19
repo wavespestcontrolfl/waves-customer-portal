@@ -391,6 +391,26 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(true);
   });
 
+  test('a restored booking on another technician keeps the former road calendar when the hour is shared', async () => {
+    const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+    const multi = process.env.GATE_MULTI_TECH_CONFIRM;
+    const capacity = process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      process.env.GATE_MULTI_TECH_CONFIRM = 'off';
+      process.env.GATE_SCHEDULING_CAPACITY = 'off';
+      await mockConn('scheduled_services').where({ id: NORTH }).update({
+        technician_id: '10000000-0000-4000-8000-000000000002',
+        reservation_expires_at: mockConn.raw("NOW() - INTERVAL '1 day'"),
+      });
+      const ctx = await loadArrivalRouteContext({ conn: mockConn, date: DAY, technicianId: TECH, serviceId: TARGET });
+      expect(ctx.rows.some(row => row.id === NORTH)).toBe(true);
+      expect(ctx.previousRoadRows.map(row => row.id)).not.toContain(NORTH);
+    } finally {
+      if (multi === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = multi;
+      if (capacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = capacity;
+    }
+  });
+
   test('a restored booking keeps existing road checks and uses local travel only for the new legs', async () => {
     const { loadArrivalRouteContext, enumerateArrivalPlacements } = require('../services/scheduling/arrival-route');
     const travel = require('../services/route-optimizer').createSchedulingTravel({ maxRequests: 0 });

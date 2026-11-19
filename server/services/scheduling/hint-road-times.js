@@ -126,7 +126,7 @@ async function buyWithinCeilings({ spender, pro = 0, plain = 0 }, send) {
  * drive_source 'google', or the input numbers with drive_source 'estimate'.
  * Never throws.
  */
-async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(), paid = false, spender = null } = {}) {
+async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(), paid = false, cacheOnly = false, spender = null } = {}) {
   // Only gap chips (GAP_LEGS) are re-priced; a capacity chip stays an
   // estimate (Codex #6045 r9: its admission and numbers stay on the model).
   // An hour the route check already drove on Google
@@ -149,7 +149,7 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now(),
       }
     }
     let travel = null;
-    if (missing.size) {
+    if (!cacheOnly && missing.size) {
       const factory = travelFactory || (() => {
         const RouteOptimizer = require('../route-optimizer');
         return RouteOptimizer.createSchedulingTravel({

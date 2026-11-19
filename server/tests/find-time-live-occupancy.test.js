@@ -80,7 +80,9 @@ test('a restored booking blocks its gaps without making its chip legs provider-e
     customer_id: 'booked-customer', reservation_expires_at: new Date(Date.now() - 60_000),
     road_pricing_eligible: false, window_start: '10:00', window_end: '11:00',
   })]);
-  const { slots } = await findAvailableSlots(OPTIONS);
+  const result = await findAvailableSlots(OPTIONS);
+  expect(result[require('../services/scheduling/find-time').RESTORED_CALENDAR]).toBe(true);
+  const { slots } = result;
   const before = slots.find(slot => slot.start_time === '08:00');
   const after = slots.find(slot => slot.start_time === '11:00');
   expect(before[GAP_LEGS]).toMatchObject({ prevRoadEligible: true, nextRoadEligible: false });

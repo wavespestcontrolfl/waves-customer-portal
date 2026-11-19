@@ -28,6 +28,7 @@ const { SELLABLE_MIN, SLOT_MIN } = require('./close-gaps');
 const { _internals: replan } = require('./index');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+const { liveServiceOrHold } = require('../scheduling/reservation-occupancy');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
 const KEY_PREFIX = 'open-blocks:';
@@ -123,7 +124,7 @@ async function unplannedDays(conn, planned, elig) {
   // Untimed rows are read too: a day with one is left out (it is not empty), and they hold no hour.
   const rows = await conn('scheduled_services').whereBetween('scheduled_date', [elig.from, elig.to])
     .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
-    .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
+    .where(liveServiceOrHold)
     .select('id', 'technician_id', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"), 'window_start', 'window_end', 'estimated_duration_minutes');
   const blocks = await conn('tech_schedule_blocks').whereBetween('date', [elig.from, elig.to]).whereNot('block_type', 'available')
     .select('technician_id', conn.raw("to_char(date, 'YYYY-MM-DD') as day"), 'start_time', 'end_time');

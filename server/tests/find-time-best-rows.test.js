@@ -219,6 +219,16 @@ describe('priceChipsOnRoads', () => {
     expect(out).toMatchObject({ drive_in_minutes: 19, detour_minutes: 34, drive_source: 'estimate' });
   });
 
+  test('a restored calendar cannot purchase any newly displayed chip, including one with unchanged neighbours', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    const factory = jest.fn();
+    const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)],
+      { travelFactory: factory, ...STAFF, cacheOnly: true });
+    expect(chip.drive_source).toBe('estimate');
+    expect(factory).not.toHaveBeenCalled();
+    expect(reserveRoadSpend).not.toHaveBeenCalled();
+  });
+
   test('a restored neighbour may consume the exact chip already in cache', async () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const seed = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });

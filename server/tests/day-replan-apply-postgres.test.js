@@ -178,6 +178,25 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
   }
   const changedColumns = (before, after) => Object.keys(after).filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k])).sort();
 
+  test('morning unplanned days keep stale-stamped booked work and expire only an unlinked hold', async () => {
+    const { unplannedDays } = require('../services/day-replan/open-blocks-alert')._internals;
+    const date = '2097-06-11';
+    await mockConn('scheduled_services').insert([{
+      customer_id: visits[0].customerId, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', window_start: '10:00', window_end: '11:00',
+      estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01T00:00:00Z',
+    }, {
+      customer_id: null, technician_id: techId, scheduled_date: date,
+      service_type: 'Quarterly Pest Control Service', status: 'pending', window_start: '12:00', window_end: '13:00',
+      estimated_duration_minutes: 60, reservation_expires_at: '2001-01-01T00:00:00Z',
+    }]);
+    const elig = { from: date, to: date, blackout: new Set(), techIds: [techId], absent: new Set() };
+
+    const [day] = await unplannedDays(mockConn, new Set(), elig);
+    expect(day).toMatchObject({ day: date, technician_id: techId, stops: 1 });
+    expect(day.blocks.map(block => [block.start, block.min])).toEqual([[480, 120], [660, 360]]);
+  });
+
   test('writes the planned hours, the route order and the reminders in one go, silently, and says applied', async () => {
     // A booked visit can retain its former hold stamp. The planner, locked
     // membership check and final route-order writer must all keep the row.
