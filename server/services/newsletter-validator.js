@@ -210,29 +210,6 @@ async function lockedPricesForSend(send, knex) {
   }
 }
 
-// Owner 2026-11-19: the Pest Insider (and no other email) may carry Amazon
-// links, for opted-in readers, approved registry products only, with
-// Amazon's exact sentence next to the link. Its reviewed tool links
-// (pest-insider/tools.js TOOL_URLS, each an approved registry URL) are taken
-// out of a body before the affiliate scan, each only when that sentence
-// follows it within TOOL_DISCLOSURE_WINDOW characters (the renderer puts it
-// right after the link). A link is taken out only whole (a quote, a space,
-// "<" or the end must follow it), so an approved URL with anything added
-// still reads as affiliate material.
-const PEST_INSIDER_TYPE = 'pest-insider-monthly';
-const TOOL_DISCLOSURE_WINDOW = 600;
-const escapeForRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-function withoutPestInsiderToolLinks(segment, newsletterType) {
-  if (newsletterType !== PEST_INSIDER_TYPE || !segment) return segment;
-  // Loaded here, not at the top: tools.js loads the Pest Insider copy check,
-  // which loads this module.
-  const { TOOL_URLS, AMAZON_DISCLOSURE } = require('./pest-insider/tools');
-  return TOOL_URLS.reduce((out, url) => out.replace(
-    new RegExp(`${escapeForRegExp(url)}(?=["'\\s<]|$)`, 'g'),
-    (match, at, whole) => (whole.slice(at + match.length, at + match.length + TOOL_DISCLOSURE_WINDOW).includes(AMAZON_DISCLOSURE) ? ' ' : match),
-  ), segment);
-}
-
 function validateNewsletterDraft(send, opts = {}) {
   const errors = [];
   const warnings = [];
@@ -315,16 +292,12 @@ function validateNewsletterDraft(send, opts = {}) {
   // programs, e.g. DoMyOwn/Awin, restrict or void email placements, and
   // the newsletter has no review queue, so this must hard-block in code).
   // Scanned on EVERY newsletter type, manual included — no legitimate send
-  // carries an affiliate/tracking URL. One narrow exception, owner
-  // 2026-11-19: the Pest Insider's reviewed Amazon tool links (see
-  // withoutPestInsiderToolLinks). Any other affiliate material in that
-  // email still blocks, and its subject and preview never carry one.
-  for (const [segment, label, isBody] of [
+  // carries an affiliate/tracking URL.
+  for (const [segment, label] of [
     [send.subject, 'subject'], [send.subject_b, 'subject B'], [send.preview_text, 'preview text'],
-    [send.html_body, 'HTML body', true], [send.text_body, 'plain-text body', true],
+    [send.html_body, 'HTML body'], [send.text_body, 'plain-text body'],
   ]) {
-    const scanned = isBody ? withoutPestInsiderToolLinks(segment, send.newsletter_type) : segment;
-    if (scanned && containsAffiliateMaterial(scanned)) {
+    if (segment && containsAffiliateMaterial(segment)) {
       errors.push(`AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: ${label} contains affiliate material (an <AffiliateLink>, a registered affiliate URL, or a tracking-network URL) — affiliate links publish on the blog only, never by email`);
       break;
     }
@@ -334,4 +307,4 @@ function validateNewsletterDraft(send, opts = {}) {
 }
 
 module.exports = {
-  lockedPricesForSend, validateNewsletterDraft, findHallucinatedClaims, TOOL_DISCLOSURE_WINDOW };
+  lockedPricesForSend, validateNewsletterDraft, findHallucinatedClaims };

@@ -24,11 +24,12 @@ jest.mock('../services/pest-insider/posts', () => {
   const postUrl = (id) => (Object.prototype.hasOwnProperty.call(POSTS, id) ? `${actual.SITE}${POSTS[id].path}` : null);
   return { ...actual, POSTS, postUrl, POST_URLS: Object.freeze([...new Set(Object.keys(POSTS).map(postUrl))]) };
 });
-const { buildIssue } = require('../services/pest-insider');
+const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
-const { POST_LINK_TEXT } = require('../services/pest-insider/render');
+const { POST_LINK_TEXT, withToolBlock } = require('../services/pest-insider/render');
+const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { TOOLS, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 
 // Every main fact's post answers as live, unless a case says otherwise.
@@ -66,20 +67,27 @@ describe('buildIssue', () => {
     expect(r.issue.html_body).toContain(`href="${postUrl('A01')}"`);
     expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
     expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
-    // no live tool named: no tool item, and no Amazon link anywhere
+    // no live tool named: no tool, and no Amazon link anywhere
+    expect(r.toolId).toBeNull();
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
   });
 
-  test('a live tool renders "A tool we\'d use" with its link and Amazon\'s sentence, and the send validator accepts it', () => {
+  test('a live tool comes back as toolId, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
     const mesh = toolById('stuff-it-copper-mesh');
     usePlan(A01, WFA, mesh);
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: [mesh.productId] });
-    expect(r).toMatchObject({ ok: true, reason: null });
+    expect(r).toMatchObject({ ok: true, reason: null, toolId: 'stuff-it-copper-mesh' });
     expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
-    expect(r.issue.html_body).toContain(`href="${mesh.url}"`);
-    expect(r.issue.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
-    expect(r.issue.text_body).toContain(`${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
-    expect(r.issue.text_body).toContain(mesh.lines.join(' '));
+    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1)
+    for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
+    const optedIn = withToolBlock(r.issue, r.toolId);
+    expect(optedIn.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
+    expect(optedIn.text_body).toContain(`${mesh.lines.join(' ')}\n\n${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
+    // No newsletter type may carry it yet: PR 4 adds the per-recipient check with opt-in evidence.
+    const { errors } = validateNewsletterDraft({
+      subject: optedIn.subject, preview_text: optedIn.preview, html_body: optedIn.html_body, text_body: optedIn.text_body, newsletter_type: NEWSLETTER_TYPE,
+    });
+    expect(errors.join(' ')).toMatch(/AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL/);
   });
 
   test('the builder refuses a tool the planner returns without a live check', () => {
@@ -228,9 +236,10 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
     ]) {
       expect(run(dates)).toEqual({ status: 2, stderr: expect.stringMatching(why), files: [] });
     }
+    // --assume-live counts every tool as live, so each date also gets the opted-in reader's copy
     expect(run(['2026-12-03', '2026-12-17'])).toMatchObject({
       status: 0,
-      files: ['pest-insider-2026-12-03.html', 'pest-insider-2026-12-03.txt', 'pest-insider-2026-12-17.html', 'pest-insider-2026-12-17.txt'],
+      files: ['2026-12-03', '2026-12-17'].flatMap((d) => ['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-${d}${ext}`)),
     });
   }, 120000);
 });

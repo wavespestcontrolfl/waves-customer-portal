@@ -1,5 +1,5 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
-const { renderIssue, wrapIssueHtml, POST_LINK_TEXT } = require('../services/pest-insider/render');
+const { renderIssue, withToolBlock, wrapIssueHtml, POST_LINK_TEXT } = require('../services/pest-insider/render');
 const { POST_URLS } = require('../services/pest-insider/posts');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { bodyIsDarkAware } = require('../services/email-template');
@@ -47,10 +47,22 @@ describe('renderIssue', () => {
     }
   });
 
-  test('"A tool we\'d use" renders the reviewed tool by its id, with Amazon\'s sentence right after the link', () => {
+  test('the shared body never has "A tool we\'d use": the archive serves it to anyone (pre-push PR 3 r1)', () => {
+    const shared = renderIssue(BASE);
+    expect(renderIssue({ ...BASE, toolId: 'acurite-glass-rain-gauge' })).toEqual(shared);
+    for (const part of [shared.html_body, shared.text_body]) expect(part).not.toMatch(/amazon/i);
+  });
+
+  test('withToolBlock adds the tool after "What\'s this?", with Amazon\'s sentence right after the link', () => {
     const gauge = toolById('acurite-glass-rain-gauge');
-    const r = renderIssue({ ...BASE, toolId: gauge.productId });
-    const html = r.html_body;
+    const shared = renderIssue(BASE);
+    const r = withToolBlock(shared, gauge.productId);
+    expect(r.subject).toBe(shared.subject);
+    expect(r.preview).toBe(shared.preview);
+    // the shared copy, unchanged, then the tool block
+    expect(r.html_body.startsWith(`${shared.html_body}\n<div class="dm-text">`)).toBe(true);
+    expect(r.text_body.startsWith(shared.text_body)).toBe(true);
+    const html = r.html_body.slice(shared.html_body.length);
     expect(html).toContain('A tool we&#39;d use');
     expect(html).toContain(`href="${gauge.url}"`);
     const linkAt = html.indexOf(`>${toolLinkText(gauge)}</a>`);
@@ -59,17 +71,13 @@ describe('renderIssue', () => {
     expect(sentenceAt).toBeGreaterThan(linkAt);
     // in normal body text, not the muted small print
     expect(html.slice(html.lastIndexOf('<p', sentenceAt), sentenceAt)).not.toMatch(/dm-muted/);
-    expect(r.text_body).toContain(`A TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}`);
-    // the tool item comes after "What's this?"
-    expect(html.indexOf('A tool we&#39;d use')).toBeGreaterThan(html.indexOf('/pest-identifier/aedes-mosquito/'));
-    // no tool id: no tool item and no Amazon link
-    for (const part of [renderIssue(BASE).html_body, renderIssue(BASE).text_body]) expect(part).not.toMatch(/amazon/i);
-    expect(renderIssue({ ...BASE, toolId: null }).html_body).toBe(renderIssue(BASE).html_body);
+    expect(r.text_body.slice(shared.text_body.length))
+      .toBe(`\nA TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n`);
   });
 
-  test('a tool id that is not a reviewed tool is refused', () => {
-    for (const toolId of ['ks-adjustable-door-sweep', 'no-such-tool', '', 7]) {
-      expect(() => renderIssue({ ...BASE, toolId })).toThrow(/must be a reviewed tool/);
+  test('withToolBlock refuses a tool id that is not a reviewed tool', () => {
+    for (const toolId of ['ks-adjustable-door-sweep', 'no-such-tool', '', null, 7]) {
+      expect(() => withToolBlock(renderIssue(BASE), toolId)).toThrow(/must be a reviewed tool/);
     }
   });
 

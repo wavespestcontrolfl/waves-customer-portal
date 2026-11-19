@@ -20,7 +20,9 @@
  *
  * "A tool we'd use" shows only a tool whose Amazon page passed a live check.
  * Amazon refuses plain page requests, so this script checks no tool page:
- * without --assume-live the samples have no tool item.
+ * without --assume-live the samples have no tool item. With a tool, it also
+ * writes the opted-in reader's copy (<date>.optin.html and .txt); the shared
+ * copy, which the archive serves, never has the tool.
  *
  * Dates run in order: each issue's fact and species count as "recent" for the
  * next one, the way the real schedule will. So each date must be a real
@@ -78,7 +80,7 @@ require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: n
 
 const { buildIssue } = require('../../server/services/pest-insider');
 const { sendDateET } = require('../../server/services/pest-insider/facts');
-const { wrapIssueHtml } = require('../../server/services/pest-insider/render');
+const { wrapIssueHtml, withToolBlock } = require('../../server/services/pest-insider/render');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
 const { TOOLS } = require('../../server/services/pest-insider/tools');
@@ -118,6 +120,7 @@ async function main() {
     if (result.ok) {
       console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
       console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
+      if (result.toolId) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, withToolBlock(result.issue, result.toolId))}.html and .txt (opted-in readers: + "A tool we'd use")`);
       // Only a built issue counts toward the rotation, like a sent one will.
       recent.factIds.push(d.factId);
       recent.speciesSlugs.push(d.speciesSlug);

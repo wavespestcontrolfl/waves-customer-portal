@@ -15,10 +15,14 @@
  * leads only when the caller names it in `livePostFactIds`: the facts whose
  * post answered as live for this send (posts.checkLivePosts). With no list,
  * no issue builds. "A tool we'd use" is a reviewed tool (tools.js) whose
- * product page passed this send's live check: the caller names those tools
- * in `liveToolIds`. With none, the issue has no tool item.
- * Returns { ok, reason, issue, diagnostics } where `issue` is
- * { subject, preview, html_body, text_body } when ok.
+ * product page passed this send's live check (the caller names those tools
+ * in `liveToolIds`). It is not in `issue`: the result's `toolId` names it,
+ * and the send path adds it per recipient, for opted-in readers only
+ * (render.withToolBlock), so the shared body, which the archive serves,
+ * never carries an Amazon link.
+ * Returns { ok, reason, issue, toolId, diagnostics } where `issue` is
+ * { subject, preview, html_body, text_body } and `toolId` is the live tool
+ * or null, when ok.
  */
 'use strict';
 
@@ -95,7 +99,6 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     preview: copy.preview,
     lead: { headline: copy.headline, sentences: copy.lead.map((text) => ({ text })), postUrl: post },
     idItem: { text: copy.idText, species: idItem },
-    toolId,
   });
 
   const errors = sendGateErrors(issue);
@@ -103,7 +106,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     diagnostics.problems = errors.map((err) => ({ part: 'send_validator', text: '', reason: err }));
     return { ok: false, reason: `send_validator_blocked: ${errors[0]}`, issue: null, diagnostics };
   }
-  return { ok: true, reason: null, issue, diagnostics };
+  return { ok: true, reason: null, issue, toolId, diagnostics };
 }
 
 module.exports = { buildIssue, NEWSLETTER_TYPE };
