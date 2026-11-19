@@ -1562,6 +1562,7 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     // statements, so rung 1 precedes the estimates UPDATE here.
     resetStore(recurringPestEstimate({ id: 'est-lock-1', token: 'tok-lock-1-x0123456789' }));
     db.__state.tables.scheduled_services = [holdFixture()];
+    const commitSpy = jest.spyOn(require('../services/slot-reservation'), 'commitReservation');
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       tier: 'Bronze',
@@ -1580,6 +1581,12 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(res.data.reservationCommitted).toBe(true);
+    expect(commitSpy).toHaveBeenCalledWith(expect.objectContaining({
+      scheduledServiceId: 'ss-hold-1',
+      expectedSourceEstimateId: 'est-lock-1',
+      expectUnclaimed: true,
+    }));
+    commitSpy.mockRestore();
 
     // The hold graduated inside the accept: customer bound, expiry cleared,
     // still on the pre-locked date.

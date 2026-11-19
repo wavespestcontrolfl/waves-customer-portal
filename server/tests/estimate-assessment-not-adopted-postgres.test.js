@@ -584,6 +584,131 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect((await getAcceptance(token)).mode).not.toBe('existing_appointment');
   });
 
+  test('a legacy unflagged re-service is neither offered nor adopted and repriced', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction, {
+      data: PEST_DATA, monthly: 15, annual: 180,
+    });
+    const callbackId = await visit(mockTransaction, {
+      customerId,
+      key: 'pest_re_service',
+      type: 'Quarterly Pest Control Service',
+      date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, is_callback: false, estimated_price: 0 },
+    });
+
+    expect((await getAcceptance(token)).mode).not.toBe('existing_appointment');
+    const response = await putAccept(token, { existingAppointmentId: callbackId });
+
+    expect(response.status).toBe(409);
+    expect(await mockTransaction('scheduled_services').where({ id: callbackId }).first())
+      .toMatchObject({ customer_id: customerId, source_estimate_id: estimateId, estimated_price: '0.00' });
+    expect((await mockTransaction('estimates').where({ id: estimateId }).first()).status).not.toBe('accepted');
+  });
+
+  test('locked adoption refuses a visit relabelled as a legacy re-service after preflight', async () => {
+    await mockTransaction.rollback();
+    mockTransaction = null;
+    let seeded;
+    let bookedId;
+    await db.transaction(async (seedTrx) => {
+      seeded = await fixture(seedTrx, { data: PEST_DATA, monthly: 15, annual: 180 });
+      bookedId = await visit(seedTrx, {
+        customerId: seeded.customerId,
+        key: 'pest_general_quarterly',
+        type: 'Quarterly Pest Control Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId, estimated_price: 0 },
+      });
+    });
+    mockTransaction = await db.transaction();
+    const relabel = await db.transaction();
+    const observer = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    let relabelOpen = true;
+    let request;
+    try {
+      const { rows: [{ pid }] } = await relabel.raw('SELECT pg_backend_pid()::int AS pid');
+      const reServiceId = await serviceId(relabel, 'pest_re_service');
+      await relabel('scheduled_services').where({ id: bookedId }).forUpdate().first();
+      await relabel('scheduled_services').where({ id: bookedId }).update({
+        service_id: reServiceId,
+        is_callback: false,
+      });
+
+      request = putAccept(seeded.token, {
+        existingAppointmentId: bookedId,
+        paymentMethodPreference: 'pay_at_visit',
+      });
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const result = await observer.raw(`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND ?::int = ANY(pg_blocking_pids(pid))
+        ) AS waiting`, [pid]);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      await relabel.commit();
+      relabelOpen = false;
+
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
+      expect(await mockTransaction('scheduled_services').where({ id: bookedId }).first())
+        .toMatchObject({ customer_id: seeded.customerId, service_id: reServiceId, estimated_price: '0.00' });
+    } finally {
+      if (relabelOpen) await relabel.rollback().catch(() => {});
+      if (request) await request.catch(() => {});
+      await observer.destroy();
+      await mockTransaction?.rollback().catch(() => {});
+      mockTransaction = null;
+      if (seeded) {
+        await db('scheduled_services').where({ source_estimate_id: seeded.estimateId }).del();
+        await db('estimates').where({ id: seeded.estimateId }).del();
+        await db('customers').where({ id: seeded.customerId }).del();
+      }
+    }
+  });
+
+  test('an accepted one-time retry still offers booking when its only stamped row is a legacy re-service', async () => {
+    const oneTimeData = {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [{ name: 'German Roach Cleanout', price: 250 }], membershipFee: 0 },
+      },
+    };
+    const { customerId, estimateId, token } = await fixture(mockTransaction, {
+      data: oneTimeData, monthly: 0, annual: 0,
+    });
+    await mockTransaction('estimates').where({ id: estimateId }).update({
+      status: 'accepted',
+      accepted_at: new Date(),
+      accepted_service_mode: 'one_time',
+      price_locked_at: new Date(),
+      onetime_total: 250,
+    });
+    const callbackId = await visit(mockTransaction, {
+      customerId,
+      key: 'pest_re_service',
+      type: 'Pest Control Re-Service',
+      date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, is_callback: false, estimated_price: 0 },
+    });
+
+    const response = await putAccept(token);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      alreadyAccepted: true,
+      nextStep: 'book_one_time',
+      reservationCommitted: false,
+      bookingUrl: expect.stringContaining(`estimate_id=${estimateId}`),
+    });
+    expect(await mockTransaction('scheduled_services').where({ id: callbackId }).first())
+      .toMatchObject({ customer_id: customerId, estimated_price: '0.00' });
+  });
+
   test('accept: a stale page posting the assessment id is refused and the assessment is not restamped', async () => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const assessmentId = await assessmentVisit(mockTransaction, customerId, { estimated_price: 0 });

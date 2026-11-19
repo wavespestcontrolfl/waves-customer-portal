@@ -168,9 +168,9 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     return slotId;
   }
 
-  // The whole flow a customer walks: tap a service in the My Plan list, pick
-  // a time, confirm.
-  async function buy(serviceKey) {
+  // The first two steps a customer walks: tap a service in My Plan, then pick
+  // a time. Kept separate so claim races can stop immediately before confirm.
+  async function startPurchase(serviceKey) {
     const { offers } = await oneTap.listOffers({ customerId: ids.customer });
     const offer = offers.find((candidate) => candidate.serviceKey === serviceKey);
     expect(offer).toMatchObject({ serviceKey, mode: 'priced' });
@@ -181,6 +181,12 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     } });
     const slotId = await offerOpening(init.estimateId);
     await oneTap.reserve({ customerId: ids.customer, purchaseId: init.purchaseId, slotId });
+    return init;
+  }
+
+  // The whole flow: confirm the held visit after the first two steps.
+  async function buy(serviceKey) {
+    const init = await startPurchase(serviceKey);
     const done = await oneTap.confirm({ customerId: ids.customer, purchaseId: init.purchaseId,
       termsAccepted: true, ip: '203.0.113.9', userAgent: 'fixture' });
     return { init, done };
@@ -223,6 +229,64 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
     expect(money(await ownedVisits())).toEqual([shown.newPerVisit, shown.newPerVisit]);
     expect(done.pricing.existingServices).toEqual([expect.objectContaining({ newPerVisit: shown.newPerVisit })]);
     expect(done.pricing.existingPending).toBe(false);
+  });
+
+  test('confirm refuses a staff-claimed hold without changing its owner or staff price', async () => {
+    await seedOwnedService('pest_control');
+    const init = await startPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    expect(purchase).toMatchObject({ status: 'reserved', scheduled_service_id: expect.anything() });
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).update({
+      customer_id: ids.customer,
+      estimated_price: 333,
+    });
+
+    await expect(oneTap.confirm({
+      customerId: ids.customer,
+      purchaseId: init.purchaseId,
+      termsAccepted: true,
+      ip: '203.0.113.9',
+      userAgent: 'fixture',
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'RESERVATION_CLAIMED',
+      officeResolution: true,
+    });
+
+    expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first())
+      .toMatchObject({ customer_id: ids.customer, estimated_price: '333.00' });
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first())
+      .toMatchObject({ status: 'reserved', scheduled_service_id: purchase.scheduled_service_id });
+    expect(await trx('estimates').where({ id: init.estimateId }).first())
+      .toMatchObject({ status: 'draft', price_locked_at: null });
+    expect(await trx('scheduled_services').where({ source_estimate_id: init.estimateId })).toHaveLength(1);
+  });
+
+  test('confirm refuses a stale pointer to another estimate\'s unclaimed hold before updating it', async () => {
+    await seedOwnedService('pest_control');
+    const init = await startPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const foreignEstimateId = ids.ownedEstimates[0];
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).update({
+      source_estimate_id: foreignEstimateId,
+      customer_id: null,
+      estimated_price: 222,
+    });
+
+    await expect(oneTap.confirm({
+      customerId: ids.customer,
+      purchaseId: init.purchaseId,
+      termsAccepted: true,
+      ip: '203.0.113.9',
+      userAgent: 'fixture',
+    })).rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
+
+    expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first())
+      .toMatchObject({ source_estimate_id: foreignEstimateId, customer_id: null, estimated_price: '222.00' });
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first())
+      .toMatchObject({ status: 'initiated', scheduled_service_id: null });
+    expect(await trx('estimates').where({ id: init.estimateId }).first())
+      .toMatchObject({ status: 'draft', price_locked_at: null });
   });
 
   // Owner 2026-10-30: above Bronze, repricing current services is the office's

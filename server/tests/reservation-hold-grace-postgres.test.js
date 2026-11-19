@@ -156,9 +156,28 @@ postgres('hold grace + extend (real Postgres)', () => {
       });
       await expect(slotReservation.commitReservation({
         trx, scheduledServiceId: holdId, customerId, estimatedPrice: 45, expectUnclaimed: true,
-      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      })).rejects.toMatchObject({ code: 'RESERVATION_CLAIMED' });
       expect(await trx('scheduled_services').where({ id: holdId }).first('customer_id', 'status', 'estimated_price'))
         .toEqual(staffBooking);
+    });
+  });
+
+  test('a locked commit refuses another estimate\'s unclaimed hold without changing it', async () => {
+    await withHold({}, async ({ trx, holdId, estimateId, customerId }) => {
+      await trx('scheduled_services').where({ id: holdId }).update({ estimated_price: 79 });
+      const foreignEstimateId = randomUUID();
+
+      await expect(slotReservation.commitReservation({
+        trx,
+        scheduledServiceId: holdId,
+        customerId,
+        estimatedPrice: 45,
+        expectUnclaimed: true,
+        expectedSourceEstimateId: foreignEstimateId,
+      })).rejects.toMatchObject({ code: 'RESERVATION_EXPIRED' });
+
+      expect(await trx('scheduled_services').where({ id: holdId }).first())
+        .toMatchObject({ source_estimate_id: estimateId, customer_id: null, estimated_price: '79.00' });
     });
   });
 

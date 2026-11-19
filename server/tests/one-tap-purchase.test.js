@@ -808,6 +808,8 @@ describe('confirm', () => {
     expect(commitArgs.preLockedDate).toBe('2026-08-20');
     expect(commitArgs.trx).toBeTruthy();
     expect(Number(commitArgs.estimatedPrice)).toBe(84);
+    expect(commitArgs.expectUnclaimed).toBe(true);
+    expect(commitArgs.expectedSourceEstimateId).toBe('est-1');
 
     // Converter ran on the SAME transaction with the ruled option set.
     const [, convertOpts] = EstimateConverter.convertEstimate.mock.calls[0];
@@ -851,6 +853,19 @@ describe('confirm', () => {
       .rejects.toMatchObject({ status: 409, code });
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('initiated');
     expect(db.__state.tables.one_tap_purchases[0].scheduled_service_id).toBeNull();
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a staff claim returns an office-resolution 409 and keeps the purchase pointer', async () => {
+    slotReservation.commitReservation.mockRejectedValueOnce(
+      Object.assign(new Error('claimed'), { code: 'RESERVATION_CLAIMED' }),
+    );
+
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 409, code: 'RESERVATION_CLAIMED', officeResolution: true });
+
+    expect(db.__state.tables.one_tap_purchases[0])
+      .toMatchObject({ status: 'reserved', scheduled_service_id: 'ss-1' });
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
   });
 
@@ -1178,7 +1193,7 @@ describe('getPurchaseState / sweepStaleOneTapDrafts', () => {
       }),
     });
     db.__state.tables.scheduled_services = [{
-      id: 'ss-1', scheduled_date: '2026-08-20', window_start: '09:00',
+      id: 'ss-1', source_estimate_id: 'est-1', scheduled_date: '2026-08-20', window_start: '09:00',
       reservation_expires_at: futureIso(),
     }];
     findConsentedChargeableCard.mockResolvedValue({ id: 'pm-row' });
@@ -1193,6 +1208,10 @@ describe('getPurchaseState / sweepStaleOneTapDrafts', () => {
       pricing: { tierLabel: 'Silver', newService: null, existingServices: [SHOWN_ROW] },
     });
     expect(state.slot).toMatchObject({ date: '2026-08-20', windowStart: '09:00', windowEnd: '11:00' });
+
+    db.__state.tables.scheduled_services[0].source_estimate_id = 'est-foreign';
+    const guarded = await oneTap.getPurchaseState({ customerId: 'cust-1', purchaseId: 'p-1' });
+    expect(guarded).toMatchObject({ slot: null, holdLive: false });
   });
 
   test('another customer 404s; sweep voids open purchases on expired drafts and archives them', async () => {
@@ -1374,6 +1393,28 @@ describe('route contracts', () => {
     });
     expect(confirm.status).toBe(402);
     expect(await confirm.json()).toMatchObject({ needsCard: true });
+  });
+
+  test('gate on: a claimed reservation carries the staff-resolution response contract', async () => {
+    serviceMock.confirm.mockRejectedValue(Object.assign(new Error('office review needed'), {
+      status: 409,
+      code: 'RESERVATION_CLAIMED',
+      officeResolution: true,
+    }));
+    const base = await listen(appWithGate(true));
+
+    const response = await fetch(`${base}/api/one-tap/${PURCHASE_ID}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ termsAccepted: true }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: 'office review needed',
+      code: 'RESERVATION_CLAIMED',
+      officeResolution: true,
+    });
   });
 });
 

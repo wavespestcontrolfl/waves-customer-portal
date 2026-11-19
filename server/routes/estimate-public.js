@@ -24,6 +24,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { isAssessmentVisit, excludeAssessmentBookings, paidEstimateVisitsQuery } = require('../services/assessment-booking');
+const { isReService, excludeReServices } = require('../services/re-service');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -91,7 +92,7 @@ const {
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
 const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
-const { RETAINED_HISTORY_STATUSES, UPCOMING_SERVICE_STATUSES } = require('../services/visit-context/statuses');
+const { UPCOMING_SERVICE_STATUSES } = require('../services/visit-context/statuses');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
 // held slot's date key ahead of its estimate/customer row locks.
@@ -1931,7 +1932,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     // the same paid-family filter as normal adoption and require exactly one
     // result; duplicate staff bookings at the signed coordinates are
     // ambiguous and must send the customer back to the picker.
-    const matches = await excludeAssessmentBookings(q);
+    const matches = await excludeReServices(excludeAssessmentBookings(q));
     const eligible = (Array.isArray(matches) ? matches : []).filter((candidate) => (
       !isAssessmentVisit(candidate)
       && (anyModeFamilyKeys.size === 0 || appointmentMatchesEstimateFamily(candidate, familyKeys))
@@ -1939,7 +1940,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     if (eligible.length !== 1) return null;
     [row] = eligible;
   } else {
-    row = await excludeAssessmentBookings(q).first();
+    row = await excludeReServices(excludeAssessmentBookings(q)).first();
   }
 
   // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
@@ -2013,7 +2014,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
             'services.name as catalog_service_name',
           );
         if (requestedId) cw.where('scheduled_services.id', requestedId);
-        const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
+        const candidates = await excludeReServices(cw).limit(CANDIDATE_PAGE_SIZE).offset(offset);
         if (!Array.isArray(candidates) || candidates.length === 0) break;
         row = null;
         for (const cand of candidates) {
@@ -13276,6 +13277,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           const committedAppointment = await slotReservation.commitReservation({
             scheduledServiceId: reservationRow.id,
             expectUnclaimed: true,
+            expectedSourceEstimateId: estimate.id,
             customerId,
             paymentMethodPreference,
             estimatedPrice: visitEstimatedPrice,
@@ -13326,7 +13328,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             err.code = 'RESERVATION_EXPIRED';
             throw err;
           }
-          if (commitErr.code === 'SLOT_UNAVAILABLE') {
+          if (commitErr.code === 'SLOT_UNAVAILABLE' || commitErr.code === 'RESERVATION_CLAIMED') {
             const err = new Error('slot no longer available — re-pick a slot');
             err.status = 409;
             err.code = 'SLOT_UNAVAILABLE';
@@ -13349,6 +13351,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             const committedAppointment = await slotReservation.commitReservation({
               scheduledServiceId: existingAppointmentRow.id,
               expectUnclaimed: true,
+              expectedSourceEstimateId: estimate.id,
               customerId,
               paymentMethodPreference,
               estimatedPrice: visitEstimatedPrice,
@@ -13398,7 +13401,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               err.code = 'RESERVATION_EXPIRED';
               throw err;
             }
-            if (commitErr.code === 'SLOT_UNAVAILABLE') {
+            if (commitErr.code === 'SLOT_UNAVAILABLE' || commitErr.code === 'RESERVATION_CLAIMED') {
               const err = new Error('slot no longer available — re-pick a slot');
               err.status = 409;
               err.code = 'SLOT_UNAVAILABLE';
@@ -13430,17 +13433,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // one that targets this very visit. A lock_timeout maps to the same
           // recoverable catalog_unavailable the resolver raises.
           {
-            // Whole row: naming reservation_policy_version breaks the
-            // golden-master schemas that predate the capacity columns.
-            const adoptPolicy = await trx('scheduled_services')
-              .where({ id: existingAppointmentRow.id })
-              .first();
-            if (require('../services/scheduling/policy').capacityEnabled() || adoptPolicy?.reservation_policy_version === 2) {
-              try {
-                await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);
-              } catch (lockErr) {
-                throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause: lockErr });
-              }
+            // Every adopted row now needs catalog identity for the free
+            // re-service guard, not only capacity rows. Take the catalog
+            // table lock before the appointment row so a concurrent catalog
+            // write cannot create an ABBA wait with this locked recheck.
+            try {
+              await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);
+            } catch (lockErr) {
+              throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause: lockErr });
             }
           }
           {
@@ -13458,6 +13458,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             .where(bookedSlotMatch || {})
             .forUpdate('scheduled_services')
             .first();
+          // EvalPlanQual can return the freshly updated scheduled_services
+          // row after waiting on FOR UPDATE while retaining the join values
+          // from the statement's older snapshot. Resolve the now-locked
+          // row's current service_id again under the catalog table lock.
+          const lockedCatalog = lockedAdoptRow?.service_id
+            ? await trx('services').where({ id: lockedAdoptRow.service_id }).first('service_key', 'name')
+            : null;
           const lockedAnyModeKeys = new Set([
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
             ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),
@@ -13470,6 +13477,11 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             serviceModes: adoptionServiceModesForContract(estimate, estData),
           });
           const lockedFamilyOk = !isAssessmentVisit(lockedAdoptRow)
+            && !isReService({
+              serviceKey: lockedCatalog?.service_key ?? lockedAdoptRow?.catalog_service_key,
+              serviceName: lockedCatalog?.name ?? lockedAdoptRow?.catalog_service_name,
+              serviceType: lockedAdoptRow?.service_type,
+            })
             && (lockedAnyModeKeys.size === 0
               || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys));
           // Property scope under lock, mirroring the preflight's coverage
@@ -22908,16 +22920,10 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // A booking bound to this estimate (committed reservation, linked existing
   // appointment, or the converter's auto-scheduled first visit) — enough to
   // know the customer does NOT need the one-time booking link again.
-  const committedAppointment = estimate.customer_id && await excludeAssessmentBookings(db('scheduled_services')
-    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
-    .where({ 'scheduled_services.source_estimate_id': estimate.id, 'scheduled_services.customer_id': estimate.customer_id })
-    .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES)
-    .andWhere((builder) => {
-      builder.whereNull('scheduled_services.is_callback')
-        .orWhere('scheduled_services.is_callback', false);
-    }))
-    .orderBy('scheduled_services.scheduled_date', 'asc')
-    .first('scheduled_services.id');
+  const committedAppointment = estimate.customer_id && await paidEstimateVisitsQuery(db, {
+    estimateId: estimate.id,
+    customerId: estimate.customer_id,
+  }).first('scheduled_services.id');
   const reservationCommitted = !!committedAppointment;
 
   // One-time accepts that never booked get the self-serve booking link again.

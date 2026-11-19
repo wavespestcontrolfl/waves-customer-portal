@@ -46,6 +46,25 @@ and ineligible rows are indistinguishable (no existence oracle); "privacy
 headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 `Referrer-Policy: no-referrer`.
 
+## Authenticated one-tap confirmation
+
+`POST /api/one-tap/:purchaseId/confirm` requires the customer's authentication
+and a UUID purchase ID that belongs to that customer. The route uses
+`GATE_ONE_TAP_PURCHASE` and a limit of ten confirmation attempts per hour.
+The client sends `{ termsAccepted: true }`. The server reads the customer
+identity, IP address and user agent from the authenticated request.
+
+If staff claim the selected appointment before confirmation, the route returns
+`409 { error, code: "RESERVATION_CLAIMED", officeResolution: true }`. The
+appointment keeps its booked customer and price. The portal keeps the current
+purchase and selected appointment on the confirmation screen and shows the
+office number, (941) 297-5749. The existing expired and unavailable responses
+let the customer choose another time.
+
+Confirmation checks the locked appointment's `source_estimate_id` against
+the purchase's synthesized estimate. A mismatch returns `RESERVATION_EXPIRED`.
+The resume response omits appointment details for mismatched estimates.
+
 ## Routes
 
 Customer page-view log (no payload, gate, or header change): the data GET of

@@ -1985,7 +1985,7 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, expectedSourceEstimateId?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -2005,6 +2005,9 @@ async function commitReservation({
   // preflight, acceptance must restart through the booked-appointment
   // adoption path instead of overwriting that booking's identity or price.
   expectUnclaimed = false,
+  // Self-serve callers bind the pointer to the estimate that minted the
+  // hold. Checked on the locked row before idempotent replay or any update.
+  expectedSourceEstimateId = null,
   trx,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
@@ -2159,9 +2162,15 @@ async function commitReservation({
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
+    if (expectedSourceEstimateId != null
+      && String(row.source_estimate_id || '') !== String(expectedSourceEstimateId)) {
+      const err = new Error('reservation belongs to another estimate');
+      err.code = 'RESERVATION_EXPIRED';
+      throw err;
+    }
     if (expectUnclaimed && row.customer_id != null) {
       const err = new Error('the held appointment was booked before confirmation');
-      err.code = 'SLOT_UNAVAILABLE';
+      err.code = 'RESERVATION_CLAIMED';
       throw err;
     }
     if (!row.reservation_expires_at) {

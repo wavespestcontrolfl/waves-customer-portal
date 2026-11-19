@@ -1620,6 +1620,11 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         setNeedsCard(true);
         setCardSaved(false);
         setStepError('Save a payment method above to finish.');
+      } else if (err?.code === 'RESERVATION_CLAIMED') {
+        // Staff already turned this hold into a real appointment. Keep the
+        // selected time and purchase pointer visible; automatically re-picking
+        // would conceal that booking and could create a duplicate.
+        setStepError('Our office has already booked this appointment. Call or text (941) 297-5749 before continuing checkout.');
       } else if (err?.code === 'RESERVATION_EXPIRED' || err?.code === 'SLOT_UNAVAILABLE') {
         setSelectedSlot(null);
         setStep('time');

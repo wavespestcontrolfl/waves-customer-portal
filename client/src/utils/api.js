@@ -222,6 +222,7 @@ export class ApiClient {
         // Machine-readable discriminator (e.g. 'consent_required') — callers
         // branch on this, never on the human-facing message string.
         if (errorBody?.code) requestErr.code = errorBody.code;
+        if (errorBody?.officeResolution === true) requestErr.officeResolution = true;
         if (errorBody?.method_type) requestErr.methodType = errorBody.method_type;
         // Per-field validation detail (e.g. PUT /property/preferences when
         // every field in the batch was rejected) — callers that can save

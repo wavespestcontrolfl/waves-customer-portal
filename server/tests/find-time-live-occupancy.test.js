@@ -30,16 +30,19 @@ function serviceQuery(input) {
     where(fn) {
       let nullColumn;
       let liveColumn;
+      let customerColumn;
       const group = {
         whereNull(key) { nullColumn = column(key); return group; },
         orWhereRaw(sql) {
-          expect(sql).toBe('scheduled_services.reservation_expires_at > NOW()');
+          expect(sql).toBe('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
+          customerColumn = 'customer_id';
           liveColumn = 'reservation_expires_at';
           return group;
         },
       };
       fn(group);
-      rows = rows.filter(row => row[nullColumn] == null || new Date(row[liveColumn]) > new Date());
+      rows = rows.filter(row => row[nullColumn] == null || row[customerColumn] != null
+        || new Date(row[liveColumn]) > new Date());
       return q;
     },
     leftJoin: () => q,
@@ -70,6 +73,11 @@ test('expired holds release the route while live holds still block it', async ()
   wire([stop({ reservation_expires_at: new Date(Date.now() - 60_000) })]);
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(1);
   wire([stop({ reservation_expires_at: new Date(Date.now() + 60_000) })]);
+  expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
+});
+
+test('a claimed visit remains occupied after its old hold stamp expires', async () => {
+  wire([stop({ customer_id: 'customer-1', reservation_expires_at: new Date(Date.now() - 60_000) })]);
   expect((await findAvailableSlots(OPTIONS)).slots).toHaveLength(0);
 });
 

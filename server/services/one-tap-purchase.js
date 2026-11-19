@@ -726,7 +726,7 @@ async function getPurchaseState({ customerId, purchaseId }) {
   let holdLive = false;
   if (purchase.scheduled_service_id) {
     const hold = await db('scheduled_services')
-      .where({ id: purchase.scheduled_service_id })
+      .where({ id: purchase.scheduled_service_id, source_estimate_id: purchase.estimate_id })
       .first('scheduled_date', 'window_start', 'reservation_expires_at');
     if (hold) {
       holdLive = !!(hold.reservation_expires_at && new Date(hold.reservation_expires_at) > new Date());
@@ -1186,6 +1186,11 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           preLockedDate,
           preLockedTechId,
           preparedCapacity: preparedReservationCapacity,
+          // This legacy caller priced an unclaimed hold. A staff claim must
+          // survive confirmation unchanged; exact-match adoption belongs to
+          // the dedicated one-tap recovery lane.
+          expectUnclaimed: true,
+          expectedSourceEstimateId: est.id,
           trx,
         });
       } catch (commitErr) {
@@ -1198,6 +1203,11 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         }
         if (commitErr.code === 'SLOT_UNAVAILABLE') {
           throw httpError(409, 'That time is no longer available — pick a slot again.', { code: 'SLOT_UNAVAILABLE' });
+        }
+        if (commitErr.code === 'RESERVATION_CLAIMED') {
+          throw httpError(409,
+            'This appointment was booked by our office. Please call or text us before continuing checkout.',
+            { code: 'RESERVATION_CLAIMED', officeResolution: true });
         }
         throw commitErr;
       }

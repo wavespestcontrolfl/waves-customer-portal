@@ -32,6 +32,7 @@ const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
 const { packedBounds } = require('./packing-geometry');
 const { customerWindowAdmits } = require('./customer-windows');
+const { liveServiceOrHold } = require('./reservation-occupancy');
 
 // customerWindowAdmits (scheduling/customer-windows.js) is the ONE grid /
 // day-end admission rule for customer-facing callers — the
@@ -400,8 +401,12 @@ async function findCapacitySlots(opts) {
   // one bounded, request-local budget across the complete calendar horizon.
   for (let pass = 0; pass < 3; pass++) {
     const legs = [];
-    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
-    await travel.preload(legs);
+    for (const candidate of candidates) {
+      if (!candidate.context.restoredBooking) {
+        evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
+      }
+    }
+    if (legs.length) await travel.preload(legs);
   }
   const slots = [];
   // Why each refused candidate was refused (arrival_window, day_overcommitted,
@@ -1303,10 +1308,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .whereNotNull('scheduled_services.window_start')
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .where(liveServiceOrHold)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',
