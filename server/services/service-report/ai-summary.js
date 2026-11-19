@@ -1,3 +1,4 @@
+const { provenFindingRows } = require('./finding-provenance');
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { METHOD_LABELS } = require('./treatment-map');
@@ -187,7 +188,10 @@ async function buildWavesAiSummaryContext({
   knex = db,
 } = {}) {
   if (!record?.id) return undefined;
-  const { findings, applications } = await loadAiSummaryRows(record.id, knex);
+  const { findings: rows, applications } = await loadAiSummaryRows(record.id, knex);
+  // Only the rows a customer may see (finding-provenance.js): a bare title
+  // can be a line of the raw technician note.
+  const findings = provenFindingRows(rows, record.structured_notes);
   const facts = buildAiSummaryFacts({ record, pressureTrend, reentry, sinceLastVisit, findings, applications });
   const inputHash = sha256(stableStringify(facts));
   const existing = await knex('service_report_ai_summaries')

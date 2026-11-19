@@ -492,6 +492,21 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Findings in the dynamic context (2026-11-19; no new key): the AI summary card
+(`dynamicContext.aiSummary`, `ai-summary.js`), the premium cards
+(`dynamicContext.premiumExperience`, `premium-experience.js`), the pressure
+trend (`dynamicContext.pressureTrend` `mainDriver` and counts, this visit and
+the prior ones, `pressure-trend.js`), the since-last-visit lines
+(`since-last-visit.js`, which the staff pre-visit brief also reads) and the
+report writer's prior-visit grounding (`report-copy-context.js`) read a
+visit's `service_findings` rows only through `provenFindingRows`
+(`service-report/finding-provenance.js`), each against that visit's own form
+snapshot: a row with a detail or a recommendation, or one whose title the
+completion form's `structured_notes.formObservations` lists. A bare title (the
+form's free-text observations, a `[Found]` line of the raw technician note
+among them) never prints, as in the report document, the texting prompt and
+the voice relay.
+
 Pest rain outlook (owner 2026-10-24; no new route, token, key, privacy or
 rate-limit surface): on the pest-line service-report payload
 (`/api/reports/:token/data` and the PDF) the existing `weatherCall.body` (inside
