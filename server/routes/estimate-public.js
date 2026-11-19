@@ -6216,7 +6216,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // The mix comes from the rows accept reads (planRecurringRowsAsAccepted), not the rendered list alone: a legacy
   // estimate can keep a second service in the root recurring block or the engine lines.
   const hasWaveGuardMembership = require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData));
+    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData, estimate));
   // Operator-stated waiver removes the fee outright (no strike-through, no
   // invoice) — zeroing it here keeps every downstream SSR figure (fee row,
   // pay-per-application invoice copy, prepay math) consistent.
@@ -6434,7 +6434,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // A plan with more than one recurring service cannot prepay: accept and the
   // converter refuse it (withMultiServicePrepayClosed, same unit count).
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
-    && !(multiServicePrepayUnits(estData) > 1)
+    && !(multiServicePrepayUnits(estData, estimate) > 1)
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
   // The prepay invoice carries the disclosed bait-station setup as its own
   // line (converter, codex r4) — never waived by prepay — so the displayed
@@ -12342,21 +12342,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           ...(serviceCadences ? { serviceCadences } : {}),
           selectedAt: new Date().toISOString(),
         };
-        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
-        if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.result?.recurring?.services)) {
-          nextEstimateData.result = {
-            ...nextEstimateData.result,
-            recurring: {
-              ...nextEstimateData.result.recurring,
-              services: nextEstimateData.result.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
-            },
-          };
-        }
-        if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.recurring?.services)) {
-          nextEstimateData.recurring = {
-            ...nextEstimateData.recurring,
-            services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
-          };
+        if (shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData)) {
+          nextEstimateData = withPestOnlyRecurringChoice(nextEstimateData);
         }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
@@ -28189,12 +28176,12 @@ function estimateDataRecurringServices(estData = {}) {
   return recurringServicesWithSupplements(result || {});
 }
 
-function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
+function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}, estimate = {}) {
   const converter = require('../services/estimate-converter');
   // The rows accept reads (planRecurringRowsAsAccepted): a legacy estimate can keep a second service in the root
   // recurring block or the engine lines, and that plan carries no setup fee (owner 2026-10-21: the fee is pest-only).
   const membershipFeeMixApplies = converter
-    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData));
+    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData, estimate));
   // Operator-stated waiver strips the fee even when the mix carries it —
   // this finalize choke point is what removes it from snapshot/cached
   // bundles frozen before the waiver was applied.
@@ -28370,26 +28357,50 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
 // service in the root recurring block, and the page prefers a frequency's flag
 // over the estimate-level one. The server-rendered page applies the same count
 // (renderPage showAnnualPrepayOption).
-// The plan's recurring rows as accept and the converter read them: the supplemented rows, through the converter's
-// own reader (it merges result, engineResult and the root recurring block). Every page decision about the WaveGuard
-// setup fee reads this one list (stripStaleWaveGuardSetupFromBundle for /data, renderPage for the server-rendered
-// page), and the unit count below is the converter's own function over the same rows, so no storage shape can make
-// the page and accept disagree.
-function planRecurringRowsAsAccepted(estData) {
-  return require('../services/estimate-converter')
-    .recurringServicesFromEstimateData(withSupplementedRecurringServices(estData || {}) || estData || {});
+// A recurring choice on an estimate that also offers a one-time pest visit keeps only the pest rows
+// (shouldPersistPestOnlyRecurringChoice): accept persists exactly this, so conversion sees solo pest and bills its
+// setup fee. Shared by accept and recurringDataAsAccepted.
+function withPestOnlyRecurringChoice(estData) {
+  const keepPest = (services) => services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
+  let next = estData;
+  if (Array.isArray(next?.result?.recurring?.services)) {
+    next = { ...next, result: { ...next.result, recurring: { ...next.result.recurring, services: keepPest(next.result.recurring.services) } } };
+  }
+  if (Array.isArray(next?.recurring?.services)) {
+    next = { ...next, recurring: { ...next.recurring, services: keepPest(next.recurring.services) } };
+  }
+  return next;
 }
 
-function multiServicePrepayUnits(estData) {
+// The plan's data as accept persists it for a recurring choice: the supplemented rows, and on an estimate with a
+// one-time pest choice only the pest rows (withPestOnlyRecurringChoice).
+function recurringDataAsAccepted(estData, estimate) {
+  const supplemented = withSupplementedRecurringServices(estData || {}) || estData || {};
+  return shouldPersistPestOnlyRecurringChoice(estimate || {}, supplemented)
+    ? withPestOnlyRecurringChoice(supplemented)
+    : supplemented;
+}
+
+// The plan's recurring rows as accept and the converter read them: recurringDataAsAccepted, through the converter's
+// own reader (it merges result, engineResult and the root recurring block). Every page decision about the WaveGuard
+// setup fee reads this one list (stripStaleWaveGuardSetupFromBundle for /data, renderPage for the server-rendered
+// page, pricingBundleMissingRequiredSetupFee for frozen bundles), and the unit count below is the converter's own
+// function over the same data, so no storage shape can make the page and accept disagree.
+function planRecurringRowsAsAccepted(estData, estimate) {
+  return require('../services/estimate-converter')
+    .recurringServicesFromEstimateData(recurringDataAsAccepted(estData, estimate));
+}
+
+function multiServicePrepayUnits(estData, estimate) {
   try {
     return require('../services/estimate-converter')
-      .annualPrepayRecurringUnitCount(withSupplementedRecurringServices(estData || {}) || estData || {});
+      .annualPrepayRecurringUnitCount(recurringDataAsAccepted(estData, estimate));
   } catch { return 0; }
 }
 
-function withMultiServicePrepayClosed(payload, estData) {
+function withMultiServicePrepayClosed(payload, estData, estimate) {
   const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
-  const multi = multiServicePrepayUnits(estData) > 1;
+  const multi = multiServicePrepayUnits(estData, estimate) > 1;
   if (!combos.length && !multi) return payload;
   const closed = (entry) => ({ ...entry, annualPrepayEligible: false });
   // With no prepay there is no "waived when you pay the year": Ask Waves reads the fee flags as stated.
@@ -28419,7 +28430,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     }
     payload.measuredBasisAnchor = Object.keys(anchorBasis).length ? anchorBasis : null;
   }
-  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
+  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData, estimate), estimate, estData);
   let withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
@@ -28470,7 +28481,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     }
   }
   // Last word on prepay for a multi-service plan: after the tier stamps above.
-  withQuoteState = withMultiServicePrepayClosed(withQuoteState, estData);
+  withQuoteState = withMultiServicePrepayClosed(withQuoteState, estData, estimate);
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
@@ -29274,7 +29285,7 @@ function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
 // fee card. The prepay-eligibility gate mirrors the fresh v1 build's add
 // condition exactly, so the bypass only fires when the rebuild will actually
 // attach the fee (otherwise it would recompute every request for nothing).
-function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
+function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}, estimate) {
   // Quote-required snapshots never self-serve accept (the acceptance
   // contract routes them to "Call Waves", so no setup invoice can fire) and
   // a recompute would wipe the manually-quoted rows — leave them alone.
@@ -29297,13 +29308,16 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
   // fee-less sendSnapshots fast-path forever, hiding a fee acceptance
   // invoices. Recognize the fee-due seasonal mix the same way the fee-card
   // sites do; existing customers keep the outright waiver (no recompute).
+  // The rows the finalize strip and accept read (planRecurringRowsAsAccepted): with another reader, a bundle finalize
+  // saved fee-less (a second service in the root block) would read as missing its fee and rebuild on every view.
+  const planRows = planRecurringRowsAsAccepted(estData, estimate);
   const stalePrepayEligible = annualPrepayEligibleForEstimateData(estData);
   const staleSeasonalFeeDue = !stalePrepayEligible
     && !estData?.membershipSnapshot?.isExistingCustomer
-    && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
+    && recurringMixHasSeasonalMosquito(planRows);
   if (!stalePrepayEligible && !staleSeasonalFeeDue) return false;
   return require('../services/estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({
-    recurringServices: estimateDataRecurringServices(estData),
+    recurringServices: planRows,
     estimateData: estData,
   });
 }
@@ -29574,7 +29588,7 @@ function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
     // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
     // path will invoice) recompute instead of fast-pathing.
     && !pricingBundleHasStaleTermiteRow(snapshotBundle)
-    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData, estimate)
     // Snapshots whose rows never netted the estimate's manual discount
     // (evidenced by the persisted totals disagreeing with the blob's own
     // discounted figures) re-derive through the live (discount-aware)
@@ -29716,7 +29730,7 @@ async function buildPricingBundleInner(estimate) {
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
   // total the converter won't bill.
-  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
+  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData, estimate)
     && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
     // Stamped after finalize for the same reason as the snapshot path; a
     // cache entry written before this deploy must never serve a stale count.
@@ -32824,6 +32838,7 @@ module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
 module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
+module.exports.withPestOnlyRecurringChoice = withPestOnlyRecurringChoice;
 module.exports.isPestServiceName = isPestServiceName;
 module.exports.resolveAcceptOneTimeTotal = resolveAcceptOneTimeTotal;
 module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
