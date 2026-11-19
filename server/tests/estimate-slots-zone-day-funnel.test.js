@@ -32,6 +32,7 @@ const {
   getZoneFunnelDays,
   onZoneDay,
   funnelOfferPool,
+  offerFunnelDays,
   funnelZoneRows,
   rowInFunnelZones,
   isFunnelZone,
@@ -306,6 +307,19 @@ describe('isFunnelZone / zone matching', () => {
     } finally {
       if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
     }
+  });
+
+  test('a feature-gates mock without multiTechConfirmLive reads as off: the fleet view, never a failed lookup', async () => {
+    let fresh;
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => true }));
+      fresh = require('../services/scheduling/zone-day-funnel');
+    });
+    jest.dontMock('../config/feature-gates');
+    const dbc = jest.fn(() => scheduledServicesChain([zoneStopRow()]));
+    expect(fresh.perTruckLive()).toBe(false);
+    expect(await fresh.getZoneFunnelDays(dbc, { estimateZone: VENICE_ZONE, dateFrom: '2027-05-18', dateTo: '2027-05-22' }))
+      .toEqual({ days: new Set(['2027-05-20']), techDays: null, failed: false });
   });
 
   test('rowMatchesZone: zone stamp authoritative (legacy slugs by prefix), city decides unstamped rows only', () => {
@@ -586,6 +600,18 @@ describe('funnelOfferPool (assessment link pool, same helpers as the estimate pa
     } finally {
       if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
     }
+  });
+
+  test('offerFunnelDays reads the address\'s zone days once; funnelOfferPool reuses a view it is handed, null leaves the pool', async () => {
+    mockDb({ scheduledRows: [zoneStopRow()] });
+    const view = await offerFunnelDays({ address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db });
+    expect(view).toEqual({ days: new Set(['2027-05-20']), techDays: null });
+    expect(await offerFunnelDays({ address: '55 Main St, Sarasota, FL, 34231', ...WINDOW_ARGS, conn: db })).toBeNull();
+    db.mockClear();
+    const out = await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db, view });
+    expect(new Set(out.map((s) => s.date))).toEqual(new Set(['2027-05-20']));
+    expect(await funnelOfferPool(pool, { address: VENICE_ADDRESS, ...WINDOW_ARGS, conn: db, view: null })).toBe(pool);
+    expect(db).not.toHaveBeenCalled();
   });
 
   test('a lead outside the funneled zones gets the very same pool, and no zone-stop query runs', async () => {

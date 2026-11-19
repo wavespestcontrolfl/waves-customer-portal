@@ -1611,6 +1611,11 @@ describe('POST /:token commit', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.visit).toEqual({ date: FUTURE_DATE, window: { start: '09:00', end: '09:30' } });
     expect(res.body.rescheduleUrl).toBe('/reschedule/new-reschedule-token');
+    // The commit's rebuild is not funneled, but names the address for the per-truck claim (GATE_MULTI_TECH_CONFIRM),
+    // so it books the truck the offered list showed.
+    const rebuildArgs = mockBuildAvailability.mock.calls[0][0];
+    expect(rebuildArgs.zoneFunnelAddress).toBeUndefined();
+    expect(rebuildArgs.zoneTruckAddress).toEqual(expect.stringContaining('123 Palm Ave'));
 
     expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
     const callArgs = mockCreateSelfBooking.mock.calls[0][0];
@@ -1920,6 +1925,9 @@ describe('POST /:token commit', () => {
       const bookingArgs = mockCreateSelfBooking.mock.calls[0][0];
       expect(bookingArgs.technician_id).toBe('tech-matched');
       expect(bookingArgs.slot_end).toBe('09:45');
+      // The re-validation names the matched row's address for the per-truck claim; it is not funneled either.
+      expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ zoneTruckAddress: expect.stringContaining('123 Palm Ave') }));
+      expect(mockBuildAvailability.mock.calls[1][0].zoneFunnelAddress).toBeUndefined();
       expect(res.body.visit.window.end).toBe('09:45');
       expect(res.body.endLabel).toBe('9:45 AM');
     });

@@ -56,7 +56,16 @@
 
 const logger = require('../logger');
 const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
-const { isEnabled, multiTechConfirmLive } = require('../../config/feature-gates');
+const featureGates = require('../../config/feature-gates');
+
+const { isEnabled } = featureGates;
+
+// The per-truck switch: GATE_MULTI_TECH_CONFIRM (multiTechConfirmLive), read at call time through the module
+// object, so a suite that mocks feature-gates down to a few functions reads it as off (every zone day the
+// fleet's) instead of failing the zone lookup.
+function perTruckLive() {
+  return typeof featureGates.multiTechConfirmLive === 'function' && featureGates.multiTechConfirmLive() === true;
+}
 
 // Funneled zone slugs (zoneSlugOf format — 'Venice / North Port' → 'venice').
 // Override without a deploy via SOUTH_FUNNEL_ZONE_SLUGS (comma-separated);
@@ -213,7 +222,7 @@ async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
   if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
     const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo);
-    return { days: dates, techDays: multiTechConfirmLive() ? techs : null, failed: false };
+    return { days: dates, techDays: perTruckLive() ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
     return { days: null, techDays: null, failed: true };
@@ -260,6 +269,24 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [], tec
   };
 }
 
+// The funnel's zone days for an offer address over [dateFrom, dateTo]:
+// { days, techDays } (getZoneFunnelDays), or null when the funnel does not
+// apply (gate off, no address, no funneled zone) or cannot be resolved (zone
+// or lookup failure: logged, fail open). The zone resolves from the address
+// text through resolveEstimateZone (a service_zones read, no geocoding).
+async function offerFunnelDays({ address, dateFrom, dateTo, conn }) {
+  if (!address || !isEnabled('southZoneDayFunnel')) return null;
+  let estimateZone = null;
+  try {
+    estimateZone = await resolveEstimateZone(conn, { address });
+  } catch (err) {
+    logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
+    return null;
+  }
+  const { days, techDays } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
+  return days ? { days, techDays } : null;
+}
+
 // The same funnel for an offer pool that is not built by the estimate page
 // (the lead assessment link: routes/booking.js buildBookingAvailability, fed
 // the lead's address text). Same helpers, same rules: the zone resolves from
@@ -269,17 +296,13 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [], tec
 // Returns `pool` itself — same array — whenever the funnel does not apply
 // (gate off, no address, no funneled zone) or cannot be resolved (zone or
 // lookup failure: logged, fail open, exactly as the estimate page does).
-async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn }) {
-  if (!address || !Array.isArray(pool) || !pool.length || !isEnabled('southZoneDayFunnel')) return pool;
-  let estimateZone = null;
-  try {
-    estimateZone = await resolveEstimateZone(conn, { address });
-  } catch (err) {
-    logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
-    return pool;
-  }
-  const { days, techDays } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
-  if (!days) return pool;
+// `view`: the address's offerFunnelDays, when the caller already read it
+// (null = the funnel does not apply); undefined reads it here.
+async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn, view }) {
+  if (!address || !Array.isArray(pool) || !pool.length) return pool;
+  const funnel = view === undefined ? await offerFunnelDays({ address, dateFrom, dateTo, conn }) : view;
+  if (!funnel) return pool;
+  const { days, techDays } = funnel;
   let preferredSeedDates = [...new Set(pool.map((s) => s?.date).filter(Boolean))];
   if (routeDaySlug) {
     const { preferRouteDayDates, readZoneRouteDays } = require('./zone-route-days');
@@ -313,6 +336,8 @@ module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
   funnelOfferPool,
+  offerFunnelDays,
+  perTruckLive,
   funnelZoneRows,
   rowInFunnelZones,
   onZoneDay,

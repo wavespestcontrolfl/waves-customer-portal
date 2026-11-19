@@ -1397,7 +1397,10 @@ The south-zone day funnel follows it too (owner 2026-11-19): on the estimate
 picker and the lead assessment link's offered lists, a far-south slot is on a
 cluster day only when its own technician has a zone stop that day or the day
 has an unassigned zone stop (`zone-day-funnel.js` `onZoneDay`); a slot with no
-technician counts any zone stop. Off, every zone day is the fleet's, byte for byte.
+technician counts any zone stop. One opening per start is chosen after that
+filter (the estimate picker's collapse waits for it; /book claims the start for
+the zone-day truck, see the assessment link below). Off, every zone day is the
+fleet's, byte for byte.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7544,7 +7547,13 @@ can see fewer days, or one. A lead outside those zones, a gate-off request and
 any zone or stop lookup failure get the unfunneled list. The funnel is
 offer-time only, like the route check: the commit's single-day anti-forgery
 build and the location re-validation omit the address and are not funneled, so
-a time the funnel hid can still be committed by a request built by hand. No
+a time the funnel hid can still be committed by a request built by hand. Per
+truck (`GATE_MULTI_TECH_CONFIRM` on, owner 2026-11-19): the builder keeps one
+technician per date and start, so the truck whose zone day it is claims a start
+both trucks have before the funnel runs (`routes/booking.js` `truckRankOf`, ahead
+of the line-map rank); the commit build and the re-validation pass the address
+as `zoneTruckAddress` (the same claim, no funnel), so the commit books the truck
+the list offered. Gate off: no zone read before the claims. No
 field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than

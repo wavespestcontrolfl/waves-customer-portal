@@ -184,14 +184,19 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(datesOf(await buildLead(VENICE))).toEqual([D, D1, D2]);
   });
 
-  test('every list the route OFFERS passes the address; the commit and re-validation rebuilds omit it', () => {
+  test('every list the route OFFERS passes the address; the commit and re-validation rebuilds pass it only as truckAddress', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
     const calls = [...src.matchAll(/await buildAvailabilityForLead\(([^;]*?)\);/gs)].map((m) => m[1]);
-    const withAddress = calls.filter((c) => /\baddress\b/.test(c));
-    // GET, /availability, /find-slots, the email block's slots and the SLOT_TAKEN refresh.
-    expect(withAddress).toHaveLength(5);
-    // The commit's single-day anti-forgery build and revalidateSlotAt: unfunneled, like the estimate page's redeem side.
-    expect(calls.filter((c) => !/\baddress\b/.test(c))).toHaveLength(2);
-    expect(calls.filter((c) => !/\baddress\b/.test(c)).every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
+    const rebuilds = calls.filter((c) => /\btruckAddress:/.test(c));
+    const offered = calls.filter((c) => !/\btruckAddress:/.test(c));
+    // GET, /availability, /find-slots, the email block's slots and the SLOT_TAKEN refresh: funneled.
+    expect(offered).toHaveLength(5);
+    expect(offered.every((c) => /\baddress\b/.test(c))).toBe(true);
+    // The commit's single-day anti-forgery build and revalidateSlotAt: unfunneled (no `address`), like the estimate
+    // page's redeem side. `truckAddress` only lets the zone-day truck claim the start (GATE_MULTI_TECH_CONFIRM, owner
+    // 2026-11-19), so the commit books the truck the offered list showed.
+    expect(rebuilds).toHaveLength(2);
+    expect(rebuilds.every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
+    expect(rebuilds.some((c) => /\baddress\b/.test(c.replace(/truckAddress:\s*[\w.]+/g, '')))).toBe(false);
   });
 });
