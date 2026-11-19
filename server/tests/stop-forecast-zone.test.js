@@ -34,4 +34,26 @@ describe('stopForecastZone', () => {
   it('gives no forecast zone to an unknown stored zone the row cannot place', () => {
     expect(stopForecastZone(row('somewhere', 'Tampa', '33601'))).toBeNull();
   });
+
+  // The day query fills each missing stamp field from the primary address (COALESCE per field).
+  const lakewoodPrimary = { customer_address_line1: '500 Main St', customer_city: 'Lakewood Ranch', customer_zip: '34211' };
+  const stamped = (zone, line1, city, zip, primary = lakewoodPrimary) => ({
+    zone, ...primary,
+    service_address_line1: line1, service_address_city: city, service_address_zip: zip,
+    city: city || primary.customer_city, zip: zip || primary.customer_zip,
+  });
+
+  it('reads a stamp for another property by its own city and ZIP, never the primary ZIP', () => {
+    // Coalesced, this row reads Venice + 34211, and getZone checks the ZIP first: Lakewood Ranch.
+    expect(stopForecastZone(stamped('venice', '100 Gulf Dr', 'Venice', null))).toBe('venice_north_port');
+    // Neither city nor ZIP on the stamp: the location id's own zone, not the primary's area.
+    expect(stopForecastZone(stamped('bradenton', '100 Gulf Dr', null, null))).toBe('bradenton_north');
+    expect(stopForecastZone(stamped(null, '100 Gulf Dr', null, null))).toBeNull();
+  });
+
+  it('lets a stamp of the primary address borrow the primary ZIP', () => {
+    // Same street and city as the primary: its ZIP 34202 places the stop (the city alone reads Bradenton N).
+    const bradentonPrimary = { customer_address_line1: '500 Main St', customer_city: 'Bradenton', customer_zip: '34202' };
+    expect(stopForecastZone(stamped('bradenton', '500 Main Street', 'Bradenton', null, bradentonPrimary))).toBe('lakewood_ranch');
+  });
 });

@@ -5992,10 +5992,15 @@ const LOCATION_ZONE_FORECAST = { bradenton: 'bradenton_north', venice: 'venice_n
 // stays; else the row's city and ZIP place the stop, else the zone its stored
 // location id names; a stop none of these place has no forecast zone (owner
 // 2026-11-02, "leave the rain for all"; 11-19: 18 of 84 stops, stored
-// 'bradenton', showed no rain).
+// 'bradenton', showed no rain). The day query fills each missing stamp field
+// from the primary address, so a stamp for another property reads only its
+// own city and ZIP ("no pin beats a wrong pin", services/stamped-address.js).
 function stopForecastZone(row) {
   if (ZONE_COORDS[row.zone]) return row.zone;
-  return getZone(row.city, row.zip, LOCATION_ZONE_FORECAST[row.zone] || null);
+  const ownAddress = require('../services/stamped-address').stampedAddressDiverges(row);
+  const city = ownAddress ? row.service_address_city : row.city;
+  const zip = ownAddress ? row.service_address_zip : row.zip;
+  return getZone(city, zip, LOCATION_ZONE_FORECAST[row.zone] || null);
 }
 
 // Completion reuses a non-void invoice already attached to the visit
@@ -6785,6 +6790,9 @@ router.get('/', async (req, res, next) => {
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+        // The primary address on file, for the rain step's stopForecastZone
+        // (stampedAddressDiverges): kept on the row only, never in the response.
+        'customers.address_line1 as customer_address_line1', 'customers.city as customer_city', 'customers.zip as customer_zip',
         // Visit coordinates for map-centered tools (treatment-zone mapper):
         // stamped visit coords win; the customer mirror only backfills a
         // NON-divergent stamp — a divergent stamp with no coords must degrade
