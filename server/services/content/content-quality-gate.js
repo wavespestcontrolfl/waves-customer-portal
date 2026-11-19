@@ -1168,9 +1168,11 @@ const PUBLIC_BODIES = [
 // word>" pair: "the federal" would clear "The Federal family", a surname with
 // no agency named (pre-push audit). A sentence that opens "The Federal Trade
 // Commission" still holds the draft for review, as it did before this list;
-// the briefs never open a sentence with "The" and a capitalized word.
+// the briefs never open a sentence with "The" and a capitalized word. North
+// Carolina State University is not listed: the briefs cite NC State
+// Extension, and its "carolina state" pair would clear a person's name.
 const PUBLIC_BODIES_NO_ARTICLE_PAIR = [
-  'NC State Extension', 'North Carolina State University', 'Pennsylvania State University Extension',
+  'NC State Extension', 'Pennsylvania State University Extension',
   'Federal Trade Commission', 'National Park Service', 'Florida Building Code',
 ];
 

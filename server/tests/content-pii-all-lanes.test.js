@@ -211,12 +211,15 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  // Pre-push audit: a "the federal" pair would clear this sentence, which
-  // names a family and no agency. The federal agency citation above passes.
-  test('live: "The Federal family" still holds the draft (the newly cited bodies add no "the <first word>" pair)', () => {
+  // Pre-push audits: a "the federal" pair would clear the first sentence and
+  // a "carolina state" pair the second. Each names a person and no public
+  // body; the agency and extension citations above pass.
+  test.each([
+    'The Federal family in Venice called about rats.',
+    'A homeowner named Carolina State called our Sarasota office.',
+  ])('live: a name that reads like part of a newly cited body still holds the draft: %s', (body) => {
     process.env[GATE] = 'true';
-    const r = evalLane(brief, 'The Federal family in Venice called about rats.');
-    expect(r.checks.redaction_passed.ok).toBe(false);
+    expect(evalLane(brief, body).checks.redaction_passed.ok).toBe(false);
   });
 
   test('live: a customer surname that matches a one-word competitor alias still holds the draft', () => {
