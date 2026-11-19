@@ -214,6 +214,15 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(opts.detail).toBe(`Series started ${started} (every 42 days). The dispatch due date is missing.`);
     expect(spec.link).toBe(`/admin/dispatch?tab=schedule&date=${DAY}&appointment=${target.id}`);
 
+    capture.mockClear();
+    const targetRoot = children.find(child => child.id === target.id).recurring_parent_id;
+    await mockConn('scheduled_services').where({ id: targetRoot }).update({
+      recurring_pattern: 'monthly_nth_weekday', recurring_nth: 3, recurring_weekday: 5,
+    });
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    expect(fixtureCalls().map(([, , notice]) => notice.detail))
+      .toEqual([`Series started ${started} (third Friday of each month). The dispatch due date is missing.`]);
+
     // The due date drives the alert words/key, while the locked appointment's
     // actual calendar date drives the management link.
     capture.mockClear();

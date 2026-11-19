@@ -469,6 +469,20 @@ async function prepareNoWindowNotices(nowDate, today, to) {
   return rows;
 }
 
+function seriesCadence(root) {
+  const pattern = root.recurring_pattern;
+  if (pattern === 'custom') {
+    const days = Number(root.recurring_interval_days);
+    return Number.isInteger(days) && days > 0 ? `every ${days} ${days === 1 ? 'day' : 'days'}` : pattern;
+  }
+  if (pattern === 'monthly_nth_weekday') {
+    const ordinal = [null, 'first', 'second', 'third', 'fourth', 'last'][root.recurring_nth];
+    const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][root.recurring_weekday];
+    return ordinal && weekday ? `${ordinal} ${weekday} of each month` : 'monthly';
+  }
+  return pattern?.replace(/_/g, ' ');
+}
+
 // The office already chose this visit's series. Show that saved choice in
 // the alert instead of making dispatch infer it from the occurrence alone.
 async function noWindowSeriesDetail(trx, row) {
@@ -478,11 +492,9 @@ async function noWindowSeriesDetail(trx, row) {
     // lookup instead of leaving the alert transaction aborted.
     const root = await trx.transaction((savepoint) => savepoint('scheduled_services')
       .where({ id: row.recurring_parent_id, customer_id: row.customer_id })
-      .first('scheduled_date', 'recurring_pattern', 'recurring_interval_days'));
+      .first('scheduled_date', 'recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday'));
     const started = root?.scheduled_date ? toDateStr(root.scheduled_date) : null;
-    const days = Number(root?.recurring_interval_days);
-    const pattern = root?.recurring_pattern === 'custom' && Number.isInteger(days) && days > 0
-      ? `every ${days} ${days === 1 ? 'day' : 'days'}` : root?.recurring_pattern;
+    const pattern = root && seriesCadence(root);
     const series = started
       ? `Series started ${started}${pattern ? ` (${pattern})` : ''}.`
       : null;
