@@ -145,13 +145,15 @@ describeDb("the caller's word (PostgreSQL)", () => {
   });
 
   // Intake links a call by the primary phone only; the processor links a service-contact number after its read.
-  // Each customer: a service-contact number, a secondary number filed in another format, and a Waves number in a slot.
+  // Each customer: a service-contact number, a secondary number filed in another format, a number abroad, and a Waves
+  // number in a slot.
   const OURS = () => require('../config/twilio-numbers').mainLine.number;
   async function customerWithNumbers() {
     const customerId = await customer();
     const numbers = { contact: `+1941555${6000 + seq}`, secondary: `+1941555${7000 + seq}` };
     await trx('customers').where({ id: customerId }).update({
       service_contact_phone: numbers.contact, secondary_phone: `(941) 555-${7000 + seq}`, service_contact3_phone: OURS(),
+      service_contact2_phone: '+44 20 7946 0958',
     });
     return { customerId, ...numbers };
   }
@@ -159,11 +161,17 @@ describeDb("the caller's word (PostgreSQL)", () => {
   test.each([
     ['from their service-contact number', (n) => ({ from_phone: n.contact }), true],
     ['from their secondary number, filed in another format', (n) => ({ from_phone: n.secondary }), true],
+    ['from their number abroad (all its digits)', () => ({ from_phone: '+442079460958' }), true],
+    ['from a number abroad that only ends like theirs', () => ({ from_phone: '+4412079460958' }), false],
     ['an outbound call to their secondary number', (n) => ({ direction: 'Outbound-API', from_phone: OURS(), to_phone: n.secondary }), true],
     ['from a number not on their record', () => ({ from_phone: '+19415550199' }), false],
     ['an outbound call whose number called is not theirs', (n) => ({ direction: 'outbound-dial', from_phone: n.contact, to_phone: '+19415550199' }), false],
     ['from the Waves number in their slot (a forwarding leg)', () => ({ from_phone: OURS() }), false],
     ['from their number but linked to another customer', (n) => ({ from_phone: n.contact, customer_id: n.otherId }), false],
+    // A deliberate unlink stays one (the relink job's rule).
+    ['from their number, but an operator unlinked it', (n) => ({
+      from_phone: n.contact, metadata: JSON.stringify({ customer_link_override: { customer_id: null } }),
+    }), false],
   ])('a call not linked to the customer, being read: %s', async (_name, over, counts) => {
     const otherId = await customer();
     const n = await customerWithNumbers();
@@ -358,6 +366,9 @@ describeDb("the caller's word (PostgreSQL)", () => {
     const bookingCallId = await call(n.customerId, null, { created_at: hoursAgo(2) });
     const yes = { callLogId: yesCallId, at: hoursAgo(5) };
     await call(null, null, { created_at: hoursAgo(1), from_phone: '+19415550199' });
+    // An empty voicemail the processor rejected and unlinked on purpose stays unlinked.
+    const { TRANSCRIPTION_REJECTED_SENTINEL } = require('../services/call-log-relink');
+    await call(null, null, { created_at: hoursAgo(1), from_phone: n.contact, transcription: TRANSCRIPTION_REJECTED_SENTINEL });
     await expect(laterWordProblem(trx, { customerId: n.customerId, yes, booking: await rowOf(bookingCallId) })).resolves.toBeNull();
     await call(null, null, { created_at: hoursAgo(1), from_phone: n.contact });
     await expect(laterWordProblem(trx, { customerId: n.customerId, yes, booking: await rowOf(bookingCallId) })).resolves.toBe('newer_call');

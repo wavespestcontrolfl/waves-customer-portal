@@ -155,33 +155,46 @@ async function latestBillingChoice(conn, { customerId, since }) {
   }
 }
 
-// The customer's numbers as 10-digit keys (customerPhoneLookupKey), from every identity column a call is attributed by
-// (KNOWN_CALLER_PHONE_COLS). Never a Waves number: forwarding legs show ours as the contact (call-log-relink.js).
+// The customer's numbers as lookup keys (customerPhoneLookupKey: 10 digits for a NANP number, all digits otherwise),
+// from every identity column a call is attributed by (KNOWN_CALLER_PHONE_COLS), on the relink job's rules: only a
+// number it may link by (isLinkableKey), never a Waves number (forwarding legs show ours as the contact).
 async function customerPhoneKeys(conn, customerId) {
   const { KNOWN_CALLER_PHONE_COLS, customerPhoneLookupKey } = require('../utils/known-caller-phone');
+  const { isLinkableKey } = require('./call-log-relink');
   const TWILIO_NUMBERS = require('../config/twilio-numbers');
   const row = await conn('customers').where({ id: customerId }).first(KNOWN_CALLER_PHONE_COLS);
   const keys = KNOWN_CALLER_PHONE_COLS.map((col) => row?.[col])
-    .filter((phone) => phone && !TWILIO_NUMBERS.isInternalNumber(phone))
-    .map(customerPhoneLookupKey)
-    .filter((key) => key.length === 10);
+    .filter((phone) => phone && isLinkableKey(phone) && !TWILIO_NUMBERS.isInternalNumber(phone))
+    .map(customerPhoneLookupKey);
   return [...new Set(keys)];
 }
+
+// A call_log phone column matches a key: a NANP key by its last 10 digits, any other key by all its digits.
+const contactMatchSql = (col) => `(right(regexp_replace(call_log.${col}, '\\D', '', 'g'), 10) = ANY(?::text[])`
+  + ` OR regexp_replace(call_log.${col}, '\\D', '', 'g') = ANY(?::text[]))`;
 
 // Calls with the customer, for the two hold checks only: linked to them, or linked to no one with one of their numbers
 // (customerPhoneKeys) as the contact (the caller; on an outbound call, the number called: call-log-relink's
 // pickContactPhone, with the processor's case-blind outbound test). Intake links by the primary phone alone, and the
 // processor links a service-contact number only after its read (findCustomerForCallContact), so until then a call from
-// the customer's other number has no customer. A word is read from linked calls only (latestBillingChoice).
+// the customer's other number has no customer. A deliberate unlink stays one, as in the relink job: an operator's
+// explicit unlink (NOT_EXPLICITLY_UNLINKED_SQL), or a rejected empty voicemail the processor unlinked. A word is read
+// from linked calls only (latestBillingChoice).
 function whereWithCustomer(qb, customerId, keys) {
   return qb.where((w) => {
     w.where('call_log.customer_id', customerId);
     if (!keys.length) return;
-    w.orWhere((unlinked) => unlinked.whereNull('call_log.customer_id').where((contact) => contact
-      .where((inbound) => inbound.whereRaw("lower(COALESCE(call_log.direction, '')) NOT LIKE 'outbound%'")
-        .whereRaw("right(regexp_replace(call_log.from_phone, '\\D', '', 'g'), 10) = ANY(?)", [keys]))
-      .orWhere((outbound) => outbound.whereRaw("lower(call_log.direction) LIKE 'outbound%'")
-        .whereRaw("right(regexp_replace(call_log.to_phone, '\\D', '', 'g'), 10) = ANY(?)", [keys]))));
+    const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
+    const { TRANSCRIPTION_REJECTED_SENTINEL } = require('./call-log-relink');
+    const byKind = [keys.filter((key) => key.length === 10), keys.filter((key) => key.length !== 10)];
+    w.orWhere((unlinked) => unlinked.whereNull('call_log.customer_id')
+      .whereRaw(NOT_EXPLICITLY_UNLINKED_SQL)
+      .whereRaw('call_log.transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
+      .where((contact) => contact
+        .where((inbound) => inbound.whereRaw("lower(COALESCE(call_log.direction, '')) NOT LIKE 'outbound%'")
+          .whereRaw(contactMatchSql('from_phone'), byKind))
+        .orWhere((outbound) => outbound.whereRaw("lower(call_log.direction) LIKE 'outbound%'")
+          .whereRaw(contactMatchSql('to_phone'), byKind))));
   });
 }
 
