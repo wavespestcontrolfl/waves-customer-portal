@@ -800,8 +800,10 @@ settle. While that attempt is unverified, the invoice's `/setup`, `/quote`,
 Combined checkout omits a held sibling. If the hold appears after selection,
 checkout returns HTTP 409 with `staleBalance` so the page can reload the
 amount. Setup, tender changes, and finalization check the affected invoices
-under lock. A verified cancellation for the same attempt and PaymentIntent
-clears the authentication hold. The `/confirm` endpoint can still record money
+under lock. A cancellation clears the hold only when the original charging
+worker recorded that exact PaymentIntent on the attempt. A legacy ID without
+worker provenance keeps checkout on HTTP 409, including when Stripe verifies
+that the supplied intent was canceled. The `/confirm` endpoint can still record money
 the processor has already accepted.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner

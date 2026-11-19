@@ -1,7 +1,7 @@
 // MUTATES with --execute. The default verifies one historical cancellation.
 const fs = require('node:fs');
-const { lookup } = require('node:dns/promises');
-const { isIP } = require('node:net');
+const { lookup } = require('node:dns');
+const { isIP, Socket } = require('node:net');
 const tls = require('node:tls');
 const { parseArgs } = require('node:util');
 const { parse: parsePgUrl } = require('pg-connection-string');
@@ -63,15 +63,20 @@ function databaseConfig(connectionString) {
   };
 }
 
-async function databaseDriverConfig(connectionString, resolveHost = lookup) {
+function databaseDriverConfig(connectionString, resolveHost = lookup) {
   const config = databaseConfig(connectionString);
   const { host, ssl } = config.connection;
   const requestedName = String(process.env.PGSSL_SERVER_NAME || '').trim();
   if (requestedName && requestedName !== host && ssl?.checkServerIdentity && !isIP(host)) {
-    // pg sets SNI to its TCP host when that host is a DNS name. Connect to
-    // the proxy address so TLS can send and verify the database hostname.
-    const { address } = await resolveHost(host);
-    config.connection.host = address;
+    // pg uses its configured host for SNI. Route the underlying socket to
+    // the proxy by DNS so Node can try both IPv6 and IPv4 for a TCP tunnel.
+    class DatabaseProxySocket extends Socket {
+      connect(port) {
+        return super.connect({ port, host, lookup: resolveHost, autoSelectFamily: true });
+      }
+    }
+    config.connection.host = requestedName;
+    config.connection.stream = () => new DatabaseProxySocket();
   }
   return config;
 }
@@ -87,7 +92,7 @@ async function main() {
     throw new Error(`Supply ${DATABASE_ENV} and STRIPE_SECRET_KEY for the same environment.`);
   }
   const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-  const database = require('knex')(await databaseDriverConfig(process.env[DATABASE_ENV]));
+  const database = require('knex')(databaseDriverConfig(process.env[DATABASE_ENV]));
   try {
     const result = await verifySavedCardCancellation({
       attemptId: values.attempt, intentId: values.intent, execute: values.execute, stripe, database,

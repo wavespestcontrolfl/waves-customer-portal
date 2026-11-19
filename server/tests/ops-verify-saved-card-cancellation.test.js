@@ -113,13 +113,15 @@ test.each([
   });
   await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   try {
-    const resolveProxy = jest.fn(async () => ({ address: '127.0.0.1' }));
+    const resolveProxy = jest.fn((_host, _options, done) => done(null, [
+      { address: '::1', family: 6 }, { address: '127.0.0.1', family: 4 },
+    ]));
     const config = await withEnv({ PGSSL_SERVER_NAME: 'database.provider.test' }, () =>
       databaseDriverConfig(`postgres://synthetic:synthetic@${proxyHost}:${gateway.address().port}/billing?ssl=false`, resolveProxy));
     const client = new Client({ ...config.connection, connectionTimeoutMillis: 5000 });
     try {
       await expect(client.connect()).rejects.toThrow();
-      if (resolvesDns) expect(resolveProxy).toHaveBeenCalledWith('proxy.provider.test');
+      if (resolvesDns) expect(resolveProxy).toHaveBeenCalledWith('proxy.provider.test', expect.objectContaining({ all: true }), expect.any(Function));
       else expect(resolveProxy).not.toHaveBeenCalled();
       expect(receivedName).toHaveBeenCalledWith('database.provider.test');
     } finally {
