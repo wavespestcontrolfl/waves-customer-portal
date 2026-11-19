@@ -263,14 +263,18 @@ function websiteCageFeatures(ep, trustedTurf) {
 }
 
 // Gate off. A profile with its own poolCageLegacySize key is a two-size profile from
-// before a rollback: price its four-size answer, the re-read first. Any other profile
-// is today's code exactly.
+// before a rollback: price its four-size answer, the re-read first, and inherit the
+// re-read's cage when the client omits the answer. Any other profile is today's code exactly.
 function fourSizeCageFeatures(ep, trusted, { pool, clientCage }) {
   const { fourSizeOf } = require('../services/property-lookup/cage-sizes');
   if (Object.prototype.hasOwnProperty.call(ep, 'poolCageLegacySize')) {
     const four = fourSizeOf(trusted) || fourSizeOf(ep);
+    // A client that omits poolCage inherits the re-read's decided cage, as the gate-on path does.
+    const cageOmitted = ep.poolCage === undefined || ep.poolCage === null || ep.poolCage === '';
+    const trustedCage = cageOmitted && String(trusted?.poolCage).toUpperCase() === 'YES';
+    const poolCage = clientCage || trustedCage;
     // No cage, no size: the engine reads a Large size as a hold even without a cage.
-    return { pool, poolCage: clientCage, poolCageSize: clientCage && four ? four.toLowerCase() : undefined };
+    return { pool: pool || trustedCage, poolCage, poolCageSize: poolCage && four ? four.toLowerCase() : undefined };
   }
   const own = String(ep.poolCageSize || '').toLowerCase();
   return {

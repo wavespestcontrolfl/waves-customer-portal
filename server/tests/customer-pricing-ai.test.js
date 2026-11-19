@@ -2221,6 +2221,50 @@ describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price 
     expect(noFlag.poolCageReview).toBeUndefined();
   });
 
+  // A seeded size is held on the seed's OWN cage evidence (a lawn-only estimate never priced the cage).
+  describe('a seeded cage on a lookup miss', () => {
+    const seedFeaturesFor = async (cageEvidence, size = 'medium') => (await _private.resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-cage-seed-evidence' }),
+      turfProfile: null,
+      propertyLookup: async () => null,
+      propertySeed: {
+        homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        features: { poolCage: true, poolCageSize: size },
+        ...(cageEvidence ? { cageEvidence } : {}),
+      },
+    })).propertyInput.features;
+
+    test('gate on: a seeded Medium with a stored area of 750 sq ft, or a stored four-size Large, is held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect((await seedFeaturesFor({ poolCageSqft: 750 })).poolCageReview).toBe(true);
+      expect((await seedFeaturesFor({ poolCageLegacySize: 'OVERSIZED' })).poolCageReview).toBe(true);
+    });
+
+    test('gate on: a stored area of 500 sq ft, or no evidence, is not held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect((await seedFeaturesFor({ poolCageSqft: 500 })).poolCageReview).toBeUndefined();
+      expect((await seedFeaturesFor(null)).poolCageReview).toBeUndefined();
+    });
+
+    test('gate off: the same evidence gives no flag', async () => {
+      expect((await seedFeaturesFor({ poolCageSqft: 750 })).poolCageReview).toBeUndefined();
+    });
+
+    test('the lookup still decides when it backs the size (a current Medium cage clears the seed evidence)', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const f = (await _private.resolvePropertyContext({
+        customer: propertyCustomer({ id: 'cust-cage-seed-evidence-lookup' }),
+        turfProfile: null,
+        propertyLookup: lookupWith({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }),
+        propertySeed: {
+          homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+          features: { poolCage: true, poolCageSize: 'medium' }, cageEvidence: { poolCageSqft: 750 },
+        },
+      })).propertyInput.features;
+      expect(f.poolCageReview).toBeUndefined();
+    });
+  });
+
   test('gate on: the flag reaches the pest option as manual review', async () => {
     process.env[TWO_SIZES] = 'true';
     const run = (cage) => buildCustomerPricingResponse({

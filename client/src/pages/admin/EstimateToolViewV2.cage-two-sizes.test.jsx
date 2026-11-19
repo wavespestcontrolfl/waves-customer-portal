@@ -176,3 +176,30 @@ describe('Pool Cage Size box on a fresh editor', () => {
     expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
   });
 });
+
+// Reuse paths: the saved size of the estimate just opened must not follow the editor into the next one.
+describe('Pool Cage Size box after a reuse path', () => {
+  const setCageYes = () => fireEvent.change(screen.getByLabelText('Pool Cage'), { target: { value: 'YES' } });
+
+  it('"Next estimate (keep services)" offers only Medium and Large (the saved Oversized is not carried over)', async () => {
+    reopen('OVERSIZED', { poolCageTwoSizes: true });
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
+    fireEvent.click(screen.getByRole('button', { name: /Next estimate \(keep services\)/ }));
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage')).toHaveValue('NO'));
+    setCageYes();
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+    // The previous Oversized is gone from the box and the new estimate starts at the default Medium.
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM');
+  }, 120000);
+
+  it('"Add another property" offers only Medium and Large (the saved Oversized is not carried over)', async () => {
+    reopen('OVERSIZED', { poolCageTwoSizes: true });
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE', 'OVERSIZED']);
+    fireEvent.click(screen.getByRole('button', { name: /Add another property/ }));
+    await waitFor(() => expect(screen.getByLabelText('Pool Cage')).toHaveValue('NO'));
+    setCageYes();
+    expect(await sizeValues()).toEqual(['MEDIUM', 'LARGE']);
+    // The previous Oversized is gone from the box and the new estimate starts at the default Medium.
+    expect(screen.getByLabelText('Pool Cage Size')).toHaveValue('MEDIUM');
+  }, 120000);
+});

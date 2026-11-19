@@ -3800,6 +3800,8 @@ export default function EstimateToolViewV2({
     setConfirmAddress(false);
     draftIdRef.current = null;
     setEditLoadError(null);
+    // The previous estimate's saved cage size no longer applies to this new property.
+    setLoadedCageSize("");
     const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
     setForm((f) => ({
       ...buildDefaultEstimateForm({
@@ -5156,6 +5158,8 @@ export default function EstimateToolViewV2({
     // same-customer guard (codex #3244 r5). Clearing it also lets the
     // intake-list effect clear extracted addresses.
     setGroupAnchorId(null);
+    // The previous estimate's saved cage size no longer applies to the next estimate.
+    setLoadedCageSize("");
     setForm((f) => ({
       ...f,
       ...clearedPropertyFields(),

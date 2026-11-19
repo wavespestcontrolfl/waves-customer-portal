@@ -283,4 +283,28 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
       expect(await held({ poolCageSize: 'LARGE' })).toBe(true);
     });
   });
+
+  // Rollback branch (gate off, a profile with its own poolCageLegacySize key): an omitted poolCage
+  // inherits the re-read's decided cage, as the gate-on path does. An explicit NO stays no cage.
+  describe('rollback: a legacy-key profile that omits poolCage', () => {
+    const serverSaysCage = () => {
+      mockServerLookup = {
+        enriched: { pool: 'YES', poolCage: 'YES', poolCageSize: 'LARGE', poolCageSqft: 750 },
+        propertyRecord: {},
+      };
+    };
+
+    test('gate off: omitted poolCage with the re-read saying YES and area 750 is held', async () => {
+      serverSaysCage();
+      expect(await held({ poolCage: undefined, pool: undefined, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+      expect(await held({ poolCage: null, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+      expect(await held({ poolCage: '', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+    });
+
+    test('gate off: an explicit NO with the re-read saying YES is not held', async () => {
+      serverSaysCage();
+      expect(await held({ poolCage: 'NO', poolCageSize: 'NONE', poolCageLegacySize: 'NONE' })).toBe(false);
+      expect(await held({ poolCage: false, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(false);
+    });
+  });
 });

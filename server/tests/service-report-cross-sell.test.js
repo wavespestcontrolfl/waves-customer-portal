@@ -273,6 +273,67 @@ describe('buildReportCrossSell', () => {
       expect(result.serviceKey).toBe('pest_control');
       expect(result.mode).toBe('priced');
     });
+
+    // A lawn-only accepted estimate never priced the cage (it only moves pest). On a lookup miss the
+    // seed's cage size is held on the seed's OWN cage evidence.
+    describe('a seeded cage on a lookup miss', () => {
+      const seededOffer = (profile, size = 'medium') => buildReportCrossSell(
+        SERVICE(),
+        dbFor({
+          serviceTypes: ['Lawn Care'],
+          turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+          estimates: [{
+            id: 'est-cage', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+            estimate_data: JSON.stringify({
+              engineInputs: { homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: size } },
+              engineRequest: { profile },
+            }),
+          }],
+        }),
+        { propertyLookup: missLookup },
+      );
+
+      test('gate on: a seeded Medium whose stored area is 750 sq ft shows the quote CTA', async () => {
+        process.env[TWO_SIZES] = 'true';
+        const held = await seededOffer({ poolCageSqft: 750 });
+        expect(held.serviceKey).toBe('pest_control');
+        expect(held.mode).toBe('quote_cta');
+        expect(held.option).toBeNull();
+      });
+
+      test('gate on: a stored area of 500 sq ft prices', async () => {
+        process.env[TWO_SIZES] = 'true';
+        const priced = await seededOffer({ poolCageSqft: 500 });
+        expect(priced.mode).toBe('priced');
+        expect(priced.option.perVisit).toBeGreaterThan(0);
+      });
+
+      test('gate off: the same 750 sq ft seed prices as before', async () => {
+        const priced = await seededOffer({ poolCageSqft: 750 });
+        expect(priced.mode).toBe('priced');
+      });
+    });
+
+    test('loadEstimateSeed reads cageEvidence from engineRequest.profile, falls back to enriched, else null', async () => {
+      const { loadEstimateSeed } = _private;
+      const street = require('../services/estimate-property-linkage')
+        .normalizedEstimateStreet('123 Gulf Dr, Sarasota, FL 34236');
+      const seedFor = (estimateData) => loadEstimateSeed(dbFor({
+        estimates: [{
+          id: 'est-evidence', address: '123 Gulf Dr, Sarasota, FL 34236', status: 'accepted',
+          estimate_data: { engineInputs: { homeSqFt: 2100, lotSqFt: 8000, stories: 1 }, ...estimateData },
+        }],
+      }), 'cust-1', street);
+      expect((await seedFor({ engineRequest: { profile: { poolCageSqft: 750, poolCageLegacySize: 'large' } }, enriched: { poolCageSqft: 300 } })).cageEvidence)
+        .toEqual({ poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
+      expect((await seedFor({ engineRequest: { profile: { homeSqFt: 2100 } }, enriched: { poolCageSqft: '640' } })).cageEvidence)
+        .toEqual({ poolCageSqft: 640 });
+      expect((await seedFor({ enriched: { poolCageLegacySize: 'OVERSIZED', poolCageSize: 'LARGE' } })).cageEvidence)
+        .toEqual({ poolCageLegacySize: 'OVERSIZED' });
+      for (const none of [{}, { engineRequest: { profile: { poolCageSqft: 0, poolCageLegacySize: 'NONE' } }, enriched: { poolCageSqft: 'abc' } }]) {
+        expect((await seedFor(none)).cageEvidence).toBeNull();
+      }
+    });
   });
 
   describe('engineContext is opt-in mint material, never public payload (click-to-estimate lane)', () => {
