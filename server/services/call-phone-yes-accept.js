@@ -26,9 +26,9 @@
  * sent when the call began counts, and never an archived one. "Sent" is the estimate's first real handoff
  * (deliveryState.firstDeliveredAt, which a resend never moves), else sent_at. The card stays open while an unlinked
  * pest visit the call booked is on the calendar, also after the estimate expires. It closes itself only on evidence that
- * answers its ask (AGENTS.md): none of its estimates is open, lapsed or accepted (each declined or archived; an accept
- * that leaves the visit unlinked keeps the card, saying so), no unlinked pest visit of the call is left on the
- * calendar, or the call moves to another customer.
+ * answers its ask (AGENTS.md): none of its estimates is left (each declined, archived or deleted; any other status,
+ * also send_failed during a re-send, keeps the card, and an accept that leaves the visit unlinked keeps it, saying so),
+ * no unlinked pest visit of the call is left on the calendar, or the call moves to another customer.
  *
  * Dark behind GATE_CALL_PHONE_YES_ACCEPT; off = nothing here runs.
  */
@@ -51,9 +51,11 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
 const CALENDAR_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'];
 const OPEN_ESTIMATE_STATUSES = ['sent', 'viewed'];
-// An estimate a card keeps naming: open, lapsed (the office can extend it and accept), or being sent again (a resend
-// claims 'sending' and then restores its status, admin-estimates.js; a sweep in between must not close the card).
-const CARD_ESTIMATE_STATUSES = ['sent', 'viewed', 'expired', 'sending'];
+// The statuses that settle an estimate for good (with an archive or a deleted row). Any other status keeps the card
+// naming it: open, lapsed (the office can extend it and accept), being sent again (a resend claims 'sending' and then
+// restores its status, admin-estimates.js), or held back as send_failed until the office re-sends it (a re-price hold
+// during a send parks it there). An accepted estimate keeps the card only while the call's visit is unlinked.
+const SETTLED_ESTIMATE_STATUSES = ['accepted', 'declined'];
 // The one one-time line a standard accept of a pest plan may carry: the setup fee, which the first visit bills by
 // hand (estimate-accept-effects membershipFeeLine; one-time work rows never carry this name).
 const MEMBERSHIP_FEE_LINE_NAME = 'WaveGuard membership fee';
@@ -468,8 +470,8 @@ function cardEstimateIds(card) {
 // Why an open card closes ({ close: note }), what changed ({ refresh: yes, rechecking? } for its yes fields, keepYes
 // when they did not, estimateIds when its estimate links changed, estimateAccepted when its accepted state did), or
 // null to keep it as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of
-// its estimates is still open, lapsed or accepted: an expiry alone never closes it, and neither does an accept (the
-// visit is still unlinked). While a call in its window still owes a read, the card shows nothing new.
+// its estimates is not yet declined, archived or deleted: an expiry, a held-back re-send or an accept alone never
+// closes it (the visit is still unlinked). While a call in its window still owes a read, the card shows nothing new.
 // Every visit the call booked that is still on the calendar (any status but cancelled or skipped: also one en route, on
 // site or done), by the call's id and a source_action only a call writes.
 function callVisitsOnCalendar(conn, callLogId, customerId) {
@@ -497,7 +499,7 @@ async function cardState(card, conn = db) {
     : [];
   // An archived estimate is closed to the customer, whatever its status.
   const live = estimates.filter((e) => !e.archived_at);
-  const kept = live.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status));
+  const kept = live.filter((e) => !SETTLED_ESTIMATE_STATUSES.includes(e.status));
   // An accepted estimate keeps the card while a pest visit this call booked is unlinked (checked above): the office's
   // Mark accepted links no visit (skipAutoSchedule), so the visit still lacks the plan. The accept answers only half of
   // the card's ask, so the card stays, says so and keeps that estimate's link.

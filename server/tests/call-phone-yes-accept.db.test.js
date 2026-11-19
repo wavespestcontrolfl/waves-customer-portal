@@ -893,6 +893,20 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ closed: 1 });
   });
 
+  // A re-price hold during a send parks the estimate as send_failed until the office re-sends it: not a close.
+  test('an estimate held back as send_failed during a re-send keeps the card, and its link', async () => {
+    const { est, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('estimates').where({ id: est.id }).update({ status: 'send_failed', last_send_error: 'reprice_pending' });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    let [card] = await cards(bookingCallId);
+    expect(card).toMatchObject({ status: 'open', related_estimate_id: est.id });
+    await trx('estimates').where({ id: est.id }).update({ status: 'sent', last_send_error: null });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+  });
+
   test('an accepted estimate that is then archived closes the card', async () => {
     const { est, bookingCallId } = await phoneYes();
     await sweep();
