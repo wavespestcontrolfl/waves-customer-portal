@@ -46,6 +46,9 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unr
 async function isKnownSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return { known: false };
+  // kind 'operational' = known by its DOMAIN alone (ours, Google, Stripe, SiteOne ...), not as a person on file.
+  // Every caller reads that sender's Authentication-Results with { strict: true }, whatever
+  // GATE_EMAIL_AUTH_STRICT says: the legacy reader accepts a result forged inside a quoted MAIL FROM (#6668).
   if (isOperationalDomain(domainFromAddress(normalized))) return { known: true, kind: 'operational' };
   const customer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first();
   if (customer) return { known: true, kind: 'customer', customer };
@@ -382,7 +385,7 @@ async function sweepQuarantine(now = new Date()) {
       // authenticated known-sender check before anything destructive and
       // restore instead of trash.
       const verdict = await isKnownSender(row.from_address);
-      if (verdict.known && hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address))) {
+      if (verdict.known && hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address), { strict: verdict.kind === 'operational' })) {
         try {
           await gmailClient.modifyLabels(row.gmail_id, ['INBOX'], [quarantineLabelId]);
         } catch (e) {
@@ -614,7 +617,7 @@ async function rescueSpamFolder(now = new Date()) {
         const fromAddress = full?.from_address;
         const verdict = await isKnownSender(fromAddress);
         if (!verdict.known) continue;
-        if (!hasAlignedAuth(full?.authentication_results, domainFromAddress(fromAddress))) {
+        if (!hasAlignedAuth(full?.authentication_results, domainFromAddress(fromAddress), { strict: verdict.kind === 'operational' })) {
           // Looks like someone we know but did not authenticate as them —
           // exactly what a phish looks like. Never auto-reverse Gmail's
           // verdict; park a review notification instead.

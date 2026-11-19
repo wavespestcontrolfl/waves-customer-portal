@@ -67,6 +67,25 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'deals@siteone.com.evil.example', GOOG('siteone.com.evil.example'))).toBe(false);
   });
 
+  test('a quoted MAIL FROM forgery never earns the operational exemption, even with GATE_EMAIL_AUTH_STRICT dark', () => {
+    const saved = process.env.GATE_EMAIL_AUTH_STRICT;
+    delete process.env.GATE_EMAIL_AUTH_STRICT;
+    try {
+      // The loose reader takes the dkim=pass that the sender typed into the SMTP MAIL FROM; the exemption reads strictly.
+      const forged = (d) => `mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=${d} y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=${d} y"@evil.example`;
+      const real = (d) => `mx.google.com; dkim=pass header.i=@${d} header.s=s1 header.b=abc; spf=pass (google.com: domain of bounce@${d} designates 192.0.2.1 as permitted sender) smtp.mailfrom=bounce@${d}; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=${d}`;
+      expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', forged('siteone.com'))).toBe(false);
+      expect(shouldSkipAutoAction('marketing_newsletter', 'marketing@grow.siteone.com', forged('grow.siteone.com'))).toBe(false);
+      expect(shouldSkipAutoAction('spam', 'billing@stripe.com', forged('stripe.com'))).toBe(false);
+      expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', real('grow.siteone.com'))).toBe(true);
+      expect(shouldSkipAutoAction('spam', 'billing@stripe.com', real('stripe.com'))).toBe(true);
+      expect(shouldSkipAutoAction('marketing_newsletter', 'events@news.wavespestcontrol.com', real('news.wavespestcontrol.com'))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_EMAIL_AUTH_STRICT;
+      else process.env.GATE_EMAIL_AUTH_STRICT = saved;
+    }
+  });
+
   test('external newsletters and spam still get auto-actioned', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'deals@retailer.example.com')).toBe(false);
     expect(shouldSkipAutoAction('spam', 'winner@lottery.example.biz')).toBe(false);
