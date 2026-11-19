@@ -271,10 +271,13 @@ describe('buildPrompt cast', () => {
     expect(logo).toContain(`${gen.TECHNICIAN_CAST_LINE} ${gen.WAVES_UNIFORM_LOGO_LINE}`);
   });
 
-  test('an identification post adds the no-pest-close-up sentence to homeowner and none pictures only', () => {
-    expect(prompt('none', { identification: true })).toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
-    expect(prompt('homeowner', { identification: true })).toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
-    expect(prompt('technician', { identification: true })).not.toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+  test('an identification post adds the no-pest-close-up sentence whatever the cast; other posts never carry it', () => {
+    for (const cast of ['technician', 'homeowner', 'none']) {
+      expect(prompt(cast, { identification: true })).toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+      expect(prompt(cast)).not.toContain(gen.IDENTIFICATION_NO_PEST_CLOSEUP_LINE);
+    }
+    // The technician picture keeps its uniform clause in front of the restriction.
+    expect(prompt('technician', { identification: true })).toContain(`${gen.TECHNICIAN_CAST_LINE} `);
   });
 
   test('body action framing agrees with the cast', () => {

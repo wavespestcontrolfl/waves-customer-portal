@@ -458,11 +458,16 @@ const NO_PEOPLE_CAST_LINE = 'People: none. No person, hand, arm, silhouette or f
 const IDENTIFICATION_NO_PEST_CLOSEUP_LINE = 'Do not show the pest in an identifiable close-up; it may appear small in the scene or not at all.';
 // The people clause of a prompt: the plan's cast line, or the legacy uniform
 // clause when the plan carries no cast (social tiles, newsletter, no plan).
+// An identification post adds the no-pest-close-up sentence whatever the
+// cast: a technician holding the pest up to the camera is the same
+// wrong-species risk as an empty picture of it.
 function peopleClauseFor(plan, uniform) {
-  const cast = plan && plan.cast;
-  if (cast === 'technician') return `${TECHNICIAN_CAST_LINE} ${uniform}`;
-  if (cast !== 'homeowner' && cast !== 'none') return uniform;
-  const line = cast === 'homeowner' ? HOMEOWNER_CAST_LINE : NO_PEOPLE_CAST_LINE;
+  const line = {
+    technician: `${TECHNICIAN_CAST_LINE} ${uniform}`,
+    homeowner: HOMEOWNER_CAST_LINE,
+    none: NO_PEOPLE_CAST_LINE,
+  }[plan && plan.cast];
+  if (!line) return uniform;
   return plan.identification === true ? `${line} ${IDENTIFICATION_NO_PEST_CLOSEUP_LINE}` : line;
 }
 // Blog scene pictures state no verdict: an image model given a section
