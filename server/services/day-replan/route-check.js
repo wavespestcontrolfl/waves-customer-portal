@@ -92,10 +92,15 @@ function vanNow({ completed, onSite, home, departureMin, nowMin, day, blocks = [
   const lastDone = done ? etMinuteOn(done.completed_at, day) : -Infinity;
   // Busy until the stay as the simulator charges it from the arrival (a shared window counted once), and, when a
   // service of the stop finished after the arrival, until the work still to do after that finish.
-  // A schedule block during the work pauses it (pastBlocks).
+  // A schedule block during the work pauses it (pastBlocks). Only a service finished at this stop (same customer and
+  // property) restarts the remaining work; a job closed elsewhere does not.
+  const siblingDone = (row) => Math.max(-Infinity, ...completed
+    .filter((c) => String(c.customer_id) === String(row.customer_id) && String(c.property_id || '') === String(row.property_id || ''))
+    .map((c) => etMinuteOn(c.completed_at, day)).filter((m) => m != null));
   const onSiteClock = (row) => {
     const arrived = etMinuteOn(row.arrived_at, day) ?? nowMin;
-    const afterDone = lastDone > arrived ? pastBlocks(lastDone, lastDone + row.workMin, blocks) : -Infinity;
+    const doneHere = siblingDone(row);
+    const afterDone = doneHere > arrived ? pastBlocks(doneHere, doneHere + row.workMin, blocks) : -Infinity;
     return Math.max(nowMin, pastBlocks(arrived, arrived + row.stayMin, blocks), afterDone);
   };
   const seen = [
@@ -113,10 +118,21 @@ function vanNow({ completed, onSite, home, departureMin, nowMin, day, blocks = [
 
 const sameStopTuple = (a, b) => String(a.customer_id) === String(b.customer_id) && String(a.property_id || '') === String(b.property_id || '');
 
+/** Overlapping or touching intervals joined (pure): a technician block and a company block over one hour count once. */
+function mergeIntervals(list) {
+  const out = [];
+  for (const b of [...list].sort((x, y) => x.startMin - y.startMin)) {
+    const last = out.at(-1);
+    if (last && b.startMin <= last.endMin) last.endMin = Math.max(last.endMin, b.endMin);
+    else out.push({ startMin: b.startMin, endMin: b.endMin });
+  }
+  return out;
+}
+
 /** When work from `fromMin` to `endMin` ends once each schedule block it meets pauses it (pure). */
 function pastBlocks(fromMin, endMin, blocks) {
   let end = endMin;
-  for (const b of [...blocks].sort((x, y) => x.startMin - y.startMin)) {
+  for (const b of mergeIntervals(blocks)) {
     if (b.startMin < end && b.endMin > fromMin) end += b.endMin - Math.max(b.startMin, fromMin);
   }
   return end;
@@ -155,7 +171,8 @@ function onSiteStays(stops, arrivedById) {
     const rows = stop.flat();
     const arrivals = rows.map((r) => arrivedById.get(String(r.id))).filter(Boolean).map((v) => new Date(v).getTime());
     return {
-      lat: rows[0].lat, lng: rows[0].lng, arrived_at: arrivals.length ? new Date(Math.min(...arrivals)) : null,
+      lat: rows[0].lat, lng: rows[0].lng, customer_id: rows[0].customer_id, property_id: rows[0].property_id,
+      arrived_at: arrivals.length ? new Date(Math.min(...arrivals)) : null,
       stayMin: stayOf(stop), workMin: sum(rows, (r) => workDuration({ ...r, window_end: null })),
     };
   });
@@ -334,13 +351,8 @@ function summarize(days, today, { techBlind = false } = {}) {
  * unreadable). Not only active ones: the local status lags Google until the next sync.
  */
 async function liveAdModes(conn) {
-  try {
-    const rows = await conn('ad_campaigns').where({ platform: 'google_ads' }).select('id', 'status', 'budget_mode');
-    return rows.map((r) => ({ id: r.id, status: r.status, mode: r.budget_mode }));
-  } catch (err) {
-    logger.warn(`[route-check] ad campaigns unread (${err.message})`);
-    return null;
-  }
+  const rows = await conn('ad_campaigns').where({ platform: 'google_ads' }).select('id', 'status', 'budget_mode');
+  return rows.map((r) => ({ id: r.id, status: r.status, mode: r.budget_mode }));
 }
 
 /**
@@ -358,9 +370,11 @@ async function loadProgress(conn, day) {
     .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.status',
       'scheduled_services.completed_at', 'scheduled_services.actual_end_time', 'scheduled_services.check_out_time',
       'scheduled_services.arrived_at', 'scheduled_services.actual_start_time', 'scheduled_services.check_in_time',
-      'scheduled_services.en_route_at', ...guardedCoordSelects(conn));
+      'scheduled_services.en_route_at', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+      ...guardedCoordSelects(conn));
   return rows.map((r) => ({
     id: r.id, technician_id: r.technician_id, status: r.status, lat: r.lat, lng: r.lng, en_route_at: r.en_route_at,
+    customer_id: r.customer_id, property_id: r.property_id,
     completed_at: firstFiniteDate(r.actual_end_time, r.check_out_time, r.completed_at),
     arrived_at: firstFiniteDate(r.actual_start_time, r.check_in_time, r.arrived_at),
   }));
@@ -385,10 +399,19 @@ function inSnapshot(conn, read) {
   return conn.transaction((trx) => read(trx), RUN_SNAPSHOT);
 }
 
+/**
+ * A read whose failure the run survives, in its own savepoint inside the snapshot: PostgreSQL aborts the whole
+ * transaction on a failed statement, so without it one unreadable date would fail every later read.
+ */
+function recoverable(conn, read) {
+  if (conn.isTransaction && typeof conn.transaction === 'function') return conn.transaction((savepoint) => read(savepoint));
+  return read(conn);
+}
+
 /** Today's rows and progress; either read failing returns nulls (today is then FAILED). */
 async function readToday(conn, today) {
   try {
-    return { rows: await replan.loadDayStops(conn, today), progress: await loadProgress(conn, today) };
+    return await recoverable(conn, async (c) => ({ rows: await replan.loadDayStops(c, today), progress: await loadProgress(c, today) }));
   } catch (err) {
     logger.warn(`[route-check] ${today}: today's read failed (${err.message})`);
     return { rows: null, progress: null };
@@ -404,7 +427,7 @@ function rowReader(conn, seed = new Map()) {
   return async (day) => {
     if (!cache.has(day)) {
       try {
-        cache.set(day, await replan.loadDayStops(conn, day));
+        cache.set(day, await recoverable(conn, (c) => replan.loadDayStops(c, day)));
       } catch (err) {
         logger.warn(`[route-check] ${day}: stops read failed (${err.message})`);
         cache.set(day, null);
@@ -451,7 +474,7 @@ function enRouteDeparture({ first, mine, van, origin, nowMin, day }) {
 async function measureOne(conn, env, { day, techId, rows, progress, occupancy }) {
   try {
     const own = rows.filter((r) => String(r.technician_id) === techId);
-    const blocks = await replan.loadBlocks(conn, day, techId);
+    const blocks = await recoverable(conn, (c) => replan.loadBlocks(c, day, techId));
     // Time held for this technician: every booked span the booking surfaces count, exact to the minute
     // (listOccupiedWindows: completed rows and make-room destinations included; a window may end off the hour).
     const held = heldSpans(occupancy, techId, env.techBlind);
@@ -550,7 +573,7 @@ async function measureRun(conn, now) {
     }
     let occupancy = [];
     try {
-      if (working.length) occupancy = await loadOccupancy(conn, day);
+      if (working.length) occupancy = await recoverable(conn, (c) => loadOccupancy(c, day));
     } catch (err) {
       // One date's read failing marks that date, never loses the hour's row.
       logger.warn(`[route-check] ${day}: occupancy read failed (${err.message})`);
@@ -563,13 +586,18 @@ async function measureRun(conn, now) {
   }
   const { totals, ad } = summarize(days, today, { techBlind: env.techBlind });
   const status = days.some((d) => d.skip === 'FAILED') ? 'completed_with_errors' : 'completed';
-  return { status, days, totals, ad: { ...ad, live: await liveAdModes(conn) } };
+  // The read throws inside its savepoint (rolled back there), and only then is caught.
+  const live = await recoverable(conn, (c) => liveAdModes(c)).catch((err) => {
+    logger.warn(`[route-check] ad campaigns unread (${err.message})`);
+    return null;
+  });
+  return { status, days, totals, ad: { ...ad, live } };
 }
 
 module.exports = {
   runRouteCheck,
   _internals: {
-    vanNow, pastBlocks, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, routeOrder, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    vanNow, pastBlocks, mergeIntervals, recoverable, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, routeOrder, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
     etMinuteOn, STAFFED_DAYS, DEMAND_DAYS,
   },
 };

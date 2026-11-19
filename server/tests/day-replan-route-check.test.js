@@ -110,8 +110,11 @@ describe('where the van is now (today)', () => {
 
   test('a service of the on-site stop already done: the rest starts when it finished, not at the arrival', () => {
     const onSite = rc.onSiteStays(rc.physicalStops([sibling('s2')]), new Map([['s2', '2026-11-19T15:00:00Z']])); // arrived 10:00
-    const completed = [{ completed_at: '2026-11-19T15:45:00Z', lat: 27.5, lng: -82.4 }]; // the first service done at 10:45
+    const completed = [{ completed_at: '2026-11-19T15:45:00Z', customer_id: 'cust-1', lat: 27.5, lng: -82.4 }]; // the first service done at 10:45
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed, onSite })).toMatchObject({ clockMin: 690, source: 'on_site' });
+    // A job closed for another customer after the arrival does not restart this stop's work.
+    const elsewhere = [{ ...completed[0], customer_id: 'cust-7' }];
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed: elsewhere, onSite })).toMatchObject({ clockMin: 660, source: 'on_site' });
   });
 
   test("today's stops: the progress status wins by id; on site, en route and the rest are split by physical stop", () => {
@@ -136,7 +139,7 @@ describe('where the van is now (today)', () => {
   test('co-visit siblings sharing a window: one done early, the other is charged its own work, the window once', () => {
     const share = (id) => ({ ...sibling(id), window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 30 });
     const onSite = rc.onSiteStays(rc.physicalStops([share('s2')]), new Map([['s2', '2026-11-19T15:00:00Z']])); // arrived 10:00
-    const completed = [{ completed_at: '2026-11-19T15:30:00Z', lat: 27.5, lng: -82.4 }]; // s1 done at 10:30
+    const completed = [{ completed_at: '2026-11-19T15:30:00Z', customer_id: 'cust-1', lat: 27.5, lng: -82.4 }]; // s1 done at 10:30
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 640, completed, onSite }).clockMin).toBe(660); // 11:00, not 11:30
   });
 
@@ -146,6 +149,19 @@ describe('where the van is now (today)', () => {
     const blocks = [{ startMin: 660, endMin: 720 }]; // 11-noon
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, completed: [], onSite, blocks }).clockMin).toBe(750); // 12:30
     expect(rc.pastBlocks(600, 690, [])).toBe(690);
+    // A technician block and a company block over the same hour pause it once.
+    const twice = [{ startMin: 660, endMin: 720 }, { startMin: 660, endMin: 720 }];
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, completed: [], onSite, blocks: twice }).clockMin).toBe(750);
+  });
+
+  test('a read inside the snapshot runs in its own savepoint; outside a transaction it reads directly', async () => {
+    const savepoint = { name: 'sp' };
+    const trx = { isTransaction: true, transaction: jest.fn(async (fn) => fn(savepoint)) };
+    expect(await rc.recoverable(trx, async (c) => c)).toBe(savepoint);
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
+    const plain = { transaction: jest.fn() };
+    expect(await rc.recoverable(plain, async (c) => c)).toBe(plain);
+    expect(plain.transaction).not.toHaveBeenCalled();
   });
 
   test('nothing done yet: the start point at the departure minute', () => {
