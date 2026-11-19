@@ -318,6 +318,27 @@ describe('a visit the call agent held', () => {
     expect(bookItAlert(plain, false).detail).not.toContain('The call agent held');
   });
 
+  // Pre-push P1 (2026-11-18): an opt-out or a missing number must not end on "call back".
+  test('a hold where a callback is wrong or impossible names it first and drops the callback step', () => {
+    const missFor = (flag) => computeBookingMisses([call({ created_at: minutesAgo(HELD_GRACE_MINUTES + 1), ai_validation: held(['address_unverified', flag]) })], [], { now: NOW })[0];
+    const optOut = bookItAlert(missFor('do_not_contact_requested'), false);
+    expect(optOut.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked not to be contacted.');
+    expect(optOut.detail).toContain('Review it in dispatch before booking, and do not call or text the caller.');
+    expect(optOut.detail).not.toContain('call back');
+    const noNumber = bookItAlert(missFor('caller_phone_missing'), false);
+    expect(noNumber.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the call has no callback number.');
+    expect(noNumber.detail).toContain('Book it in dispatch; the call left no number to call back.');
+    expect(noNumber.detail).not.toContain('or call back');
+    // The routing-reason form of the opt-out reads the same.
+    expect(agentHoldReason({ mode: 'enforce', routing: { allowed: false, reason: 'do_not_contact', appointment_blocking_flags: [] } })).toBe('the caller asked not to be contacted');
+  });
+
+  test('every blocking triage flag has a phrase', () => {
+    const { BLOCKING_TRIAGE_FLAGS } = require('../services/call-triage-flags');
+    const phrased = new Set(HOLD_REASONS.map(([flag]) => flag));
+    expect([...BLOCKING_TRIAGE_FLAGS].filter((flag) => !phrased.has(flag))).toEqual([]);
+  });
+
   test('every reason fits the why rules behind the longest prefix and slot', () => {
     const slot = { dateET: '2026-09-30', minutes: 12 * 60, name: 'Pat Sample', service: 'Waves Assessment' };
     for (const holdReason of [...HOLD_REASONS.map(([, phrase]) => phrase), ...HOLD_REASONS_BY_ROUTING.values(), HOLD_REASON_FALLBACK]) {

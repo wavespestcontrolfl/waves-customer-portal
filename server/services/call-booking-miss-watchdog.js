@@ -12,8 +12,9 @@
  * nothing on it.
  *
  * What counts as a miss: a fully-processed call in the lookback window, past
- * the grace period (GRACE_MINUTES; HELD_GRACE_MINUTES when the call agent
- * itself held the visit, and the bell then names why), whose stored V2 extraction (v2_extraction_status =
+ * the grace period (GRACE_MINUTES from created_at; HELD_GRACE_MINUTES from the
+ * call's end when the call agent itself held the visit, and the bell then names
+ * why), whose stored V2 extraction (v2_extraction_status =
  * 'valid') says scheduling.status === 'confirmed' with a parseable
  * confirmed_start_at — and no scheduled_services row CLEARS it. A row clears
  * the miss only with call-linked evidence, mirroring the processor's
@@ -93,23 +94,46 @@ const GRACE_MINUTES = 90;
 // day on the address check would have waited 1 hour 42 minutes for its first alert).
 const HELD_GRACE_MINUTES = 10;
 // Why the call agent held it, for the bell's why: the first appointment-blocking flag
-// in this order (the flags seen on held confirmed calls, 90 days to 2026-11-18), else
-// the fallback. Each phrase fits the why's 110 characters behind the longest prefix and
-// slot ("Still unbooked: confirmed Wed Sep 30 at 12:00 PM on a call; held because ").
+// in this order, else the fallback. Every flag in call-triage-flags.js's
+// BLOCKING_TRIAGE_FLAGS has a phrase (a test keeps it so). Each phrase fits the why's
+// 110 characters behind the longest prefix and slot ("Still unbooked: confirmed Wed Sep 30
+// at 12:00 PM on a call; held because ").
 // A phrase says what the flag means wherever it is raised: address_unverified comes from
 // the address check's verdict, from two readings of the call that disagree on where, or
 // from a stated address that conflicts with the one on file, so it names no provider.
+const NO_CONTACT_REASON = 'the caller asked not to be contacted';
+const NO_NUMBER_REASON = 'the call has no callback number';
 const HOLD_REASONS = [
+  // A reason that changes what staff should do (STEP_WITHOUT_CALLBACK) comes first.
+  ['do_not_contact_requested', NO_CONTACT_REASON],
+  ['caller_phone_missing', NO_NUMBER_REASON],
+  ['spam_or_wrong_number', 'the call may be spam or misdialed'],
+  ['voicemail', 'the call was a voicemail'],
+  ['out_of_service_area', 'the address is outside our area'],
   ['commercial_requires_quote', 'a commercial job needs a quote first'],
+  ['hoa_common_area_requires_approval', 'an HOA common area needs approval'],
   ['caller_not_authorized', 'the caller is not the account holder'],
+  ['cancellation_request', 'the caller asked to cancel'],
+  ['reschedule_or_cancel', 'the caller asked to move or cancel'],
+  ['existing_appointment_coordination', 'it involves a visit already booked'],
+  ['after_hours_emergency', 'it was an after-hours emergency'],
+  ['manual_review_requested', 'a manual review was requested'],
   ['missing_service_address', 'the call gave no service address'],
   ['address_unverified', 'the address is not confirmed'],
   ['address_unverifiable', 'the address could not be checked'],
+  ['address_validation_unavailable', 'the address check was down'],
   ['low_confidence_address', 'the address was hard to hear'],
+  ['ambiguous_scheduling', 'the agreed time is not clear'],
   ['ambiguous_pest_or_service', 'the service is not clear'],
   ['low_extraction_confidence', 'the call details are unclear'],
   ['on_file_house_number_conflict', 'a different house number was given'],
 ];
+// The detail's last step when a callback is wrong (the caller opted out) or impossible (no
+// number). Every other miss keeps "Book it in dispatch or call back to reset expectations."
+const STEP_WITHOUT_CALLBACK = new Map([
+  [NO_CONTACT_REASON, 'Review it in dispatch before booking, and do not call or text the caller.'],
+  [NO_NUMBER_REASON, 'Book it in dispatch; the call left no number to call back.'],
+]);
 // The house-number hold (the processor's houseNumberDisputed) blocks an allowed decision
 // after the fact: it stores no routing reason and no blocking flag, only this flag in
 // routing.flags.
@@ -124,7 +148,7 @@ const HOLD_REASONS_BY_ROUTING = new Map([
   ['address_not_validated', 'the address is not confirmed'],
   ['off_hour_start', 'the start time is not on the hour'],
   ['low_confidence', 'the call details are unclear'],
-  ['do_not_contact', 'the caller asked not to be contacted'],
+  ['do_not_contact', NO_CONTACT_REASON],
   ['unsupported_service', 'the service is not auto-bookable'],
   ['administrative_followup', 'the call is an office follow-up'],
 ]);
@@ -696,7 +720,7 @@ function bookItAlert(m, repeat) {
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
       (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
-      'Book it in dispatch or call back to reset expectations.' +
+      (STEP_WITHOUT_CALLBACK.get(m.holdReason) || 'Book it in dispatch or call back to reset expectations.') +
       (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
   };
 }
@@ -731,7 +755,7 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
   const calls = await db('call_log')
     .whereIn('id', [...byCall.keys()])
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched', 'ai_validation',
-      db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
+      'processing_status', db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // The slot comes from the call's extraction. When a reprocessed extraction no
   // longer confirms one, the newest stamped bell stands in: its date and time,
   // and the service it stamps (confirmed_service survives a date check's title;
@@ -749,8 +773,11 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
     });
     // The hold reason belongs to the decision made on the extraction that confirmed the slot:
     // a stamped slot stands in for a reprocessed call whose new decision is about another
-    // reading of the call, so it carries none.
-    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot ? agentHoldReason(call.ai_validation) : null });
+    // reading of the call, so it carries none. Nor does a call still in processing (the
+    // scan's own test: NULL or 'processing'): a pass writes the new extraction before the new
+    // ai_validation, so the two may come from different passes.
+    const settled = call.processing_status != null && call.processing_status !== 'processing';
+    if (slot) entries.push({ call, slot, rows, holdReason: ownSlot && settled ? agentHoldReason(call.ai_validation) : null });
   }
   if (!entries.length) return [];
 
