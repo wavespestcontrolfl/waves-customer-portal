@@ -360,8 +360,14 @@ and 3.
 - **Which rain counts.** The card promises "rain since your last watering
   day", meaning the last day the lawn was watered. The helper returns a
   seven-day window, and its total can hold rain from before that day. So
-  the worker does not use the total. It sums the helper's `dailyRain` rows
-  from the day after the last watering through the run day.
+  the worker does not use the total. It counts observed rain from the time
+  of the last watering to the run time.
+  - `dailyRain` holds one amount for each day. So for the day of the last
+    watering the whole day's amount counts, and a storm that afternoon is
+    not lost. This can count rain from before that run a second time,
+    which errs toward a skip. An hourly radar read for that one day would
+    remove the error; whether the radar rung can give one is a build
+    question.
   - The last watering is the latest turf run in the ledger, automatic or
     tapped. It is not read from the day list in `watering_days`: a customer
     may leave one of those days unselected, and then nothing waters on it.
@@ -419,10 +425,23 @@ and 3.
   down) the lawn is not watered. This is the reverse of today, where the
   timer waters no matter what the plan says. The card shows the missed run
   and offers Run; repeated misses raise one admin alert.
+- **Unknown is not failed.** If Hunter accepts a start and the answer
+  times out, the lawn may be watering. The ledger records that run as
+  unknown. The card says the run could not be confirmed and does not offer
+  Run, because a second start would water twice. The worker reads the
+  timer's state or run history and settles the row as started or not
+  started; only "not started" shows the missed run. If Hunter's API takes
+  an idempotency key, every start carries one.
 - **Plumbing.** The ledger and sweep cron from step 3. A week's runs are
   written when Monday's plan is published (the transaction that sets
   `published_at` in `server/services/irrigation-weekly-email.js`) and
   applied by the worker at their time.
+- **Runs are rewritten when the schedule changes.** Monday is not the only
+  time runs are written. Turning automatic runs on, or changing the days
+  or the time, rewrites the rest of the current plan week: the runs the
+  plan prescribes, less the runs already taken that week (automatic or
+  tapped), on the chosen slots still ahead. Without this, a run moved from
+  Saturday to Friday on a Tuesday would be discarded and never replaced.
 - **A queued run is a plan, not a permission.** The customer can turn
   automatic runs off, change the days or the time, change the turf zones
   or connect another timer after Monday. So at run time the worker checks

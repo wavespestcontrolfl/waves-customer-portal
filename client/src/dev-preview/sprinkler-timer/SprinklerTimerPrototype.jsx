@@ -14,6 +14,7 @@ import { useState } from 'react';
 import Icon from '../../components/Icon';
 import { COLORS as B, FONTS, BUTTON_BASE } from '../../theme-brand';
 import { addETDays, etDateString, formatETDateOnly, etNowMinutes } from '../../lib/timezone';
+import useModalFocus from '../../hooks/useModalFocus';
 
 const BODY = '#3F4A65';
 const RULE = '#E7E2D7';
@@ -160,13 +161,15 @@ function Callout({ children }) {
 }
 
 function Sheet({ label, onClose, children }) {
+  // The portal's shared modal contract: focus moves into the sheet, Tab stays inside, Escape closes, focus returns to the opener.
+  const dialogRef = useModalFocus(true, onClose);
   return (
     <div data-glass-scrim="" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }} style={{
       position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999,
       background: 'rgba(15,23,42,0.48)', display: 'flex', alignItems: 'center', justifyContent: 'center',
       padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
     }}>
-      <div role="dialog" aria-modal="true" aria-label={label} data-glass="modal" style={{
+      <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={label} data-glass="modal" style={{
         background: 'rgba(255,255,255,0.94)', borderRadius: 16, padding: 24, width: '100%', maxWidth: 460,
         maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', overscrollBehavior: 'contain',
         color: B.glassNavy, fontFamily: FONTS.ui, fontSize: 16, lineHeight: 1.55,
@@ -553,7 +556,7 @@ function ConnectSheet({ byRequest, onClose, onContinue }) {
         'Start this week\'s watering plan when you tap Run.',
       ]} />
       <PointList icon="close" tone="#B91C1C" heading="Waves will never" points={[
-        'Start watering on its own, unless you turn on automatic runs and pick the day and time.',
+        'Start watering on its own, unless you turn on automatic runs and pick the days and time.',
         'Change the schedule you set in the Hydrawise app.',
         'Touch your beds or drip zones.',
       ]} />
@@ -620,7 +623,8 @@ export default function SprinklerTimerCard({ initialView = 'pick', wateringDays 
   const [view, setView] = useState(start.view);
   const [sheet, setSheet] = useState(start.sheet || null);
   const [zones, setZones] = useState(ZONES);
-  const [model, setModel] = useState(DEFAULT_MODEL);
+  // A direct link to a model's own screen (?timer=proc) starts with that model, as the picker would.
+  const [model, setModel] = useState(HUNTER_MODELS.find((item) => item.next === start.view && item.next !== 'ready')?.label || DEFAULT_MODEL);
   const firstSchedule = { days: savedDays, time: '5 AM' };
   const [schedule, setSchedule] = useState(firstSchedule);
   const [auto, setAuto] = useState(start.auto || AUTO_OFF);
