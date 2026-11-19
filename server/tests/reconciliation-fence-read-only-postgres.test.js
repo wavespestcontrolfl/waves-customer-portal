@@ -185,8 +185,6 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await app('invoices').insert({ id: anchor, customer_id: sibling.customerId, status: 'sent', total: 25 });
     const allocation = [anchor, sibling.invoiceId].map((invoiceId) => ({ invoiceId, cents: 2500 }));
     const collect = jest.fn();
-    let queued;
-    const started = new Promise((resolve) => { queued = resolve; });
     await app('stripe_invoice_charge_attempts').where({ id: sibling.attemptId }).update({ decline_code: 'insufficient_funds' });
     expect(await verdict(sibling.invoiceId, app, { checkout: true })).toBeNull();
     const nextId = randomUUID();
@@ -200,15 +198,29 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       await charge('stripe_invoice_charge_attempts').where({ id: nextId }).update({
         status: 'failed', resolved_at: new Date(), decline_code: 'authentication_required', stripe_payment_intent_id: nextIntent.id,
       });
+      let identifyCheckout;
+      const connectionReady = new Promise((resolve) => { identifyCheckout = resolve; });
       const checkout = app.transaction(async (trx) => {
-        trx.on('query', (q) => { if (q.sql.includes('for update')) queued(); });
+        const { rows: [connection] } = await trx.raw('SELECT pg_backend_pid() AS pid');
+        identifyCheckout(connection.pid);
         await verifyAllocationLocked(trx, allocation, { anchorInvoiceId: anchor, allowUnbound: true });
         collect();
       });
-      const refused = expect(checkout).rejects.toMatchObject({ staleBalance: true, statusCode: 409 });
-      await started;
+      const outcome = checkout.then(() => null, (err) => err);
+      // Observe a real database waiter before committing. A rejection based on
+      // the older, already-visible claim would otherwise look just as safe.
+      const waitingPid = await connectionReady;
+      const deadline = Date.now() + 5000;
+      while (true) {
+        const { rows: [lock] } = await charge.raw(
+          'SELECT pg_backend_pid() = ANY(pg_blocking_pids(?::int)) AS blocked', [waitingPid],
+        );
+        if (lock.blocked) break;
+        if (Date.now() >= deadline) throw new Error('Combined checkout did not wait for the sibling invoice lock');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       await charge.commit();
-      await refused;
+      expect(await outcome).toMatchObject({ staleBalance: true, statusCode: 409 });
       expect(collect).not.toHaveBeenCalled();
     } finally {
       if (!charge.isCompleted()) await charge.rollback();
@@ -219,7 +231,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       collect();
     });
     expect(collect).toHaveBeenCalledTimes(1);
-  });
+  }, 15000);
 
   test('stale SUBMITTED claim: ambiguous verdict, no write, transaction stays usable', async () => {
     const f = await staleClaim({ submitted: true });
