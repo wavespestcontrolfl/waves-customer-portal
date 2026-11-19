@@ -30,10 +30,11 @@ const CHOICE_SCAN_LIMIT = 50;
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
 // The call reader's cancel flag (triage_flags) takes it back the same way, whatever service_intent says.
 const CANCEL_FLAG = 'cancellation_request';
-// A call the voice agent answered and handed on is stored as segments under these header lines
-// (voice-agent/relay-segments.js). Each segment's lines are labeled, so only the exact headers are dropped; any other
-// unlabeled line still makes the transcript ungroundable.
-const SEGMENT_HEADER = /^\s*\[(?:AI|Staff|Voicemail) segment\]\s*$/;
+// The voice agent's transcript holds its own non-speech lines between the labeled turns (voice-agent/relay-transcript.js
+// and relay-segments.js): the segment headers of a call it handed on, the separator between socket sessions, the
+// truncation notice, and its tool lines. Only these exact lines are dropped; any other unlabeled line still makes the
+// transcript ungroundable.
+const RELAY_MARKER_LINE = /^\s*(?:\[(?:AI|Staff|Voicemail) segment\]|\[Reconnected\]|\[AI transcript truncated\]|\[tool\] .*)\s*$/;
 
 // How long a call can still be read for the first time or retried after its row last changed: the processor reads a
 // call within minutes, its retries come 10 minutes apart, and a call with no recording is recovered from its live text
@@ -61,7 +62,8 @@ const startedSql = () => require('./sms-pending-conversations').callStartedAtSql
 
 // The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
 // evidence quote labeled the caller's (a short one must be a whole caller turn), with outbound labels oriented the way
-// the triage flags read them and segment headers dropped; an unlabeled or one-speaker transcript grounds nothing. The
+// the triage flags read them and the voice agent's marker lines dropped; an unlabeled or one-speaker transcript grounds
+// nothing. The
 // words are the caller's latest turn that says a grounded quote at any length, found with the tools' own normalization
 // ("9am" = "9 a.m."), and always the whole turn: a later turn, or a later sentence, that takes the choice back is in
 // front of the office.
@@ -71,7 +73,7 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   if (!quotes.length) return null;
   const { parseTurns, turnsHolding, normalize } = require('./call-reschedule-agreement').groundingTools;
   const { orientTranscriptForOutbound } = require('./call-triage-flags');
-  const labeled = String(transcript || '').split(/\r?\n/).filter((line) => !SEGMENT_HEADER.test(line)).join('\n');
+  const labeled = String(transcript || '').split(/\r?\n/).filter((line) => !RELAY_MARKER_LINE.test(line)).join('\n');
   const turns = parseTurns(orientTranscriptForOutbound(labeled, outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
   const grounded = quotes.filter((e) => turnsHolding(turns, e.quote, 'caller').length).map((e) => normalize(e.quote)).filter(Boolean);
