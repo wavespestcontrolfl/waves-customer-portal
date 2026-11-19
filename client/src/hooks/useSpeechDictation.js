@@ -256,13 +256,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // `clip` is the recording's own snapshot (target at the tap), never today's props.
   const runTranscription = useCallback(
     async (blob, durationSeconds, clip) => {
-      // The recording belongs to the login that made the tap (`clip.token`): signed out, or another
-      // tab switched the login while it was recording, and nothing is sent.
+      // The login that made the tap (`clip.token`); uploadClip already dropped a recording whose
+      // login changed since.
       const { token } = clip;
-      if (!token || readToken() !== token) {
-        clearLive();
-        return;
-      }
+      if (!token) return;
       setUploading(true);
       // The round trip can outlive the field: unmounted, the mic now belongs to another customer or
       // visit, or another tab switched the login. Never append into the wrong field.
@@ -293,7 +290,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
 
   const uploadClip = useCallback(
     (blob, durationSeconds, clip) => {
-      if (!blob || !blob.size) {
+      // Empty, or another tab signed out or switched the login since the tap: the recording is
+      // dropped before either path sees it (a clip handler would send it under the new login).
+      if (!blob || !blob.size || readToken() !== clip.token) {
         clearLive();
         return undefined;
       }

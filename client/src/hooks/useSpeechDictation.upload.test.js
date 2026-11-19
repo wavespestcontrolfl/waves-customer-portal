@@ -322,6 +322,32 @@ describe("useSpeechDictation upload fallback", () => {
       expect(clipHandler).toHaveBeenCalledTimes(1);
     });
 
+    it("another tab switches the login while recording: the recording stops and is never handed to the handler", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      localStorage.setItem("waves_admin_token", "other-staff-jwt");
+      await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+      await waitFor(() => expect(result.current.listening).toBe(false));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(clipHandler).not.toHaveBeenCalled();
+      expect(result.current.uploading).toBe(false);
+      expect(track.stop).toHaveBeenCalled();
+    });
+
+    it("the login changed in this tab before the tech stopped: the clip is never handed to the handler", async () => {
+      const clipHandler = vi.fn(async () => {});
+      const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(true));
+      localStorage.setItem("waves_admin_token", "other-staff-jwt");
+      await act(async () => { result.current.toggle(); });
+      await waitFor(() => expect(result.current.listening).toBe(false));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(clipHandler).not.toHaveBeenCalled();
+    });
+
     it("stops recording on pagehide", async () => {
       const clipHandler = vi.fn(async () => {});
       const { result } = renderHook(() => useSpeechDictation(null, { clipHandler }));
