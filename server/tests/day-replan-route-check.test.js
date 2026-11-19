@@ -81,6 +81,15 @@ describe('physical stops and reads', () => {
     expect(rc.physicalStops([am, { ...pm, window_start: '10:00:00', window_end: '11:00:00', customer_id: 'cust-2' }])).toHaveLength(2);
   });
 
+  test("a legacy promised time takes part in the chain rule: one visit's 9 AM and 3 PM services are two stops", () => {
+    const legacy = (id, time_window) => ({ ...sibling(id), visit_id: 'visit-1', window_start: null, window_end: null, time_window });
+    expect(rc.physicalStops([legacy('v1', '9:00 AM'), legacy('v2', '3:00 PM')])).toHaveLength(2);
+    expect(rc.physicalStops([legacy('v1', '9:00 AM'), legacy('v2', '10:00 AM')])).toHaveLength(1); // 9-11 and 10-12 connect
+    // On a stale route the noon stop runs between them, as with windowed services.
+    const noon = stop('n1', '12:00:00', '13:00:00', { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
+    expect(rc.routeOrder([legacy('v1', '9:00 AM'), legacy('v2', '3:00 PM'), noon]).map((r) => r.id)).toEqual(['v1', 'n1', 'v2']);
+  });
+
   test('a read inside the snapshot runs in its own savepoint; outside a transaction it reads directly', async () => {
     const savepoint = { name: 'sp' };
     const trx = { isTransaction: true, transaction: jest.fn(async (fn) => fn(savepoint)) };
@@ -128,6 +137,12 @@ describe('one tech-day', () => {
     expect(rc.measureTechDay({ ...open, rows: [stop('a', '09:00:00', null, { lat: null })] }).skip).toBe('STOP_WITHOUT_COORDINATES');
   });
 
+  test('stops counts physical stops, measured or not: one visit\'s two services at one place are one stop', () => {
+    const service = (id, extra) => stop(id, '09:00:00', '10:00:00', { visit_id: 'visit-1', ...extra });
+    expect(rc.measureTechDay({ ...open, rows: [service('v1'), service('v2')] }).stops).toBe(1);
+    expect(rc.measureTechDay({ ...open, rows: [service('v1'), service('v2', { lat: null })] })).toMatchObject({ stops: 1, skip: 'STOP_WITHOUT_COORDINATES' });
+  });
+
   test('after the day closes there is no opening', () => {
     expect(rc.measureTechDay({ ...open, rows: [], departureMin: 1050, openMin: 1050 })).toMatchObject({ openings: [], slots: 0 });
   });
@@ -160,7 +175,7 @@ describe('the totals', () => {
       day('2026-11-20'), day('2026-11-21'), day('2026-11-23', { slots: 1 }), day('2026-11-24', { slots: 3 }),
     ], '2026-11-19');
     expect(totals).toEqual({
-      next: { dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1, unmeasured: 0 }, week: { through: '2026-11-26', slots: 4 }, techBlind: false,
+      next: { dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1, unmeasured: [] }, week: { through: '2026-11-26', slots: 4, unmeasured: [] }, techBlind: false,
     });
     // Today is not measured: a row dated today never counts.
     expect(rc.summarize([day('2026-11-19', { slots: 5 }), day('2026-11-20'), day('2026-11-21'), day('2026-11-23')], '2026-11-19').next.slots).toBe(0);
@@ -197,19 +212,24 @@ describe('the totals', () => {
       day('2026-11-20'), day('2026-11-21'), day('2026-11-23'), day('2026-11-24', { slots: 4 }),
       day('2026-11-25', { skip: 'UNTIMED_STOP' }), // past the window: not counted
     ], '2026-11-19');
-    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 0, unmeasured: 0 });
-    expect(totals.week.slots).toBe(4);
+    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 0, unmeasured: [] });
+    // The 7-day view names the date it could not measure.
+    expect(totals.week).toEqual({ through: '2026-11-26', slots: 4, unmeasured: ['2026-11-25'] });
   });
 
   test('a staffed day in the window that could not be measured is counted as unmeasured, never as room', () => {
     const totals = rc.summarize([
       day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
     ], '2026-11-19');
-    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 0, unmeasured: 1 });
+    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 0, unmeasured: ['2026-11-20'] });
     // A long closure: the scan found only 2 staffed days, and the dates say so.
     expect(rc.summarize([day('2026-11-20'), day('2026-11-21')], '2026-11-19').next.dates).toHaveLength(2);
     expect(rc.summarize([day('2026-11-20', { slots: 1 }), day('2026-11-21', { skip: 'FAILED' })], '2026-11-19').next)
-      .toMatchObject({ slots: 1, unmeasured: 1 });
+      .toMatchObject({ slots: 1, unmeasured: ['2026-11-21'] });
+    // Two technicians unmeasured on one date name that date once.
+    const TECH2 = '00000000-0000-4000-8000-000000000002';
+    const both = [day('2026-11-20', { skip: 'FAILED' }), { ...day('2026-11-20', { skip: 'UNTIMED_STOP' }), technician_id: TECH2 }, day('2026-11-21'), day('2026-11-23')];
+    expect(rc.summarize(both, '2026-11-19').next.unmeasured).toEqual(['2026-11-20']);
   });
 });
 
@@ -264,7 +284,7 @@ describe('runRouteCheck', () => {
     // Only the measured dates and the Sundays are read: never today, never the whole 14-day scan.
     expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
     expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-20', dateTo: '2026-11-20' }));
-    expect(totals.next).toMatchObject({ slots: expect.any(Number), unmeasured: 0 });
+    expect(totals.next).toMatchObject({ slots: expect.any(Number), unmeasured: [] });
     expect(result).toMatchObject({ status: 'completed', days: 5 });
   });
 

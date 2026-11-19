@@ -71,12 +71,23 @@ const hasCoords = (row) => {
 };
 
 const sameStopTuple = (a, b) => String(a.customer_id) === String(b.customer_id) && String(a.property_id || '') === String(b.property_id || '');
+const clock = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+// Tracking's chain rule (visit-groups.js windowedMembersConnected) reads window_start and window_end only, so a row
+// promised by a legacy time_window alone ('morning', '3 PM') would join any chain. Such a row takes part with its
+// promised interval resolved (effectiveWindowRange: the band, or the clock time and its arrival window).
+const withResolvedWindow = (row) => {
+  if (row.window_start) return row;
+  const range = effectiveWindowRange(row);
+  return range ? { ...row, window_start: clock(range.startMin), window_end: clock(range.endMin) } : row;
+};
 
 /**
  * The physical stops of a day's rows (pure), in promised-window order: each is a list of co-visit groups (app-sim
  * coVisitGroups). Groups of one visit (one visit_id, which promisedWindowOrder keeps adjacent) are one stop on
  * tracking's own boundary (visit-groups.js): same customer and property, and windows that form one connected chain.
- * A visit with a morning and an afternoon service is two stops, as tracking keeps them.
+ * A visit with a morning and an afternoon service is two stops, as tracking keeps them; a legacy promised time
+ * counts as its resolved interval (withResolvedWindow).
  */
 function physicalStops(rows) {
   const { windowedMembersConnected } = require('../visit-groups');
@@ -86,7 +97,7 @@ function physicalStops(rows) {
     const sofar = last ? last.flat() : [];
     const visitId = group[0].visit_id;
     const sameVisit = visitId != null && sofar.some((r) => r.visit_id != null && String(r.visit_id) === String(visitId))
-      && group.every((r) => sofar.every((m) => sameStopTuple(r, m))) && windowedMembersConnected([...sofar, ...group]);
+      && group.every((r) => sofar.every((m) => sameStopTuple(r, m))) && windowedMembersConnected([...sofar, ...group].map(withResolvedWindow));
     if (sameVisit) last.push(group);
     else stops.push([group]);
   }
@@ -174,10 +185,12 @@ function unmeasurable(rows) {
  * noticeSlots: the 07:05 notice's own count (close-gaps: whole SLOT_MIN slots), so the two can be compared.
  */
 function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin }) {
+  // Physical stops, not services: one visit's services at one place are one stop (physicalStops).
+  const stops = physicalStops(rows).length;
   const skip = unmeasurable(rows);
-  if (skip) return { stops: rows.length, skip };
+  if (skip) return { stops, skip };
   const sim = simulate(routeOrder(rows), { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
-  if (!sim) return { stops: rows.length, skip: 'NO_SIMULATION' };
+  if (!sim) return { stops, skip: 'NO_SIMULATION' };
   const open = openMin < closeMin
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
@@ -187,7 +200,7 @@ function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, clo
     .map((o) => ({ ...o, slots: hourSlots(o), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
     .filter((o) => o.noticeSlots > 0);
   return {
-    stops: rows.length,
+    stops,
     driveMin: Math.round(sim.travelMin),
     endMin: Math.round(sim.serviceFinishMin),
     openings,
@@ -227,8 +240,8 @@ function datesToMeasure(elig, today, stopsOn) {
 /**
  * Totals from the measured tech-days (pure). techBlind (GATE_MULTI_TECH_CONFIRM off): one booking holds its time for
  * every technician (scheduling/occupancy.js), so a date's room is the most any one technician can take (each
- * technician's count already holds the others' booked time), never the sum. `unmeasured`: the staffed days in the
- * next window that could not be measured, so no room found there is not a measured zero.
+ * technician's count already holds the others' booked time), never the sum. `unmeasured`, in each window: the dates
+ * with a staffed tech-day that could not be measured (each date once), so no room found there is not a measured zero.
  */
 function summarize(days, today, { techBlind = false } = {}) {
   const ahead = days.filter((d) => d.date > today);
@@ -239,13 +252,13 @@ function summarize(days, today, { techBlind = false } = {}) {
     const dates = [...new Set(list.map((d) => d.date))];
     return sum(dates, (date) => Math.max(...list.filter((d) => d.date === date).map((d) => d.slots)));
   };
-  const pick = (filter) => ({ slots: slotsOf(counted.filter(filter)) });
+  const unmeasuredDates = (filter) => [...new Set(ahead.filter((d) => d.staffed && d.skip && filter(d)).map((d) => d.date))].sort();
+  const pick = (filter) => ({ slots: slotsOf(counted.filter(filter)), unmeasured: unmeasuredDates(filter) });
   const next = pick((d) => staffedDates.includes(d.date));
   const lastDemand = dayAfter(today, DEMAND_DAYS);
   const week = pick((d) => d.date <= lastDemand);
-  const unmeasured = ahead.filter((d) => d.staffed && d.skip && staffedDates.includes(d.date)).length;
   // next.dates holds fewer than STAFFED_DAYS dates when the scan found fewer staffed days (a long closure).
-  return { next: { dates: staffedDates, ...next, unmeasured }, week: { through: lastDemand, ...week }, techBlind };
+  return { next: { dates: staffedDates, ...next }, week: { through: lastDemand, ...week }, techBlind };
 }
 
 /**
