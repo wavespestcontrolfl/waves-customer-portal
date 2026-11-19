@@ -75,6 +75,7 @@ const {
   officeCageStartSize,
   agentDraftCageProfile,
   stampEstimateToolCageStart,
+  customerCageHold,
 } = require('../services/property-lookup/office-cage-start');
 const { runDraftPipeline } = require('../services/estimator-engine');
 const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
@@ -223,6 +224,47 @@ describe('GATE_CAGE_TWO_SIZES supersedes the Medium start', () => {
       const isolated = require('../services/property-lookup/office-cage-start');
       const result = { enriched: cagedHome(1300, 'LARGE'), meta: {} };
       expect(isolated.stampEstimateToolCageStart(result).meta).toEqual({});
+    });
+    jest.dontMock('../config/feature-gates');
+  });
+});
+
+describe('customerCageHold (automatic customer prices keep today\'s manual-quote hold)', () => {
+  const legacy = (size) => ({ poolCageSize: 'MEDIUM', poolCageLegacySize: size });
+
+  test('on: held for a four-size answer of Large or Oversized, in any letter case', () => {
+    process.env[TWO_SIZES] = 'true';
+    for (const size of ['LARGE', 'OVERSIZED', 'large', 'Oversized']) {
+      expect(customerCageHold(legacy(size))).toBe(true);
+    }
+  });
+
+  test('on: not held for Medium or Small, an absent field, or no profile', () => {
+    process.env[TWO_SIZES] = 'true';
+    for (const profile of [legacy('MEDIUM'), legacy('SMALL'), legacy('NONE'), { poolCageSize: 'LARGE' }, {}, null, undefined]) {
+      expect(customerCageHold(profile)).toBe(false);
+    }
+  });
+
+  test('off, unset or a stray value: never held, whatever the profile says', () => {
+    for (const value of [undefined, 'false', '1']) {
+      if (value === undefined) delete process.env[TWO_SIZES]; else process.env[TWO_SIZES] = value;
+      expect(customerCageHold(legacy('LARGE'))).toBe(false);
+      expect(customerCageHold(legacy('OVERSIZED'))).toBe(false);
+    }
+  });
+
+  test('the start gate does not matter: two sizes alone holds', () => {
+    process.env[TWO_SIZES] = 'true';
+    gate(undefined);
+    expect(customerCageHold(legacy('LARGE'))).toBe(true);
+  });
+
+  test('a whole-module feature-gates mock without the reader reads as off', () => {
+    process.env[TWO_SIZES] = 'true';
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      expect(require('../services/property-lookup/office-cage-start').customerCageHold(legacy('LARGE'))).toBe(false);
     });
     jest.dontMock('../config/feature-gates');
   });

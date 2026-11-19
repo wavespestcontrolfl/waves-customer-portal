@@ -55,6 +55,13 @@ jest.mock('../services/newsletter-subscribers', () => ({ subscribeOrResubscribe:
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn(async () => ({ enrolled: false })) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 
+// The route's own cache-only server re-read. A test sets what it answers.
+let mockServerLookup = null;
+jest.mock('../routes/property-lookup-v2', () => ({
+  ...jest.requireActual('../routes/property-lookup-v2'),
+  performPropertyLookup: jest.fn(async () => mockServerLookup),
+}));
+
 const express = require('express');
 
 const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
@@ -78,7 +85,7 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
     server.closeAllConnections();
     server.close(done);
   });
-  beforeEach(() => { delete process.env[TWO_SIZES]; });
+  beforeEach(() => { delete process.env[TWO_SIZES]; mockServerLookup = null; });
 
   const quote = async (cage) => {
     const res = await fetch(`${base}/calculate`, {
@@ -120,5 +127,28 @@ describe('POST /api/public/quote/calculate: pool cage manual-quote hold', () => 
     expect(await held({ poolCageSqft: 500, poolCageSize: 'MEDIUM' })).toBe(false);
     // A stray legacy key with the gate off must not hold a Medium cage.
     expect(await held({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' })).toBe(false);
+  });
+
+  // /calculate is a public API: a caller can send a partial `enriched` with no
+  // four-size answer. The server's own cache-only re-read still carries it.
+  test('a partial client profile cannot drop the hold: the server re-read carries the four-size answer', async () => {
+    mockServerLookup = {
+      enriched: { pool: 'YES', poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE', poolCageSqft: 750 },
+      propertyRecord: {},
+    };
+    const partial = { poolCageSize: 'MEDIUM' };
+    process.env[TWO_SIZES] = 'true';
+    expect(await held(partial)).toBe(true);
+    delete process.env[TWO_SIZES];
+    expect(await held(partial)).toBe(false);
+  });
+
+  test('a visitor who says no cage is never held, even when the re-read has a cage', async () => {
+    mockServerLookup = {
+      enriched: { pool: 'YES', poolCage: 'YES', poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' },
+      propertyRecord: {},
+    };
+    process.env[TWO_SIZES] = 'true';
+    expect(await held({ poolCage: 'NO', poolCageSize: 'NONE' })).toBe(false);
   });
 });

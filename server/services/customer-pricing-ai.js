@@ -465,6 +465,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
   let roofType = null;
   let palmCount = positiveNumber(customer.palm_count);
   let lookupMeta = null;
+  // GATE_CAGE_TWO_SIZES: the lookup's own two-size answer, set only when today's four sizes
+  // would have held this cage for a person to quote (customerCageHold). Else null.
+  let lookupCageHoldSize = null;
   // Feature defaults, NOT observations: the profile carries no feature
   // columns, so these stand only until the lookup answers. treeCount is
   // deliberately ABSENT, not 0 — priceTreeShrub treats any supplied count
@@ -516,6 +519,8 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
       const lookup = await propertyLookup(address);
       const p = lookup?.enriched || {};
       const record = lookup?.propertyRecord || lookup?.rentcast || {};
+      lookupCageHoldSize = require('./property-lookup/office-cage-start').customerCageHold(p)
+        ? String(p.poolCageSize || '').toLowerCase() : null;
       source = homeSqFt || lotSqFt ? 'customer_profile_plus_property_lookup' : 'property_lookup';
       lookupMeta = {
         used: true,
@@ -934,6 +939,14 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup, p
     }
     if (seedMayFill('foundationType')) foundationType = foundationType || propertySeed.foundationType || null;
     if (seedMayFill('roofType')) roofType = roofType || propertySeed.roofType || null;
+  }
+
+  // GATE_CAGE_TWO_SIZES: keep today's manual-quote hold. The engine adds
+  // large_pool_cage for poolCageReview. It holds only when the priced size is
+  // the lookup's own two-size answer; a seed's saved four-size value prices as before.
+  if (lookupCageHoldSize && lookupFeatureKeys.has('poolCageSize')
+    && String(features.poolCageSize || '').toLowerCase() === lookupCageHoldSize) {
+    features = { ...features, poolCageReview: true };
   }
 
   const grassType = normalizeGrassType(turfProfile?.track_key || turfProfile?.grass_type || customer.lawn_type);

@@ -231,6 +231,50 @@ describe('buildReportCrossSell', () => {
     expect(result.currentServices).toBeUndefined();
   });
 
+  // GATE_CAGE_TWO_SIZES (owner 2026-11-19, "hold"): a cage the old four sizes call
+  // Large still shows the quote CTA, not a price, although the lookup now says Medium.
+  describe('GATE_CAGE_TWO_SIZES keeps the quote CTA for a Large-by-four-sizes cage', () => {
+    const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+    let prior;
+    beforeAll(() => { prior = process.env[TWO_SIZES]; });
+    afterAll(() => {
+      if (prior === undefined) delete process.env[TWO_SIZES];
+      else process.env[TWO_SIZES] = prior;
+    });
+    beforeEach(() => { delete process.env[TWO_SIZES]; });
+
+    const cageLookup = (legacy) => async () => ({
+      enriched: {
+        homeSqFt: 2400, lotSqFt: 8000, stories: 1,
+        pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: 750,
+        poolCageSize: 'MEDIUM', poolCageLegacySize: legacy,
+      },
+      propertyRecord: {},
+    });
+    const offer = (legacy) => buildReportCrossSell(
+      SERVICE(),
+      dbFor({ serviceTypes: ['Lawn Care'], turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' } }),
+      { propertyLookup: cageLookup(legacy) },
+    );
+
+    test('gate on: the pest offer is the unpriced CTA for Large, and priced for Medium', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const held = await offer('LARGE');
+      expect(held.serviceKey).toBe('pest_control');
+      expect(held.mode).toBe('quote_cta');
+      expect(held.option).toBeNull();
+      const medium = await offer('MEDIUM');
+      expect(medium.mode).toBe('priced');
+      expect(medium.option.perVisit).toBeGreaterThan(0);
+    });
+
+    test('gate off: the same lookup prices as before', async () => {
+      const result = await offer('LARGE');
+      expect(result.serviceKey).toBe('pest_control');
+      expect(result.mode).toBe('priced');
+    });
+  });
+
   describe('engineContext is opt-in mint material, never public payload (click-to-estimate lane)', () => {
     const args = () => ({
       serviceTypes: ['Pest Control'],

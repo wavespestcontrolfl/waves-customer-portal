@@ -239,12 +239,10 @@ function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) 
   return null;
 }
 
-// GATE_CAGE_TWO_SIZES website hold. The lookup profile carries poolCageLegacySize
-// (the four-size answer) only while the gate is on; `?.()` so a whole-module
-// feature-gates mock without the reader reads as off.
-function pestCageHeldByLegacySize(ep) {
-  if (require('../config/feature-gates').cageTwoSizesLive?.() !== true) return false;
-  return ['LARGE', 'OVERSIZED'].includes(String(ep?.poolCageLegacySize || '').toUpperCase());
+// GATE_CAGE_TWO_SIZES website hold: shared rule, lazy so a whole-module mock reads as off.
+function cageHeldForCustomer(...profiles) {
+  const { customerCageHold } = require('../services/property-lookup/office-cage-start');
+  return profiles.some((profile) => customerCageHold(profile));
 }
 
 function isPublicCommercialQuote(body = {}, enriched = {}) {
@@ -1727,7 +1725,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // GATE_CAGE_TWO_SIZES: the lookup now says Medium or Large, so a cage that
         // today's four sizes call Large or Oversized keeps its manual-quote hold
         // (the engine adds large_pool_cage for the flag). Absent while the gate is off.
-        ...(pestCageHeldByLegacySize(ep) ? { poolCageReview: true } : {}),
+        // The client's profile OR the server's own cache-only re-read can carry the
+        // four-size answer: /calculate is a public API, so a partial `enriched` must not
+        // drop the hold.
+        ...(cageHeldForCustomer(ep, trustedTurf) ? { poolCageReview: true } : {}),
         shrubs: (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined,
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,

@@ -25,6 +25,12 @@
  * meta.poolCageStartSize is stamped. The call-agent draft still drops a cage
  * on a home with no decided pool (GATE_CAGE_START_MEDIUM). The estimate tool is
  * told to offer two sizes by meta.poolCageTwoSizes (stampEstimateToolCageStart).
+ *
+ * customerCageHold (owner 2026-11-19, "hold"): the automatic customer prices
+ * (website quote, service-report offer card, restart offer) keep today's manual
+ * quote for a cage the old four sizes call Large or Oversized, although the
+ * lookup now says Medium. It is the single place a later "instant" ruling
+ * would change. Office tools never read it.
  */
 
 // A cage over this area is no longer the lookup's Medium (classifyPoolCageSize).
@@ -46,6 +52,14 @@ function officeCageStartSize(enriched) {
   if (!gateLive() || twoSizesLive()) return null;
   const sqft = Number(enriched?.poolCageSqft);
   return sqft > CAGE_START_ABOVE_SQFT && sqft <= CAGE_START_MAX_SQFT ? 'MEDIUM' : null;
+}
+
+// True when an AUTOMATIC customer price must still hold this cage for a person
+// to quote: GATE_CAGE_TWO_SIZES is on and the profile's four-size answer
+// (poolCageLegacySize) is Large or Oversized. False with the gate off, and for
+// a profile with no such field (the key is absent while the gate is off).
+function customerCageHold(enriched) {
+  return twoSizesLive() && ['LARGE', 'OVERSIZED'].includes(up(enriched?.poolCageLegacySize));
 }
 
 // The lookup profile as the call-agent draft prices it. Gate off, or nothing
@@ -72,4 +86,4 @@ function stampEstimateToolCageStart(result) {
   return result;
 }
 
-module.exports = { officeCageStartSize, agentDraftCageProfile, stampEstimateToolCageStart };
+module.exports = { officeCageStartSize, agentDraftCageProfile, stampEstimateToolCageStart, customerCageHold };
