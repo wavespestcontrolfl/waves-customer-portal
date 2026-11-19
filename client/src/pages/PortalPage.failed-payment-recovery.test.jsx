@@ -88,6 +88,38 @@ describe('failed payment recovery', () => {
     expect(within(row).queryByRole('link', { name: /^Pay / })).not.toBeInTheDocument();
   });
 
+  it('shows verification guidance without a new invoice shortcut while authentication is unresolved', async () => {
+    api.getPayments.mockResolvedValue({
+      payments: [
+        failedPayment({
+          recoveryInvoice: null,
+          recoveryState: 'authentication_pending',
+        }),
+        failedPayment({ id: 'pay-legacy', date: '2026-10-17', description: 'October pest visit' }),
+      ],
+    });
+    api.getBalance.mockResolvedValue({
+      currentBalance: 95,
+      lastPaymentFailed: true,
+      openInvoices: [openInvoices[1]],
+    });
+
+    render(<BillingTab customer={customer} />);
+
+    const row = paymentRow(await screen.findByText('November pest visit'));
+    expect(screen.getByText('Payment needs verification')).toBeInTheDocument();
+    expect(screen.getByText('Contact us to confirm the payment status before trying again.'))
+      .toBeInTheDocument();
+    expect(within(row).getByRole('status'))
+      .toHaveTextContent('Payment needs verification. Contact us to confirm the payment status before trying again.');
+    expect(screen.queryByRole('link', { name: 'View open invoices' })).not.toBeInTheDocument();
+    expect(within(row).queryByRole('link', { name: 'Review invoice' })).not.toBeInTheDocument();
+    // The bounded fix does not change the original account-balance invoice
+    // list or central checkout behavior.
+    expect(screen.getByRole('link', { name: 'Pay $95.00 now' }))
+      .toHaveAttribute('href', '/pay/tok-failed');
+  });
+
   it('does not send a cancelled customer to hidden payment-method controls', async () => {
     api.getPayments.mockResolvedValue({ payments: [failedPayment()] });
     api.getBalance.mockResolvedValue({ currentBalance: 95, lastPaymentFailed: true, openInvoices: [openInvoices[1]] });

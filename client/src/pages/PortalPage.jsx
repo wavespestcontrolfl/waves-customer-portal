@@ -7091,11 +7091,18 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // the Auto Pay-off banner can point at the Pay now button when one renders.
   const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
   const primaryOpenInvoice = openInvoices[0] || null;
+  // A saved-card attempt awaiting authentication can still settle. Keep the
+  // original open-invoice list intact, but do not let the newer failed-payment
+  // recovery surfaces actively send the customer toward another checkout.
+  const authenticationPending = payments.some((payment) => (
+    payment.status === 'failed' && payment.recoveryState === 'authentication_pending'
+  ));
   const bannerConfig = {
     failed: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
-      badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
-      title: 'Payment failed',
+      badge: authenticationPending ? 'Status check needed' : 'Action needed',
+      titleColor: B.red, subtitleColor: B.grayDark,
+      title: authenticationPending ? 'Payment needs verification' : 'Payment failed',
       // No interruption claim: a balance never withholds service (nothing
       // reads service_paused_at to block a visit). No retry promise either —
       // billing-cron only retries rows it armed with next_retry_at, which
@@ -7108,7 +7115,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // skips and no card update clears (there is no resume path today), and
       // it renders with Auto Pay off. Both actions are stated plainly and
       // nothing is guaranteed about what happens next.
-      detail: cancelledAccount
+      detail: authenticationPending
+        ? 'Contact us to confirm the payment status before trying again.'
+        : cancelledAccount
         ? (primaryOpenInvoice
           ? 'Your last payment could not be processed. Review your open invoices above.'
           : 'Your last payment could not be processed. Contact us to review your balance.')
@@ -7559,7 +7568,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
             {bannerConfig.detail}
           </div>
-          {bannerState === 'failed' && primaryOpenInvoice && (
+          {bannerState === 'failed' && primaryOpenInvoice && !authenticationPending && (
             <div style={{ marginTop: 10 }}>
               <a href="#billing-open-invoices" style={payNowButtonStyle} data-glass-accent="">
                 View open invoices
@@ -8026,11 +8035,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               </div>
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {p.recoveryInvoice ? (
+                  {p.recoveryState === 'authentication_pending' ? (
+                    <span role="status" style={{ color: B.red, fontSize: 14, fontWeight: 700, lineHeight: 1.4 }}>
+                      Payment needs verification. Contact us to confirm the payment status before trying again.
+                    </span>
+                  ) : p.recoveryInvoice ? (
                     <a data-glass-accent="" href={p.recoveryInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       Review invoice
                     </a>
-                  ) : primaryOpenInvoice ? (
+                  ) : primaryOpenInvoice && !authenticationPending ? (
                     <a data-glass-accent="" href="#billing-open-invoices" style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       View open invoices
                     </a>

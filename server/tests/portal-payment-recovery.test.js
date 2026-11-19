@@ -3,6 +3,14 @@ jest.mock('../services/logger', () => ({ warn: jest.fn() }));
 jest.mock('../services/stripe', () => ({
   getPaymentHistory: jest.fn(),
 }));
+jest.mock('../services/payer-linkage', () => ({
+  ...jest.requireActual('../services/payer-linkage'),
+  loadPayerLinkage: jest.fn(async () => ({
+    failed: false,
+    payerInvoiceIds: new Set(),
+    isPayerLinked: () => false,
+  })),
+}));
 jest.mock('../services/invoice-payer-ownership', () => ({
   liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })),
   invoicePayerOwnership: jest.fn(async () => null),
@@ -20,7 +28,8 @@ jest.mock('../services/termite-annual-renewal-charge', () => ({
   renewalPaymentRefusal: jest.fn(async () => null),
 }));
 
-const { recoveryInvoiceIndexFor } = require('../services/portal-payment-history');
+const stripe = require('../services/stripe');
+const { listPortalPayments, recoveryInvoiceIndexFor } = require('../services/portal-payment-history');
 const { liveInvoiceOwnership, invoicePayerOwnership } = require('../services/invoice-payer-ownership');
 const { memberCollectionPending } = require('../services/pay-combined');
 const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
@@ -201,6 +210,63 @@ test('a saved-card authentication_required row with no PI id cannot open a secon
   }]));
 
   expect(recovery.has('pay-sca')).toBe(false);
+  expect(memberCollectionPending).not.toHaveBeenCalled();
+});
+
+test('the portal marks a known authentication_required row for a verification-only UI', async () => {
+  const payment = {
+    id: 'pay-sca',
+    customer_id: 'cust-1',
+    payment_date: '2026-11-17',
+    amount: '95.00',
+    status: 'failed',
+    description: 'Invoice WPC-100 — card on file (FAILED)',
+    stripe_payment_intent_id: null,
+    stripe_charge_id: null,
+    metadata: { invoice_id: INV_A, source: 'card_on_file_failed_attempt' },
+    method_type: 'card',
+  };
+  stripe.getPaymentHistory.mockResolvedValue([payment]);
+  let invoiceReads = 0;
+  const database = jest.fn((table) => {
+    const query = {};
+    for (const method of [
+      'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orWhere', 'orWhereIn', 'count',
+    ]) {
+      query[method] = (...args) => {
+        if (typeof args[0] === 'function') args[0].call(query, query);
+        return query;
+      };
+    }
+    query.first = async () => ({ count: 1 });
+    query.select = async () => {
+      if (table === 'stripe_invoice_charge_attempts as attempt') {
+        return [{
+          invoice_id: INV_A,
+          decline_code: 'authentication_required',
+          status: 'failed',
+          resolved_at: new Date(),
+        }];
+      }
+      if (table !== 'invoices') return [];
+      invoiceReads += 1;
+      // The first invoice read is receipt enrichment. The second is the
+      // failed-payment recovery candidate lookup.
+      return invoiceReads === 1 ? [] : [invoice()];
+    };
+    return query;
+  });
+
+  const result = await listPortalPayments('cust-1', {
+    database,
+    includeRecoveryInvoices: true,
+  });
+
+  expect(result.payments[0]).toMatchObject({
+    id: 'pay-sca',
+    recoveryInvoice: null,
+    recoveryState: 'authentication_pending',
+  });
   expect(memberCollectionPending).not.toHaveBeenCalled();
 });
 

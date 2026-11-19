@@ -378,16 +378,36 @@ function recoveryInvoiceIsPayable(invoice, ownedIds = null) {
 // pay link under a failed $95 attempt. Resolve every canonical linkage the
 // payment ledger supports, then fail closed when the row's identifiers are
 // absent, conflicting, payer-owned, settled, withdrawn, or fully covered.
-async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
+function emptyRecoveryDetails() {
+  return {
+    recoveryByPaymentId: new Map(),
+    authenticationPendingPaymentIds: new Set(),
+  };
+}
+
+function recoveryFieldsFor(paymentId, { recoveryByPaymentId, authenticationPendingPaymentIds }) {
+  const id = String(paymentId);
+  return {
+    recoveryInvoice: recoveryByPaymentId.get(id) || null,
+    // Do not collapse this into an ordinary unavailable invoice. The client
+    // must replace its new pay/list shortcuts with verification guidance
+    // while the original off-session intent can still settle.
+    recoveryState: authenticationPendingPaymentIds.has(id)
+      ? 'authentication_pending'
+      : null,
+  };
+}
+
+async function recoveryDetailsFor(customerId, visiblePayments, database = db) {
   const failedPayments = visiblePayments.filter(isRecoveryPayment)
     // Checkout parity requires several read-only fences per candidate. Keep
-    // that work bounded to the newest failures; every other row retains the
-    // safe "View open invoices" fallback.
+    // that work bounded to the newest failures; every other row remains
+    // ineligible for a direct bearer recovery link.
     .slice(0, RECOVERY_PAYMENT_LIMIT);
   const keys = recoveryLookupKeys(failedPayments);
-  if (!Object.values(keys).some((values) => values.length > 0)) return new Map();
+  if (!Object.values(keys).some((values) => values.length > 0)) return emptyRecoveryDetails();
   const initialRows = await loadRecoveryInvoiceRows(customerId, keys, database);
-  if (!initialRows) return new Map();
+  if (!initialRows) return emptyRecoveryDetails();
 
   // An asynchronous saved-bank failure reopens the invoice and deliberately
   // clears its PaymentIntent. The resolved charge-attempt row retains the
@@ -412,18 +432,25 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   const authPendingInvoiceIds = await loadAuthenticationPendingInvoiceIds(
     customerId, [...invoiceByPaymentId.values()], database,
   );
-  if (!authPendingInvoiceIds) return new Map();
+  if (!authPendingInvoiceIds) return emptyRecoveryDetails();
+  const authenticationPendingPaymentIds = new Set();
   for (const [paymentId, invoice] of invoiceByPaymentId) {
-    if (authPendingInvoiceIds.has(String(invoice.id))) invoiceByPaymentId.delete(paymentId);
+    if (!authPendingInvoiceIds.has(String(invoice.id))) continue;
+    authenticationPendingPaymentIds.add(paymentId);
+    invoiceByPaymentId.delete(paymentId);
   }
 
   const identifiedInvoices = [...new Map([...invoiceByPaymentId.values()]
     .map((row) => [String(row.id), row])).values()];
-  if (!identifiedInvoices.length) return new Map();
+  if (!identifiedInvoices.length) {
+    return { recoveryByPaymentId: new Map(), authenticationPendingPaymentIds };
+  }
   const ownership = await require('./invoice-payer-ownership').liveInvoiceOwnership(
     customerId, identifiedInvoices, database, { maxResolutions: 30, byCandidatePayer: true },
   );
-  if (ownership.unverifiable) return new Map();
+  if (ownership.unverifiable) {
+    return { recoveryByPaymentId: new Map(), authenticationPendingPaymentIds };
+  }
 
   const availableInvoices = new Map();
   for (const invoice of identifiedInvoices) {
@@ -448,6 +475,11 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
       invoiceNumber: current.invoice_number || null,
     });
   }
+  return { recoveryByPaymentId, authenticationPendingPaymentIds };
+}
+
+async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = db) {
+  const { recoveryByPaymentId } = await recoveryDetailsFor(customerId, visiblePayments, database);
   return recoveryByPaymentId;
 }
 
@@ -548,9 +580,9 @@ async function listPortalPayments(customerId, {
   // BillingTab follows every history cursor before rendering. Enrich only its
   // first page so a long ledger cannot multiply the per-invoice fence reads
   // across as many as 50 sequential requests.
-  const recoveryByPaymentId = !includeRecoveryInvoices || payerLookupFailed || Number(requestedCursor) !== 0
-    ? new Map()
-    : await recoveryInvoiceIndexFor(customerId, visiblePayments, database);
+  const recoveryDetails = !includeRecoveryInvoices || payerLookupFailed || Number(requestedCursor) !== 0
+    ? emptyRecoveryDetails()
+    : await recoveryDetailsFor(customerId, visiblePayments, database);
 
   return {
     payments: visiblePayments.map(p => ({
@@ -571,7 +603,7 @@ async function listPortalPayments(customerId, {
       refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
       refundStatus: p.refund_status || null,
       ...(includeRecoveryInvoices
-        ? { recoveryInvoice: recoveryByPaymentId.get(String(p.id)) || null }
+        ? recoveryFieldsFor(p.id, recoveryDetails)
         : {}),
       // Receipt surfaces (see the resolution block above). All three are
       // null when this payment has no retrievable receipt — the row simply
