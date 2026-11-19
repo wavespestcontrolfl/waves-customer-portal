@@ -461,7 +461,8 @@ export function CallPrepayEvidence({ payload, callPrepay, isOpenView, isAdmin, b
 
 // call_phone_yes (GATE_CALL_PHONE_YES_ACCEPT, admin only): a call booked a pest visit while the customer had an open
 // estimate, and nothing accepted the estimate. The card says what the call reader heard: the caller's yes in their own
-// words, or "No yes heard". The shadow line is what an automatic accept would have done when the card opened.
+// words, or "No yes heard" (the sweep keeps it current). The shadow line is what an automatic accept would have done
+// when the card was filed.
 export function PhoneYesEvidence({ payload }) {
   const p = parsePayload(payload) || {};
   const saidAt = p.yes_at
@@ -471,7 +472,7 @@ export function PhoneYesEvidence({ payload }) {
   const rows = [
     ["On the call", heard],
     ["Caller's words", p.yes_heard === true && p.caller_words ? `\u201c${p.caller_words}\u201d` : null],
-    ["Auto would accept", p.auto_would_accept === true ? "Yes" : ["No.", p.auto_message].filter(Boolean).join(" ")],
+    ["Auto would accept (when filed)", p.auto_would_accept === true ? "Yes" : ["No.", p.auto_message].filter(Boolean).join(" ")],
   ].filter(([, value]) => value);
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">

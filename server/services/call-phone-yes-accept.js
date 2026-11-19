@@ -8,18 +8,19 @@
  * sends nothing: the booking text keeps the estimate's accept link, and the customer can still accept alone.
  *
  * The card has two states. "Caller said yes" carries the caller's own words: service_request.billing_choice is
- * per_application on that call or an earlier one since the estimate was sent. "No yes heard" says only that: the card
- * never claims a yes that did not happen. The caller's billing_choice is never consent on its own (the extraction
- * schema says so), so a person decides every accept. Each card also records a shadow verdict for the later automatic
- * step: would an automatic accept go ahead, and if not, the first reason (the accept's own checks, then the caller's
- * word).
+ * per_application on that call or an earlier one since the estimate was sent, and its evidence quote is found word for
+ * word in a caller turn of that call's transcript. "No yes heard" says only that: the card never claims a yes that did
+ * not happen. The caller's billing_choice is never consent on its own (the extraction schema says so), so a person
+ * decides every accept. Each sweep re-reads an open card's yes, so a call that is re-read or moved never leaves a stale
+ * quote on it. Each card also records a shadow verdict for the later automatic step, as of its filing: would an
+ * automatic accept go ahead, and if not, the first reason (the accept's own checks, then the caller's word).
  *
  * No card when the customer's latest word since the send is annual prepay (the prepay card owns it,
- * call-prepay-choice.js), a cancellation or a one-time visit; and none until every call since the send is read. Only an
- * estimate already sent when the call booked the visit counts. The card stays open while a visit the call booked is on
- * the calendar, also after the estimate expires. It closes itself once none of its estimates is open or lapsed (each
- * accepted or declined), the booked visit is linked to an estimate, every visit the call booked is cancelled, the call
- * moves to another customer, or a later call takes the yes back.
+ * call-prepay-choice.js), a cancellation or a one-time visit; and none until every call since the send is read (the
+ * processor's own retry rules). Only an estimate already sent when the call booked the visit counts. The card stays
+ * open while an unlinked pest visit the call booked is on the calendar, also after the estimate expires. It closes
+ * itself once none of its estimates is open or lapsed (each accepted or declined), no unlinked pest visit of the call
+ * is left on the calendar, the call moves to another customer, or a later call takes the yes back.
  *
  * Dark behind GATE_CALL_PHONE_YES_ACCEPT; off = nothing here runs.
  */
@@ -44,15 +45,26 @@ const CARD_ESTIMATE_STATUSES = ['sent', 'viewed', 'expired'];
 // The one one-time line a standard accept of a pest plan may carry: the setup fee, which the first visit bills by
 // hand (estimate-accept-effects membershipFeeLine; one-time work rows never carry this name).
 const MEMBERSHIP_FEE_LINE_NAME = 'WaveGuard membership fee';
-// A call row the pipeline has not finished, queued retries included (its extraction may still change). The SQL
-// form is SETTLED_SQL.
-const UNSETTLED = new Set([null, undefined, 'pending', 'processing']);
-const SETTLED_SQL = "processing_status IS NOT NULL AND processing_status NOT IN ('pending', 'processing')";
-const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
 // The extraction's evidence pointer for the caller's plan choice (JSON pointer; a dotted path in older rows).
 const BILLING_CHOICE_PATHS = new Set(['/service_request/billing_choice', 'service_request.billing_choice']);
 const CALLER_WORDS_CHARS = 200;
 const PEST_FAMILY = new Set(['pest_control']);
+
+// A call the pipeline still owes a read, by the processor's own rules (pendingCandidatesQuery, with the shared retry
+// budget in config/call-extraction-retry): not started or queued with a recording to read, being read, or a failed
+// transcription or extraction it will retry. A call with nothing to read (no recording) is never waited on.
+function owedReadSql(t) {
+  const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
+  const underCap = `COALESCE(${t}.extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
+  const readable = `((COALESCE(${t}.recording_url, '') <> '' AND COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) > 10)`
+    + ` OR (${t}.transcription_metadata ->> 'pan_detected') = 'true')`;
+  return `(${t}.processing_status = 'processing'`
+    + ` OR ((${t}.processing_status IS NULL OR ${t}.processing_status = 'pending') AND ${readable})`
+    + ` OR (${t}.processing_status = 'no_transcription' AND ${underCap})`
+    + ` OR (${t}.processing_status = 'extraction_failed' AND ${underCap}`
+    + ` AND ${t}.created_at > now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'))`;
+}
 
 // `?.() === true`: a test's whole-module gate mock without this reader reads as off (the #7910 pattern).
 const live = () => require('../config/feature-gates').callPhoneYesAcceptLive?.() === true;
@@ -111,10 +123,18 @@ async function openEstimatesOf(conn, customerId, now) {
     .select('*');
 }
 
-// The caller's own sentence choosing the plan (the extraction's evidence for billing_choice), cut to fit, or null.
-function callerWordsOf(extraction) {
-  const hit = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
-    .find((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
+// The caller's own sentence choosing the plan: an evidence quote for billing_choice labeled as the caller's AND found
+// word for word in a caller turn of the transcript (outbound labels oriented the way the triage flags read them),
+// cut to fit; null when none is. An unlabeled or one-speaker transcript grounds nothing.
+function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
+  const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
+    .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
+  if (!quotes.length) return null;
+  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
+  const { orientTranscriptForOutbound } = require('./call-triage-flags');
+  const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
+  const hit = quotes.find((e) => turnsHolding(turns, e.quote, 'caller').length > 0);
   if (!hit) return null;
   const words = hit.quote.replace(/\s+/g, ' ').trim();
   return words.length > CALLER_WORDS_CHARS ? `${words.slice(0, CALLER_WORDS_CHARS - 1).trimEnd()}…` : words;
@@ -124,9 +144,9 @@ function callerWordsOf(extraction) {
 // visit instead of the plan (service_request.service_intent). It is the latest word even with no billing choice.
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
 
-// The customer's latest word on a call since `since`, from the newest settled, valid, two-party call that has one:
-// a billing choice ({ choice, callLogId, at, quote }), a cancellation or one-time ask ({ contrary: true, callLogId, at }),
-// or null when no call has either.
+// The customer's latest word on a call since `since`, from the newest read, valid, two-party call that has one: a
+// billing choice ({ choice, callLogId, at, quote }; quote = callerWordsOf, read from the call's transcript), a
+// cancellation or one-time ask ({ contrary: true, callLogId, at }), or null when no call has either.
 async function latestBillingChoice(conn, { customerId, since }) {
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
@@ -134,7 +154,8 @@ async function latestBillingChoice(conn, { customerId, since }) {
   const rows = await conn('call_log')
     .where({ customer_id: customerId, v2_extraction_status: 'valid' })
     .where('created_at', '>=', since)
-    .whereRaw(SETTLED_SQL)
+    .whereNotNull('processing_status')
+    .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .whereNotNull('ai_extraction_enriched')
     .modify((qb) => whereNotSandboxCall(qb))
     .orderBy('created_at', 'desc')
@@ -146,7 +167,10 @@ async function latestBillingChoice(conn, { customerId, since }) {
     // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
     if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
     const choice = billingChoiceOf(extraction);
-    if (choice) return { choice, callLogId: row.id, at: row.created_at, quote: callerWordsOf(extraction) };
+    if (!choice) continue;
+    const { transcription } = (await conn('call_log').where({ id: row.id }).first('transcription')) || {};
+    const quote = callerWordsOf(extraction, { transcript: transcription, outbound: row.direction === 'outbound' });
+    return { choice, callLogId: row.id, at: row.created_at, quote };
   }
   return null;
 }
@@ -230,15 +254,14 @@ async function acceptProblem(conn, { estimate, visit, customerId, now }) {
     || ((await existingPlan(conn, customerId, visit.id)) ? 'existing_plan' : null);
 }
 
-// True when a call from the customer since `since`, other than the booking call, is not read yet (queued, retried or
-// processing): it may hold the yes or take it back. Sandbox calls do not count.
-async function unreadCallSince(conn, { customerId, since, bookingCallId }) {
+// True when a call from the customer since `since` (the booking call included) still owes a read (owedReadSql): it
+// may hold the yes or take it back. Sandbox calls do not count.
+async function unreadCallSince(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   return !!(await conn('call_log')
     .where({ customer_id: customerId })
     .where('created_at', '>=', since)
-    .whereNot({ id: bookingCallId })
-    .where((qb) => qb.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']))
+    .whereRaw(owedReadSql('call_log'))
     .modify((qb) => whereNotSandboxCall(qb))
     .first('id'));
 }
@@ -278,6 +301,7 @@ async function callerWord(conn, { customerId, since }) {
  * @returns {{card:false, reason}|{card:true, yes:{callLogId, at, quote}|null, estimate, visit, estimateIds,
  *   acceptProblem, autoProblem}}
  *   estimate / visit: the one open estimate and the one booked visit, or null when there are more.
+ *   estimateIds: the open estimates already sent when the call booked the visit (the ones the card is about).
  *   acceptProblem: the first check an accept from this call fails, or null.
  *   autoProblem: why an automatic accept would not go ahead (acceptProblem, then the caller's word), or null.
  *   yes: the caller's pay-per-application choice with their own words (the evidence quote), or null.
@@ -286,22 +310,23 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
   // The call must still belong to this customer (a relinked call reads as gone).
   const call = await conn('call_log').where({ id: callLogId, customer_id: customerId }).first(CALL_COLUMNS);
   if (!call) return skip('customer_changed');
-  if (UNSETTLED.has(call.processing_status)) return skip('call_reprocessing');
   const visits = await require('./call-prepay-choice').liveVisitsOfCall(conn, callLogId, customerId);
   if (!visits.length) return skip('no_booked_visit');
   // The same visit must be both unlinked and pest (a linked pest visit beside an unlinked lawn visit is not one).
   if (!(await anyPestVisit(conn, visits.filter((v) => !v.source_estimate_id)))) return skip('no_pest_visit');
-  // Only an estimate already sent when the call booked the visit (one sent later is not what the caller answered).
-  const estimates = (await openEstimatesOf(conn, customerId, now)).filter((e) => sentAnchorOf(e) <= new Date(call.created_at));
-  if (!estimates.length) return skip('no_open_estimate');
-  const since = earliestSentAnchor(estimates);
-  // Every call since the send is read first: an unread one may hold the yes or take it back.
-  if (await unreadCallSince(conn, { customerId, since, bookingCallId: call.id })) return skip('call_still_processing');
+  // The card is about an estimate already sent when the call booked the visit (one sent later is not what the caller
+  // answered); every open estimate still counts toward "more than one".
+  const open = await openEstimatesOf(conn, customerId, now);
+  const answerable = open.filter((e) => sentAnchorOf(e) <= new Date(call.created_at));
+  if (!answerable.length) return skip('no_open_estimate');
+  const since = earliestSentAnchor(answerable);
+  // Every call since the send, the booking call included, is read first: an unread one may hold the yes or take it back.
+  if (await unreadCallSince(conn, { customerId, since })) return skip('call_still_processing');
   const heard = await callerWord(conn, { customerId, since });
   if (heard.skip) return skip(heard.skip);
   const { yes } = heard;
   const later = await laterWordProblem(conn, { customerId, yes, booking: call });
-  const estimate = estimates.length === 1 ? estimates[0] : null;
+  const estimate = open.length === 1 ? open[0] : null;
   const visit = visits.length === 1 ? visits[0] : null;
   const problem = await acceptProblem(conn, { estimate, visit, customerId, now });
   return {
@@ -309,7 +334,7 @@ async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Da
     yes,
     estimate,
     visit,
-    estimateIds: estimates.map((e) => String(e.id)),
+    estimateIds: answerable.map((e) => String(e.id)),
     acceptProblem: problem,
     autoProblem: problem || later || heard.noYes,
   };
@@ -320,6 +345,18 @@ function cardSummary({ yes }) {
   return yes
     ? 'Caller said yes to pay per application on the call. The estimate is not accepted yet.'
     : 'A call booked a pest visit while an estimate is open. No yes heard on the call. The estimate is not accepted yet.';
+}
+
+// The card's yes fields: the caller's pay-per-application choice with their own words, or none. The sweep keeps them
+// current (cardState); the shadow verdict stays as filed.
+function heardFields(yes) {
+  return {
+    yes_heard: !!yes,
+    billing_choice: yes ? 'per_application' : null,
+    yes_call_log_id: yes ? String(yes.callLogId) : null,
+    yes_at: yes?.at ? new Date(yes.at).toISOString() : null,
+    caller_words: yes?.quote || null,
+  };
 }
 
 // The one card for a call. Idempotent: ANY row for (call, reason), open or closed, means it was filed.
@@ -339,11 +376,7 @@ async function fileCard({ call, extraction, evaluation }) {
         estimate_id: estimate ? String(estimate.id) : null,
         estimate_ids: evaluation.estimateIds,
         scheduled_service_id: visit ? String(visit.id) : null,
-        yes_heard: !!yes,
-        billing_choice: yes ? 'per_application' : null,
-        yes_call_log_id: yes ? String(yes.callLogId) : null,
-        yes_at: yes?.at ? new Date(yes.at).toISOString() : null,
-        caller_words: yes?.quote || null,
+        ...heardFields(yes),
         // The shadow verdict for the later automatic step, as of the card's filing. Nothing acts on it.
         auto_would_accept: !autoProblem,
         auto_reason: autoProblem,
@@ -371,6 +404,7 @@ async function fileCard({ call, extraction, evaluation }) {
 const MOOT_NOTES = {
   customer_changed: 'No longer applies: the call is no longer linked to this customer.',
   no_booked_visit: 'No longer applies: the visits the call booked are off the calendar.',
+  no_pest_visit: 'No longer applies: no pest visit the call booked is left on the calendar.',
   visit_linked: 'No longer applies: the visit the call booked is linked to an estimate now.',
   estimate_accepted: 'No longer applies: the estimate was accepted.',
   estimate_closed: 'No longer applies: the estimate was declined or is gone.',
@@ -385,55 +419,77 @@ function cardEstimateIds(card) {
   return Array.isArray(ids) ? ids.map(String) : [];
 }
 
-// The note to close an open card with, or null to keep it. The card holds while a visit its call booked is on the
-// calendar and not linked to an estimate, and one of its estimates is still open or lapsed: an expiry alone never
-// closes it, and neither does another estimate's accept (the card may still be about the one left open).
-async function mootNote(card) {
+// Why an open card closes ({ close: note }), its yes fields when they changed ({ refresh: yes }), or null to keep it
+// as it is. The card holds while an unlinked pest visit its call booked is on the calendar and one of its estimates is
+// still open or lapsed: an expiry alone never closes it, and neither does another estimate's accept (the card may
+// still be about the one left open). While a call in its window still owes a read, the card waits as it is.
+async function cardState(card) {
   const customerId = card.related_customer_id;
-  if (!(await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first('id'))) return MOOT_NOTES.customer_changed;
+  if (!(await db('call_log').where({ id: card.call_log_id, customer_id: customerId }).first('id'))) return { close: MOOT_NOTES.customer_changed };
   const onCalendar = await db('scheduled_services')
     .where({ source_call_log_id: card.call_log_id, customer_id: customerId })
     .whereIn('source_action', require('./call-prepay-choice').callCreatedSourceActions())
     .whereIn('status', CALENDAR_VISIT_STATUSES)
-    .select('id', 'source_estimate_id');
-  if (!onCalendar.length) return MOOT_NOTES.no_booked_visit;
-  if (onCalendar.every((v) => v.source_estimate_id)) return MOOT_NOTES.visit_linked;
+    .select('*');
+  if (!onCalendar.length) return { close: MOOT_NOTES.no_booked_visit };
+  if (!(await anyPestVisit(db, onCalendar.filter((v) => !v.source_estimate_id)))) {
+    return { close: onCalendar.some((v) => v.source_estimate_id) ? MOOT_NOTES.visit_linked : MOOT_NOTES.no_pest_visit };
+  }
   const ids = cardEstimateIds(card);
   const estimates = ids.length
     ? await db('estimates').whereIn('id', ids).where({ customer_id: customerId }).select('id', 'status', 'sent_at', 'created_at')
     : [];
   const kept = estimates.filter((e) => CARD_ESTIMATE_STATUSES.includes(e.status));
-  if (!kept.length) return estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed;
-  const word = await latestBillingChoice(db, { customerId, since: earliestSentAnchor(kept) });
-  if (word?.contrary) return MOOT_NOTES.took_back;
-  if (word?.choice === 'annual_prepay') return MOOT_NOTES.chose_annual_prepay;
-  return null;
+  if (!kept.length) return { close: estimates.some((e) => e.status === 'accepted') ? MOOT_NOTES.estimate_accepted : MOOT_NOTES.estimate_closed };
+  const since = earliestSentAnchor(kept);
+  if (await unreadCallSince(db, { customerId, since })) return null;
+  const heard = await callerWord(db, { customerId, since });
+  if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
+  // The yes the card shows must still be the customer's latest word, from the same call with the same words.
+  const p = parseJson(card.payload);
+  const now = heardFields(heard.yes);
+  const same = now.yes_call_log_id === (p.yes_call_log_id ?? null) && now.caller_words === (p.caller_words ?? null) && now.yes_heard === (p.yes_heard === true);
+  return same ? null : { refresh: heard.yes };
 }
 
-// Closes an OPEN card that stopped being true (mootNote). Dismissed, not resolved, as the prepay card does.
+// Closes a card that stopped being true (dismissed, as the prepay card does), or rewrites its yes fields and headline.
+// Both under the call's triage lock, and only while the card is still open.
+async function applyCardState(card, state) {
+  return db.transaction(async (trx) => {
+    await lockTriageCall(trx, card.call_log_id);
+    const row = await trx('triage_items').where({ id: card.id, status: 'open' }).first('payload');
+    if (!row) return false;
+    const stamp = new Date();
+    if (state.close) {
+      await trx('triage_items').where({ id: card.id, status: 'open' }).update({
+        status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: state.close,
+        resolved_at: stamp, updated_at: stamp,
+      });
+      await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
+      return true;
+    }
+    await trx('triage_items').where({ id: card.id, status: 'open' }).update({
+      payload: JSON.stringify({ ...parseJson(row.payload), ...heardFields(state.refresh) }),
+      summary: cardSummary({ yes: state.refresh }),
+      updated_at: stamp,
+    });
+    return false;
+  });
+}
+
+// Each open card, read again: closed when it stopped being true, its yes rewritten when it changed.
 async function closeMootCards() {
   const open = await db('triage_items').where({ reason_code: REASON_CODE, status: 'open' })
     .select('id', 'call_log_id', 'related_customer_id', 'related_estimate_id', 'payload');
   let closed = 0;
   for (const card of open) {
-    // A failed read keeps the card (read again next run).
-    const note = await mootNote(card).catch((e) => {
-      logger.warn(`[call-phone-yes] moot check skipped for card ${card.id}: ${e.code || e.name || 'error'}`);
-      return null;
-    });
-    if (!note) continue;
-    await db.transaction(async (trx) => {
-      await lockTriageCall(trx, card.call_log_id);
-      const stamp = new Date();
-      const n = await trx('triage_items').where({ id: card.id, status: 'open' }).update({
-        status: 'dismissed', resolution_source: 'auto', resolution_rule: MOOT_RULE, resolution_note: note,
-        resolved_at: stamp, updated_at: stamp,
-      });
-      if (n) {
-        await syncCallReviewStatus(trx, card.call_log_id, 'dismissed');
-        closed += 1;
-      }
-    });
+    try {
+      const state = await cardState(card);
+      if (state && await applyCardState(card, state)) closed += 1;
+    } catch (e) {
+      // A failed read keeps the card as it is (read again next run).
+      logger.warn(`[call-phone-yes] card check skipped for card ${card.id}: ${e.code || e.name || 'error'}`);
+    }
   }
   return closed;
 }
@@ -451,7 +507,8 @@ async function runCallPhoneYesSweep({ now = new Date() } = {}) {
   const calls = await db('call_log')
     .where('created_at', '>=', since)
     .whereNotNull('customer_id')
-    .whereRaw(SETTLED_SQL)
+    .whereNotNull('processing_status')
+    .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .modify((qb) => whereNotSandboxCall(qb))
     // A live, still-unlinked visit this call booked.
     .whereExists(function bookedVisit() {

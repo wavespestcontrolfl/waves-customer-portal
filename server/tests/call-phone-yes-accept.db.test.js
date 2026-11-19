@@ -65,6 +65,12 @@ const extractionWith = (choice, intent = null) => ({
   ] : [],
 });
 
+// A labeled two-speaker transcript: the caller says WORDS on a call that names the plan.
+const transcriptWith = (choice) => (choice
+  ? `Agent: Thanks for calling Waves, how can I help?\nCaller: ${WORDS}\nAgent: You can bill each time. You are all set.`
+  : 'Agent: Thanks for calling Waves, how can I help?\nCaller: I need someone out for the bugs.\nAgent: You are all set.');
+const RECORDED = { recording_url: 'https://example.test/recording.mp3', recording_duration_seconds: 60 };
+
 describeDb('call phone yes cards (PostgreSQL)', () => {
   let database; let trx;
   const savedGate = process.env[GATE];
@@ -111,7 +117,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     const id = randomUUID();
     await trx('call_log').insert({
       id, customer_id: customerId, twilio_call_sid: `CA${id.replace(/-/g, '')}`, from_phone: '+19415550101', answered_by: 'human',
-      processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(extractionWith(choice, intent)), ...over,
+      processing_status: 'processed', v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify(extractionWith(choice, intent)),
+      transcription: transcriptWith(choice), direction: 'inbound', ...over,
     });
     return id;
   }
@@ -127,11 +134,12 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
   // The usual case: estimate sent two days ago; the yes call yesterday; the booking call two hours ago.
   async function phoneYes({
     estimateOver = {}, customerOver = {}, yesChoice = 'per_application', yesIntent = null, bookingChoice = null, bookingIntent = null, visitOver = {},
+    bookingOver = {},
   } = {}) {
     const customerId = await customer(customerOver);
     const est = await estimate(customerId, estimateOver);
     const yesCallId = await call(customerId, yesChoice, { created_at: new Date(Date.now() - DAY) }, yesIntent);
-    const bookingCallId = await call(customerId, bookingChoice, { created_at: new Date(Date.now() - 2 * 3600000) }, bookingIntent);
+    const bookingCallId = await call(customerId, bookingChoice, { created_at: new Date(Date.now() - 2 * 3600000), ...bookingOver }, bookingIntent);
     const visitId = await visit(customerId, bookingCallId, visitOver);
     return { customerId, est, yesCallId, bookingCallId, visitId };
   }
@@ -183,10 +191,14 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     });
   });
 
-  test("a pay-per-application choice without the caller's own words is no yes the card shows", async () => {
+  test.each([
+    ['only a staff quote', { ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), evidence: [{ field_path: '/service_request/billing_choice', quote: 'You can bill each time.', speaker: 'agent' }] }) }],
+    ["a caller quote the transcript does not hold", { transcription: 'Agent: Thanks for calling Waves.\nCaller: I need someone out for the bugs.\nAgent: You are all set.' }],
+    ['a caller quote said only by staff', { transcription: `Agent: ${WORDS}\nCaller: Okay.\nAgent: You are all set.` }],
+    ['an unlabeled transcript', { transcription: `Thanks for calling. ${WORDS} You are all set.` }],
+  ])("a pay-per-application choice without the caller's own words (%s) is no yes the card shows", async (_name, change) => {
     const { yesCallId, bookingCallId } = await phoneYes();
-    const unquoted = { ...extractionWith('per_application'), evidence: [{ field_path: '/service_request/billing_choice', quote: 'We can bill each time.', speaker: 'agent' }] };
-    await trx('call_log').where({ id: yesCallId }).update({ ai_extraction_enriched: JSON.stringify(unquoted) });
+    await trx('call_log').where({ id: yesCallId }).update(change);
     await sweep();
     const [card] = await cards(bookingCallId);
     expect(card.summary).toMatch(/No yes heard/);
@@ -211,6 +223,8 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     ['the estimate lapsed', { estimateOver: { expires_at: new Date(Date.now() - 3600000) } }, 'no_open_estimate'],
     ['the estimate was first sent after the booking call', { estimateOver: { sent_at: new Date(Date.now() - 3600000), created_at: new Date(Date.now() - 3600000) } },
       'no_open_estimate'],
+    ['the booking call still has an extraction retry left', { bookingOver: { processing_status: 'extraction_failed', v2_extraction_status: 'failed', extraction_attempts: 1 } },
+      'call_still_processing'],
   ])('no card when %s', async (_name, setup, reason) => {
     const { customerId, bookingCallId } = await phoneYes(setup);
     await expect(evaluatePhoneYes({ callLogId: bookingCallId, customerId })).resolves.toEqual({ card: false, reason });
@@ -280,15 +294,18 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
   });
 
   test.each([
-    ['being read, after the yes', { hoursAgo: 1, status: 'processing' }, {}, 'newer_call'],
-    ['queued for a retry, after the yes', { hoursAgo: 1, status: 'pending' }, {}, 'newer_call'],
-    ['not started, after the yes', { hoursAgo: 1, status: null }, {}, 'newer_call'],
-    ['being read, between the send and the booking, with no yes yet', { hoursAgo: 5, status: 'processing' }, { yesChoice: null }, 'no_yes_heard'],
-    ['being read, after a booking call that could not be read', { hoursAgo: 1, status: 'processing' }, {}, 'booking_call_unread', true],
+    ['being read, after the yes', { hoursAgo: 1, processing_status: 'processing' }, {}, 'newer_call'],
+    ['queued, with a recording, after the yes', { hoursAgo: 1, processing_status: 'pending', ...RECORDED }, {}, 'newer_call'],
+    ['not started, with a recording, after the yes', { hoursAgo: 1, processing_status: null, ...RECORDED }, {}, 'newer_call'],
+    ['with a transcription retry left, after the yes', { hoursAgo: 1, processing_status: 'no_transcription', extraction_attempts: 1 }, {}, 'newer_call'],
+    ['with an extraction retry left, after the yes', { hoursAgo: 1, processing_status: 'extraction_failed', extraction_attempts: 2 }, {}, 'newer_call'],
+    ['being read, between the send and the booking, with no yes yet', { hoursAgo: 5, processing_status: 'processing' }, { yesChoice: null }, 'no_yes_heard'],
+    ['being read, after a booking call that could not be read', { hoursAgo: 1, processing_status: 'processing' }, {}, 'booking_call_unread', true],
   ])('a call from the customer %s waits; once read, the card files', async (_name, unread, setup, reason, bookingUnread = false) => {
     const fixture = await phoneYes(setup);
     if (bookingUnread) await trx('call_log').where({ id: fixture.bookingCallId }).update({ v2_extraction_status: 'failed' });
-    const unreadCallId = await call(fixture.customerId, null, { created_at: new Date(Date.now() - unread.hoursAgo * 3600000), processing_status: unread.status });
+    const { hoursAgo, ...state } = unread;
+    const unreadCallId = await call(fixture.customerId, null, { created_at: new Date(Date.now() - hoursAgo * 3600000), ...state });
     await expect(evaluatePhoneYes({ callLogId: fixture.bookingCallId, customerId: fixture.customerId }))
       .resolves.toEqual({ card: false, reason: 'call_still_processing' });
     await expect(sweep()).resolves.toMatchObject({ filed: 0 });
@@ -296,6 +313,26 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     await expect(sweep()).resolves.toMatchObject({ filed: 1 });
     const [card] = await cards(fixture.bookingCallId);
     expect(payloadOf(card).auto_reason).toBe(reason);
+  });
+
+  test.each([
+    ['a call with no recording', { processing_status: null }],
+    ['a failed extraction at the retry cap', { processing_status: 'extraction_failed', extraction_attempts: 3 }],
+    ['a failed transcription at the retry cap', { processing_status: 'no_transcription', extraction_attempts: 3 }],
+    ['a failed extraction older than the retry window', { processing_status: 'extraction_failed', extraction_attempts: 1, created_at: new Date(Date.now() - 8 * DAY) }],
+  ])('%s owes no read: the card files at once', async (_name, state) => {
+    const fixture = await phoneYes({ estimateOver: { sent_at: new Date(Date.now() - 10 * DAY) } });
+    await call(fixture.customerId, null, { created_at: new Date(Date.now() - 3600000), ...state });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+  });
+
+  test('an estimate sent after the booking call is not what the card is about, but it still makes two', async () => {
+    const { customerId, est, bookingCallId } = await phoneYes();
+    await estimate(customerId, { sent_at: new Date(Date.now() - 3600000), created_at: new Date(Date.now() - 3600000) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card.related_estimate_id).toBeNull();
+    expect(payloadOf(card)).toMatchObject({ estimate_ids: [est.id], auto_would_accept: false, auto_reason: 'more_than_one_estimate' });
   });
 
   test('two open estimates: the card names both and stays until neither is open or lapsed', async () => {
@@ -328,6 +365,38 @@ describeDb('call phone yes cards (PostgreSQL)', () => {
     [card] = await cards(bookingCallId);
     expect(card).toMatchObject({ status: 'dismissed', resolution_rule: 'call_phone_yes_moot' });
     expect(card.resolution_note).toContain('linked to an estimate');
+  });
+
+  test('a pest and a lawn visit: cancelling the pest visit closes the card', async () => {
+    const { customerId, bookingCallId, visitId } = await phoneYes();
+    await visit(customerId, bookingCallId, { service_type: 'Lawn Care', scheduled_date: inDays(12) });
+    await expect(sweep()).resolves.toMatchObject({ filed: 1, closed: 0 });
+    await trx('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
+    await expect(sweep()).resolves.toMatchObject({ closed: 1 });
+    const [card] = await cards(bookingCallId);
+    expect(card.resolution_note).toContain('no pest visit');
+  });
+
+  test('the yes moves with its call: a card whose yes call moves to another customer shows no yes, and stays open', async () => {
+    const { yesCallId, bookingCallId } = await phoneYes();
+    await sweep();
+    await trx('call_log').where({ id: yesCallId }).update({ customer_id: await customer() });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card.status).toBe('open');
+    expect(card.summary).toMatch(/No yes heard/);
+    // The yes fields follow the calls; the shadow verdict stays as filed.
+    expect(payloadOf(card)).toMatchObject({ yes_heard: false, yes_call_log_id: null, caller_words: null, auto_would_accept: true });
+  });
+
+  test("a later call's yes, in the caller's words, turns a no-yes card into a yes card", async () => {
+    const { customerId, bookingCallId } = await phoneYes({ yesChoice: null });
+    await sweep();
+    const laterYesId = await call(customerId, 'per_application', { created_at: new Date(Date.now() - 3600000) });
+    await expect(sweep()).resolves.toMatchObject({ closed: 0 });
+    const [card] = await cards(bookingCallId);
+    expect(card.summary).toBe('Caller said yes to pay per application on the call. The estimate is not accepted yet.');
+    expect(payloadOf(card)).toMatchObject({ yes_heard: true, yes_call_log_id: laterYesId, caller_words: WORDS, auto_reason: 'no_yes_heard' });
   });
 
   test('the card stays open after the estimate expires and after the visit is done', async () => {

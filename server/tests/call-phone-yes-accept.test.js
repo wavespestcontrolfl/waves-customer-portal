@@ -85,27 +85,43 @@ describe('the card text', () => {
 describe("the caller's words", () => {
   const evidence = (...entries) => ({ evidence: entries });
   const choice = (quote, speaker = 'caller', fieldPath = '/service_request/billing_choice') => ({ field_path: fieldPath, quote, speaker, transcript_offset_ms: 100 });
+  const talk = (callerLine, agentLine = 'You are all set.') => ({ transcript: `Agent: Thanks for calling Waves.\nCaller: ${callerLine}\nAgent: ${agentLine}` });
 
-  test("the caller's own quote for the plan choice, never staff's, never another field's", () => {
+  test("the caller's own quote for the plan choice, found in a caller turn; never staff's, never another field's", () => {
+    const transcript = talk('Okay. Just bill me each time, that works.');
     expect(callerWordsOf(evidence(
       choice('We bill after each visit.', 'agent'),
       choice('Bill me each time.', 'caller', '/scheduling/status'),
-      choice('  Just   bill me\neach time.  '),
-    ))).toBe('Just bill me each time.');
-    expect(callerWordsOf(evidence(choice('Bill me each time.', 'caller', 'service_request.billing_choice')))).toBe('Bill me each time.');
+      choice('  Just   bill me\neach time  '),
+    ), transcript)).toBe('Just bill me each time');
+    expect(callerWordsOf(evidence(choice('just bill me each time', 'caller', 'service_request.billing_choice')), transcript)).toBe('just bill me each time');
+  });
+
+  test('a quote the transcript does not hold in a caller turn is no words', () => {
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), talk('I need someone out for the bugs.'))).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), talk('Okay.', 'Just bill me each time.'))).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: 'Just bill me each time. You are all set.' })).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: 'Caller: Just bill me each time.' })).toBeNull();
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), {})).toBeNull();
+  });
+
+  test('an outbound call with swapped labels is read the way the triage flags read it', () => {
+    const swapped = { transcript: 'Caller: Hi, this is Sam with Waves, calling about your quote.\nAgent: Just bill me each time.\nCaller: Will do.', outbound: true };
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), swapped)).toBe('Just bill me each time.');
+    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { ...swapped, outbound: false })).toBeNull();
   });
 
   test('none: null', () => {
-    expect(callerWordsOf({})).toBeNull();
-    expect(callerWordsOf(null)).toBeNull();
-    expect(callerWordsOf(evidence(choice('   ')))).toBeNull();
-    expect(callerWordsOf(evidence(choice('Bill me.', 'agent')))).toBeNull();
-    expect(callerWordsOf({ evidence: 'not a list' })).toBeNull();
+    expect(callerWordsOf({}, talk('x'))).toBeNull();
+    expect(callerWordsOf(null, talk('x'))).toBeNull();
+    expect(callerWordsOf(evidence(choice('   ')), talk('x'))).toBeNull();
+    expect(callerWordsOf({ evidence: 'not a list' }, talk('x'))).toBeNull();
   });
 
   test('a long quote is cut to 200 characters', () => {
-    const words = callerWordsOf(evidence(choice('a'.repeat(400))));
+    const long = `${'word '.repeat(80)}done`;
+    const words = callerWordsOf(evidence(choice(long)), talk(long));
     expect(words).toHaveLength(200);
-    expect(words.endsWith('…')).toBe(true);
+    expect(words.endsWith('\u2026')).toBe(true);
   });
 });
