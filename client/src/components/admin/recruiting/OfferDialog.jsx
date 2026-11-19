@@ -80,7 +80,7 @@ function TermsBlock({ data }) {
 function Row({ label, children }) {
   return (
     <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
-      <div className="text-ui-caption font-medium text-ink-secondary sm:w-40 sm:shrink-0">{label}</div>
+      <div className="ui-label sm:w-40 sm:shrink-0">{label}</div>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
@@ -98,7 +98,7 @@ function OfferFields({ fields, onChange, startError, sendTo, disabled }) {
       </Field>
       <Row label="Offer open until">
         <span className="text-14 text-zinc-800">{expiryLabel()}</span>
-        <span className="text-14 text-zinc-400"> · 7 days from the day you send</span>
+        <span className="text-14 text-zinc-500"> · 7 days from the day you send</span>
       </Row>
       <Field label="Hourly rate ($)">
         <Input type="number" inputMode="decimal" step="0.01" min="0" value={fields.hourlyRate} onChange={set("hourlyRate")} disabled={disabled} />
@@ -360,11 +360,11 @@ function OfferFormBody({ applicationId, contact, data, draft, onClose, onChanged
             <TermsBlock data={data} />
           </Row>
           <div>
-            <div className="text-ui-caption font-medium text-ink-secondary mb-1">Letter preview</div>
-            <div className="border-hairline border rounded p-3 max-h-80 overflow-y-auto">
+            <div className="ui-label mb-1">Letter preview</div>
+            <div className="border-hairline border border-zinc-200 rounded p-3 max-h-80 overflow-y-auto">
               <SafeMarkdown markdown={data.letterPreview?.markdown} />
             </div>
-            <div className="text-14 text-zinc-400 mt-1">Shows the saved draft. Save the draft to refresh it.</div>
+            <div className="text-14 text-zinc-500 mt-1">Shows the saved draft. Save the draft to refresh it.</div>
           </div>
           <div className="text-14 text-zinc-500">
             {sendNote(ownerActions, sends, firstName)}

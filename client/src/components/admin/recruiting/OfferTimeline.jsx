@@ -39,7 +39,7 @@ function Timeline({ entries }) {
       {entries.map((e, i) => (
         <li key={`${e.kind}-${e.at}-${i}`} className="flex flex-col gap-0 sm:flex-row sm:items-baseline sm:gap-3">
           <span className="text-14 text-zinc-800 min-w-0 break-words">{e.label}</span>
-          <span className="text-14 text-zinc-400 sm:ml-auto sm:shrink-0">{formatTimelineTime(e.at)}</span>
+          <span className="text-14 text-zinc-500 sm:ml-auto sm:shrink-0">{formatTimelineTime(e.at)}</span>
         </li>
       ))}
     </ul>
@@ -73,7 +73,7 @@ export function SignedCopyView({ copy, onClose }) {
             <div className="text-14 text-zinc-600 mb-3 break-words">
               Signed by {copy.signedName} · {formatTimelineTime(copy.signedAt)} ET
               {copy.signedIp ? ` · IP ${copy.signedIp}` : ""}
-              <div className="text-zinc-400 break-all">Signature hash {copy.signatureHash}</div>
+              <div className="text-zinc-500 break-all">Signature hash {copy.signatureHash}</div>
             </div>
             <SafeMarkdown markdown={copy.markdown} />
           </>
@@ -136,7 +136,7 @@ function closeCopy(target, firstName, liveOffer) {
 function DateRequestNote({ offer, busy, canAct, onUpdate }) {
   if (offer.status !== "date_requested" || !offer.requestedStartDate) return null;
   return (
-    <div className="border-hairline border rounded p-3 mb-3">
+    <div className="border-hairline border border-zinc-200 rounded p-3 mb-3">
       <div className="text-14 text-zinc-800 mb-1">
         Asked to start {formatDay(offer.requestedStartDate)}.
         {offer.dateRequestNote ? ` Note: ${offer.dateRequestNote}` : ""}
@@ -159,7 +159,7 @@ export function History({ history, onViewSigned }) {
       </summary>
       <div className="flex flex-col gap-3 mt-1">
         {history.map((h) => (
-          <div key={h.id} className="border-hairline border rounded p-3">
+          <div key={h.id} className="border-hairline border border-zinc-200 rounded p-3">
             <div className="flex flex-wrap items-center gap-2 mb-1">
               <Badge>{STATUS_LABEL[h.status] || h.status}</Badge>
               <span className="text-14 text-zinc-500">{formatTimelineTime(h.sentAt || h.createdAt)}</span>
@@ -180,7 +180,7 @@ export function History({ history, onViewSigned }) {
 
 function DraftBlock({ draft, busy, canAct, onOpen, onDiscard }) {
   return (
-    <div className="border-hairline border rounded p-3 mb-3">
+    <div className="border-hairline border border-zinc-200 rounded p-3 mb-3">
       <div className="flex flex-wrap items-center gap-2 mb-1">
         <span className="text-14 font-medium text-zinc-900">Updated draft</span>
         <Badge>Not sent</Badge>
@@ -280,7 +280,7 @@ export default function OfferTimeline({ applicationId, firstName, offer, draft, 
     });
 
   return (
-    <div className="border-hairline border rounded p-3 mb-4" data-testid="offer-card">
+    <div className="border-hairline border border-zinc-200 rounded p-3 mb-4" data-testid="offer-card">
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <span className="text-14 font-medium text-zinc-900">Offer</span>
         <Badge>{STATUS_LABEL[offer.status] || offer.status}</Badge>
