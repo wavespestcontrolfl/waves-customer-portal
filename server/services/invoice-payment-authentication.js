@@ -59,7 +59,7 @@ async function findSettlingAuthenticationAttempt(intent, invoice, database, { lo
   if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
   if (lock) query.forUpdate();
   return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts')
-    .first('id', 'amount', 'credit_applied_delta', 'credit_applied_total');
+    .first('id', 'amount', 'credit_applied_delta', 'credit_applied_total', 'canceled_checkout_payment_intent_id');
 }
 
 // A webhook can arrive before the worker records the decline. Without a

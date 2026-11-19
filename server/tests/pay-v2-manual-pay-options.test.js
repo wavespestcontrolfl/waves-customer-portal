@@ -56,6 +56,10 @@ jest.mock('../services/open-balance', () => ({
 jest.mock('../services/completion-balance-sweep', () => ({
   dunningStoppedInvoiceIds: jest.fn(async () => new Set()),
 }));
+const mockSpendableAccountCredit = jest.fn(async ({ balance }) => Number(balance) || 0);
+jest.mock('../services/customer-credit', () => ({
+  spendableAccountCreditForInvoice: (...args) => mockSpendableAccountCredit(...args),
+}));
 
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
@@ -126,6 +130,8 @@ const ENV_KEYS = ['ZELLE_RECIPIENT', 'VENMO_HANDLE', 'PAYPAL_ME_HANDLE']; // leg
 const saved = {};
 beforeEach(() => {
   ENV_KEYS.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+  mockSpendableAccountCredit.mockClear();
+  mockSpendableAccountCredit.mockImplementation(async ({ balance }) => Number(balance) || 0);
 });
 afterEach(() => {
   ENV_KEYS.forEach((k) => {
@@ -438,6 +444,29 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
     });
     const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
     expect(result).toEqual({ visible: false, reason: 'credit_pending', projectedCredit: 20 });
+  });
+
+  test('$100 gross credit projects only $75 while $25 is reserved for another invoice', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    require('../config/feature-gates').gates.autoApplyAccountCredit = true;
+    mockSpendableAccountCredit.mockResolvedValue(75);
+    db.mockImplementation((table) => {
+      if (table === 'customers') {
+        return chain({
+          first: { billing_mode: null, monthly_rate: null, account_credits: 100, auto_apply_account_credit: true },
+        });
+      }
+      return chain({ first: null });
+    });
+
+    const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', total: 100 }) });
+
+    expect(result).toEqual({ visible: false, reason: 'credit_pending', projectedCredit: 75 });
+    expect(mockSpendableAccountCredit).toHaveBeenLastCalledWith({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+      balance: 100,
+    }, db);
   });
 
   test('a LIVE-resolved payer denies visibility (round 5 finding 3)', async () => {

@@ -18,6 +18,7 @@ jest.mock('../services/invoice-followups', () => ({ stopOnPayment: jest.fn(async
 const { _handlePaymentIntentSucceeded: settle } = require('../routes/stripe-webhook');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const schema = `auth_settlement_${randomUUID().replaceAll('-', '')}`;
+jest.setTimeout(20000);
 
 (connection ? describe : describe.skip)('authenticated saved-card settlement with account credit', () => {
   const tables = ['customers', 'invoices', 'payments', 'stripe_invoice_charge_attempts', 'stripe_orphan_charges',
@@ -81,6 +82,84 @@ const schema = `auth_settlement_${randomUUID().replaceAll('-', '')}`;
   test('two deliveries settle $75 cash and $25 credit once on a $100 invoice', async () => {
     await Promise.all([settle(intent), settle(intent)]);
     await expectSettled('15.00', '-25.00');
+  });
+
+  test('settlement replaces the checkout this attempt retired, including its sibling stamps', async () => {
+    const retired = `pi_old_${attemptId}`;
+    const sibling = randomUUID();
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: retired });
+    await mockDatabase('invoices').insert({ id: sibling, customer_id: customerId, invoice_number: `SIB-${sibling.slice(0, 12)}`,
+      token: randomUUID(), status: 'sent', total: 15, subtotal: 15, line_items: '[]', stripe_payment_intent_id: retired });
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ canceled_checkout_payment_intent_id: retired });
+    await settle(intent);
+    await expectSettled('15.00', '-25.00');
+    expect(await mockDatabase('invoices').where({ id: sibling }).first()).toMatchObject({
+      status: 'sent', total: '15.00', stripe_payment_intent_id: null,
+    });
+  });
+
+  test('an unrelated checkout attached after the preliminary lookup is preserved', async () => {
+    const retired = `pi_old_${attemptId}`;
+    const newer = `pi_new_${attemptId}`;
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: retired });
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ canceled_checkout_payment_intent_id: retired });
+    const holder = await mockDatabase.transaction();
+    let outcome;
+    try {
+      const { rows: [session] } = await holder.raw('SELECT pg_backend_pid() AS pid');
+      await holder('customers').where({ id: customerId }).forUpdate().first('id');
+      outcome = settle(intent);
+      const deadline = Date.now() + 10000;
+      for (;;) {
+        const { rows: [wait] } = await mockDatabase.raw(
+          'SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE ?::int = ANY(pg_blocking_pids(pid))) AS blocked', [session.pid],
+        );
+        if (wait.blocked) break;
+        if (Date.now() >= deadline) throw new Error('Settlement did not reach the customer lock');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await holder('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: newer });
+      await holder.commit();
+      await outcome;
+      expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+        status: 'sent', credit_applied: '0.00', stripe_payment_intent_id: newer,
+      });
+      expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
+        .toMatchObject({ amount: '75.00', resolved: false });
+      expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+    } finally {
+      if (!holder.isCompleted()) await holder.rollback();
+      await outcome;
+    }
+  });
+
+  test.each([
+    ['the invoice gained one cent', 100.01, '75', '0'],
+    ['the submitted base lost one cent', 100, '74.99', '0.01'],
+    ['the submitted surcharge exceeds the capture by one cent', 100, '75', '0.01'],
+  ])('quarantines a one-cent disagreement when %s', async (_description, total, base, surcharge) => {
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ total });
+    Object.assign(intent.metadata, { base_amount: base, card_surcharge: surcharge });
+    await settle(intent);
+    expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
+      .toMatchObject({ amount: '75.00', resolved: false });
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      status: 'sent', total: total.toFixed(2), credit_applied: '0.00',
+    });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+  });
+
+  test('a submitted $1.88 surcharge reconciles with $75 principal and $25 account credit', async () => {
+    Object.assign(intent, { amount: 7688, amount_received: 7688 });
+    intent.metadata.card_surcharge = '1.88';
+    await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ amount: 76.88 });
+    await settle(intent);
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      status: 'paid', total: '101.88', credit_applied: '25.00',
+    });
+    expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id }).first()).toMatchObject({
+      status: 'paid', amount: '76.88', base_amount_cents: 7500, surcharge_amount_cents: 188,
+    });
   });
 
   test('a pre-existing payment uses only the missing credit and finishes in the invoice transaction', async () => {

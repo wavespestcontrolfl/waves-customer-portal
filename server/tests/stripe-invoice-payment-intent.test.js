@@ -4,6 +4,8 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   let stripeClient;
   let dbMock;
   let trxMock;
+  let lockedInvoiceQuery;
+  let customersQuery;
   // Configurable per test: the customer's account-credit balance and what
   // applyAccountCreditToInvoice does to the invoice row when the gated auto-apply
   // path runs. Default to no credit so existing cases keep the original lifecycle.
@@ -59,7 +61,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       where: jest.fn(() => rootInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
     };
-    const lockedInvoiceQuery = {
+    lockedInvoiceQuery = {
       where: jest.fn(() => lockedInvoiceQuery),
       forUpdate: jest.fn(() => lockedInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
@@ -88,8 +90,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     };
     // Auto-apply resolves the customer's account-credit balance up front; these
     // cases have no credit, so the original PI lifecycle must run untouched.
-    const customersQuery = {
+    customersQuery = {
       where: jest.fn(() => customersQuery),
+      forUpdate: jest.fn(() => customersQuery),
       // opted in to automatic credit application (owner ruling 2026-08-28: default OFF, this harness models a customer who turned the slider on)
       first: jest.fn(async () => ({ account_credits: customerAccountCredits, auto_apply_account_credit: true })),
     };
@@ -122,6 +125,7 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     }));
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/customer-credit', () => ({
+      spendableAccountCreditForInvoice: jest.fn(async ({ balance }) => Number(balance) || 0),
       applyAccountCreditToInvoice: jest.fn(async () => {
         if (applyCreditSideEffect) applyCreditSideEffect();
       }),
@@ -196,6 +200,50 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     } finally {
       jest.dontMock('../services/estimate-deposits');
+    }
+  });
+
+  test('hold-for-capture uses $75 available from a $100 balance with $25 reserved elsewhere', async () => {
+    customerAccountCredits = '100.00';
+    invoiceRow.total = '100.00';
+    invoiceRow.stripe_payment_intent_id = null;
+    applyCreditSideEffect = () => { invoiceRow.credit_applied = '75.00'; };
+    const CustomerCredit = require('../services/customer-credit');
+    CustomerCredit.spendableAccountCreditForInvoice.mockResolvedValue(75);
+
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id, {
+      holdCoverageForCapture: true,
+    });
+
+    expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+      customerId: invoiceRow.customer_id,
+      invoiceId: invoiceRow.id,
+      balance: 100,
+    }, trxMock);
+    expect(CustomerCredit.applyAccountCreditToInvoice).toHaveBeenCalledWith({
+      invoiceId: invoiceRow.id,
+    }, trxMock);
+    expect(customersQuery.forUpdate).toHaveBeenCalledTimes(1);
+    expect(customersQuery.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(lockedInvoiceQuery.forUpdate.mock.invocationCallOrder[0]);
+    expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(2500);
+    expect(result.covered_by_credit).not.toBe(true);
+  });
+
+  test('credit-disabled setup does not hold the customer row across payment setup', async () => {
+    jest.doMock('../config/feature-gates', () => ({
+      gates: { autoApplyAccountCredit: false, payPromoCode: false },
+      isEnabled: jest.fn(() => false),
+    }));
+    try {
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(customersQuery.forUpdate).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    } finally {
+      jest.dontMock('../config/feature-gates');
     }
   });
 
@@ -776,6 +824,31 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       expect(promo.redeemAndApplyPromoCode.mock.invocationCallOrder[0])
         .toBeLessThan(applyAccountCreditToInvoice.mock.invocationCallOrder[0]);
       expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(3500);
+    });
+
+    test('a legacy reservation that absorbs the pending promo does not overstate available credit', async () => {
+      customerAccountCredits = '0.00';
+      const promo = withPromoWaiting(25);
+      invoiceRow.stripe_payment_intent_id = null;
+      stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+        id: 'pi_gross_after_reserved_promo',
+        status: 'requires_payment_method',
+        client_secret: 'pi_gross_after_reserved_promo_secret',
+      });
+      const CustomerCredit = require('../services/customer-credit');
+      CustomerCredit.spendableAccountCreditForInvoice.mockResolvedValueOnce(0);
+
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(CustomerCredit.spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+        customerId: invoiceRow.customer_id,
+        invoiceId: invoiceRow.id,
+        balance: 25,
+      }, trxMock);
+      expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
+      expect(CustomerCredit.applyAccountCreditToInvoice).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(7500);
     });
 
     test('no code waiting: the open payment is left alone and nothing is redeemed or applied', async () => {

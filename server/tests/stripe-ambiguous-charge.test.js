@@ -351,6 +351,7 @@ describe('saved-card attempt state updates', () => {
       amount: 42.5,
       creditAppliedDelta: 10,
       creditAppliedTotal: 10,
+      canceledCheckoutPaymentIntentId: 'pi_checkout_old',
       database,
     });
 
@@ -359,6 +360,7 @@ describe('saved-card attempt state updates', () => {
       amount: 42.5,
       credit_applied_delta: 10,
       credit_applied_total: 10,
+      canceled_checkout_payment_intent_id: 'pi_checkout_old',
       submitted_at: expect.any(Date),
     }));
   });

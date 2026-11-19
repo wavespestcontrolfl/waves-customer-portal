@@ -402,6 +402,7 @@ async function commitInvoiceSavedCardChargeSubmission({
   amount,
   creditAppliedDelta,
   creditAppliedTotal,
+  canceledCheckoutPaymentIntentId = null,
   database = db,
 }) {
   // This transaction deliberately uses the root database handle, not the
@@ -413,6 +414,7 @@ async function commitInvoiceSavedCardChargeSubmission({
       amount,
       credit_applied_delta: creditAppliedDelta,
       credit_applied_total: creditAppliedTotal,
+      canceled_checkout_payment_intent_id: canceledCheckoutPaymentIntentId,
       submitted_at: new Date(),
     }, submissionTrx);
   });
@@ -2168,15 +2170,25 @@ const StripeService = {
     // opt-in, owner ruling 2026-08-28) — an opted-out customer's quote must
     // be the gross total, or the confirmed quote and the charge disagree
     // and the charge rejects it as stale.
-    const { getBalance, computeApplication, customerAutoApplyEnabled } = require('./customer-credit');
+    const {
+      getBalance,
+      computeApplication,
+      customerAutoApplyEnabled,
+      spendableAccountCreditForInvoice,
+    } = require('./customer-credit');
     if (require('../config/feature-gates').gates.autoApplyAccountCredit
       && await customerAutoApplyEnabled(invoice.customer_id)) {
       const balance = await getBalance(invoice.customer_id);
+      const spendableBalance = await spendableAccountCreditForInvoice({
+        customerId: invoice.customer_id,
+        invoiceId,
+        balance,
+      }, db);
       const projection = computeApplication({
         total: invoice.total,
         creditApplied: projectedCreditApplied,
         amountPaid: invoice.amount_paid,
-        balance: balance || 0,
+        balance: spendableBalance,
       });
       projectedCreditApplied = projection.newCreditApplied;
     }
@@ -2344,6 +2356,7 @@ const StripeService = {
     let chargeAppliedCreditDelta = 0;
     let chargeOriginalCreditApplied = Number(invoice.credit_applied) || 0;
     let chargeCreditAppliedTotal = chargeOriginalCreditApplied;
+    let canceledCheckoutPaymentIntentId = null;
     try {
       await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
@@ -2775,8 +2788,9 @@ const StripeService = {
         chargeCreditAppliedTotal = chargeOriginalCreditApplied;
         let stalePaymentIntentToCancel = null;
         if (lockedInvoice.stripe_payment_intent_id) {
+          const checkoutPaymentIntentId = String(lockedInvoice.stripe_payment_intent_id);
           const activePayment = await trx('payments')
-            .where({ stripe_payment_intent_id: lockedInvoice.stripe_payment_intent_id })
+            .where({ stripe_payment_intent_id: checkoutPaymentIntentId })
             .first();
           const terminalStatuses = ['failed', 'canceled', 'cancelled', 'refunded'];
           if (activePayment && !terminalStatuses.includes(activePayment.status)) {
@@ -2786,7 +2800,10 @@ const StripeService = {
           // A browser holding that secret can confirm it directly (wallet or
           // ACH). Retire it under the same rules as an abandoned checkout.
           if (!activePayment || activePayment.status === 'failed') {
-            const activeIntent = await stripe.paymentIntents.retrieve(lockedInvoice.stripe_payment_intent_id);
+            const activeIntent = await stripe.paymentIntents.retrieve(checkoutPaymentIntentId);
+            if (!activeIntent || String(activeIntent.id || '') !== checkoutPaymentIntentId) {
+              throw new Error('Could not verify the previous payment for this invoice');
+            }
             if (activePayment && activeIntent.status !== 'canceled'
               && !require('./pay-combined').paymentIntentOwnsInvoice(activeIntent.metadata, invoiceId)) {
               throw new Error('Could not verify the previous payment for this invoice');
@@ -2795,7 +2812,13 @@ const StripeService = {
             if (!cancellableStatuses.includes(activeIntent.status)) {
               throw new Error('Invoice has a different active payment');
             }
-            if (activeIntent.status !== 'canceled') {
+            if (activeIntent.status === 'canceled') {
+              // The exact invoice pointer was retrieved as canceled. Preserve
+              // that durable evidence on the attempt before its replacement
+              // can be submitted; the succeeded webhook can then distinguish
+              // this intentional handoff from an unrelated pointer change.
+              canceledCheckoutPaymentIntentId = checkoutPaymentIntentId;
+            } else {
               // Do not mutate Stripe yet. Account-credit application below can
               // change the quoted total (including fully covering it), and a
               // stale expectedTotal must fail while this existing pay-session
@@ -2805,6 +2828,24 @@ const StripeService = {
             }
           }
         }
+
+        const cancelStaleCheckout = async () => {
+          if (!stalePaymentIntentToCancel) return;
+          const canceledIntent = await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
+          if (!canceledIntent
+            || String(canceledIntent.id || '') !== String(stalePaymentIntentToCancel.id)
+            || canceledIntent.status !== 'canceled') {
+            throw new Error('Could not verify the previous checkout was canceled');
+          }
+          canceledCheckoutPaymentIntentId = String(stalePaymentIntentToCancel.id);
+          // A combined PI is stamped on its siblings — unbind them from the
+          // canceled intent (codex #3427 r19 P2).
+          await require('./pay-combined').clearPaymentIntentStamps(
+            trx,
+            stalePaymentIntentToCancel.id,
+            { keepInvoiceIds: [String(lockedInvoice.id)] },
+          );
+        };
 
         // The stale collection session (if any) was just cancelled, but its id
         // is still on the row and applyAccountCreditToInvoice fail-closes on any
@@ -2850,10 +2891,7 @@ const StripeService = {
               throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
             }
             if (stalePaymentIntentToCancel) {
-              await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
-              // A combined PI is stamped on its siblings — unbind them from
-              // the canceled intent (codex #3427 r19 P2).
-              await require('./pay-combined').clearPaymentIntentStamps(trx, stalePaymentIntentToCancel.id, { keepInvoiceIds: [String(lockedInvoice.id)] });
+              await cancelStaleCheckout();
             }
             // Fully covered by account credit. COMMIT the credit draw-down +
             // prepaid transition (return, don't throw — a throw would roll back
@@ -2900,12 +2938,7 @@ const StripeService = {
           throw new Error('Charge total exceeds the quoted total the customer authorized. Review before charging.');
         }
         if (stalePaymentIntentToCancel) {
-          await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
-          // Unbind combined siblings from the canceled intent (codex #3427
-          // r19 P2) — the saved-card charge replaces only THIS invoice's
-          // session; the other allocation rows must not stay bound to a
-          // dead PI.
-          await require('./pay-combined').clearPaymentIntentStamps(trx, stalePaymentIntentToCancel.id, { keepInvoiceIds: [String(lockedInvoice.id)] });
+          await cancelStaleCheckout();
         }
 
         const invSurchargeDetails = buildSurchargeAmountDetails(invSurchargeCents);
@@ -2969,6 +3002,7 @@ const StripeService = {
           amount: total,
           creditAppliedDelta: chargeAppliedCreditDelta,
           creditAppliedTotal: chargeCreditAppliedTotal,
+          canceledCheckoutPaymentIntentId,
           // Explicitly use the root handle: this small independent transaction
           // must commit before Stripe is called, even though the invoice work
           // around it is still inside `trx`.
@@ -4036,6 +4070,13 @@ const StripeService = {
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
+        const setupCreditGates = require('../config/feature-gates').gates;
+        const setupCreditEnabled = !!invoice.customer_id
+          && !invoice.payer_id
+          && (setupCreditGates.autoApplyAccountCredit
+            || (!opts.holdCoverageForCapture && setupCreditGates.payPromoCode));
+        let setupCreditCustomerId = setupCreditEnabled ? String(invoice.customer_id) : null;
+        let setupCreditCustomer = null;
         // The intent a cancel-and-replace branch below retires (codex local
         // max-effort review on #5434): it must stay in the replacement's
         // idempotency key. Clearing the invoice pointer alone made the key
@@ -4090,12 +4131,51 @@ const StripeService = {
           if (saveCard && ownerId !== String(invoice.customer_id)) {
             stripeCustomerId = await this.ensureStripeCustomer(ownerId);
           }
+          if (setupCreditEnabled) setupCreditCustomerId = ownerId;
+        }
+        // Balance movements and saved-card reservation settlement both take
+        // the customer row before their invoice row. Keep that order here and
+        // hold the row through the balance + reservation reads below, so the
+        // coverage projection cannot observe the old balance after a sibling
+        // has already made its reservation disappear (or vice versa).
+        if (setupCreditCustomerId) {
+          const creditProbe = await trx('customers')
+            .where({ id: setupCreditCustomerId })
+            .first('id', 'account_credits', 'auto_apply_account_credit');
+          const promoProbe = opts.holdCoverageForCapture || !setupCreditGates.payPromoCode
+            ? 0
+            : await require('./invoice-promo-code').pendingPromoCredit(invoice, trx);
+          const probeOptedIn = setupCreditGates.autoApplyAccountCredit
+            && creditProbe?.auto_apply_account_credit === true;
+          if (probeOptedIn || promoProbe > 0) {
+            const probeSpendable = await require('./customer-credit').spendableAccountCreditForInvoice({
+              customerId: setupCreditCustomerId,
+              invoiceId,
+              balance: (Number(creditProbe?.account_credits) || 0) + promoProbe,
+            }, trx);
+            const probeAvailable = probeOptedIn
+              ? probeSpendable
+              : Math.min(promoProbe, probeSpendable);
+            if (probeAvailable > 0) {
+              setupCreditCustomer = await trx('customers')
+                .where({ id: setupCreditCustomerId })
+                .forUpdate()
+                .first('id', 'account_credits', 'auto_apply_account_credit');
+            }
+          }
         }
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceId })
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
+        const lockedCustomerId = lockedInvoice.customer_id ? String(lockedInvoice.customer_id) : null;
+        if (setupCreditCustomerId && lockedCustomerId !== setupCreditCustomerId) {
+          const ownerErr = new Error('The account changed while preparing this payment — refreshing.');
+          ownerErr.statusCode = 409;
+          ownerErr.staleBalance = true;
+          throw ownerErr;
+        }
         assertInvoiceCollectible(lockedInvoice);
         // Preserve the original collectible status and provenance. Full
         // account-credit coverage below changes lockedInvoice to prepaid,
@@ -4146,13 +4226,6 @@ const StripeService = {
         // an opted-out balance reads as zero here, so the stale-PI triage,
         // the coverage probe and the apply all leave it untouched.
         //
-        let autoCredit = 0;
-        if (require('../config/feature-gates').gates.autoApplyAccountCredit && lockedInvoice.customer_id) {
-          const creditRow = await trx('customers')
-            .where({ id: lockedInvoice.customer_id })
-            .first('account_credits', 'auto_apply_account_credit');
-          autoCredit = creditRow?.auto_apply_account_credit === true ? (Number(creditRow?.account_credits) || 0) : 0;
-        }
         // A promo code the customer entered on this invoice's pay page and
         // not redeemed yet (GATE_PAY_PROMO_CODE, invoice-promo-code.js) is
         // credit this setup will post and draw too, whatever their
@@ -4160,10 +4233,35 @@ const StripeService = {
         // here, so the stale-PI triage below clears the way for it; the
         // redemption and its draw are one step at the apply. Never on a
         // hold-for-capture setup: the code is not offered there.
-        const promoPending = opts.holdCoverageForCapture
+        const promoPending = !setupCreditCustomer || opts.holdCoverageForCapture
           ? 0
           : await require('./invoice-promo-code').pendingPromoCredit(lockedInvoice, trx);
-        const availableCredit = autoCredit + promoPending;
+        const autoApplyEnabled = setupCreditGates.autoApplyAccountCredit;
+        let autoCredit = 0;
+        let availableCredit = 0;
+        if (setupCreditCustomer && !lockedInvoice.payer_id
+          && (autoApplyEnabled || promoPending > 0)) {
+          const creditRow = setupCreditCustomer;
+          const optedIn = autoApplyEnabled && creditRow?.auto_apply_account_credit === true;
+          if (optedIn || promoPending > 0) {
+            // Promo issuance happens before its capped draw. Price against the
+            // balance that will exist after that post, so a legacy saved-card
+            // reservation larger than today's balance absorbs the promo first
+            // instead of making setup promise credit the savepoint cannot use.
+            const postPromoSpendable = await require('./customer-credit').spendableAccountCreditForInvoice({
+              customerId: lockedInvoice.customer_id,
+              invoiceId,
+              balance: (Number(creditRow?.account_credits) || 0) + promoPending,
+            }, trx);
+            // The promo hook consumes up to its own posted amount. Only the
+            // remainder came from the customer's pre-existing opted-in
+            // balance and should trigger the second, automatic draw.
+            autoCredit = optedIn ? Math.max(0, postPromoSpendable - promoPending) : 0;
+            availableCredit = optedIn
+              ? postPromoSpendable
+              : Math.min(promoPending, postPromoSpendable);
+          }
+        }
 
         // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice
         // fail-closes on any attached PI, and the recovery path below would

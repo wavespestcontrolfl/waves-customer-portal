@@ -127,7 +127,11 @@ async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
   // preview would show a coverage the setup path will never apply.
   const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
   if (row?.auto_apply_account_credit !== true) return false;
-  const credit = Number(row?.account_credits) || 0;
+  const credit = await require('./customer-credit').spendableAccountCreditForInvoice({
+    customerId: invoice.customer_id,
+    invoiceId: invoice.id,
+    balance: row.account_credits,
+  }, database);
   return credit > 0 && credit >= invoiceAmountDue(invoice);
 }
 

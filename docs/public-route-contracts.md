@@ -814,6 +814,9 @@ payment and any missing portion of its submitted account credit in one invoice
 transaction. A funding shortfall or amount mismatch records the captured
 payment for reconciliation and keeps the invoice open. A later dispute can
 reopen a settled invoice after the original authentication hold has cleared.
+If the card charge replaced an earlier checkout, settlement can clear the
+old invoice pointer only with that attempt's recorded Stripe cancellation
+for the exact prior PaymentIntent.
 The `/confirm` endpoint can still record money the processor has already accepted.
 
 Off-Stripe tender block (2026-08-29; ZELLE-ONLY since 2026-09-02 — owner

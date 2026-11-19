@@ -9,6 +9,10 @@
 // `database` param (pay-v2 imports it; it no longer re-exports it).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+const mockSpendableAccountCredit = jest.fn(async ({ balance }) => Number(balance) || 0);
+jest.mock('../services/customer-credit', () => ({
+  spendableAccountCreditForInvoice: (...args) => mockSpendableAccountCredit(...args),
+}));
 const mockGates = { autoApplyAccountCredit: true };
 const mockEnabled = { payIncludeBalance: true };
 jest.mock('../config/feature-gates', () => ({
@@ -63,6 +67,7 @@ beforeEach(() => {
   mockStopped.mockResolvedValue(new Set());
   mockOpenBalance.mockResolvedValue([sib('s1')]);
   mockReconcile.mockResolvedValue(undefined);
+  mockSpendableAccountCredit.mockImplementation(async ({ balance }) => Number(balance) || 0);
   // The readOnly member predicate re-reads each sibling's FULL invoice row by
   // id (openBalanceInvoices rows carry no customer/payer columns).
   fullRows = new Map();
@@ -212,7 +217,7 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
 });
 
 describe('invoiceCreditWouldFullyCover (lives in pay-combined)', () => {
-  const invoice = { customer_id: 'cust-1', total: 100, credit_applied: 0 };
+  const invoice = { id: 'inv-1', customer_id: 'cust-1', total: 100, credit_applied: 0 };
   const dbReturning = (row) => {
     const handle = jest.fn(() => ({ where: () => ({ first: jest.fn(async () => row) }) }));
     return handle;
@@ -223,6 +228,19 @@ describe('invoiceCreditWouldFullyCover (lives in pay-combined)', () => {
     await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: handle })).resolves.toBe(true);
     expect(handle).toHaveBeenCalledWith('customers');
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a sibling saved-card reservation reduces gross credit before the full-coverage verdict', async () => {
+    const handle = dbReturning({ account_credits: 100, auto_apply_account_credit: true });
+    mockSpendableAccountCredit.mockResolvedValueOnce(75);
+
+    await expect(PayCombined.invoiceCreditWouldFullyCover(invoice, { database: handle }))
+      .resolves.toBe(false);
+    expect(mockSpendableAccountCredit).toHaveBeenCalledWith({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+      balance: 100,
+    }, handle);
   });
 
   test('the same verdicts as before: partial, opted out, payer-billed, gate off', async () => {

@@ -5,6 +5,10 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: true } }));
+const mockSpendableAccountCredit = jest.fn(async ({ balance }) => Number(balance) || 0);
+jest.mock('../services/customer-credit', () => ({
+  spendableAccountCreditForInvoice: (...args) => mockSpendableAccountCredit(...args),
+}));
 
 const db = require('../models/db');
 const {
@@ -40,7 +44,7 @@ function setQueues(queues) {
   });
 }
 
-const INVOICE = { customer_id: 'cust-1', scheduled_service_id: 'ss-1' };
+const INVOICE = { id: 'inv-1', customer_id: 'cust-1', scheduled_service_id: 'ss-1' };
 
 describe('invoiceRequiresSavedMethod fail-closed error handling (Codex #2507 round-6 P1)', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -129,9 +133,12 @@ describe('invoiceCaptureNeeded — saved-chargeable-method test, NOT customerOnA
 });
 
 describe('invoiceCreditWouldFullyCover — held-coverage probe (Codex #2507 round-7 P1)', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSpendableAccountCredit.mockImplementation(async ({ balance }) => Number(balance) || 0);
+  });
 
-  const COVERED_INVOICE = { customer_id: 'cust-1', total: 100, credit_applied: 0 };
+  const COVERED_INVOICE = { id: 'inv-1', customer_id: 'cust-1', total: 100, credit_applied: 0 };
 
   test('credit ≥ amount due → would fully cover', async () => {
     setQueues({ customers: [qb({ first: { account_credits: 150, auto_apply_account_credit: true } })] });
@@ -141,6 +148,18 @@ describe('invoiceCreditWouldFullyCover — held-coverage probe (Codex #2507 roun
   test('partial credit → would NOT fully cover (normal apply + PI mint captures the method)', async () => {
     setQueues({ customers: [qb({ first: { account_credits: 40, auto_apply_account_credit: true } })] });
     await expect(invoiceCreditWouldFullyCover(COVERED_INVOICE)).resolves.toBe(false);
+  });
+
+  test('$100 gross credit with $25 reserved elsewhere leaves only $75 and does not hold coverage', async () => {
+    setQueues({ customers: [qb({ first: { account_credits: 100, auto_apply_account_credit: true } })] });
+    mockSpendableAccountCredit.mockResolvedValueOnce(75);
+
+    await expect(invoiceCreditWouldFullyCover(COVERED_INVOICE)).resolves.toBe(false);
+    expect(mockSpendableAccountCredit).toHaveBeenCalledWith({
+      customerId: 'cust-1',
+      invoiceId: 'inv-1',
+      balance: 100,
+    }, db);
   });
 
   test('credit counts against amount DUE (total − credit_applied), not raw total', async () => {

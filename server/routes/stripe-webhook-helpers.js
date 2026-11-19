@@ -93,6 +93,21 @@ function savedCardCreditAdjustment({ attempt, invoice }) {
   };
 }
 
+// The replacement charge was submitted with a fixed base and surcharge.
+// Compare both in cents before the webhook changes the invoice's total.
+function authenticatedSavedCardAmountMatches(paymentIntent, attempt, amountDue) {
+  const metadata = paymentIntent.metadata || {};
+  if (metadata.base_amount == null || metadata.base_amount === '') return false;
+  const submittedBase = Math.round(Number(metadata.base_amount) * 100);
+  const submittedSurcharge = Math.round(Number(metadata.card_surcharge ?? 0) * 100);
+  const captured = paymentIntent.amount_received;
+  return Number.isSafeInteger(captured) && captured > 0 && paymentIntent.amount === captured
+    && Number.isSafeInteger(submittedSurcharge) && submittedSurcharge >= 0
+    && submittedBase === Math.round(amountDue * 100)
+    && submittedBase + submittedSurcharge === captured
+    && (attempt.amount == null || Math.round(Number(attempt.amount) * 100) === captured);
+}
+
 function invoicePaymentIntentBlocksFallback({
   invoiceStatus,
   activePaymentIntentId,
@@ -129,5 +144,6 @@ module.exports = {
   lateSavedCardPaymentNeedsOrphan,
   savedCardAttemptMatchesPaymentIntent,
   savedCardCreditAdjustment,
+  authenticatedSavedCardAmountMatches,
   STALE_CLAIM_WINDOW_MS,
 };

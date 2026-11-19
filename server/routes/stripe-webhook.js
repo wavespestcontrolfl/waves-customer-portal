@@ -16,6 +16,7 @@ const {
   lateSavedCardPaymentNeedsOrphan,
   savedCardAttemptMatchesPaymentIntent,
   savedCardCreditAdjustment,
+  authenticatedSavedCardAmountMatches,
   STALE_CLAIM_WINDOW_MS,
 } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
@@ -481,6 +482,8 @@ async function findInvoiceForPaymentIntent(paymentIntent) {
       && String(byMetadata.stripe_payment_intent_id) !== String(paymentIntent.id)) {
       const savedCardAttempt = await findMatchingSavedCardAttempt(db, byMetadata, paymentIntent);
       if (savedCardAttempt) return byMetadata;
+      const authentication = await findSettlingAuthenticationAttempt(paymentIntent, byMetadata, db);
+      if (authentication?.canceled_checkout_payment_intent_id === byMetadata.stripe_payment_intent_id) return byMetadata;
       logger.warn(
         `[stripe-webhook] PI ${paymentIntent.id} metadata invoice ${invoiceId} is already bound to ${byMetadata.stripe_payment_intent_id}; ignoring metadata fallback`,
       );
@@ -2032,9 +2035,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         // charge with no payments row.
         return QUARANTINED;
       }
+      const lockedAuthentication = authenticatingAttempt
+        && await findSettlingAuthenticationAttempt(paymentIntent, lockedInvoice, trx, { lock: true });
+      if (authenticatingAttempt && !lockedAuthentication) return quarantineAuthentication('the saved-card attempt no longer matches');
+      const canceledCheckoutId = lockedAuthentication?.canceled_checkout_payment_intent_id;
+      const replacesCanceledCheckout = !!activePi && activePi === canceledCheckoutId && activePi !== piId;
       if (invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,
-        activePaymentIntentId: activePi,
+        activePaymentIntentId: replacesCanceledCheckout ? null : activePi,
         incomingPaymentIntentId: piId,
         terminalStatuses: INVOICE_TERMINAL_PAYMENT_STATUSES,
         hasMatchingSavedCardAttempt: !!matchingAmbiguousAttempt,
@@ -2047,9 +2055,6 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         return;
       }
 
-      const lockedAuthentication = authenticatingAttempt
-        && await findSettlingAuthenticationAttempt(paymentIntent, lockedInvoice, trx, { lock: true });
-      if (authenticatingAttempt && !lockedAuthentication) return quarantineAuthentication('the saved-card attempt no longer matches');
       const creditAttempt = lockedAuthentication || matchingAmbiguousAttempt;
       if (creditAttempt) {
         const creditAdjustment = savedCardCreditAdjustment({
@@ -2057,13 +2062,16 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           invoice: lockedInvoice,
         });
         if (lockedAuthentication) {
-          if (!chargedTotal || (creditAttempt.amount != null && chargedTotal !== Number(creditAttempt.amount))
-            || (creditAdjustment && creditAdjustment.delta > Number(creditAttempt.credit_applied_delta))) {
-            return quarantineAuthentication('the captured amount or required credit differs from the submitted attempt');
+          if (creditAdjustment && creditAdjustment.delta > Number(creditAttempt.credit_applied_delta)) {
+            return quarantineAuthentication('the required credit exceeds the submitted draw');
           }
           const expectedInvoice = creditAdjustment ? { ...lockedInvoice, credit_applied: creditAdjustment.target } : lockedInvoice;
+          const amountDue = invoiceAmountDue(expectedInvoice);
+          if (!authenticatedSavedCardAmountMatches(paymentIntent, creditAttempt, amountDue)) {
+            return quarantineAuthentication('the locked invoice, submitted base and surcharge, or captured cents disagree');
+          }
           try {
-            assertInvoicePaymentIntentTenderMatches(paymentIntent, details.paymentMethod || 'card', invoiceAmountDue(expectedInvoice));
+            assertInvoicePaymentIntentTenderMatches(paymentIntent, details.paymentMethod || 'card', amountDue);
           } catch (err) {
             return quarantineAuthentication(err.message);
           }
@@ -2119,6 +2127,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         invoiceLinkQuery.where(function activePaidIntentGuard() {
           this.whereNull('stripe_payment_intent_id')
             .orWhere({ stripe_payment_intent_id: piId });
+          if (replacesCanceledCheckout) this.orWhere({ stripe_payment_intent_id: canceledCheckoutId });
         });
       }
       const invoiceLinked = await invoiceLinkQuery.update(fallbackInvoiceUpdates);
@@ -2126,6 +2135,9 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         throw new Error(`Invoice ${invoice.id} no longer matches PI ${piId}`);
       }
       fallbackLinkedInvoiceId = lockedInvoice.id;
+      if (canceledCheckoutId && canceledCheckoutId !== piId) {
+        await require('../services/pay-combined').clearPaymentIntentStamps(trx, canceledCheckoutId, { keepInvoiceIds: [lockedInvoice.id] });
+      }
 
       const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(lockedInvoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);

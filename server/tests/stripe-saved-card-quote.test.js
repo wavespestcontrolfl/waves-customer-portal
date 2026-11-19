@@ -156,6 +156,63 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     }));
   });
 
+  test('quotes only $75 spendable from a $100 balance when another invoice reserves $25', async () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', status: 'draft', total: '100.00',
+      credit_applied: '0.00', amount_paid: '0.00', payer_id: null,
+    };
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit',
+    };
+    const customer = { account_credits: '100.00', auto_apply_account_credit: true };
+    const query = (row) => {
+      const chain = {
+        where: jest.fn(() => chain),
+        first: jest.fn().mockResolvedValue(row),
+      };
+      return chain;
+    };
+    const db = jest.fn((table) => {
+      if (table === 'invoices') return query(invoice);
+      if (table === 'payment_methods') return query(card);
+      if (table === 'customers') return query(customer);
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    const spendableAccountCreditForInvoice = jest.fn(async () => 75);
+
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => ({})));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: true } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/customer-credit', () => ({
+      ...jest.requireActual('../services/customer-credit'),
+      spendableAccountCreditForInvoice,
+    }));
+
+    try {
+      const StripeService = require('../services/stripe');
+      const quote = await StripeService.quoteInvoiceSavedCardCharge('inv-1', 'pm-1');
+
+      expect(spendableAccountCreditForInvoice).toHaveBeenCalledWith({
+        customerId: 'cust-1',
+        invoiceId: 'inv-1',
+        balance: 100,
+      }, db);
+      expect(quote).toMatchObject({
+        base: 25,
+        surcharge: 0,
+        total: 25,
+        projectedCreditApplied: 75,
+        coveredByCredit: false,
+      });
+    } finally {
+      jest.dontMock('../services/customer-credit');
+    }
+  });
+
   test.each([
     [null, 'requires_payment_method', 'Invoice amount changed after the payment quote'],
     ['failed', 'requires_payment_method', 'Invoice amount changed after the payment quote'],
