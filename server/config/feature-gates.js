@@ -101,6 +101,7 @@
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
  *   GATE_CALL_APPLICANT_HANDLING=true (a phone call whose caller is a JOB APPLICANT or a vendor/partner is handled as that third party, not as a customer call: the call is labeled vendor_logged even when the model recommended no_action_needed; no customer-only review card is raised on it (service address, email, name, consent capture); a promise the office made on it is stored as kind other, so the customer follow-up watchdog does not page on it; and a job applicant call with a valid extraction files ONE Careers application (role technician, status new, source phone_call) unless an open application with the same phone already exists. Sends nothing to the applicant: no text, no email, no invite, no AI screen. Read at call time via callApplicantHandlingLive(), strict 'true', dark by default; off = every call is handled exactly as before.)
  *   GATE_CALL_PREPAY_CHOICE=true (a caller who chose annual prepay on a call, when the call extraction carries service_request.billing_choice = annual_prepay: (1) the scheduling payload of a not-booked call and its held-visit row on Dispatch say "Caller chose annual prepay", and Book it opens the New appointment form with Annual prepay preselected when the customer's linked estimate is prepay-eligible; (2) for a call the pipeline DID book, one admin-only Needs Review card (reason call_prepay_choice) per call, filed every 10 minutes while the customer's newest open estimate is prepay-eligible, whose one tap "Accept as annual prepay" runs the same accept the New appointment form runs (a DRAFT annual prepay invoice that is NOT sent, plus a payment-pending term). The office decides every accept; nothing is accepted, invoiced or texted by the sweep. Read at call time via callPrepayChoiceLive(), strict 'true', dark by default; off = no field is carried, no card is filed, the card's route answers 404, and the form opens as before.)
+ *   GATE_CALL_PHONE_YES_ACCEPT=true (a call that booked a pest visit while the customer had an open estimate: every 10 minutes the call-phone-yes sweep files ONE admin card for it, "Caller said yes to pay per application on the call" with the caller's words, or "No yes heard" (a later annual prepay choice, cancellation or one-time ask is no yes, named on the card; an annual choice on the booking call itself is the prepay card's). The card records a shadow verdict (would an automatic accept go ahead, and why not) and stays open while a visit the call booked is on the calendar, also after the estimate expires. It accepts nothing and sends nothing; the booking text keeps the accept link. Owner 2026-11-18 "ok go" (step 1: the office taps); the owner flips it. Kill: unset it; off = no card. Read at call time: callPhoneYesAcceptLive())
  *   GATE_CALL_CANCEL_GUARD=true (the New Appointment form shows "Canceled on a call" with the call's summary under the
  *     chosen customer when that customer's latest real conversation in the last 14 days filed a cancellation card that
  *     still stands. A warning only: the save goes through. Never texts, emails, changes a visit or closes a card. Read at
@@ -2504,6 +2505,8 @@ const gates = {
   callHeldVisit: process.env.GATE_CALL_HELD_VISIT === 'true',
   // GATE_CALL_PREPAY_CHOICE (annual prepay chosen on a call: carried to Dispatch + one office card per booked call, dark). Boot-log entry only; the call-time reader is callPrepayChoiceLive().
   callPrepayChoice: process.env.GATE_CALL_PREPAY_CHOICE === 'true',
+  // GATE_CALL_PHONE_YES_ACCEPT (a call that booked a pest visit on an open estimate files one admin card for the office's accept, dark). Boot-log entry only; the call-time reader is callPhoneYesAcceptLive().
+  callPhoneYesAccept: process.env.GATE_CALL_PHONE_YES_ACCEPT === 'true',
   // GATE_CALL_CANCEL_GUARD (a "Canceled on a call" notice on New Appointment, dark). Boot-log entry only; the call-time reader is callCancelGuardLive().
   callCancelGuard: process.env.GATE_CALL_CANCEL_GUARD === 'true',
   // GATE_AI_CHANGE_CHECK (before-and-after AI citation check per content change + one lost-citations digest leg, dark). Boot-log entry only; the call-time reader is aiChangeCheckLive().
@@ -9153,6 +9156,11 @@ function callLeadLazyStripeLive() {
 function callPrepayChoiceLive() {
   return process.env.GATE_CALL_PREPAY_CHOICE === 'true';
 }
+// GATE_CALL_PHONE_YES_ACCEPT read at CALL time, strict `=== 'true'`, dark in every environment. The owner flips it (its cards
+// ask the office to accept estimates, and an accept changes a customer's billing). Off = byte-identical: no card.
+function callPhoneYesAcceptLive() {
+  return process.env.GATE_CALL_PHONE_YES_ACCEPT === 'true';
+}
 // GATE_CALL_CANCEL_GUARD read at CALL time, strict `=== 'true'`, dark in every environment. Off = byte-identical: the
 // cancel-notice route answers {enabled:false}, so New Appointment renders as before.
 function callCancelGuardLive() {
@@ -9345,6 +9353,8 @@ module.exports.slabBusinessSiteTaxLive = slabBusinessSiteTaxLive;
 module.exports.callApplicantHandlingLive = callApplicantHandlingLive;
 // GATE_CALL_PREPAY_CHOICE reader, on its own line so gate PRs never conflict.
 module.exports.callPrepayChoiceLive = callPrepayChoiceLive;
+// GATE_CALL_PHONE_YES_ACCEPT reader, on its own line so gate PRs never conflict.
+module.exports.callPhoneYesAcceptLive = callPhoneYesAcceptLive;
 // GATE_CALL_CANCEL_GUARD reader, on its own line so gate PRs never conflict.
 module.exports.callCancelGuardLive = callCancelGuardLive;
 // GATE_AI_CHANGE_CHECK reader, on its own line so gate PRs never conflict.

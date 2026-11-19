@@ -25,14 +25,16 @@ const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candid
 // addresses, and a family-account suggestion lists customers and the caller's number for the office to
 // link. Hidden from the tech list and counts, and refused on every shared transition.
 // Cards whose transitions must carry the version (expected_updated_at) the operator saw: a reprocess
-// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
+// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion; the
+// phone-yes sweep rewrites its card's yes).
 const VERSION_BOUND_REASONS = [
   'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
   'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs', 'family_account_candidates', 'name_spelling_differs',
-  'call_prepay_choice',
+  'call_prepay_choice', 'call_phone_yes',
 ];
 // call_prepay_choice (GATE_CALL_PREPAY_CHOICE): the card carries the customer's estimate amount, and its one tap leads to an invoice: admin only.
-const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs', 'call_prepay_choice'];
+// call_phone_yes (GATE_CALL_PHONE_YES_ACCEPT): the card asks the office to accept an estimate (a billing decision): admin only.
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs', 'call_prepay_choice', 'call_phone_yes'];
 // Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
 // the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
 // what the card asks).
@@ -46,6 +48,7 @@ const NOT_A_VERDICT_MESSAGES = {
   text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
   name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
   call_prepay_choice: 'This card offers to accept the customer\u2019s estimate as annual prepay, not a call verdict — use Accept as annual prepay, or Resolve or Dismiss.',
+  call_phone_yes: 'This card asks the office to accept the customer\u2019s estimate, not a call verdict — accept it from the estimate, then use Resolve or Dismiss.',
 };
 
 
@@ -2693,6 +2696,8 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // …and the phone-yes card, settled by the office's accept on the estimate (or Resolve / Dismiss).
+          'call_phone_yes',
           // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
           'family_account_candidates',
           // …and a no-text line card (text_number_differs): settled by its own Resolve/Dismiss only.

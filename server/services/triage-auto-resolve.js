@@ -91,7 +91,7 @@
  *     (reschedule_or_cancel, existing_appointment_coordination: call-
  *     reschedule-proposals / -apply / call-held-visits), cancellation_request
  *     (call-cancel-guard), callback_number_needed / text_number_differs
- *     (disclaimed-number-holds), call_prepay_choice, customer_creation_failed,
+ *     (disclaimed-number-holds), call_prepay_choice, call_phone_yes, customer_creation_failed,
  *     email_bounce_reverify, family_account_candidates,
  *     reschedule_link_promise, do_not_contact_requested, after_hours_emergency,
  *     and the spam / extraction-failure cards other rules own.

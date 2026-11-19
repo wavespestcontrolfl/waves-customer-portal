@@ -10361,6 +10361,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — a call that BOOKED a pest visit while the customer had an open estimate (GATE_CALL_PHONE_YES_ACCEPT,
+  // checked each tick): files ONE admin card so the office accepts the estimate, and closes the cards that stopped being
+  // true. It accepts nothing and sends nothing. See server/services/call-phone-yes-accept.js.
+  cron.schedule('9,19,29,39,49,59 * * * *', async () => {
+    if (!require('../config/feature-gates').callPhoneYesAcceptLive()) return;
+    try {
+      await runExclusive('call-phone-yes', async () => {
+        const result = await require('./call-phone-yes-accept').runCallPhoneYesSweep();
+        if (result.filed > 0 || result.closed > 0) {
+          logger.info(`[call-phone-yes] scanned=${result.scanned} filed=${result.filed} closed=${result.closed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[call-phone-yes] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // Call booking-miss watchdog — every 10 min (owner 2026-11-18: a visit the
   // call agent held rings about 15 minutes after the call, not 1.5-2 hours
