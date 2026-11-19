@@ -86,7 +86,8 @@ describe('what the query asks for', () => {
       ['leftJoin', 'service_records as sr', 'sr.id', 'i.service_record_id'],
       ['joinRaw', 'JOIN scheduled_services AS s ON s.id = COALESCE(i.scheduled_service_id, sr.scheduled_service_id)'],
       ['where', 'i.status', 'paid'],
-      ['whereNull', 'i.receipt_sent_at'], ['whereNull', 'i.archived_at'],
+      // An accepted receipt text is stamped on its own (receipt_sms_sent_at): that customer has the receipt.
+      ['whereNull', 'i.receipt_sent_at'], ['whereNull', 'i.receipt_sms_sent_at'], ['whereNull', 'i.archived_at'],
       ['where', 'i.total', '>', 0],
       ['whereNull', 'i.payer_statement_id'], ['whereNull', 'i.payer_id'],
       ['where', 'i.paid_at', '>=', new Date('2026-11-11T19:50:00Z')],
@@ -151,14 +152,27 @@ describe('raising', () => {
     expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(C), keyOf(D)]);
   });
 
-  test('a receipt whose text the visit summary carried rings nothing (the queue rings its own bell for a missing email)', async () => {
+  test('a carried receipt text never accepted rings only when the queue\'s own carried-receipt alert does not stand for it', async () => {
     candidates = [row(A), row(B)];
     jobs = {
       [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } },
       [B]: { status: 'failed', sms_result: JSON.stringify({ sent: false, reason: 'carried_by_visit_summary' }) },
     };
+    // The queue raised its alert for A only (its own raise can fail): B gets this bell, A keeps one bell.
+    episodes.openAdminAlertKeys.mockImplementation(async (_conn, prefix) => (prefix === `summary-carried-receipt-email:${A}` ? [prefix] : []));
     await check.runPaidVisitReceiptCheck({ now: NOW, conn: makeConn() });
-    expect(raised()).toEqual([]);
+    expect(raised().map((b) => b.opts.dedupeKey)).toEqual([keyOf(B)]);
+  });
+
+  test('an operator send parked for reconciliation (outcome unknown) asks to check before sending again', async () => {
+    const { RECONCILIATION_HOLD_ERROR } = require('../services/receipt-delivery-queue');
+    candidates = [row(A)];
+    jobs = { [A]: { status: 'failed', last_error: RECONCILIATION_HOLD_ERROR } };
+    await run();
+    const [bell] = raised();
+    expect(bell.headline).toBe('Billing — check that Pat Tester got the receipt');
+    expect(bell.why).toBe('The $125.00 invoice was paid by check at the Nov 18 visit; an earlier receipt send may have gone out.');
+    expect(bell.opts.dedupeKey).toBe(keyOf(A));
   });
 
   test('a customer with no real name still gets a bell', async () => {
@@ -208,11 +222,12 @@ describe('closing', () => {
 
   test.each([
     ['receipt sent', { receipt_sent_at: new Date('2026-11-18T18:00:00Z') }, 'Receipt sent', null],
+    ['receipt sent', { receipt_sms_sent_at: new Date('2026-11-18T18:00:00Z') }, 'Receipt sent', null],
     ['invoice void', { status: 'void' }, 'Invoice void', null],
     ['invoice archived', { archived_at: new Date('2026-11-18T18:00:00Z') }, 'Invoice archived', null],
     ['receipts turned off', {}, 'Receipts turned off', () => { prefs = { 'cust-1': { payment_receipt: false } }; }],
     ['receipt delivered', {}, 'Receipt delivered', () => { jobs = { [A]: { status: 'completed', email_result: { ok: true } } }; }],
-    ['receipt carried by the visit text', {}, 'Receipt carried by the visit text', () => { jobs = { [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } } }; }],
+    ['the visit text alert covers it', {}, 'The visit text alert covers it', () => { jobs = { [A]: { status: 'completed', sms_result: { sent: false, reason: 'carried_by_visit_summary' } } }; }],
   ])('%s closes the bell with a one-line resolution', async (why, change, resolution, arrange) => {
     candidates = [];
     invoices = [{ id: A, customer_id: 'cust-1', status: 'paid', receipt_sent_at: null, archived_at: null, ...change }];

@@ -6,24 +6,27 @@
 // check that would have found it without the owner (portal .claude/commands/lesson.md, "Check it on live data").
 //
 // A hit is an invoice where ALL hold:
-//   - status paid, no receipt_sent_at, not archived, total above 0, not a payer statement child (payer_statement_id)
-//     and not billed to a third-party payer (payer_id);
+//   - status paid, no receipt_sent_at and no receipt_sms_sent_at (an accepted receipt text, stamped on its own), not
+//     archived, total above 0, not a payer statement child (payer_statement_id) and not billed to a third-party payer
+//     (payer_id);
 //   - it links to a visit (scheduled_service_id, or through its service record: service_records.scheduled_service_id, as
 //     invoice.js resolves a post-completion invoice) and the ET calendar day of paid_at is that visit's scheduled_date
 //     ("paid at the visit": a back-office reconciliation of an old check is skipped);
 //   - paid_at is between 7 days and 2 hours ago;
 //   - the customer is not an internal test customer and has not turned payment receipts off
 //     (notification_prefs.payment_receipt = false);
-//   - its receipt_delivery_jobs row (one per invoice) is not still in flight (any status but completed or failed), did not
-//     deliver a leg (email_result.ok or sms_result.sent: a delivered receipt the stamp missed), and its Text leg was not
-//     carried by the visit summary text (the summary sent the receipt link; the queue rings its own bell when that
-//     receipt's email did not go). A failed job that delivered nothing IS a hit.
+//   - its receipt_delivery_jobs row (one per invoice) is not still in flight (any status but completed or failed) and did
+//     not deliver a leg (email_result.ok or sms_result.sent: a delivered receipt the stamp missed). A Text leg carried by
+//     the visit summary text that was never accepted is a hit, unless the queue's own carried-receipt alert
+//     (CARRIED_RECEIPT_ALERT_PREFIX) stands for it: one bell per invoice. A failed job that delivered nothing IS a hit.
+//     A failed job parked for reconciliation (RECONCILIATION_HOLD_ERROR: an operator send whose outcome is unknown) is a
+//     hit with other words: check that the customer got the receipt before sending it again.
 //
 // ONE Billing bell per invoice (category billing, dedupeKey `paid-visit-no-receipt:<invoice id>`, bell: true because
 // billing is silenced by default), raised once per episode (raiseAdminAlertWithReopen: a standing row is a silent
-// dedupe, a person's Done stays done). Each run first closes every open bell whose invoice now has a receipt stamp, is
-// no longer paid, is archived or is gone, or whose receipt a job delivered or the visit text carried, or whose customer
-// turned payment receipts off since. A lookup that throws fails CLOSED for that row (no raise, no close) and the
+// dedupe, a person's Done stays done). Each run first closes every open bell whose invoice now has a receipt stamp
+// (email or text), is no longer paid, is archived or is gone, or whose receipt a job delivered, or whose carried
+// receipt the queue's alert now covers, or whose customer turned payment receipts off since. A lookup that throws fails CLOSED for that row (no raise, no close) and the
 // run throws after the other rows, so job_health shows it. Standing down while ALERT_EPISODES is off, as every
 // episode closer does.
 // Read-only except admin notification rows; texts, emails and calls no one, no paid call. No GATE_* (owner rule
@@ -37,7 +40,7 @@ const { dateOnlyString } = require('../utils/date-only');
 const { composeAdminAlert } = require('./admin-alert-compose');
 const { fitAction, realName, shortDateET } = require('./admin-alert-names');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { TEXT_CARRIED_BY_SUMMARY } = require('./receipt-delivery-queue');
+const { TEXT_CARRIED_BY_SUMMARY, CARRIED_RECEIPT_ALERT_PREFIX, RECONCILIATION_HOLD_ERROR } = require('./receipt-delivery-queue');
 const episodes = require('./admin-alert-episodes');
 
 const KEY_PREFIX = 'paid-visit-no-receipt:';
@@ -62,7 +65,7 @@ function paidAtVisit(row) {
 // Why the invoice's bell is done, or null while it stands.
 function settledReason(row) {
   if (!row) return 'invoice gone';
-  if (row.receipt_sent_at) return 'receipt sent';
+  if (row.receipt_sent_at || row.receipt_sms_sent_at) return 'receipt sent';
   if (String(row.status || '').toLowerCase() !== 'paid') return `invoice ${String(row.status || 'changed').toLowerCase()}`;
   if (row.archived_at) return 'invoice archived';
   return null;
@@ -75,13 +78,13 @@ async function loadCandidates(conn, now) {
     .leftJoin('service_records as sr', 'sr.id', 'i.service_record_id')
     .joinRaw('JOIN scheduled_services AS s ON s.id = COALESCE(i.scheduled_service_id, sr.scheduled_service_id)')
     .leftJoin('customers as c', 'c.id', 'i.customer_id')
-    .where('i.status', 'paid').whereNull('i.receipt_sent_at').whereNull('i.archived_at')
+    .where('i.status', 'paid').whereNull('i.receipt_sent_at').whereNull('i.receipt_sms_sent_at').whereNull('i.archived_at')
     .where('i.total', '>', 0)
     .whereNull('i.payer_statement_id').whereNull('i.payer_id')
     .where('i.paid_at', '>=', new Date(now.getTime() - MAX_AGE_MS))
     .where('i.paid_at', '<=', new Date(now.getTime() - MIN_AGE_MS))
     .select('i.id', 'i.customer_id', 'i.invoice_number', 'i.total', 'i.payment_method', 'i.paid_at', 'i.status',
-      'i.receipt_sent_at', 'i.archived_at', 's.scheduled_date', 'c.first_name', 'c.last_name');
+      'i.receipt_sent_at', 'i.receipt_sms_sent_at', 'i.archived_at', 's.scheduled_date', 'c.first_name', 'c.last_name');
   return rows.filter((row) => !settledReason(row) && paidAtVisit(row) && !isInternalTestCustomerId(row.customer_id));
 }
 
@@ -91,27 +94,37 @@ function legOf(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
-// Why no receipt is owed for this invoice, or null when one is. 'in flight' is the one passing reason (a job may still
-// deliver); the others are final, and the close pass closes an open bell on them. Throws on a failed read; the caller
-// fails the row closed.
-async function receiptNotOwed(conn, row) {
+// { notOwed, unknownOutcome }. notOwed: why no receipt is owed for this invoice, or null when one is. 'in flight' is the
+// one passing reason (a job may still deliver); the others are final, and the close pass closes an open bell on them.
+// unknownOutcome: an operator send parked for reconciliation (it may have reached the customer). Throws on a failed
+// read; the caller fails the row closed.
+async function receiptState(conn, row) {
   // One job row per invoice (receipt_delivery_jobs.invoice_id is the enqueue's conflict key).
-  const job = await conn('receipt_delivery_jobs').where({ invoice_id: row.id }).first('status', 'sms_result', 'email_result');
-  if (job && !DONE_JOB_STATUSES.includes(job.status)) return 'in flight';
+  const job = await conn('receipt_delivery_jobs').where({ invoice_id: row.id }).first('status', 'sms_result', 'email_result', 'last_error');
+  if (job && !DONE_JOB_STATUSES.includes(job.status)) return { notOwed: 'in flight', unknownOutcome: false };
   const sms = legOf(job?.sms_result);
-  if (legOf(job?.email_result)?.ok === true || sms?.sent === true) return 'receipt delivered';
-  if (sms?.reason === TEXT_CARRIED_BY_SUMMARY) return 'receipt carried by the visit text';
+  if (legOf(job?.email_result)?.ok === true || sms?.sent === true) return { notOwed: 'receipt delivered', unknownOutcome: false };
+  // The summary text carried the receipt link but was never accepted (an accepted one stamps receipt_sms_sent_at): the
+  // queue's own alert covers it when one stands; with none, this bell does.
+  if (sms?.reason === TEXT_CARRIED_BY_SUMMARY && (await episodes.openAdminAlertKeys(conn, `${CARRIED_RECEIPT_ALERT_PREFIX}${row.id}`)).length) {
+    return { notOwed: 'the visit text alert covers it', unknownOutcome: false };
+  }
   const prefs = row.customer_id ? await conn('notification_prefs').where({ customer_id: row.customer_id }).first('payment_receipt') : null;
-  return prefs?.payment_receipt === false ? 'receipts turned off' : null;
+  if (prefs?.payment_receipt === false) return { notOwed: 'receipts turned off', unknownOutcome: false };
+  return { notOwed: null, unknownOutcome: job?.status === 'failed' && job.last_error === RECONCILIATION_HOLD_ERROR };
 }
 
-function specFor(row, name) {
+function specFor(row, name, { unknownOutcome = false } = {}) {
   const method = METHOD_WORDS[String(row.payment_method || '').toLowerCase()];
-  const amount = `$${Number(row.total).toFixed(2)}`;
+  const paid = `The $${Number(row.total).toFixed(2)} invoice was paid${method ? ` ${method}` : ''} at the ${shortDateET(row.paid_at)} visit`;
   return {
     area: AREA,
-    action: fitAction(AREA, name, [(who) => `send ${who}'s receipt`, (who) => `send ${who} a receipt`]),
-    why: `The ${amount} invoice was paid${method ? ` ${method}` : ''} at the ${shortDateET(row.paid_at)} visit; no receipt has gone out.`,
+    action: unknownOutcome
+      ? fitAction(AREA, name, [(who) => `check that ${who} got the receipt`, (who) => `check ${who}'s receipt`])
+      : fitAction(AREA, name, [(who) => `send ${who}'s receipt`, (who) => `send ${who} a receipt`]),
+    why: unknownOutcome
+      ? `${paid}; an earlier receipt send may have gone out.`
+      : `${paid}; no receipt has gone out.`,
     severity: 'needs-you',
     link: `/admin/invoices?invoice=${row.id}`,
     subject: { type: 'invoice', id: String(row.id) },
@@ -120,14 +133,14 @@ function specFor(row, name) {
   };
 }
 
-async function raiseBell(row) {
+async function raiseBell(row, { unknownOutcome = false } = {}) {
   const name = realName(row) || 'a customer';
   let composed;
   try {
-    composed = composeAdminAlert(specFor(row, name));
+    composed = composeAdminAlert(specFor(row, name, { unknownOutcome }));
   } catch {
     // A name that breaks the alert rules (an emoji, say) becomes "a customer".
-    composed = composeAdminAlert(specFor(row, 'a customer'));
+    composed = composeAdminAlert(specFor(row, 'a customer', { unknownOutcome }));
   }
   const result = await episodes.raiseAdminAlertWithReopen(CATEGORY, composed.headline, composed.why, {
     dedupeKey: `${KEY_PREFIX}${row.id}`,
@@ -149,8 +162,8 @@ async function closeSettled(conn, now) {
   for (const key of keys) {
     try {
       const id = idOf(key);
-      const row = UUID_RE.test(id) ? await conn('invoices').where({ id }).first('id', 'customer_id', 'status', 'receipt_sent_at', 'archived_at') : null;
-      const owed = row && !settledReason(row) ? await receiptNotOwed(conn, row) : null;
+      const row = UUID_RE.test(id) ? await conn('invoices').where({ id }).first('id', 'customer_id', 'status', 'receipt_sent_at', 'receipt_sms_sent_at', 'archived_at') : null;
+      const owed = row && !settledReason(row) ? (await receiptState(conn, row)).notOwed : null;
       const why = settledReason(row) || (owed && owed !== 'in flight' ? owed : null);
       if (why) tally.closed += Number(await episodes.closeAdminAlertKeys(conn, [key], why, { now, resolution: capital(why) })) || 0;
     } catch (err) {
@@ -175,7 +188,8 @@ async function runPaidVisitReceiptCheck({ now = new Date(), conn = db } = {}) {
   tally.candidates = rows.length;
   for (const row of rows) {
     try {
-      if (!(await receiptNotOwed(conn, row))) tally.raised += await raiseBell(row);
+      const state = await receiptState(conn, row);
+      if (!state.notOwed) tally.raised += await raiseBell(row, state);
     } catch (err) {
       tally.failed += 1;
       logger.warn(`[paid-visit-receipt-check] check failed for invoice ${row.id}: ${errCode(err)}`);
@@ -189,5 +203,5 @@ async function runPaidVisitReceiptCheck({ now = new Date(), conn = db } = {}) {
 module.exports = {
   runPaidVisitReceiptCheck,
   KEY_PREFIX,
-  _private: { settledReason, paidAtVisit, specFor, receiptNotOwed },
+  _private: { settledReason, paidAtVisit, specFor, receiptState },
 };

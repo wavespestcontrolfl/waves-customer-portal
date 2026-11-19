@@ -225,6 +225,11 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
 // follows what the summary text actually did: receipt_sms_sent_at is stamped only when it was
 // accepted. A summary that is deferred or was suppressed delivered nothing, so neither channel has.
 // The alert is closed when the summary text is later accepted (visit-completion-summary.js).
+// The key of that alert, and the last_error of an operator send whose outcome is unknown (parked as failed, below):
+// exported for the paid-visit receipt check, which must neither ring a second bell beside this alert nor ask for a
+// resend the customer may already have.
+const CARRIED_RECEIPT_ALERT_PREFIX = 'summary-carried-receipt-email:';
+const RECONCILIATION_HOLD_ERROR = 'operator receipt send outcome unknown — held for reconciliation, not retried automatically';
 async function alertCarriedReceiptEmail(job, reason) {
   try {
     const accepted = Boolean((await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at);
@@ -243,7 +248,7 @@ async function alertCarriedReceiptEmail(job, reason) {
       detail: accepted
         ? `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`
         : `Invoice ${job.invoice_id}: the visit summary text that was to carry its receipt link has not been accepted (deferred or not sent), and the receipt email did not go (${reason}). Send the customer their receipt.`,
-      dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`,
+      dedupeKey: `${CARRIED_RECEIPT_ALERT_PREFIX}${job.invoice_id}`,
       // The admin bell policy (on in production) writes no row for an 'alert' that does not ask to
       // ring. This one rings unless the owner silences the category.
       bellDefault: true,
@@ -252,7 +257,7 @@ async function alertCarriedReceiptEmail(job, reason) {
     // The summary text may have been accepted between the read above and the insert: its
     // acceptance closes the alert key, which did not exist yet. Read again now that the alert does.
     if (!accepted && (await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at) {
-      await require('./admin-alert-episodes').closeAdminAlertKeys(db, [`summary-carried-receipt-email:${job.invoice_id}`], 'summary_text_accepted');
+      await require('./admin-alert-episodes').closeAdminAlertKeys(db, [`${CARRIED_RECEIPT_ALERT_PREFIX}${job.invoice_id}`], 'summary_text_accepted');
     }
   } catch (err) {
     logger.warn(`[receipt-delivery-queue] carried-receipt email alert failed for invoice ${job.invoice_id}: ${err.message}`);
@@ -666,7 +671,7 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
           status: 'failed',
           sms_result: smsResult,
           email_result: emailResult,
-          last_error: 'operator receipt send outcome unknown — held for reconciliation, not retried automatically',
+          last_error: RECONCILIATION_HOLD_ERROR,
           ...unlock,
         }), 'held_for_reconciliation');
       }
@@ -734,6 +739,8 @@ module.exports = {
   markTextCarriedBySummary,
   resumeDeferredReceiptDelivery,
   TEXT_CARRIED_BY_SUMMARY,
+  CARRIED_RECEIPT_ALERT_PREFIX,
+  RECONCILIATION_HOLD_ERROR,
   _internals: {
     recoverStaleLocks,
     actionableSmsFailure,
