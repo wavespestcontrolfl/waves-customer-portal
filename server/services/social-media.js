@@ -707,6 +707,21 @@ try {
   if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
 
+// One issue for each phone number in `text` that is not a shared line.
+function unknownPhoneIssues(text) {
+  return (String(text || '').match(PHONE_PATTERN) || []).flatMap((phone) => {
+    const digits = phone.replace(/\D/g, '');
+    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
+    return KNOWN_PHONES.has(digits) || KNOWN_PHONES.has(normalized) ? [] : [`Unknown phone number: ${phone} — may be hallucinated`];
+  });
+}
+
+// LinkedIn also shows the title and description on the article card, so a
+// phone number there gets the same check as the post text.
+const linkedinCardIssues = (platform, title, description) => (
+  platform === 'linkedin' ? unknownPhoneIssues([title, description].filter(Boolean).join('\n')) : []
+);
+
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
 // The compliance-language subset of validateContent, callable on its own
@@ -741,14 +756,7 @@ function validateContent(text, platform) {
     issues.push('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: contains affiliate material — affiliate links publish on the blog only');
   }
 
-  const phones = text.match(PHONE_PATTERN) || [];
-  for (const phone of phones) {
-    const digits = phone.replace(/\D/g, '');
-    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
-    if (!KNOWN_PHONES.has(digits) && !KNOWN_PHONES.has(normalized)) {
-      issues.push(`Unknown phone number: ${phone} — may be hallucinated`);
-    }
-  }
+  issues.push(...unknownPhoneIssues(text));
 
   const limit = PLATFORM_LENGTH_LIMITS[platform];
   if (limit && text.length > limit) {
@@ -2428,10 +2436,10 @@ const SocialMediaService = {
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
-        const validation = validateContent(content, p.key);
-        if (!validation.valid) {
-          logger.warn(`[social] Content validation failed for ${p.key}: ${validation.issues.join('; ')}`);
-          platformResults.push({ platform: p.key, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
+        const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, title, description)];
+        if (issues.length) {
+          logger.warn(`[social] Content validation failed for ${p.key}: ${issues.join('; ')}`);
+          platformResults.push({ platform: p.key, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues });
           continue;
         }
         // Semantic second pass (owner ruling 2026-07-30): the deterministic
@@ -2782,9 +2790,9 @@ const SocialMediaService = {
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
 
-    const validation = validateContent(text, platform);
-    if (!validation.valid) {
-      return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    const issues = [...validateContent(text, platform).issues, ...linkedinCardIssues(platform, title, description)];
+    if (issues.length) {
+      return { platform, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues };
     }
     // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
     // the tech no-admin-queue flow, which must not bypass the judge. A

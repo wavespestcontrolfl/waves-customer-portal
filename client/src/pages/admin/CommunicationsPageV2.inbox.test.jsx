@@ -656,6 +656,21 @@ it.each([line, "+19412972606"])("keeps recovered sender, reply target, and overr
   expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: line, replyToMessageId: "a", mediaUrls: [attachment.url] });
 });
 
+// The web-only line is on no picker (REPLY_LINE_NUMBERS): a Text back from a
+// call to it must still reply from it, or the conversation splits.
+it("a Text back for a call to the web-only reply line sends from that line", async () => {
+  const webLine = "+19412542617";
+  window.history.replaceState({}, "", `/?phone=%2B19415550100&fromNumber=${encodeURIComponent(webLine)}`);
+  setup(); await tick();
+  const sender = screen.getByRole("combobox", { name: "Send from" });
+  expect(sender).toHaveValue(webLine);
+  expect(sender).toHaveDisplayValue("Main site web-only line");
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Thanks for calling" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ fromNumber: webLine, to: "+19415550100", body: "Thanks for calling" });
+});
+
 it.each([23, 24])("checks restored attachment expiry at send time (%s hours old)", async (ageHours) => {
   const owner = `attachment-owner-${ageHours}`;
   const media = { ...attachment, key: `sms-attachments/${Date.now() - ageHours * 60 * 60 * 1000}-fixture-gate.png` };

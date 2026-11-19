@@ -85,7 +85,7 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import EmailPage from "./EmailPage";
-import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
+import { ALL_NUMBERS, NUMBER_LABEL_MAP, REPLY_LINE_NUMBERS } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import LiveCallPanelV2 from "./LiveCallPanelV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
@@ -246,11 +246,14 @@ function getCustomerOptionName(customer) {
   );
 }
 
+// Every Waves line a thread can be on: the picker's lines plus the reply-only
+// lines (REPLY_LINE_NUMBERS), so a Text back or a thread on one of those
+// replies from that same line.
+const KNOWN_WAVES_NUMBERS = [...ALL_NUMBERS.flatMap((group) => group.numbers), ...REPLY_LINE_NUMBERS].map((n) => n.number);
+
 function findKnownWavesNumber(value) {
   if (!value) return "";
-  return ALL_NUMBERS.flatMap((group) => group.numbers.map((n) => n.number)).find(
-    (number) => phoneKey(number) === phoneKey(value),
-  ) || "";
+  return KNOWN_WAVES_NUMBERS.find((number) => phoneKey(number) === phoneKey(value)) || "";
 }
 
 const TABS = [
@@ -3080,8 +3083,7 @@ export function SmsTab({
     const sorted = [...messages].sort(
       (a, b) => new Date(a.createdAt) - new Date(b.createdAt),
     );
-    const allNums = new Set();
-    ALL_NUMBERS.forEach((g) => g.numbers.forEach((n) => allNums.add(n.number)));
+    const allNums = new Set(KNOWN_WAVES_NUMBERS);
     sorted.forEach((m) => {
       let contactPhone, ourNumber;
       if (m.direction === "inbound") {
