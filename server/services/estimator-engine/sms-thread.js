@@ -237,11 +237,11 @@ function safeErrorText(err) {
   }
 }
 
-// Who texted, for the owed-quote bell. The sender is named by the SAME rule
-// the relevance sweep judges the bell by (customerIdsBySenderIdentity: the
-// canonical phone identity on a customer's phone or service-contact phones,
-// or a live lead's customer), never by the last 10 digits alone: an
-// international sender must not be named as a US customer who shares them.
+// Who texted, for the owed-quote bell. The sender is named by the shared
+// sender-identity rule (customerIdsBySenderIdentity: the canonical phone
+// identity on a customer's phone or service-contact phones, or a live lead's
+// customer), never by the last 10 digits alone: an international sender must
+// not be named as a US customer who shares them.
 // Exactly one live customer names the sender; none, several, an error or a
 // timeout fall back to the last four digits. The triggering text's Twilio SID
 // anchors the link. The phone number NEVER appears in a link (access logs and
@@ -269,7 +269,7 @@ async function triggerTextSid(triggerSmsLogId) {
   }
 }
 
-// { id, name } of the ONE live customer behind the sender identity, else null.
+// { name } of the ONE live customer behind the sender identity, else null.
 async function namedSender(senderIdentity) {
   if (!senderIdentity) return null;
   try {
@@ -283,7 +283,7 @@ async function namedSender(senderIdentity) {
       .timeout(SENDER_LOOKUP_TIMEOUT_MS, { cancel: true })
       .first();
     const name = row ? [row.first_name, row.last_name].filter(Boolean).join(' ').trim() : '';
-    return name ? { id, name } : null;
+    return name ? { name } : null;
   } catch (err) {
     logger.warn(`[estimator-sms] sender lookup failed (using phone label): ${safeErrorText(err)}`);
     return null;
