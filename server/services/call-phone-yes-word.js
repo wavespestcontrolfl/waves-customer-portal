@@ -45,8 +45,8 @@ const OWED_READ_HOURS = 2;
 // recording webhook sets the status back to NULL and bumps updated_at), so a long read and an old call with new audio
 // are waited for too. Bounded in time on purpose, so no processor path is copied here: a row no pass will finish (a
 // missed call with nothing to read, a dead claim) delays a card by at most OWED_READ_HOURS after its last change and
-// never blocks it. Never NULL, so NOT owed is exact.
-function owedReadSql(t) {
+// never blocks it. Never NULL, so NOT owed is exact. SQL over the alias `t`, call_log by default.
+function owedReadSql(t = 'call_log') {
   const { exhaustedExtractionSql } = require('./call-commitments');
   const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam') OR ${exhaustedExtractionSql(t)})`;
   // GREATEST skips NULLs: a row with no update or no heartbeat counts from its insert.
@@ -110,8 +110,13 @@ function wordOfCall(row) {
   // relative, an agent: the processor's isExplicitlyNonOwner; owner, spouse or partner, and unknown are the holder's
   // side) is never the customer's yes, choice or cancellation, and their word still hides an older yes. Booking keeps
   // its own exceptions (a relative with a confirmed time, owner 2026-09-28); agreeing to a price takes none here, so
-  // the office decides.
-  if (require('./call-triage-flags').isExplicitlyNonOwner(extraction.caller?.relationship_to_property)) {
+  // the office decides. A caller who says the phone is not theirs (caller_id_disclaimed) and does not say they are the
+  // owner or the owner's spouse or partner is not shown to be the holder either: the phone linked the call, and
+  // 'unknown' is the holder's side (owner 2026-07-31) only because the phone vouches for it.
+  const caller = extraction.caller || {};
+  const relationship = String(caller.relationship_to_property || '').trim().toLowerCase();
+  const statedHolder = relationship === 'owner' || relationship === 'spouse_partner';
+  if (require('./call-triage-flags').isExplicitlyNonOwner(relationship) || (caller.caller_id_disclaimed === true && !statedHolder)) {
     return { notHolder: true, callLogId: row.id, at: callStartedAt(row) };
   }
   // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes, and

@@ -1,14 +1,15 @@
 /**
  * GATE_CALL_PHONE_YES_ACCEPT, the parts that need no database (owner 2026-11-18, step 1: the office taps): the gate
- * reader, the wiring (the scheduler, the booking text, the admin-only card), the card's two states and the caller's
- * words. The sweep runs against PostgreSQL in call-phone-yes-accept.db.test.js. Synthetic names and numbers only.
+ * reader, the wiring (the scheduler, the booking text, the admin-only card, the one caller's-word module) and the card's
+ * two states. The caller's word is tested in call-phone-yes-word(.db).test.js; the sweep runs against PostgreSQL in
+ * call-phone-yes-accept.db.test.js. Synthetic names and numbers only.
  */
 jest.mock('../models/db', () => jest.fn(() => { throw new Error('db must not be touched'); }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const fs = require('fs');
 const gates = require('../config/feature-gates');
-const { runCallPhoneYesSweep, cardSummary, callerWordsOf, REASONS } = require('../services/call-phone-yes-accept');
+const { runCallPhoneYesSweep, cardSummary, REASONS } = require('../services/call-phone-yes-accept');
 
 const GATE = 'GATE_CALL_PHONE_YES_ACCEPT';
 const saved = process.env[GATE];
@@ -54,6 +55,15 @@ describe('wiring', () => {
     }
   });
 
+  test("the caller's word comes from one module: the cards keep no copy of its rules", () => {
+    const service = read('../services/call-phone-yes-accept.js');
+    expect(service).toContain("require('./call-phone-yes-word')");
+    for (const copy of ['function owedReadSql', 'function callerWordsOf', 'function wordOfCall', 'function latestBillingChoice',
+      'function unreadCallSince', 'function laterWordProblem', 'function callerWord', "->> 'billing_choice'", 'billingChoiceOf(']) {
+      expect(service).not.toContain(copy);
+    }
+  });
+
   test('the sweep rewrites the card in place, so its Resolve and Dismiss carry the version; a new recording keeps it', () => {
     expect(read('../routes/admin-triage.js')).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'call_phone_yes'/);
     const { SUPERSEDE_KEPT_REASON_CODES, SUPERSEDE_KEPT_CARD_SQL } = require('../services/call-routing-gates');
@@ -93,58 +103,5 @@ describe('the card text', () => {
       expect(text).toMatch(/^[A-Z].*\.$/);
       expect(text).not.toContain(code);
     }
-  });
-});
-
-describe("the caller's words", () => {
-  const evidence = (...entries) => ({ evidence: entries });
-  const choice = (quote, speaker = 'caller', fieldPath = '/service_request/billing_choice') => ({ field_path: fieldPath, quote, speaker, transcript_offset_ms: 100 });
-  const talk = (callerLine, agentLine = 'You are all set.') => ({ transcript: `Agent: Thanks for calling Waves.\nCaller: ${callerLine}\nAgent: ${agentLine}` });
-
-  test("the caller's whole sentence that holds the quote, from a caller turn; never staff's, never another field's", () => {
-    const transcript = talk('Okay. Just bill me each time, that works.');
-    expect(callerWordsOf(evidence(
-      choice('We bill after each visit.', 'agent'),
-      choice('Bill me each time.', 'caller', '/scheduling/status'),
-      choice('  Just   bill me\neach time  '),
-    ), transcript)).toBe('Just bill me each time, that works.');
-    expect(callerWordsOf(evidence(choice('just bill me each time', 'caller', 'service_request.billing_choice')), transcript))
-      .toBe('Just bill me each time, that works.');
-  });
-
-  test.each([
-    ['a negated sentence', "Please don't bill me each time."],
-    ['a hedge', 'Maybe just bill me each time.'],
-    ['a question', 'Can you just bill me each time?'],
-  ])('a quote inside %s is no yes', (_name, line) => {
-    expect(callerWordsOf(evidence(choice('bill me each time')), talk(line))).toBeNull();
-  });
-
-  test('a quote the transcript does not hold in a caller turn is no words', () => {
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), talk('I need someone out for the bugs.'))).toBeNull();
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), talk('Okay.', 'Just bill me each time.'))).toBeNull();
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: 'Just bill me each time. You are all set.' })).toBeNull();
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { transcript: 'Caller: Just bill me each time.' })).toBeNull();
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), {})).toBeNull();
-  });
-
-  test('an outbound call with swapped labels is read the way the triage flags read it', () => {
-    const swapped = { transcript: 'Caller: Hi, this is Sam with Waves, calling about your quote.\nAgent: Just bill me each time.\nCaller: Will do.', outbound: true };
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), swapped)).toBe('Just bill me each time.');
-    expect(callerWordsOf(evidence(choice('Just bill me each time.')), { ...swapped, outbound: false })).toBeNull();
-  });
-
-  test('none: null', () => {
-    expect(callerWordsOf({}, talk('x'))).toBeNull();
-    expect(callerWordsOf(null, talk('x'))).toBeNull();
-    expect(callerWordsOf(evidence(choice('   ')), talk('x'))).toBeNull();
-    expect(callerWordsOf({ evidence: 'not a list' }, talk('x'))).toBeNull();
-  });
-
-  test('a long sentence is cut to 200 characters', () => {
-    const long = `${'word '.repeat(80)}done`;
-    const words = callerWordsOf(evidence(choice(long)), talk(long));
-    expect(words).toHaveLength(200);
-    expect(words.endsWith('\u2026')).toBe(true);
   });
 });

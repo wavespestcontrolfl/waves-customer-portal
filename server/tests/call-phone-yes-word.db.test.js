@@ -240,6 +240,14 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ["someone else's call with no word is no word", [['per_application', { created_at: hoursAgo(5) }], [null, {
       created_at: hoursAgo(2), ai_extraction_enriched: thirdParty(null),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
+    // The phone linked the call: a caller who says it is not theirs, and does not say they are the owner or spouse,
+    // is not shown to be the holder.
+    ['a caller on a phone that is not theirs, who does not say who they are', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'unknown', on_site_authorization: null, caller_id_disclaimed: true }),
+    }]], { yes: null, noYes: 'caller_not_account_holder' }],
+    ['an owner on a phone that is not theirs speaks for the account', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'owner', caller_id_disclaimed: true }),
+    }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
     ['a spouse speaks for the account', [['per_application', {
       ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'spouse_partner' }),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],

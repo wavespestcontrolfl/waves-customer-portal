@@ -9,15 +9,17 @@
  *
  * The card has two states. "Caller said yes" carries the caller's own words: service_request.billing_choice is
  * per_application on that call or an earlier one since the estimate was sent, and its evidence quote is found word for
- * word in a caller turn of that call's transcript. "No yes heard" says only that: the card never claims a yes that did
- * not happen. The caller's billing_choice is never consent on its own (the extraction schema says so), so a person
- * decides every accept. Each sweep re-reads an open card's yes, so a call that is re-read or moved never leaves a stale
- * quote on it. Each card also records a shadow verdict for the later automatic step, as of its filing: would an
- * automatic accept go ahead, and if not, the first reason (the accept's own checks, then the caller's word).
+ * word in a caller turn of that call's recording transcript; the card shows the caller's whole latest turn that says it.
+ * "No yes heard" says only that: the card never claims a yes that did not happen. The caller's word is read by
+ * call-phone-yes-word.js (one copy, shared with the later steps); it judges no words, the call reader does. The
+ * caller's billing_choice is never consent on its own (the extraction schema says so), so a person decides every
+ * accept. Each sweep re-reads an open card's yes, so a call that is re-read or moved never leaves a stale quote on it.
+ * Each card also records a shadow verdict for the later automatic step, as of its filing: would an automatic accept go
+ * ahead, and if not, the first reason (the accept's own checks, then the caller's word).
  *
  * No card when the customer's latest word since the send is annual prepay (the prepay card owns it,
- * call-prepay-choice.js), a cancellation or a one-time visit; and none until every call since the send is read (the
- * processor's own retry rules). Only an estimate already sent when the call booked the visit counts. The card stays
+ * call-prepay-choice.js), a cancellation or a one-time visit; and none while a call since the send still owes a read
+ * (call-phone-yes-word.js owedReadSql). Only an estimate already sent when the call began counts. The card stays
  * open while an unlinked pest visit the call booked is on the calendar, also after the estimate expires. It closes
  * itself once none of its estimates is open or lapsed (each accepted or declined), no unlinked pest visit of the call
  * is left on the calendar, the call moves to another customer, or a later call takes the yes back.
@@ -28,13 +30,14 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+const { callStartedAt } = require('../utils/call-timeline');
+const Word = require('./call-phone-yes-word');
 
 const REASON_CODE = 'call_phone_yes';
 const MOOT_RULE = 'call_phone_yes_moot';
 const LOOKBACK_DAYS = 3;
 const SCAN_LIMIT = 200;
 const MAX_CARDS_PER_RUN = 10;
-const CHOICE_SCAN_LIMIT = 50;
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // A visit still on the calendar keeps the card: every status but cancelled and skipped. A visit waiting for its new
 // slot (rescheduled) and a done visit keep it too (the plan was still never accepted), so the gap never closes by itself.
@@ -45,32 +48,7 @@ const CARD_ESTIMATE_STATUSES = ['sent', 'viewed', 'expired'];
 // The one one-time line a standard accept of a pest plan may carry: the setup fee, which the first visit bills by
 // hand (estimate-accept-effects membershipFeeLine; one-time work rows never carry this name).
 const MEMBERSHIP_FEE_LINE_NAME = 'WaveGuard membership fee';
-const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
-// The extraction's evidence pointer for the caller's plan choice (JSON pointer; a dotted path in older rows).
-const BILLING_CHOICE_PATHS = new Set(['/service_request/billing_choice', 'service_request.billing_choice']);
-const CALLER_WORDS_CHARS = 200;
 const PEST_FAMILY = new Set(['pest_control']);
-
-// A call the pipeline still owes a read: a pass holds it now, or the processor's sweep will (re)read it, by the
-// processor's own rules (pendingCandidatesQuery without its 10-minute settle gates; the retry budget in
-// config/call-extraction-retry): a recording over 10 seconds that is not started, queued, waiting for its transcript,
-// or failed with retries left; or a masked transcript (card-number quarantine) not started, queued or failed with
-// retries left. A row the processor will not read again is never waited on. The DB test holds this to
-// pendingCandidatesQuery row for row. Never NULL, so NOT owed is the read calls exactly.
-function owedReadSql(t) {
-  const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
-  const underCap = `COALESCE(${t}.extraction_attempts, 0) < ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
-  const failedRetry = `(${t}.processing_status = 'extraction_failed' AND ${underCap}`
-    + ` AND ${t}.created_at > now() - interval '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days')`;
-  const masked = `(${t}.transcription_metadata::jsonb ->> 'pan_detected') = 'true'`;
-  const unstarted = `(${t}.processing_status IS NULL OR ${t}.processing_status = 'pending')`;
-  const recorded = `(COALESCE(${t}.recording_url, '') <> ''`
-    + ` AND (COALESCE(${t}.recording_duration_seconds, ${t}.duration_seconds, 0) > 10 OR ${masked})`
-    + ` AND (${unstarted} OR (${t}.transcription_status = 'pending' AND ${t}.transcription IS NULL)`
-    + ` OR (${t}.processing_status = 'no_transcription' AND ${underCap}) OR ${failedRetry}))`;
-  const quarantined = `(${masked} AND ${t}.transcription IS NOT NULL AND (${unstarted} OR ${failedRetry}))`;
-  return `COALESCE((${t}.processing_status = 'processing' OR ${recorded} OR ${quarantined}), false)`;
-}
 
 // `?.() === true`: a test's whole-module gate mock without this reader reads as off (the #7910 pattern).
 const live = () => require('../config/feature-gates').callPhoneYesAcceptLive?.() === true;
@@ -79,7 +57,9 @@ const live = () => require('../config/feature-gates').callPhoneYesAcceptLive?.()
 // and then the reason.
 const REASONS = {
   no_yes_heard: 'No yes was heard on the call.',
-  yes_without_words: "The call reader recorded a pay-per-application choice but saved none of the caller's own words.",
+  yes_without_words: "The call reader recorded a pay-per-application choice, but the caller's own words for it are not in the call's recording.",
+  caller_not_account_holder: "The caller is not shown to be the account holder's side (a tenant, a relative, or a caller on a phone that is not theirs), so their word is not the customer's yes.",
+  caller_declined_price: 'The caller said no to the price on the call.',
   more_than_one_estimate: 'The customer has more than one open estimate.',
   more_than_one_visit: 'The call booked more than one visit.',
   termite_estimate: 'The estimate has a termite line. Its notice and agreement are handled on the estimate.',
@@ -127,96 +107,6 @@ async function openEstimatesOf(conn, customerId, now) {
     .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now))
     .orderBy('created_at', 'desc')
     .select('*');
-}
-
-// The whole sentences of a turn that hold the quote, as said (a fragment is read with its "don't"), or null.
-function sentencesHolding(turnText, quote) {
-  const norm = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
-  const sentences = String(turnText || '').match(/[^.!?]+[.!?]*/g) || [];
-  const words = sentences.map(norm);
-  const flat = words.flat();
-  const q = norm(quote);
-  if (!q.length) return null;
-  for (let i = 0; i + q.length <= flat.length; i += 1) {
-    if (!q.every((w, k) => flat[i + k] === w)) continue;
-    let at = 0;
-    const held = sentences.filter((_x, n) => {
-      const from = at;
-      at += words[n].length;
-      return from < i + q.length && at > i;
-    });
-    return held.map((x) => x.trim()).join(' ');
-  }
-  return null;
-}
-
-// The caller's own words choosing the plan: an evidence quote for billing_choice labeled as the caller's AND found
-// word for word in a caller turn of the transcript (outbound labels oriented the way the triage flags read them),
-// given as the whole sentences that hold it, which must be a plain statement (no negation, hedge, condition or
-// question: quoteIsPlainStatement); cut to fit. Null when no quote is. An unlabeled or one-speaker transcript grounds
-// nothing.
-function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
-  const quotes = (Array.isArray(extraction?.evidence) ? extraction.evidence : [])
-    .filter((e) => BILLING_CHOICE_PATHS.has(e?.field_path) && e.speaker === 'caller' && typeof e.quote === 'string' && e.quote.trim());
-  if (!quotes.length) return null;
-  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
-  const { orientTranscriptForOutbound, quoteIsPlainStatement } = require('./call-triage-flags');
-  const turns = parseTurns(orientTranscriptForOutbound(transcript, outbound));
-  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return null;
-  for (const e of quotes) {
-    for (const turn of turnsHolding(turns, e.quote, 'caller')) {
-      const said = sentencesHolding(turn.raw, e.quote);
-      if (!said || !quoteIsPlainStatement(said)) continue;
-      const words = said.replace(/\s+/g, ' ').trim();
-      return words.length > CALLER_WORDS_CHARS ? `${words.slice(0, CALLER_WORDS_CHARS - 1).trimEnd()}…` : words;
-    }
-  }
-  return null;
-}
-
-// A later call with one of these intents takes back an earlier yes: the customer asked to cancel, or for a one-time
-// visit instead of the plan (service_request.service_intent). It is the latest word even with no billing choice.
-const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
-// The billing choices a call can name (call-prepay-choice.js BILLING_CHOICES).
-const WORD_CHOICES = new Set(['annual_prepay', 'per_application']);
-
-// One call's word: a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing choice with the
-// caller's own words ({ choice, callLogId, at, quote }; quote = callerWordsOf, from the call's transcript), or null.
-async function wordOfCall(conn, row) {
-  const { parseExtraction, isRealConversation } = require('./call-held-visits');
-  const extraction = parseExtraction(row.ai_extraction_enriched);
-  if (!extraction || !isRealConversation(row, extraction)) return null;
-  // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
-  if (CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
-  const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
-  if (!choice) return null;
-  const { transcription } = (await conn('call_log').where({ id: row.id }).first('transcription')) || {};
-  const quote = callerWordsOf(extraction, { transcript: transcription, outbound: String(row.direction || '').startsWith('outbound') });
-  return { choice, callLogId: row.id, at: row.created_at, quote };
-}
-
-// The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
-// billing choice or a cancellation or one-time ask (filtered in SQL before the row limit, so calls without a word
-// never push the last one out), as wordOfCall gives it, or null.
-async function latestBillingChoice(conn, { customerId, since }) {
-  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  const rows = await conn('call_log')
-    .where({ customer_id: customerId, v2_extraction_status: 'valid' })
-    .where('created_at', '>=', since)
-    .whereNotNull('processing_status')
-    .whereRaw(`NOT ${owedReadSql('call_log')}`)
-    .where((qb) => qb
-      .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...WORD_CHOICES]])
-      .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]]))
-    .modify((qb) => whereNotSandboxCall(qb))
-    .orderBy('created_at', 'desc')
-    .limit(CHOICE_SCAN_LIMIT)
-    .select(CALL_COLUMNS);
-  for (const row of rows) {
-    const word = await wordOfCall(conn, row);
-    if (word) return word;
-  }
-  return null;
 }
 
 // The visit's catalog row joined in, so the family matchers classify it by what it IS (an unlinked visit by its label).
@@ -298,48 +188,6 @@ async function acceptProblem(conn, { estimate, visit, customerId, now }) {
     || ((await existingPlan(conn, customerId, visit.id)) ? 'existing_plan' : null);
 }
 
-// True when a call from the customer since `since` (the booking call included) still owes a read (owedReadSql): it
-// may hold the yes or take it back. Sandbox calls do not count.
-async function unreadCallSince(conn, { customerId, since }) {
-  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  return !!(await conn('call_log')
-    .where({ customer_id: customerId })
-    .where('created_at', '>=', since)
-    .whereRaw(owedReadSql('call_log'))
-    .modify((qb) => whereNotSandboxCall(qb))
-    .first('id'));
-}
-
-// What stands between the caller's word and the call that booked the visit (`booking`, a call_log row), or null:
-//   yes_after_booking    the yes came on a later call than the booking (the visit was not booked for the plan);
-//   booking_call_unread  the booking call's words were not read (a failed or invalid extraction may hide a no);
-//   newer_call           another call from the customer came since the yes (or, with no yes, since the booking).
-// Every call in the window is read by now (unreadCallSince). Sandbox calls do not count.
-async function laterWordProblem(conn, { customerId, yes, booking }) {
-  if (yes && new Date(yes.at) > new Date(booking.created_at)) return 'yes_after_booking';
-  if (booking.v2_extraction_status !== 'valid') return 'booking_call_unread';
-  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  const later = await conn('call_log')
-    .where({ customer_id: customerId })
-    .where('created_at', '>', yes ? yes.at : booking.created_at)
-    .whereNotIn('id', [yes?.callLogId, booking.id].filter(Boolean))
-    .modify((qb) => whereNotSandboxCall(qb))
-    .first('id');
-  return later ? 'newer_call' : null;
-}
-
-// The customer's word since the send, as the card reads it: a reason for no card (took_back, chose_annual_prepay), or
-// the yes and, when there is none, why. A yes is the caller's pay-per-application choice WITH the caller's own words;
-// a choice without them is no yes the card can show.
-async function callerWord(conn, { customerId, since }) {
-  const word = await latestBillingChoice(conn, { customerId, since });
-  if (word?.contrary) return { skip: 'took_back' };
-  if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
-  if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };
-  if (!word.quote) return { yes: null, noYes: 'yes_without_words' };
-  return { yes: { callLogId: word.callLogId, at: word.at, quote: word.quote }, noYes: null };
-}
-
 /**
  * Does this call get a card, and what does it say?
  * @returns {{card:false, reason}|{card:true, yes:{callLogId, at, quote}|null, estimate, visit, estimateIds,
@@ -352,24 +200,24 @@ async function callerWord(conn, { customerId, since }) {
  */
 async function evaluatePhoneYes({ callLogId, customerId, conn = db, now = new Date() }) {
   // The call must still belong to this customer (a relinked call reads as gone).
-  const call = await conn('call_log').where({ id: callLogId, customer_id: customerId }).first(CALL_COLUMNS);
+  const call = await conn('call_log').where({ id: callLogId, customer_id: customerId }).first(Word.CALL_COLUMNS);
   if (!call) return skip('customer_changed');
   const visits = await require('./call-prepay-choice').liveVisitsOfCall(conn, callLogId, customerId);
   if (!visits.length) return skip('no_booked_visit');
   // The same visit must be both unlinked and pest (a linked pest visit beside an unlinked lawn visit is not one).
   if (!(await anyPestVisit(conn, visits.filter((v) => !v.source_estimate_id)))) return skip('no_pest_visit');
-  // The card is about an estimate already sent when the call booked the visit (one sent later is not what the caller
-  // answered); every open estimate still counts toward "more than one".
+  // The card is about an estimate already sent when the call began (one sent later is not what the caller answered);
+  // every open estimate still counts toward "more than one".
   const open = await openEstimatesOf(conn, customerId, now);
-  const answerable = open.filter((e) => sentAnchorOf(e) <= new Date(call.created_at));
+  const answerable = open.filter((e) => sentAnchorOf(e) <= callStartedAt(call));
   if (!answerable.length) return skip('no_open_estimate');
   const since = earliestSentAnchor(answerable);
   // Every call since the send, the booking call included, is read first: an unread one may hold the yes or take it back.
-  if (await unreadCallSince(conn, { customerId, since })) return skip('call_still_processing');
-  const heard = await callerWord(conn, { customerId, since });
+  if (await Word.unreadCallSince(conn, { customerId, since })) return skip('call_still_processing');
+  const heard = await Word.callerWord(conn, { customerId, since });
   if (heard.skip) return skip(heard.skip);
   const { yes } = heard;
-  const later = await laterWordProblem(conn, { customerId, yes, booking: call });
+  const later = await Word.laterWordProblem(conn, { customerId, yes, booking: call });
   const estimate = open.length === 1 ? open[0] : null;
   const visit = visits.length === 1 ? visits[0] : null;
   const problem = await acceptProblem(conn, { estimate, visit, customerId, now });
@@ -412,11 +260,11 @@ function heardFields(yes, { recheckingCallId = null } = {}) {
 async function yesCallState(payload, customerId) {
   if (!payload.yes_call_log_id || (payload.yes_heard !== true && payload.yes_rechecking !== true)) return 'none';
   const row = await db('call_log').where({ id: payload.yes_call_log_id, customer_id: customerId })
-    .first([...CALL_COLUMNS, db.raw(`${owedReadSql('call_log')} AS owed_read`)]);
+    .first([...Word.WORD_COLUMNS, db.raw(`${Word.owedReadSql()} AS owed_read`)]);
   if (!row) return 'gone';
   if (row.owed_read) return 'owed';
   if (payload.yes_rechecking === true) return 'read';
-  const word = await wordOfCall(db, row);
+  const word = Word.wordOfCall(row);
   return word?.choice === 'per_application' && word.quote && word.quote === payload.caller_words ? 'same' : 'changed';
 }
 
@@ -508,8 +356,8 @@ async function cardState(card) {
   const yesCall = await yesCallState(p, customerId);
   if (yesCall === 'owed') return p.yes_rechecking === true ? null : { refresh: null, rechecking: p.yes_call_log_id };
   if (yesCall === 'gone' || yesCall === 'changed') return { refresh: null };
-  if (await unreadCallSince(db, { customerId, since })) return null;
-  const heard = await callerWord(db, { customerId, since });
+  if (await Word.unreadCallSince(db, { customerId, since })) return null;
+  const heard = await Word.callerWord(db, { customerId, since });
   if (heard.skip) return { close: MOOT_NOTES[heard.skip] };
   // The yes the card shows must be the customer's latest word, from the same call with the same words.
   const now = heardFields(heard.yes);
@@ -574,7 +422,7 @@ async function runCallPhoneYesSweep({ now = new Date() } = {}) {
     .where('created_at', '>=', since)
     .whereNotNull('customer_id')
     .whereNotNull('processing_status')
-    .whereRaw(`NOT ${owedReadSql('call_log')}`)
+    .whereRaw(`NOT ${Word.owedReadSql()}`)
     .modify((qb) => whereNotSandboxCall(qb))
     // A live, still-unlinked visit this call booked.
     .whereExists(function bookedVisit() {
@@ -589,7 +437,8 @@ async function runCallPhoneYesSweep({ now = new Date() } = {}) {
       this.select(db.raw('1')).from('estimates')
         .whereRaw('estimates.customer_id = call_log.customer_id')
         .whereIn('estimates.status', OPEN_ESTIMATE_STATUSES)
-        .whereRaw('COALESCE(estimates.sent_at, estimates.created_at) <= call_log.created_at')
+        // Sent by the time the call began (callStartedAtSql's default alias is this call_log row).
+        .whereRaw(`COALESCE(estimates.sent_at, estimates.created_at) <= ${require('./sms-pending-conversations').callStartedAtSql()}`)
         .where((qb) => qb.whereNull('estimates.expires_at').orWhere('estimates.expires_at', '>', now));
     })
     .whereNotExists(function cardAlreadyFiled() {
@@ -628,9 +477,6 @@ module.exports = {
   REASONS,
   MEMBERSHIP_FEE_LINE_NAME,
   evaluatePhoneYes,
-  latestBillingChoice,
-  owedReadSql,
-  callerWordsOf,
   runCallPhoneYesSweep,
   closeMootCards,
   cardSummary,
