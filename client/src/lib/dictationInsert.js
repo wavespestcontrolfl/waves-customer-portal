@@ -71,19 +71,27 @@ function nativeSet(el, value) {
  * does the same job for React.
  * Returns { ok: true } or { ok: false, reason: "gone" | "locked" | "full" }.
  */
-/** True while a box can still take dictated words: on the page, and neither disabled nor read-only. */
-export function boxTakesWords(el) {
-  return Boolean(el?.isConnected) && !el.disabled && !el.readOnly;
+/**
+ * Why a box cannot take dictated words now: "gone" (left the page), "locked" (disabled or
+ * read-only) or "full" (no room at the caret); null when it can. The one check for the insert
+ * below and for FocusedBoxMic's resend question.
+ */
+export function dictationRefusal(el, selection) {
+  if (!el || !el.isConnected) return "gone";
+  if (el.disabled || el.readOnly) return "locked";
+  const { start, end } = clampSelection(el.value, currentSelection(el, selection));
+  return roomFor(el, end - start) <= 0 ? "full" : null;
 }
 
 export function insertDictatedText(el, text, selection) {
-  if (!boxTakesWords(el)) return { ok: false, reason: el?.isConnected ? "locked" : "gone" };
+  const refusal = dictationRefusal(el, selection);
+  if (refusal === "gone" || refusal === "locked") return { ok: false, reason: refusal };
   const words = String(text || "").trim();
   if (!words) return { ok: true };
+  if (refusal === "full") return { ok: false, reason: "full" };
   const before = el.value;
   const { start, end } = clampSelection(before, currentSelection(el, selection));
   const lead = start > 0 && !/\s/.test(before[start - 1]) ? " " : "";
-  if (roomFor(el, end - start) <= 0) return { ok: false, reason: "full" };
   let payload = lead + words;
   try {
     el.focus({ preventScroll: true });

@@ -362,6 +362,17 @@ describe("useSpeechDictation with server dictation on", () => {
     }
   });
 
+  it("the login changed before the question: no resend with the new login, the error is shown", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { localStorage.setItem("waves_admin_token", "other-staff-jwt"); throw new TypeError("Load failed"); });
+    await recordAndStop(vi.fn());
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(postsTo(fetchMock)).toHaveLength(1);
+  });
+
   it("a refusal (the server answered) is shown and never offers a resend", async () => {
     const confirm = vi.fn(() => true);
     vi.stubGlobal("confirm", confirm);

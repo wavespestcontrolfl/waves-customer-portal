@@ -7,7 +7,7 @@ import { readToken } from "../../hooks/useServerDictationMode";
 import { setDictationPending } from "../../hooks/dictationPending";
 import { LiveWordsBubble } from "../tech/DictationButton";
 import { useIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
-import { boxFits, boxTakesWords, insertDictatedText, isEligibleBox, readSelection } from "../../lib/dictationInsert";
+import { boxFits, dictationRefusal, insertDictatedText, isEligibleBox, readSelection } from "../../lib/dictationInsert";
 
 // One Waves mic for every staff multi-line text box that has none of its own
 // (GATE_DICTATION_EVERY_BOX). AdminLayoutV2 mounts it once. While an eligible
@@ -345,7 +345,10 @@ function FocusedBoxMicInner() {
     if (!result.ok) setNotice(NOTICES[result.reason]);
   }, []);
   // A send with no answer may ask to resend the clip: only while the tap's box can still take the words.
-  const resendWanted = useCallback(() => boxTakesWords(sessionRef.current?.el), []);
+  const resendWanted = useCallback(() => {
+    const session = sessionRef.current;
+    return Boolean(session) && dictationRefusal(session.el, session.selection) === null;
+  }, []);
   const { listening, starting, uploading, toggle, abandon, mode, supported, liveText } = useSpeechDictation(onTranscript, { dictationContext, resendWanted });
   const busy = mode === "upload" && (starting || listening || uploading);
 
