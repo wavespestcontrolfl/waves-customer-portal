@@ -13,14 +13,29 @@
 // Chainable stub for the cooldown lookup (notifications table); tests set
 // mockRecentBell to simulate a run inside the cooldown window.
 let mockRecentBell = null;
+// sms_log row (the triggering text's Twilio SID) for the placeholder link anchor.
+let mockSmsLogRow = null;
+let mockSmsLogThrows = false;
 jest.mock('../models/db', () => {
+  let table = null;
   const chain = {
     whereRaw: () => chain,
     where: () => chain,
     orderBy: () => chain,
-    first: async () => mockRecentBell,
+    select: () => chain,
+    timeout: () => chain,
+    first: async () => {
+      if (table === 'sms_log') {
+        if (mockSmsLogThrows) throw new Error('sms_log down');
+        return mockSmsLogRow;
+      }
+      return mockRecentBell;
+    },
   };
-  return jest.fn(() => chain);
+  return jest.fn((t) => {
+    table = t;
+    return chain;
+  });
 });
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -79,6 +94,8 @@ const PHONE = '+19415550123';
 beforeEach(() => {
   jest.clearAllMocks();
   mockRecentBell = null;
+  mockSmsLogRow = null;
+  mockSmsLogThrows = false;
   process.env.GATE_ESTIMATOR_SMS_DRAFTS = 'true';
   mockEngineEnabled.mockReturnValue(true);
   // Re-pin defaults every test — mockReturnValue survives clearAllMocks
@@ -158,76 +175,113 @@ describe('startSmsThreadDraft', () => {
   });
 
   describe('the placeholder names who texted and links to where to act', () => {
-    const PHONE_LINK = '/admin/communications?phone=%2B19415550123';
+    const BARE = '/admin/communications';
+    const TEXT = 'what would a quote for pest control run me?';
     const placeholderArgs = () => mockNotify.mock.calls[0][0];
+    const named = (extra = {}) => ({ customer: { id: 'cust-42', first_name: 'Jane', last_name: 'Doe', ...extra }, ambiguous: false });
+    const noDigits = (link) => {
+      expect(link).not.toMatch(/9415550123/);
+      expect(link).not.toMatch(/phone=/);
+      expect(link).not.toMatch(/%2B1/);
+    };
 
-    test('one unambiguous customer: name in the body, thread link, placeholder marker', async () => {
-      mockLoadCustomerByPhone.mockResolvedValue({
-        customer: { id: 'cust-42', first_name: 'Jane', last_name: 'Doe' }, ambiguous: false,
-      });
-      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
-      expect(mockLoadCustomerByPhone).toHaveBeenCalledWith(PHONE, null, { timeoutMs: 1000 });
+    test('one unambiguous customer: name in the body, thread + message anchor, placeholder marker', async () => {
+      mockLoadCustomerByPhone.mockResolvedValue(named());
+      mockSmsLogRow = { twilio_sid: 'SM123abc' };
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      // Service-contact numbers are included so a shared number reads ambiguous.
+      expect(mockLoadCustomerByPhone).toHaveBeenCalledWith(PHONE, null, { timeoutMs: 1000, includeServiceContacts: true });
       const args = placeholderArgs();
       expect(args.title).toBe('Quote asked by text — send it');
       expect(args.body).toMatch(/^Jane Doe asked for a quote by text\./);
-      expect(args.link).toBe('/admin/communications?thread=cust-42');
+      expect(args.link).toBe('/admin/communications?thread=cust-42&message=SM123abc');
+      noDigits(args.link);
       expect(args.placeholder).toBe(true);
       await result.draftPromise;
       // The outcome bells reuse the same link: one lookup only.
-      expect(mockRunDraftPipeline.mock.calls[0][0].origin.bellLink).toBe('/admin/communications?thread=cust-42');
+      expect(mockRunDraftPipeline.mock.calls[0][0].origin.bellLink).toBe(args.link);
       expect(mockLoadCustomerByPhone).toHaveBeenCalledTimes(1);
     });
 
-    test('no customer on file: last four digits and a phone compose link', async () => {
-      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+    test('a known customer with no triggering text id gets the bare thread link', async () => {
+      mockLoadCustomerByPhone.mockResolvedValue(named());
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      expect(placeholderArgs().link).toBe('/admin/communications?thread=cust-42');
+    });
+
+    test('no customer on file: last four digits and a message-only anchor, no phone in the link', async () => {
+      mockSmsLogRow = { twilio_sid: 'SM9/x y' };
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       const args = placeholderArgs();
       expect(args.body).toMatch(/^Texter …0123 asked for a quote by text\./);
       expect(args.body).not.toMatch(/9415550123/);
-      expect(args.link).toBe(PHONE_LINK);
+      expect(args.link).toBe(`${BARE}?message=${encodeURIComponent('SM9/x y')}`);
+      noDigits(args.link);
       expect(args.placeholder).toBe(true);
     });
 
-    test('an ambiguous shared line is not named', async () => {
-      mockLoadCustomerByPhone.mockResolvedValue({
-        customer: { id: 'cust-1', first_name: 'Jane', last_name: 'Doe' }, ambiguous: true,
-      });
-      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
-      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
-      expect(placeholderArgs().link).toBe(PHONE_LINK);
+    test('no customer and no triggering text id: the bare communications link', async () => {
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      expect(placeholderArgs().link).toBe(BARE);
     });
 
-    test('lookup unavailable or throwing keeps the phone copy and the bell is still written', async () => {
+    test('an ambiguous shared line (service-contact overlap) is not named and keeps the sid anchor only', async () => {
+      mockLoadCustomerByPhone.mockResolvedValue({ ...named(), ambiguous: true });
+      mockSmsLogRow = { twilio_sid: 'SM5' };
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      expect(placeholderArgs().body).not.toMatch(/Jane/);
+      expect(placeholderArgs().link).toBe(`${BARE}?message=SM5`);
+      noDigits(placeholderArgs().link);
+    });
+
+    test('lookup unavailable or throwing: phone-free copy and link, bell still written', async () => {
       mockLoadCustomerByPhone.mockResolvedValueOnce({ customer: null, ambiguous: false, unavailable: true });
-      let result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      let result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
       expect(result.started).toBe(true);
       expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      expect(placeholderArgs().link).toBe(BARE);
       mockNotify.mockClear();
       mockLoadCustomerByPhone.mockRejectedValueOnce(new Error('db down'));
-      result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      mockSmsLogRow = { twilio_sid: 'SM7' };
+      result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(result.started).toBe(true);
-      expect(placeholderArgs().link).toBe(PHONE_LINK);
       expect(placeholderArgs().placeholder).toBe(true);
+      noDigits(placeholderArgs().link);
+      // The customer lookup failing does not lose the text anchor.
+      expect(placeholderArgs().link).toBe(`${BARE}?message=SM7`);
+    });
+
+    test('a failed sms_log read only drops the anchor; the customer is still named', async () => {
+      mockLoadCustomerByPhone.mockResolvedValue(named());
+      mockSmsLogThrows = true;
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(result.started).toBe(true);
+      expect(placeholderArgs().body).toMatch(/^Jane Doe/);
+      expect(placeholderArgs().link).toBe('/admin/communications?thread=cust-42');
     });
 
     test('a lookup that never answers is cut off and the bell is still written', async () => {
       mockLoadCustomerByPhone.mockReturnValueOnce(new Promise(() => {}));
-      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       expect(result.started).toBe(true);
       expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      expect(placeholderArgs().link).toBe(BARE);
     }, 10000);
 
     test('a dry run writes no bell and does no lookup', async () => {
-      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?', dryRun: true });
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, dryRun: true });
       expect(mockLoadCustomerByPhone).not.toHaveBeenCalled();
       expect(mockNotify).not.toHaveBeenCalled();
     });
 
-    test('the unreadable-thread red bell carries the same link', async () => {
+    test('the unreadable-thread red bell carries the same phone-free link', async () => {
       mockBuildSmsThreadContext.mockResolvedValue({ error: 'thread_unreadable' });
-      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      mockSmsLogRow = { twilio_sid: 'SM8' };
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
       await result.draftPromise;
       expect(mockNotify).toHaveBeenCalledTimes(2);
-      expect(mockNotify.mock.calls[1][0].link).toBe(PHONE_LINK);
+      expect(mockNotify.mock.calls[1][0].link).toBe(`${BARE}?message=SM8`);
       expect(mockNotify.mock.calls[1][0].placeholder).toBeUndefined();
     });
   });

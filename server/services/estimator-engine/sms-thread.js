@@ -225,32 +225,61 @@ function smsOrigin(threadKey) {
 }
 
 // Who texted, for the owed-quote bell. One short, bounded lookup of live
-// customers by the thread phone. Exactly one unambiguous match names the
-// customer and opens their thread; anything else (no match, a shared line,
-// an error, a timeout) falls back to the last four digits and a compose link
-// on the number. Fail-soft: this must never block or fail the durable bell
-// (the Twilio webhook awaits it), so every failure returns the fallback.
+// customers by the thread phone (service-contact numbers included, so a
+// number that is primary on one account and a service contact on another
+// reads ambiguous), plus the triggering text's Twilio SID. Exactly one
+// unambiguous match names the customer; anything else (no match, a shared
+// line, an error, a timeout) falls back to the last four digits.
+// The phone number NEVER appears in a link (access logs and referrers carry
+// it): links anchor on the customer id and the text's SID, the way the
+// inbound-text bell does. Fail-soft: this must never block or fail the
+// durable bell (the Twilio webhook awaits it), so every failure returns the
+// fallback, and a failed SID read only drops the anchor.
 const SENDER_LOOKUP_TIMEOUT_MS = 1000;
-async function threadSenderInfo(phone, digits) {
-  const info = {
-    label: `Texter …${digits.slice(-4)}`,
-    link: `/admin/communications?phone=${encodeURIComponent(`+1${digits}`)}`,
-    named: false,
-  };
+
+async function triggerTextSid(triggerSmsLogId) {
+  if (!triggerSmsLogId) return null;
+  try {
+    const db = require('../../models/db');
+    const row = await db('sms_log')
+      .where({ id: triggerSmsLogId })
+      .select('twilio_sid')
+      .timeout(SENDER_LOOKUP_TIMEOUT_MS, { cancel: true })
+      .first();
+    return row?.twilio_sid ? String(row.twilio_sid) : null;
+  } catch (err) {
+    logger.warn(`[estimator-sms] trigger text lookup failed (link without anchor): ${err.message}`);
+    return null;
+  }
+}
+
+function threadBellLinkFor(customerId, sid) {
+  const anchor = sid ? `message=${encodeURIComponent(sid)}` : '';
+  if (customerId) return `/admin/communications?thread=${customerId}${anchor ? `&${anchor}` : ''}`;
+  return anchor ? `/admin/communications?${anchor}` : '/admin/communications';
+}
+
+async function threadSenderInfo(phone, digits, triggerSmsLogId = null) {
+  const info = { label: `Texter …${digits.slice(-4)}`, link: threadBellLinkFor(null, null), named: false };
   let timer;
   try {
     const { loadCustomerByPhone } = require('./context-builder');
-    const lookup = loadCustomerByPhone(phone, null, { timeoutMs: SENDER_LOOKUP_TIMEOUT_MS });
-    // The knex timeout bounds the query; the race also bounds a stuck pool wait.
+    const lookups = Promise.all([
+      loadCustomerByPhone(phone, null, { timeoutMs: SENDER_LOOKUP_TIMEOUT_MS, includeServiceContacts: true })
+        .catch(() => ({ unavailable: true })),
+      triggerTextSid(triggerSmsLogId),
+    ]);
+    // The knex timeouts bound the queries; the race also bounds a stuck pool wait.
     const guard = new Promise((resolve) => {
-      timer = setTimeout(() => resolve({ unavailable: true }), SENDER_LOOKUP_TIMEOUT_MS + 500);
+      timer = setTimeout(() => resolve([{ unavailable: true }, null]), SENDER_LOOKUP_TIMEOUT_MS + 500);
     });
-    const match = await Promise.race([lookup, guard]);
+    const [match, sid] = await Promise.race([lookups, guard]);
     const customer = match && !match.unavailable && !match.ambiguous ? match.customer : null;
     const name = customer ? [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() : '';
-    if (customer?.id && name) {
+    const named = !!(customer?.id && name);
+    info.link = threadBellLinkFor(named ? customer.id : null, sid);
+    if (named) {
       info.label = name;
-      info.link = `/admin/communications?thread=${customer.id}`;
       info.named = true;
     }
   } catch (err) {
@@ -509,7 +538,7 @@ async function startSmsThreadDraft({
       // failed insert means NO durable artifact exists: report not-started
       // so callers keep their own fallback (lead-intake keeps the shell).
       const { notify } = require('./index');
-      const sender = await threadSenderInfo(phone, digits);
+      const sender = await threadSenderInfo(phone, digits, triggerSmsLogId);
       // Outcome bells (red, blocked, error) reuse this link: one lookup.
       origin.bellLink = sender.link;
       const belled = await notify({

@@ -615,6 +615,11 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
   return { address, propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts };
 }
 
+// WHERE for the placeholder-gives-way rewrite: still open, still a
+// placeholder, still no estimate. Raw (no bind values) so it adds nothing a
+// minimal query fake must support beyond whereRaw.
+const PLACEHOLDER_OPEN_SQL = "done_at IS NULL AND metadata->>'placeholder' = 'true' AND COALESCE(metadata->>'estimateId', '') = ''";
+
 // True when the existing thread bell is a still-open "drafting now"
 // placeholder and this call is an outcome with no estimate on either side.
 function openPlaceholderGivesWay(existing, existingMeta, { placeholder, estimateId }) {
@@ -721,6 +726,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
           existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
         } catch { existingMeta = {}; }
         let insertFresh = false;
+        let yieldingPlaceholder = false;
         if (existingMeta.estimator_engine === true) {
           if (forceUpdate) {
             // The fail-closed reconciliation alerts REPLACE whatever the
@@ -749,14 +755,19 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             // is rewritten with the real outcome. Two placeholders stand,
             // and an outcome never regresses to a later placeholder.
             const placeholderGivesWay = openPlaceholderGivesWay(existing, existingMeta, { placeholder, estimateId });
+            yieldingPlaceholder = placeholderGivesWay;
             const bothOpen = !estimateId && !existingMeta.estimateId && !placeholderGivesWay;
             if (sameDraft || bothOpen) return true;
             if (existingMeta.estimateId && existingMeta.estimateId !== estimateId) insertFresh = true;
           }
         }
         if (!insertFresh) {
-          await db('notifications')
-            .where({ id: existing.id })
+          let rewrite = db('notifications').where({ id: existing.id });
+          // The placeholder rewrite is conditional in the UPDATE itself: a
+          // person closing the row, or the draft upgrade landing, between the
+          // read above and this write must not be overwritten or reopened.
+          if (yieldingPlaceholder) rewrite = rewrite.whereRaw(PLACEHOLDER_OPEN_SQL);
+          await rewrite
             .update({
               title,
               // body + detail together: "Show full text" must never keep the
@@ -769,6 +780,8 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
               // come back unread or the upgrade is invisible.
               read_at: null, done_at: null, done_by: null, resolution: null,
             });
+          // Zero rows on the placeholder path means a concurrent writer already
+          // changed the row: a bell exists, its version stands, nothing is cleared.
           return true;
         }
       }

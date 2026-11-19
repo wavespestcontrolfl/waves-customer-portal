@@ -14,17 +14,27 @@
  */
 
 let mockRow = null;
+let mockAffectedRows = 1;
 const mockUpdates = [];
+// Every where clause applied to the builder that ran each update, in order.
+const mockUpdateWheres = [];
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'bell-new' }));
 
 jest.mock('../models/db', () => {
   const db = (table) => {
     const b = {};
-    for (const m of ['where', 'whereRaw', 'orderBy']) b[m] = () => b;
+    const log = [];
+    for (const m of ['where', 'whereRaw', 'orderBy']) {
+      b[m] = (...args) => {
+        log.push({ m, args });
+        return b;
+      };
+    }
     b.first = async () => (table === 'notifications' ? mockRow : null);
     b.update = async (row) => {
       mockUpdates.push(row);
-      return 1;
+      mockUpdateWheres.push(log.slice());
+      return mockAffectedRows;
     };
     return b;
   };
@@ -39,7 +49,8 @@ jest.mock('../services/notification-service', () => ({
 const { notify, _private } = require('../services/estimator-engine/index');
 
 const THREAD_KEY = 'sms:9415550123';
-const PHONE_LINK = '/admin/communications?phone=%2B19415550123';
+// Links carry a customer id and the text's SID, never the phone number.
+const SENDER_LINK = '/admin/communications?message=SM0abc';
 const PLACEHOLDER_TITLE = 'Quote asked by text — send it';
 
 function bellRow(meta = {}, overrides = {}) {
@@ -68,7 +79,7 @@ function placeholderCall(extra = {}) {
     threadKey: THREAD_KEY,
     title: PLACEHOLDER_TITLE,
     body: 'Texter …0123 asked for a quote by text. The estimator is drafting it; if no draft comes, send one by hand.',
-    link: PHONE_LINK,
+    link: SENDER_LINK,
     placeholder: true,
     ...extra,
   };
@@ -83,7 +94,7 @@ function outcomeCall(extra = {}) {
     threadKey: THREAD_KEY,
     title: PLACEHOLDER_TITLE,
     body: 'Jane Doe: quote requested over SMS, no auto-draft (needs a property check). Reply with pricing manually.',
-    link: PHONE_LINK,
+    link: SENDER_LINK,
     ...extra,
   };
 }
@@ -91,6 +102,8 @@ function outcomeCall(extra = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockUpdates.length = 0;
+  mockUpdateWheres.length = 0;
+  mockAffectedRows = 1;
   mockRow = null;
 });
 
@@ -99,7 +112,7 @@ describe('notify() with a thread key', () => {
     expect(await notify(placeholderCall())).toBe(true);
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
     const [, , , opts] = mockNotifyAdmin.mock.calls[0];
-    expect(opts.link).toBe(PHONE_LINK);
+    expect(opts.link).toBe(SENDER_LINK);
     expect(opts.metadata.placeholder).toBe(true);
     expect(opts.metadata.smsThreadKey).toBe(THREAD_KEY);
   });
@@ -129,7 +142,7 @@ describe('notify() with a thread key', () => {
   test('a blocked outcome replaces the placeholder and links to the open estimate (estimateId stays null)', async () => {
     mockRow = bellRow();
     const link = _private.blockedThreadLink(
-      { threadKey: THREAD_KEY, bellLink: PHONE_LINK },
+      { threadKey: THREAD_KEY, bellLink: SENDER_LINK },
       { blocked: true, duplicateBlock: { existingEstimateId: 'est-77' } },
     );
     expect(link).toBe('/admin/estimates?estimateId=est-77');
@@ -194,6 +207,43 @@ describe('notify() with a thread key', () => {
   });
 });
 
+describe('the placeholder rewrite is conditional in the UPDATE itself', () => {
+  const rawSql = (wheres) => wheres.filter((w) => w.m === 'whereRaw').map((w) => w.args[0]).join(' | ');
+
+  test('the placeholder-gives-way UPDATE requires: still open, still a placeholder, still no estimate', async () => {
+    mockRow = bellRow();
+    await notify(outcomeCall());
+    expect(mockUpdates).toHaveLength(1);
+    const sql = rawSql(mockUpdateWheres[0]);
+    expect(sql).toMatch(/done_at IS NULL/);
+    expect(sql).toMatch(/metadata->>'placeholder' = 'true'/);
+    expect(sql).toMatch(/COALESCE\(metadata->>'estimateId', ''\) = ''/);
+    expect(mockUpdateWheres[0].some((w) => w.m === 'where' && w.args[0]?.id === 'bell-1')).toBe(true);
+  });
+
+  test('0 rows updated (a person closed it, or a draft landed): returns true, no fresh insert, nothing further written', async () => {
+    mockRow = bellRow();
+    mockAffectedRows = 0;
+    expect(await notify(outcomeCall())).toBe(true);
+    expect(mockUpdates).toHaveLength(1);
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('the draft upgrade path stays unconditional, exactly as on main', async () => {
+    mockRow = bellRow();
+    await notify(outcomeCall({ estimateId: 'est-5', link: undefined }));
+    expect(mockUpdates).toHaveLength(1);
+    expect(rawSql(mockUpdateWheres[0])).not.toMatch(/placeholder/);
+  });
+
+  test('a forceUpdate rewrite stays unconditional', async () => {
+    mockRow = bellRow({ placeholder: false });
+    await notify(outcomeCall({ forceUpdate: true }));
+    expect(mockUpdates).toHaveLength(1);
+    expect(rawSql(mockUpdateWheres[0])).not.toMatch(/placeholder/);
+  });
+});
+
 describe('notify() call origin is unchanged', () => {
   const CALL = { twilio_call_sid: 'CA-thread-test-1' };
 
@@ -218,7 +268,7 @@ describe('notify() call origin is unchanged', () => {
 
 describe('thread link helpers', () => {
   test('threadBellLink is the sender link for a thread origin, null for call origin or unset', () => {
-    expect(_private.threadBellLink({ threadKey: THREAD_KEY, bellLink: PHONE_LINK })).toBe(PHONE_LINK);
+    expect(_private.threadBellLink({ threadKey: THREAD_KEY, bellLink: SENDER_LINK })).toBe(SENDER_LINK);
     expect(_private.threadBellLink({ threadKey: THREAD_KEY })).toBeNull();
     expect(_private.threadBellLink(_private.CALL_ORIGIN)).toBeNull();
   });
@@ -226,6 +276,6 @@ describe('thread link helpers', () => {
   test('blockedThreadLink ignores the estimate for call origin and falls back to the sender link without one', () => {
     const draft = { duplicateBlock: { existingEstimateId: 'est-1' } };
     expect(_private.blockedThreadLink(_private.CALL_ORIGIN, draft)).toBeNull();
-    expect(_private.blockedThreadLink({ threadKey: THREAD_KEY, bellLink: PHONE_LINK }, { duplicateBlock: {} })).toBe(PHONE_LINK);
+    expect(_private.blockedThreadLink({ threadKey: THREAD_KEY, bellLink: SENDER_LINK }, { duplicateBlock: {} })).toBe(SENDER_LINK);
   });
 });
