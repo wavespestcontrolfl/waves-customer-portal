@@ -12,10 +12,30 @@ jest.mock('../services/auto-dispatch/eligibility', () => ({
   planKey: jest.requireActual('../services/auto-dispatch/eligibility').planKey,
   heldOutOfAutoDispatch: jest.requireActual('../services/auto-dispatch/eligibility').heldOutOfAutoDispatch,
 }));
+jest.mock('../services/rebooker', () => ({ probeMoveConflicts: jest.fn() }));
+jest.mock('../services/day-replan', () => ({
+  _internals: {
+    loadToldLevels: jest.fn(), loadDayStops: jest.fn(), dryWindowPref: jest.fn(() => null),
+  },
+}));
+jest.mock('../services/day-replan/booking-fit', () => ({ assessOfferedHours: jest.fn() }));
+jest.mock('../services/technician-eligibility', () => ({
+  applyAssignable: jest.fn(() => ({ where: () => ({ first: async () => ({ id: 'tech-1' }) }) })),
+  absentTechDays: jest.fn(async () => new Set()),
+}));
+jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
+jest.mock('../services/technician-capabilities', () => ({ inactiveCapabilitiesForServices: jest.fn(async () => []) }));
+jest.mock('../services/auto-dispatch/preferences', () => ({
+  getCustomerSchedulingPreferences: jest.fn(async () => ({ blackout: null, preferred_day_indexes: [], preferred_time_window: null, dry_time: null })),
+}));
+jest.mock('../services/auto-dispatch/mowing-days', () => ({ unitRule: jest.fn(() => null), blocksLive: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const eligibility = require('../services/auto-dispatch/eligibility');
 const notifications = require('../services/notification-service');
+const rebooker = require('../services/rebooker');
+const replan = require('../services/day-replan')._internals;
+const bookingFit = require('../services/day-replan/booking-fit');
 const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
 const knex = require('knex')({ client: 'pg' });
 
@@ -49,6 +69,10 @@ beforeEach(() => {
   retire.mockResolvedValue(1);
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: true });
   eligibility.lapsedPlanKeys.mockResolvedValue(new Set());
+  rebooker.probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
+  replan.loadToldLevels.mockResolvedValue({ told: new Map() });
+  replan.loadDayStops.mockResolvedValue([]);
+  bookingFit.assessOfferedHours.mockResolvedValue([]);
   db.raw = jest.fn((sql) => sql);
   for (const method of ['join', 'whereNotNull', 'whereNull', 'whereIn', 'where', 'whereRaw', 'whereNotExists', 'forNoKeyUpdate']) {
     query[method] = jest.fn(() => query);
@@ -211,6 +235,36 @@ describe('recurring visit with no arrival time and no due date', () => {
     const opts = notifications.notifyAdmin.mock.calls[0][3];
     expect(opts.detail).toBe('Series started 2026-01-10 (quarterly). The dispatch due date is missing.');
     expect(opts.metadata.suggestedStarts).toEqual([]);
+  });
+
+  test('suggested hours batch the writer occupancy read and exclude an interview across the visit exact width', async () => {
+    const date = '2026-08-10';
+    const candidate = { ...windowless, scheduled_date: date };
+    const current = { ...candidate, technician_id: 'tech-1', estimated_duration_minutes: 90 };
+    query.select = jest.fn().mockResolvedValueOnce([candidate]).mockResolvedValue([]);
+    query.first = jest.fn()
+      .mockResolvedValueOnce(current)
+      .mockResolvedValueOnce({ scheduled_date: '2026-01-10', recurring_pattern: 'quarterly' })
+      .mockResolvedValueOnce(null);
+    replan.loadDayStops.mockResolvedValue([{ id: current.id, estimated_duration_minutes: 90 }]);
+    bookingFit.assessOfferedHours.mockImplementation(async (_trx, slots) => slots.slice(0, 3).map((slot, i) => ({
+      slot, driveMin: i + 1, slots: 3 - i, startMin: 8 * 60 + i * 60,
+    })));
+    rebooker.probeMoveConflicts.mockResolvedValue({ rows: [{
+      id: 'interview:application-1', scheduled_date: date, window_start: '09:15', window_end: '09:45',
+      estimated_duration_minutes: 30, status: 'interview', conflict_reason: 'interview',
+    }] });
+    notifications.notifyAdmin.mockResolvedValue({ id: 'notice9' });
+
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).toBe(1);
+    expect(rebooker.probeMoveConflicts).toHaveBeenCalledTimes(1);
+    expect(rebooker.probeMoveConflicts).toHaveBeenCalledWith({
+      conn: db,
+      target: { id: current.id, date, windowStart: '08:00', windowEnd: '17:00', technicianId: 'tech-1' },
+      excludeServiceIds: [current.id],
+      options: {},
+    });
+    expect(notifications.notifyAdmin.mock.calls[0][3].metadata.suggestedStarts).toEqual(['10:00']);
   });
 
   test('re-checks the row under its lock: a visit given a time meanwhile raises nothing', async () => {

@@ -972,7 +972,12 @@ async function listOccupiedWindows({
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
       .whereNotIn('scheduled_services.status', excludeStatuses)
       .where((q) => {
-        q.whereNull('scheduled_services.reservation_expires_at')
+        // Only customer-NULL rows are expiring estimate holds. A committed
+        // customer-linked visit stays occupied when a stale expiry stamp is
+        // non-null or already past (the same LIVE_OCCUPANCY_SQL contract as
+        // the day-route reader).
+        q.whereNotNull('scheduled_services.customer_id')
+          .orWhereNull('scheduled_services.reservation_expires_at')
           .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
       })
       .whereNotNull('scheduled_services.window_start');
@@ -983,7 +988,8 @@ async function listOccupiedWindows({
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', excludeStatuses)
       .where((q) => {
-        q.whereNull('reservation_expires_at')
+        q.whereNotNull('customer_id')
+          .orWhereNull('reservation_expires_at')
           .orWhereRaw('reservation_expires_at > NOW()');
       })
       // Windowless placeholder rows are inert to conflicts (see header).
@@ -1063,7 +1069,6 @@ module.exports = {
   findConflictingVisits,
   findInterviewConflicts,
   listOccupiedWindows,
-  liveMakeRoomDestinations,
   windowsOverlap,
   occupiedRows,
   stopCreditResolver,

@@ -34,6 +34,7 @@ function targetStamp(row) {
 
 function routeFits(rows, order, { origin, departureMin, dayEndMin, blocks = [] }) {
   const byId = new Map(rows.map(r => [r.id, r]));
+  if (order.length !== rows.length || byId.size !== rows.length || new Set(order).size !== rows.length) return false;
   const seq = order.map(id => byId.get(id));
   if (!Number.isFinite(dayEndMin) || seq.some(r => !r || !r.window_start || r.lat == null || r.lng == null)) return false;
   return !!simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {

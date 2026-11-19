@@ -5,7 +5,9 @@ const { coVisitGroups, simulate } = require('./app-sim');
 const { preferredFit, fitOfferedHour } = require('./close-gaps');
 const { loadTechStartPoints, homeFromMap } = require('../scheduling/tech-start-point');
 const { dayDepartureMinutes } = require('../scheduling/departure-time');
-const { DEFAULT_EXCLUDE_STATUSES, liveMakeRoomDestinations, techScopedConfirmActive } = require('../scheduling/occupancy');
+const {
+  DEFAULT_EXCLUDE_STATUSES, listOccupiedWindows, occupiedRows, techScopedConfirmActive,
+} = require('../scheduling/occupancy');
 const { isHoldStop } = require('../scheduling/travel-gap');
 const { etDateString } = require('../../utils/datetime-et');
 
@@ -26,6 +28,48 @@ function withoutOwnEstimateHold(rows, ownEstimateId) {
 }
 
 const sameTech = (row, techId) => row.technician_id != null && String(row.technician_id) === String(techId);
+
+// listOccupiedWindows supplies the writer-mirroring spans, including a v2 allocation's summed work and live
+// make-room destinations. Keep those spans separate from the richer day-route rows: the latter carry the premise,
+// route order and pin fields the travel simulation needs, while this map answers only which booked hours they hold.
+function spanHours(row) {
+  const start = Number(row.startMin);
+  const end = Number(row.endMin);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) return [];
+  const first = Math.floor(start / 60);
+  const last = Math.max(first, Math.ceil(end / 60) - 1);
+  return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+}
+
+function occupancyById(rows) {
+  const byId = new Map();
+  for (const row of rows) {
+    const key = String(row.id);
+    if (!byId.has(key)) byId.set(key, []);
+    byId.get(key).push(row);
+  }
+  return byId;
+}
+
+function routeRowHours(row, byId, fallback) {
+  const spans = byId.get(String(row.id));
+  if (!spans?.length) return fallback(row);
+  return [...new Set(spans.flatMap(spanHours))];
+}
+
+// The booking writer scopes occupancy to unassigned rows plus this technician when multi-tech confirmation is on;
+// with the gate off, every other technician blocks too. A same-tech committed route row is handled by `groups`, but
+// a hold, completed row or destination that is not in that route must still block its canonical occupied span.
+function occupiedBlockedHours(rows, techId, techBlind, routeIds) {
+  const hours = new Set();
+  for (const row of rows) {
+    const own = sameTech(row, techId);
+    if (own && routeIds.has(String(row.id)) && !isHoldStop(row)) continue;
+    if (!own && row.technician_id != null && !techBlind) continue;
+    for (const hour of spanHours(row)) hours.add(hour);
+  }
+  return [...hours].sort((a, b) => a - b);
+}
 
 // All inputs are stored appointments, pins and local drive estimates. One read of the route per date and
 // one of the calendar blocks per technician-date. Candidates come from the caller's own admitted hours.
@@ -56,17 +100,19 @@ async function assessOfferedHours(conn, offered, target, {
   const fits = [];
   for (const [date, techs] of byDate) {
     const loaded = await read(date, () => replan.loadDayStops(conn, date));
-    const excludedIds = loaded.filter(row => String(row.id) === String(target.id)
-      || isOwnEstimateHold(row, ownEstimateId))
-      .map(row => String(row.id));
     const rows = withoutOwnEstimateHold(loaded.filter(r => String(r.id) !== String(target.id)), ownEstimateId);
-    // Use the booking writer's shared occupancy reader for reversible make-room destinations. The excluded ids
-    // remove this prospective target and this estimate's own genuine holds; expiry and mode semantics stay canonical.
-    const destinationKey = `make-room|${date}|${excludedIds.slice().sort().join(',')}`;
-    const destinations = (await read(destinationKey, () => liveMakeRoomDestinations(conn, {
-      dateFrom: date, dateTo: date, excludeIds: excludedIds, excludeStatuses: DEFAULT_EXCLUDE_STATUSES, scopeTechId: null,
-    }))).map(destination => destination.row);
-    const occupancyRows = [...rows, ...destinations];
+    // One canonical occupancy read per date/target is shared by every technician and, for new estimates, by the
+    // morning matcher’s 20 estimates. Target exclusion also removes a make-room chain that moves this target, as the
+    // writer does. Own estimate holds are filtered only after the cached read so different estimates can share it;
+    // committed customer-linked rows from that estimate stay occupied even when a stale expiry stamp remains.
+    const targetIds = target.id == null ? [] : [String(target.id)];
+    const occupancyKey = `occupancy|${date}|${targetIds.join(',')}`;
+    const listed = await read(occupancyKey, () => listOccupiedWindows({
+      db: conn, dateFrom: date, dateTo: date, excludeServiceIds: targetIds,
+      excludeStatuses: DEFAULT_EXCLUDE_STATUSES,
+    }));
+    const occupancyRows = withoutOwnEstimateHold(occupiedRows(listed), ownEstimateId);
+    const occupiedById = occupancyById(occupancyRows);
     for (const [techId, slots] of techs) {
       // A linked appointment with a leftover reservation stamp is committed, not a hold: route and simulate it.
       const own = rows.filter(r => sameTech(r, techId) && !isHoldStop(r));
@@ -75,8 +121,9 @@ async function assessOfferedHours(conn, offered, target, {
       if (ordered.some((r, i) => i && effectiveWindowRange(r).startMin < effectiveWindowRange(ordered[i - 1]).startMin)) continue;
       const groups = coVisitGroups(ordered);
       const blocks = await read(`${date}|${techId}`, () => replan.loadBlocks(conn, date, techId));
-      const blockedHours = [...new Set([...replan.blockedHoursFor(occupancyRows, techId, techBlind),
-        ...occupancyRows.filter(r => sameTech(r, techId) && isHoldStop(r)).flatMap(replan.rowHours)])];
+      const routeIds = new Set(own.map(row => String(row.id)));
+      const blockedHours = occupiedBlockedHours(occupancyRows, techId, techBlind, routeIds);
+      const rowHours = row => routeRowHours(row, occupiedById, replan.rowHours);
       const unavailable = [...blocks, ...blockedHours.map(h => ({ startMin: h * 60, endMin: h * 60 + 60 }))];
       const origin = homeFromMap(homes, techId);
       const before = simulate(ordered, { origin, departureMin });
@@ -86,7 +133,7 @@ async function assessOfferedHours(conn, offered, target, {
         const proposed = { ...target, id: target.id || '__new_booking__', technician_id: techId, window_start: slot.windowStart, window_end: slot.windowEnd };
         const group = [proposed];
         const fit = fitOfferedHour({ groups: [...groups, group], group, leaderId: proposed.id, pref,
-          origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds, blocks, blockedHours, rowHours: replan.rowHours, requireClose: true },
+          origin, marginMin: DEFAULT_OPTIONS.marginMin, bounds, blocks, blockedHours, rowHours, requireClose: true },
         minute(slot.windowStart) / 60);
         if (fit) fits.push({ ...fit, addedDriveMin: fit.driveMin - before.travelMin, slot });
       }
@@ -145,4 +192,7 @@ function observeOffers(conn, shown, target, options = {}) {
   };
 }
 
-module.exports = { assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK, _internals: { withoutOwnEstimateHold } };
+module.exports = {
+  assessOfferedHours, rankOfferedHours, observeOffers, OFFER_RANK,
+  _internals: { withoutOwnEstimateHold },
+};

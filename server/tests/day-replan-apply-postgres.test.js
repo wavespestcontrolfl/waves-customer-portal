@@ -152,7 +152,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     await mockConn.rollback();
   });
 
-  async function scoredCrossDay() {
+  async function scoredCrossDay({ destinationExpiry } = {}) {
     const { positionFor, routeStamp } = require('../services/auto-dispatch/route-position');
     const { DAY_CLOSE, _internals: { loadDayStopRows } } = require('../services/auto-dispatch/candidate-slots');
     const date = '2097-06-11';
@@ -160,6 +160,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     for (const [v, start, end, n] of [[left, '13:00', '14:00', 1], [right, '15:00', '16:00', 2]]) {
       await mockConn('scheduled_services').where('id', v.id).update({ scheduled_date: date, window_start: start, window_end: end, route_order: n });
     }
+    if (destinationExpiry) await mockConn('scheduled_services').where({ id: left.id }).update({ reservation_expires_at: destinationExpiry });
     const rows = await loadDayStopRows(mockConn, { dates: [DAY, date], technicianIds: [techId] });
     const others = rows.filter(r => r.dateStr === DAY && r.id !== mover.id);
     const source = rows.find(r => r.id === mover.id);
@@ -178,11 +179,20 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
   }
 
   test('the auto-dispatch writer puts a cross-day move exactly between its scored neighbors', async () => {
-    const { date, left, right, mover, position } = await scoredCrossDay();
+    const { date, left, right, mover, position } = await scoredCrossDay({ destinationExpiry: '2001-01-01T00:00Z' });
     await rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
       { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position });
     const ordered = await mockConn('scheduled_services').where({ technician_id: techId, scheduled_date: date }).orderBy('route_order');
     expect(ordered.map(r => [r.id, r.route_order])).toEqual([[left.id, 1], [mover.id, 2], [right.id, 3]]);
+  });
+
+  test('a priced order with a duplicate or missing destination stop cannot alter the schedule', async () => {
+    const { date, left, mover, position } = await scoredCrossDay();
+    for (const order of [[left.id, mover.id], [left.id, left.id, mover.id]]) {
+      await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+        { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: { ...position, order } })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    }
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
   });
 
   test('a different writer cannot use a cross-day dispatch position', async () => {
@@ -272,6 +282,20 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect((await measure(randomUUID())).map(m => Number.isFinite(m.driveMin))).toEqual([false, false, false, false]);
   });
 
+  test('two simultaneous allocation members reserve their full combined duration before ranking a new hour', async () => {
+    const { observeOffers } = require('../services/day-replan/booking-fit');
+    const date = '2097-06-11';
+    const ids = [randomUUID(), randomUUID()];
+    const mix = { version: 2, allocatedServiceIds: ids };
+    await mockConn('scheduled_services').insert(ids.map(id => ({ id, customer_id: visits[0].customerId, technician_id: techId,
+      scheduled_date: date, service_type: 'Quarterly Pest Control Service', status: 'pending', lat: HQ.lat, lng: HQ.lng,
+      window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, reservation_service_mix: mix })));
+    const cards = ['10', '12'].map(h => ({ date, techId, windowStart: h + ':00', windowEnd: (Number(h) + 1) + ':00' }));
+    const result = await observeOffers(mockConn, cards,
+      { lat: HQ.lat, lng: HQ.lng, planning_exempt: true, estimated_duration_minutes: 60 }, { now: NOW })();
+    expect(result.map(m => Number.isFinite(m.driveMin))).toEqual([false, true]);
+  });
+
   test('the office notice shows the verified series and two feasible starts, and a live customer pick stays quiet', async () => {
     const { flagUnplacedVisits } = require('../services/auto-dispatch/audit');
     const compose = require('../services/admin-alert-compose');
@@ -291,6 +315,14 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(notice?.metadata.suggestedStarts).toHaveLength(2);
     expect(new Set(notice.metadata.suggestedStarts).size).toBe(2);
     expect(notices.some(n => n.metadata.scheduledServiceId === pending.id)).toBe(false);
+    const blockedStart = notice.metadata.suggestedStarts[0];
+    const interviewAt = parseETDateTime(DAY + 'T' + blockedStart);
+    await mockConn('job_applications').insert({ status: 'interview', interview_at: interviewAt,
+      interview_end_at: new Date(new Date(interviewAt).getTime() + 30 * 60000) });
+    capture.mockClear();
+    await flagUnplacedVisits({ lockWindowDays: 14 }, NOW);
+    const updated = capture.mock.calls.map(c => c[2]).find(n => n?.metadata?.scheduledServiceId === target.id);
+    expect(updated.metadata.suggestedStarts).not.toContain(blockedStart);
     expect((await mockConn('scheduled_services').where('id', target.id).first('window_start')).window_start).toBeNull();
   });
 

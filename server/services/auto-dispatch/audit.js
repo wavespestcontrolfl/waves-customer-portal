@@ -506,7 +506,24 @@ async function noWindowDetail(trx, row, date, now = new Date()) {
   }
   const { assessOfferedHours } = require('../day-replan/booking-fit');
   const fits = await assessOfferedHours(trx, slots, target, { now, pref: prefs.preferred_time_window || replan.dryWindowPref(prefs.dry_time) });
-  const hours = fits.sort((a, b) => a.driveMin - b.driveMin || b.slots - a.slots || a.startMin - b.startMin)
+  // These hours do not come through find-time, so ask the move writer's own
+  // interview-inclusive occupancy probe once for the whole day. Its technician
+  // scope follows the live multi-tech policy and the moving row is invisible,
+  // exactly as it will be at commit. Filter each already route-feasible fit by
+  // its real service width before ranking; a 90-minute visit must not clear an
+  // interview merely because its first hour does.
+  const occupancy = await require('../rebooker').probeMoveConflicts({
+    conn: trx,
+    target: { id: row.id, date, windowStart: fmt(DAY_OPEN), windowEnd: fmt(DAY_CLOSE), technicianId: techId },
+    excludeServiceIds: [String(row.id)],
+    options: {},
+  });
+  const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
+  const occupied = occupiedRows(occupancy.rows);
+  const clear = fits.filter((fit) => !occupied.some((block) => windowsOverlap(
+    block.startMin, block.endMin, fit.startMin, fit.startMin + duration,
+  )));
+  const hours = clear.sort((a, b) => a.driveMin - b.driveMin || b.slots - a.slots || a.startMin - b.startMin)
     .slice(0, 2).map(f => f.slot.windowStart);
   if (hours.length) detail.push(`Route-checked starts for the assigned technician: ${hours.join(' or ')} ET. Confirm availability in dispatch when placing the visit.`);
   return { detail: detail.join(' '), hours };

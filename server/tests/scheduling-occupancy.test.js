@@ -279,6 +279,25 @@ describe('listOccupiedWindows', () => {
     expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
   });
 
+  test.each([
+    [false, 'customer_id', 'reservation_expires_at'],
+    [true, 'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at'],
+  ])('committed customer-linked rows survive stale expiry stamps (withCoords=%s)', async (withCoords, customerColumn, expiryColumn) => {
+    const q = makeQuery([]);
+    db.mockReturnValue(q);
+    db.raw = jest.fn((sql) => sql);
+
+    await listOccupiedWindows({
+      db, dateFrom: '2099-01-01', dateTo: '2099-01-14', withCoords,
+    });
+
+    // customer-linked (committed) OR unstamped OR a still-live hold. Only a
+    // customer-NULL row with a past stamp is dropped by the SQL predicate.
+    expect(q.whereNotNull).toHaveBeenCalledWith(customerColumn);
+    expect(q.orWhereNull).toHaveBeenCalledWith(expiryColumn);
+    expect(q.orWhereRaw).toHaveBeenCalledWith(`${expiryColumn} > NOW()`);
+  });
+
   test('normalizes dates and derives endMin with the duration-or-60 fallback', async () => {
     const q = makeQuery([
       // Unassigned row with an explicit end.

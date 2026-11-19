@@ -69,6 +69,7 @@ function emptyDb() {
   ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
     .forEach((m) => { c[m] = () => c; });
   c.select = async () => [];
+  c.distinct = async () => [];
   return () => c;
 }
 

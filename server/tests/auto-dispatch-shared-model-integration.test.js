@@ -55,13 +55,15 @@ function stopRow(id, windowStart, windowEnd, lat, lng, { date = '2026-08-11', te
 // same-day hours), call 3+ = the candidate tech-days' OTHER stops (one batched read).
 function sequencedDb(candidateStops, currentStops) {
   let call = 0;
-  return () => {
+  return (table) => {
     call += 1;
     const n = call;
     const c = {};
     ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
       .forEach((m) => { c[m] = () => c; });
+    c.distinct = async () => [];
     c.select = async () => {
+      if (table === 'tech_schedule_blocks') return [];
       if (n === 1) return [];
       if (n === 2) return currentStops;
       return candidateStops;
