@@ -839,3 +839,103 @@ describe('follow-up 20261119010300: the Crosscheck row is tagged mosquito and te
     expect(snapshot(knex)).toEqual(before);
   });
 });
+
+// Follow-up 20261119010400: a repo-built database links the older bifenthrin products (Talstar P, Bifen I/T) from earlier
+// seeds; those links follow to Crosscheck too. Production has none (read 2026-11-18).
+describe('follow-up 20261119010400: links to Talstar P and Bifen I/T follow to Crosscheck', () => {
+  const legacy = require('../models/migrations/20261119010400_legacy_bifenthrin_links');
+  const BIFEN = 'dddddddd-0000-4000-8000-000000000004';
+  const TALSTAR = 'eeeeeeee-0000-4000-8000-000000000005';
+  const legacyTables = () => {
+    const tables = baseTables();
+    tables.products_catalog.push({ id: BIFEN, name: 'Bifen I/T', active: true }, { id: TALSTAR, name: 'Talstar P', active: false });
+    tables.lawn_protocol_products.push(
+      { id: 'r5', lawn_protocol_window_id: 'w1', product_id: BIFEN, product_name: 'Bifen I/T', role: 'insect_curative', rate_per_1000: 0.25, updated_at: 't0' },
+      { id: 'r6', lawn_protocol_window_id: 'w3', product_id: null, product_name: 'Talstar P', role: 'insect_curative', rate_per_1000: 1, updated_at: 't0' },
+      { id: 'r7', lawn_protocol_window_id: 'w2', product_id: TALSTAR, product_name: 'Talstar P', role: 'insect_curative', rate_per_1000: 1, updated_at: 't0' },
+    );
+    tables.services.push(
+      { id: 's6', name: 'Seeded Mosquito Monthly', default_products: ['Bifen I/T', 'Tekko Pro IGR', 'Scion Insecticide'] },
+      { id: 's7', name: 'Both Listed', default_products: ['LESCO Crosscheck Plus', 'Bifen I/T', 'Talstar P'] },
+    );
+    tables.service_product_usage.push(
+      { id: 'u5', product_id: BIFEN, service_type: 'Mosquito Treatment - Essential Barrier', usage_amount: 3 },
+      { id: 'u6', product_id: TALSTAR, service_type: 'Already Mapped', usage_amount: 2 },
+      { id: 'u7', product_id: TALSTAR, service_type: 'Mosquito Treatment - Essential Barrier', usage_amount: 1 },
+    );
+    return tables;
+  };
+  const events = (knex, step) => knex.tables.audit_log.filter((e) => e.action === legacy.actionFor(step));
+  const withoutAudit = (tables) => { const { audit_log: _log, ...rest } = tables; return byIdOrder(rest); };
+
+  test('up: rows, defaults and usage on either product move to Crosscheck; duplicates go whole into the audit; a re-run changes nothing', async () => {
+    const knex = makeKnex(legacyTables());
+    await migration.up(knex);
+    await legacy.up(knex);
+    for (const id of ['r5', 'r6', 'r7']) {
+      expect(byId(knex, 'lawn_protocol_products', id)).toMatchObject({ product_id: CROSS, product_name: 'LESCO Crosscheck Plus', role: 'insect_curative' });
+    }
+    expect(byId(knex, 'lawn_protocol_products', 'r4')).toMatchObject({ product_id: OTHER, product_name: 'Taurus SC' });
+    const lawnLogs = knex.tables.lawn_protocol_audit_log.filter((log) => log.action === legacy.LAWN_ACTION);
+    expect(lawnLogs.map((log) => log.lawn_protocol_id).sort()).toEqual(['p1', 'p2']);
+    expect(byId(knex, 'services', 's6').default_products).toEqual(['LESCO Crosscheck Plus', 'Tekko Pro IGR', 'Scion Insecticide']);
+    expect(byId(knex, 'services', 's7').default_products).toEqual(['LESCO Crosscheck Plus']);
+    expect(byId(knex, 'service_product_usage', 'u5')).toMatchObject({ product_id: CROSS });
+    expect(byId(knex, 'service_product_usage', 'u6')).toBeUndefined();
+    expect(byId(knex, 'service_product_usage', 'u7')).toBeUndefined();
+    expect(events(knex, legacy.STEPS.usage).map((e) => e.metadata.kind).sort()).toEqual(['moved', 'removed', 'removed']);
+    expect(events(knex, legacy.STEPS.usage).find((e) => e.resource_id === 'u6').metadata.row).toMatchObject({ id: 'u6', product_id: TALSTAR });
+    expect(events(knex, legacy.STEPS.services)).toHaveLength(2);
+    expect(knex.locks.map(([table]) => table)).toEqual(expect.arrayContaining(['lawn_protocol_products', 'service_product_usage']));
+    for (const e of knex.tables.audit_log) expect(e.action.length).toBeLessThanOrEqual(96);
+    expect(legacy.rollbackActionFor(legacy.STEPS.services).length).toBeLessThanOrEqual(96);
+    expect(legacy.LAWN_ACTION.length).toBeLessThanOrEqual(40);
+    const after = snapshot(knex);
+    await legacy.up(knex);
+    expect(snapshot(knex)).toEqual(after);
+  });
+
+  test('down: every link goes back to its own product (a row with no product stays with none); audit_log is only appended to', async () => {
+    const knex = makeKnex(legacyTables());
+    await migration.up(knex);
+    const start = snapshot(knex);
+    await legacy.up(knex);
+    const upEvents = knex.tables.audit_log.length - start.audit_log.length;
+    await legacy.down(knex);
+    expect(withoutAudit(snapshot(knex))).toEqual(withoutAudit(start));
+    expect(byId(knex, 'lawn_protocol_products', 'r6')).toMatchObject({ product_id: null, product_name: 'Talstar P' });
+    expect(knex.tables.audit_log.slice(0, start.audit_log.length)).toEqual(start.audit_log);
+    expect(knex.tables.audit_log.filter((e) => String(e.action).endsWith(':rollback') && e.action.includes(legacy.MIGRATION))).toHaveLength(upEvents);
+    const rolledBack = snapshot(knex);
+    await legacy.down(knex);
+    expect(snapshot(knex)).toEqual(rolledBack);
+  });
+
+  test('down keeps a row edited since up() and a link whose old product is gone', async () => {
+    const knex = makeKnex(legacyTables());
+    await migration.up(knex);
+    await legacy.up(knex);
+    byId(knex, 'services', 's6').default_products = ['Office Pick'];
+    byId(knex, 'service_product_usage', 'u5').product_id = OTHER;
+    knex.tables.products_catalog = knex.tables.products_catalog.filter((row) => row.id !== TALSTAR);
+    await legacy.down(knex);
+    expect(byId(knex, 'services', 's6').default_products).toEqual(['Office Pick']);
+    expect(byId(knex, 'service_product_usage', 'u5')).toMatchObject({ product_id: OTHER });
+    expect(byId(knex, 'lawn_protocol_products', 'r7')).toMatchObject({ product_id: CROSS });
+    expect(byId(knex, 'lawn_protocol_products', 'r5')).toMatchObject({ product_id: BIFEN, product_name: 'Bifen I/T' });
+    expect(byId(knex, 'service_product_usage', 'u6')).toBeUndefined();
+  });
+
+  test.each([
+    ['production: the older products link nothing', (tables) => tables],
+    ['two catalog rows named Crosscheck', (tables) => { tables.products_catalog.push({ id: 'cross-2', name: 'LESCO Crosscheck Plus' }); return tables; }],
+  ])('%s: nothing changes', async (_label, shape) => {
+    const tables = baseTables();
+    tables.products_catalog.push({ id: BIFEN, name: 'Bifen I/T', active: false }, { id: TALSTAR, name: 'Talstar P', active: false });
+    const knex = makeKnex(shape(tables));
+    await migration.up(knex);
+    const before = snapshot(knex);
+    await legacy.up(knex);
+    expect(snapshot(knex)).toEqual(before);
+  });
+});
