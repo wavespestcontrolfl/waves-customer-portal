@@ -48,7 +48,7 @@ const tableResults = {
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNot', 'orWhereNull', 'orWhereNotNull', 'orderBy', 'limit', 'offset'];
+    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereIn', 'orWhereNot', 'orWhereNull', 'orWhereNotNull', 'orderBy', 'limit', 'offset'];
     for (const m of passthrough) {
       q[m] = (...args) => {
         q._calls = q._calls || [];
@@ -69,8 +69,10 @@ jest.mock('../models/db', () => {
   const dbFn = jest.fn((table) => mkChain((q, wantFirst) => {
     const calls = q._calls || [];
     const whereArg = (calls.find(([m]) => m === 'where') || [null, [{}]])[1][0] || {};
+    if (table === 'customers') return { id: 'cust-1', payer_id: null };
     if (table === 'invoices') {
       if (calls.some(([m]) => m === 'whereNotNull')) return tableResults.payerInvoices;
+      if (q._selected?.includes('scheduled_service_id')) return [];
       // unpaidInvoices SUM terminates with .first() (checked before whereNull:
       // it also filters whereNull('payer_id')).
       if (wantFirst) return { total: tableResults.unpaidTotal };
@@ -167,7 +169,8 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
     // Failed completion autopay: obligation lives on a draft invoice, so it
     // rides failedTotal (not unpaidInvoices) — the pay-link query must pick
     // the draft up by id or the CTA is absent in the one scenario it's for.
-    tableResults.failedRows = [{ amount: '89.00', metadata: JSON.stringify({ invoice_id: 'inv-draft' }) }];
+    const draftId = 'ab36f51e-4441-4cc8-bbf7-c41ffad50152';
+    tableResults.failedRows = [{ amount: '89.00', metadata: JSON.stringify({ invoice_id: draftId }) }];
     tableResults.linkedNonDraftInvoices = []; // draft → not balance-carrying
     tableResults.recentAttempts = [{ status: 'failed', metadata: null }];
     tableResults.openInvoiceRows = [
@@ -176,6 +179,7 @@ describe('GET /balance — Pay-now open-invoice links (GATE_PORTAL_PAY_NOW)', ()
 
     const body = await getBalance();
     expect(body.currentBalance).toBe(89);
+    expect(tableResults.lastOpenInvoicesCalls).toContainEqual(['orWhereIn', ['id', [draftId]]]);
     expect(body.lastPaymentFailed).toBe(true);
     expect(body.openInvoices).toEqual([
       { payUrl: '/pay/tok-draft', amountDue: 89, invoiceNumber: 'INV-DRAFT-1', dueDate: null },

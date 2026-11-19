@@ -12,6 +12,8 @@
 const db = require('../models/db');
 const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const metadataInvoiceId = (p) => {
   try {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -74,25 +76,54 @@ async function loadFailedPaymentFacts(customerId, dbh = db, { statuses = ['faile
   const rows = await scoped.select('id', 'amount', 'metadata', 'stripe_payment_intent_id', 'stripe_charge_id',
     'description', 'payer_id', 'retry_count', 'next_retry_at');
   const failedInvoiceIds = [...new Set(rows.map(metadataInvoiceId).filter(Boolean))];
+  // invoices.id is UUID. Historical metadata is not: keep malformed legacy
+  // references out of the PostgreSQL lookup so one bad value cannot abort
+  // deduplication for every valid invoice on the account.
+  const validFailedInvoiceIds = [...new Set(failedInvoiceIds
+    .filter((id) => UUID_SHAPE.test(id))
+    .map((id) => id.toLowerCase()))];
   let carrying = [];
-  if (failedInvoiceIds.length) {
-    const lookup = dbh('invoices').whereIn('id', failedInvoiceIds).whereNot({ status: 'draft' }).select('id');
-    carrying = strict ? await lookup : await lookup.catch(() => []);
+  let invoiceLookupFailed = false;
+  if (validFailedInvoiceIds.length) {
+    const lookup = dbh('invoices').whereIn('id', validFailedInvoiceIds).whereNot({ status: 'draft' }).select('id');
+    if (strict) {
+      carrying = await lookup;
+    } else {
+      carrying = await lookup.catch(() => {
+        invoiceLookupFailed = true;
+        return [];
+      });
+    }
   }
-  const balanceCarryingInvoiceIds = new Set(carrying.map((r) => String(r.id)));
-  return { rows, failedInvoiceIds, balanceCarryingInvoiceIds };
+  const balanceCarryingInvoiceIds = new Set(carrying.map((r) => String(r.id).toLowerCase()));
+  // When the lookup itself fails, a valid linked attempt may already be
+  // represented by its invoice. Withhold that unresolved amount instead of
+  // treating the lookup failure as proof that it is standalone debt.
+  const unresolvedInvoiceIds = invoiceLookupFailed
+    ? new Set(validFailedInvoiceIds)
+    : new Set();
+  return { rows, failedInvoiceIds, balanceCarryingInvoiceIds, unresolvedInvoiceIds, invoiceLookupFailed };
 }
 
 // `isPayerPayment(row)` — the caller's payer-ownership predicate.
-function standaloneFailedTotal({ rows, balanceCarryingInvoiceIds }, isPayerPayment = () => false) {
+function standaloneFailedTotal({ rows, balanceCarryingInvoiceIds, unresolvedInvoiceIds = new Set() }, isPayerPayment = () => false) {
   return rows
     .filter((p) => !isPayerPayment(p))
     .filter((p) => !isNeverAttemptedDeferral(p))
     .filter((p) => {
       const invId = metadataInvoiceId(p);
-      return !invId || !balanceCarryingInvoiceIds.has(invId);
+      if (!invId) return true;
+      const canonicalId = invId.toLowerCase();
+      return !balanceCarryingInvoiceIds.has(canonicalId) && !unresolvedInvoiceIds.has(canonicalId);
     })
     .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 }
 
-module.exports = { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral, excludeNeverAttemptedDeferrals, metadataInvoiceId };
+module.exports = {
+  UUID_SHAPE,
+  loadFailedPaymentFacts,
+  standaloneFailedTotal,
+  isNeverAttemptedDeferral,
+  excludeNeverAttemptedDeferrals,
+  metadataInvoiceId,
+};
