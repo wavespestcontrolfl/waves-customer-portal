@@ -287,12 +287,16 @@ async function exchangeHangupScreenHit(fromPhone, at = new Date()) {
 // it without calling from that very number. A repeat = an unknown caller on a
 // GBP line whose same number made a silent hang-up (silentHangupsBefore) on a
 // DIFFERENT GBP line, or REPEAT_MIN_PRIOR silent hang-ups on any line, in the
-// last REPEAT_DAYS. The first call from a number never matches. Production
-// back-test, 90 days to 2026-11-19: 22 calls from 14 numbers, 13 pushed bells,
-// 0 real callers (no message, no later text, no later call that got through,
-// no lead, no customer).
+// last REPEAT_DAYS. The first call from a number never matches. Only history
+// the carrier fully attested (STIR/SHAKEN 'TN-Validation-Passed-A', stored as
+// metadata.stir_verstat by the voice webhook) counts (pre-push audit): a
+// spoofed earlier call that borrowed a real person's number must never silence
+// that person's own first missed call. Production back-test, 90 days to
+// 2026-11-19: 22 calls from 14 numbers, 13 pushed bells, 0 real callers (no
+// message, no later text, no later call that got through, no lead, no customer).
 const REPEAT_DAYS = 14;
 const REPEAT_MIN_PRIOR = 2;
+const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
 async function isRepeatSilentCaller(row) {
   if (!row || row.customer_id) return false;
@@ -306,6 +310,7 @@ async function isRepeatSilentCaller(row) {
   const found = await silentHangupsBefore(new Date(row.created_at || Date.now()), REPEAT_DAYS, new Date())
     .whereNot('id', row.id)
     .whereRaw(`${CALLER_KEY} = ?`, [`1${raw.slice(-10)}`])
+    .whereRaw("metadata->>'stir_verstat' = ?", [FULL_ATTESTATION])
     .select(db.raw('COUNT(*) AS n'), db.raw(`COALESCE(bool_or(${otherLineSql}), false) AS other_line`, otherLines))
     .first();
   return Boolean(found?.other_line) || Number(found?.n || 0) >= REPEAT_MIN_PRIOR;

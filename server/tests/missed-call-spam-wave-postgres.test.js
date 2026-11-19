@@ -597,10 +597,12 @@ jest.setTimeout(30000);
     // The call judged: the caller's latest silent hang-up on the Parrish GBP line
     // (the webhook stores the line's label as metadata.location; the bell names it).
     const judged = (extra = {}) => call(CALLER, 10, { metadata: { location: 'GBP — Parrish' }, ...extra });
+    // History the carrier fully attested (what the webhook stores as metadata.stir_verstat).
+    const prior = (phone, minutesAgo, extra = {}) => call(phone, minutesAgo, { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, ...extra });
 
     test('gate on: the third silent call from one number keeps its bell row, sends no push, is titled likely robocall, and settles', async () => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
-      await database('call_log').insert([call(CALLER, 60 * 24 * 3), call(CALLER, 60 * 24)]);
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const row = judged();
       await database('call_log').insert(row);
       reports({ bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } });
@@ -616,7 +618,7 @@ jest.setTimeout(30000);
 
     test('gate off: the call rings as before, titled unknown caller, stamped for the shadow read', async () => {
       isEnabled.mockImplementation((name) => name === 'missedCallUnknownCallers');
-      await database('call_log').insert([call(CALLER, 60 * 24 * 3), call(CALLER, 60 * 24)]);
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const row = judged();
       await database('call_log').insert(row);
       reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
@@ -633,27 +635,37 @@ jest.setTimeout(30000);
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(false);
-      await database('call_log').insert(call(CALLER, 60 * 24));
+      await database('call_log').insert(prior(CALLER, 60 * 24));
       expect(await repeat(row)).toBe(false);
-      await database('call_log').insert(call(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       expect(await repeat(row)).toBe(true);
     });
 
     test('a redial one minute after a hang-up on another GBP line counts once that hang-up is past the voicemail grace at check time (pre-push audit)', async () => {
       // The first call ended 1 minute before the judged call began; the check runs 10 minutes after the judged call.
-      await database('call_log').insert(call(CALLER, 11, { to_phone: SECOND_GBP_LINE }));
+      await database('call_log').insert(prior(CALLER, 11, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       // A hang-up that ended inside the grace at check time may still get its voicemail: it does not count.
-      const fresh = call('+17275550613', 2);
+      const fresh = prior('+17275550613', 2);
       const redial = call('+17275550613', 1);
       await database('call_log').insert([{ ...fresh, to_phone: SECOND_GBP_LINE }, redial]);
       expect(await repeat(redial)).toBe(false);
     });
 
+    test('only fully attested history counts: B, a failed check or no attestation could be a spoofed number (pre-push audit)', async () => {
+      const unattested = (minutesAgo, stir) => call(CALLER, minutesAgo, { to_phone: SECOND_GBP_LINE, metadata: stir ? { stir_verstat: stir } : {} });
+      await database('call_log').insert([unattested(60 * 24, 'TN-Validation-Passed-B'), unattested(60 * 24 * 2, 'TN-Validation-Failed-A'), unattested(60 * 24 * 3, null)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(false);
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 4, { to_phone: SECOND_GBP_LINE }));
+      expect(await repeat(row)).toBe(true);
+    });
+
     test('two earlier silent calls on any line make a repeat, but only a call on a GBP line is judged', async () => {
-      await database('call_log').insert([call(CALLER, 60 * 24 * 3, { to_phone: OFFICE_LINE }), call(CALLER, 60 * 24, { to_phone: OFFICE_LINE })]);
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3, { to_phone: OFFICE_LINE }), prior(CALLER, 60 * 24, { to_phone: OFFICE_LINE })]);
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
@@ -662,24 +674,24 @@ jest.setTimeout(30000);
 
     test('only silent hang-ups of the last 14 days by the same number count', async () => {
       await database('call_log').insert([
-        call(CALLER, 60 * 24 * 15, { to_phone: SECOND_GBP_LINE }),
+        prior(CALLER, 60 * 24 * 15, { to_phone: SECOND_GBP_LINE }),
         // Answered before the later silent call below, so it never makes that call a real caller.
-        call(CALLER, 60 * 24 * 5, { answered_by: 'human' }),
-        call(CALLER, 60, { recording_sid: 'RE5', recording_duration_seconds: 20 }),
-        call(CALLER, 60, { call_outcome: 'ai_handled' }),
-        call('+17275550612', 60 * 24, { to_phone: SECOND_GBP_LINE }),
-        call('+17275550612', 60 * 24 * 2),
+        prior(CALLER, 60 * 24 * 5, { answered_by: 'human' }),
+        prior(CALLER, 60, { recording_sid: 'RE5', recording_duration_seconds: 20 }),
+        prior(CALLER, 60, { call_outcome: 'ai_handled' }),
+        prior('+17275550612', 60 * 24, { to_phone: SECOND_GBP_LINE }),
+        prior('+17275550612', 60 * 24 * 2),
       ]);
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(false);
       // A silent recording of 3 s or less is no message.
-      await database('call_log').insert(call(CALLER, 60, { to_phone: SECOND_GBP_LINE, recording_sid: 'RE6', recording_duration_seconds: 2 }));
+      await database('call_log').insert(prior(CALLER, 60, { to_phone: SECOND_GBP_LINE, recording_sid: 'RE6', recording_duration_seconds: 2 }));
       expect(await repeat(row)).toBe(true);
     });
 
     test('a caller who got through later, is on a live lead or on a customer slot is a real caller', async () => {
-      await database('call_log').insert(call(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
@@ -696,14 +708,14 @@ jest.setTimeout(30000);
     });
 
     test('a call linked to a customer, or from a non-North-American number, is never a repeat', async () => {
-      await database('call_log').insert([call('+4922123401', 120, { to_phone: SECOND_GBP_LINE }), call(CALLER, 120, { to_phone: SECOND_GBP_LINE })]);
+      await database('call_log').insert([prior('+4922123401', 120, { to_phone: SECOND_GBP_LINE }), prior(CALLER, 120, { to_phone: SECOND_GBP_LINE })]);
       expect(await repeat(call('+4922123401', 10))).toBe(false);
       expect(await repeat(judged({ customer_id: randomUUID() }))).toBe(false);
     });
 
     test('a repeat check that errors pushes as usual', async () => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
-      await database('call_log').insert(call(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
       await database('call_log').insert(row);
       const numbers = require('../config/twilio-numbers');
