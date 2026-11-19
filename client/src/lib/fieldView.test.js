@@ -112,15 +112,21 @@ describe('warmFieldViewLanding', () => {
     document.head.appendChild(element);
   }
 
+  // A shell page as the build writes it, listing `files`.
+  const savedShell = (files) => `<!doctype html><html><head><script type="application/json" id="${FIELD_VIEW_ASSETS_ID}">${JSON.stringify(files)}</script></head><body></body></html>`;
+
   // A service worker in control of the page. It stores a file a moment after
-  // it answered the request for it, unless `stores` says it cannot.
-  // `shell` is the page it saved for an open with no signal ('/'): its HTML,
-  // or an Error its read throws.
-  function controlledBy({ stored = [], stores = () => true, shell } = {}) {
+  // it answered the request for it, unless `stores` says it cannot. `shell`
+  // is the page it saved for an open with no signal ('/'): its HTML (by
+  // default this page's own build), an Error its read throws, or null when
+  // none is saved. `cache.saveShell(html)` replaces it, as a newer tab does.
+  function controlledBy({ stored = [], stores = () => true, shell = savedShell(TODAY_FILES) } = {}) {
     const cache = new Set(stored);
+    let shellPage = shell;
+    cache.saveShell = (html) => { shellPage = html; };
     vi.stubGlobal('caches', {
       match: vi.fn(async (url) => {
-        if (url === '/') return shell === undefined ? undefined : { text: async () => { if (shell instanceof Error) throw shell; return shell; } };
+        if (url === '/') return shellPage === null ? undefined : { text: async () => { if (shellPage instanceof Error) throw shellPage; return shellPage; } };
         return cache.has(url) ? {} : undefined;
       }),
     });
@@ -180,7 +186,6 @@ describe('warmFieldViewLanding', () => {
   // Pre-push P1 (round 11): an open with no signal gets the shell the worker
   // saved last, and a tab on a newer deploy can replace it. Its files count.
   const NEWER_FILES = ['/assets/TodayShell-e5.js', '/assets/TechFieldShell-c3.css', '/assets/TechHomePage-f6.js'];
-  const savedShell = (files) => `<!doctype html><html><head><script type="application/json" id="${FIELD_VIEW_ASSETS_ID}">${JSON.stringify(files)}</script></head><body></body></html>`;
   it("asks for the saved shell's files too, and reports false while one is not stored", async () => {
     vi.useFakeTimers();
     listTodayFiles();
@@ -210,13 +215,35 @@ describe('warmFieldViewLanding', () => {
     await expect(warm()).resolves.toBe(true);
     expect(fetch).not.toHaveBeenCalled();
   });
-  it("leaves this page's files to decide when the saved shell has no list, cannot be read, or is missing", async () => {
+  // Pre-push P1 (follow-up round 1): with no saved shell to check, an open
+  // with no signal cannot be shown to work, even when the phone holds this
+  // page's files. The try still asks for them.
+  it('reports false with no readable list in a saved shell, also with no signal, and still asks for the files', async () => {
     listTodayFiles();
-    for (const shell of ['<!doctype html><html><head></head><body></body></html>', new Error('read failed'), undefined]) {
+    for (const shell of ['<!doctype html><html><head></head><body></body></html>', new Error('read failed'), null]) {
       controlledBy({ shell, stored: TODAY_FILES });
-      await expect((await freshWarm())()).resolves.toBe(true);
+      await expect((await freshWarm())()).resolves.toBe(false);
       expect(fetch.mock.calls.map(([url]) => url)).toEqual(TODAY_FILES);
+      const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      await expect((await freshWarm())()).resolves.toBe(false);
+      onLine.mockRestore();
     }
+  });
+  // Pre-push P1 (follow-up round 1): another tab can save a newer deploy's
+  // shell under the same worker, so a try that worked holds only while the
+  // saved shell is the one it checked.
+  it('reuses a try that worked while the saved shell stays the same, and tries anew once another tab replaced it', async () => {
+    listTodayFiles();
+    const cache = controlledBy({ stored: [...TODAY_FILES, ...NEWER_FILES] });
+    const warm = await freshWarm();
+    await expect(warm()).resolves.toBe(true);
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
+    cache.saveShell(savedShell(NEWER_FILES));
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch.mock.calls.slice(TODAY_FILES.length).map(([url]) => url)).toEqual([...TODAY_FILES, NEWER_FILES[0], NEWER_FILES[2]]);
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length * 2 + 2);
   });
 
   // Pre-push P1 (rounds 8 and 9): a try before the worker took control must

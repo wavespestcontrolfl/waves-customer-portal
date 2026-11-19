@@ -199,6 +199,26 @@ describe('Field view preference', () => {
     act(() => navigation.toggleGroup(second));
     expect(saved('acct-1')).toMatchObject({ pins: ['customers'], groups: { [first]: true, [second]: true } });
   });
+  // Pre-push P1 (follow-up round 1): an unsaved pin or unpin applies to the
+  // newest saved pins, so another tab's pins stay.
+  it("an unsaved pin joins another tab's newest pins, and an unsaved unpin removes only that pin", () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    withFullStorage(() => { act(() => navigation.togglePin('today')); });
+    otherTabSaved({ pins: ['customers'] });
+    act(() => navigation.toggleGroup(navigation.groups[0].id));
+    expect(saved('acct-1').pins).toEqual(['customers', 'today']);
+    withFullStorage(() => { act(() => navigation.togglePin('today')); });
+    otherTabSaved({ pins: ['customers', 'today', 'pipeline'] });
+    act(() => navigation.toggleGroup(navigation.groups[0].id));
+    expect(saved('acct-1').pins).toEqual(['customers', 'pipeline']);
+  });
+  it('an unsaved pin waits while another tab holds 3 pins', () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    withFullStorage(() => { act(() => navigation.togglePin('today')); });
+    otherTabSaved({ pins: ['customers', 'pipeline', 'schedule'] });
+    act(() => navigation.toggleGroup(navigation.groups[0].id));
+    expect(saved('acct-1').pins).toEqual(['customers', 'pipeline', 'schedule']);
+  });
   it("another tab's pins show here at once", () => {
     mount({ id: 'acct-1', role: 'admin' });
     otherTabSaved({ pins: ['today'] });

@@ -60,23 +60,28 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // Every tab on this phone saves to the same record. A change applies to the
   // newest saved settings (this tab's own when storage cannot be read), so a
   // tab that missed another tab's change never writes an old value back. A
-  // write can fail while reads still work (full storage). The pins or groups
-  // that change set then stay in this tab, and each later change applies them
-  // to the newest saved settings, until a write succeeds or another tab's
-  // save arrives. Only what this tab changed stays: an unsaved pin never
-  // writes back an old copy of another tab's switch or groups. The Field view
-  // switch never changes unsaved (onlyIfSaved): the shell remounts on every
-  // page change and a cold open reads storage, so an unsaved switch would
-  // turn itself off. The read and the write stay outside the state update:
-  // StrictMode runs a queued update twice in development, and a second pin
-  // toggle would undo the first. Returns true when the change reached storage.
+  // write can fail while reads still work (full storage). The pins that
+  // change added or removed and the groups it opened or closed then stay in
+  // this tab, by id, and each later change applies them to the newest saved
+  // settings (an added pin joins while there is room for 3), until a write
+  // succeeds or another tab's save arrives. Only what this tab changed stays:
+  // it never writes back an old copy of another tab's switch, pins or groups.
+  // The Field view switch never changes unsaved (onlyIfSaved): the shell
+  // remounts on every page change and a cold open reads storage, so an
+  // unsaved switch would turn itself off. The read and the write stay outside
+  // the state update: StrictMode runs a queued update twice in development,
+  // and a second pin toggle would undo the first. Returns true when the
+  // change reached storage.
   const unsaved = useRef(null);
   const updatePreferences = (update, { onlyIfSaved = false } = {}) => {
     const stored = user?.id ? readSavedPreferences(user.id) : null;
     const pending = unsaved.current;
-    const base = stored
-      ? { ...stored, pins: pending?.pins || stored.pins, groups: { ...stored.groups, ...pending?.groups } }
-      : preferences;
+    let base = stored || preferences;
+    if (stored && pending) {
+      const kept = stored.pins.filter((id) => pending.pins[id] !== false);
+      const added = Object.keys(pending.pins).filter((id) => pending.pins[id] && !kept.includes(id));
+      base = { ...stored, pins: [...kept, ...added].slice(0, 3), groups: { ...stored.groups, ...pending.groups } };
+    }
     const next = update(base);
     let saved = false;
     if (user?.id) {
@@ -87,7 +92,11 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
     }
     if (!saved && onlyIfSaved) return false;
     unsaved.current = saved ? null : {
-      pins: next.pins === base.pins ? pending?.pins : next.pins,
+      pins: {
+        ...pending?.pins,
+        ...Object.fromEntries(base.pins.filter((id) => !next.pins.includes(id)).map((id) => [id, false])),
+        ...Object.fromEntries(next.pins.filter((id) => !base.pins.includes(id)).map((id) => [id, true])),
+      },
       groups: { ...pending?.groups, ...Object.fromEntries(Object.entries(next.groups).filter(([id, open]) => base.groups[id] !== open)) },
     };
     setPreferences(next);
