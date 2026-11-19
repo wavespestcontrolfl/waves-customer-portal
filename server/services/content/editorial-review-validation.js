@@ -49,15 +49,15 @@ function validateChecks(checks, document, title, sources) {
 // are removed for the figure test only: an attributed quote is detected on the passage as written.
 const DOCUMENT_CODE_RE = /\b(?:EENY|ENY|ENH|LH|SL|IN|CIR)-?\d+[A-Z]?\b/g;
 const FIGURE_RE = /(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
-// A Markdown link's destination is not read as prose ("[guide](/pest-control/2026-roach-guide/)"); its
-// text is. A bare URL stays in: it is visible text.
-const LINK_DESTINATION_RE = /\]\([^)\s]*(?:\([^)\s]*\)[^)\s]*)*(?:\s+"[^"]*")?\)/g;
-const hasVisibleFigure = (text) => FIGURE_RE.test(String(text).replace(LINK_DESTINATION_RE, '] ').replace(DOCUMENT_CODE_RE, ' '));
+// A Markdown link's destination, with any title, is not read as prose
+// ("[guide](/pest-control/2026-roach-guide/ 'Roaches')"); its text is. A bare URL stays in: it is visible
+// text. A form this misses counts its digits, which costs a repair, never a pass (holdUnsourcedFigures).
+const LINK_DESTINATION_RE = /\]\(\s*(?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\s*\)/g;
 function deterministicClaimKind(passage) {
   const text = String(passage || '');
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
-  if (hasVisibleFigure(text)) return 'quantitative';
+  if (FIGURE_RE.test(text.replace(LINK_DESTINATION_RE, '] ').replace(DOCUMENT_CODE_RE, ' '))) return 'quantitative';
   return null;
 }
 
@@ -67,26 +67,13 @@ function exactQuotedPhrases(passage) {
   return phrases;
 }
 
-// An instruction whose only number counts places the reader checks ("Check 2 containers by the door"): the
-// number sits right after the verb and counts one of a closed list of places, never a time, a size, an
-// amount or a package ("Look for larvae that hatch in 3 days", "Remove 2 ounces of bait", "2 bags"), and
-// no other figure follows in the sentence. A missed form costs a repair, not the review: see
-// holdUnsourcedFigures.
-const COUNT_INSTRUCTION_RE = /^(?:check|empty|inspect|look at|remove|walk)\s+(?:(?:the|your|all|each|at least|about)\s+)?\d+\s+(?:containers?|traps?|stations?|spots?|areas?|corners?|rooms?|doors?|windows?|sides?|pots?|saucers?|drains?|vents?|plants?|gutters?)\b/i;
-function isTrivialNumericInstruction(passage) {
-  const text = String(passage || '').trim();
-  const match = text.match(COUNT_INSTRUCTION_RE);
-  return Boolean(match) && !hasVisibleFigure(text.slice(match[0].length));
-}
-
-// A non_external passage may carry a number only where the number makes no outside claim: a trivial
-// instruction, or the visible "Last updated: Month Year" line every brief asks for (content-brief-builder).
-// Any other figure, link text included, is held to the deterministic kind.
+// A non_external passage may carry a number only in the visible "Last updated: Month Year" line every
+// brief asks for (content-brief-builder). Any other figure, an instruction's or link text's included, is
+// held to the deterministic kind: holdUnsourcedFigures turns it into a repairable unsupported claim. This
+// replaces main's first-word instruction allowance ("Check 2 containers"), which let a fact inside an
+// instruction ("Look for larvae that hatch in 3 days") pass with no source; it existed only so that a
+// mislabel did not lose the whole answer, which holdUnsourcedFigures now prevents.
 const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)[*_\s]*:?[*_\s]*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
-function numericNonExternalAllowed(passage) {
-  const text = String(passage || '').trim();
-  return isTrivialNumericInstruction(text) || DATE_STAMP_RE.test(text);
-}
 
 // A supported claim meets the rules of BOTH its label and the deterministic kind, so a wrong label
 // cannot loosen anything (Mac test 2026-11-19: a supported nickname quote labeled "general" used to
@@ -112,7 +99,7 @@ function validateClaimEvidence(claim, sources) {
   // An unsupported claim fails source support whatever its label. A figure or an attributed quote marked
   // non_external would skip the source rules, so that stays a hard reject.
   if (claim.verdict !== 'non_external') return null;
-  const allowedNumber = deterministicKind === 'quantitative' && numericNonExternalAllowed(claim.passage);
+  const allowedNumber = deterministicKind === 'quantitative' && DATE_STAMP_RE.test(String(claim.passage || '').trim());
   if (deterministicKind && !allowedNumber) return `claim_kind_mismatch:${claim.claimId}`;
   if (claim.claimKind !== 'non_external' || claim.sourceSuitability !== 'not_applicable') return `claim_non_external_shape:${claim.claimId}`;
   return null;
@@ -129,7 +116,7 @@ function holdUnsourcedFigures(json) {
   const held = json.claims.filter((claim) => {
     if (claim?.verdict !== 'non_external') return false;
     const kind = deterministicClaimKind(claim.passage);
-    return Boolean(kind) && !(kind === 'quantitative' && numericNonExternalAllowed(claim.passage));
+    return Boolean(kind) && !(kind === 'quantitative' && DATE_STAMP_RE.test(String(claim.passage || '').trim()));
   });
   if (!held.length) return json;
   const heldIds = new Set(held.map((claim) => claim.claimId));

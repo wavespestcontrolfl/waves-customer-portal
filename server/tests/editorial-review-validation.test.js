@@ -32,9 +32,12 @@ describe('editorial review coverage validation', () => {
     expect(validatePlanJson(response, sections)).toBe('plan_finding_missing');
   });
 
-  test('allows numeric instructions to be classified as non-external', () => {
+  // Main allowed any instruction by its first word, so a fact inside one passed with no source. In
+  // review(), holdUnsourcedFigures turns such a label into a repairable finding before this check runs.
+  test('holds a numeric instruction to the figure rule', () => {
     const passage = 'Check 2 containers near your door.';
-    expect(validateClaim(passage, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' })).toBeNull();
+    expect(validateClaim(passage, { verdict: 'non_external', claimKind: 'non_external', sourceSuitability: 'not_applicable', sourceIndex: -1, sourceQuote: '' }))
+      .toBe('claim_kind_mismatch:C1');
   });
 
   test.each([
@@ -62,7 +65,9 @@ describe('editorial review coverage validation', () => {
   test.each([
     'Read the [cockroach guide](/pest-control/cockroach-types-2026/) next.',
     'The [UF/IFAS page](https://edis.ifas.ufl.edu/publication/IN917 "Woods roach") has photos.',
-    'Check 2 traps, as the [trap guide](/pest-control/trap-guide-2026/) shows.',
+    "See the [trap guide](/pest-control/trap-guide-2026/ 'Traps') first.",
+    'See the [report](</reports/roach report 2026/>) first.',
+    'See the [report](https://example.org/report_(2026)) first.',
   ])('does not read digits in a link destination as a figure: %s', (passage) => {
     expect(validateClaim(passage, NON_EXTERNAL)).toBeNull();
   });
