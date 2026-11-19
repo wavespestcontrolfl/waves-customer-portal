@@ -214,6 +214,16 @@ describe('part 1: next-door stops booked apart', () => {
     expect(pairs[0].miles).toBeLessThan(0.1);
   });
 
+  test('two days: a served service next door beside an open one a mile away pairs as history, never a report', () => {
+    const homeA = (pin, start, status = 'pending') => stop({ customer: 'c-a', at: pin, date: '2027-03-01', start, status, street: '100 Sample Way', plan: true });
+    const rows = [
+      homeA(HOME_A, '09:00', 'completed'),
+      homeA(north(1, HOME_A), '11:00'),
+      stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true }),
+    ];
+    expect(findApartPairs(rows)).toEqual([]);
+  });
+
   test("one day: only services whose own pins are next door are judged, and the line shows their distance", () => {
     const route = (row, order) => ({ ...row, route_order: order });
     const homeA = (pin, start) => stop({ customer: 'c-a', at: pin, date: '2027-03-01', start, street: '100 Sample Way' });

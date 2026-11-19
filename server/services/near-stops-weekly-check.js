@@ -520,7 +520,7 @@ function pairSplits(pair, routes) {
       candidates.push({
         keys: [x.key, y.key],
         key: [x.anchor, y.anchor].sort().join('|'),
-        done: x.done || y.done,
+        done: hit.first.done || hit.second.done, // a served service shown: pairing history, never a report
         days: Math.abs(daysBetween(x.date, y.date)),
         ...hit,
       });
