@@ -726,6 +726,27 @@ describe('customer-question manifest 2026-11-18', () => {
     expect(failures).toEqual([]);
   });
 
+  // A writer copies the brief's own wording into the body. "Call Poison
+  // Control" reads as a person's name to the live all-lanes check (pre-push
+  // audit), so CQ09 names the poison control center in lowercase.
+  test('CQ09 gives its exposure line in wording the live name check accepts', () => {
+    const { checkRedactionPassedAllLanes } = require('../services/content/content-quality-gate')._internals;
+    const verify = composeSeedBrief(manifest, 'CQ09').voice_constraints.operator_brief.verify_notes.join(' ');
+    expect(verify).toContain('your local poison control center');
+    expect(verify).not.toMatch(/Poison Control/);
+    const prior = process.env.GATE_CONTENT_PII_ALL_LANES;
+    process.env.GATE_CONTENT_PII_ALL_LANES = 'true';
+    try {
+      const draft = (line) => ({ body: `Guidance for homes in Sarasota and Bradenton.\n\n${line}\n`, frontmatter: {} });
+      expect(checkRedactionPassedAllLanes(draft('For an exposure, call your local poison control center or 911, or see a doctor.')).ok).toBe(true);
+      // Control: the capitalized form holds the draft.
+      expect(checkRedactionPassedAllLanes(draft('Call Poison Control or 911.')).ok).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_CONTENT_PII_ALL_LANES;
+      else process.env.GATE_CONTENT_PII_ALL_LANES = prior;
+    }
+  });
+
   // The completion gate's conversion CTA is judged on the link anchor: it
   // must ask for an estimate or quote and name the brief's own service
   // ("the contact page" does not qualify). Each Waves section names the
