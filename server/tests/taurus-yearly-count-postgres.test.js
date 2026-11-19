@@ -99,7 +99,7 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     await application({ cust, property: propB, date: NEW }); // another home
     await application({ cust, property: propA, date: '2025-12-31' }); // last year
     await application({ cust, property: propA, date: '2027-01-01' }); // next year
-    expect(await count(cust, propA)).toEqual({ high: 1, low: 1, count: 2, eligible: true, eligibleHigh: false, year: 2026 });
+    expect(await count(cust, propA)).toEqual({ high: 1, low: 1, count: 2, eligible: true, eligibleHigh: false, year: 2026, beforeRuling: false });
   });
 
   it('leaves out only the rows of the visit being completed', async () => {

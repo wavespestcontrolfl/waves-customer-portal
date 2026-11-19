@@ -194,6 +194,19 @@ const ALERT_WINDOW = 20; // recent posts to scan — enough to find THRESHOLD at
 const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp', 'linkedin', 'twitter'];
 const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business', linkedin: 'LinkedIn', twitter: 'X (Twitter)' };
 const SOCIAL_ALERT_KEY = 'social_consecutive_failures_alert';
+// The error a platform result carries when the content check refused the post
+// before any request: the publish paths below write it, the streak reads it.
+const VALIDATION_ERROR_PREFIX = 'Validation: ';
+// A post the content check refused never reached the platform: it is no
+// attempt for the streak, and its error never becomes the alert's latest error
+// (a refused card is not a broken login). Rows stored before this rule carry
+// the same prefix.
+const refusedByContentCheck = (entry) => String(entry.error || '').startsWith(VALIDATION_ERROR_PREFIX);
+// A real request to the platform: not disabled or skipped (a compliance-judge
+// rejection is stored as skipped), not a dry run, not refused by the content
+// check. The streak and its latest error read the same entries.
+const isPlatformAttempt = (entry, platform) => !!entry && entry.platform === platform
+  && !entry.skipped && !entry.dryRun && !refusedByContentCheck(entry);
 
 function parsePlatformResults(value) {
   if (!value) return [];
@@ -208,7 +221,7 @@ function parsePlatformResults(value) {
 // ANY location succeeded (mirrors the post-level "any success" rule) and a
 // fail only if every attempted location failed.
 function platformOutcomeForPost(entries, platform) {
-  const attempts = entries.filter(e => e && e.platform === platform && !e.skipped && !e.dryRun);
+  const attempts = entries.filter(e => isPlatformAttempt(e, platform));
   if (!attempts.length) return null;
   if (attempts.some(e => e.success === true)) return 'success';
   if (attempts.some(e => e.success === false)) return 'fail';
@@ -217,7 +230,7 @@ function platformOutcomeForPost(entries, platform) {
 
 function firstPlatformError(parsedPosts, platform) {
   for (const entries of parsedPosts) {
-    const e = entries.find(x => x && x.platform === platform && x.success === false && x.error);
+    const e = entries.find(x => isPlatformAttempt(x, platform) && x.success === false && x.error);
     if (e) return String(e.error).slice(0, 120);
   }
   return null;
@@ -718,8 +731,10 @@ function unknownPhoneIssues(text) {
 }
 
 // A validation issue names the phone number it found, and that may be a
-// customer's: logs get the issues with every phone number masked.
-const issuesForLog = (issues) => issues.join('; ').replace(PHONE_PATTERN, '[phone]');
+// customer's: logs and stored post results get the issues with every phone
+// number masked.
+const maskPhones = (text) => String(text).replace(PHONE_PATTERN, '[phone]');
+const issuesForLog = (issues) => maskPhones(issues.join('; '));
 
 // LinkedIn also shows an article card under a post with a link: the card
 // createPost sends (linkedin-article.js). A phone number in its title or
@@ -2447,7 +2462,9 @@ const SocialMediaService = {
         const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, link, title, description)];
         if (issues.length) {
           logger.warn(`[social] Content validation failed for ${p.key}: ${issuesForLog(issues)}`);
-          platformResults.push({ platform: p.key, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues });
+          platformResults.push({
+            platform: p.key, success: false, error: `${VALIDATION_ERROR_PREFIX}${maskPhones(issues[0])}`, validationIssues: issues.map(maskPhones),
+          });
           continue;
         }
         // Semantic second pass (owner ruling 2026-07-30): the deterministic
@@ -2642,7 +2659,7 @@ const SocialMediaService = {
         const gbpValidation = validateContent(gbpContent, 'gbp');
         if (!gbpValidation.valid) {
           logger.warn(`[social] GBP content validation failed for ${loc.name}: ${issuesForLog(gbpValidation.issues)}`);
-          platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `${VALIDATION_ERROR_PREFIX}${maskPhones(gbpValidation.issues[0])}` });
           continue;
         }
         // Semantic second pass — same contract as the platforms loop above.
@@ -2800,7 +2817,7 @@ const SocialMediaService = {
 
     const issues = [...validateContent(text, platform).issues, ...linkedinCardIssues(platform, link, title, description)];
     if (issues.length) {
-      return { platform, success: false, error: `Validation: ${issues[0]}`, validationIssues: issues };
+      return { platform, success: false, error: `${VALIDATION_ERROR_PREFIX}${maskPhones(issues[0])}`, validationIssues: issues.map(maskPhones) };
     }
     // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
     // the tech no-admin-queue flow, which must not bypass the judge. A
