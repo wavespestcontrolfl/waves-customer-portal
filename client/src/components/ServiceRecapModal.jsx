@@ -21,6 +21,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { isMlUnit } from '../lib/measure-units';
 import { defaultApplicationMethodForLine, prefillRateCeiling, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
+import { applyTaurusYearlyLimit, taurusYearlyNote, taurusYearlyOf } from '../lib/taurus-yearly-limit';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
 import { UiSurface, Button, Field, Input, Textarea, Checkbox, ActionFeedback, cn } from './ui';
@@ -98,6 +99,11 @@ export default function ServiceRecapModal({
 
   const [note, setNote] = useState('');
   const [selected, setSelected] = useState(() => new Set());
+  // The house mix was pre-selected on open (so a Taurus left off it for the label limit is worth saying).
+  const [houseMixSeeded, setHouseMixSeeded] = useState(false);
+  // Amounts recorded on a reopened recap, by catalog id: this lane edits no amounts, but the Taurus
+  // yearly-limit warning reads them as the ledger count does.
+  const [recordedAmounts, setRecordedAmounts] = useState(() => ({}));
   // productId -> { rate: string, unit: string }. Seeded from the rate
   // already recorded on the visit (reopen) or the catalog prefill
   // (fresh selection); the tech edits it before submit.
@@ -160,6 +166,7 @@ export default function ServiceRecapModal({
           );
           const preselect = new Set();
           const seededRates = {};
+          const seededAmounts = {};
           recorded.forEach((rp) => {
             const cat = (rp.product_id != null ? byId.get(String(rp.product_id)) : null)
               || byName.get(String(rp.product_name || '').trim().toLowerCase());
@@ -171,6 +178,10 @@ export default function ServiceRecapModal({
               return;
             }
             preselect.add(cat.id);
+            // The ledger's quantity (the recap's own rows keep no amounts), with its unit: the yearly count reads it.
+            if (Number(rp.ledger_quantity) > 0 && rp.ledger_quantity_unit) {
+              seededAmounts[cat.id] = { totalAmount: Number(rp.ledger_quantity), amountUnit: rp.ledger_quantity_unit };
+            }
             // The rate RECORDED on the visit outranks the catalog prefill —
             // reopening a recap must show (and re-submit) what was applied,
             // not rewrite it to the current catalog default.
@@ -202,6 +213,7 @@ export default function ServiceRecapModal({
           if (preselect.size) {
             setSelected(preselect);
             setRates(seededRates);
+            setRecordedAmounts(seededAmounts);
           }
         }
         // Default pest tank mix (shared with CompletionPanel via
@@ -238,7 +250,8 @@ export default function ServiceRecapModal({
         ) {
           const mixSelect = new Set();
           const mixRates = {};
-          pestDefaultMixSelections(data.products).forEach(({ product }) => {
+          // Taurus SC's yearly label limit at this home: the server's answer leaves it off when no application fits.
+          applyTaurusYearlyLimit(pestDefaultMixSelections(data.products), taurusYearlyOf(data.taurusYearly)).forEach(({ product }) => {
             mixSelect.add(product.id);
             const prefill = catalogRatePrefill(product, data?.service?.serviceType);
             if (prefill) mixRates[product.id] = prefill;
@@ -246,6 +259,7 @@ export default function ServiceRecapModal({
           if (mixSelect.size) {
             setSelected(mixSelect);
             setRates(mixRates);
+            setHouseMixSeeded(true);
           }
         }
         if (!data?.service?.hasPhone) setSendText(false);
@@ -264,6 +278,10 @@ export default function ServiceRecapModal({
     products.forEach((p) => m.set(p.id, p));
     return m;
   }, [products]);
+
+  // Taurus SC's label limit: a warning (never a block) when it is selected over the limit, else the line
+  // saying the house mix left it off (over the limit, or this year's count unavailable). Null when the count is under the limit.
+  const taurusNote = taurusYearlyNote(taurusYearlyOf(ctx?.taurusYearly), [...selected].map((id) => ({ ...productById.get(id), ...recordedAmounts[id], rate: rates[id]?.rate, rateUnit: rates[id]?.unit })), { mixVisit: houseMixSeeded });
 
   const [restoredNames, setRestoredNames] = useState({});
   const draft = useServiceRecapDraft({
@@ -476,7 +494,7 @@ export default function ServiceRecapModal({
                     placeholder="Quick internal note — areas treated, what you found, anything for the next visit."
                   />
                 </Field>
-                <RecapProducts products={products} catalogLoadFailed={ctx?.catalogLoadFailed} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} />
+                <RecapProducts products={products} catalogLoadFailed={ctx?.catalogLoadFailed} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} taurusNote={taurusNote} />
                 <RecapMissingSelections ids={draft.missingSelections} names={restoredNames} onRemove={toggleProduct} />
                 <RecapMessage
                   message={message} setMessage={setMessage} drafting={drafting} handleDraft={handleDraft}
@@ -508,7 +526,7 @@ export default function ServiceRecapModal({
   );
 }
 
-function RecapProducts({ products, catalogLoadFailed, selected, rates, productById, toggleProduct, setRateValue }) {
+function RecapProducts({ products, catalogLoadFailed, selected, rates, productById, toggleProduct, setRateValue, taurusNote = null }) {
   const rateRows = [...selected]
     .map((id) => ({ id, product: productById.get(id), entry: rates[id] }))
     .filter((row) => row.product && row.entry?.unit);
@@ -534,6 +552,7 @@ function RecapProducts({ products, catalogLoadFailed, selected, rates, productBy
           ))}
         </div>
       )}
+      {taurusNote && <p className="tech-visit-muted" role="status">{taurusNote}</p>}
       {rateRows.length > 0 && (
         <div className="tech-visit-card">
           <h3 className="tech-visit-section-title">Application rates (adjust to what you applied)</h3>
