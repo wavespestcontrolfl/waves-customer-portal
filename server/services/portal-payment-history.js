@@ -42,6 +42,12 @@ const anyInvoiceIdOf = (p) => invoiceIdOf(p) || aliasInvoiceIdOf(p);
 // number is the only link back and the receipt would otherwise never
 // appear on a cash/check payment (codex r2 P1).
 const invoiceNumberOf = descriptionInvoiceNumberOf;
+const RECOVERY_INVOICE_COLUMNS = [
+  'id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id',
+  'token', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid',
+  'payer_id', 'payer_statement_id', 'scheduled_send_error', 'notes', 'line_items',
+  'stripe_payment_intent_id', 'stripe_charge_id',
+];
 
 // The Waves receipt (token) for each visible payment's invoice, indexed by
 // every linkage a payment row can carry.
@@ -149,13 +155,7 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
         if (chargeIds.length) this.orWhereIn('stripe_charge_id', chargeIds);
         if (invoiceNumbers.length) this.orWhereIn('invoice_number', invoiceNumbers);
       })
-      .select(
-        'id', 'customer_id', 'scheduled_service_id', 'service_record_id', 'visit_completion_packet_id',
-        'token', 'invoice_number', 'status', 'total', 'credit_applied', 'amount_paid',
-        'payer_id', 'payer_statement_id', 'scheduled_send_error',
-        'notes', 'line_items',
-        'stripe_payment_intent_id', 'stripe_charge_id',
-      );
+      .select(...RECOVERY_INVOICE_COLUMNS);
   } catch (err) {
     if (database !== db && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
       || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
@@ -166,17 +166,32 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   // An asynchronous saved-bank failure reopens the invoice and deliberately
   // clears its PaymentIntent. The resolved charge-attempt row retains the
   // verified invoice/PI pair, so load that terminal evidence before identity
-  // matching. The invoice ids stay bounded to this customer's candidate set.
+  // matching. Resolve by PI across every invoice owned by this customer before
+  // narrowing candidates; otherwise a different invoice's live PI stamp can
+  // hide the cleared invoice named by the resolved attempt.
   let resolvedFailedAttempts = [];
-  if (intentIds.length && rows.length) {
+  let resolvedAttemptLookupFailed = false;
+  if (intentIds.length) {
     try {
-      resolvedFailedAttempts = await database('stripe_invoice_charge_attempts')
-        .whereIn('invoice_id', rows.map((row) => row.id))
-        .whereIn('stripe_payment_intent_id', intentIds)
-        .where({ status: 'failed' })
-        .whereNotNull('resolved_at')
-        .select('invoice_id', 'stripe_payment_intent_id');
+      resolvedFailedAttempts = await database('stripe_invoice_charge_attempts as attempt')
+        .join('invoices as attempt_invoice', 'attempt_invoice.id', 'attempt.invoice_id')
+        .where({ 'attempt_invoice.customer_id': customerId, 'attempt.status': 'failed' })
+        .whereIn('attempt.stripe_payment_intent_id', intentIds)
+        .whereNotNull('attempt.resolved_at')
+        .select('attempt.invoice_id', 'attempt.stripe_payment_intent_id');
+      const loadedIds = new Set(rows.map((row) => String(row.id)));
+      const missingIds = [...new Set(resolvedFailedAttempts.map((attempt) => String(attempt.invoice_id)))]
+        .filter((id) => !loadedIds.has(id));
+      if (missingIds.length) {
+        const resolvedAttemptInvoices = await database('invoices')
+          .where({ customer_id: customerId })
+          .whereIn('id', missingIds)
+          .select(...RECOVERY_INVOICE_COLUMNS);
+        rows = [...rows, ...resolvedAttemptInvoices];
+      }
     } catch (err) {
+      resolvedAttemptLookupFailed = true;
+      resolvedFailedAttempts = [];
       logger.warn(`[billing] failed-payment charge-attempt lookup failed for customer ${customerId}: ${err.message}`);
     }
   }
@@ -214,6 +229,10 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
 
   const invoiceByPaymentId = new Map();
   for (const payment of failedPayments) {
+    // A failed evidence lookup means a historic binding could conflict with
+    // the invoice's current PI stamp. Keep the history row, but withhold the
+    // bearer recovery link until the lookup succeeds.
+    if (payment.stripe_payment_intent_id && resolvedAttemptLookupFailed) continue;
     const explicitGroups = paymentInvoiceIds(payment).map((id) => byId.get(id) || []);
     const invoiceNumber = invoiceNumberOf(payment);
     const strictGroups = [...explicitGroups];

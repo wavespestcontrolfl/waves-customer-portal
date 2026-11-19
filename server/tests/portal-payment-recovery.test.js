@@ -51,18 +51,26 @@ beforeEach(() => {
   invoicePayerOwnedNow.mockResolvedValue(false);
 });
 
-function reader(rows, resolvedAttempts = []) {
+function reader(rows, resolvedAttempts = [], supplementalRows = rows, { attemptError = null } = {}) {
+  let invoiceReads = 0;
   return jest.fn((table) => {
     const query = {};
     for (const method of [
-      'where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereIn',
+      'join', 'where', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereIn',
     ]) {
       query[method] = (...args) => {
         if (typeof args[0] === 'function') args[0].call(query);
         return query;
       };
     }
-    query.select = async () => (table === 'stripe_invoice_charge_attempts' ? resolvedAttempts : rows);
+    query.select = async () => {
+      if (table === 'stripe_invoice_charge_attempts as attempt') {
+        if (attemptError) throw attemptError;
+        return resolvedAttempts;
+      }
+      invoiceReads += 1;
+      return invoiceReads === 1 ? rows : supplementalRows;
+    };
     return query;
   });
 }
@@ -145,16 +153,22 @@ test('a resolved saved-bank failure verifies the invoice after its PaymentIntent
   expect(recovery.get('pay-bank')?.payUrl).toBe('/pay/tok-a');
 });
 
-test('resolved-attempt evidence cannot hide a conflicting live PaymentIntent binding', async () => {
+test('a legacy intent-only row sees both a live binding and a cleared resolved-attempt binding', async () => {
   const recovery = await recoveryInvoiceIndexFor('cust-1', [{
-    id: 'pay-bank', status: 'failed', metadata: { invoice_id: INV_A },
-    stripe_payment_intent_id: 'pi-reused',
+    id: 'pay-bank', status: 'failed', metadata: null, stripe_payment_intent_id: 'pi-reused',
   }], reader([
-    invoice({ stripe_payment_intent_id: null }),
     invoice({ id: INV_B, token: 'tok-b', invoice_number: 'WPC-200', stripe_payment_intent_id: 'pi-reused' }),
   ], [{
     invoice_id: INV_A, stripe_payment_intent_id: 'pi-reused', status: 'failed', resolved_at: new Date(),
-  }]));
+  }], [invoice({ stripe_payment_intent_id: null })]));
+
+  expect(recovery.has('pay-bank')).toBe(false);
+});
+
+test('a failed resolved-attempt lookup withholds intent-based recovery', async () => {
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-bank', status: 'failed', metadata: { invoice_id: INV_A }, stripe_payment_intent_id: 'pi-a',
+  }], reader([invoice()], [], undefined, { attemptError: new Error('attempt lookup failed') }));
 
   expect(recovery.has('pay-bank')).toBe(false);
 });
