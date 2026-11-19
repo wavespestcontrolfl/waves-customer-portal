@@ -11,8 +11,10 @@
  *
  * - numbers (with their units), month and season words, and proper names
  *   must all appear in the fact's own statement or quotes;
- * - a sentence that states a number or a month must copy one source unit
- *   word for word (a quote sentence, the statement, or a part of it);
+ * - a sentence that states an amount or a time in any form (a digit, a
+ *   number word, a frequency, a measure word, an ordinal, a month, a
+ *   season, a weekday or a time of day) must copy one source unit word for
+ *   word (a quote sentence, the statement, or a part of it);
  * - a publisher a sentence names must be the one whose quote it restates;
  * - the banned words, the hallucination tripwires and the shared claim
  *   register the send validator runs apply to every sentence.
@@ -43,6 +45,30 @@ const NUMBER_WORDS = {
 const COMPOUND_NUMBER = new RegExp(`\\b(${Object.keys(TENS).join('|')})[-\\s]+(one|two|three|four|five|six|seven|eight|nine)\\b`, 'g');
 const compoundDigits = (lower) => lower.replace(COMPOUND_NUMBER, (m, tens, unit) => String(TENS[tens] + NUMBER_WORDS[unit]));
 const numberWord = (word) => (Object.hasOwn(NUMBER_WORDS, word) ? String(NUMBER_WORDS[word]) : null);
+// Every word that states an amount or a time counts, not only digits and
+// number words: rounds 12 to 15 of the pre-push audit each found one more
+// spelling that slipped through ("thirty", "zero", "millions", then "once a
+// day" against the CDC's "once a week"). So a frequency ("once a week",
+// "every year", "weekly", "every other day"), a measure word ("in a day",
+// "a few blocks", "over a decade"), an ordinal ("the first sign"), a
+// multiple ("double") and a time of day ("in the evening") are all tokens.
+// Each must be in the source, and a lead sentence that has one must copy
+// its source unit word for word, so changing any of them fails.
+const FREQUENCY = /(?:\b(?:per|every|each)(?:[\s-]+other)?|\b(?:once|twice|thrice|times|days?|\d+|one|two|three|four|five|six|seven)[\s-]+(?:a|an|per))[\s-]+(day|week|month|year|night|hour|season)s?\b/g;
+const FREQUENCY_ADVERB = {
+  daily: 'day', weekly: 'week', biweekly: '2 week', fortnightly: '2 week', monthly: 'month', bimonthly: '2 month',
+  quarterly: '3 month', yearly: 'year', annually: 'year', annual: 'year', biannually: '6 month', semiannually: '6 month',
+  nightly: 'night', hourly: 'hour',
+};
+// Measure words. "yard", "block" and "time" are everyday words too ("your
+// yard", "block the gaps", "at the same time"), so alone they do not count;
+// with a number they still pair as units (quantityPairs).
+const MEASURE_UNITS = new Set(['second', 'minute', 'hour', 'day', 'week', 'month', 'year', 'decade', 'century', 'inch', 'foot', 'mile', 'meter',
+  'millimeter', 'centimeter', 'kilometer', 'degree', 'pound', 'ounce', 'gallon', 'quart', 'acre', 'generation', 'lifetime']);
+const TIME_OF_DAY = new Set(['morning', 'afternoon', 'evening', 'night', 'nighttime', 'daytime', 'daylight', 'dawn', 'dusk', 'sunrise', 'sunset',
+  'midnight', 'noon', 'overnight', 'tonight']);
+const ORDINALS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+const MULTIPLES = { single: 1, double: 2, doubles: 2, doubled: 2, twofold: 2, triple: 3, triples: 3, tripled: 3, threefold: 3, quadruple: 4 };
 const FRACTION_DEN = { half: 2, halves: 2, third: 3, thirds: 3, fourth: 4, fourths: 4, quarter: 4, quarters: 4, fifth: 5, fifths: 5 };
 const SCALE_WORDS = /\b(hundred|thousand|million|billion|dozen)s?\b/g;
 
@@ -99,11 +125,24 @@ function numberTokens(text) {
     tokens.add(`${n === 'a' ? 1 : NUMBER_WORDS[n]}/${FRACTION_DEN[d]}`);
     return ' ';
   });
+  for (const m of t.matchAll(FREQUENCY)) tokens.add(`per:${m[1]}`);
+  // "once" is a count only in front of a period ("once a week"), not in "once a palm is infected"
+  t = t.replace(/\bonce(?=[\s-]+(?:a|an|per|every|each)[\s-]+(?:other[\s-]+)?(?:day|week|month|year|night|hour|season)s?\b)/g, () => { tokens.add('1'); return ' '; });
   t = t.replace(/\b(half|halves)\b/g, () => { tokens.add('1/2'); return ' '; });
   t = t.replace(/\d+\/\d+/g, (m) => { tokens.add(m); return ' '; });
   t = t.replace(/\d+(?:,\d{3})*(?:\.\d+)?/g, (m) => { tokens.add(String(Number(m.replace(/,/g, '')))); return ' '; });
   t = t.replace(SCALE_WORDS, (m, w) => { tokens.add(`scale:${w}`); return ' '; });
-  for (const w of t.match(/[a-z]+/g) || []) if (numberWord(w) !== null) tokens.add(numberWord(w));
+  for (const w of t.match(/[a-z]+/g) || []) {
+    if (numberWord(w) !== null) tokens.add(numberWord(w));
+    if (Object.hasOwn(FREQUENCY_ADVERB, w)) tokens.add(`per:${FREQUENCY_ADVERB[w]}`);
+    if (Object.hasOwn(ORDINALS, w)) tokens.add(`ord:${ORDINALS[w]}`);
+    if (Object.hasOwn(MULTIPLES, w)) tokens.add(`times:${MULTIPLES[w]}`);
+    const single = w.replace(/s$/, '');
+    if (TIME_OF_DAY.has(w) || TIME_OF_DAY.has(single)) tokens.add(`time:${TIME_OF_DAY.has(w) ? w : single}`);
+    // "second" alone is the ordinal; "seconds" is the measure
+    const unit = w === 'second' ? null : unitOf(w);
+    if (unit && MEASURE_UNITS.has(unit)) tokens.add(`unit:${unit}`);
+  }
   if (/%|\bpercent\b/i.test(text)) tokens.add('percent');
   return tokens;
 }
@@ -117,7 +156,7 @@ const UNITS = {
   meter: 'meter', metre: 'meter', millimeter: 'millimeter', centimeter: 'centimeter', kilometer: 'kilometer',
   percent: 'percent', degree: 'degree', pound: 'pound', ounce: 'ounce', gallon: 'gallon', acre: 'acre',
   hundred: 'hundred', thousand: 'thousand', million: 'million', billion: 'billion', dozen: 'dozen',
-  generation: 'generation', time: 'time',
+  generation: 'generation', time: 'time', century: 'century', centuries: 'century', quart: 'quart', lifetime: 'lifetime',
 };
 const unitOf = (word) => UNITS[word] || UNITS[word.replace(/(?:es|s)$/, '')] || UNITS[word.replace(/s$/, '')] || null;
 const RANGE_WORDS = new Set(['to', 'through', 'thru', 'and', 'or', '-']);
@@ -162,6 +201,7 @@ const SEASON_RES = [
 // rain") or next to a dash ("April-June") (pre-push round 14), and in
 // lowercase too, except the words that are also a verb or an adjective
 // (may, march, august), which count only capitalized.
+const WEEKDAY_RE = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b/gi;
 const LOWERCASE_MONTH = new RegExp(`\\b(${MONTHS.filter((m) => !['may', 'march', 'august'].includes(m)).join('|')})\\b`, 'g');
 
 function timeTokens(text) {
@@ -177,6 +217,7 @@ function timeTokens(text) {
   // in front of a date or range word.
   if (/(?<!^)(?<=[a-z,;:]\s)May\b|(?:^|[.!?]\s)May\s+(?:\d|through|to|and|until|is|brings)\b|\bMay\s+\d/.test(t)) out.add('may');
   for (const [name, re] of SEASON_RES) if (re.test(t)) out.add(name);
+  for (const m of t.matchAll(WEEKDAY_RE)) out.add(m[1].toLowerCase());
   return out;
 }
 
@@ -222,8 +263,8 @@ function unknownName(sentence, namesCorpus) {
 // with water but no food" (R02): both numbers and both conditions are in the
 // source. So a sentence that states a number or a month must COPY one source
 // unit word for word: a sentence of a quote, the statement, or a part of the
-// statement between semicolons or either side of ", and" / ", but". It may wrap that copy in "<publisher> says" or
-// "According to <publisher>,". Case, punctuation, curly quotes and number
+// statement between semicolons or either side of ", and" / ", but". It may wrap that copy in "<publisher> says"
+// ("says that", or "says to" for a quoted instruction) or "According to <publisher>,". Case, punctuation, curly quotes and number
 // words ("eight" = "8") do not count as differences. Anything looser fails.
 const NUMBER_WORD_RE = new RegExp(`\\b(${Object.keys(NUMBER_WORDS).join('|')})\\b`, 'g');
 const LEADING_CONNECTOR = /^(?:and|but|so|also|however|still|plus|in fact|did you (?:know|realize)(?: that)?)\s+/;
@@ -268,22 +309,22 @@ function stripAttribution(c, labels) {
   const names = labels.map((l) => canonical(l)).filter(Boolean).map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   if (!names) return c;
   return c
-    .replace(new RegExp(`^(?:the )?(?:${names}) ${ATTRIBUTION_VERBS}(?: that)? `), '')
+    .replace(new RegExp(`^(?:the )?(?:${names}) ${ATTRIBUTION_VERBS}(?: that| to)? `), '')
     .replace(new RegExp(`^according to (?:the )?(?:${names}) `), '')
     .replace(new RegExp(` (?:the )?(?:${names}) ${ATTRIBUTION_VERBS}$`), '');
 }
 
-// A scale word alone ("millions of colonies") is a count too, so it must
-// copy the source unit it comes from, not move to another subject
-// (pre-push round 14).
-const needsCopy = (text) => numberTokens(text).size > 0 || [...timeTokens(text)].some((t) => MONTHS.includes(t));
+// Any amount or time word binds the sentence to its source unit: a scale
+// word alone ("millions of colonies", pre-push round 14), a frequency or a
+// measure word (round 15), a month, a season or a weekday.
+const needsCopy = (text) => numberTokens(text).size > 0 || timeTokens(text).size > 0;
 
-/** Why a number or month sentence is not a word-for-word copy of one source unit, or null. */
+/** Why a sentence that states an amount or a time is not a word-for-word copy of one source unit, or null. */
 function copyProblem(text, units, labels) {
   if (!needsCopy(text)) return null;
   const c = stripAttribution(canonical(text), labels).replace(LEADING_CONNECTOR, '');
   const allowed = units.get(c);
-  if (!allowed) return 'a number or month must keep its own claim: copy that source sentence word for word';
+  if (!allowed) return 'an amount or a time must keep its own claim: copy that source sentence word for word';
   if (allowed.has('*')) return null;
   const wrong = [...labelsNamed(text)].find((l) => !allowed.has(l));
   return wrong ? `credits ${wrong} for another source's text` : null;

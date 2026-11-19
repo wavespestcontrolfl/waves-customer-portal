@@ -42,7 +42,7 @@ describe('the sentence rules', () => {
   });
 
   test('a month that is not in the fact fails the sentence; "may" the verb does not count', () => {
-    expect(sentenceProblem('The first rains in June hatch them.', factSource(FACT))).toMatch(/month or season not in the source: june/);
+    expect(sentenceProblem('The rains in June hatch them.', factSource(FACT))).toMatch(/month or season not in the source: june/);
     expect(sentenceProblem('Eggs may survive a dry spell.', loose(FACT))).toBeNull();
     expect(sentenceProblem('Watch for them in May.', loose(FACT))).toMatch(/may/);
     const oct = factById('T02'); // April through June, peaking in May
@@ -50,8 +50,8 @@ describe('the sentence rules', () => {
     expect(sentenceProblem('Swarms peak in May.', loose(oct))).toBeNull();
     expect(sentenceProblem('Swarms peak in October.', loose(oct))).toMatch(/october/);
     // a possessive, a dash or lowercase does not hide a month; lowercase "march" and "may" stay words (pre-push round 14)
-    expect(sentenceProblem("Eggs hatch with June's first rain.", factSource(FACT))).toMatch(/month or season not in the source: june/);
-    expect(sentenceProblem('Eggs hatch with the first june rain.', factSource(FACT))).toMatch(/june/);
+    expect(sentenceProblem("Eggs hatch with June's rain.", factSource(FACT))).toMatch(/month or season not in the source: june/);
+    expect(sentenceProblem('Eggs hatch with the june rain.', factSource(FACT))).toMatch(/june/);
     expect(sentenceProblem('They swarm October-November.', loose(oct))).toMatch(/october/);
     expect(sentenceProblem('Swarmers march toward lights.', loose(oct))).toBeNull();
   });
@@ -130,6 +130,39 @@ describe('the sentence rules', () => {
     // months are bound the same way (T03: R. hageni December to February, R. flavipes January to April)
     const T03 = factById('T03');
     expect(sentenceProblem('Native termites fly from December to April.', factSource(T03))).toMatch(/word for word/);
+  });
+
+  test('every amount or time word counts, not only digits and number words (pre-push round 15)', () => {
+    // a frequency: "once a day" against the CDC's "once a week" (M01)
+    const weekly = 'Once a week, empty and scrub, turn over, cover, or throw out any items that hold water.';
+    expect(sentenceProblem(weekly, factSource(FACT))).toBeNull();
+    expect(sentenceProblem(weekly.replace('Once a week', 'Once a day'), factSource(FACT))).toMatch(/number not in the source: per:day/);
+    expect(sentenceProblem(weekly.replace('Once a week', 'Every other week'), factSource(FACT))).toMatch(/word for word/);
+    expect(sentenceProblem('Empty and scrub them weekly.', factSource(FACT))).toMatch(/word for word/);
+    // "once" in front of anything but a period is not a count (P04: once a palm is infected)
+    expect(sentenceProblem('Nothing cures it once a palm is infected.', loose(factById('P04')))).toBeNull();
+    // a measure word with no number (M02: a few blocks), in a lead line and in a title
+    const M02 = factById('M02');
+    expect(sentenceProblem('In their lifetime, these mosquitoes will only fly a few miles.', factSource(M02))).toMatch(/unit:mile/);
+    expect(checkIssueCopy({ leadFact: { ...M02, title: 'Aedes mosquitoes stay within a few miles' }, species: SPECIES_ENTRY }).problems)
+      .toEqual([expect.objectContaining({ part: 'title', reason: expect.stringMatching(/unit:mile/) })]);
+    // an ordinal (P05: the first symptom)
+    const P05 = factById('P05');
+    expect(sentenceProblem('UF/IFAS says if fruit is present, the first symptom is generally premature fruit drop.', factSource(P05))).toBeNull();
+    expect(sentenceProblem('UF/IFAS says if fruit is present, the second symptom is generally premature fruit drop.', factSource(P05))).toMatch(/ord:2/);
+    // a time of day: both words are in L04's source, so only the copy rule catches the swap
+    const L04 = factById('L04');
+    const swapped = 'UF/IFAS says watering in the morning before dew forms, or in the evening after it dries, keeps grass wet longer.';
+    expect(sentenceProblem(swapped, loose(L04))).toBeNull();
+    expect(sentenceProblem(swapped, factSource(L04))).toMatch(/word for word/);
+    // a season binds its sentence too (L12's source has spring)
+    expect(sentenceProblem('Homeowners often apply pre-emergent too early in the spring.', factSource(factById('L12')))).toMatch(/word for word/);
+    // a weekday must be in the source
+    expect(sentenceProblem('Even addresses may water on Tuesday.', loose(factById('O04')))).toMatch(/tuesday/);
+    // "<publisher> says to" wraps a quoted instruction, and its period still binds (M03)
+    const M03 = factById('M03');
+    expect(sentenceProblem('UF/IFAS says to flush the cups with a strong jet of water from a hose at least once a week.', factSource(M03))).toBeNull();
+    expect(sentenceProblem('UF/IFAS says to flush the cups with a strong jet of water from a hose at least once a month.', factSource(M03))).toMatch(/per:month/);
   });
 
   test('a copied number sentence credits only the publisher of that quote', () => {
@@ -247,20 +280,22 @@ describe('the fact bank copy, as every issue will print it', () => {
   // so each entry pins the whole reviewed statement: any edit to it fails
   // until it is reviewed again (pre-push round 11). Any new entry fails too.
   const REVIEWED_STATEMENTS = {
-    // quote: mowed at 3.5–4"
-    L05: ['Most St. Augustine should be cut at 3.5 to 4 inches, and never lose more than one-third of the blade at once.', 'number and unit not in the source: 3.5 inch'],
+    // quote: mowed at 3.5–4" (an inch mark, not the word)
+    L05: ['Most St. Augustine should be cut at 3.5 to 4 inches, and never lose more than one-third of the blade at once.', 'number not in the source: unit:inch'],
     // quote: South Florida is south of State Road 60
-    L12: ["In South Florida, which includes Manatee, Sarasota and Charlotte counties, UF's rule of thumb is to apply pre-emergent by February 1, not in spring.", 'name not in the source: Manatee'],
+    L12: ["In South Florida, which includes Manatee, Sarasota and Charlotte counties, UF's rule of thumb is to apply pre-emergent by February 1, not in spring; homeowners often wait too late in the spring.", 'name not in the source: Manatee'],
     // the source's own date: published July 23, 1997
     M04: ['In a one-night test that UF/IFAS reported in 1997, a bug zapper killed about 10,000 insects, and only eight were mosquitoes.', 'number not in the source: 1997'],
     // quotes: one-day-per-week; on days 1-30
-    O04: ['The Southwest Florida Water Management District limits lawn watering to one day a week through March 31, 2027, but new lawns may be watered any day for 30 days.', 'number and unit not in the source: 1 day'],
-    // quote: 12"-18" from the base of trees
-    P06: ['Mulch piled against a trunk holds extra moisture that can cause rot and insect infestations; keep mulch 12 to 18 inches back from trees.', 'number and unit not in the source: 12 inch'],
+    O04: ['The Southwest Florida Water Management District limits lawn watering to one day a week through March 31, 2027, but new lawns may be watered any day for 30 days; '
+      + 'homes that water only with reclaimed water are subject only to voluntary watering hours unless the local government or utility restricts them; '
+      + 'many cities and counties have different schedules or stricter hours, so check your city or county rules first.', 'number and unit not in the source: 1 day'],
+    // quote: 12"-18" from the base of trees (an inch mark, not the word)
+    P06: ['Mulch piled against a trunk holds extra moisture that can cause rot and insect infestations; keep mulch 12 to 18 inches back from trees.', 'number not in the source: unit:inch'],
     // quote: flights from early December
     T03: ["Florida's native subterranean termites swarm in winter and spring, December through May; check the waist and antennae to rule out ants.", 'month or season not in the source: winter'],
     // quote: often called palmetto bugs
-    R01: ['The big roaches Floridians call palmetto bugs are generally found outdoors and do not survive well inside, so a single one in the kitchen is usually a visitor.', 'name not in the source: Floridians'],
+    R01: ['The big roaches Floridians call palmetto bugs are generally found outdoors and do not survive well indoors, so removing the roach is often all that is needed.', 'name not in the source: Floridians'],
   };
   test('a statement adds no number, month or name its quotes lack, except the reviewed ones', () => {
     const found = {};

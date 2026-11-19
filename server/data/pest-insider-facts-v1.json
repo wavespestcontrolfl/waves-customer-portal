@@ -153,9 +153,9 @@
       "title": "Water inside the dew window",
       "statement": "Watering in the evening before dew forms, or in the morning after it dries, keeps grass wet longer; watering while dew is already on the grass lowers the risk of disease.",
       "lead": [
-        "UF/IFAS says watering in the evening before dew forms, or in the morning after it dries, keeps the grass wet longer.",
+        "UF/IFAS says watering in the evening before dew forms, or in the morning after it dries, keeps grass wet longer.",
         "To lower the risk of lawn disease, UF/IFAS suggests watering while dew is already on the grass.",
-        "Dew is usually on the grass in the hours before dawn."
+        "Dew is usually present in the predawn hours, between 2 and 8 a.m."
       ],
       "quotes": [
         "Irrigating in the evening before dew forms or in the morning after dew evaporates extends the dew period. One strategy to reduce the risk of disease development is to irrigate when dew is already present. Dew is usually present in the predawn hours, between 2 and 8 a.m.",
@@ -305,9 +305,9 @@
       "title": "Why grass can yellow after a spring nitrogen feeding",
       "statement": "Iron deficiency is common in Florida lawns in spring after a nitrogen feeding, and it usually fades within a few weeks.",
       "lead": [
-        "UF/IFAS says iron deficiency is common in Florida lawns in the spring, after nitrogen fertilizer goes down.",
+        "UF/IFAS says iron deficiency is common in Florida lawns in spring after a nitrogen feeding.",
         "It shows up most in bahiagrass, centipedegrass and St. Augustinegrass, which can look yellow in spots just when you expect them to green up.",
-        "This spring yellowing normally fades within a few weeks."
+        "It usually fades within a few weeks."
       ],
       "quotes": [
         "Iron deficiency is commonly observed in Florida in the spring following N fertilizer applications, especially to bahiagrass, centipedegrass, and St. Augustinegrass. This can be frustrating because the N application should have resulted in greener turfgrass, but, in fact, the lawn may appear chlorotic in places.",
@@ -444,8 +444,8 @@
       "title": "Chinch bugs start at the hot edges",
       "statement": "Chinch bug damage usually starts in water-stressed spots along the lawn's edges or in full sun; a bottomless coffee can filled with water floats them up.",
       "lead": [
-        "UF/IFAS says chinch bug damage usually shows up first in water-stressed spots along the edges of the lawn, or where the grass grows in full sun.",
-        "Chinch bugs are most active when it is warm, but in South Florida they can do damage year-round.",
+        "UF/IFAS says chinch bug damage usually starts in water-stressed spots along the lawn's edges or in full sun.",
+        "Chinch bugs are most active when it is warm, but may cause damage year-round, particularly in South Florida.",
         "To check for them, UF/IFAS describes pushing a bottomless metal coffee can into the soil around the discolored grass and filling it with water; chinch bugs trapped inside float to the top."
       ],
       "quotes": [
@@ -544,7 +544,7 @@
     {
       "id": "L12",
       "title": "Pre-emergent goes down by February 1 here",
-      "statement": "In South Florida, which includes Manatee, Sarasota and Charlotte counties, UF's rule of thumb is to apply pre-emergent by February 1, not in spring.",
+      "statement": "In South Florida, which includes Manatee, Sarasota and Charlotte counties, UF's rule of thumb is to apply pre-emergent by February 1, not in spring; homeowners often wait too late in the spring.",
       "lead": [
         "In South Florida, which includes Manatee, Sarasota and Charlotte counties, UF's rule of thumb is to apply pre-emergent by February 1, not in spring.",
         "UF/IFAS notes that homeowners often wait too late in the spring."
@@ -628,11 +628,11 @@
     {
       "id": "O02",
       "title": "Sarasota County's fertilizer blackout",
-      "statement": "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer; the rest of the year, nitrogen fertilizer must be at least 50 percent slow-release.",
+      "statement": "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer; outside that window, nitrogen fertilizer must be at least 50 percent slow-release.",
       "lead": [
         "June 1 to September 30, most of Sarasota County bans nitrogen and phosphorus lawn fertilizer.",
-        "The rest of the year, nitrogen fertilizer must be at least 50 percent slow-release.",
-        "WUSF reports that Manatee County's fertilizer ban has been in place for over a decade."
+        "Outside that window, nitrogen fertilizer must be at least 50 percent slow-release.",
+        "WUSF reports that in Manatee County, the fertilizer ban has been in place for over a decade."
       ],
       "quotes": [
         "From June 1 through Sept. 30, no fertilizer containing nitrogen or phosphorus shall be applied to turf or landscape plants in residential areas.",
@@ -716,17 +716,22 @@
     },
     {
       "id": "O04",
-      "title": "Once a week, through March",
-      "statement": "The Southwest Florida Water Management District limits lawn watering to one day a week through March 31, 2027, but new lawns may be watered any day for 30 days.",
+      "title": "The District's once-a-week watering limit runs through March",
+      "statement": "The Southwest Florida Water Management District limits lawn watering to one day a week through March 31, 2027, but new lawns may be watered any day for 30 days; homes that water only with reclaimed water are subject only to voluntary watering hours unless the local government or utility restricts them; many cities and counties have different schedules or stricter hours, so check your city or county rules first.",
       "lead": [
         "The Southwest Florida Water Management District limits lawn watering to one day a week through March 31, 2027.",
-        "New lawns may be watered any day for 30 days."
+        "New lawns may be watered any day for 30 days.",
+        "Homes that water only with reclaimed water are subject only to voluntary watering hours unless the local government or utility restricts them.",
+        "Many cities and counties have different schedules or stricter hours, so check your city or county rules first."
       ],
       "quotes": [
         "The District's Modified Phase III one-day-per-week water shortage restrictions were extended through March 31, 2027.",
         "Lawn and landscape watering remains limited to a once-per-week schedule.",
         "On days 1-30, new lawns and plants may be watered any day of the week.",
-        "only subject to voluntary watering hours"
+        "exclusive use of reclaimed water is only subject to voluntary watering hours",
+        "unless restricted by the local government or utility.",
+        "as many have different schedules or stricter hours in effect",
+        "Always refer to your city or county regulations first."
       ],
       "sources": [
         {
@@ -751,6 +756,9 @@
       "recheck_before_send": true,
       "expires_on": "2027-03-31",
       "quote_sources": [
+        0,
+        0,
+        0,
         0,
         0,
         0,
@@ -929,7 +937,8 @@
       "lead": [
         "UF/IFAS says the organism behind lethal bronzing lives only in a palm's sap and cannot survive outside a plant or an insect.",
         "That means it cannot spread on pruning tools or through roots touching new roots.",
-        "On a palm with fruit, the first sign is usually fruit dropping early; a palm that shows symptoms and tests positive should be removed right away."
+        "UF/IFAS says if fruit is present, the first symptom is generally premature fruit drop.",
+        "A palm that shows symptoms and tests positive should be removed right away."
       ],
       "quotes": [
         "The LB phytoplasma is limited to the phloem (sap) of the palm and cannot survive outside a plant or insect; therefore, it cannot be mechanically transmitted (e.g., by pruning tools or infected roots touching new roots).",
@@ -1028,7 +1037,7 @@
       "lead": [
         "Aedes mosquitoes lay their eggs on the inside walls of containers that hold water, just above the waterline.",
         "The CDC says eggs can survive drying out for up to 8 months.",
-        "The CDC says to empty and scrub anything that holds water once a week."
+        "Once a week, empty and scrub, turn over, cover, or throw out any items that hold water."
       ],
       "quotes": [
         "Adult female mosquitoes lay eggs on the inner walls of containers with water, above the waterline.",
@@ -1077,7 +1086,7 @@
       "title": "Aedes mosquitoes stay close; black salt marsh mosquitoes travel",
       "statement": "Aedes aegypti and Aedes albopictus fly only a few blocks in their lifetime, but the black salt marsh mosquito has a long flight range and emerges in large numbers after rains and flooding.",
       "lead": [
-        "The CDC says Aedes aegypti and Aedes albopictus mosquitoes fly only a few blocks in their lifetime.",
+        "The CDC says Aedes aegypti and Aedes albopictus fly only a few blocks in their lifetime.",
         "Black salt marsh mosquitoes are different: UF/IFAS says they breed in coastal salt marshes but have a long flight range and can turn up far inland.",
         "They emerge in large numbers after rain and flooding, and they bite aggressively."
       ],
@@ -1125,7 +1134,7 @@
     {
       "id": "M03",
       "title": "Flush your bromeliads weekly",
-      "statement": "Water in bromeliad cups can breed mosquitoes; UF says to flush them with a strong jet from a hose at least once a week instead of ripping the plants out.",
+      "statement": "Water in bromeliad cups can breed mosquitoes; flush the cups with a strong jet of water from a hose at least once a week; there is currently no evidence that removing bromeliads helps during outbreaks of mosquito-borne viruses.",
       "lead": [
         "Water that collects in bromeliad cups can breed mosquitoes.",
         "UF/IFAS says to flush the cups with a strong jet of water from a hose at least once a week.",
@@ -1462,7 +1471,7 @@
     {
       "id": "R01",
       "title": "Big \"palmetto bugs\" are mostly outdoor roaches",
-      "statement": "The big roaches Floridians call palmetto bugs are generally found outdoors and do not survive well inside, so a single one in the kitchen is usually a visitor.",
+      "statement": "The big roaches Floridians call palmetto bugs are generally found outdoors and do not survive well indoors, so removing the roach is often all that is needed.",
       "lead": [
         "The big roaches Floridians call palmetto bugs, the American, Australian, brown and smokybrown, are generally found outdoors.",
         "UF/IFAS says outdoor cockroaches do not survive well indoors, and people often overreact when they see them.",
@@ -1534,10 +1543,10 @@
     },
     {
       "id": "R03",
-      "title": "German roaches ride in on groceries and cardboard",
+      "title": "German roaches ride in on grocery bags and breed in boxes",
       "statement": "German roaches can ride in on infested grocery bags and breed in corrugated boxes, so check groceries and get rid of extra boxes fast.",
       "lead": [
-        "UF/IFAS says German cockroaches can first get into a home in infested grocery bags.",
+        "UF/IFAS says German cockroaches can get into a home in infested grocery bags.",
         "They also breed in corrugated cardboard boxes.",
         "UF/IFAS advises checking groceries before you put them away and getting rid of boxes you do not need right away."
       ],
@@ -1699,7 +1708,7 @@
     {
       "id": "D03",
       "title": "Never sweep rodent droppings",
-      "statement": "Sweeping or vacuuming rodent droppings can put germs in the air; the CDC says to soak them with disinfectant first, as the label directs.",
+      "statement": "Sweeping or vacuuming rodent droppings can put germs in the air; the CDC says to spray them with an EPA-registered disinfectant until very wet and let it soak as the label directs.",
       "lead": [
         "The CDC says not to sweep or vacuum rodent urine, droppings or nesting material.",
         "Diseases mainly spread from rodents to people when people breathe in contaminated air.",
@@ -1747,9 +1756,10 @@
     {
       "id": "S01",
       "title": "Brown recluses are not established here",
-      "statement": "Despite yearly \"recluse bite\" reports, UF says brown recluses are not established in Florida; widows are our only medically significant spiders.",
+      "statement": "Unconfirmed brown recluse spider bites are reported in Florida every year, but no brown recluse specimen has ever been collected in Tampa; the widow spiders are the only spiders native to or established in Florida with medically significant venom.",
       "lead": [
-        "Florida gets reports of unconfirmed brown recluse bites every year, but UF/IFAS says no brown recluse specimen has ever been collected in Tampa.",
+        "Unconfirmed brown recluse spider bites are reported in Florida every year.",
+        "But UF/IFAS says no brown recluse specimen has ever been collected in Tampa.",
         "UF/IFAS says the only spiders native to or established in Florida with medically significant venom are the widow spiders.",
         "Widow spiders are shy and not aggressive, and bites rarely happen unless the spider is taunted or accidentally crushed."
       ],
