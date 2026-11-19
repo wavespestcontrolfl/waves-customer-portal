@@ -16,7 +16,10 @@ function whereAwaitingAuthentication(query, table) {
     }).orWhere(function conflictingIdentities() {
       // A legacy failure handler can still change the general ID and decline
       // code. Neither its new status nor a cancellation for that ID is proof.
-      this.whereColumn(`${table}.worker_payment_intent_id`, '<>', `${table}.stripe_payment_intent_id`);
+      this.whereRaw('?? IS NOT NULL AND ?? IS NOT NULL AND ?? <> ??', [
+        `${table}.worker_payment_intent_id`, `${table}.stripe_payment_intent_id`,
+        `${table}.worker_payment_intent_id`, `${table}.stripe_payment_intent_id`,
+      ]);
     });
   });
 }

@@ -302,7 +302,7 @@ async function claimInvoiceSavedCardCharge({
 }) {
   const idempotencyKey = `inv_card_on_file_${invoiceId}_${attemptId}`;
   try {
-    return await database.transaction(async (claimTrx) => {
+    const claimResult = await database.transaction(async (claimTrx) => {
       // Public server-side confirm takes this same invoice lock for its final
       // fence check. Whichever path wins serializes the decision: a committed
       // claim blocks confirm, while a confirm already sent to Stripe leaves an
@@ -312,6 +312,17 @@ async function claimInvoiceSavedCardCharge({
         .forUpdate()
         .first('id');
       if (!lockedInvoice) throw new Error('Invoice not found');
+      // A previous charge can move from a claim to an authentication decline
+      // between preflight and this lock. It can still settle in either state.
+      try {
+        await assertNoInvoiceChargeReconciliationPending(invoiceId, claimTrx, { checkout: true });
+      } catch (conflict) {
+        if (!savedCardChargeSuppressesAlternateCollection(conflict)) throw conflict;
+        // The guard may have promoted a stale submitted claim to ambiguous.
+        // Return that known refusal so its update commits with this transaction;
+        // throwing here would roll the promotion back to an unsafe stale claim.
+        return { conflict };
+      }
 
       const [attempt] = await claimTrx('stripe_invoice_charge_attempts')
         .insert({
@@ -323,8 +334,10 @@ async function claimInvoiceSavedCardCharge({
           status: 'claimed',
         })
         .returning('*');
-      return attempt;
+      return { attempt };
     });
+    if (claimResult.conflict) throw claimResult.conflict;
+    return claimResult.attempt;
   } catch (err) {
     if (err.code !== '23505') throw err;
     const blocking = await database('stripe_invoice_charge_attempts')
@@ -630,6 +643,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   customerId,
   stripePaymentIntentId,
   failureMessage,
+  requestIdempotencyKey = null,
   // Codex #4971 r24 P1: the asynchronous failure's own code (a bank
   // return, an async card decline) — persisted as decline_code so the
   // termite renewal's crash recovery reads this as the CUSTOMER-side
@@ -663,10 +677,16 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
+      .first('id', 'status', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
     if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
     if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
-    if (!attempt.worker_payment_intent_id && invoice.stripe_payment_intent_id !== stripePaymentIntentId) {
+    const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
+      && attempt.idempotency_key === requestIdempotencyKey);
+    if (!attempt.worker_payment_intent_id && !originalCreateFailed) {
+      // Even the invoice's pointer may have been written by a processing
+      // webhook. A timed-out worker cannot supply further proof. Acknowledge
+      // that observation while retaining the ambiguous claim and its credit.
+      if (attempt.status === 'ambiguous') return false;
       // Stripe can deliver failure before the original create returns. Retry
       // the signed event after the worker has bound its exact response. No
       // invoice, reserved credit or attempt state has changed in this path.
@@ -2325,7 +2345,7 @@ const StripeService = {
     // request to a generic status error and let callers miss the terminal
     // reconciliation semantics (and potentially expose a fallback pay rail).
     try {
-      await assertNoInvoiceChargeReconciliationPending(invoiceId);
+      await assertNoInvoiceChargeReconciliationPending(invoiceId, db, { checkout: true });
     } catch (err) {
       if (savedCardChargeNeedsReconciliation(err)) {
         const parked = await parkInvoiceForSavedCardReconciliation({ invoiceId, error: err });

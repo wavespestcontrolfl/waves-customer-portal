@@ -962,7 +962,7 @@ router.post(
           // is absent (rare authorize-only fail). Each Stripe event has a
           // distinct id, so this preserves per-attempt dedupe granularity
           // even in the no-charge case.
-          await handlePaymentIntentFailed(event.data.object, event.id, event.created);
+          await handlePaymentIntentFailed(event.data.object, event.id, event.created, event.request?.idempotency_key);
           break;
 
         case 'charge.refunded':
@@ -2916,7 +2916,7 @@ async function armMonthlyAutopayRetryForAsyncFailure(paymentIntent, processingRo
 /**
  * payment_intent.payment_failed — Update to failed, log failure reason
  */
-async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = null) {
+async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = null, requestIdempotencyKey = null) {
   const piId = paymentIntent.id;
   if (paymentIntent.metadata?.waves_statement_id) {
     await handleStatementPaymentIntentEvent(paymentIntent, 'failed');
@@ -3053,6 +3053,9 @@ async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = 
 
   for (const failedRow of failedInvoices) {
     if (failedRow.status !== 'processing') continue;
+    // The attempt-specific resolver below owns reopening saved-card invoices
+    // and releasing their credit after checking independent request identity.
+    if (paymentIntent.metadata?.source === 'admin_card_on_file' && paymentIntent.metadata?.saved_card_attempt_id) continue;
     const nextStatus = nextInvoiceStatusAfterFailedPayment(failedRow);
     // Clearing ach_processing_notified_at means a re-attempted ACH on
     // the same invoice (different bank account, customer retries, etc.)
@@ -3105,6 +3108,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId, eventCreated = 
     const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
     const attemptResolved = await resolveFailedInvoiceSavedCardChargeAttempt({
       attemptId: failedSavedCardAttempt.id,
+      requestIdempotencyKey,
       invoiceId: failedAttemptInvoice.id,
       customerId: failedAttemptInvoice.customer_id,
       stripePaymentIntentId: piId,

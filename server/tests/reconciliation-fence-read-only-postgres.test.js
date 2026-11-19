@@ -311,6 +311,10 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await recordAuthenticationCancellation(intent, app);
     expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
     expect(await worker('pi_webhook')).toBe(false);
+    await expect(StripeService.claimInvoiceSavedCardCharge({
+      database: app, invoiceId, paymentMethodId: randomUUID(), stripePaymentMethodId: 'pm_other', attemptId: randomUUID(),
+    })).rejects.toMatchObject({ chargeAttemptId: attemptId, statusCode: 409 });
+    expect(await verdict(invoiceId, app, {})).toBeNull(); // settlement of received money still runs
   });
 
   test('a create-returned nonterminal PI binds in one write and can bind after its exact webhook wins', async () => {

@@ -190,8 +190,11 @@ function claimDb({ insertError = null, blocking = null } = {}) {
   const makeQuery = (table, { root = false } = {}) => {
     calls.push(`${root ? 'root' : 'trx'}:${table}`);
     const query = {};
-    ['where', 'whereIn', 'whereNull', 'forUpdate'].forEach((method) => {
-      query[method] = jest.fn(() => query);
+    ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNull', 'orWhereColumn', 'forUpdate', 'orderByRaw'].forEach((method) => {
+      query[method] = jest.fn((arg) => {
+        if (['where', 'orWhere'].includes(method) && typeof arg === 'function') arg.call(query, query);
+        return query;
+      });
     });
     query.insert = jest.fn((payload) => {
       insertedAttempt = payload;
@@ -233,8 +236,11 @@ describe('saved-card charge claim', () => {
       stripe_payment_method_id: 'pm-stripe-1',
       idempotency_key: 'inv_card_on_file_inv-1_attempt-new',
     });
-    expect(database.calls.slice(0, 2)).toEqual([
+    expect(database.calls.slice(0, 5)).toEqual([
       'trx:invoices',
+      'trx:stripe_invoice_charge_attempts',
+      'trx:stripe_orphan_charges',
+      'trx:payments',
       'trx:stripe_invoice_charge_attempts',
     ]);
   });
@@ -595,6 +601,17 @@ describe('saved-card failed-webhook attempt repair', () => {
     })).rejects.toMatchObject({ code: 'SAVED_CARD_WORKER_INTENT_PENDING' });
     expect(state.ledger).toEqual([]);
     expect(state.updates).toEqual([]);
+  });
+
+  test('a completed create timeout stays held without independent request proof, even if processing stamped the invoice', async () => {
+    const { database, state } = failedAttemptDb();
+    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, submitted_at: new Date(), idempotency_key: 'original-create' });
+    state.invoice.stripe_payment_intent_id = 'pi-failed';
+    const failure = { attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database };
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'other-create' })).resolves.toBe(false);
+    expect(state.updates).toEqual([]);
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'original-create' })).resolves.toBe(true);
+    expect(state.customer.account_credits).toBe(25);
   });
 
   test('an exact failure leaves a different customer checkout attached to a collectible invoice', async () => {
