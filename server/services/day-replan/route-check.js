@@ -12,15 +12,16 @@
  *     technicians comes with the second technician's shift build (page D4);
  *   - the totals for the next STAFFED_DAYS staffed days and the 7-day view, with the staffed days it could not
  *     measure;
- *   - the live ad rule's campaigns at that hour (`ad_shadow.live`), to compare the counts with.
+ *   - the live ad rule's campaigns at that hour (`ad_shadow.live`), to compare the counts with;
+ *   - the slot rule's decision (`ad_shadow.decision`, decideSlotRule): full or the 1% floor, from the booking engine.
  * It measures only: nothing here changes a visit, a time, a budget or a message. Every opening's start and length are
  * stored, so a rule can be counted again from the rows.
  *
- * The counts are room in the route as booked, not a booking engine's answer. This check has no customer address, so
- * it cannot ask the dispatch picker (scheduling/arrival-route.js) or the /book page whether a job fits. Either can
+ * The counts are room in the route as booked, not a booking engine's answer. A count has no customer address, so it
+ * cannot say whether the dispatch picker (scheduling/arrival-route.js) or the /book page would place a job. Either can
  * refuse a counted job (a stop already late, a route through unassigned work) or place one the count leaves out (a
- * customer near the route, a reordered route). So no budget decision is made here: that follows in its own build,
- * which checks openings with the booking engine.
+ * customer near the route, a reordered route). So the decision is not taken from the counts: decideSlotRule asks the
+ * booking engine itself about one stated job at stated addresses (each service zone's center).
  *
  * Today is not measured here. Its room depends on where the van is now, which comes in a follow-up that reuses the
  * staff placement's own reading of the stop under way (scheduling/arrival-route.js) and leaves every state it cannot
@@ -48,6 +49,8 @@ const {
   promisedWindowOrder, currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
 } = require('../route-reorder-window-fit');
 const { SHIFT } = require('../scheduling/policy');
+const { customerWindowAdmits } = require('../scheduling/customer-windows');
+const { parseHHMM } = require('../scheduling/window-rules');
 const { allocationKey } = require('../scheduling/visit-capacity');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
@@ -58,6 +61,8 @@ const STAFFED_DAYS = 3;
 const DEMAND_DAYS = 7;
 // How far ahead to look for STAFFED_DAYS staffed days (a holiday week can close several in a row).
 const SCAN_DAYS = 14;
+// The slot rule's stated job (decideSlotRule): the catalog's quarterly pest visit, at its catalog length.
+const STANDARD_JOB_KEY = 'pest_general_quarterly';
 // A job slot's parts (close-gaps SLOT_MIN: the 60-minute median job and its added drive). The drive comes first, so
 // the service can start on the hour (AGENTS.md).
 const JOB_MIN = 60;
@@ -461,6 +466,57 @@ async function measureOne(conn, env, { day, techId, rows, occupancy }) {
 }
 
 /**
+ * The slot rule's decision (ad budget rule v2, owner 2026-11-19 "do whatever you reccomend": any slot = full budget,
+ * else the 1% floor), asked of the booking engine itself, not taken from the counts. One stated job (STANDARD_JOB_KEY,
+ * at its catalog length) is asked about at each service zone's center, on each of the next staffed days the totals
+ * count, through the day-agreement shadow's freeSlotsAt: find-time's findAvailableSlots (the engine /book, the
+ * estimate picker and the night tool call), asked as a customer-facing caller, then the reserve gate's collision guard
+ * outside capacity routing. So both shadows ask the engine the same way. A slot counts only when the customer window
+ * admits its start (customerWindowAdmits: the 9:00-17:00 grid, the last customer start, the close), as every
+ * customer-facing booking path checks it: find-time applies that rule itself only under capacity routing. The engine
+ * reads the live tables itself, just after the snapshot.
+ * Shadow only: nothing reads the decision, no budget changes, nothing is held, and nothing is paid for (no road lookup
+ * is bought; a zone center is a pin, so nothing is geocoded).
+ *   mode 'full': some zone has a slot. 'floor': every ask answered and none has one, or no staffed day is ahead.
+ *   'unknown': no slot, and the job, the zones or an ask could not be read (`reason`, or a zone's `error`).
+ */
+async function decideSlotRule(conn, dates) {
+  if (!dates.length) return { mode: 'floor', reason: 'no_staffed_days', dates };
+  const job = await conn('services').where({ service_key: STANDARD_JOB_KEY })
+    .first('name', 'default_duration_minutes', 'is_active');
+  if (!job || job.is_active !== true) return { mode: 'unknown', reason: 'job_unresolved', dates };
+  const { freeSlotsAt, visitIdentity } = require('../day-agreement-shadow');
+  const identity = visitIdentity({ service: job });
+  // A blank coordinate is no pin (Number(null) is 0), as the /book pin reader rules.
+  const zones = (await conn('service_zones').select('zone_name', 'center_lat', 'center_lng'))
+    .map((z) => ({ zone: z.zone_name, where: { lat: Number(z.center_lat), lng: Number(z.center_lng) } }))
+    .filter(({ where }) => [where.lat, where.lng].every((v) => Number.isFinite(v) && v !== 0))
+    .sort((a, b) => String(a.zone).localeCompare(String(b.zone)));
+  if (!zones.length) return { mode: 'unknown', reason: 'no_zones', dates };
+  const admitted = (s) => customerWindowAdmits({ startMin: parseHHMM(s.start_time), endMin: parseHHMM(s.end_time) });
+  const asked = [];
+  for (const { zone, where } of zones) {
+    const byDate = {};
+    let first = null;
+    let error = null;
+    for (const day of dates) {
+      try {
+        const starts = (await freeSlotsAt(conn, { where, day, identity })).filter(admitted).map((s) => s.start_time).sort();
+        byDate[day] = starts.length;
+        first ||= starts.length ? `${day} ${starts[0]}` : null;
+      } catch (err) {
+        byDate[day] = null;
+        error = String(err.message).slice(0, 200);
+      }
+    }
+    asked.push({ zone, byDate, first, ...(error ? { error } : {}) });
+  }
+  const anySlot = asked.some((z) => Object.values(z.byDate).some((n) => n > 0));
+  const mode = anySlot ? 'full' : (asked.some((z) => z.error) ? 'unknown' : 'floor');
+  return { mode, job: { key: STANDARD_JOB_KEY, ...identity }, dates, zones: asked };
+}
+
+/**
  * One hourly run: every read in one read-only snapshot, then one route_check_runs row written outside it. A run-wide
  * read failing (technicians, blackout days, absences, start points, departure time) still writes the hour's row,
  * status 'failed', with the error in its totals.
@@ -482,6 +538,15 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     logger.warn(`[route-check] ${today}: run failed (${err.message}); recorded`);
     run = { status: 'failed', days: [], totals: { error: String(err.message).slice(0, 200) }, ad: {} };
   }
+  // A decision the run could not make, or an ask that failed, is an error of the run, as an unread campaign list is.
+  if (run.status !== 'failed') {
+    const decision = await decideSlotRule(conn, run.totals.next.dates).catch((err) => {
+      logger.warn(`[route-check] ${today}: slot-rule decision failed (${err.message})`);
+      return { mode: 'unknown', error: String(err.message).slice(0, 200) };
+    });
+    run.ad.decision = decision;
+    if (decision.mode === 'unknown' || decision.zones?.some((z) => z.error)) run.status = 'completed_with_errors';
+  }
   const written = await conn(TABLE).insert({
     run_at: now, service_date: today, run_hour: hour, status: run.status,
     days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
@@ -493,7 +558,8 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     return { status, duplicate: true, totals: {}, days: 0 };
   }
   if (run.status !== 'failed') {
-    logger.info(`[route-check] ${run.status}: next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}`);
+    logger.info(`[route-check] ${run.status}: next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}`
+      + ` decision=${run.ad.decision.mode}`);
   }
   return { status: run.status, totals: run.totals, days: run.days.length };
 }
@@ -552,7 +618,7 @@ module.exports = {
   runRouteCheck,
   _internals: {
     recoverable, physicalStops, heldSpans, unheldWork, hourSlots, simulateBookedDay, latestHomeDeparture, measureTechDay, staffed,
-    datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END,
-    STAFFED_DAYS, DEMAND_DAYS,
+    datesToMeasure, summarize, unmeasurable, DISPATCH_DAY_END, decideSlotRule,
+    STAFFED_DAYS, DEMAND_DAYS, STANDARD_JOB_KEY,
   },
 };

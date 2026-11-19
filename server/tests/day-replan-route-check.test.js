@@ -20,8 +20,14 @@ jest.mock('../services/scheduling/tech-start-point', () => ({
 jest.mock('../services/day-replan/index', () => ({
   _internals: { loadDayStops: jest.fn(async () => []), loadBlocks: jest.fn(async () => []), blockedHoursFor: jest.fn(() => []) },
 }));
+// The booking engine's question (day-agreement-shadow.js freeSlotsAt); its own suite covers how it asks the engine.
+jest.mock('../services/day-agreement-shadow', () => ({
+  freeSlotsAt: jest.fn(async () => []),
+  visitIdentity: ({ service }) => ({ name: service?.name || null, minutes: Number(service?.default_duration_minutes) || 60 }),
+}));
 
 const { _internals: replan } = require('../services/day-replan/index');
+const { freeSlotsAt } = require('../services/day-agreement-shadow');
 const { getBlackoutDates } = require('../services/scheduling/blackout-dates');
 const { absentTechDays } = require('../services/technician-eligibility');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
@@ -331,21 +337,49 @@ describe('the totals', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
+  // The slot rule's inputs: the catalog's stated job and the service zones' centers (synthetic pins).
+  const JOB = { name: 'Quarterly Pest Control Service', default_duration_minutes: 60, is_active: true };
+  const ZONES = [
+    { zone_name: 'North', center_lat: 27.5, center_lng: -82.57 },
+    { zone_name: 'South', center_lat: 27.1, center_lng: -82.45 },
+  ];
+  // The decision when every ask answers with no slot.
+  const FLOOR = {
+    mode: 'floor', job: { key: 'pest_general_quarterly', name: JOB.name, minutes: 60 },
+    dates: ['2026-11-20', '2026-11-21', '2026-11-23'],
+    zones: ['North', 'South'].map((zone) => ({
+      zone, byDate: { '2026-11-20': 0, '2026-11-21': 0, '2026-11-23': 0 }, first: null,
+    })),
+  };
+
   // `campaigns` an Error: the campaign read throws. `taken`: the unique key's rows (key -> row), shared across runs.
-  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map() } = {}) {
+  // `job` / `zones`: the catalog row and the zone rows the decision reads (an Error throws).
+  function fakeConn({
+    campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }], taken = new Map(), job = JOB, zones = ZONES,
+  } = {}) {
     const writes = [];
     const conflicts = [];
+    const reads = [];
     const conn = (table) => {
       let filter = {};
       const q = {
         leftJoin() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
         where(arg) { if (arg && typeof arg === 'object') filter = arg; return q; },
-        first: async () => taken.get(`${filter.service_date}|${filter.run_hour}`),
+        first: async () => {
+          if (table !== 'services') return taken.get(`${filter.service_date}|${filter.run_hour}`);
+          reads.push([table, filter]);
+          if (job instanceof Error) throw job;
+          return job;
+        },
         select: async () => {
           if (table === 'technicians') return [{ id: TECH }];
           if (table === 'ad_campaigns') {
             if (campaigns instanceof Error) throw campaigns;
             return campaigns;
+          }
+          if (table === 'service_zones') {
+            if (zones instanceof Error) throw zones;
+            return zones;
           }
           return [];
         },
@@ -369,10 +403,12 @@ describe('runRouteCheck', () => {
       return q;
     };
     conn.raw = (sql) => sql;
-    return { conn, writes, conflicts };
+    return { conn, writes, conflicts, reads };
   }
 
   beforeEach(() => {
+    freeSlotsAt.mockReset();
+    freeSlotsAt.mockImplementation(async () => []);
     getBlackoutDates.mockResolvedValue(new Set(['2026-11-26']));
     absentTechDays.mockResolvedValue(new Set());
     replan.loadDayStops.mockImplementation(async (_c, date) => {
@@ -397,8 +433,8 @@ describe('runRouteCheck', () => {
     const totals = JSON.parse(row.totals);
     expect(totals.next.dates).toEqual(['2026-11-20', '2026-11-21', '2026-11-23']);
     expect(totals.today).toBeUndefined();
-    // No budget decision: the live rule's campaigns only, to compare the counts with.
-    expect(JSON.parse(row.ad_shadow)).toEqual({ live: [{ id: 'c1', status: 'paused', mode: 'stop' }] });
+    // The live rule's campaigns, to compare with, and the slot rule's decision from the booking engine (no slot here).
+    expect(JSON.parse(row.ad_shadow)).toEqual({ live: [{ id: 'c1', status: 'paused', mode: 'stop' }], decision: FLOOR });
     // Only the measured dates and the Sundays are read: never today, never the whole 14-day scan.
     expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
     expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-20', dateTo: '2026-11-20' }));
@@ -585,10 +621,10 @@ describe('runRouteCheck', () => {
     const unread = fakeConn({ campaigns: new Error('timeout') });
     expect((await runRouteCheck({ conn: unread.conn, now: NOW })).status).toBe('completed_with_errors');
     expect(unread.writes[0][1].status).toBe('completed_with_errors');
-    expect(JSON.parse(unread.writes[0][1].ad_shadow)).toEqual({ live: null, error: 'timeout' });
+    expect(JSON.parse(unread.writes[0][1].ad_shadow)).toEqual({ live: null, error: 'timeout', decision: FLOOR });
     const none = fakeConn({ campaigns: [] });
     expect((await runRouteCheck({ conn: none.conn, now: NOW })).status).toBe('completed');
-    expect(JSON.parse(none.writes[0][1].ad_shadow)).toEqual({ live: [] });
+    expect(JSON.parse(none.writes[0][1].ad_shadow)).toEqual({ live: [], decision: FLOOR });
   });
 
   test('a run-wide read failing still writes the hour, as failed with its error', async () => {
@@ -599,6 +635,100 @@ describe('runRouteCheck', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0][1]).toMatchObject({ status: 'failed', service_date: '2026-11-19' });
     expect(JSON.parse(writes[0][1].totals)).toEqual({ error: 'timeout' });
+    // No staffed days were found, so the booking engine is not asked.
+    expect(JSON.parse(writes[0][1].ad_shadow)).toEqual({});
+    expect(freeSlotsAt).not.toHaveBeenCalled();
+  });
+
+  test('slot rule (A3): a slot the booking engine gives any zone on a next staffed day makes the decision full', async () => {
+    freeSlotsAt.mockImplementation(async (_c, { where, day }) => (where.lat === 27.1 && day === '2026-11-21'
+      ? [{ date: day, start_time: '14:00', end_time: '15:00' }, { date: day, start_time: '10:00', end_time: '11:00' }] : []));
+    const { conn, writes, reads } = fakeConn();
+    const result = await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].ad_shadow).decision).toEqual({
+      ...FLOOR,
+      mode: 'full',
+      zones: [FLOOR.zones[0], { zone: 'South', byDate: { '2026-11-20': 0, '2026-11-21': 2, '2026-11-23': 0 }, first: '2026-11-21 10:00' }],
+    });
+    // The stated job is read from the catalog by its key. Each zone's center is asked about on each next staffed day,
+    // on the run's own connection, with the catalog's name and length.
+    expect(reads).toEqual([['services', { service_key: 'pest_general_quarterly' }]]);
+    expect(freeSlotsAt.mock.calls.map(([c, ask]) => [c === conn, ask.where, ask.day, ask.identity])).toEqual(
+      ZONES.flatMap((z) => FLOOR.dates.map((day) => [true, { lat: z.center_lat, lng: z.center_lng }, day, { name: JOB.name, minutes: 60 }])),
+    );
+    expect(result.status).toBe('completed');
+  });
+
+  test('slot rule (A3): a failed ask is an error of the run; with no slot anywhere the decision is unknown, not floor', async () => {
+    freeSlotsAt.mockImplementation(async (_c, { where, day }) => {
+      if (where.lat === 27.5 && day === '2026-11-21') throw new Error('booking_config_unknown');
+      return [];
+    });
+    const none = fakeConn();
+    expect((await runRouteCheck({ conn: none.conn, now: NOW })).status).toBe('completed_with_errors');
+    const decision = JSON.parse(none.writes[0][1].ad_shadow).decision;
+    expect(decision.mode).toBe('unknown');
+    expect(decision.zones).toEqual([
+      { zone: 'North', byDate: { '2026-11-20': 0, '2026-11-21': null, '2026-11-23': 0 }, first: null, error: 'booking_config_unknown' },
+      FLOOR.zones[1],
+    ]);
+    // Any slot is full, so a slot in another zone still decides it; the failed ask still marks the run.
+    freeSlotsAt.mockImplementation(async (_c, { where, day }) => {
+      if (where.lat === 27.5) throw new Error('timeout');
+      return day === '2026-11-23' ? [{ date: day, start_time: '09:00', end_time: '10:00' }] : [];
+    });
+    const some = fakeConn();
+    expect((await runRouteCheck({ conn: some.conn, now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(some.writes[0][1].ad_shadow).decision).toMatchObject({
+      mode: 'full', zones: [{ zone: 'North', error: 'timeout' }, { zone: 'South', first: '2026-11-23 09:00' }],
+    });
+  });
+
+  test('slot rule (A3): no active stated job, or no zone with a pin, asks nothing; the decision is unknown', async () => {
+    const cases = [
+      [{ job: null }, 'job_unresolved'],
+      [{ job: { ...JOB, is_active: false } }, 'job_unresolved'],
+      // A blank coordinate is no pin: Number(null) is 0.
+      [{ zones: [{ zone_name: 'Blank', center_lat: null, center_lng: null }, { zone_name: 'Zero', center_lat: 0, center_lng: -82.5 }] }, 'no_zones'],
+    ];
+    for (const [inputs, reason] of cases) {
+      freeSlotsAt.mockClear();
+      const { conn, writes } = fakeConn(inputs);
+      expect((await runRouteCheck({ conn, now: NOW })).status).toBe('completed_with_errors');
+      expect(JSON.parse(writes[0][1].ad_shadow).decision).toEqual({ mode: 'unknown', reason, dates: FLOOR.dates });
+      expect(freeSlotsAt).not.toHaveBeenCalled();
+    }
+    // A read that throws is unknown too, with its message, and the row is still written.
+    const unread = fakeConn({ zones: new Error('timeout') });
+    expect((await runRouteCheck({ conn: unread.conn, now: NOW })).status).toBe('completed_with_errors');
+    expect(JSON.parse(unread.writes[0][1].ad_shadow).decision).toEqual({ mode: 'unknown', error: 'timeout' });
+  });
+
+  test('slot rule (A3): a slot counts only when the customer window admits its start', async () => {
+    const slot = (start, end) => ({ date: '2026-11-20', start_time: start, end_time: end });
+    const decide = async (slots) => {
+      freeSlotsAt.mockImplementation(async (_c, { day }) => (day === '2026-11-20' ? slots : []));
+      const { conn } = fakeConn();
+      return rc.decideSlotRule(conn, FLOOR.dates);
+    };
+    const before = process.env.GATE_CUSTOMER_LAST_START_16;
+    process.env.GATE_CUSTOMER_LAST_START_16 = 'true';
+    try {
+      // 8:00 is before the customer grid, 17:00 is past the last customer start, 9:30 is off the hour.
+      expect((await decide([slot('08:00', '09:00'), slot('17:00', '18:00'), slot('09:30', '10:30')])).mode).toBe('floor');
+      const full = await decide([slot('17:00', '18:00'), slot('16:00', '17:00')]);
+      expect(full).toMatchObject({ mode: 'full' });
+      expect(full.zones[0]).toEqual({ zone: 'North', byDate: { '2026-11-20': 1, '2026-11-21': 0, '2026-11-23': 0 }, first: '2026-11-20 16:00' });
+    } finally {
+      if (before === undefined) delete process.env.GATE_CUSTOMER_LAST_START_16;
+      else process.env.GATE_CUSTOMER_LAST_START_16 = before;
+    }
+  });
+
+  test('slot rule (A3): with no staffed day ahead nothing can be booked: the floor, with no ask', async () => {
+    const { conn } = fakeConn();
+    expect(await rc.decideSlotRule(conn, [])).toEqual({ mode: 'floor', reason: 'no_staffed_days', dates: [] });
+    expect(freeSlotsAt).not.toHaveBeenCalled();
   });
 
   test('an unassigned booking ending off the hour holds only its own minutes', async () => {

@@ -447,10 +447,7 @@ function visitIdentity({ fromVisit, service }) {
 }
 
 // The first slot the picker would take on the agreed day, honoring the daypart
-// and whole-hour starts. { slot } or { reason }. The service identity goes to
-// find-time the way the other new-booking callers pass it (serviceType and
-// serviceTypes), so capacity routing drops technicians switched off for that
-// kind of work; the collision guard applies the same rule outside capacity mode.
+// and whole-hour starts. { slot } or { reason }.
 async function pickSlot(conn, {
   customerId, day, daypart, fromVisit, service = null,
 }, deps) {
@@ -458,6 +455,21 @@ async function pickSlot(conn, {
   if (!identity.name) return { reason: 'service_unresolved' };
   const where = await coordinates(conn, customerId, fromVisit);
   if (!where) return { reason: 'no_coordinates' };
+  const free = await freeSlotsAt(conn, { where, day, identity, fromVisit }, deps);
+  const slot = rules.chooseSlot(free, daypart);
+  return slot ? { slot } : { reason: 'no_slot' };
+}
+
+// Every slot the picker offers a customer-facing caller for one visit identity
+// ({ name, minutes }) at one pin on one day, after the reserve gate's collision
+// guard: pickSlot's question, before its daypart choice. The hourly route
+// check's slot-rule decision (day-replan/route-check.js) asks the picker through
+// this too, so both ask it the same way. No road lookup is bought
+// (providerTravel: false). The service identity goes to find-time the way the
+// other new-booking callers pass it (serviceType and serviceTypes), so capacity
+// routing drops technicians switched off for that kind of work; the collision
+// guard applies the same rule outside capacity mode.
+async function freeSlotsAt(conn, { where, day, identity, fromVisit = null }, deps = {}) {
   const findSlots = deps.findSlots || require('./scheduling/find-time').findAvailableSlots;
   // The customer day end (booking_config.day_end, 18:00 unless reconfigured), as
   // /book and the estimate picker pass it: find-time's own default close is 17:00,
@@ -480,9 +492,7 @@ async function pickSlot(conn, {
     excludeServiceIds: fromVisit ? [fromVisit.id] : [],
   });
   const offered = result && !result.error && Array.isArray(result.slots) ? result.slots : [];
-  const free = offered.length ? await dropCollidingSlots(offered, { day, where, fromVisit, serviceName: identity.name }, deps) : [];
-  const slot = rules.chooseSlot(free, daypart);
-  return slot ? { slot } : { reason: 'no_slot' };
+  return offered.length ? dropCollidingSlots(offered, { day, where, fromVisit, serviceName: identity.name }, deps) : [];
 }
 
 // ---- one moment into one row -------------------------------------------------------------
@@ -714,6 +724,9 @@ async function runDayAgreementShadow({ conn = db, now = new Date(), deps = {} } 
 
 module.exports = {
   runDayAgreementShadow,
+  // The picker's question for one pin and one day, shared with the hourly route check (day-replan/route-check.js).
+  freeSlotsAt,
+  visitIdentity,
   _internals: {
     callCandidatesQuery,
     smsCandidatesQuery,
