@@ -16,16 +16,22 @@ const { sendDateET } = require('./facts');
 
 const SERVICE_EMOJI = { pest: '🐜', lawn: '🌱', tree_shrub: '🌴', mosquito: '🦟', termite: '🪵', rodent: '🐀' };
 
+function claimFailReason(checked) {
+  const why = checked.lead.length < 2 ? `only ${checked.lead.length} lead sentence(s) passed` : `id_item failed: ${checked.idItem.reason}`;
+  return `claim_check_failed: ${why}`;
+}
+
 /**
  * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[] },
  *   blogUrl?: string|null, areaLine?: string|null, tool?: object|null, home?: object|null,
- *   write?: Function }} input   `write` is the writer (injectable for tests).
+ *   write?: Function, plan?: Function }} input   `write` is the writer and `plan` the
+ *   planner (both injectable for tests).
  */
-async function buildIssue({ sendDate, recent = {}, blogUrl = null, areaLine = null, tool = null, home = null, write = writeIssue }) {
+async function buildIssue({ sendDate, recent = {}, blogUrl = null, areaLine = null, tool = null, home = null, write = writeIssue, plan = planIssue }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, cut: [], fallbacks: [], provider: null, model: null };
 
-  const { leadFact, idItem, reason } = planIssue({
+  const { leadFact, idItem, reason } = plan({
     sendDate: dateET,
     recentFactIds: recent.factIds || [],
     recentSpeciesSlugs: recent.speciesSlugs || [],
@@ -43,10 +49,7 @@ async function buildIssue({ sendDate, recent = {}, blogUrl = null, areaLine = nu
   diagnostics.cut = checked.cut;
   diagnostics.fallbacks = checked.fallbacks;
   diagnostics.idItem = checked.idItem;
-  if (!checked.ok) {
-    const why = checked.lead.length < 2 ? `only ${checked.lead.length} lead sentence(s) passed` : `id_item failed: ${checked.idItem.reason}`;
-    return { ok: false, reason: `claim_check_failed: ${why}`, issue: null, diagnostics };
-  }
+  if (!checked.ok) return { ok: false, reason: claimFailReason(checked), issue: null, diagnostics };
 
   const issue = renderIssue({
     subject: checked.subject || `${SERVICE_EMOJI[leadFact.service]} ${leadFact.title}`,

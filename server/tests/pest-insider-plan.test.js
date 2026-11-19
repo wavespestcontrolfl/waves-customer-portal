@@ -1,6 +1,10 @@
 // Pest Insider plan: which fact leads and which species fills "What's this?".
-const { planIssue, SPECIES, CATEGORY_SERVICES } = require('../services/pest-insider/plan');
-const { factsForSend } = require('../services/pest-insider/facts');
+const { planIssue, SPECIES, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS } = require('../services/pest-insider/plan');
+const { factsForSend, factById } = require('../services/pest-insider/facts');
+
+const relates = (s, service) => (CATEGORY_SERVICES[s.category] || []).includes(service);
+const named = (s, fact) => s.name.toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 3)
+  .some((w) => new RegExp(`\\b${w}(?:s|es)?\\b`).test(`${fact.title} ${fact.statement}`.toLowerCase()));
 
 describe('planIssue', () => {
   test('is deterministic for the same inputs', () => {
@@ -9,11 +13,31 @@ describe('planIssue', () => {
     expect(a).toEqual(b);
   });
 
-  test('leads with the first pest-kind, high-confidence fact of the month', () => {
+  test('leads with a pest-kind fact of the month, seasonal first, when one exists', () => {
     const { leadFact } = planIssue({ sendDate: '2026-12-03' });
-    expect(leadFact).toBe(factsForSend('2026-12-03')[0]);
+    const pool = factsForSend('2026-12-03');
     expect(leadFact.kind).toBe('pest');
     expect(leadFact.months).toContain(12);
+    const seasonalPest = pool.filter((f) => f.kind === 'pest' && f.months.length <= SEASONAL_MAX_MONTHS);
+    if (seasonalPest.length) expect(leadFact.months.length).toBeLessThanOrEqual(SEASONAL_MAX_MONTHS);
+  });
+
+  test('skips the previous issue\'s service when another service fits the month', () => {
+    const first = planIssue({ sendDate: '2026-12-03' }).leadFact;
+    const next = planIssue({ sendDate: '2026-12-17', recentFactIds: [first.id] }).leadFact;
+    const others = factsForSend('2026-12-17', { excludeIds: [first.id] }).filter((f) => f.service !== first.service);
+    expect(others.length).toBeGreaterThan(0);
+    expect(next.service).not.toBe(first.service);
+  });
+
+  test('falls back to the same service when no other service fits', () => {
+    const pool = factsForSend('2026-12-03');
+    const [prev, only] = pool.filter((f) => f.service === 'pest');
+    const others = pool.filter((f) => f.id !== prev.id && f.id !== only.id).map((f) => f.id);
+    // Oldest first: the last id is the previous issue, and only `only` is left.
+    const { leadFact } = planIssue({ sendDate: '2026-12-03', recentFactIds: [...others, prev.id] });
+    expect(leadFact.id).toBe(only.id);
+    expect(leadFact.service).toBe(factById(prev.id).service);
   });
 
   test('a fact used in the last six issues never repeats', () => {
@@ -40,27 +64,23 @@ describe('planIssue', () => {
     expect(planIssue({ sendDate: '2027-01-07', recentFactIds: all })).toEqual({ leadFact: null, idItem: null, reason: 'no_fact_for_month' });
   });
 
-  test('picks a species whose category relates to the lead fact service', () => {
-    // T01 is a termite fact; the Termites category is the only one that relates to it.
-    const { leadFact, idItem } = planIssue({ sendDate: '2026-12-03', recentFactIds: factsForSend('2026-12-03').filter((f) => f.service !== 'termite').map((f) => f.id) });
-    expect(leadFact.service).toBe('termite');
-    expect(CATEGORY_SERVICES[idItem.category]).toContain('termite');
-  });
-
-  test('prefers the species the fact names', () => {
-    const { leadFact, idItem } = planIssue({ sendDate: '2026-12-03' });
-    expect(leadFact.id).toBe('A01'); // white-footed ant colonies
-    expect(idItem.slug).toBe('white-footed-ant');
+  test('never picks the species the lead fact is about, and prefers another corner of the yard', () => {
+    for (const date of ['2026-12-03', '2026-12-17', '2027-01-07', '2027-04-01', '2027-06-03']) {
+      const { leadFact, idItem } = planIssue({ sendDate: date });
+      expect(named(idItem, leadFact)).toBe(false);
+      const otherCorner = SPECIES.filter((s) => !named(s, leadFact) && !relates(s, leadFact.service));
+      if (otherCorner.length) expect(relates(idItem, leadFact.service)).toBe(false);
+    }
   });
 
   test('never reuses a species from the last six issues, falling back to any unused one', () => {
     const first = planIssue({ sendDate: '2026-12-03' });
     const again = planIssue({ sendDate: '2026-12-03', recentSpeciesSlugs: [first.idItem.slug] });
     expect(again.idItem.slug).not.toBe(first.idItem.slug);
-    // Exclude every related species: any other unused species still fills the slot.
-    const related = SPECIES.filter((s) => (CATEGORY_SERVICES[s.category] || []).includes(first.leadFact.service)).map((s) => s.slug);
-    const fallback = planIssue({ sendDate: '2026-12-03', recentSpeciesSlugs: related });
-    expect(related).not.toContain(fallback.idItem.slug);
+    // Exclude every species from another corner: an unused related species still fills the slot.
+    const otherCorner = SPECIES.filter((s) => !relates(s, first.leadFact.service)).map((s) => s.slug);
+    const fallback = planIssue({ sendDate: '2026-12-03', recentSpeciesSlugs: otherCorner });
+    expect(otherCorner).not.toContain(fallback.idItem.slug);
     expect(planIssue({ sendDate: '2026-12-03', recentSpeciesSlugs: SPECIES.map((s) => s.slug) })).toMatchObject({ idItem: null, reason: 'no_species' });
   });
 });

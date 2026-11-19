@@ -7,7 +7,7 @@
 
 const crypto = require('crypto');
 const snapshot = require('../../data/pest-identifier-species-v1.json');
-const { factsForSend, sendDateET } = require('./facts');
+const { factsForSend, factById, sendDateET } = require('./facts');
 
 /** How many past issues count as "recent": the caller passes the last six. */
 const RECENT_WINDOW = 6;
@@ -50,18 +50,11 @@ const CATEGORY_SERVICES = {
 const relatesTo = (species, service) => (CATEGORY_SERVICES[species.category] || []).includes(service);
 
 // A species whose name words appear in the fact ("carpenter" and "ant" in a
-// carpenter ant fact) is the closest match inside the related category: the
-// pool is every species sharing the best score.
+// carpenter ant fact) is the species the lead is about.
 function nameScore(species, fact) {
   const text = `${fact.title} ${fact.statement}`.toLowerCase();
   const words = species.name.toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 3);
   return words.filter((w) => new RegExp(`\\b${w}(?:s|es)?\\b`).test(text)).length;
-}
-
-function bestNamed(candidates, fact) {
-  const scored = candidates.map((s) => ({ s, score: nameScore(s, fact) }));
-  const top = Math.max(0, ...scored.map((x) => x.score));
-  return top ? scored.filter((x) => x.score === top).map((x) => x.s) : [];
 }
 
 function pickIndex(seed, length) {
@@ -69,29 +62,55 @@ function pickIndex(seed, length) {
   return n % length;
 }
 
+// "What's this?" is a second topic, not an echo of the lead: a species the
+// lead fact names is never picked, and a category unrelated to the lead's
+// service comes first so one issue covers two corners of the house and yard.
 function pickSpecies({ dateET, fact, recentSpeciesSlugs }) {
   const used = new Set(recentSpeciesSlugs);
   const unused = SPECIES.filter((s) => !used.has(s.slug));
-  const related = unused.filter((s) => relatesTo(s, fact.service));
-  const named = bestNamed(related, fact);
-  const pool = [named, related, unused].find((p) => p.length) || [];
+  const unnamed = unused.filter((s) => nameScore(s, fact) === 0);
+  const otherCorner = unnamed.filter((s) => !relatesTo(s, fact.service));
+  const pool = [otherCorner, unnamed, unused].find((p) => p.length) || [];
   if (!pool.length) return null;
   return pool[pickIndex(`${dateET}:${fact.id}`, pool.length)];
 }
 
+// Seasonal facts (6 months or fewer) are more timely than year-round ones.
+const SEASONAL_MAX_MONTHS = 6;
+const tier = (f) => [f.kind === 'pest' ? 0 : 1, f.months.length <= SEASONAL_MAX_MONTHS ? 0 : 1, f.confidence === 'high' ? 0 : 1];
+const sameTier = (a, b) => a.every((v, i) => v === b[i]);
+const tierBefore = (a, b) => { const i = a.findIndex((v, k) => v !== b[k]); return i >= 0 && a[i] < b[i]; };
+
+// Lead fact: the previous issue's service is skipped when another fits, then
+// the best tier (pest kind, seasonal, high confidence) wins, and the send
+// date picks inside that tier, so equal facts rotate instead of the same id
+// always winning.
+function pickLeadFact(dateET, recentFactIds) {
+  const candidates = factsForSend(dateET, { excludeIds: recentFactIds });
+  if (!candidates.length) return null;
+  const previous = recentFactIds.length ? factById(recentFactIds[recentFactIds.length - 1]) : null;
+  const fresh = previous ? candidates.filter((f) => f.service !== previous.service) : candidates;
+  const pool = fresh.length ? fresh : candidates;
+  let best = tier(pool[0]);
+  for (const f of pool) if (tierBefore(tier(f), best)) best = tier(f);
+  const top = pool.filter((f) => sameTier(tier(f), best));
+  return top[pickIndex(`${dateET}:lead`, top.length)];
+}
+
 /**
  * @param {{ sendDate: string|Date, recentFactIds?: string[], recentSpeciesSlugs?: string[] }} input
- *   recent* lists hold the last six issues' picks (RECENT_WINDOW); every id in
- *   them is excluded, so a fact or species used there never repeats.
+ *   recent* lists hold the last six issues' picks (RECENT_WINDOW), oldest
+ *   first; every id in them is excluded, so a fact or species used there
+ *   never repeats, and the last fact id names the previous issue's service.
  * @returns {{ leadFact: object|null, idItem: object|null, reason?: string }}
  */
 function planIssue({ sendDate, recentFactIds = [], recentSpeciesSlugs = [] }) {
   const dateET = sendDateET(sendDate);
-  const [leadFact] = factsForSend(dateET, { excludeIds: recentFactIds });
+  const leadFact = pickLeadFact(dateET, recentFactIds);
   if (!leadFact) return { leadFact: null, idItem: null, reason: 'no_fact_for_month' };
   const idItem = pickSpecies({ dateET, fact: leadFact, recentSpeciesSlugs });
   if (!idItem) return { leadFact, idItem: null, reason: 'no_species' };
   return { leadFact, idItem };
 }
 
-module.exports = { planIssue, SPECIES, RECENT_WINDOW, CATEGORY_SERVICES };
+module.exports = { planIssue, SPECIES, RECENT_WINDOW, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS };
