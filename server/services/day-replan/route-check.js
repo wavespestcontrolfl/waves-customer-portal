@@ -84,7 +84,7 @@ const hasCoords = (row) => {
  * services not yet done, as the simulator charges them and as work alone). The van is at that stop since its arrival, so a service finished after the arrival was
  * done there: the rest starts then. Busy until the stay ends and never before now (a job running long). Returns
  * { origin, clockMin, source }; source 'start_point' when nothing is done or under way, 'unknown' (origin null)
- * when the latest stop done has no place.
+ * when the latest stop done has no place or a stop done has no finish time today.
  */
 function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
   // The latest stop done by its full timestamp (two in one minute: the later one), then its ET minute.
@@ -102,6 +102,8 @@ function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
     ...onSite.map((row) => ({ row, clockMin: onSiteClock(row), source: 'on_site' })),
   ];
   const best = seen.reduce((top, s) => (!top || s.clockMin > top.clockMin ? s : top), null);
+  // A stop done with no finish time today: the van's last place and time are unknown, never home.
+  if (completed.some((row) => etMinuteOn(row.completed_at, day) == null)) return { origin: null, clockMin: null, source: 'unknown' };
   if (!best) return { origin: home, clockMin: departureMin, source: 'start_point' };
   // The latest stop done has no place: the van's place is unknown (never an earlier customer's, never home).
   if (!hasCoords(best.row)) return { origin: null, clockMin: best.clockMin, source: 'unknown' };
@@ -385,12 +387,9 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
   try {
     const own = rows.filter((r) => String(r.technician_id) === techId);
     const blocks = await replan.loadBlocks(conn, day, techId);
-    // Time held for this technician: the re-plan's whole hours (blockedHoursFor) and every booked span the booking
-    // surfaces count (listOccupiedWindows: completed rows and make-room destinations included).
-    const held = [
-      ...replan.blockedHoursFor(rows, techId, env.techBlind).map((h) => ({ startMin: h * 60, endMin: h * 60 + 60 })),
-      ...heldSpans(occupancy, techId, env.techBlind),
-    ];
+    // Time held for this technician: every booked span the booking surfaces count, exact to the minute
+    // (listOccupiedWindows: completed rows and make-room destinations included; a window may end off the hour).
+    const held = heldSpans(occupancy, techId, env.techBlind);
     const home = homeFromMap(env.homes, techId);
     const common = { blocks, held, closeMin: DAY_CLOSE };
     if (day !== env.today) {
@@ -414,7 +413,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
       onSite: onSiteStays(onSite, new Map(mine.map((p) => [String(p.id), p.arrived_at]))),
       home, departureMin: env.departureMin, nowMin: env.nowMin, day,
     });
-    if (!van.origin) return { stops: live.length, skip: 'LAST_STOP_WITHOUT_COORDINATES' };
+    if (!van.origin) return { stops: live.length, skip: van.clockMin == null ? 'COMPLETION_WITHOUT_TIME' : 'LAST_STOP_WITHOUT_COORDINATES' };
     const first = enRoute.flatMap((s) => s.flat());
     const departureMin = enRouteDeparture({ first, mine, van, origin: van.origin, nowMin: env.nowMin, day });
     const fig = measureTechDay({
@@ -427,7 +426,25 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
   }
 }
 
+/**
+ * One hourly run: one route_check_runs row. A run-wide read failing (technicians, blackout days, absences, start
+ * points, departure time) still writes the hour's row, status 'failed' and decision 'unknown'.
+ */
 async function runRouteCheck({ conn = db, now = new Date() } = {}) {
+  try {
+    return await measureRun(conn, now);
+  } catch (err) {
+    const today = etDateString(now);
+    logger.warn(`[route-check] ${today}: run failed (${err.message}); recorded as unknown`);
+    const ad = { decision: 'unknown', error: String(err.message).slice(0, 200) };
+    await conn(TABLE).insert({
+      run_at: now, service_date: today, status: 'failed', days: JSON.stringify([]), totals: JSON.stringify({}), ad_shadow: JSON.stringify(ad),
+    });
+    return { status: 'failed', totals: {}, ad, days: 0 };
+  }
+}
+
+async function measureRun(conn, now) {
   const today = etDateString(now);
   const p = etParts(now);
   const elig = await eligibility(conn, today, dayAfter(today, SCAN_DAYS));

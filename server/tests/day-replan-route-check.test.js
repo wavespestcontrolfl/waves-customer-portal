@@ -447,6 +447,32 @@ describe('runRouteCheck', () => {
     expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', van: 'completed' });
   });
 
+  test('a stop done with no finish time leaves today unmeasured, never the van at home', async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    const { conn, writes } = fakeConn({ progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: null, lat: 27.5, lng: -82.4 }] });
+    await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'COMPLETION_WITHOUT_TIME' });
+  });
+
+  test('a run-wide read failing still writes the hour, as unknown', async () => {
+    getBlackoutDates.mockRejectedValueOnce(new Error('timeout'));
+    const { conn, writes } = fakeConn();
+    const result = await runRouteCheck({ conn, now: NOW });
+    expect(result).toMatchObject({ status: 'failed', ad: { decision: 'unknown' } });
+    expect(writes).toHaveLength(1);
+    expect(writes[0][1]).toMatchObject({ status: 'failed', service_date: '2026-11-19' });
+  });
+
+  test('an unassigned booking ending off the hour holds only its own minutes', async () => {
+    replan.loadDayStops.mockResolvedValue([]);
+    listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-20' ? [span('u1', null, 480, 930)] : [])); // 8:00-3:30
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
+    expect(friday.openings).toEqual([expect.objectContaining({ start: 930, min: 90, slots: 1 })]); // drive 3:30-3:50, a 4 PM job
+    listOccupiedWindows.mockResolvedValue([]);
+  });
+
   test("a failed progress read on a Sunday keeps today's technicians, marked FAILED", async () => {
     replan.loadDayStops.mockResolvedValue([]);
     const { conn, writes } = fakeConn();
