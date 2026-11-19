@@ -289,16 +289,53 @@ function pushDetail(parts) {
   return [parts.name, parts.service, slot, parts.street].filter(Boolean).join(' · ');
 }
 
-// The devices that may show a visit's details: a native app's device token,
-// which push_subscriptions holds in one row only (a unique index), re-pointed
-// whole to whoever signs in and released at sign-out. A browser's web-push
-// endpoint can stay active under two staff accounts on a shared browser, and
-// its service worker shows a push whoever is signed in, so a browser gets the
-// first line only. The sender asks per device (sendToAdminUsers' per-device
-// form); a native device gets `push` itself, so a recheck that clears its
-// second line still reaches that device.
-const NAMED_PLATFORMS = new Set(['ios', 'android']);
-const forDevice = (push) => (_adminUserId, sub) => (NAMED_PLATFORMS.has(sub && sub.platform) ? push : { ...push, body: '' });
+// A push's second line stays well inside the providers' 4 KB payload (APNs,
+// FCM) with its title and keys: past the budget it is cut, with "…".
+const BODY_BYTE_BUDGET = 1500;
+function fitBody(text) {
+  if (!text || Buffer.byteLength(text, 'utf8') <= BODY_BYTE_BUDGET) return text;
+  let out = '';
+  let bytes = 0;
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch, 'utf8');
+    if (bytes + size > BODY_BYTE_BUDGET - 3) break;
+    out += ch;
+    bytes += size;
+  }
+  return `${out}…`;
+}
+
+// The devices that may show this tech's visit details right now: the staff
+// app's own sign-ups (an active iOS row with the staff app's topic and no
+// customer on it, under the tech's current sign-in), as id → device token.
+// A native token sits in one row only (a unique index), re-pointed whole to
+// whoever signs in and released at sign-out; read at each device's own
+// handoff, a phone a newer sign-in took over is no longer in it. A browser's
+// web-push endpoint can stay active under two staff accounts on a shared
+// browser, and its page shows a push whoever is signed in, so it is never in
+// it; nor is a token a customer registration re-pointed.
+async function namedDevices(technicianId, conn) {
+  const { STAFF_APP_BUNDLE_ID } = require('./apns');
+  const rows = await conn('push_subscriptions as ps')
+    .join('technicians as t', 'ps.admin_user_id', 't.id')
+    .where({ 'ps.admin_user_id': technicianId, 'ps.active': true, 'ps.platform': 'ios', 't.active': true })
+    .whereIn('t.role', ['admin', 'technician'])
+    .whereNull('ps.customer_id')
+    .whereRaw('ps.staff_token_version = t.auth_token_version')
+    .whereRaw("ps.subscription_data::jsonb->>'topic' = ?", [STAFF_APP_BUNDLE_ID])
+    .select('ps.id', 'ps.device_token');
+  return new Map(rows.map((row) => [String(row.id), row.device_token]));
+}
+
+// What one device shows (sendToAdminUsers' per-device form, which the sender
+// calls right after that device's recheck): the visit's details only on a
+// device namedDevices verified at that recheck; any other, the first line
+// only. A verified device gets `push` itself, so a recheck that clears its
+// second line still reaches it.
+const forDevice = (push, verifiedNow) => (_adminUserId, sub) => (
+  sub && sub.platform === 'ios' && sub.device_token && verifiedNow().get(String(sub.id)) === sub.device_token
+    ? push
+    : { ...push, body: '' });
 
 /**
  * Compose the card's headline / message / payload for one kind. Pure.
@@ -573,9 +610,10 @@ async function newerCardExists(notice, conn) {
 // and, for either, no newer card for this tech and visit. A clean "stale"
 // skips the push; a recheck ERROR sends anyway (owner steer: a missed alert
 // is worse than a rare misordered one), as its first line only: the visit's
-// details go only to a device whose recheck passed. The sender builds each
-// device's payload right after that device's recheck, so clearing the
-// second line there reaches that device and every later one.
+// details go only to a device whose recheck passed, and only to one the
+// same recheck verified as this tech's staff app (namedDevices). The sender
+// builds each device's payload right after that device's recheck, so
+// clearing the second line there reaches that device and every later one.
 async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
@@ -588,10 +626,13 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       tag: `visit-${notice.visitId}`,
       priority: 'high',
     };
+    let verified = new Map();
     const beforeHandoff = async () => {
+      verified = new Map();
       try {
         if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
         else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
+        else if (push.body) verified = await namedDevices(notice.technicianId, db);
       } catch (err) {
         push.body = '';
         logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending the first line only`);
@@ -599,7 +640,7 @@ async function pushCard(notice, { checkCurrent = null } = {}) {
       }
       return !stale;
     };
-    await PushService.sendToAdminUser(notice.technicianId, forDevice(push), { beforeHandoff });
+    await PushService.sendToAdminUser(notice.technicianId, forDevice(push, () => verified), { beforeHandoff });
     if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
@@ -631,7 +672,7 @@ async function deliver(notices) {
     try {
       const card = await writeCard(n);
       // A push that goes out now says what its card was just written with.
-      if (card) written.push({ ...n, cardId: card.id || null, pushBody: pushDetail(partsFromCard(card.payload, n.kind)) });
+      if (card) written.push({ ...n, cardId: card.id || null, pushBody: fitBody(pushDetail(partsFromCard(card.payload, n.kind))) });
       else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
@@ -1062,11 +1103,11 @@ function bundleDetail(plan) {
 function bundlePush(plan) {
   const named = plan.every((notice) => !notice.unverified);
   if (plan.length === 1) {
-    return { title: plan[0].pushTitle, body: named ? pushDetail(plan[0].parts) : '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
+    return { title: plan[0].pushTitle, body: named ? fitBody(pushDetail(plan[0].parts)) : '', url: '/tech', tag: `visit-${plan[0].visitId}`, priority: 'high' };
   }
   return {
     title: bundleTitle(plan.map((notice) => notice.kind)),
-    body: named ? bundleDetail(plan) : '',
+    body: named ? fitBody(bundleDetail(plan)) : '',
     url: '/admin/today',
     tag: `route-changes-${[...plan].map((notice) => String(notice.cardId)).sort()[0]}`,
     priority: 'high',
@@ -1146,7 +1187,9 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
   let delivered = 0;
   let changed = false;
   let lost = false;
+  let verified = new Map();
   const beforeHandoff = async () => {
+    verified = new Map();
     try {
       if (!(await renewHeld(ids, token))) {
         lost = true;
@@ -1162,6 +1205,7 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
         changed = true;
         return false;
       }
+      if (same && push.body) verified = await namedDevices(technicianId, db);
       return same;
     } catch (err) {
       push.body = '';
@@ -1170,7 +1214,7 @@ async function sendBundle(technicianId, rows, token, { pastLongestWait }) {
     }
   };
   const PushService = require('./push-notifications');
-  const result = await PushService.sendToAdminUser(technicianId, forDevice(push), {
+  const result = await PushService.sendToAdminUser(technicianId, forDevice(push, () => verified), {
     beforeHandoff,
     onDelivered: () => { delivered += 1; },
   });
@@ -1613,5 +1657,5 @@ module.exports = {
   staleVisitCardSql,
   rankedVisitCards,
   refreshVisitCards,
-  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText, pushDetail, partsFromVisit },
+  _test: { setCurrentAutoDispatchRun: (id) => { currentAutoDispatchRun = id; }, formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists, liveCard, moverText, pushDetail, partsFromVisit, fitBody, BODY_BYTE_BUDGET },
 };

@@ -16,12 +16,20 @@ let mockLegs = null;
 let mockLegsSent = [];
 // What each device that got the push shows as its second line, in order.
 let mockLegBodies = [];
+// The device row the sender hands the per-device form: a leg's own (its
+// platform, default the staff app on an iPhone), or one default device.
+const mockDefaultDevice = { id: 'dev-1', platform: 'ios', device_token: 'tok-dev-1' };
+const mockDeviceOf = (leg) => (leg
+  ? { id: leg.id, platform: leg.platform === undefined ? 'ios' : leg.platform, device_token: leg.token || `tok-${leg.id}` }
+  : mockDefaultDevice);
 // The notification one device gets: the sender's per-device form (a function
 // of the staff id and the device row) or one notification for every device.
-// A leg names its platform; the default is the staff app on an iPhone.
-const mockAsDevice = (id, notification, platform = 'ios') => (typeof notification === 'function'
-  ? notification(id, { platform })
+const mockAsDevice = (id, notification, leg) => (typeof notification === 'function'
+  ? notification(id, mockDeviceOf(leg))
   : notification);
+// The staff-app sign-ups namedDevices reads at a handoff: null = every iOS
+// device the mock sender presents; an Error = the read fails.
+let mockStaffAppRows = null;
 // Runs after a leg's beforeHandoff passed, while that leg is "in flight".
 let mockAfterCheck = null;
 
@@ -44,7 +52,7 @@ jest.mock('../services/push-notifications', () => ({
         if (leg.sent) {
           sent += 1;
           mockLegsSent.push(leg.id);
-          mockLegBodies.push(mockAsDevice(id, notification, leg.platform).body);
+          mockLegBodies.push(mockAsDevice(id, notification, leg).body);
           if (opts.onDelivered) opts.onDelivered({ id: leg.id });
         }
       }
@@ -229,6 +237,23 @@ function chain(first, firstImpl = null) {
   return c;
 }
 
+// namedDevices' read of a tech's staff-app sign-ups, as the query asked.
+let lastStaffAppQuery = null;
+function staffAppChain() {
+  const c = { calls: [] };
+  for (const m of ['join', 'where', 'whereIn', 'whereNull', 'whereRaw']) {
+    c[m] = jest.fn((...args) => { c.calls.push([m, ...args]); return c; });
+  }
+  c.select = jest.fn(async () => {
+    if (mockStaffAppRows instanceof Error) throw mockStaffAppRows;
+    if (mockStaffAppRows) return mockStaffAppRows;
+    const devices = mockLegs ? mockLegs.map(mockDeviceOf) : [mockDefaultDevice];
+    return devices.filter((d) => d.platform === 'ios').map((d) => ({ id: d.id, device_token: d.device_token }));
+  });
+  lastStaffAppQuery = c;
+  return c;
+}
+
 // technicians rows by id; one visit row for scheduled_services.
 // visits: rows by id (the loader's where('s.id', id)), for tests with several visits.
 function visitsChain(visits) {
@@ -249,6 +274,7 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT, vis
       return c;
     }
     if (table === 'scheduled_services as s') return visits ? visitsChain(visits) : chain(visit);
+    if (table === 'push_subscriptions as ps') return staffAppChain();
     if (table === 'tech_notifications') return cardsTable();
     if (table === 'tech_notifications as n') return newerCardsQuery();
     if (table === 'tech_notifications as o') {
@@ -786,6 +812,7 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     mockLegs = null;
     mockLegsSent = [];
     mockLegBodies = [];
+    mockStaffAppRows = null;
     mockAfterCheck = null;
     bundleLeaseCutoff = null;
     mockClearFailures = 0;
@@ -1118,6 +1145,46 @@ describe('bundled pushes for any other mover (owner 2026-10-22)', () => {
     expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
     const line = 'Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W';
     expect(mockLegBodies).toEqual(['', [line, line].join('\n')]);
+  });
+
+  test('a phone that a newer sign-in took over during the send gets the first line only (pre-push audit P0)', async () => {
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    // d2's token was re-pointed to another sign-in after the sender read the rows.
+    mockBeforeLeg = async (leg) => { if (leg.id === 'd2') mockStaffAppRows = [{ id: 'd1', device_token: 'tok-d1' }]; };
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockLegBodies).toEqual(['Ana Ruiz · Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W', '']);
+  });
+
+  test('only a staff-app sign-up of this tech is read as one: no customer on the row, the staff topic, the current sign-in (pre-push audit P0)', async () => {
+    mockStaffAppRows = [];
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
+    expect(lastStaffAppQuery.calls).toEqual(expect.arrayContaining([
+      ['where', { 'ps.admin_user_id': 'tech-1', 'ps.active': true, 'ps.platform': 'ios', 't.active': true }],
+      ['whereNull', 'ps.customer_id'],
+      ['whereRaw', 'ps.staff_token_version = t.auth_token_version'],
+      ['whereRaw', "ps.subscription_data::jsonb->>'topic' = ?", ['com.wavespestcontrol.wavespay']],
+    ]));
+  });
+
+  test('a device read that fails sends the first line only; a bundle\'s too', async () => {
+    mockStaffAppRows = new Error('db down');
+    await officeMove('v-1', { kind: 'assigned', actorId: 'auto_dispatch' });
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'You have a new visit on your route', body: '' }));
+    await officeMove('v-2');
+    await officeMove('v-3');
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: '2 visits on your route moved', body: '' }));
+  });
+
+  test('a bundled push to a phone another sign-in took over shows that phone the count line only', async () => {
+    await officeMove('v-1');
+    await officeMove('v-2');
+    mockLegs = [{ id: 'd1', sent: true }, { id: 'd2', sent: true }];
+    mockStaffAppRows = [{ id: 'd2', device_token: 'tok-d2' }];
+    expect(await notices.flushBundledPushes({ now: quiet() })).toEqual({ pushed: 1 });
+    expect(mockLegBodies[0]).toBe('');
+    expect(mockLegBodies[1]).toMatch(/^Ana Ruiz · Pest Control · /);
   });
 
   test('a single unverified visit gets its own first line only', async () => {
@@ -1801,5 +1868,18 @@ describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)',
     expect(updateArg.updated_at).toBeInstanceOf(Date);
     // Same instant for both — one revive is one "this is now" stamp, not two.
     expect(updateArg.created_at.getTime()).toBe(updateArg.updated_at.getTime());
+  });
+});
+
+describe('the second line stays inside the providers\' payload (pre-push audit P1)', () => {
+  const { fitBody, BODY_BYTE_BUDGET } = require('../services/tech-visit-notifications')._test;
+  test('a short line is unchanged; a long multibyte one is cut to the byte budget, with "…"', () => {
+    expect(fitBody('Ana Ruiz · Pest Control')).toBe('Ana Ruiz · Pest Control');
+    expect(fitBody('')).toBe('');
+    const long = `${'Ñandú 🐜 '.repeat(400)}`;
+    const cut = fitBody(long);
+    expect(Buffer.byteLength(cut, 'utf8')).toBeLessThanOrEqual(BODY_BYTE_BUDGET);
+    expect(cut.endsWith('…')).toBe(true);
+    expect(long.startsWith(cut.slice(0, -1))).toBe(true);
   });
 });
