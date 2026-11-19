@@ -12,4 +12,9 @@ function liveServiceOrHold(q) {
     .orWhereRaw('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
 }
 
-module.exports = { liveServiceOrHold, liveServiceOrHoldSql, LIVE_SERVICE_OR_HOLD_SQL };
+function serviceOrHoldIsLive(row, now = Date.now()) {
+  return row?.customer_id != null || row?.reservation_expires_at == null
+    || new Date(row.reservation_expires_at).getTime() > now;
+}
+
+module.exports = { liveServiceOrHold, liveServiceOrHoldSql, serviceOrHoldIsLive, LIVE_SERVICE_OR_HOLD_SQL };

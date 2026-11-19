@@ -144,5 +144,18 @@ test("a restored stop cannot choose a new paid band, including the previous cale
   expect(currentStarts).not.toContain('09:00');
   await preloadBandLegs(restored.context.travel, [restored]);
 
-  expect([...restored.context.travel.bought.entries()]).toEqual([...previous.context.travel.bought.entries()]);
+  const previousKeys = new Set(previous.context.travel.bought.keys());
+  expect(restored.context.travel.bought.size).toBeGreaterThan(0);
+  expect([...restored.context.travel.bought.keys()].every(key => previousKeys.has(key))).toBe(true);
+});
+
+test('a restored calendar with no feasible hours spends no road allowance', async () => {
+  const restored = route(fakeTravel());
+  restored.context.previousRoadRows = restored.context.rows;
+  restored.context.rows = [...restored.context.rows, {
+    ...stop('booked', '08:00', 27.3, -82.3), window_end: '09:00', estimated_duration_minutes: 900,
+  }];
+  expect(enumerateArrivalPlacements(restored.context, restored.limits).placements).toHaveLength(0);
+  await preloadBandLegs(restored.context.travel, [restored]);
+  expect(restored.context.travel.bought.size).toBe(0);
 });

@@ -89,6 +89,14 @@ test('a restored booking blocks its gaps without making its chip legs provider-e
   expect(after[GAP_LEGS]).toMatchObject({ prevRoadEligible: false, nextRoadEligible: true });
 });
 
+test('a restored booking outside every searched technician route preserves normal chip pricing', async () => {
+  wire([stop({ technician_id: 'other-tech', customer_id: 'booked-customer', road_pricing_eligible: false,
+    reservation_expires_at: new Date(Date.now() - 60_000), window_start: '10:00', window_end: '11:00' })]);
+  const result = await findAvailableSlots(OPTIONS);
+  expect(result.slots.length).toBeGreaterThan(0);
+  expect(result[require('../services/scheduling/find-time').RESTORED_CALENDAR]).toBeUndefined();
+});
+
 test('untimed placeholders do not invent a morning stop', async () => {
   wire([stop({ window_start: null, window_end: null })]);
   const { slots } = await findAvailableSlots(OPTIONS);

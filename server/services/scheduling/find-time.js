@@ -167,8 +167,23 @@ async function preloadBandLegs(travel, routes) {
     nearBestStarts(enumerateArrivalPlacements(purchaseContexts.get(route), route.limits).placements)]));
   let pending = routes;
   for (let round = 1; pending.length; round++) {
-    await preloadRouteLegs(travel, pending,
-      (route, legs) => enumerateArrivalPlacements(purchaseContexts.get(route), { ...route.limits, collectLegs: legs, startsOnly: bands.get(route) }));
+    await preloadRouteLegs(travel, pending, (route, legs) => {
+      const previous = purchaseContexts.get(route);
+      const options = { ...route.limits, startsOnly: bands.get(route) };
+      if (previous === route.context) {
+        enumerateArrivalPlacements(previous, { ...options, collectLegs: legs });
+        return;
+      }
+      const liveStarts = new Set(enumerateArrivalPlacements(route.context, route.limits).placements.map(slot => slot.windowStart));
+      if (!liveStarts.size) return;
+      const liveLegs = [];
+      enumerateArrivalPlacements(route.context, { ...route.limits, startsOnly: liveStarts, collectLegs: liveLegs });
+      const requestKey = travel.requestKey || require('../route-optimizer').schedulingLegKey;
+      const needed = new Set(liveLegs.map(requestKey));
+      const formerLegs = [];
+      enumerateArrivalPlacements(previous, { ...options, collectLegs: formerLegs });
+      legs.push(...formerLegs.filter(leg => needed.has(requestKey(leg))));
+    });
     if (round >= BAND_ROUNDS) return;
     pending = pending.filter((route) => widenBand(bands.get(route),
       enumerateArrivalPlacements(purchaseContexts.get(route), route.limits).placements));
@@ -1149,7 +1164,7 @@ function candidatesForDay(date, tech, params) {
 
     for (const startMin of legacyGapStarts(gap, params)) found.push(gap.makeCandidate(startMin));
   }
-  return { candidates: found, evaluatedGaps };
+  return { candidates: found, evaluatedGaps, restoredCalendar: dayStops.some(stop => stop.roadPricingEligible === false) };
 }
 
 // Legacy path: the starts one gap offers. By default ONE, the earliest
@@ -1471,12 +1486,14 @@ async function findAvailableSlots(opts) {
   // technician working. Auto-dispatch's audit lists these, so a closed day or
   // a day nobody works never reads as "searched, nothing open".
   const searchedDates = [];
+  let restoredCalendar = false;
   for (const date of dates) {
     let searched = false;
     for (const tech of techs) {
       if (absentDays.has(`${tech.id}:${date}`)) continue;
       searched = true;
-      const { candidates: dayCandidates, evaluatedGaps } = candidatesForDay(date, tech, dayParams);
+      const { candidates: dayCandidates, evaluatedGaps, restoredCalendar: restoredDay } = candidatesForDay(date, tech, dayParams);
+      if (restoredDay) restoredCalendar = true;
       evaluated += evaluatedGaps;
       candidates.push(...dayCandidates);
     }
@@ -1493,7 +1510,7 @@ async function findAvailableSlots(opts) {
     searched_dates: searchedDates,
     // Changing one gap can replace both the day and week chips, including a
     // chip with unchanged endpoints. Keep this response on cached road times.
-    ...(services.some(row => row.road_pricing_eligible === false) ? { [RESTORED_CALENDAR]: true } : {}),
+    ...(restoredCalendar ? { [RESTORED_CALENDAR]: true } : {}),
   };
 }
 

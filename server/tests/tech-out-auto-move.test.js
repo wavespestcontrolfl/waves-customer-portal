@@ -483,7 +483,7 @@ describe('selection matches the commit policy', () => {
     expect(options.expect.service_type).toBe('general_pest');
   });
 
-  test('a lapsed estimate hold on the candidate\'s day does not count as a conflict', async () => {
+  test('only an unclaimed lapsed hold releases the candidate hour', async () => {
     const { _test: { fitsWindow } } = require('../services/tech-out-auto-move');
     const others = query([]);
     const queue = [others, query([])];
@@ -495,8 +495,10 @@ describe('selection matches the commit policy', () => {
     const predicate = others.where.mock.calls.find(([arg]) => typeof arg === 'function')[0];
     const q = { whereNull: jest.fn(() => q), orWhereRaw: jest.fn(() => q) };
     predicate(q);
-    expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
-    expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
+    expect(q.whereNull).toHaveBeenCalledWith('scheduled_services.reservation_expires_at');
+    expect(q.orWhereRaw).toHaveBeenCalledWith(
+      'scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()',
+    );
   });
 
   test('lapsed estimate holds neither count as stops nor anchor the detour', async () => {
@@ -505,6 +507,7 @@ describe('selection matches the commit policy', () => {
     const future = new Date(Date.now() + 3600e3).toISOString();
     dayStopsQuery.mockResolvedValueOnce([
       { id: 'lapsed', window_start: '08:00', reservation_expires_at: past },
+      { id: 'booked-stale', customer_id: 'customer-1', window_start: '10:00', reservation_expires_at: past },
       { id: 'live-hold', window_start: '12:00', reservation_expires_at: future },
       { id: 'visit', window_start: '14:00', reservation_expires_at: null },
     ]);
@@ -512,7 +515,7 @@ describe('selection matches the commit policy', () => {
 
     const res = await detourForTech(baseStop(), CANDIDATE.id, DATE);
 
-    expect(res.stops_that_day).toBe(3); // live-hold + visit + the stop itself
+    expect(res.stops_that_day).toBe(4); // booked stale stamp + live hold + visit + the stop itself
   });
 
   test('a candidate\'s completed visit occupies nothing — the same status set as the rebooker\'s commit probe', async () => {
