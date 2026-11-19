@@ -252,9 +252,13 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
 
   test.each([
     ['after the active estimate read, before the slot lookup', 'slot'],
+    ['after an unlinked estimate read, before the existing appointment lookup', 'unlinked-pointer'],
     ['after reservation preparation, before the acceptance CAS', 'prepared'],
   ])('a competing confirmation completing %s returns the same durable receipt', async (_when, interleaving) => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
+    if (interleaving === 'unlinked-pointer') {
+      await mockTransaction('estimates').where({ id: estimateId }).update({ customer_id: null });
+    }
     const today = new Date();
     const days = Array.from({ length: 14 }, (_, offset) => etDateString(addETDays(today, 10 + offset)));
     const closed = await require('../services/scheduling/blackout-dates')
@@ -287,7 +291,7 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(1);
     };
     const prepare = jest.spyOn(reservations, 'prepareReservationCommit');
-    if (interleaving === 'slot') {
+    if (interleaving !== 'prepared') {
       mockAfterActiveEstimateRead = completeWinner;
     } else {
       prepare.mockImplementationOnce(async (...args) => {
@@ -304,7 +308,9 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       expect(receipt.alreadyAccepted).toBe(true);
       expect(new URL(receipt.invoicePayUrl, winnerReceipt.invoicePayUrl).href)
         .toBe(winnerReceipt.invoicePayUrl);
-      expect(prepare).toHaveBeenCalledTimes(interleaving === 'slot' ? 1 : 2);
+      expect(prepare).toHaveBeenCalledTimes(interleaving === 'prepared' ? 2 : 1);
+      expect(await mockTransaction('estimates').where({ id: estimateId }).first('customer_id', 'status'))
+        .toEqual({ customer_id: customerId, status: 'accepted' });
       expect(await mockTransaction('invoices').where({ customer_id: customerId }))
         .toEqual([expect.objectContaining({ scheduled_service_id: visitId, total: '55.00' })]);
     } finally {
@@ -328,6 +334,22 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       code: 'RESERVATION_EXPIRED',
     });
     expect(await mockTransaction('estimates').where({ id: estimateId }).first()).toEqual(estimateBefore);
+  });
+
+  test('an active unlinked estimate without a winning acceptance keeps its linkage refusal', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    await mockTransaction('estimates').where({ id: estimateId }).update({ customer_id: null });
+    const separateVisit = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+    });
+    const result = await putAccept(token, {
+      existingAppointmentId: separateVisit, paymentMethodPreference: 'pay_at_visit',
+    });
+    expect(result.status).toBe(409);
+    expect(await result.json()).toEqual({ error: 'existing appointment is not linked to this active estimate' });
+    expect(await mockTransaction('estimates').where({ id: estimateId }).first('status', 'customer_id'))
+      .toEqual({ status: 'sent', customer_id: null });
+    expect(await mockTransaction('invoices').where({ customer_id: customerId })).toHaveLength(0);
   });
 
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {

@@ -205,10 +205,11 @@ describe('accept-path wiring (source pins)', () => {
     // Slice to the linkage refusal itself rather than a fixed length — the
     // swept-hold branch (codex r2 P2) now sits between the two.
     const start = src.indexOf('const ownLapsedHold');
-    const block = src.slice(start, src.indexOf("error: 'existing appointment is not linked to this active estimate'", start) + 80);
+    const linkageRefusal = "throw acceptedReceiptConflict('existing appointment is not linked to this active estimate')";
+    const block = src.slice(start, src.indexOf(linkageRefusal, start) + linkageRefusal.length);
     expect(block).toContain(".whereRaw('reservation_expires_at < NOW()')");
     expect(block).toContain('throw holdExpiredError()');
-    expect(block).toContain("error: 'existing appointment is not linked to this active estimate'");
+    expect(block).toContain(linkageRefusal);
   });
 
   test('every hold-expiry decision is measured by POSTGRES, never the app process clock (pre-push audit r1/r2 P1)', () => {
@@ -249,7 +250,7 @@ describe('accept: a swept hold still answers RESERVATION_EXPIRED', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
   const branch = src.slice(
     src.indexOf('if (existingAppointmentId && !existingAppointmentRow)'),
-    src.indexOf("return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });"),
+    src.indexOf("throw acceptedReceiptConflict('existing appointment is not linked to this active estimate')"),
   );
 
   test('the missing-row case is classified before the generic linkage 409', () => {

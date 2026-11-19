@@ -10423,6 +10423,10 @@ function logAcceptRefusals(req, res, next) {
   next();
 }
 
+function acceptedReceiptConflict(message = 'Estimate is no longer active') {
+  return Object.assign(new Error(message), { status: 409, checkAcceptedReceipt: true });
+}
+
 async function sendAcceptedEstimateReplay(res, estimate) {
   if (!isEstimateCustomerViewable(estimate)) {
     const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
@@ -10908,7 +10912,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       if (!rowStillExists && estimateOwnedThatHold) {
         throw holdExpiredError();
       }
-      return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });
+      throw acceptedReceiptConflict('existing appointment is not linked to this active estimate');
     }
     if (
       existingAppointmentRow?.customer_id
@@ -12370,6 +12374,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
         const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status', 'customer_id');
+        // The first confirmation may have booked the plan while this one
+        // waited. Fresh eligibility (including restart) now describes the
+        // purchased plan. Re-read its durable receipt after releasing the lock.
+        if (freshLinkRow?.status === 'accepted') throw acceptedReceiptConflict();
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12516,10 +12524,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         })
         .update(withServedDisclosurePreserved(trx, acceptedUpdates));
       if (!acceptedCount) {
-        const err = new Error('Estimate is no longer active');
-        err.status = 409;
-        err.checkAcceptedReceipt = true;
-        throw err;
+        throw acceptedReceiptConflict();
       }
       // The add-ons' yearly limits, rechecked HERE: after the estimate row lock above (the order the reserve takes its locks in)
       // and under the lock that serializes this person's bookings: the customer lock taken at the top of this transaction, else,
@@ -16964,7 +16969,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
   } catch (err) {
     // A competing confirmation may finish after this request read an active
     // estimate. Only its durable acceptance can turn a refused hold or a
-    // zero-row acceptance CAS into a successful receipt replay.
+    // lost appointment link or acceptance race into a successful receipt replay.
     if (err?.checkAcceptedReceipt || ['RESERVATION_EXPIRED', 'SLOT_UNAVAILABLE'].includes(err?.code)) {
       try {
         const accepted = await db('estimates').where({

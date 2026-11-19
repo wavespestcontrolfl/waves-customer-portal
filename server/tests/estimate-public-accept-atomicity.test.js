@@ -2337,6 +2337,27 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
+  test('a restart already accepted while waiting for the transaction returns its receipt', async () => {
+    resetStore(restartEstimate());
+    db.__state.tables.customers = [churnedCustomer()];
+    const transaction = db.transaction;
+    const admission = jest.spyOn(db, 'transaction').mockImplementationOnce((callback) => {
+      storedEstimate().status = 'accepted';
+      db.__state.tables.customers[0].active = true;
+      return transaction(callback);
+    });
+    try {
+      const result = await putAccept('tok-restart-1-x0123456789');
+      expect(admission).toHaveBeenCalled();
+      expect(result.status).toBe(200);
+      expect(result.data).toMatchObject({ success: true, alreadyAccepted: true });
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+    } finally {
+      admission.mockRestore();
+    }
+  });
+
   test('active drifted to NULL refuses too — only the exact churn stamp accepts', async () => {
     resetStore(restartEstimate({ id: 'est-restart-2', token: 'tok-restart-2-x0123456789' }));
     db.__state.tables.customers = [churnedCustomer({ active: null })];
