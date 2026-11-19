@@ -57,6 +57,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
+import LawnPlanTab from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -6907,10 +6908,10 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
+// `aside` sits beside the header button, not inside it (a control cannot nest in a button).
+function JobCardCollapsible({ title, right = null, aside = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+  const header = (
       <button
         type="button"
         id={domId}
@@ -6939,6 +6940,10 @@ function JobCardCollapsible({ title, right = null, defaultOpen = false, children
         </span>
         {right && <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{right}</span>}
       </button>
+  );
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+      {aside ? <div style={{ display: "flex", alignItems: "center" }}>{header}{aside}</div> : header}
       {open && <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${D.border}` }}>{children}</div>}
     </div>
   );
@@ -7113,14 +7118,16 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
 
 // A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
 // basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
-// grass sends the reason in place of the rate.
-export function JobCardGoverned({ governed, D }) {
+// grass sends the reason in place of the rate. `pending`: the card is being read again, so no rate
+// from the old read shows (the card's header says "Checking the amounts…").
+export function JobCardGoverned({ governed, D, pending = false }) {
   if (!governed) return null;
+  const rate = governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>;
   return (
     <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
       {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
       {governed.grass && <div>{governed.grass}</div>}
-      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      {!pending && rate}
       <div>Area: {governed.area}</div>
       <div>Limit: {governed.limit}</div>
       {governed.use && <div>{governed.use}</div>}
@@ -7129,40 +7136,87 @@ export function JobCardGoverned({ governed, D }) {
   );
 }
 
-function JobCardProduct({ p, serviceId, D }) {
-  const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+// The "Use" tick on an "if needed" lawn product: asks the job card to plan it. Not saved to the visit.
+function JobCardUse({ name, use, D }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 14px 0 4px", minHeight: 44, fontSize: 14, color: D.text, cursor: use.disabled ? "default" : "pointer", flexShrink: 0 }}>
+      <input type="checkbox" checked={use.checked} disabled={use.disabled} onChange={() => use.onSet(!use.checked)} aria-label={`Use ${name}`} style={{ width: 18, height: 18, accentColor: D.heading }} />
+      Use
+    </label>
+  );
+}
+
+// A numbered mixing order (the plan's own steps: no amounts).
+function JobCardMixingOrder({ title, steps, D }) {
+  if (!steps?.length) return null;
+  return (
+    <JobCardCollapsible title={title} D={D}>
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        {steps.map((step) => (
+          <div key={`${step.step}-${step.productId}`} style={{ display: "flex", gap: 10, fontSize: 14, color: D.text }}>
+            <span style={{ width: 22, height: 22, borderRadius: 2, background: D.heading, color: D.white, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{step.step}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 500 }}>{step.productName}</div>
+              <div style={{ color: D.muted }}>{step.instruction}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+// A mix's required conditions (the plan's own warnings for its planned products: water setback, storm hold, the Bermuda
+// spot's growth, morning and test-patch rules), open under that mix's order, each once with the products it names.
+function JobCardRequired({ title, notes, D }) {
+  if (!notes?.length) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, padding: "10px 14px", marginBottom: 8, fontSize: 14, color: D.text, display: "grid", gap: 4 }}>
+      <div style={{ fontWeight: 500 }}>{title}</div>
+      {notes.map((note) => (
+        <div key={note.text}>{note.products?.length ? `${note.products.join(", ")}: ` : ""}{note.text}</div>
+      ))}
+    </div>
+  );
+}
+
+// `pending`: a "Use" tick is being read again; the amounts on this card belong to the old selection, so none shows.
+function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
+  const amount = pending ? null : fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
-  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const demand = pending ? null : fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const short = p.short && !pending;
   const right = (
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
-      {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
+      {short && <JobCardChip tone="hold" label="Short" D={D} />}
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+      {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the amounts…</span>}
     </>
   );
   return (
-    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} aside={use && <JobCardUse name={p.name} use={use} D={D} />} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
-        <JobCardGoverned governed={p.governed} D={D} />
+        <JobCardGoverned governed={p.governed} D={D} pending={pending} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
         {p.verdictAction && <div style={{ fontSize: 14, color: D.text }}>{p.verdictAction}</div>}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
-        {p.short && (
+        {short && (
           <div style={{ color: "#C8312F" }}>
             {demand
               ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
               : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
-        {!p.short && p.onHand != null && (
+        {!short && !pending && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
-        {p.amountNote && <div style={{ color: D.muted }}>{p.amountNote}</div>}
+        {p.amountNote && !pending && <div style={{ color: D.muted }}>{p.amountNote}</div>}
         {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
@@ -7171,13 +7225,16 @@ function JobCardProduct({ p, serviceId, D }) {
             {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
           </div>
         )}
-        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />
+        {/* While a tick is re-read the order is sized for the old selection, so there is no order button; it comes
+            back idle (any open confirmation gone) with the new quantity. */}
+        {!pending && <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />}
       </div>
     </JobCardCollapsible>
   );
 }
 
-function JobCardTank({ tank, serviceId, D }) {
+// `ticks`: the Use ticks (comma list) the card was read with; the search reads the same plan.
+function JobCardTank({ tank, serviceId, ticks = "", D }) {
   const [gallons, setGallons] = useState(110);
   // A rig row picked in place of the 110 / 1 gal presets: a full tank of
   // that rig, dosed on its own carrier and volume.
@@ -7223,12 +7280,12 @@ function JobCardTank({ tank, serviceId, D }) {
     // Never show the previous product's verdict beside the new one.
     setMix(null);
     const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}${ticks ? `&selectedConditionalProductIds=${encodeURIComponent(ticks)}` : ""}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, pickedRigId, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId, ticks]);
 
   const pill = (selected) => ({
     flex: 1,
@@ -7460,7 +7517,11 @@ export function JobCardAwayWatch({ lines, D }) {
   ));
 }
 
-export function JobCardTab({ card, loading, error, D }) {
+// `lawn` (lawn visits): { selectedIds, ticks, pending, onSet(productIds, wanted), onOpenPlan() } from the panel, which
+// holds the "Use" ticks. Only a card the server marks `planOption` (the primary lawn plan's "if needed" line) gets a
+// box; it reads the server's own selection (`!conditional`), or the local tick while a re-read is pending. While
+// `pending` the card's amounts, the mixing orders and the Tank search belong to the old selection, so none shows.
+export function JobCardTab({ card, loading, error, D, lawn = null }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7491,11 +7552,28 @@ export function JobCardTab({ card, loading, error, D }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
-      <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
-      {card.planBlocks?.length > 0 && (
+      {!lawn?.pending && (
+        <>
+          <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />
+          <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />
+          <JobCardRequired title="Required for the mix" notes={card.mixRequired} D={D} />
+          <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />
+          <JobCardRequired title="Required for the Bermuda backpack mix" notes={card.bermudaRequired} D={D} />
+        </>
+      )}
+      {!lawn?.pending && card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
           {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
+          {lawn?.onOpenPlan && (
+            <button
+              type="button"
+              onClick={lawn.onOpenPlan}
+              style={{ marginTop: 8, minHeight: 44, padding: "0 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 2, background: D.card, color: D.heading, fontSize: 14, fontWeight: 500, cursor: "pointer" }}
+            >
+              See Plan tab
+            </button>
+          )}
         </div>
       )}
       {products.length > 0 && (
@@ -7506,7 +7584,17 @@ export function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => {
+        // The bermuda removal step is one selection: its lines tick together.
+        // A tick is matched by the id the engine selects by (`selectionId`: the original product's when a substitution swaps it).
+        const ids = (p.bermudaStep ? products.filter((c) => c.bermudaStep) : [p]).map((c) => String(c.selectionId || c.id));
+        const use = lawn && p.planOption ? {
+          checked: lawn.pending ? lawn.selectedIds.includes(String(p.selectionId || p.id)) : !p.conditional,
+          disabled: lawn.pending,
+          onSet: (wanted) => lawn.onSet(ids, wanted),
+        } : null;
+        return <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} use={use} pending={Boolean(lawn?.pending)} />;
+      })}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7524,7 +7612,10 @@ function protocolMonthForService(service) {
   );
 }
 
-export function ProtocolPanel({ service, onClose }) {
+const NO_TICKS = [];
+
+// `initialSection`: the tab to open on ("lawn_plan" from the Plan entry points); lawn visits only.
+export function ProtocolPanel({ service, onClose, initialSection = null }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
   const panelRef = useModalFocus(true, onClose);
@@ -7569,6 +7660,25 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCard, setJobCard] = useState(null);
   const [jobCardLoading, setJobCardLoading] = useState(true);
   const [jobCardError, setJobCardError] = useState(false);
+  // The tick query the shown card was read with: a card read with another one is pending its re-read.
+  const [jobCardQuery, setJobCardQuery] = useState("");
+  // "Use" ticks on "if needed" lawn lines: product ids for this visit. Not saved to the visit; a new visit starts clean.
+  const [useTicks, setUseTicks] = useState({ serviceId: null, ids: [] });
+  const selectedConditionalIds = useTicks.serviceId === service?.id ? useTicks.ids : NO_TICKS;
+  const selectedQuery = selectedConditionalIds.length
+    ? `?selectedConditionalProductIds=${encodeURIComponent(selectedConditionalIds.join(","))}`
+    : "";
+  // The lawn plan (GET /admin/treatment-plans), read with the same ticks. It feeds only the Plan tab, so it is read
+  // from the first time that tab opens (the server builds a full plan for it).
+  const [planSeenFor, setPlanSeenFor] = useState(null);
+  const [lawnPlan, setLawnPlan] = useState(null);
+  // The tick query the shown plan was read with: a plan read with other ticks is not shown as current.
+  const [lawnPlanQuery, setLawnPlanQuery] = useState("");
+  const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
+  const [lawnPlanError, setLawnPlanError] = useState("");
+  // The Plan tab's Refresh re-reads the plan AND the job card, so the two tabs never show two reads.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const jobCardShownFor = useRef(null);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const payGrowthAvailable = usePayGrowthAvailable();
@@ -7609,11 +7719,15 @@ export function ProtocolPanel({ service, onClose }) {
   // ask bar. A failed request is shown as a notice under the header instead.
   const jobCardEnabled = Boolean(jobCard?.enabled);
   const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
-  const defaultSection = jobCardEnabled
+  // The shown card was read with other ticks, or a Refresh is out: nothing that card says about amounts, blocks or
+  // mixes shows as current on the Job or Protocol tab until the new read lands.
+  const cardPending = Boolean(jobCard) && jobCardQuery !== selectedQuery;
+  const wantedSection = initialSection === "lawn_plan" && !isLawn ? null : initialSection;
+  const defaultSection = wantedSection || (jobCardEnabled
     ? "job_card"
     : isLawn
       ? "lawn_protocol"
-      : "overview";
+      : "overview");
   const [requestedSection, setActiveSection] = useState(defaultSection);
 
   useEffect(() => {
@@ -7622,24 +7736,32 @@ export function ProtocolPanel({ service, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
-    setJobCard(null);
+    // A "Use" tick re-reads the card in place; only another visit blanks it.
+    const sameVisit = jobCardShownFor.current === service?.id;
+    if (!sameVisit) setJobCard(null);
     setJobCardError(false);
     if (!service?.id) {
       setJobCardLoading(false);
       return undefined;
     }
-    setJobCardLoading(true);
-    setJobCardError(false);
-    adminFetch(`/admin/protocols/job-card/${service.id}`)
+    setJobCardLoading(!sameVisit);
+    adminFetch(`/admin/protocols/job-card/${service.id}${selectedQuery}`)
       .then((data) => {
         if (cancelled) return;
-        setJobCard(data && data.enabled ? data : { enabled: false });
+        // Only the server's literal word opens a path: `enabled: true` with a card, or `enabled: false` (the Job tab is
+        // off, the one answer that shows the legacy Lawn tab's mix amounts). Any other answer fails closed below.
+        if (typeof data?.enabled !== "boolean") throw new Error("Job card answer has no enabled flag");
+        jobCardShownFor.current = service.id;
+        setJobCardQuery(selectedQuery);
+        setJobCard(data.enabled ? data : { enabled: false });
       })
       .catch(() => {
         if (cancelled) return;
-        // A failed request (503 safety-data outage, network) keeps the tab
-        // and shows its unavailable state — never a silent fall-back to
-        // the legacy view. Only a successful { enabled: false } hides it.
+        // A failed request (503 safety-data outage, network, an answer with
+        // no enabled flag) keeps the tab and shows its unavailable state —
+        // never a silent fall-back to the legacy view. Only a successful
+        // { enabled: false } hides it.
+        jobCardShownFor.current = null;
         setJobCard(null);
         setJobCardError(true);
       })
@@ -7649,7 +7771,39 @@ export function ProtocolPanel({ service, onClose }) {
     return () => {
       cancelled = true;
     };
+  }, [service?.id, selectedQuery, refreshKey]);
+
+  useEffect(() => {
+    setLawnPlan(null);
   }, [service?.id]);
+
+  const planTabOpen = isLawn && requestedSection === "lawn_plan";
+  useEffect(() => {
+    if (planTabOpen) setPlanSeenFor(service?.id);
+  }, [planTabOpen, service?.id]);
+
+  const readPlan = planTabOpen || (isLawn && planSeenFor === service?.id);
+  useEffect(() => {
+    if (!readPlan || !service?.id) return undefined;
+    let cancelled = false;
+    setLawnPlanLoading(true);
+    setLawnPlanError("");
+    adminFetch(`/admin/treatment-plans/${service.id}${selectedQuery}`)
+      .then((data) => {
+        if (cancelled) return;
+        setLawnPlanQuery(selectedQuery);
+        setLawnPlan(data?.plan || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setLawnPlanError(err?.message || "Failed to load treatment plan");
+      })
+      .finally(() => {
+        if (!cancelled) setLawnPlanLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [readPlan, service?.id, selectedQuery, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -7783,6 +7937,7 @@ export function ProtocolPanel({ service, onClose }) {
 
   const SECTIONS = [
     ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
+    ...(isLawn ? [{ id: "lawn_plan", label: "Plan", count: null }] : []),
     ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
     ...(!protocolEnabled && isLawn
       ? [
@@ -7977,7 +8132,7 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && (
+        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && activeSection !== "lawn_plan" && (
           <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
             <div>Could not load: {loadErrors.join(", ")}.</div>
             <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
@@ -7993,9 +8148,42 @@ export function ProtocolPanel({ service, onClose }) {
         {activeSection === "score" && canScore ? (
           <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} initialData={participantScore || null} />
         ) : activeSection === "job_card" && jobCardEnabled ? (
-          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
+          <JobCardTab
+            card={jobCard}
+            loading={jobCardLoading}
+            error={jobCardError}
+            D={D}
+            lawn={isLawn ? {
+              selectedIds: selectedConditionalIds,
+              ticks: selectedConditionalIds.join(","),
+              pending: cardPending,
+              onSet: (productIds, wanted) => setUseTicks({
+                serviceId: service.id,
+                ids: wanted
+                  ? [...new Set([...selectedConditionalIds, ...productIds])]
+                  : selectedConditionalIds.filter((id) => !productIds.includes(id)),
+              }),
+              onOpenPlan: () => setActiveSection("lawn_plan"),
+            } : null}
+          />
+        ) : activeSection === "lawn_plan" && isLawn ? (
+          <LawnPlanTab
+            jobTab={jobCard ? jobCardEnabled : null}
+            plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
+            loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
+            error={lawnPlanError}
+            onRefresh={() => {
+              // Until the card's re-read lands the Job tab is pending: no amount from the old read shows.
+              setJobCardQuery(null);
+              setRefreshKey((k) => k + 1);
+            }}
+          />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
-          <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          cardPending ? (
+            <div style={{ padding: 40, textAlign: "center", color: D.muted, fontSize: 14 }}>Checking the amounts…</div>
+          ) : (
+            <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          )
         ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
@@ -8100,7 +8288,13 @@ export function ProtocolPanel({ service, onClose }) {
                         lawn sqft before using product amounts.
                       </div>
                     )}
-                    {lawnMix && (
+                    {/* Mix amounts only on the server's current word that the Job tab is off ({ enabled: false }): not
+                        while the card loads, after a failed read (503, a failed tick re-read), or while a Refresh is out. */}
+                    {lawnMix && (jobCard?.enabled !== false || cardPending ? (
+                      <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
+                        {jobCardEnabled ? "Amounts show on the Job tab." : "Amounts show once the job card loads."}
+                      </div>
+                    ) : (
                       <div
                         style={{
                           background: D.bg,
@@ -8345,7 +8539,7 @@ export function ProtocolPanel({ service, onClose }) {
                           </div>
                         )}
                       </div>
-                    )}
+                    ))}
                     {lawnProtocol && (
                       <>
                         <div
