@@ -318,6 +318,8 @@ const SILENT_COLUMNS = [
   'id', 'direction', 'from_phone', 'to_phone', 'twilio_call_sid', 'status', 'duration_seconds',
   'answered_by', 'call_outcome', 'metadata', 'created_at', 'updated_at', 'call_recording_consent_disclaimer_played',
 ];
+// Counters whose database default is 0; a silent call leaves them at 0.
+const ZERO_COUNTER_COLUMNS = ['extraction_attempts', 'retranscribe_attempts', 'processing_generation'];
 const SILENT_METADATA_KEYS = [
   // Call setup, on every inbound call.
   'addons', 'domain', 'location', 'numberType', 'screen_caller_name', 'stir_verstat', 'promise_chaser_eligible', 'ended_at',
@@ -334,11 +336,16 @@ const sqlNames = (names) => names.map((name) => {
   if (!/^[A-Za-z_]+$/.test(name)) throw new Error(`not a plain name: ${name}`);
   return `'${name}'`;
 }).join(', ');
-// Every other column empty (null, false, 0 or ''); metadata an object, or
+// Every other column NULL, and the counters 0: a recorded length of 0 is a
+// value too, from a recording callback (pre-push audit r9). Production's
+// silent calls hold no other value, not even '' or false; a column added
+// later with a non-NULL default makes every call non-silent (the rule then
+// fails toward the push) until it is listed here. Metadata an object, or
 // none, with no other key. Names call_log itself: only for a read of call_log
 // with no alias.
-const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_log) - ARRAY[${sqlNames(SILENT_COLUMNS)}]::text[]) col`
-  + ` WHERE col.value NOT IN ('null'::jsonb, 'false'::jsonb, '0'::jsonb, '""'::jsonb))`
+const SILENT_SHAPE_SQL = `(NOT EXISTS (SELECT 1 FROM jsonb_each(to_jsonb(call_log) - ARRAY[${sqlNames([...SILENT_COLUMNS, ...ZERO_COUNTER_COLUMNS])}]::text[]) col`
+  + " WHERE col.value <> 'null'::jsonb)"
+  + ZERO_COUNTER_COLUMNS.map((column) => ` AND COALESCE(call_log.${column}, 0) = 0`).join('')
   + " AND COALESCE(jsonb_typeof(call_log.metadata), 'null') IN ('null', 'object')"
   + " AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(call_log.metadata) = 'object' THEN call_log.metadata ELSE '{}'::jsonb END) mk"
   + ` WHERE mk NOT IN (${sqlNames(SILENT_METADATA_KEYS)})))`;
@@ -362,8 +369,10 @@ function settledSilentSql(checkedAt) {
 
 // The number's record beside the counted history, read only once that matched
 // and bounded like it: the judged call has the silent shape; no other call
-// from or to the number in the window is anything but a settled silent
-// hang-up (IS NOT TRUE: a NULL in the test blocks too); no text from it.
+// from or to the number, from the window start up to this check, is anything
+// but a settled silent hang-up (IS NOT TRUE: a NULL in the test blocks too);
+// no text from it. Up to the check, not to the judged call: a staff callback
+// can come between the call and its bell (pre-push audit r9).
 async function recordIsSilent(row, key, at, checkedAt) {
   const since = new Date(at.getTime() - REPEAT_DAYS * 86400 * 1000);
   const judged = await db('call_log').where('id', row.id).whereRaw(SILENT_SHAPE_SQL)
@@ -374,7 +383,6 @@ async function recordIsSilent(row, key, at, checkedAt) {
     .modify((qb) => whereNotSandboxCall(qb))
     .whereNot('id', row.id)
     .where('created_at', '>=', since)
-    .where('created_at', '<', at)
     .where((number) => number
       .whereRaw(`${CALLER_KEY} = ?`, [key])
       .orWhereRaw(`${phoneKeySql('call_log.to_phone')} = ?`, [key]))

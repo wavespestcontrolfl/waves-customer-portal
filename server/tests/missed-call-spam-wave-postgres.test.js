@@ -737,6 +737,8 @@ jest.setTimeout(30000);
       ['an inbound call that was bridged', { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, bridged_at: new Date() }],
       // The settled-silent test is NULL here; IS NOT TRUE still counts the call as no silent hang-up.
       ['a call whose status was never saved', { answered_by: null, status: null, metadata: { stir_verstat: 'TN-Validation-Passed-A' } }],
+      // A recording callback wrote the length, long settled (pre-push audit r9).
+      ['a recorded length of 0 s', { metadata: { stir_verstat: 'TN-Validation-Passed-A' }, recording_duration_seconds: 0 }],
     ])('a number with %s in the last 14 days is never a repeat (pre-push audit)', async (label, sign) => {
       await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
       const row = judged();
@@ -757,6 +759,18 @@ jest.setTimeout(30000);
       await database('call_log').insert(row);
       expect(await repeat(row)).toBe(true);
       await database('call_log').insert(call(GBP_LINE, 60 * 24 * 4, { direction: 'outbound', to_phone: CALLER, answered_by: null, ...shape }));
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('calls after the judged call, up to the check, count too: a staff callback blocks, a settled silent redial does not (pre-push audit r9)', async () => {
+      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+      const row = judged();
+      await database('call_log').insert(row);
+      // Two minutes after the judged call, over and past the voicemail grace at check time.
+      await database('call_log').insert(prior(CALLER, 8));
+      expect(await repeat(row)).toBe(true);
+      // Staff called the number back before the bell was checked; it rang out.
+      await database('call_log').insert(call(GBP_LINE, 6, { direction: 'outbound', to_phone: CALLER, answered_by: null, status: 'no-answer' }));
       expect(await repeat(row)).toBe(false);
     });
 
