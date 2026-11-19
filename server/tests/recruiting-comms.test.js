@@ -658,13 +658,16 @@ describe('sendStageComms — a held job-offer text', () => {
 });
 
 describe('the email ledger snapshot', () => {
-  test('hides a token that a line break splits from its path inside an href, since a browser drops the break and opens it', async () => {
+  // A browser decodes the references in an href (named ones too) and drops tabs and line breaks before it opens it.
+  test('hides a token in an href that a line break or a named line-break reference splits', async () => {
     const { portalUrl } = require('../utils/portal-url');
     const token = 'e'.repeat(64);
-    const html = `<p>Read it:</p><a href="https://portal.wavespestcontrol.com/careers/offer/\n${token}">Read your offer</a>`;
+    const html = `<p>Read it:</p><a href="https://portal.wavespestcontrol.com/careers/offer/\n${token}">Read your offer</a>`
+      + `<a href="https://portal.wavespestcontrol.com/careers/o&NewLine;ffer/${token}">Or here</a>`;
     await RecruitingComms._internals.sendRawEmail({ app: baseApp(), stage: 'offer_sent', to: 'jane@example.com', subject: 'Your job offer from Waves', html, text: 'Read it.' });
     const row = mockDb.__tables.email_messages.find((r) => r.recipient_id === 'app-1');
-    expect(row.html_snapshot).toBe(`<p>Read it:</p><a href="${portalUrl('/careers/offer/[link hidden]')}">Read your offer</a>`);
+    const hidden = portalUrl('/careers/offer/[link hidden]');
+    expect(row.html_snapshot).toBe(`<p>Read it:</p><a href="${hidden}">Read your offer</a><a href="${hidden}">Or here</a>`);
     expect(mockSendOne.mock.calls[0][0].html).toContain(token); // the provider still gets the real link
   });
 });

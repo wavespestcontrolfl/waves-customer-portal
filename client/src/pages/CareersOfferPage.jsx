@@ -210,9 +210,9 @@ function ClosedState({ data }) {
   );
 }
 
-// signedElsewhere: a 409 said the offer is signed, so the signature on record
-// is not one this page just sent. Say so, with the name on record once a read
-// brings it.
+// signedElsewhere: the signature on record is not one this tab sent (a 409, or
+// a read after a lost reply, shows it under another name). Say so, with the
+// name on record once a read brings it.
 function resultMessage(data, signedElsewhere) {
   const who = ownerFirstName(data);
   if (data.state === 'signed') {
@@ -600,7 +600,7 @@ function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
   );
 }
 
-function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
+function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid, onSign }) {
   const [name, setName] = useState('');
   const [panel, setPanel] = useState('none'); // none | date | decline
   const [unknown, setUnknown] = useState(false);
@@ -644,7 +644,10 @@ function OpenOffer({ token, data, onApplied, onRefused, onReload, onInvalid }) {
           busy={anyBusy}
           saving={accept.busy}
           frozen={accept.frozen}
-          onAccept={() => accept.run('/accept', { signedName: name.trim() })}
+          onAccept={() => {
+            onSign(name.trim());
+            accept.run('/accept', { signedName: name.trim() });
+          }}
         />
         {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
         <LostBanner action={accept} />
@@ -709,6 +712,8 @@ const CLOSED_STATES = ['expired', 'withdrawn', 'superseded'];
 // with the closed page itself: { state, message, contactPhone }. On an answered
 // offer (signed, declined, date asked) it names only the state: { state }.
 const isClosedAnswer = (body) => Boolean(body) && CLOSED_STATES.includes(body.state) && typeof body.message === 'string';
+// One person's signature in any letter case, as the server compares a resend (job-offers.js sameName).
+const sameName = (a, b) => Boolean(a) && String(a).trim().toLowerCase() === String(b || '').trim().toLowerCase();
 const ANSWERED_STATES = ['signed', 'declined', 'date_requested'];
 
 async function readOffer(token) {
@@ -744,7 +749,8 @@ function OfferPage({ token }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
-  const [signedElsewhere, setSignedElsewhere] = useState(false);
+  const [firstState, setFirstState] = useState(null); // the state the first read showed
+  const [sentName, setSentName] = useState(null); // the last signature this tab sent
   const [loadAttempt, setLoadAttempt] = useState(0);
   const seq = useRef(0);
 
@@ -757,6 +763,7 @@ function OfferPage({ token }) {
       .then((body) => {
         if (cancelled || mine !== seq.current) return;
         setData(body);
+        setFirstState((prev) => prev || body.state);
         setLoading(false);
       })
       .catch((err) => {
@@ -801,7 +808,6 @@ function OfferPage({ token }) {
       return true;
     }
     if (!ANSWERED_STATES.includes(body?.state)) return false;
-    setSignedElsewhere(body.state === 'signed');
     applied({ state: body.state });
     reload();
     return true;
@@ -813,6 +819,11 @@ function OfferPage({ token }) {
     return <Column><PublicLoadError resource="offer link" onRetry={() => setLoadAttempt((a) => a + 1)} /></Column>;
   }
   if (CLOSED_STATES.includes(data.state)) return <ClosedState data={data} />;
-  if (ANSWERED_STATES.includes(data.state)) return <ResultState data={data} signedElsewhere={signedElsewhere} />;
-  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} />;
+  if (ANSWERED_STATES.includes(data.state)) {
+    // Opened as signed: this is the signer's return visit. Seen open first: the
+    // signature is this tab's only when its name is the one this tab sent.
+    const signedElsewhere = firstState !== 'signed' && !sameName(sentName, data.signedName);
+    return <ResultState data={data} signedElsewhere={signedElsewhere} />;
+  }
+  return <OpenOffer token={token} data={data} onApplied={applied} onRefused={refused} onReload={reload} onInvalid={invalid} onSign={setSentName} />;
 }

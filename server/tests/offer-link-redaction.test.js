@@ -55,6 +55,8 @@ describe('redactOfferLinks', () => {
     ['a tab and a line break inside the token', `https://portal.wavespestcontrol.com/careers/offer/${TOKEN.slice(0, 20)}\t\r\n${TOKEN.slice(20)}`],
     ['an encoded letter', `https://x.test/careers/&#111;ffer/${TOKEN}`],
     ['an encoded line break', `https://portal.wavespestcontrol.com/careers/offer/&#10;${TOKEN}`],
+    ['named tab and line break references inside the route words', `https://x.test/car&Tab;eers/o&NewLine;ffer/${TOKEN}`],
+    ['named slash references', `https://x.test/careers&sol;offer&sol;${TOKEN}`],
   ])('an HTML link with %s keeps its quotes, stores the standard hidden link and replays as a working link', (label, href) => {
     const { replayBodyFor } = require('../services/messaging/deferred-replay-registry');
     for (const q of ['"', "'"]) {
@@ -71,6 +73,16 @@ describe('redactOfferLinks', () => {
     expect(redactOfferLinks(`<a href="https://x.test/careers/offer/${TOKEN}">Read</a>`)).toBe(`<a href="https://x.test/careers/offer/${OFFER_LINK_HIDDEN}">Read</a>`);
     expect(redactOfferLinks(`x.test/careers/offer/${TOKEN.toUpperCase()}.`)).toBe(`x.test/careers/offer/${OFFER_LINK_HIDDEN}.`);
     expect(offerLinkTokens(`x.test/careers/offer/${TOKEN.toUpperCase()}.`)).toEqual([TOKEN]);
+  });
+
+  test('pins only the token on the offer path: a 64-hex query value beside it stays and is not pinned', () => {
+    const ref = 'f'.repeat(64);
+    const sent = `https://portal.wavespestcontrol.com/careers/offer/${TOKEN}?ref=${ref}`;
+    expect(redactOfferLinks(sent)).toBe(`https://portal.wavespestcontrol.com/careers/offer/${OFFER_LINK_HIDDEN}?ref=${ref}`);
+    expect(offerLinkTokens(sent)).toEqual([TOKEN]);
+    const other = `https://portal.wavespestcontrol.com/careers/./offer/${TOKEN}?ref=${ref}`;
+    expect(redactOfferLinks(other)).toBe(HIDDEN_LINK);
+    expect(offerLinkTokens(other)).toEqual([TOKEN]);
   });
 
   test('leaves other 64-hex links alone: the interview page (also encoded), a visit link, a token with no offer route', () => {

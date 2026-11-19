@@ -300,7 +300,7 @@ describe('CareersOfferPage — open state', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new Error('cut off'); } })
-      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })));
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'Jordan Rivera', signedAt: '2026-12-12T13:15:00.000Z' })));
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
@@ -528,16 +528,39 @@ describe('CareersOfferPage — open state', () => {
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\./)).toBeInTheDocument();
   });
 
-  it('re-reads the offer when signing answers 502', async () => {
+  it('re-reads the offer when signing answers 502; the name on record in any letter case is this signature', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({}, 502))
-      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' })));
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: 'JORDAN RIVERA', signedAt: '2026-12-12T13:15:00.000Z' })));
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
-    expect(await screen.findByText(/You signed this offer/)).toBeInTheDocument();
+    expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026/)).toBeInTheDocument();
+  });
+
+  // Another tab signed under another name while this tab's reply was lost:
+  // the read shows that signature, and this tab must not claim it.
+  it.each([
+    ['sign', 'Jordan M. Rivera'],
+    ['decline', 'Jordan Rivera'],
+  ])('after a lost %s reply, a read that shows a signature this tab did not send says whose it is', async (act, onRecord) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockRejectedValueOnce(new Error('offline')) // this tab's send: reply lost
+      .mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: onRecord, signedAt: '2026-12-12T13:15:00.000Z' })));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    if (act === 'sign') {
+      fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
+    } else {
+      fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Yes, decline' }));
+    }
+    expect(await screen.findByText(new RegExp(`^This offer was already signed by ${onRecord.replace('.', '\\.')} on Sat, Dec 12, 2026\\.`))).toBeInTheDocument();
+    expect(screen.queryByText(/You signed this offer/)).toBeNull();
   });
 
   it('keeps the form and shows an error when the connection drops', async () => {
