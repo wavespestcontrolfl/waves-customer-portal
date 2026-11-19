@@ -28176,12 +28176,10 @@ function estimateDataRecurringServices(estData = {}) {
   return recurringServicesWithSupplements(result || {});
 }
 
-function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}, estimate = {}) {
+function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const converter = require('../services/estimate-converter');
-  // The rows accept reads (planRecurringRowsAsAccepted): a legacy estimate can keep a second service in the root
-  // recurring block or the engine lines, and that plan carries no setup fee (owner 2026-10-21: the fee is pest-only).
   const membershipFeeMixApplies = converter
-    .recurringMixHasMembershipFeeService(planRecurringRowsAsAccepted(estData, estimate));
+    .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
   // Operator-stated waiver strips the fee even when the mix carries it —
   // this finalize choke point is what removes it from snapshot/cached
   // bundles frozen before the waiver was applied.
@@ -28382,10 +28380,10 @@ function recurringDataAsAccepted(estData, estimate) {
 }
 
 // The plan's recurring rows as accept and the converter read them: recurringDataAsAccepted, through the converter's
-// own reader (it merges result, engineResult and the root recurring block). Every page decision about the WaveGuard
-// setup fee reads this one list (stripStaleWaveGuardSetupFromBundle for /data, renderPage for the server-rendered
-// page, pricingBundleMissingRequiredSetupFee for frozen bundles), and the unit count below is the converter's own
-// function over the same data, so no storage shape can make the page and accept disagree.
+// own reader (it merges result, engineResult and the root recurring block). The server-rendered page decides its
+// setup-fee row from this list (it read the rendered result alone, so an engine-only plan showed no fee that accept
+// bills), and the prepay unit count below is the converter's own function over the same data. The /data builders
+// keep their own fee readers: this change is the prepay offer, not the fee.
 function planRecurringRowsAsAccepted(estData, estimate) {
   return require('../services/estimate-converter')
     .recurringServicesFromEstimateData(recurringDataAsAccepted(estData, estimate));
@@ -28430,7 +28428,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     }
     payload.measuredBasisAnchor = Object.keys(anchorBasis).length ? anchorBasis : null;
   }
-  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData, estimate), estimate, estData);
+  const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
   let withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
@@ -29285,7 +29283,7 @@ function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
 // fee card. The prepay-eligibility gate mirrors the fresh v1 build's add
 // condition exactly, so the bypass only fires when the rebuild will actually
 // attach the fee (otherwise it would recompute every request for nothing).
-function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}, estimate) {
+function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
   // Quote-required snapshots never self-serve accept (the acceptance
   // contract routes them to "Call Waves", so no setup invoice can fire) and
   // a recompute would wipe the manually-quoted rows — leave them alone.
@@ -29308,16 +29306,13 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}, estimat
   // fee-less sendSnapshots fast-path forever, hiding a fee acceptance
   // invoices. Recognize the fee-due seasonal mix the same way the fee-card
   // sites do; existing customers keep the outright waiver (no recompute).
-  // The rows the finalize strip and accept read (planRecurringRowsAsAccepted): with another reader, a bundle finalize
-  // saved fee-less (a second service in the root block) would read as missing its fee and rebuild on every view.
-  const planRows = planRecurringRowsAsAccepted(estData, estimate);
   const stalePrepayEligible = annualPrepayEligibleForEstimateData(estData);
   const staleSeasonalFeeDue = !stalePrepayEligible
     && !estData?.membershipSnapshot?.isExistingCustomer
-    && recurringMixHasSeasonalMosquito(planRows);
+    && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
   if (!stalePrepayEligible && !staleSeasonalFeeDue) return false;
   return require('../services/estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({
-    recurringServices: planRows,
+    recurringServices: estimateDataRecurringServices(estData),
     estimateData: estData,
   });
 }
@@ -29588,7 +29583,7 @@ function sentSnapshotServesAsIs(snapshotBundle, estimate, estData) {
     // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
     // path will invoice) recompute instead of fast-pathing.
     && !pricingBundleHasStaleTermiteRow(snapshotBundle)
-    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData, estimate)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
     // Snapshots whose rows never netted the estimate's manual discount
     // (evidenced by the persisted totals disagreeing with the blob's own
     // discounted figures) re-derive through the live (discount-aware)
@@ -29730,7 +29725,7 @@ async function buildPricingBundleInner(estimate) {
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
   // total the converter won't bill.
-  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData, estimate)
+  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
     && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
     // Stamped after finalize for the same reason as the snapshot path; a
     // cache entry written before this deploy must never serve a stale count.

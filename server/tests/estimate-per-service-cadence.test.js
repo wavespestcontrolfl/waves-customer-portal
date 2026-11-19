@@ -1271,8 +1271,7 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
     expect(JSON.stringify(solo)).toContain('"waveguard_setup"');
     const legacy = await buildPricingBundle(mosquitoEstimate('with-root-pest', ROOT_PEST, NO_ONE_TIME_CHOICE));
     expect(offersPrepay(legacy)).toBe(false);
-    // Two services carry no setup fee (accept reads the same supplemented rows), and nothing promises a prepay waiver.
-    expect(JSON.stringify(legacy)).not.toContain('"waveguard_setup"');
+    // With prepay closed, nothing promises "waived when you pay the year".
     expect(JSON.stringify(legacy)).not.toContain('"waivedWithPrepay":true');
   });
 
@@ -1281,24 +1280,12 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
       engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', annual: 900, monthly: 75 }] },
     }));
     expect(offersPrepay(withEngineLawn)).toBe(false);
-    expect(JSON.stringify(withEngineLawn)).not.toContain('"waveguard_setup"');
-  });
-
-  test('a bundle saved without the fee for two services is not read as missing it, so frozen pricing serves', async () => {
-    const { pricingBundleMissingRequiredSetupFee } = require('../routes/estimate-public');
-    const twoServices = mosquitoEstimate('frozen-root-pest', ROOT_PEST, NO_ONE_TIME_CHOICE);
-    const finalized = await buildPricingBundle(twoServices);
-    expect(JSON.stringify(finalized)).not.toContain('"waveguard_setup"');
-    expect(pricingBundleMissingRequiredSetupFee(finalized, twoServices.estimate_data, twoServices)).toBe(false);
-    // Control: seasonal mosquito alone, saved without its fee, still rebuilds to show the fee accept bills.
-    const solo = mosquitoEstimate('frozen-solo');
-    expect(pricingBundleMissingRequiredSetupFee({ frequencies: [{ key: 'monthly12', monthly: 82.5 }] }, solo.estimate_data, solo))
-      .toBe(true);
+    expect(JSON.stringify(withEngineLawn)).not.toContain('"waivedWithPrepay":true');
   });
 
   // An estimate that also offers a one-time pest visit: a recurring choice keeps only the pest rows (accept persists
-  // withPestOnlyRecurringChoice), and conversion bills solo pest's setup fee. A second service in the root recurring
-  // block must not hide that fee or change prepay on the page.
+  // withPestOnlyRecurringChoice), so the unit count reads one service and prepay stays as accept allows it. A second
+  // service in the root recurring block changes neither the fee nor prepay on the page.
   const pestChoiceEstimate = (tag, root = {}) => ({
     id: `estimate-prepay-pest-choice-${tag}`,
     show_one_time_option: true,
@@ -1316,7 +1303,7 @@ describe('annual prepay on a multi-service plan: every page path agrees with acc
   });
   const ROOT_LAWN = { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 69.75, visitsPerYear: 9 }] } };
 
-  test('a one-time pest choice with lawn in the root block: the page shows the setup fee accept bills', async () => {
+  test('a one-time pest choice with lawn in the root block: the page keeps the fee and prepay accept keeps', async () => {
     const { shouldPersistPestOnlyRecurringChoice, withPestOnlyRecurringChoice } = require('../routes/estimate-public');
     const converter = require('../services/estimate-converter');
     const split = pestChoiceEstimate('split', ROOT_LAWN);
