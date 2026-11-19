@@ -236,7 +236,7 @@ function ResultState({ data }) {
 function OfferRow({ label, children }) {
   return (
     <div style={{ display: 'flex', gap: 12, padding: '10px 0', borderTop: '1px solid var(--border, #E2E8F0)' }}>
-      <div style={{ flex: '0 0 72px', fontFamily: FONTS.ui, fontSize: 14, fontWeight: 700, color: MUTED }}>{label}</div>
+      <div style={{ flex: '0 0 92px', fontFamily: FONTS.ui, fontSize: 14, fontWeight: 700, color: MUTED }}>{label}</div>
       <div style={{ flex: 1, minWidth: 0, fontFamily: FONTS.body, fontSize: 16, color: TEXT, overflowWrap: 'anywhere' }}>
         {children}
       </div>
@@ -250,6 +250,7 @@ function OfferSummary({ data }) {
     ['Start', formatLongDate(data.startDate)],
     ['Pay', payLine(data)],
     ['Week', data.hoursLine],
+    ['Reports to', data.reportTo],
     ['Pay day', data.payDayLine],
   ];
   return (
@@ -316,8 +317,9 @@ function TextConsent({ token, initial, onPending, onStale, onInvalid, locked }) 
       setError('');
       onPending(false);
       if (body.state !== 'open') onStale();
-    } catch {
-      setUnconfirmed(true);
+    } catch (err) {
+      if (err.notFound) onInvalid();
+      else setUnconfirmed(true);
     } finally {
       setSaving(false);
     }
@@ -336,12 +338,14 @@ function TextConsent({ token, initial, onPending, onStale, onInvalid, locked }) 
       return;
     }
     if (res.ok) setChecked(Boolean(res.body.textConsent));
-    else {
-      setChecked(!next);
-      if (res.status === 404) onInvalid();
-      else if (res.status === 409) onStale();
-      else setError(res.body?.error || CONNECTION_ERROR);
-    }
+    else setChecked(!next);
+    if (res.status === 404) onInvalid();
+    else if (res.status === 409 && (await onStale()) === 'failed') {
+      // The offer changed but the new state could not be read: stay locked.
+      setUnconfirmed(true);
+      setSaving(false);
+      return;
+    } else if (!res.ok && res.status !== 409) setError(res.body?.error || CONNECTION_ERROR);
     setSaving(false);
     onPending(false);
   };

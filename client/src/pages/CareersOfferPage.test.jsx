@@ -76,6 +76,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByText('Mon, Jan 4, 2027')).toBeInTheDocument();
     expect(screen.getByText('$23.00 an hour, $25.00 from Apr 5')).toBeInTheDocument();
     expect(screen.getByText(/four 10-hour days, Monday to Thursday/)).toBeInTheDocument();
+    expect(screen.getByText('Sam Carter, owner')).toBeInTheDocument();
     expect(screen.getByText('Every Friday, for the week before')).toBeInTheDocument();
     expect(screen.getByText(/Please don.t give notice at your current job until you have signed this offer\./)).toBeInTheDocument();
     expect(screen.getByText('Open until Fri, Dec 18')).toBeInTheDocument();
@@ -142,6 +143,19 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.click(await screen.findByLabelText('Text me about this offer'));
     expect(await screen.findByText(/This offer is no longer open/)).toBeInTheDocument();
+  });
+
+  it('stays locked with a retry when the refresh after a consent 409 fails', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(openPayload()))
+      .mockResolvedValueOnce(jsonResponse({ error: 'Not open', code: 'NOT_OPEN' }, 409))
+      .mockResolvedValueOnce(jsonResponse({}, 500));
+    globalThis.fetch = fetchMock;
+    renderPage();
+    fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
+    fireEvent.click(screen.getByLabelText('Text me about this offer'));
+    expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
   });
 
   it('shows the not-valid page when the consent save answers 404', async () => {
