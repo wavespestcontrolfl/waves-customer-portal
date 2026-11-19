@@ -293,6 +293,12 @@ describe('skipPreview: what the cancel window shows', () => {
 });
 
 describe('public next-visit date scope', () => {
+  beforeAll(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-11-18T17:00:00.000Z'));
+  });
+  afterAll(() => jest.useRealTimers());
+
   test('requires durable service and property keys when used by a customer tracker', async () => {
     const row = planVisit({ service_id: null });
     await expect(nextPlanVisitDate(memoryConn([row]), row, '2027-03-20', { requireServiceAndProperty: true }))

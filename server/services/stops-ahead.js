@@ -238,6 +238,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
             AND s.scheduled_date = t.scheduled_date
             AND NOT (s.customer_id = t.customer_id
                      AND s.window_start IS NOT DISTINCT FROM t.window_start)
+            AND (s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)
             AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
             AND s.status NOT IN (${routeExcl})
             AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
@@ -387,6 +388,7 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
               AND status NOT IN ('en_route', 'on_site')
               AND COALESCE(track_state, 'scheduled') = 'scheduled'
               AND (customer_pick_by IS NULL OR window_start IS NOT NULL)
+            FOR UPDATE
          ),
          floor_val AS (
            SELECT LEAST(?::int, MIN(CASE WHEN s.stops_ahead_shown_date = ?::date

@@ -171,9 +171,15 @@ describe('computeStopsAhead', () => {
     expect(countSql).toMatch(/progressed_beyond/);
     // Dead estimate-slot holds must not count (live-hold predicate).
     expect(countSql).toContain('(s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())');
+    // A foreign Quick Move that still owns its technician but has no slot
+    // is not a route contributor for this placed customer's count.
+    expect(countSql).toContain('(s.customer_pick_by IS NULL OR s.window_start IS NOT NULL)');
     // Tracker-terminal rows drop out of the LIVE flag by track_state too,
     // NULL-safely (track_state can diverge from status).
     expect(countSql).toContain("(dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))");
+    // Floor persistence rechecks and locks the eligible target before it
+    // updates siblings, so a status-only office rebook cannot race the stamp.
+    expect(updateSql).toContain('FOR UPDATE');
   });
 
   test(`raw count above the cap (${STOPS_AHEAD_DISPLAY_CAP}) → null and nothing persists`, async () => {
