@@ -1,6 +1,6 @@
 /**
  * Hourly route check, shadow (services/day-replan/route-check.js, owner 2026-11-19): the openings dispatch can fill
- * from the live schedule; today from the van's progress; which tech-days count; the ad rule's shadow decision; one
+ * on the staffed days after today, from the live schedule; which tech-days count; the ad rule's shadow decision; one
  * route_check_runs row and no other write. Fake knex, synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -61,43 +61,16 @@ describe('dispatch held time', () => {
   });
 });
 
-describe('where the van is now (today)', () => {
-  const day = '2026-11-19';
-  const home = HQ;
+describe('physical stops and reads', () => {
   const sibling = (id) => ({
-    id, visit_id: null, customer_id: 'cust-1', status: 'on_site', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 45,
+    id, visit_id: null, customer_id: 'cust-1', status: 'confirmed', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 45,
     lat: 27.5, lng: -82.4, service_address_line1: '1 Test St', created_at: '2026-11-01T12:00:00Z',
   });
 
-  test('the latest completed stop sets the place and the clock', () => {
-    const van = rc.vanNow({
-      day, home, departureMin: 480, nowMin: 630, onSite: [],
-      completed: [
-        { completed_at: '2026-11-19T13:50:00Z', lat: 27.3, lng: -82.5 }, // 8:50 ET
-        { completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }, // 9:45 ET
-      ],
-    });
-    expect(van).toEqual({ origin: { lat: 27.5, lng: -82.4 }, clockMin: 585, source: 'completed' });
-  });
-
-  test('a job on site that runs past its stay keeps the van there until now', () => {
-    const onSite = rc.onSiteStays(rc.physicalStops([sibling('s1')]), new Map([['s1', '2026-11-19T14:00:00Z']])); // 9:00 + 45
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed: [], onSite }).clockMin).toBe(660);
-  });
-
-  test('co-visit siblings on site together are charged their combined stay, as the simulator charges them', () => {
-    const arrived = new Map([['s1', '2026-11-19T14:00:00Z'], ['s2', '2026-11-19T14:00:00Z']]);
-    const onSite = rc.onSiteStays(rc.physicalStops([sibling('s1'), sibling('s2')]), arrived);
-    expect(onSite).toHaveLength(1);
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 560, completed: [], onSite })).toMatchObject({ clockMin: 630, source: 'on_site' });
-  });
-
-  test("one visit's services (one visit_id) on site are one stop, charged one after another", () => {
+  test('co-visit siblings, and one visit\'s services (one visit_id), are one stop', () => {
+    expect(rc.physicalStops([sibling('s1'), sibling('s2')])).toHaveLength(1);
     const service = (id) => ({ ...sibling(id), visit_id: 'visit-1' });
-    const stops = rc.physicalStops([service('v1'), service('v2')]);
-    expect(stops).toHaveLength(1);
-    const onSite = rc.onSiteStays(stops, new Map([['v1', '2026-11-19T14:00:00Z']])); // fan-out: one arrival recorded
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 560, completed: [], onSite })).toMatchObject({ clockMin: 630, source: 'on_site' });
+    expect(rc.physicalStops([service('v1'), service('v2')])).toHaveLength(1);
   });
 
   test("one visit's services with disconnected windows are two stops, as tracking keeps them", () => {
@@ -108,52 +81,6 @@ describe('where the van is now (today)', () => {
     expect(rc.physicalStops([am, { ...pm, window_start: '10:00:00', window_end: '11:00:00', customer_id: 'cust-2' }])).toHaveLength(2);
   });
 
-  test('a service of the on-site stop already done: the rest starts when it finished, not at the arrival', () => {
-    const onSite = rc.onSiteStays(rc.physicalStops([sibling('s2')]), new Map([['s2', '2026-11-19T15:00:00Z']])); // arrived 10:00
-    const completed = [{ completed_at: '2026-11-19T15:45:00Z', customer_id: 'cust-1', lat: 27.5, lng: -82.4 }]; // the first service done at 10:45
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed, onSite })).toMatchObject({ clockMin: 690, source: 'on_site' });
-    // A job closed for another customer after the arrival does not restart this stop's work.
-    const elsewhere = [{ ...completed[0], customer_id: 'cust-7' }];
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 660, completed: elsewhere, onSite })).toMatchObject({ clockMin: 660, source: 'on_site' });
-  });
-
-  test("today's stops: the progress status wins by id; on site, en route and the rest are split by physical stop", () => {
-    const own = [stop('a', '09:00:00', null), stop('b', '11:00:00', null, { status: 'en_route' }), stop('c', '13:00:00', null)];
-    const split = rc.todaysStops(own, [{ id: 'a', status: 'completed' }]);
-    expect(split.live.map((r) => r.id)).toEqual(['b', 'c']);
-    expect(split.onSite).toEqual([]);
-    expect(split.enRoute.flat(2).map((r) => r.id)).toEqual(['b']);
-    expect(split.rest.map((r) => r.id)).toEqual(['c']);
-    expect(rc.todaysStops(own, [{ id: 'c', status: 'on_site' }]).onSite.flat(2).map((r) => r.id)).toEqual(['c']);
-  });
-
-  test('two stops done in one minute: the later timestamp sets the place', () => {
-    const completed = [
-      { completed_at: '2026-11-19T14:45:40Z', lat: 27.5, lng: -82.4 },
-      { completed_at: '2026-11-19T14:45:10Z', lat: 27.3, lng: -82.5 },
-    ];
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed }).origin).toEqual({ lat: 27.5, lng: -82.4 });
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed: completed.slice().reverse() }).origin).toEqual({ lat: 27.5, lng: -82.4 });
-  });
-
-  test('co-visit siblings sharing a window: one done early, the other is charged its own work, the window once', () => {
-    const share = (id) => ({ ...sibling(id), window_start: '10:00:00', window_end: '11:00:00', estimated_duration_minutes: 30 });
-    const onSite = rc.onSiteStays(rc.physicalStops([share('s2')]), new Map([['s2', '2026-11-19T15:00:00Z']])); // arrived 10:00
-    const completed = [{ completed_at: '2026-11-19T15:30:00Z', customer_id: 'cust-1', lat: 27.5, lng: -82.4 }]; // s1 done at 10:30
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 640, completed, onSite }).clockMin).toBe(660); // 11:00, not 11:30
-  });
-
-  test('a schedule block during the on-site work pauses it', () => {
-    const job = { ...sibling('s1'), estimated_duration_minutes: 90 };
-    const onSite = rc.onSiteStays(rc.physicalStops([job]), new Map([['s1', '2026-11-19T15:00:00Z']])); // 10:00, 90 min
-    const blocks = [{ startMin: 660, endMin: 720 }]; // 11-noon
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, completed: [], onSite, blocks }).clockMin).toBe(750); // 12:30
-    expect(rc.pastBlocks(600, 690, [])).toBe(690);
-    // A technician block and a company block over the same hour pause it once.
-    const twice = [{ startMin: 660, endMin: 720 }, { startMin: 660, endMin: 720 }];
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, completed: [], onSite, blocks: twice }).clockMin).toBe(750);
-  });
-
   test('a read inside the snapshot runs in its own savepoint; outside a transaction it reads directly', async () => {
     const savepoint = { name: 'sp' };
     const trx = { isTransaction: true, transaction: jest.fn(async (fn) => fn(savepoint)) };
@@ -162,20 +89,6 @@ describe('where the van is now (today)', () => {
     const plain = { transaction: jest.fn() };
     expect(await rc.recoverable(plain, async (c) => c)).toBe(plain);
     expect(plain.transaction).not.toHaveBeenCalled();
-  });
-
-  test('nothing done yet: the start point at the departure minute', () => {
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [] })).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
-  });
-
-  test("the latest stop done has no place: the van's place is unknown, never an earlier customer's", () => {
-    const completed = [
-      { completed_at: '2026-11-19T13:50:00Z', lat: 27.3, lng: -82.5 }, // 8:50, placed
-      { completed_at: '2026-11-19T14:45:00Z', lat: null, lng: null }, // 9:45, no place
-    ];
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed })).toMatchObject({ origin: null, source: 'unknown' });
-    // An earlier stop with no place does not matter.
-    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, onSite: [], completed: completed.slice().reverse().map((r, i) => (i ? { ...r, lat: 27.5, lng: -82.4 } : { ...r, completed_at: '2026-11-19T13:00:00Z' })) }).source).toBe('completed');
   });
 });
 
@@ -193,11 +106,9 @@ describe('one tech-day', () => {
     const am = stop('v1', '09:00:00', '10:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
     const pm = stop('v2', '15:00:00', '16:00:00', { visit_id: 'visit-1', customer_id: 'cust-1' });
     const noon = stop('n1', '12:00:00', '13:00:00', { customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
-    const fig = rc.measureTechDay({ ...open, rows: [am, pm, noon] });
-    // In window order the day ends when the 3 PM service does; pulled together, the noon stop would run last and late.
-    const pulled = rc.measureTechDay({ ...open, rows: [noon], first: [am, pm] });
-    expect(fig.endMin).toBeLessThanOrEqual(960);
-    expect(pulled.endMin).toBeGreaterThan(fig.endMin);
+    // Two stops of one visit, in window order: the noon stop runs between them, and the day ends with the 3 PM service.
+    expect(rc.routeOrder([am, pm, noon]).map((r) => r.id)).toEqual(['v1', 'n1', 'v2']);
+    expect(rc.measureTechDay({ ...open, rows: [am, pm, noon] }).endMin).toBeLessThanOrEqual(960);
   });
 
   test("the stored route order when it is a real plan, else each stop at its own promised time", () => {
@@ -205,17 +116,6 @@ describe('one tech-day', () => {
     const b = stop('b', '09:00:00', '12:00:00', { route_order: 1, customer_id: 'cust-2', lat: 27.45, lng: -82.4 });
     expect(rc.routeOrder([a, b]).map((r) => r.id)).toEqual(['b', 'a']);
     expect(rc.routeOrder([{ ...a, route_order: null }, b]).map((r) => r.id)).toEqual(['a', 'b']); // a null: clock order
-  });
-
-  test('the stop the van is driving to comes first, even with a later window', () => {
-    const a = stop('a', '11:00:00', null);
-    const b = stop('b', '13:00:00', null, { status: 'en_route', lat: 27.45, lng: -82.4 });
-    const plain = rc.measureTechDay({ ...open, rows: [a, b] });
-    const pinned = rc.measureTechDay({ ...open, rows: [a], first: [b] });
-    expect(pinned.stops).toBe(2);
-    expect(pinned.endMin).toBeGreaterThan(plain.endMin); // b at 1 PM, then a: the day ends later
-    expect(plain.openings.map((o) => o.kind)).toContain('start');
-    expect(pinned.openings.map((o) => o.kind)).not.toContain('start'); // no job goes ahead of the customer en route
   });
 
   test('a schedule block takes its time out of the openings', () => {
@@ -243,9 +143,9 @@ describe('which days count', () => {
     expect(rc.staffed(elig, '2026-11-23', 'someone-else', true)).toBe(false);
   });
 
-  test('today, through the third staffed day, and at least the 7-day demand view', () => {
+  test('the days after today, through the third staffed day, and at least the 7-day demand view', () => {
     expect(rc.datesToMeasure(elig, '2026-11-19', new Map())).toEqual(
-      ['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-22', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26'],
+      ['2026-11-20', '2026-11-21', '2026-11-22', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26'],
     );
     // Off all next week: the scan runs on until it finds three staffed days.
     const away = { ...elig, absent: new Set(['20', '21', '23', '24', '25', '27', '28'].map((d) => `${TECH}:2026-11-${d}`)) };
@@ -255,13 +155,15 @@ describe('which days count', () => {
 
 describe('the totals and the ad rule shadow', () => {
   const day = (date, fig) => ({ date, technician_id: TECH, staffed: true, slots: 0, openings: [], ...fig });
-  test('full budget while dispatch room exists today or in the next 3 staffed days', () => {
+  test('full budget while dispatch room exists in the next 3 staffed days', () => {
     const { totals, ad } = rc.summarize([
-      day('2026-11-19', { slots: 1 }), day('2026-11-20'), day('2026-11-21'), day('2026-11-23', { slots: 1 }), day('2026-11-24', { slots: 3 }),
+      day('2026-11-20'), day('2026-11-21'), day('2026-11-23', { slots: 1 }), day('2026-11-24', { slots: 3 }),
     ], '2026-11-19');
-    expect(totals.next).toEqual({ dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1 });
-    expect(totals.week).toEqual({ through: '2026-11-26', slots: 4 });
-    expect(ad).toEqual({ decision: 'full', slotsAhead: 2, techBlind: false, unmeasured: 0 });
+    expect(totals).toEqual({ next: { dates: ['2026-11-20', '2026-11-21', '2026-11-23'], slots: 1 }, week: { through: '2026-11-26', slots: 4 } });
+    expect(ad).toEqual({ decision: 'full', slotsAhead: 1, techBlind: false, unmeasured: 0 });
+    // Today is not measured: a row dated today never counts.
+    expect(rc.summarize([day('2026-11-19', { slots: 5 }), day('2026-11-20'), day('2026-11-21'), day('2026-11-23')], '2026-11-19').ad)
+      .toMatchObject({ decision: 'floor', slotsAhead: 0 });
   });
 
   test('tech-blind: a date counts the most any one technician can take, in any order, never the sum', () => {
@@ -292,7 +194,7 @@ describe('the totals and the ad rule shadow', () => {
 
   test('the 1% floor when no dispatch room exists in that window', () => {
     const { ad } = rc.summarize([
-      day('2026-11-19'), day('2026-11-20'), day('2026-11-21'), day('2026-11-23'), day('2026-11-24', { slots: 4 }),
+      day('2026-11-20'), day('2026-11-21'), day('2026-11-23'), day('2026-11-24', { slots: 4 }),
       day('2026-11-25', { skip: 'UNTIMED_STOP' }), // past the window: not counted
     ], '2026-11-19');
     expect(ad).toEqual({ decision: 'floor', slotsAhead: 0, techBlind: false, unmeasured: 0 });
@@ -300,13 +202,13 @@ describe('the totals and the ad rule shadow', () => {
 
   test('unknown, never a floor, when no room is found and a day in the window could not be measured', () => {
     const { ad } = rc.summarize([
-      day('2026-11-19'), day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
+      day('2026-11-20', { skip: 'UNTIMED_STOP', slots: 3 }), day('2026-11-21'), day('2026-11-23'),
     ], '2026-11-19');
     expect(ad).toEqual({ decision: 'unknown', slotsAhead: 0, techBlind: false, unmeasured: 1 });
     // A long closure: the scan found only 2 staffed days, so no room is not a measured floor.
-    expect(rc.summarize([day('2026-11-19'), day('2026-11-20'), day('2026-11-21')], '2026-11-19').ad.decision).toBe('unknown');
+    expect(rc.summarize([day('2026-11-20'), day('2026-11-21')], '2026-11-19').ad.decision).toBe('unknown');
     // Room found elsewhere: full, with the unmeasured day named.
-    expect(rc.summarize([day('2026-11-19', { slots: 1 }), day('2026-11-20', { skip: 'FAILED' })], '2026-11-19').ad)
+    expect(rc.summarize([day('2026-11-20', { slots: 1 }), day('2026-11-21', { skip: 'FAILED' })], '2026-11-19').ad)
       .toMatchObject({ decision: 'full', unmeasured: 1 });
   });
 });
@@ -314,16 +216,13 @@ describe('the totals and the ad rule shadow', () => {
 describe('runRouteCheck', () => {
   const NOW = new Date('2026-11-19T15:30:00Z'); // Thu 10:30 AM ET
 
-  function fakeConn({ progress = [], occupancy = [], campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }] } = {}) {
+  function fakeConn({ campaigns = [{ id: 'c1', status: 'paused', budget_mode: 'stop' }] } = {}) {
     const writes = [];
     const conn = (table) => {
-      let joined = false;
       const q = {
-        leftJoin() { joined = true; return q; }, where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
+        leftJoin() { return q; }, where() { return q; }, whereIn() { return q; }, whereNotIn() { return q; }, whereRaw() { return q; },
         select: async () => {
           if (table === 'technicians') return [{ id: TECH }];
-          // The progress read joins customers for the place; the occupancy read does not.
-          if (table === 'scheduled_services') return joined ? progress : occupancy;
           if (table === 'ad_campaigns') return campaigns;
           return [];
         },
@@ -346,26 +245,33 @@ describe('runRouteCheck', () => {
     });
   });
 
-  test('records one row: today from the van, then the next staffed days, and the ad shadow; nothing else is written', async () => {
-    const { conn, writes } = fakeConn({ progress: [{ technician_id: TECH, status: 'completed', completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }] });
+  test('records one row: the staffed days after today, and the ad shadow; nothing else is written', async () => {
+    const { conn, writes } = fakeConn();
     const result = await runRouteCheck({ conn, now: NOW });
     expect(writes.map(([table]) => table)).toEqual(['route_check_runs']);
     const row = writes[0][1];
     expect(row).toMatchObject({ run_at: NOW, service_date: '2026-11-19', status: 'completed' });
     const days = JSON.parse(row.days);
-    expect(days.map((d) => d.date)).toEqual(['2026-11-19', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25']);
-    const today = days[0];
-    expect(today.van).toBe('completed');
-    // Nothing before now (10:30): the van leaves the 9:45 stop at 10:30, and the opening starts after that drive.
-    expect(today.openings[0].kind).toBe('start');
-    expect(today.openings[0].start).toBeGreaterThanOrEqual(630);
+    // Today is not measured: its room depends on where the van is now (a follow-up).
+    expect(days.map((d) => d.date)).toEqual(['2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25']);
+    expect(days[0]).toMatchObject({ stops: 1, slots: expect.any(Number) });
+    expect(days[0].openings.length).toBeGreaterThan(0);
     const totals = JSON.parse(row.totals);
     expect(totals.next.dates).toEqual(['2026-11-20', '2026-11-21', '2026-11-23']);
+    expect(totals.today).toBeUndefined();
     expect(JSON.parse(row.ad_shadow)).toMatchObject({ decision: 'full', live: [{ id: 'c1', status: 'paused', mode: 'stop' }] });
-    // Only the measured dates and the Sundays are read, never the whole 14-day scan.
-    expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-19', '2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
+    // Only the measured dates and the Sundays are read: never today, never the whole 14-day scan.
+    expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
+    expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-20', dateTo: '2026-11-20' }));
     expect(JSON.parse(row.ad_shadow)).toEqual(expect.objectContaining({ slotsAhead: expect.any(Number) }));
-    expect(result).toMatchObject({ status: 'completed', days: 6 });
+    expect(result).toMatchObject({ status: 'completed', days: 5 });
+  });
+
+  test('a Sunday counts when the technician has a stop booked that day', async () => {
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-22' ? [stop('s1', '10:00:00', '11:00:00')] : []));
+    const { conn, writes } = fakeConn();
+    await runRouteCheck({ conn, now: NOW });
+    expect(JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22')).toMatchObject({ stops: 1, staffed: true });
   });
 
   test('a tech-day that fails to read is marked and the row is still written', async () => {
@@ -379,13 +285,6 @@ describe('runRouteCheck', () => {
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
     replan.loadBlocks.mockResolvedValue([]);
-  });
-
-  test('a stop on site with no place leaves today unmeasured, never free time from the start point', async () => {
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [stop('t1', '10:00:00', null, { status: 'on_site', lat: null, lng: null })] : []));
-    const { conn, writes } = fakeConn({ progress: [{ id: 't1', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:00:00Z', lat: null, lng: null }] });
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ON_SITE_WITHOUT_COORDINATES' });
   });
 
   test("an unassigned version-2 allocation holds its combined span against dispatch openings too", async () => {
@@ -403,60 +302,6 @@ describe('runRouteCheck', () => {
     expect(friday.openings.map((o) => [o.start, o.min])).toEqual([[660, 360]]); // 8-9 is under a job slot; 9-11 is held
   });
 
-  test('a stop finished between the two reads is done, not simulated again and not lost', async () => {
-    // The rows' read still sees the 9:00 stop live; the progress read, after it, sees it completed at 9:45.
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [stop('x1', '09:00:00', '10:00:00', { lat: 27.5, lng: -82.4 })] : []));
-    const { conn, writes } = fakeConn({ progress: [{ id: 'x1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: NOW });
-    const today = JSON.parse(writes[0][1].days)[0];
-    expect(today).toMatchObject({ stops: 0, van: 'completed' });
-    expect(today.openings[0]).toMatchObject({ kind: 'tail', start: 630 });
-    expect(today.driveMin).toBeGreaterThan(0); // the drive home from the last stop, not a return to that customer
-  });
-
-  test('co-visit siblings: one on site and one not yet moved are one stop on site, never a second visit', async () => {
-    const sib = (id, status) => stop(id, '09:00:00', null, {
-      status, visit_id: null, customer_id: 'cust-9', lat: 27.5, lng: -82.4, service_address_line1: '1 Test St',
-    });
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [sib('s1', 'on_site'), sib('s2', 'confirmed')] : []));
-    const { conn, writes } = fakeConn({ progress: [{ id: 's1', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:00:00Z', lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: NOW }); // arrived 10:00, two 45-minute services: busy to 11:30
-    const today = JSON.parse(writes[0][1].days)[0];
-    expect(today).toMatchObject({ stops: 0, van: 'on_site' });
-    expect(today.openings[0].start).toBeGreaterThanOrEqual(690);
-  });
-
-  test("one visit's services: one on site and one not yet moved are one stop on site, charged in full", async () => {
-    const svc = (id, status) => stop(id, '09:00:00', null, { status, visit_id: 'visit-9', customer_id: 'cust-9', lat: 27.5, lng: -82.4 });
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [svc('v1', 'on_site'), svc('v2', 'confirmed')] : []));
-    const { conn, writes } = fakeConn({ progress: [{ id: 'v1', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:00:00Z', lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: NOW }); // arrived 10:00, two 45-minute services: busy to 11:30
-    const today = JSON.parse(writes[0][1].days)[0];
-    expect(today).toMatchObject({ stops: 0, van: 'on_site' });
-    expect(today.openings[0].start).toBeGreaterThanOrEqual(690);
-  });
-
-  test('a stop done early still holds its booked window; the read is the booking surfaces\' own', async () => {
-    replan.loadDayStops.mockResolvedValue([]);
-    // Booked 10 AM-noon, finished at 10:15: the hour to noon is not room.
-    listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-11-19' ? [span('d1', TECH, 600, 720)] : []));
-    const { conn, writes } = fakeConn({ progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T15:15:00Z', lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: NOW });
-    const today = JSON.parse(writes[0][1].days)[0];
-    expect(today.openings[0].start).toBeGreaterThanOrEqual(720);
-    expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({ db: conn, dateFrom: '2026-11-19', dateTo: '2026-11-19' }));
-    listOccupiedWindows.mockResolvedValue([]);
-  });
-
-  test('two stops on site at once leave today unmeasured', async () => {
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19'
-      ? [stop('o1', '09:00:00', null, { status: 'on_site' }), stop('o2', '13:00:00', null, { status: 'on_site', customer_id: 'cust-2', lat: 27.45, lng: -82.4 })]
-      : []));
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'SEVERAL_ON_SITE' });
-  });
-
   test("a failed stops read (a Sunday's or a date's) marks that date and the row is still written", async () => {
     replan.loadDayStops.mockImplementation(async (_c, date) => {
       if (date === '2026-11-22' || date === '2026-11-20') throw new Error('timeout');
@@ -468,30 +313,6 @@ describe('runRouteCheck', () => {
     const days = JSON.parse(writes[0][1].days);
     expect(days.find((d) => d.date === '2026-11-20')).toMatchObject({ skip: 'FAILED' });
     expect(days.find((d) => d.date === '2026-11-22')).toMatchObject({ skip: 'FAILED' }); // staffed when unknown
-  });
-
-  test('a stop put on site after the rows\' read leaves today unmeasured', async () => {
-    replan.loadDayStops.mockResolvedValue([]);
-    const { conn, writes } = fakeConn({ progress: [{ id: 'late', technician_id: TECH, status: 'on_site', arrived_at: '2026-11-19T15:20:00Z', lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ACTIVE_STOP_NOT_IN_ROUTE' });
-  });
-
-  test("a completion whose tracker update failed: the dispatch finish time sets the van's clock", async () => {
-    replan.loadDayStops.mockResolvedValue([]);
-    const { conn, writes } = fakeConn({ progress: [{
-      id: 'd1', technician_id: TECH, status: 'completed', completed_at: null, check_out_time: null,
-      actual_end_time: '2026-11-19T15:20:00Z', lat: 27.5, lng: -82.4, // 10:20 ET
-    }] });
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', van: 'completed' });
-  });
-
-  test('a stop done with no finish time leaves today unmeasured, never the van at home', async () => {
-    replan.loadDayStops.mockResolvedValue([]);
-    const { conn, writes } = fakeConn({ progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: null, lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'COMPLETION_WITHOUT_TIME' });
   });
 
   test('a run-wide read failing still writes the hour, as unknown', async () => {
@@ -539,36 +360,23 @@ describe('runRouteCheck', () => {
     expect(writes[0][1]).toMatchObject({ status: 'failed' });
   });
 
-  test("today's stops and progress are read in one read-only snapshot", async () => {
-    const { conn, writes } = fakeConn({ progress: [{ id: 'x1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }] });
+  test('every read of a run comes from one read-only snapshot, each recoverable read in a savepoint; the row is written outside it', async () => {
+    const { conn, writes } = fakeConn();
     const seen = [];
-    const snap = (table) => conn(table);
+    const snap = (table) => ({ ...conn(table), insert: async () => { throw new Error('written inside the snapshot'); } });
     snap.raw = conn.raw;
     snap.isTransaction = true;
+    snap.transaction = jest.fn(async (fn) => fn(snap)); // a savepoint
     const pool = (table) => conn(table);
     pool.raw = conn.raw;
     pool.transaction = jest.fn(async (fn, opts) => { seen.push(opts); return fn(snap); });
-    await runRouteCheck({ conn: pool, now: NOW });
+    const result = await runRouteCheck({ conn: pool, now: NOW });
     expect(pool.transaction).toHaveBeenCalledTimes(1);
     expect(seen[0]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
-    expect(replan.loadDayStops.mock.calls.find(([, d]) => d === '2026-11-19')[0]).toBe(snap);
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ van: 'completed' });
-  });
-
-  test("a failed progress read on a Sunday keeps today's technicians, marked FAILED", async () => {
-    replan.loadDayStops.mockResolvedValue([]);
-    const { conn, writes } = fakeConn();
-    const base = conn;
-    const failing = (table) => {
-      const q = base(table);
-      if (table === 'scheduled_services') q.leftJoin = () => { throw new Error('timeout'); };
-      return q;
-    };
-    failing.raw = base.raw;
-    await runRouteCheck({ conn: failing, now: new Date('2026-11-22T17:00:00Z') }); // Sunday noon ET
-    const today = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22');
-    expect(today).toMatchObject({ skip: 'FAILED' });
-    expect(JSON.parse(writes[0][1].ad_shadow).decision).not.toBe('floor');
+    expect(replan.loadDayStops.mock.calls.find(([, d]) => d === '2026-11-20')[0]).toBe(snap);
+    expect(snap.transaction).toHaveBeenCalled();
+    expect(result.status).toBe('completed');
+    expect(writes.map(([table]) => table)).toEqual(['route_check_runs']);
   });
 
   test("one date's occupancy read failing marks that date and the row is still written", async () => {
@@ -585,56 +393,4 @@ describe('runRouteCheck', () => {
     listOccupiedWindows.mockResolvedValue([]);
   });
 
-  test('a drive running long: the en-route stop is reached no earlier than now', () => {
-    const far = stop('e1', '09:00:00', null, { status: 'en_route', lat: 27.6, lng: -82.3 });
-    const mine = [{ id: 'e1', status: 'en_route', en_route_at: '2026-11-19T14:00:00Z' }]; // left at 9:00
-    const van = { clockMin: 480 };
-    const dep = rc.enRouteDeparture({ first: [far], mine, van, origin: HQ, nowMin: 630, day: '2026-11-19' }); // 10:30
-    expect(dep).toBeLessThan(630); // the drive under way is credited
-    expect(dep).toBeGreaterThan(540); // but the stop is not reached before now
-    // Still driving on time (now 9:05): it departs when it set off.
-    expect(rc.enRouteDeparture({ first: [far], mine, van, origin: HQ, nowMin: 545, day: '2026-11-19' })).toBe(540);
-    // No set-off time: from now.
-    expect(rc.enRouteDeparture({ first: [far], mine: [], van, origin: HQ, nowMin: 630, day: '2026-11-19' })).toBe(630);
-  });
-
-  test('one stop on site and another en route leave today unmeasured', async () => {
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19'
-      ? [stop('o1', '09:00:00', null, { status: 'on_site' }), stop('e1', '13:00:00', null, { status: 'en_route', customer_id: 'cust-2', lat: 27.45, lng: -82.4 })]
-      : []));
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'ON_SITE_AND_EN_ROUTE' });
-  });
-
-  test('a drive under way is simulated from when the van set off, not again from now', async () => {
-    const far = { lat: 27.6, lng: -82.3 };
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [stop('e1', '10:00:00', null, { status: 'en_route', ...far })] : []));
-    const run = async (enRouteAt) => {
-      const { conn, writes } = fakeConn({ progress: [{ id: 'e1', technician_id: TECH, status: 'en_route', en_route_at: enRouteAt, ...far }] });
-      await runRouteCheck({ conn, now: NOW });
-      return JSON.parse(writes[0][1].days)[0];
-    };
-    const setOffAt10 = await run('2026-11-19T15:00:00Z'); // left at 10:00, checked at 10:30
-    const unknown = await run(null);
-    expect(setOffAt10.endMin).toBeLessThan(unknown.endMin);
-  });
-
-  test('two stops en route at once leave today unmeasured', async () => {
-    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19'
-      ? [stop('e1', '11:00:00', null, { status: 'en_route' }), stop('e2', '13:00:00', null, { status: 'en_route', lat: 27.45, lng: -82.4 })]
-      : []));
-    const { conn, writes } = fakeConn();
-    await runRouteCheck({ conn, now: NOW });
-    expect(JSON.parse(writes[0][1].days)[0]).toMatchObject({ date: '2026-11-19', skip: 'SEVERAL_EN_ROUTE' });
-  });
-
-  test("a Sunday stays staffed after its last stop is done", async () => {
-    replan.loadDayStops.mockResolvedValue([]);
-    const { conn, writes } = fakeConn({ progress: [{ id: 'd1', technician_id: TECH, status: 'completed', completed_at: '2026-11-22T16:00:00Z', lat: 27.5, lng: -82.4 }] });
-    await runRouteCheck({ conn, now: new Date('2026-11-22T17:00:00Z') }); // Sunday noon ET, the only stop done at 11
-    const today = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-22');
-    expect(today).toMatchObject({ van: 'completed' });
-    expect(today.slots).toBeGreaterThan(0);
-  });
 });

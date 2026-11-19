@@ -2164,9 +2164,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // HOURLY 7:30 AM-7:30 PM — route check, shadow (owner 2026-11-19, "do whatever you reccomend"). Recalculates the
-  // rest of today's route and the next staffed days from the live schedule, counts the openings a new job fits
-  // (dispatch and online) and records what the ad budget rule would do, in route_check_runs. It changes no visit,
-  // budget or message. Every hour, not only while a tech is clocked in: no technician clocks in yet (time_entries).
+  // next staffed days from the live schedule, counts the openings dispatch can fill and records what the ad budget
+  // rule would do, in route_check_runs. It changes no visit, budget or message. Every hour, so a booking or a
+  // cancellation made during the day shows at the next hour.
   cron.schedule('30 7-19 * * *', async () => {
     try {
       await runExclusive('route-check', async () => {
