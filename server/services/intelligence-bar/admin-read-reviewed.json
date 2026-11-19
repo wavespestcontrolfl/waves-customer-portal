@@ -23,14 +23,14 @@
     },
     {
       "endpoint": "/admin/csr/overview",
-      "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end. Re-reviewed 2026-10-30 (#7142, CSR source question): avgScore and teamTotals.avgScore now put each csr_call_scores row on the 16-point scale by its own maximum (15 when its point_details has no source_question key). Two new pure callees, storedPointDetails (parses the same row's point_details) and totalOnCurrentScale (arithmetic), plus same-file constants; no new field, table, write or sent message. Re-reviewed 2026-11-19 (booked-on-call count): getTeamOverview now also returns weeklyCallOutcomes, read by csr/weekly-call-outcomes.js: one aggregate select on call_log (inbound new_lead calls of the last 7 ET days, not voice sandbox, grouped by caller phone identity in SQL so each caller counts once), returning only counts (callers, callers with a recorded outcome, booked, estimate promised), a percent that is null when no caller has an outcome, and a fixed one-line sentence built from them, never a phone number; no call, caller, customer or transcript field, no write, no sent message. The read is fail-soft (a failure gives null).",
+      "reviewed": "Handler + CSRCoach.getTeamOverview (csr-coach.js): csr_call_scores and ai_follow_up_tasks selects, aggregated per CSR in memory; read end to end. Re-reviewed 2026-10-30 (#7142, CSR source question): avgScore and teamTotals.avgScore now put each csr_call_scores row on the 16-point scale by its own maximum (15 when its point_details has no source_question key). Two new pure callees, storedPointDetails (parses the same row's point_details) and totalOnCurrentScale (arithmetic), plus same-file constants; no new field, table, write or sent message. Re-reviewed 2026-11-19 (booked-on-call count): getTeamOverview now also returns weeklyCallOutcomes, read by csr/weekly-call-outcomes.js: one aggregate select on call_log (inbound new_lead calls of the last 7 ET days, not voice sandbox, grouped by caller phone identity in SQL so each caller counts once), returning only counts (callers, callers with a recorded outcome, booked, estimate promised), a percent that is null when no caller has an outcome, and a fixed one-line sentence built from them, never a phone number; no call, caller, customer or transcript field, no write, no sent message. The read is fail-soft (a failure gives null). Re-reviewed 2026-11-19 (pre-push audit): the same one select now also requires a valid extraction (v2_extraction_status 'valid'), drops calls whose disposition says no prospect (an existing customer by AI routing or staff tag, spam, wrong number, vendor, no conversation), bounds the week by callStartedAtSql (sms-pending-conversations.js, SQL text only) with created_at as a lower bound, counts the staff tag 'new_lead_booked' as booked, and names the estimate count estimateRequestedOrPromised; still counts only, no new field, table, write or sent message.",
       "scope": "broad",
       "query": [
         "days"
       ],
       "signals": [],
       "unresolved": [],
-      "hash": "2abafecdf57e1967081cf7fa236d852d",
+      "hash": "4b316840b495fcf3ad1240b67221a0c4",
       "freeText": {
         "lossReasons": "content",
         "reason": "content"
