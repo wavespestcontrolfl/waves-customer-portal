@@ -77,11 +77,13 @@
  * settlement transaction, and the queue honors the customer's payment_receipt opt-out, the billing email choice, the text channel
  * choice, the send window and the retries. Staff recorded the payment, so the job is not customer-initiated and its text keeps the
  * send window. `receipt` then reads { queued: true }. The caller fences the amount with amountCents + owedCentsSeen (the figure the
- * sheet showed), so the receipt never confirms a sum the technician did not take. A part-paid invoice (amount_paid > 0 on the locked
- * row) gets no automatic checkout receipt: the receipt reads the whole bill (above), which would name more than this final payment.
- * Nor does one whose invoice already holds a receipt job (the enqueue dedupes on invoice_id: a reopened invoice); that job
- * belongs to the earlier payment, so nothing is queued for this one. `receipt` then reads { manual: true }: the tender sheet
- * says no receipt went out for this payment (the paid-visit receipt check flags it too).
+ * sheet showed), so the receipt never confirms a sum the technician did not take. The receipt is queued ONLY when this payment
+ * is the invoice's only money (checkoutTenderIsSoleMoney, on the locked row): receipts read earlier money in more than one way
+ * (the text reads the amount due, the receipt page the newest payment row tagged to the invoice), so a part payment, applied
+ * credit, an estimate deposit or another tagged payment row (a visit prepayment applied to it) could make it name a sum the
+ * technician did not take. Nor is it queued when the invoice already holds a receipt job (the enqueue dedupes on invoice_id: a
+ * reopened invoice; that job belongs to the earlier payment). `receipt` then reads { manual: true }: the tender sheet says no
+ * receipt went out for this payment (the paid-visit receipt check flags it too).
  *
  * Refusals throw an Error carrying `statusCode` (400 / 404 / 409) and
  * `isOperational`; the lost-race 409 also carries `currentStatus`. Anything
@@ -102,7 +104,7 @@ const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceDepositCreditCents, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
 const { partialPaymentsLive, ibRecordPaymentPartialLive } = require('../config/feature-gates');
 const { customerOnAutopay } = require('./autopay-eligibility');
 
@@ -194,6 +196,17 @@ async function partPaymentRefusal(conn, invoice) {
 
 function owedChangedMessage(nowCents) {
   return `The amount owed on this invoice changed to $${(nowCents / 100).toFixed(2)} since the page loaded (another payment or an edit). Reload the invoice and check it before you record a payment. Nothing was recorded.`;
+}
+
+// Whether a checkout tender is the invoice's only money (see checkoutTender above), read on the LOCKED row and in the settlement
+// transaction, after this payment's ledger row is inserted (paymentId, excluded).
+async function checkoutTenderIsSoleMoney(trx, locked, paymentId) {
+  if (Number(locked.amount_paid) > 0 || Number(locked.credit_applied) > 0 || invoiceDepositCreditCents(locked) > 0) return false;
+  const other = await trx('payments').where({ customer_id: locked.customer_id })
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(locked.id)])
+    .whereNot({ id: paymentId })
+    .first('id');
+  return !other;
 }
 
 async function recordManualPayment(id, {
@@ -604,7 +617,7 @@ async function recordManualPayment(id, {
     // collect. Complete it on the SAME trx so a paid invoice never keeps
     // an `active` plan that blocks edits / credit reversal.
     await PaymentPlans.completeActivePlansForInvoice(row.id, trx);
-    if (queueReceipt && !(checkoutTender && Number(locked.amount_paid) > 0)) {
+    if (queueReceipt && (!checkoutTender || await checkoutTenderIsSoleMoney(trx, locked, paymentId))) {
       // Same transaction as the paid flip: the receipt job is durable the
       // moment the payment is. A Zelle transfer is the customer's own act
       // minutes ago (customer-initiated for the send-window decision); a

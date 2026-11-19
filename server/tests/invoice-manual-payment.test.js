@@ -60,7 +60,7 @@ const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invo
 
 function recorder({ first = null, returning = [] } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNotIn', 'whereNot', 'whereRaw', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(() => q);
   // insert() is awaited bare (most callers) or chained to returning() (the payments row, whose id the Undo marker names).
@@ -535,7 +535,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
 
   // A settlement fixture over a mutable locked row. The combined-session release can rewrite the row, as clearPaymentIntentStamps does;
   // `terms` feed the fence's own lookups on the plain connection and on the trx.
-  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null } = {}) {
+  function settle({ pre = card(), locked = card(), onRelease = null, termLinked = false, hasTermTable = true, visit = { id: 'sv-other', status: 'scheduled' }, timer = null, taggedPayment = null } = {}) {
     const calls = { update: null, updateArgs: null, paymentsInsert: null };
     const answer = (table, row) => {
       if (table === 'annual_prepay_terms') return recorder({ first: termLinked ? { id: 'term-9' } : null });
@@ -560,7 +560,7 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
           calls.update = r.update;
           return r;
         }
-        if (table === 'payments') { const r = recorder(); calls.paymentsInsert = r.insert; return r; }
+        if (table === 'payments') { const r = recorder({ first: taggedPayment }); calls.paymentsInsert = r.insert; calls.paymentsQuery = r; return r; }
         if (table === 'scheduled_services') return recorder({ first: visit });
         if (table === 'time_entries') return recorder({ first: timer });
         if (table === 'annual_prepay_terms') return answer(table);
@@ -777,6 +777,31 @@ describe('recordManualPayment — what the Intelligence Bar card adds (settlemen
       expect(out.receipt).toEqual({ manual: true });
       expect(ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain).not.toHaveBeenCalled();
       expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      // A visit prepayment applied to the invoice: its tagged row is what the receipt page would show.
+      ['another payment row tagged to the invoice', {}, { id: 'pay-0' }],
+      ['applied credit', { credit_applied: '10.00' }, null],
+      ['an estimate deposit credit', { line_items: JSON.stringify([{ category: 'deposit_credit', amount: -20 }]) }, null],
+    ])('checkoutTender with %s: recorded, no automatic receipt (manual)', async (_why, over, taggedPayment) => {
+      const inv = card(over);
+      const owed = Math.round((117 - Number(over.credit_applied || 0)) * 100);
+      settle({ pre: inv, locked: inv, taggedPayment });
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      const out = await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: owed, owedCentsSeen: owed, recordedByTechnicianId: 'staff-1' });
+      expect(out.receipt).toEqual({ manual: true });
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).not.toHaveBeenCalled();
+      expect(sendReceiptEmail).not.toHaveBeenCalled();
+    });
+
+    test('checkoutTender: the sole-money read names this invoice and leaves out its own new ledger row', async () => {
+      const calls = settle();
+      jest.spyOn(Closeout, 'closeOutVisitForIssuedInvoice').mockResolvedValue({ closed: true });
+      await recordManualPayment('inv-1', { method: 'check', sendReceipt: true, checkoutTender: true, amountCents: 11700, owedCentsSeen: 11700, recordedByTechnicianId: 'staff-1' });
+      expect(calls.paymentsQuery.whereRaw).toHaveBeenCalledWith("metadata::jsonb ->> 'invoice_id' = ?", ['inv-1']);
+      expect(calls.paymentsQuery.whereNot).toHaveBeenCalledWith({ id: 'pay-1' });
+      expect(ReceiptDeliveryQueue.enqueueReceiptDelivery).toHaveBeenCalledTimes(1);
     });
 
     test('checkoutTender on a part-paid invoice: the payment is recorded and no receipt goes out (it would name the whole bill)', async () => {
