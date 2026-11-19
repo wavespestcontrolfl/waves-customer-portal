@@ -801,10 +801,12 @@ jobs:
         run: npx vitest run --silent --shard=${{ matrix.shard }}/3
 
   browser-previews:
-    # ubuntu-24.04, not ubuntu-latest: on the Ubuntu 26.04 image (2026-10-31)
-    # `playwright install` fails with "Playwright does not support chromium
-    # on ubuntu26.04-x64". Move back once the pinned Playwright supports it.
     runs-on: ubuntu-24.04
+    # Match package-lock.json so Chromium, WebKit and their system libraries
+    # are ready before the previews start. Update the image when Playwright changes.
+    container:
+      image: mcr.microsoft.com/playwright:v1.59.1-noble-amd64@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645
+      options: --user 1001
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -814,7 +816,6 @@ jobs:
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:qa-workflow
       - name: Portal, payment, report and completion previews
         run: npm run qa:previews
