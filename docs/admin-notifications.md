@@ -627,15 +627,18 @@ day missed while the server was down is not made up). The owner turns it off in 
 "Morning summary: items waiting for you"). It sends nothing to a customer.
 
 The 9 AM "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1; no gate, an internal admin
-push): one banner a day to the admin phones says "Call today: N estimates" ("1 estimate" when one), body "Opened in the
-last 2 days. Nobody has called yet.", and a tap opens `/admin/estimates?view=call_today`, the Estimates page on its Call
-today filter. N is that page's own list: `services/estimate-call-today-push.js` applies `isCallTodayEstimate` from
+push): one banner a day to the admin phones says "Call today: N estimates" ("1 estimate" when one), body "Follow up on
+these recently active estimates." (the list can include an estimate that was called before the customer reopened it,
+or one called without an answer, so the words never claim nobody has called), and a tap opens `/admin/estimates?view=call_today`, the Estimates page on its Call
+today filter. N is that page's own list: `services/estimate-call-today-push.js` takes the rows the page loads (`estimateListQuery` in
+`services/estimate-call-list.js`, the list route's own selection: sent-list rows, newest 2,000, unarchived), then applies `isCallTodayEstimate` from
 `shared/estimate-call-today.cjs` (the one home of the rule; the page imports it too) to rows built by
 `callTodayFields` in `services/estimate-call-list.js` (the same mapping the list route uses). The words carry a count
 only, never a customer name or phone. With nothing on the list it sends nothing. It is the `estimate_call_today`
 trigger (area Estimates, fyi, expires in 7 days), sent `pushOnly`: no bell row, admin-role phones only, one banner per ET
 day (the send first takes a `sms_send_claims` row `estimate_call_today:<ET date>`; a day missed while the server was down
-is not made up). The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
+is not made up). The banner counts as sent only when a phone accepted it: with push off or no device to send to the day's claim is released
+(a later run may try); after a device failure it is kept (no second banner). The cron is `0 9 * * *` in `America/New_York` (`scheduler.js`). Each admin turns it off in Push Settings
 (Alerts group, "Morning list: estimates to call today"). It sends nothing to a customer.
 
 The owner's open-visit banner (owner 2026-11-04, "banner"; `GATE_OWNER_NUDGE_BANNER`, dark): the 7 PM open-visit nudge

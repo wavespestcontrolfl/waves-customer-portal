@@ -37,10 +37,12 @@ const row = (id, viewedHoursAgo, over = {}) => ({
 let estimateRows;
 let clickRows;
 let claimed;
+let estimateCalls; // the list query's method calls, in order
 beforeEach(() => {
   jest.clearAllMocks();
   estimateRows = [];
   clickRows = [];
+  estimateCalls = [];
   claimed = new Set();
   mockLastCalled.mockResolvedValue(new Map());
   mockDb.raw.mockImplementation(async (_sql, [key]) => {
@@ -52,8 +54,19 @@ beforeEach(() => {
     const q = { where: () => q, whereNull: () => q, whereRaw: () => q, whereIn: () => q, groupBy: () => q, select: () => q, max: () => q, then: (ok, no) => Promise.resolve(rows).then(ok, no) };
     return q;
   };
+  // The estimates list query: records every call and applies limit(n) to the rows (newest first, as the query orders them).
+  const listQuery = () => {
+    let limit = Infinity;
+    const q = {};
+    for (const name of ['leftJoin', 'select', 'orderBy', 'where', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereIn']) {
+      q[name] = (...args) => { estimateCalls.push([name, ...args]); return q; };
+    }
+    q.limit = (n) => { limit = n; estimateCalls.push(['limit', n]); return q; };
+    q.then = (ok, no) => Promise.resolve(estimateRows.slice(0, limit)).then(ok, no);
+    return q;
+  };
   mockDb.mockImplementation((table) => {
-    if (table === 'estimates') return chain(estimateRows);
+    if (table === 'estimates') return listQuery();
     if (table === 'short_codes') return chain(clickRows);
     if (table === 'sms_send_claims') return { where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return 1; } }) };
     throw new Error(`unexpected table ${table}`);
@@ -90,6 +103,36 @@ describe('the count is the page list', () => {
     expect(expected).toBe(3);
   });
 
+  test('counts only rows the page loads: the sent list, newest 2000, unarchived', async () => {
+    estimateRows = [row('a', 5)];
+    await countCallToday(NOW.getTime());
+    expect(estimateCalls).toContainEqual(['limit', 2000]);
+    expect(estimateCalls).toContainEqual(['whereNull', 'estimates.archived_at']);
+    // The sent-list scope: a row with sent_at, or a delivery attempt status. A viewed row never sent is outside it.
+    const scope = estimateCalls.find(([name, arg]) => name === 'where' && typeof arg === 'function');
+    const inner = [];
+    const rec = { whereNotNull: (...a) => { inner.push(['whereNotNull', ...a]); return rec; }, orWhereIn: (...a) => { inner.push(['orWhereIn', ...a]); return rec; } };
+    scope[1].call(rec);
+    expect(inner).toEqual([['whereNotNull', 'estimates.sent_at'], ['orWhereIn', 'estimates.status', ['scheduled', 'sending', 'send_failed']]]);
+  });
+
+  test('an estimate older than the newest 2000 the page loads is not counted', async () => {
+    // Newest first, as the query orders them: 2000 not-yet-eligible rows, then one old eligible one.
+    estimateRows = [...Array.from({ length: 2000 }, (_, i) => row(`new-${i}`, 1)), row('old-but-eligible', 5)];
+    expect(await countCallToday(NOW.getTime())).toBe(0);
+    estimateRows = [row('eligible', 5), ...Array.from({ length: 1999 }, (_, i) => row(`new-${i}`, 1))];
+    expect(await countCallToday(NOW.getTime())).toBe(1);
+  });
+
+  test('the list route and the push take their rows from the same estimateListQuery', () => {
+    const repo = path.join(__dirname, '..', '..');
+    const route = fs.readFileSync(path.join(repo, 'server/routes/admin-estimates.js'), 'utf8');
+    const push = fs.readFileSync(path.join(repo, 'server/services/estimate-call-today-push.js'), 'utf8');
+    expect(route).toMatch(/estimateListQuery\(db, \{/);
+    expect(push).toMatch(/estimateListQuery\(db, \{ sentOnly: true \}\)\.limit\(ESTIMATE_LIST_LIMIT\)/);
+    expect(route).not.toMatch(/db\('estimates'\)\s*\.leftJoin\('technicians'/);
+  });
+
   test('the page and the push import the same rule file, with no second copy', () => {
     const repo = path.join(__dirname, '..', '..');
     const page = fs.readFileSync(path.join(repo, 'client/src/pages/admin/PipelineAnalytics.jsx'), 'utf8');
@@ -119,7 +162,7 @@ describe('the banner', () => {
     const { build, rule, techVisible } = realTriggers.TRIGGER_REGISTRY.estimate_call_today;
     expect(build({ count: 3, day: '2026-11-19' })).toEqual({
       title: 'Call today: 3 estimates',
-      body: 'Opened in the last 2 days. Nobody has called yet.',
+      body: 'Follow up on these recently active estimates.',
       link: '/admin/estimates?view=call_today',
     });
     expect(build({ count: 1 }).title).toBe('Call today: 1 estimate');
@@ -127,7 +170,7 @@ describe('the banner', () => {
     expect(techVisible).toBeUndefined();
     // Never a customer name or phone, whatever the payload carries.
     const text = JSON.stringify(build({ count: 2, customerName: 'Synthetic Person', customerPhone: '+19415550101' }));
-    expect(text).not.toMatch(/Synthetic|\+1941/);
+    expect(text).not.toMatch(/Synthetic|\+1941|[Nn]obody/);
   });
 
   test('registers its tag, sound and bell-policy entry', () => {
@@ -150,7 +193,15 @@ describe('the banner', () => {
     mockLastCalled.mockRejectedValue(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
     await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toEqual({ count: 0, sent: false, error: 'count_failed' });
     expect(mockTrigger).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] count failed: ECONNRESET');
+    expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] count failed (ECONNRESET)');
+  });
+
+  test('a failed read without a driver code never logs the error text (it can carry customer phones)', async () => {
+    estimateRows = [row('a', 5)];
+    mockLastCalled.mockRejectedValue(new Error('select ... where to_phone in (+19415550101, +19415550102)'));
+    await runEstimateCallTodayPush({ now: NOW });
+    expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] count failed (no code)');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/\+1941/);
   });
 
   test('one claim per ET day: a second run the same day is skipped, the next day sends again', async () => {
@@ -170,6 +221,42 @@ describe('the banner', () => {
     mockTrigger.mockRejectedValueOnce(new Error('boom'));
     await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
     await expect(runEstimateCallTodayPush({ now: NOW })).resolves.toMatchObject({ sent: true });
+  });
+
+  describe('success needs a phone that accepted the banner', () => {
+    const run = () => runEstimateCallTodayPush({ now: NOW });
+    beforeEach(() => { estimateRows = [row('a', 5)]; });
+
+    test('push off (push null): a skip, the claim is released, a later run may try', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: null });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, skipped: 'no_push_delivered' });
+      expect([...claimed]).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: banner skipped (push off or no device to send to); claim released');
+      expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('banner sent'));
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 1, failed: 0 } });
+      await expect(run()).resolves.toMatchObject({ sent: true });
+    });
+
+    test('no device to send to (sent 0, no failure): a skip, the claim is released', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: { subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0 } });
+      await expect(run()).resolves.toMatchObject({ sent: false, skipped: 'no_push_delivered' });
+      expect([...claimed]).toEqual([]);
+    });
+
+    test('every device failed (sent 0, failed 1): uncertain, the claim stays, no second banner that day', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: { subscriptions: 1, sent: 0, failed: 1 } });
+      await expect(run()).resolves.toEqual({ count: 1, sent: false, error: 'delivery_uncertain' });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+      expect(logger.error).toHaveBeenCalledWith('[estimate-call-today] 2026-11-19: delivery uncertain (no device accepted it, some failed); claim kept');
+      await expect(run()).resolves.toMatchObject({ skipped: 'already_claimed' });
+      expect(mockTrigger).toHaveBeenCalledTimes(1);
+    });
+
+    test('one device took it and another failed: sent', async () => {
+      mockTrigger.mockResolvedValue({ bellWritten: false, push: { subscriptions: 2, sent: 1, failed: 1 } });
+      await expect(run()).resolves.toMatchObject({ sent: true });
+      expect([...claimed]).toEqual(['estimate_call_today:2026-11-19']);
+    });
   });
 
   test('a failed claim sends nothing', async () => {

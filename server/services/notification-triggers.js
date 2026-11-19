@@ -1321,7 +1321,7 @@ const TRIGGER_REGISTRY = {
     },
   },
   // The 9:00 AM ET "Call today" banner (owner 2026-11-19, plan page "Lead to Customer Plan", phase 1): how many viewed
-  // estimates nobody has called, and a tap opens the Estimates page on its Call today filter. services/estimate-call-today-push.js
+  // estimates are on its Call today list, and a tap opens the Estimates page on its Call today filter. services/estimate-call-today-push.js
   // sends it pushOnly, so it writes no bell row (rule: fyi) and each admin can switch it off in Push Settings. The words
   // are counts only, never a customer name or phone (a lock screen shows them). p = { count, day }.
   estimate_call_today: {
@@ -1334,7 +1334,7 @@ const TRIGGER_REGISTRY = {
       const count = Number(p.count) || 0;
       return {
         title: count === 1 ? 'Call today: 1 estimate' : `Call today: ${count} estimates`,
-        body: 'Opened in the last 2 days. Nobody has called yet.',
+        body: 'Follow up on these recently active estimates.',
         link: '/admin/estimates?view=call_today',
       };
     },

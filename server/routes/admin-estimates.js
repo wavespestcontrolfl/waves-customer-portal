@@ -91,13 +91,10 @@ const {
 } = require('../services/lawn-service-outline');
 const { OUTLINE_PROGRAMS, outlineProgram } = require('../services/service-outline-programs');
 
-// Hard ceiling for limit=all list fetches. The estimates pipeline computes
-// all-time KPIs client-side from this list; if the table ever outgrows this
-// cap the analytics silently truncate to the newest rows, so keep generous
-// headroom (pricing-risk batch is pure compute after one inventory preload).
-const ESTIMATE_LIST_LIMIT = 2000;
+// ESTIMATE_LIST_LIMIT (the hard ceiling for limit=all list fetches) and SENT_ONLY_DELIVERY_ATTEMPT_STATUSES live with
+// the list's row selection in services/estimate-call-list.js, which the 9 AM Call today push shares.
+const { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery } = require('../services/estimate-call-list');
 const SENDABLE_ESTIMATE_STATUSES = new Set(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']);
-const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
 
 function estimateMatchesSentOnlyScope(estimate = {}) {
   return !!estimate.sent_at || SENT_ONLY_DELIVERY_ATTEMPT_STATUSES.includes(String(estimate.status || ''));
@@ -4264,25 +4261,13 @@ router.get('/', async (req, res, next) => {
       ? 'all'
       : 'hide';
 
-    let query = db('estimates')
-      .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
-      .select('estimates.*', 'technicians.name as created_by_name')
-      .orderBy('estimates.created_at', 'desc');
-
-    if (status) query = query.where('estimates.status', status);
-    if (sentOnly) {
-      query = query.where(function () {
-        this.whereNotNull('estimates.sent_at')
-          .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
-      });
-    }
-    if (source) {
-      const sources = source.split(',');
-      query = query.whereIn('estimates.source', sources);
-    }
+    let query = estimateListQuery(db, {
+      status,
+      sentOnly,
+      sources: source ? source.split(',') : null,
+      archived,
+    });
     if (search) query = applyEstimateSearchFilter(query, search);
-    if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
-    else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
 
     let estimates;
     if (limit === 'all') {

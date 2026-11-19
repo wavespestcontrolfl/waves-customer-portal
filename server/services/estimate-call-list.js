@@ -66,6 +66,39 @@ async function lastCalledAtByEstimateId(database, estimates, nowMs = Date.now())
   return out;
 }
 
+// Hard ceiling for limit=all list fetches. The estimates pipeline computes all-time KPIs client-side from this list; if
+// the table ever outgrows this cap the analytics silently truncate to the newest rows, so keep generous headroom
+// (pricing-risk batch is pure compute after one inventory preload).
+const ESTIMATE_LIST_LIMIT = 2000;
+const SENT_ONLY_DELIVERY_ATTEMPT_STATUSES = ['scheduled', 'sending', 'send_failed'];
+
+/**
+ * The base row selection of GET /admin/estimates: ONE home for the list route and the 9 AM Call today push, so the
+ * push counts only rows the Estimates page can load. The page loads sentOnly rows (limit=all, the newest
+ * ESTIMATE_LIST_LIMIT by created_at) plus drafts; the caller applies the limit (`.limit(ESTIMATE_LIST_LIMIT)`) or a page.
+ *
+ * @param {Function} database  knex-like handle
+ * @param {{status?: string, sentOnly?: boolean, sources?: string[]|null, archived?: 'hide'|'only'|'all'}} [filters]
+ *   archived 'hide' (default) drops archived rows, 'only' keeps only them, 'all' keeps both.
+ */
+function estimateListQuery(database, { status, sentOnly = false, sources = null, archived = 'hide' } = {}) {
+  let query = database('estimates')
+    .leftJoin('technicians', 'estimates.created_by_technician_id', 'technicians.id')
+    .select('estimates.*', 'technicians.name as created_by_name')
+    .orderBy('estimates.created_at', 'desc');
+  if (status) query = query.where('estimates.status', status);
+  if (sentOnly) {
+    query = query.where(function () {
+      this.whereNotNull('estimates.sent_at')
+        .orWhereIn('estimates.status', SENT_ONLY_DELIVERY_ATTEMPT_STATUSES);
+    });
+  }
+  if (sources) query = query.whereIn('estimates.source', sources);
+  if (archived === 'only') query = query.whereNotNull('estimates.archived_at');
+  else if (archived !== 'all') query = query.whereNull('estimates.archived_at');
+  return query;
+}
+
 /**
  * The fields the "Call today" rule reads (shared/estimate-call-today.cjs), in the shape the list API sends.
  * ONE mapping for the list route and the 9 AM push, so the page and the push judge the same row.
@@ -101,4 +134,4 @@ function staffReasonOnExpiredAllowed(estimate, body = {}) {
   return (estimate.disposition || '') !== 'expired_unsent';
 }
 
-module.exports = { lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };
+module.exports = { ESTIMATE_LIST_LIMIT, SENT_ONLY_DELIVERY_ATTEMPT_STATUSES, estimateListQuery, lastCalledAtByEstimateId, callTodayFields, callLogPhoneFor, staffReasonOnExpiredAllowed, CUSTOMER_ANSWERED_SQL };

@@ -59,7 +59,7 @@ jest.mock('../services/visual-service-notes', () => ({
 
 const db = require('../models/db');
 const adminEstimatesRouter = require('../routes/admin-estimates');
-const { lastCalledAtByEstimateId, callLogPhoneFor, CUSTOMER_ANSWERED_SQL } = require('../services/estimate-call-list');
+const { lastCalledAtByEstimateId, callLogPhoneFor, CUSTOMER_ANSWERED_SQL, estimateListQuery } = require('../services/estimate-call-list');
 const { extendEstimate } = require('../services/estimate-extension');
 
 function routeHandler(router, path, method) {
@@ -281,5 +281,37 @@ describe('lastCalledAt (one batched read)', () => {
   test('callLogPhoneFor refuses garbage', () => {
     expect(callLogPhoneFor({ customer_phone: 'abc' })).toBeNull();
     expect(callLogPhoneFor({ customer_phone: '(941) 555-0101' })).toBe('+19415550101');
+  });
+});
+
+// The list route's row selection, shared with the 9 AM Call today push (estimate-call-today-push.js).
+describe('estimateListQuery', () => {
+  const recorder = () => {
+    const calls = [];
+    const q = new Proxy({}, { get: (_t, name) => (...args) => { calls.push([name, ...args]); return q; } });
+    return { q, calls };
+  };
+
+  test('joins the creator, newest first, hides archived rows by default', () => {
+    const { q, calls } = recorder();
+    estimateListQuery(() => q);
+    expect(calls).toEqual([
+      ['leftJoin', 'technicians', 'estimates.created_by_technician_id', 'technicians.id'],
+      ['select', 'estimates.*', 'technicians.name as created_by_name'],
+      ['orderBy', 'estimates.created_at', 'desc'],
+      ['whereNull', 'estimates.archived_at'],
+    ]);
+  });
+
+  test('status, source list and archived modes narrow the same query', () => {
+    const only = recorder();
+    estimateListQuery(() => only.q, { status: 'draft', sources: ['a', 'b'], archived: 'only' });
+    expect(only.calls).toContainEqual(['where', 'estimates.status', 'draft']);
+    expect(only.calls).toContainEqual(['whereIn', 'estimates.source', ['a', 'b']]);
+    expect(only.calls).toContainEqual(['whereNotNull', 'estimates.archived_at']);
+    const all = recorder();
+    estimateListQuery(() => all.q, { archived: 'all' });
+    expect(all.calls.map(([name]) => name)).not.toContain('whereNull');
+    expect(all.calls.map(([name]) => name)).not.toContain('whereNotNull');
   });
 });
