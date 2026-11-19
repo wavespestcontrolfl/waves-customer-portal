@@ -618,10 +618,14 @@ row's own title, body and link) and, with the gate on, ONE ring to the owner's c
 press-1 bridge of `lead-call-reply-ring.js` (`placeRing`, source `new-lead-cell-ring`): it rings the cell from the
 lead-alert line, says "New lead, nobody has reached them yet. Calling <first name>. Press 1 to connect.", and press 1 rings
 the lead from their home line. A ring nobody answers raises no bell: the original bell stays open. Guards: the lead's phone
-must be a valid US number (an international number or one with an extension is skipped), one ring per lead phone per 24 h
-counting a CALL-reply ring and a new-lead ring (both ring paths check both, under the phone lock), none while another call
-to that phone started in the last 10 minutes (the ring stamp is released and a later sweep judges again), at most one ring
-per sweep (a ring whose create timed out counts as that ring). The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
+must be a valid NANP number (`isValidNanpNumber`: an international number or one with an extension is skipped; Canadian and
+Caribbean +1 numbers pass, because the repo has no US-region check), a lead with no customer link rings by its own name
+(`call_log.customer_id` null), while a lead whose linked customer is deleted does not ring, a lead whose callback is asked or
+booked (`lead_callback_requests`) or who chose TEXT in the last 24 h does not ring, one ring per lead phone per 24 h counting
+a CALL-reply ring and a new-lead ring (both ring paths check both, under the phone lock), none while another call to that phone
+started in the last 10 minutes (the ring stamp is released and a later sweep judges again), at most one ring per sweep (a ring
+whose create timed out counts as that ring). A new-lead ring row that never gets a CallSid is closed as failed by the
+callback scheduler's stranded-ring step, with no bell. The clock counts only Monday to Saturday, 8:00 AM to 6:00 PM ET (`staffedDeadline`; holidays
 are not skipped), and nothing is sent outside those hours: they are judged again with a fresh clock before each stamp and before
 each push goes, and a sweep that runs past 6 PM stops and leaves the rest unstamped. A send more than 2 business hours (push) or 3 (ring) past due is dropped. Bells of
 the last 48 hours only. Each send is stamped first, fenced on the row being open and unchanged (`metadata.newLeadRealertAt`,

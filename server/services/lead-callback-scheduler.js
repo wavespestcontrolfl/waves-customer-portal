@@ -101,12 +101,14 @@ async function sendReminders(now) {
 // "Missed call request" bell, tried each tick until the bell is written.
 async function settleStrandedRings(now) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  const { LEAD_CALL_REPLY_RING_SOURCE, settleUnstartedRing } = require('./lead-call-reply-ring');
+  const { LEAD_CALL_REPLY_RING_SOURCE, NEW_LEAD_CELL_RING_SOURCE, settleUnstartedRing } = require('./lead-call-reply-ring');
   const rows = await db('call_log')
-    .where({ source: LEAD_CALL_REPLY_RING_SOURCE, direction: 'outbound' })
-    // 'failed' too: a settle whose bell never landed released its claim and
-    // is tried again here until the bell is written.
-    .whereIn('status', ['initiated', 'failed'])
+    // The new-lead cell ring's rows too: a create that timed out and never reached Twilio gets no callback, so its
+    // claimed row would stay initiated. It closes as failed with no bell.
+    .whereIn('source', [LEAD_CALL_REPLY_RING_SOURCE, NEW_LEAD_CELL_RING_SOURCE]).where({ direction: 'outbound' })
+    // 'failed' too, for a CALL-reply row: a settle whose bell never landed released its claim and is tried again here
+    // until the bell is written. A new-lead row has no bell, so once failed it is settled.
+    .where((q) => q.where('status', 'initiated').orWhere((f) => f.where({ status: 'failed', source: LEAD_CALL_REPLY_RING_SOURCE })))
     .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'missed_bell_at')")
     .modify((q) => whereNotSandboxCall(q))
     .whereNull('twilio_call_sid')

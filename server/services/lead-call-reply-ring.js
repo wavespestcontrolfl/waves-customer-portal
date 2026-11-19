@@ -152,6 +152,21 @@ async function callInProgressBlocker({ digits, now }, conn) {
   return recentCall ? 'call_in_progress' : null;
 }
 
+// A lead who chose TEXT, or whose callback is asked or booked (lead_callback_requests, read through the readers
+// lead-call-text-followup.js uses for its own once-a-day and one-open-follow-up rules), has told us how to follow up: a ring
+// at 60 minutes would override that. Read under the phone lock like the ring limits.
+async function callbackChoiceBlocker({ digits, now }, conn) {
+  const { openFollowup, sentKindRecently } = require('./lead-call-text-followup')._shared;
+  if (await openFollowup(digits, conn)) return 'callback_pending';
+  return (await sentKindRecently({ digits, kind: 'text_reply', now }, conn)) ? 'text_chosen' : null;
+}
+
+// The new-lead cell ring's guards (new-lead-reminder.js): the lead's own callback choice, then the shared ring limits. No
+// lead-text rule: the lead never texted us CALL.
+async function newLeadRingBlocker(args, conn) {
+  return (await callbackChoiceBlocker(args, conn)) || ringLimitBlocker(args, conn);
+}
+
 async function newestLeadId(customerId, conn) {
   const lead = await conn('leads')
     .where({ customer_id: customerId })
@@ -271,7 +286,8 @@ async function placeRing({ customer, fromPhone, smsLogId = null, now = new Date(
       bridgePhone: ADAM_CELL,
       from,
       bridgeFrom: TWILIO_NUMBERS.internalAlertCallerId(),
-      customer,
+      // A lead with no customer row is named by its own number in the touchpoint (call-bridge.js), not by an empty customer.
+      customer: bridgeCustomer(customer),
       source: kind.source,
       metadata: claim.metadata,
       leadName: firstName,
@@ -325,6 +341,9 @@ function ringKind(ring, firstName) {
     afterRing: ring ? async () => {} : cancelTimeAsk,
   };
 }
+
+// The customer the bridge call row and touchpoint name: none for a lead with no customer row (a new-lead ring's lead).
+const bridgeCustomer = (customer) => (customer.id ? customer : null);
 
 const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
 
@@ -390,21 +409,23 @@ async function settleMissedRow(row) {
 // its bell; a row with a sid is left to its callbacks.
 async function settleUnstartedRing(callLogId) {
   const row = await db('call_log')
-    .where({ id: callLogId, source: SOURCE })
+    .where({ id: callLogId })
+    .whereIn('source', [SOURCE, NEW_LEAD_CELL_RING_SOURCE])
     .whereNull('twilio_call_sid')
-    .first('id', 'customer_id', 'to_phone', 'bridged_at', 'metadata');
+    .first('id', 'source', 'customer_id', 'to_phone', 'bridged_at', 'metadata');
   if (!row || row.bridged_at) return false;
   await db('call_log').where({ id: row.id }).whereNull('twilio_call_sid')
     .whereNotIn('status', [...TERMINAL_CALL_STATUSES])
     .update({ status: 'failed', updated_at: new Date() });
+  // A new-lead ring raises no bell (its original bell stays open): closing it as failed settles it.
+  if (row.source === NEW_LEAD_CELL_RING_SOURCE) return true;
   return settleMissedRow(row);
 }
 
 module.exports = {
   ringForCallReply,
   placeRing,
-  // The new-lead cell ring's guards: the shared ring limits, no lead-text rule (the lead never texted us CALL).
-  newLeadRingBlocker: ringLimitBlocker,
+  newLeadRingBlocker,
   NEW_LEAD_CELL_RING_SOURCE,
   settleUnstartedRing,
   leadTextBlocker,
@@ -412,5 +433,5 @@ module.exports = {
   noteRingEnded,
   inRingHours,
   LEAD_CALL_REPLY_RING_SOURCE: SOURCE,
-  _test: { ringBlocker, ringLimitBlocker, displayName, raiseMissedBell, bellSettled, settleUnstartedRing, RING_TIMEOUT_SECONDS, UNCERTAIN_RING_CHECK_MS },
+  _test: { ringBlocker, ringLimitBlocker, callbackChoiceBlocker, displayName, raiseMissedBell, bellSettled, settleUnstartedRing, RING_TIMEOUT_SECONDS, UNCERTAIN_RING_CHECK_MS },
 };

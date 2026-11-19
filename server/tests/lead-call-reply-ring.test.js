@@ -17,6 +17,8 @@ function resetState() {
     recentCall: null,
     lead: { id: 'lead-1' },
     ringRow: null,
+    openRequest: null,
+    textChoice: null,
     reservedRow: { id: 'log-1', customer_id: 'cust-1', to_phone: '+19415550100', bridged_at: null, metadata: { leadName: 'Pat Sample', leadFirstName: 'Pat', leadId: 'lead-1' } },
     claimed: 1,
     locks: [],
@@ -38,6 +40,7 @@ function mockQuery(table) {
   q.first = async () => {
     if (table === 'current_customer_quote_texts') { mockState.quoteReads.push(q.filters); return mockState.quoteText; }
     if (table === 'sms_log') return mockState.leadText;
+    if (table === 'lead_callback_requests') return q.filters.some(([f]) => f === 'state') ? mockState.openRequest : mockState.textChoice;
     if (table === 'leads') return mockState.lead;
     if (table === 'call_log') {
       const bySource = q.filters.some(([f]) => f && f.source === 'lead-call-reply-ring')
@@ -373,11 +376,34 @@ describe('a ring of another kind (the new-lead cell ring)', () => {
   test('the CALL-reply ring counts a new-lead cell ring in its 24 h limit too, through the same two-source lookup', async () => {
     const queries = [];
     const conn = (table) => { const q = mockQuery(table); queries.push(q); return q; };
-    expect(newLeadRingBlocker).toBe(_test.ringLimitBlocker);
     mockState.priorRing = { id: 'new-lead-ring' };
     await expect(_test.ringBlocker({ customer: LEAD, digits: '9415550100', now: AFTERNOON }, conn)).resolves.toBe('rang_today');
     const ringQuery = queries.find((q) => q.filters.some(([f]) => f === 'source'));
     expect(ringQuery.filters).toContainEqual(['source', ['lead-call-reply-ring', 'new-lead-cell-ring']]);
+  });
+
+  test.each([
+    ['a callback asked or booked for the phone', () => { mockState.openRequest = { id: 'req-1' }; }, 'callback_pending'],
+    ['a TEXT choice in the last 24 h', () => { mockState.textChoice = { id: 'req-2' }; }, 'text_chosen'],
+  ])('%s holds the ring back, read under the phone lock through the follow-up readers', async (_label, arrange, reason) => {
+    arrange();
+    expect(await placeNewLeadRing()).toEqual({ rang: false, reason });
+    expect(mockInsertRow).not.toHaveBeenCalled();
+    expect(mockBridge).not.toHaveBeenCalled();
+  });
+
+  test('a lead with no customer row rings by its own name, with no customer on the call row', async () => {
+    const unlinked = { id: null, first_name: 'Pat', last_name: 'Sample' };
+    expect(await placeRing({ customer: unlinked, fromPhone: PHONE, now: AFTERNOON, blocker: newLeadRingBlocker, ring: kind })).toMatchObject({ rang: true });
+    expect(mockBridge.mock.calls[0][0]).toMatchObject({ customer: null, leadName: 'Pat', to: PHONE });
+    expect(mockInsertRow.mock.calls[0][0].customer).toMatchObject({ id: null });
+  });
+
+  test('a stale new-lead ring with no CallSid closes as failed and raises no bell (settleStrandedRings finds it by source)', async () => {
+    mockState.reservedRow = { id: 'log-9', source: 'new-lead-cell-ring', customer_id: null, to_phone: PHONE, bridged_at: null, metadata: { leadName: 'Pat Sample', leadFirstName: 'Pat' } };
+    await expect(_test.settleUnstartedRing('log-9')).resolves.toBe(true);
+    expect(mockState.updates[0]).toEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ status: 'failed' }) }));
+    expect(mockBell).not.toHaveBeenCalled();
   });
 
   test('needs no lead text: the lead never texted CALL', async () => {

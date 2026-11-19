@@ -114,6 +114,13 @@ async function closeStaleRows(digits, now, conn = db) {
     .update({ state: 'cancelled', updated_at: now });
 }
 
+// An open follow-up for this phone (an asked time question, or a booked call): one at a time per phone. Also read by the
+// new-lead cell ring (lead-call-reply-ring.js), which holds back while one governs the lead's follow-up.
+async function openFollowup(digits, conn = db) {
+  return conn('lead_callback_requests').whereIn('state', ['asked', 'scheduled'])
+    .whereRaw("RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = ?", [digits]).first('id');
+}
+
 async function sentKindRecently({ digits, kind, now }, conn = db) {
   return conn('lead_callback_requests')
     .where({ kind })
@@ -251,8 +258,7 @@ async function startFollowup({ customer, fromPhone, smsLogId, kind, now }) {
         .update({ state: 'cancelled', updated_at: now });
     }
     if (await sentKindRecently({ digits, kind, now }, trx)) return { reason: 'sent_today' };
-    const open = await trx('lead_callback_requests').whereIn('state', ['asked', 'scheduled']).whereRaw(...phoneMatch).first('id');
-    if (open) return { reason: 'open_followup' };
+    if (await openFollowup(digits, trx)) return { reason: 'open_followup' };
     const [row] = await trx('lead_callback_requests').insert({
       customer_id: customer.id,
       lead_id: leadId,
@@ -435,5 +441,5 @@ module.exports = {
   NIGHT_CALL_BODY,
   _test: { targetDateFor, slotInstant, bookSlot, dateText },
   // For lead-callback-scheduler.js (part 2b): the same send and bell rules.
-  _shared: { sendFollowup, raiseLeadBell },
+  _shared: { sendFollowup, raiseLeadBell, openFollowup, sentKindRecently },
 };

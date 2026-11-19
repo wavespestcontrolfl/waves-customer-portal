@@ -262,6 +262,14 @@ jest.setTimeout(30000);
     expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([stranded]);
   });
 
+  test('a new-lead cell ring stranded with no CallSid is settled once; a failed one (no bell to retry) is left', async () => {
+    const stranded = randomUUID();
+    await database('call_log').insert({ id: stranded, source: 'new-lead-cell-ring', direction: 'outbound', status: 'initiated', to_phone: '+19415550104', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await database('call_log').insert({ id: randomUUID(), source: 'new-lead-cell-ring', direction: 'outbound', status: 'failed', to_phone: '+19415550105', from_phone: '+19412975749', created_at: new Date(SLOT.getTime() - 6 * 60000) });
+    await runLeadCallbackTick({ now: SLOT });
+    expect(mockSettle.mock.calls.map(([id]) => id)).toEqual([stranded]);
+  });
+
   test('a failed sidless ring whose bell never landed is retried; one with its bell is not', async () => {
     const pending = randomUUID();
     await database('call_log').insert({ id: pending, source: 'lead-call-reply-ring', direction: 'outbound', status: 'failed', to_phone: '+19415550102', from_phone: '+19412975749', metadata: {}, created_at: new Date(SLOT.getTime() - 6 * 60000) });

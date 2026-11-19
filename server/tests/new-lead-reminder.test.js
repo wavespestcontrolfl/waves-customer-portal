@@ -525,6 +525,14 @@ describe('the 60-minute ring (GATE_NEW_LEAD_CELL_RING, dark)', () => {
     expect(mockPlaceRing.mock.calls[0][0].fromPhone).toBe('+19415550100');
   });
 
+  test('a lead with a valid phone and no customer link is rung by its own name, with no customer id', async () => {
+    process.env.GATE_NEW_LEAD_CELL_RING = 'true';
+    mockState.leads = [lead({ customer_id: null, first_name: 'Pat', last_name: 'Sample' })];
+    expect(await run(RING_NOW)).toMatchObject({ rang: 1 });
+    const [arg] = mockPlaceRing.mock.calls[0];
+    expect(arg).toMatchObject({ fromPhone: '+19415550100', customer: { id: null, first_name: 'Pat', last_name: 'Sample' } });
+  });
+
   test('a reached lead is never rung', async () => {
     process.env.GATE_NEW_LEAD_CELL_RING = 'true';
     mockBundles.byId = { 'n-1': { backAt: est('09', '10:40') } };
@@ -557,7 +565,6 @@ describe('the 60-minute ring (GATE_NEW_LEAD_CELL_RING, dark)', () => {
   });
 
   test.each([
-    ['no customer on the lead', () => { mockState.leads = [lead({ customer_id: null })]; }],
     ['customer row gone', () => { mockState.customer = null; }],
     ['a phone that is not 10 digits', () => { mockState.leads = [lead({ phone: '555-0100' })]; mockState.customer = { id: CUST, first_name: 'Pat', phone: '555' }; }],
     ['the row closed meanwhile', () => { mockState.open = { 'n-1': { done_at: new Date() } }; }],

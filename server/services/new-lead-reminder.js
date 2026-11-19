@@ -236,13 +236,15 @@ async function ringOwner(item, now) {
   try {
     const { placeRing, newLeadRingBlocker, NEW_LEAD_CELL_RING_SOURCE } = require('./lead-call-reply-ring');
     const customer = item.customerId ? await db('customers').where({ id: item.customerId }).whereNull('deleted_at').first() : null;
+    // A lead with a customer link keeps the deleted-customer guard; a lead with none (a valid phone alone) rings by its own name.
+    if (item.customerId && !customer) return null;
     // The shared NANP check on the whole stored number: an international number or one with an extension is no US
     // destination, so it is skipped (never its last ten digits with +1 in front).
     const stored = item.lead.phone || customer?.phone;
     const digits = isValidNanpNumber(stored) ? nanpNationalDigits(stored) : null;
-    if (!customer || !digits || !(await sweep.__private.rowStillOpen(item.row.id, LABEL))) return null;
+    if (!digits || !(await sweep.__private.rowStillOpen(item.row.id, LABEL))) return null;
     return await placeRing({
-      customer: { ...customer, first_name: customer.first_name || item.lead.first_name, last_name: customer.last_name || item.lead.last_name },
+      customer: { ...customer, id: customer?.id || null, first_name: customer?.first_name || item.lead.first_name, last_name: customer?.last_name || item.lead.last_name },
       fromPhone: `+1${digits}`,
       now,
       blocker: newLeadRingBlocker,
