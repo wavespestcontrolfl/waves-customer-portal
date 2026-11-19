@@ -6495,6 +6495,26 @@ adjustments do not add up to the handoff amount, every item carries
 never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
+
+For an invoice with a saved-card payment awaiting bank verification, both
+`POST /api/stripe/terminal/handoff` and `/payment-intent` return HTTP 409
+with `code: payment_charge_in_progress`. Handoff creation checks under the
+invoice lock before applying account credit or issuing the token. It can release
+an expired claim with no sign of submission. An unknown outcome or a payment
+received by Stripe that still needs local posting returns HTTP 409 with
+`code: payment_reconciliation_pending` and `reconciliationRequired: true`.
+Terminal checks again before creating the card-present intent and under the invoice
+lock before returning its client secret. At that final bind it first reserves
+the customer's combined-checkout namespace and, for a shared intent, locks the
+canonical allocation. It checks the hold before canceling either that shared
+checkout or a standalone pay-page intent. A reconciliation hold preserves the
+existing checkout pointer; the attempt/orphan remains the collection fence.
+If the hold appears during creation, the handoff must be reissued and the
+response includes `newHandoffRequired: true`. The post-tap
+`/apply-surcharge` request also checks the hold under lock before the
+device can continue. A surcharge-disabled session that already holds a
+client secret confirms directly with Stripe.
+
 `POST /api/stripe/terminal/validate-save-card-handoff` (machine-to-machine
 burn of the 60s single-use Tap to Pay CARD-SAVE handoff JWT — the token IS the
 auth; no charge ever happens on this surface). Minted by the admin-only,

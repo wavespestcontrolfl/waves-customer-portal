@@ -1,3 +1,5 @@
+const mockChargeFence = jest.fn();
+
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config', () => ({ jwt: { secret: 'test-secret' } }));
@@ -16,6 +18,16 @@ jest.mock('../services/audit-log', () => ({
   auditTerminalHandoffValidate: jest.fn(), ipFromReq: jest.fn(), uaFromReq: jest.fn(),
 }));
 jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  assertNoInvoiceChargeReconciliationPending: (...args) => mockChargeFence(...args),
+  parkInvoiceForSavedCardReconciliation: jest.fn(),
+  savedCardChargeSuppressesAlternateCollection: (err) => [
+    'STRIPE_CHARGE_IN_PROGRESS',
+    'STRIPE_AMBIGUOUS_OUTCOME',
+    'STRIPE_CHARGED_DB_FAILED',
+    'DEPOSIT_RECONCILIATION_REQUIRED',
+  ].includes(err?.code),
+}));
 jest.mock('stripe', () => jest.fn(() => ({ paymentIntents: { retrieve: jest.fn(), update: jest.fn() } })));
 
 const express = require('express');
@@ -43,6 +55,7 @@ async function withServer(fn) {
 test.each([true, false])('Terminal surcharge gate=%s refuses a late deposit before progressing its PI', async (enabled) => {
   jest.clearAllMocks();
   isEnabled.mockReturnValue(enabled);
+  mockChargeFence.mockResolvedValue(undefined);
   const invoice = {
     id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '100.00',
     credit_applied: '0.00', stripe_payment_intent_id: 'pi-terminal',
@@ -80,4 +93,55 @@ test.each([true, false])('Terminal surcharge gate=%s refuses a late deposit befo
   });
   expect(assertInvoiceDepositSettlementReady).toHaveBeenCalledWith(db, invoice);
   expect(Stripe).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['authentication hold', 'STRIPE_CHARGE_IN_PROGRESS', false, 'payment_charge_in_progress'],
+  ['received funds', 'STRIPE_CHARGED_DB_FAILED', true, 'payment_reconciliation_pending'],
+])('Terminal surcharge pre-confirm refuses a checkout %s', async (_label, errorCode, reconciliationRequired, responseCode) => {
+  jest.clearAllMocks();
+  isEnabled.mockReturnValue(true);
+  const invoiceUpdates = [];
+  const invoice = {
+    id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '100.00',
+    credit_applied: '0.00', stripe_payment_intent_id: 'pi-terminal',
+  };
+  const queryFor = (row, updates = null) => {
+    const query = {};
+    query.where = () => query;
+    query.forUpdate = () => query;
+    query.first = async () => row;
+    query.update = async (patch) => { if (updates) updates.push(patch); return 1; };
+    return query;
+  };
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return queryFor({ id: 'tech-1', active: true, role: 'technician' });
+    if (table === 'terminal_handoff_tokens') return queryFor({
+      jti: 'handoff-1', used_at: new Date(), tech_user_id: 'tech-1',
+      invoice_id: 'inv-1', amount_cents: 10000, stripe_payment_intent_id: 'pi-terminal',
+    });
+    if (table === 'invoices') return queryFor(invoice, invoiceUpdates);
+    throw new Error(`unexpected table ${table}`);
+  });
+  db.transaction = jest.fn(async (callback) => callback(db));
+  assertInvoiceDepositSettlementReady.mockResolvedValue(undefined);
+  mockChargeFence.mockRejectedValue(Object.assign(new Error('collection held'), {
+    code: errorCode,
+    reconciliationRequired,
+    ...(reconciliationRequired ? { stripePaymentIntentId: 'pi-received' } : {}),
+  }));
+
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/stripe/terminal/apply-surcharge`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer staff-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ jti: 'handoff-1' }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: responseCode, reconciliationRequired });
+  });
+  expect(assertInvoiceDepositSettlementReady).toHaveBeenCalledWith(db, invoice);
+  expect(mockChargeFence).toHaveBeenCalledWith('inv-1', db, { readOnly: true, checkout: true });
+  expect(Stripe).not.toHaveBeenCalled();
+  expect(invoiceUpdates).toEqual([]);
 });
