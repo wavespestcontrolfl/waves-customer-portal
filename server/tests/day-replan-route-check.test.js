@@ -440,7 +440,7 @@ describe('runRouteCheck', () => {
     replan.loadDayStops.mockResolvedValue([]);
   });
 
-  test('work the count must hold but cannot leaves its date unmeasured (rounds 35, 36)', () => {
+  test('work the count must hold but cannot leaves its date unmeasured (rounds 35 to 37)', () => {
     const work = (id, technician_id, extra) => stop(id, null, null, { technician_id, ...extra });
     const own = stop('s1', '10:00:00', null);
     const cases = [
@@ -452,6 +452,9 @@ describe('runRouteCheck', () => {
       [work('u5', null, { window_start: '09:00:00', status: 'completed' }), true, null],
       [work('u6', null, { time_window: null }), true, null],
       [work('u7', null, { time_window: '' }), true, null],
+      // Work under way with no time field: dispatch keeps it, cannot resolve it, and blocks every route (round 37).
+      [work('u8', null, { status: 'en_route' }), true, 'UNASSIGNED_WORK'],
+      [work('u9', null, { status: 'on_site' }), true, 'UNASSIGNED_WORK'],
       // Another technician's visit: only a legacy window, and only while tech-blind.
       [work('x1', 'other-tech', { time_window: '3 PM' }), true, 'LEGACY_WINDOW_ELSEWHERE'],
       [work('x2', 'other-tech', { time_window: '3 PM' }), false, null],

@@ -409,8 +409,8 @@ const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map
 /**
  * Work this technician's count must hold but cannot, or null (pre-push audit rounds 35 and 36). Its date is left
  * unmeasured.
- * - UNASSIGNED_WORK: dispatch's capacity model keeps a row with a window start or a time window (loadArrivalRouteContext)
- *   and holds unassigned work against every route: its whole arrival promise plus its work, and a promise it cannot
+ * - UNASSIGNED_WORK: dispatch's capacity model keeps a row with a window start, a time window or work under way
+ *   (en_route, on_site; loadArrivalRouteContext, pre-push audit round 37) and holds unassigned work against every route: its whole arrival promise plus its work, and a promise it cannot
  *   resolve blocks every route (arrival-route.js selectWinningOrder, fixed blocks; completed work excepted). The
  *   occupancy read holds less: the booked window only, and nothing for a legacy time window. A row with neither field
  *   is inert, there and here.
@@ -418,7 +418,8 @@ const techsWithStops = (rows) => new Set(rows.filter((r) => r.technician_id).map
  *   with only a legacy time window has no span in the occupancy read (listOccupiedWindows needs window_start).
  */
 function unheldWork(rows, techId, techBlind) {
-  if (rows.some((r) => r.technician_id == null && r.status !== 'completed' && (r.window_start || r.time_window))) {
+  const kept = (r) => r.window_start || r.time_window || ['en_route', 'on_site'].includes(r.status);
+  if (rows.some((r) => r.technician_id == null && r.status !== 'completed' && kept(r))) {
     return 'UNASSIGNED_WORK';
   }
   const elsewhere = (r) => r.technician_id != null && String(r.technician_id) !== String(techId);
