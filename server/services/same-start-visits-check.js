@@ -22,11 +22,11 @@
  * tracker already reads complete or cancelled is not live, whatever its
  * status says. A time held for an estimate has no customer yet (the hold
  * discriminator in slot-reservation.js), so the customer join leaves it out; a
- * booked visit with a leftover hold stamp still counts. The services of one
- * legacy visit group (one visit_id, visit-groups.js) are
- * one stop that shares its start by design: they never pair with each other,
- * and beside a separate visit at that start they count as one. A visit with no
- * arrival time is the no-window notice's (auto-dispatch/audit.js). A deleted or
+ * booked visit with a leftover hold stamp still counts. A service of a legacy
+ * visit group (visit_id set) never counts: visit-groups.js owns that stop, its
+ * technician and its time, and nothing creates groups since the owner retired
+ * them (2026-10-22; on 2026-11-19 no upcoming live visit was in one). A visit
+ * with no arrival time is the no-window notice's (auto-dispatch/audit.js). A deleted or
  * inactive customer's work is not checked here, nor a former customer's (a
  * churned, past or dormant stage): the churned-live-work class says to cancel
  * it.
@@ -98,16 +98,15 @@ function findSameStartVisits(todayET) {
     // cancelled is not live work on either side (customer-lifecycle-guard.js).
     .where(function trackerLive() { this.whereNull('a.track_state').orWhereNotIn('a.track_state', TERMINAL_TRACK_STATES); })
     .where(function partnerTrackerLive() { this.whereNull('b.track_state').orWhereNotIn('b.track_state', TERMINAL_TRACK_STATES); })
-    // The services of one visit group are one stop: a pair only across stops.
-    .where(function twoStops() { this.whereNull('a.visit_id').orWhereNull('b.visit_id').orWhereRaw('a.visit_id <> b.visit_id'); })
-    .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'a.technician_id', 'a.visit_id', 'c.first_name', 'c.last_name')
+    // A legacy visit group's stop, technician and time are visit-groups.js's.
+    .whereNull('a.visit_id')
+    .whereNull('b.visit_id')
+    .distinct('a.id', 'a.customer_id', 'a.scheduled_date', 'a.window_start', 'a.service_type', 'a.technician_id', 'c.first_name', 'c.last_name')
     .orderBy([{ column: 'a.customer_id' }, { column: 'a.scheduled_date' }, { column: 'a.window_start' }, { column: 'a.id' }]);
 }
 
 const byText = (a, b) => (a < b ? -1 : (a > b ? 1 : 0));
 const byService = (a, b) => byText(a.serviceType, b.serviceType) || byText(a.id, b.id);
-// The stops among some visits: a visit group's services are one stop.
-const stopCount = (visits) => new Set(visits.map((visit) => visit.stopId)).size;
 
 // One start's visits as groups that must be split: one group per technician
 // with two or more visits there. An unassigned visit joins the one technician
@@ -122,7 +121,7 @@ function startGroups(slot) {
     byTechnician.get(visit.technicianId).push(visit);
   }
   const groups = byTechnician.size > 1 ? [...byTechnician.values()] : [[...[...byTechnician.values()].flat(), ...unassigned]];
-  return groups.filter((visits) => stopCount(visits) > 1).map((visits) => ({ start: slot.start, visits: [...visits].sort(byService) }));
+  return groups.filter((visits) => visits.length > 1).map((visits) => ({ start: slot.start, visits: [...visits].sort(byService) }));
 }
 
 // One customer's slots (date + start) as calendar days in date order, each
@@ -158,7 +157,6 @@ function groupByCustomer(rows) {
     if (!slots.has(key)) slots.set(key, { date, start, visits: [] });
     slots.get(key).visits.push({
       id: String(row.id), serviceType: String(row.service_type || 'Service'), technicianId: row.technician_id ? String(row.technician_id) : null,
-      stopId: row.visit_id ? `group:${row.visit_id}` : String(row.id),
     });
   }
   const firstOf = (finding) => `${finding.days[0].date} ${finding.days[0].groups[0].start}`;
@@ -212,17 +210,15 @@ function sameStartCopy(finding, todayET) {
   const [first] = finding.days;
   const [firstGroup] = first.groups;
   const day = dayWords(first.date, todayET);
-  // A visit group counts once: its services are one stop.
-  const visitCount = first.groups.reduce((n, group) => n + stopCount(group.visits), 0);
+  const visitCount = first.groups.reduce((n, group) => n + group.visits.length, 0);
   let why = `${finding.days.length} days have visits at the same time, first ${day} at ${timeWords(firstGroup.start)}; split each so they run back to back.`;
   if (finding.days.length === 1 && first.groups.length === 1) {
     why = `${visitCount} visits start at ${timeWords(firstGroup.start)} on ${day}; split them so they run back to back.`;
   } else if (finding.days.length === 1) {
     why = `${visitCount} visits on ${day} share a start time with another visit; split them so they run back to back.`;
   }
-  // The visit the office moves: the last of the first day's first group that is
-  // not in a visit group (else the last one).
-  const moveId = ([...firstGroup.visits].reverse().find((v) => v.stopId === v.id) || firstGroup.visits[firstGroup.visits.length - 1]).id;
+  // The visit the office moves: the last of the first day's first group.
+  const moveId = firstGroup.visits[firstGroup.visits.length - 1].id;
   const link = `/admin/dispatch?tab=schedule&date=${encodeURIComponent(first.date)}&appointment=${encodeURIComponent(moveId)}`;
   const detail = detailText(finding.days, todayET);
   const spec = {
@@ -251,12 +247,15 @@ function sameStartCopy(finding, todayET) {
 
 // One customer's alert in the watchdog's tuple form: [dedupeKey, title, body,
 // metadata, options]. itemKeys are every day (YYYY-MM-DD), listed in the
-// detail or not: notifyAdmin refreshes a standing bell when they change
-// (RING_METADATA_KEYS), and the refresh rings only when a day the bell did not
-// carry joins it; a fixed day updates the bell quietly.
+// detail or not, and itemSetHash covers its visits: notifyAdmin refreshes a
+// standing bell when either changes (RING_METADATA_KEYS), so a visit replaced
+// on a listed day updates it too. The refresh rings only when a day the bell
+// did not carry joins it; anything else updates the bell quietly.
 function sameStartAlert(finding, todayET) {
+  const { itemSetHashFor } = require('./ops-digest');
   const copy = sameStartCopy(finding, todayET);
   const dates = finding.days.map((day) => day.date);
+  const visitIds = finding.days.flatMap((day) => day.groups.flatMap((group) => group.visits.map((v) => v.id)));
   return [
     `${SAME_START_PREFIX}${finding.customerId}`,
     copy.title,
@@ -266,7 +265,8 @@ function sameStartAlert(finding, todayET) {
       first_date: dates[0],
       day_count: dates.length,
       itemKeys: dates,
-      visit_ids: finding.days.flatMap((day) => day.groups.flatMap((group) => group.visits.map((v) => v.id))),
+      visit_ids: visitIds,
+      itemSetHash: itemSetHashFor(visitIds),
       ...copy.metadata,
     },
     {

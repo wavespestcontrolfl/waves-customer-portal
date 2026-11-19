@@ -45,7 +45,7 @@ test('two visits at one start make one bell: who, when, the visit to move, the d
   expect(opts.refreshOnDedupe).toBe(true);
   expect(metadata).toEqual({
     customer_id: 'cust-1', first_date: '2026-12-03', day_count: 1, itemKeys: ['2026-12-03'], visit_ids: ['visit-a', 'visit-b'],
-    area: 'Schedule', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' }, doneWhen: 'visits_start_apart', who: 'person',
+    itemSetHash: expect.stringMatching(/^[0-9a-f]{64}$/), area: 'Schedule', severity: 'needs-you', subject: { type: 'customer', id: 'cust-1' }, doneWhen: 'visits_start_apart', who: 'person',
   });
 });
 
@@ -195,21 +195,17 @@ test('two technicians at one start: each pair is its own group; an unassigned vi
   expect(pairMeta.visit_ids).toEqual(['a1', 'a2']);
 });
 
-test('the services of one legacy visit group are one stop: alone they never ring; beside a separate visit they count once', async () => {
-  finderReturns([visit({ id: 'g1', visit_id: 'stop-1' }), visit({ id: 'g2', visit_id: 'stop-1', service_type: 'Pest Control Service' })]);
-  expect((await sameStartVisitAlerts(TODAY)).alerts).toEqual([]);
-
-  finderReturns([
-    visit({ id: 'g1', visit_id: 'stop-1' }),
-    visit({ id: 'g2', visit_id: 'stop-1', service_type: 'Pest Control Service' }),
-    visit({ id: 's1', service_type: 'Mosquito Service' }),
-  ]);
-  const [[, , body, metadata, opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
-  expect(body).toBe('2 visits start at 11 AM on Dec 3; split them so they run back to back.');
-  expect(opts.detail).toBe('Dec 3 at 11 AM: Lawn Care Service, Mosquito Service and Pest Control Service.');
-  expect(metadata.visit_ids).toEqual(['g1', 's1', 'g2']);
-  // The visit to move is the separate one, not a service of the group.
-  expect(opts.link).toBe('/admin/dispatch?tab=schedule&date=2026-12-03&appointment=s1');
+test('a visit replaced on a listed day changes itemSetHash, so the bell refreshes, but it never rings', async () => {
+  finderReturns([visit(), visit({ id: 'visit-b', service_type: 'Pest Control Service' })]);
+  const [[, , beforeBody, before, beforeOpts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  // The lawn visit is replaced by the same service at that start; the link (the pest visit) stays.
+  finderReturns([visit({ id: 'visit-z' }), visit({ id: 'visit-b', service_type: 'Pest Control Service' })]);
+  const [[, , body, after, opts]] = (await sameStartVisitAlerts(TODAY)).alerts;
+  expect([body, opts.link, opts.detail, after.itemKeys]).toEqual([beforeBody, beforeOpts.link, beforeOpts.detail, before.itemKeys]);
+  expect(after.visit_ids).toEqual(['visit-z', 'visit-b']);
+  expect(after.itemSetHash).toMatch(/^[0-9a-f]{64}$/);
+  expect(after.itemSetHash).not.toBe(before.itemSetHash);
+  expect(opts.ringOnRefresh({}, before)).toBe(false);
 });
 
 test('forDays rebuilds the same bell from only some of its days: why, detail, link, visits and itemKeys; none left = null', async () => {
