@@ -210,6 +210,32 @@ describe('summaryCopySignature — PDF cache-key component', () => {
     };
     expect(summaryCopySignature(templateBody)).toBe('');
   });
+
+  // The key runs the report's own summary rule (technicianReportDrivesSummary),
+  // so it changes whenever the printed summary does.
+  test("the key follows the report's summary rule: the four-section kill switch, a reconcile confirmation beside a dropped card, the completion's rejection", () => {
+    const gate = process.env.GATE_REPORT_WRITER_RULES;
+    const record = (todaysResult, extra = {}) => ({
+      technician_notes: AI_REPORT,
+      service_data: JSON.stringify({
+        typedReportSnapshot: { type: 'one_time_pest_treatment', todaysResult: { bodySource: 'technician_report', ...todaysResult } },
+        ...extra,
+      }),
+    });
+    const keyed = summaryCopySignature({ technician_notes: AI_REPORT });
+    try {
+      process.env.GATE_REPORT_WRITER_RULES = 'true';
+      expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe(keyed);
+      process.env.GATE_REPORT_WRITER_RULES = 'false';
+      expect(summaryCopySignature(record({ bodyFormat: 'four_section' }))).toBe('');
+      expect(summaryCopySignature(record({ bodyFormat: 'four_section', reconcileConfirmed: true }))).toBe('');
+      expect(summaryCopySignature(record({}))).toBe(keyed);
+      expect(summaryCopySignature(record({}, { technicianReportBodyRejected: 'trade_name' }))).toBe('');
+    } finally {
+      if (gate === undefined) delete process.env.GATE_REPORT_WRITER_RULES;
+      else process.env.GATE_REPORT_WRITER_RULES = gate;
+    }
+  });
 });
 
 describe('typed snapshot — technician report body in the generic tail compositions', () => {

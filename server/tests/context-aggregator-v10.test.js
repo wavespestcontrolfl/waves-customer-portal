@@ -189,6 +189,31 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
       'Ghost ants were trailing at the kitchen counter. We placed bait along the counter edge. You may see more ants for a few days. If ants are still trailing, let us know.',
     );
   });
+
+  // The kill switch (activity-indicators withoutDarkFourSectionBody) holds
+  // here as on the web report: a frozen four-section card it drops accepts
+  // no body, and a reconcile confirmation frozen beside it approves none.
+  test('the four-section kill switch holds here as on the web report: a card it drops accepts no body', () => {
+    const fourSectionCard = (todaysResult = {}) => record({
+      service_data: {
+        typedReportSnapshot: {
+          type: 'one_time_pest', visitSequence: 1, values: {},
+          todaysResult: {
+            headline: 'Service completed.', body: 'x', bodySource: 'technician_report', bodyFormat: 'four_section', ...todaysResult,
+          },
+        },
+      },
+    });
+    const reviewed = 'Treated the exterior perimeter and swept eaves. Light ant activity near the lanai.';
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    expect(customerSafeVisitNotes(fourSectionCard())).toBe(reviewed);
+    expect(customerSafeVisitNotes(fourSectionCard({ reconcileConfirmed: true }))).toBe(reviewed);
+    process.env.GATE_REPORT_WRITER_RULES = 'false';
+    expect(customerSafeVisitNotes(fourSectionCard())).toBeNull();
+    expect(customerSafeVisitNotes(fourSectionCard({ reconcileConfirmed: true }))).toBeNull();
+    // A card in any other format keeps its acceptance with the switch off.
+    expect(customerSafeVisitNotes(fourSectionCard({ bodyFormat: undefined }))).toBe(reviewed);
+  });
 });
 
 describe('lawnOverall — canonical scoring mirror', () => {

@@ -343,48 +343,27 @@ function technicianReportCustomerCopy(notes) {
  *
  * Returns '' when the summary is recap/template-driven (keys unchanged, so
  * every existing cached PDF stays a valid hit) and a content-hashed suffix
- * when the technician report drives the rendered summary. Mirrors
- * report-data's summary-source decision: non-typed reports use the parsed
- * copy directly; typed reports only when the frozen snapshot's Today's
- * Result body came from the technician report.
+ * when the technician report drives the rendered summary, by the report's
+ * own rule (technicianReportDrivesSummary).
  */
 function summaryCopySignature(service = {}) {
-  let snapshot = null;
-  let companionSnapshots = [];
+  let serviceData = {};
   try {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    snapshot = data && typeof data === 'object' && !Array.isArray(data)
-      && data.typedReportSnapshot && typeof data.typedReportSnapshot === 'object'
-      && data.typedReportSnapshot.type
-      ? data.typedReportSnapshot
-      : null;
-    // Companion-only completions govern through their customer-visible
-    // companion snapshots (PDFs are customer-facing → auto_send only).
-    companionSnapshots = !snapshot && data && Array.isArray(data.companionReportSnapshots)
-      ? data.companionReportSnapshots.filter((snap) => snap
-        && typeof snap === 'object' && snap.delivery === 'auto_send')
-      : [];
+    serviceData = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
   } catch {
-    snapshot = null;
-    companionSnapshots = [];
+    serviceData = {};
   }
   const parsed = technicianReportCustomerCopy(service.technician_notes);
-  // Mirrors report-data's promotion gate exactly (codex r35 #3420): the
-  // governing typed story must have ACCEPTED the body — bodySource stamped
-  // or a frozen reconcileConfirmed (the person's override) — else the PDF
-  // signature would diverge from the live summary and serve a stale cache.
-  const governing = [snapshot, ...(snapshot ? [] : companionSnapshots)]
-    .filter((snap) => snap?.todaysResult);
-  const typedStoryAcceptedBody = !governing.length
-    || governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
-      // mirror report-data: a reconcile confirmation never accepts the body
-      // on a zero-state snapshot (codex r42)
-      || (snap.todaysResult?.reconcileConfirmed === true
-        && snap.activity?.score !== 0));
-  const drivesSummary = !!parsed?.body && typedStoryAcceptedBody;
-  if (!drivesSummary) return '';
+  // THE summary rule, as the report runs it for a customer (a PDF is
+  // customer-facing): technicianReportDrivesSummary on the frozen snapshots,
+  // through the dark four-section transform, with the completion's rejection
+  // and the trapping screens. The key then changes whenever the printed
+  // summary does, a gate flip included, and a cached PDF never keeps a
+  // summary the live report dropped (codex r35 #3420).
+  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({ serviceData, body: parsed.body })) return '';
   return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
 }
 

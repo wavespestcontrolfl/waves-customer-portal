@@ -3006,6 +3006,14 @@ report's own service line (same statuses as `nextAppointment`, no cross-line
 fallback), for the "What's next" line; `stripLiveOnlyScheduleFields` removes it
 from the PDF, static and sms_preview renders like `nextAppointment`. Both keys
 are absent for every other report.
+The gate is also the kill switch for what completion already froze: while it
+is off, a frozen Today's Result card whose body is four-section (`bodyFormat:
+'four_section'`) keeps its headline and carries no `body`, `bodySource`,
+`bodyFormat` or `reconcileConfirmed` (`withoutDarkFourSectionBody`,
+`activity-indicators.js`). The summary rule (`technicianReportDrivesSummary`)
+reads the cards through the same transform for every customer render: this
+payload, the PDF key (`summaryCopySignature`) and the visit notes on the other
+surfaces (`customerSafeVisitNotes`).
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
