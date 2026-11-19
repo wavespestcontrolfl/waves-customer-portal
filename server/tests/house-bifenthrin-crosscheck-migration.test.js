@@ -34,6 +34,16 @@ function makeKnex(initial, { columns = {} } = {}) {
     return out;
   };
   const clone = (row) => JSON.parse(JSON.stringify(row));
+  // Every FOR UPDATE read, as [table, filters]: the reads that decide a delete or a move must lock what they read.
+  const locks = [];
+  // The product_id foreign keys, as Postgres enforces them: a write naming a catalog row that does not exist throws.
+  const FK_TABLES = new Set(['lawn_protocol_products', 'product_aliases', 'service_product_usage']);
+  const checkForeignKey = (table, values) => {
+    if (!FK_TABLES.has(table) || values.product_id == null) return;
+    if (!(tables.products_catalog || []).some((row) => String(row.id) === String(values.product_id))) {
+      throw new Error(`insert or update on table "${table}" violates foreign key constraint (product_id ${values.product_id})`);
+    }
+  };
   function builder(table) {
     const filters = [];
     const rows = () => (tables[table] || []).filter((row) => matches(row, filters));
@@ -41,12 +51,19 @@ function makeKnex(initial, { columns = {} } = {}) {
       where(a, v) { filters.push({ type: 'eq', obj: typeof a === 'object' ? a : { [a]: v } }); return b; },
       whereIn(col, values) { filters.push({ type: 'in', col, values }); return b; },
       whereNull(col) { filters.push({ type: 'null', col }); return b; },
-      select() { return Promise.resolve(rows().map(clone)); },
+      select() { return b; },
+      forUpdate() { locks.push([table, JSON.parse(JSON.stringify(filters))]); return b; },
       first() { return Promise.resolve(rows().map(clone)[0]); },
       then(resolve, reject) { return Promise.resolve(rows().map(clone)).then(resolve, reject); },
-      update(patch) { const hit = rows(); hit.forEach((row) => Object.assign(row, coerce(table, patch))); return Promise.resolve(hit.length); },
+      update(patch) {
+        const hit = rows();
+        if (hit.length) checkForeignKey(table, patch);
+        hit.forEach((row) => Object.assign(row, coerce(table, patch)));
+        return Promise.resolve(hit.length);
+      },
       del() { const hit = rows(); tables[table] = tables[table].filter((row) => !hit.includes(row)); return Promise.resolve(hit.length); },
       insert(row) {
+        checkForeignKey(table, row);
         counter += 1;
         const made = { id: `gen-${counter}`, ...coerce(table, row) };
         tables[table].push(made);
@@ -64,6 +81,7 @@ function makeKnex(initial, { columns = {} } = {}) {
   };
   knex.fn = { now: () => 'now()' };
   knex.tables = tables;
+  knex.locks = locks;
   return knex;
 }
 
@@ -209,13 +227,29 @@ describe('house bifenthrin crosscheck migration: up', () => {
     expect(added[0]).toMatchObject({ product_id: CROSS, vendor_id: null });
   });
 
-  test('an alias already on Crosscheck is not moved twice', async () => {
+  test('an office name both products carry: the Talak row goes, whole, into its event, so one name resolves to one product', async () => {
     const tables = baseTables();
     tables.product_aliases.push({ id: 'a7', product_id: CROSS, alias_name: 'Talstar P', vendor_id: null });
     knex = makeKnex(tables);
     await migration.up(knex);
-    expect(byId(knex, 'product_aliases', 'a1').product_id).toBe(TALAK);
+    expect(byId(knex, 'product_aliases', 'a1')).toBeUndefined();
+    expect(knex.tables.product_aliases.filter((row) => row.alias_name === 'Talstar P').map((row) => row.product_id)).toEqual([CROSS]);
     expect(byId(knex, 'product_aliases', 'a2').product_id).toBe(CROSS);
+    const removed = eventsOf(knex, migration.actionFor(migration.STEPS.aliases)).find((row) => meta(row).kind === 'removed');
+    expect(removed.resource_id).toBe('a1');
+    expect(meta(removed).row).toEqual({ id: 'a1', product_id: TALAK, alias_name: 'Talstar P', vendor_id: null });
+    // down() puts it back on Talak, exactly as it was.
+    await migration.down(knex);
+    expect(byId(knex, 'product_aliases', 'a1')).toEqual({ id: 'a1', product_id: TALAK, alias_name: 'Talstar P', vendor_id: null });
+  });
+
+  test('the reads that decide a move or a delete lock what they read (FOR UPDATE), each scoped to the two products', async () => {
+    await migration.up(knex);
+    const locked = Object.fromEntries(knex.locks.map(([table, filters]) => [table, filters]));
+    expect(Object.keys(locked).sort()).toEqual(['lawn_protocol_products', 'product_aliases', 'service_product_usage']);
+    expect(locked.service_product_usage).toEqual([{ type: 'in', col: 'product_id', values: [TALAK, CROSS] }]);
+    expect(locked.product_aliases).toEqual([{ type: 'in', col: 'product_id', values: [TALAK, CROSS] }]);
+    expect(locked.lawn_protocol_products).toEqual([{ type: 'eq', obj: { product_id: TALAK } }]);
   });
 
   test('catalog: fills only NULL columns on the Crosscheck row; prices, cost, stock and the Talak row stay', async () => {
@@ -413,6 +447,24 @@ describe('house bifenthrin crosscheck migration: down', () => {
     await migration.down(gone);
     expect(byId(gone, 'service_product_usage', 'u2')).toBeUndefined();
     expect(reversedUsage(gone)).not.toContain(usageEventId(gone, 'u2'));
+  });
+
+  test('Talak deleted after up: down finishes, every moved link stays on Crosscheck and keeps its up event (the foreign key would fail it)', async () => {
+    const knex = makeKnex(baseTables());
+    await migration.up(knex);
+    const upEvents = knex.tables.audit_log.length;
+    knex.tables.products_catalog = knex.tables.products_catalog.filter((row) => row.id !== TALAK);
+    await expect(migration.down(knex)).resolves.toBeUndefined();
+    expect(['r1', 'r2', 'r3'].map((id) => byId(knex, 'lawn_protocol_products', id).product_id)).toEqual([CROSS, CROSS, CROSS]);
+    expect(knex.tables.lawn_protocol_audit_log).toHaveLength(2); // kept: its rows were not restored
+    expect(['a1', 'a2', 'a3', 'a4'].map((id) => byId(knex, 'product_aliases', id).product_id)).toEqual([CROSS, CROSS, CROSS, CROSS]);
+    expect(byId(knex, 'service_product_usage', 'u1').product_id).toBe(CROSS);
+    expect(byId(knex, 'service_product_usage', 'u2')).toBeUndefined();
+    // Only what could go back did: the added aliases, the services and the catalog columns. No moved link has a rollback event.
+    expect(rollbacksOf(knex, migration.STEPS.usage)).toEqual([]);
+    expect(rollbacksOf(knex, migration.STEPS.aliases).map((row) => meta(row).from_audit_id).sort())
+      .toEqual(eventsOf(knex, migration.actionFor(migration.STEPS.aliases)).filter((row) => meta(row).kind === 'inserted').map((row) => String(row.id)).sort());
+    expect(knex.tables.audit_log.length).toBeGreaterThan(upEvents);
   });
 
   test('catalog: a column edited between down\'s start and its write is kept, guarded in the UPDATE itself', async () => {

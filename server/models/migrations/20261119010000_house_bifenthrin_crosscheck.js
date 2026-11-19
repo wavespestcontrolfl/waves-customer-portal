@@ -13,7 +13,9 @@
  *   2. services.default_products (jsonb array of product names): the element 'Atticus Talak 7.9 F' becomes 'LESCO Crosscheck Plus'
  *      in place, array order kept. A service that already lists Crosscheck loses the Talak element instead (no duplicate).
  *   3. product_aliases: 'Talstar P', 'Bifen I/T', 'Bifen IT' and 'Bifen I/T 7.9%' move from Talak to Crosscheck (office and tech
- *      names for the bottle now used). The Talak-named aliases stay on Talak. 'Crosscheck Plus' and 'Cross Check Plus' are added
+ *      names for the bottle now used). Where Crosscheck already carries the same name (and vendor), the Talak row is deleted
+ *      instead, its whole row in the audit event (down() puts it back): one name must resolve to one product. Production has no
+ *      such pair (read 2026-11-18). The Talak-named aliases stay on Talak. 'Crosscheck Plus' and 'Cross Check Plus' are added
  *      to Crosscheck unless that spelling already resolves (an alias on any product, or a catalog name, compared the way every
  *      reader compares: lower case, trimmed). 'CrossCheck Plus' and 'LESCO CrossCheck Plus' differ from catalog names and
  *      aliases only in case, so they already resolve. Every alias reader resolves what a person types or says, or what a
@@ -36,15 +38,16 @@
  *
  * Audit: steps 2 to 5 write one audit_log event per changed row through recordAuditEvent (action migration:<name>:<step>, the
  * before and after values in metadata). Step 1 writes one lawn_protocol_audit_log row per protocol, the shape the earlier v13
- * lawn migrations use. Up is idempotent: every write is guarded by the value it replaces, so a second run writes nothing.
+ * lawn migrations use. Up is idempotent: every write is guarded by the value it replaces, so a second run writes nothing. The
+ * rows steps 1, 3 and 5 decide on are read FOR UPDATE (the migration runs in one transaction), so an office edit made while it
+ * runs waits for the commit instead of landing between a read and the write it decides.
  *
  * Down restores exactly what up() recorded and nothing else, each item only while it still holds the value up() wrote (a value
- * changed since is kept and logged). audit_log is append-only: down() never deletes an event; it appends a
+ * changed since is kept and logged), and a link or a deleted row goes back to Talak only while Talak's catalog row exists (the
+ * foreign key would fail the rollback). audit_log is append-only: down() never deletes an event; it appends a
  * migration:<name>:<step>:rollback event that names the up() event it reversed (from_audit_id), and skips an event that already
  * has one. Step 1 keeps the v13 lawn shape: its lawn_protocol_audit_log row goes once every row in it is restored.
  */
-const { isDeepStrictEqual } = require('util');
-
 // audit_log.action is varchar(96): `migration:<name>:<step>:rollback` must fit, so the name stays short.
 const MIGRATION = '20261119010000_house_bifenthrin_crosscheck';
 const LOG = '[house-bifenthrin-crosscheck]';
@@ -83,11 +86,6 @@ const LABEL_RATE_PER_1000 = { from: 0.18, to: 0.5 };
 const APPROVAL_FLAGS = ['approved_for_estimate_packet', 'approved_for_public_page'];
 
 const norm = (value) => String(value == null ? '' : value).trim().toLowerCase();
-const sameValue = (a, b) => {
-  if (a == null || b == null) return a == null && b == null;
-  if (typeof a === 'number' || typeof b === 'number') return Number(a) === Number(b);
-  return isDeepStrictEqual(a, b);
-};
 const asArray = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string') return null;
@@ -130,7 +128,8 @@ async function writeAudit(knex, action, resourceType, resourceId, metadata) {
 // ── up ───────────────────────────────────────────────────────────────────────
 
 async function moveProtocolRows(knex, talak, crosscheck) {
-  const rows = await knex('lawn_protocol_products').where({ product_id: talak.id }).select('id', 'product_id', 'product_name', 'lawn_protocol_window_id');
+  // Locked until the migration commits, so the audit row's before-snapshot is the row each update changed.
+  const rows = await knex('lawn_protocol_products').where({ product_id: talak.id }).select('id', 'product_id', 'product_name', 'lawn_protocol_window_id').forUpdate();
   if (!rows.length) return;
   const windows = await knex('lawn_protocol_windows').whereIn('id', rows.map((row) => row.lawn_protocol_window_id).filter(Boolean)).select('id', 'lawn_protocol_id');
   const protocolOfWindow = new Map(windows.map((window) => [String(window.id), window.lawn_protocol_id]));
@@ -182,22 +181,32 @@ async function swapServiceDefaults(knex, talak, crosscheck) {
   }
 }
 
-async function readAliasState(knex, crosscheck) {
-  const rows = await knex('product_aliases').select('id', 'product_id', 'alias_name', 'vendor_id');
+// A JSON-safe copy of a row (dates as ISO strings), so down() can insert it back exactly.
+const snapshotRow = (row) => JSON.parse(JSON.stringify(row));
+const aliasKey = (row) => `${norm(row.alias_name)}|${row.vendor_id || ''}`;
+
+// The two products' aliases are read FOR UPDATE: locked until the migration commits, so an office edit cannot change a row between
+// the read that decides its fate and the write. The spellings that already resolve (any alias, any catalog name) are a plain read.
+async function readAliasState(knex, talak, crosscheck) {
+  const rows = await knex('product_aliases').whereIn('product_id', [talak.id, crosscheck.id]).select('*').forUpdate();
+  const others = await knex('product_aliases').select('alias_name');
   const catalog = await knex('products_catalog').select('name');
-  const resolves = new Set([...rows.map((row) => norm(row.alias_name)), ...catalog.map((row) => norm(row.name))]);
-  const onCrosscheck = new Set(rows.filter((row) => String(row.product_id) === String(crosscheck.id)).map((row) => `${norm(row.alias_name)}|${row.vendor_id || ''}`));
+  const resolves = new Set([...others.map((row) => norm(row.alias_name)), ...catalog.map((row) => norm(row.name))]);
+  const onCrosscheck = new Set(rows.filter((row) => String(row.product_id) === String(crosscheck.id)).map(aliasKey));
   return { rows, resolves, onCrosscheck };
 }
 
 async function moveAliases(knex, talak, crosscheck) {
-  const { rows, resolves, onCrosscheck } = await readAliasState(knex, crosscheck);
+  const { rows, resolves, onCrosscheck } = await readAliasState(knex, talak, crosscheck);
   const action = actionFor(STEPS.aliases);
   const wanted = new Set(MOVED_ALIASES.map(norm));
   for (const row of rows) {
     if (String(row.product_id) !== String(talak.id) || !wanted.has(norm(row.alias_name))) continue;
-    if (onCrosscheck.has(`${norm(row.alias_name)}|${row.vendor_id || ''}`)) {
-      console.log(`${LOG} alias "${row.alias_name}" already exists on Crosscheck: left on Talak`);
+    if (onCrosscheck.has(aliasKey(row))) {
+      // Crosscheck already carries this name: a second mapping on Talak would leave readers two products for one name (a
+      // receipt match sees both, a first() reader can still pick Talak), so the Talak row goes, whole, into the audit event.
+      const removed = await knex('product_aliases').where({ id: row.id, product_id: talak.id }).del();
+      if (removed) await writeAudit(knex, action, 'product_aliases', row.id, { kind: 'removed', alias_name: row.alias_name, row: snapshotRow(row) });
       continue;
     }
     const changed = await knex('product_aliases').where({ id: row.id, product_id: talak.id }).update({ product_id: crosscheck.id });
@@ -212,11 +221,10 @@ async function moveAliases(knex, talak, crosscheck) {
   }
 }
 
-// A JSON-safe copy of a row (dates as ISO strings), so down() can insert it back exactly.
-const snapshotRow = (row) => JSON.parse(JSON.stringify(row));
-
+// Read FOR UPDATE: both products' rows stay locked until the migration commits, so an office edit (a service type, a rate) cannot
+// land between the read that decides a row is a duplicate and the delete, and the audit event holds the row as it was deleted.
 async function moveUsageRows(knex, talak, crosscheck) {
-  const rows = await knex('service_product_usage').whereIn('product_id', [talak.id, crosscheck.id]).select('*');
+  const rows = await knex('service_product_usage').whereIn('product_id', [talak.id, crosscheck.id]).select('*').forUpdate();
   const mapsCrosscheck = new Set(rows.filter((row) => String(row.product_id) === String(crosscheck.id)).map((row) => row.service_type));
   const action = actionFor(STEPS.usage);
   for (const row of rows) {
@@ -294,6 +302,12 @@ exports.up = async function up(knex) {
 
 // ── down ─────────────────────────────────────────────────────────────────────
 
+// Whether a catalog row exists. A link goes back to its original product only while that product exists: the foreign key would
+// otherwise fail the whole rollback (Talak deleted after up() keeps every row on Crosscheck, logged).
+async function productExists(knex, id) {
+  return Boolean(id) && Boolean(await knex('products_catalog').where({ id }).first('id'));
+}
+
 async function restoreProtocolRows(knex) {
   const logs = await knex('lawn_protocol_audit_log').where({ action: LAWN_ACTION }).select('id', 'before_snapshot', 'after_snapshot');
   for (const log of logs) {
@@ -301,7 +315,7 @@ async function restoreProtocolRows(knex) {
     let kept = 0;
     for (const written of asObject(log.after_snapshot).rows || []) {
       const old = before.get(String(written.rowId));
-      const restored = old && await knex('lawn_protocol_products')
+      const restored = old && await productExists(knex, old.product_id) && await knex('lawn_protocol_products')
         .where({ id: written.rowId, product_id: written.product_id, product_name: written.product_name })
         .update({ product_id: old.product_id, product_name: old.product_name });
       if (!restored) { kept += 1; console.log(`${LOG} protocol row ${written.rowId} is no longer as written: kept`); }
@@ -335,14 +349,26 @@ async function restoreServices(knex) {
   }
 }
 
+// A removed row goes back only while its id is free, its product exists (the foreign key needs it) and no row holds its exact name
+// and vendor (product_aliases is unique on alias_name + vendor_id; a NULL vendor never collides).
+async function insertBackAlias(knex, row) {
+  if (await knex('product_aliases').where({ id: row.id }).first('id')) return 0;
+  if (!(await productExists(knex, row.product_id))) return 0;
+  if (row.vendor_id != null && await knex('product_aliases').where({ alias_name: row.alias_name, vendor_id: row.vendor_id }).first('id')) return 0;
+  await knex('product_aliases').insert(row);
+  return 1;
+}
+
 async function restoreAliases(knex) {
   for (const event of await pendingEvents(knex, STEPS.aliases)) {
     const meta = asObject(event.metadata);
     let restored = 0;
     if (meta.kind === 'inserted') {
       restored = await knex('product_aliases').where({ id: event.resource_id, product_id: meta.product_id, alias_name: meta.alias_name }).del();
-    } else if (meta.kind === 'moved' && meta.from && meta.to) {
+    } else if (meta.kind === 'moved' && meta.from && meta.to && await productExists(knex, meta.from)) {
       restored = await knex('product_aliases').where({ id: event.resource_id, product_id: meta.to }).update({ product_id: meta.from });
+    } else if (meta.kind === 'removed' && meta.row && meta.row.id) {
+      restored = await insertBackAlias(knex, meta.row);
     }
     if (restored) await recordRollback(knex, STEPS.aliases, event, 'product_aliases');
     else keptLog(`alias "${meta.alias_name}"`);
@@ -372,13 +398,12 @@ async function restoreUsage(knex) {
   for (const event of await pendingEvents(knex, STEPS.usage)) {
     const { kind, from, to, row } = asObject(event.metadata);
     let restored = 0;
-    if (kind === 'moved' && from && to) {
+    if (kind === 'moved' && from && to && await productExists(knex, from)) {
       restored = await knex('service_product_usage').where({ id: event.resource_id, product_id: to }).update({ product_id: from });
     } else if (kind === 'removed' && row && row.id) {
       // Back only while nothing took its id and its product still exists (the foreign key needs it).
       const taken = await knex('service_product_usage').where({ id: row.id }).first('id');
-      const product = await knex('products_catalog').where({ id: row.product_id }).first('id');
-      if (!taken && product) { await knex('service_product_usage').insert(row); restored = 1; }
+      if (!taken && await productExists(knex, row.product_id)) { await knex('service_product_usage').insert(row); restored = 1; }
     }
     if (restored) await recordRollback(knex, STEPS.usage, event, 'service_product_usage');
     else keptLog(`usage row ${event.resource_id}`);

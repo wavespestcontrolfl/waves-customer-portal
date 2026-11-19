@@ -185,7 +185,7 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
 // A v13 yearly amount cap for one service line's applications (history_service_line). LESCO Crosscheck Plus: its label limit is for
 // turf, and the same bottle is the pest, mosquito and termite bifenthrin, so only lawn applications count (owner 2026-11-18).
 describe('a v13 yearly amount cap for one service line', () => {
-  const LIMIT = { limit_value: 1.01, limit_unit: 'fl oz/1000sf/year', fallback_rate: 1, history_service_line: 'lawn' };
+  const LIMIT = { limit_value: 1, limit_unit: 'fl oz/1000sf/year', fallback_rate: 1, history_service_line: 'lawn' };
   const row = (serviceType, extra = {}) => ({ application_rate: '0.5', rate_unit: 'fl oz', history_service_type: serviceType, ...extra });
   const ROWS = [
     row('Every 6 Weeks Lawn Care Service'),
@@ -194,16 +194,37 @@ describe('a v13 yearly amount cap for one service line', () => {
     row('Slab Pre-Treat Termite Service'),
     row('Quarterly Pest Control Service', { history_area_addon_key: 'fixture_addon' }), // an add-on row is audited as lawn work
     row(null), // no visit on record: counted
+    // detectServiceLine answers 'pest' for a type it cannot place: such a row is not known to be pest work, so it counts.
+    row('Service Visit'),
+    row('Callback'),
   ];
 
-  test('counts lawn visits, area add-on rows and rows with no visit; leaves out pest, mosquito and termite visits', async () => {
+  test('counts lawn visits, add-on rows, rows with no visit and visit types it cannot place; leaves out known pest, mosquito and termite work', async () => {
     const { share } = await applicationLimits.lawnAmountShare(null, ROWS, LIMIT, { propertyId: 'prop-1' });
-    expect(share).toBeCloseTo((0.5 * 3) / 1.01, 6);
+    expect(share).toBeCloseTo(0.5 * 5, 6);
   });
 
   test('a cap that names no service line counts every row, as before', async () => {
     const { share } = await applicationLimits.lawnAmountShare(null, ROWS, { ...LIMIT, history_service_line: undefined }, { propertyId: 'prop-1' });
-    expect(share).toBeCloseTo((0.5 * 6) / 1.01, 6);
+    expect(share).toBeCloseTo(0.5 * 8, 6);
+  });
+
+  test('the application being judged: known pest, mosquito and termite work passes unjudged; lawn, unknown and unnamed types are judged', () => {
+    for (const serviceType of ['Quarterly Pest Control Service', 'Pest Control Re-Service', 'Mosquito Treatment - Essential Barrier', 'Slab Pre-Treat Termite Service']) {
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType })).toBe(false);
+    }
+    for (const serviceType of ['Every 6 Weeks Lawn Care Service', 'Lawn Care Visit #4 + Quarterly Pest Control', 'Service Visit', null, undefined]) {
+      expect(applicationLimits.judgedForServiceLine(LIMIT, { serviceType })).toBe(true);
+    }
+    expect(applicationLimits.judgedForServiceLine({ ...LIMIT, history_service_line: undefined }, { serviceType: 'Quarterly Pest Control Service' })).toBe(true);
+  });
+
+  test('evaluateV13AmountCap passes a pest perimeter proposal without reading the ledger', async () => {
+    const database = jest.fn(() => { throw new Error('the ledger must not be read'); });
+    const check = await applicationLimits.evaluateV13AmountCap(LIMIT, { id: 'prod-1', name: 'LESCO Crosscheck Plus' },
+      { customerId: 'c', serviceType: 'Quarterly Pest Control Service', proposal: true, proposedDate: new Date('2026-11-18T12:00:00Z') }, database);
+    expect(check).toEqual({ violated: false });
+    expect(database).not.toHaveBeenCalled();
   });
 
   test('the history query reads the visit type and the add-on key only for a cap that names a service line', () => {

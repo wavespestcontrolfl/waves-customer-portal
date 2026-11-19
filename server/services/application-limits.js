@@ -136,13 +136,31 @@ function amountHistoryProducts(query, database, product, limit) {
   return query.whereIn('pah.product_id', database('products_catalog').where({ epa_reg_number: limit.history_epa_reg_number }).select('id'));
 }
 
+// Whether a visit type is known to be another service line's work than `line`. detectServiceLine answers 'pest' for any visit type it
+// cannot place, so a 'pest' answer is known only when the type names pest work ("Quarterly Pest Control Service"); a type it cannot
+// place ("Service Visit", "Callback") is not known to be another line's, and so it is treated as the cap's own line.
+const NAMES_PEST_WORK = /\b(pest|palmetto)\b/i;
+function knownOtherServiceLine(serviceType, line) {
+  const { detectServiceLine } = require('./service-report/service-line-configs');
+  const detected = detectServiceLine(serviceType);
+  if (detected === line) return false;
+  return detected !== 'pest' || NAMES_PEST_WORK.test(String(serviceType));
+}
+
 // Whether a history row counts toward a cap for one service line's applications (history_service_line; LESCO Crosscheck Plus: lawn, as
 // its label limit is for turf and the same bottle is the pest, mosquito and termite bifenthrin). A row counts unless its visit is known
 // to be another line: an area add-on row counts (the closeout audits add-on rows as lawn work), and so does a row with no visit.
 function countsForServiceLine(row, limit) {
   if (!limit.history_service_line || row.history_area_addon_key || !row.history_service_type) return true;
-  const { detectServiceLine } = require('./service-report/service-line-configs');
-  return detectServiceLine(row.history_service_type) === limit.history_service_line;
+  return !knownOtherServiceLine(row.history_service_type, limit.history_service_line);
+}
+
+// Whether the application being judged is work of the cap's service line. A cap on one line's applications (history_service_line)
+// does not judge another line's work: a perimeter spray of the house bifenthrin is not a lawn application. ctx.serviceType is the
+// type of the visit being planned or checked; a caller that names none (the lawn plan, the lawn brief, a status read) is judged.
+function judgedForServiceLine(limit, ctx) {
+  if (!limit.history_service_line || !ctx.serviceType) return true;
+  return !knownOtherServiceLine(ctx.serviceType, limit.history_service_line);
 }
 
 // One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
@@ -265,6 +283,8 @@ class ApplicationLimitChecker {
   // count and its minimum interval (and the v13 yearly amount) at that PLACE of the lawn: the rows placed elsewhere on the
   // lawn are left out, a row with no place on record still counts. The shared active-ingredient cap, the MOA rotation and
   // every limit that is not about this product's own applications stay lawn-wide.
+  // opts.serviceType (the visit's service type) lets a v13 yearly amount cap kept to one service line's applications (LESCO
+  // Crosscheck Plus: the lawn) pass work that is known to be another line's, a perimeter pest spray (judgedForServiceLine).
   async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
@@ -606,7 +626,9 @@ class ApplicationLimitChecker {
   // recorded applications of this product this year, each as a share of the cap (an unreadable one counts
   // at the cap row's fallback rate), plus the application being planned. Per 1,000 sq ft of the treated
   // area, as the shared active-ingredient cap reads it: a spot is its recorded rate, not scaled to its area.
+  // A cap on one service line's applications passes another line's work unjudged (judgedForServiceLine).
   async evaluateV13AmountCap(limit, product, ctx, database = db) {
+    if (!judgedForServiceLine(limit, ctx)) return { violated: false };
     const query = amountHistoryProducts(database('property_application_history as pah')
       .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
       .where('pah.customer_id', ctx.customerId), database, product, limit)
@@ -909,3 +931,5 @@ module.exports.measureFamily = (unit) => unitFamily(String(unit || '').replace(/
 module.exports.assertRollingIsCountOnly = assertRollingIsCountOnly;
 module.exports.scopeHistoryToTreatment = scopeHistoryToTreatment;
 module.exports.amountHistoryProducts = amountHistoryProducts;
+module.exports.countsForServiceLine = countsForServiceLine;
+module.exports.judgedForServiceLine = judgedForServiceLine;

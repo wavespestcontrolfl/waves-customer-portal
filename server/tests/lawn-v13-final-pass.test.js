@@ -73,20 +73,20 @@ describe('the limit entries (config/lawn-v13-count-caps.js)', () => {
     expect(Object.isFrozen(caps.V13_COUNT_CAPS) && Object.isFrozen(caps.V13_MORE_LIMITS) && Object.isFrozen(caps.V13_LIMITS)).toBe(true);
   });
 
-  test('LESCO Crosscheck Plus: 1.01 fl oz per 1,000 sq ft a year on turf (label: 44 fl oz per acre), lawn applications only', () => {
+  test('LESCO Crosscheck Plus: 1 fl oz per 1,000 sq ft a year on turf (label: 44 fl oz per acre, lawn rates up to 1), lawn applications only', () => {
     const cross = entry('LESCO Crosscheck Plus');
     expect([cross.cap, cross.minIntervalDays]).toEqual([undefined, undefined]);
-    expect(cross.annualAmount).toMatchObject({ cap: 1.01, unit: 'fl oz/1000sf/year', fallbackRate: 1, historyServiceLine: 'lawn' });
-    expect(cross.annualAmount.description).toContain('label EPA 10404-120');
-    // 44 fl oz per acre over 43.56 thousand sq ft. One pass at the label's 1 fl oz lawn maximum fits the year, and so do two at the
-    // 0.5 catalog rate; a third 0.5 pass does not.
-    expect(Math.round((44 / 43.56) * 100) / 100).toBe(cross.annualAmount.cap);
-    expect(1).toBeLessThanOrEqual(cross.annualAmount.cap);
+    expect(cross.annualAmount).toMatchObject({ cap: 1, unit: 'fl oz/1000sf/year', fallbackRate: 1, historyServiceLine: 'lawn' });
+    expect(cross.annualAmount.description).toContain('EPA 10404-120');
+    // 44 fl oz per acre over 43.56 thousand sq ft is 1.01; the label's lawn table stops at 1 fl oz a pass, and the cap is that 1 (the
+    // safety rule's figure), so neither the year nor one pass can go past the label. Two passes at the 0.5 catalog rate fit; a third does not.
+    expect(cross.annualAmount.cap).toBeLessThanOrEqual(44 / 43.56);
+    expect(cross.annualAmount.cap).toBe(1);
     expect(0.5 * 2).toBeLessThanOrEqual(cross.annualAmount.cap);
     expect(0.5 * 3).toBeGreaterThan(cross.annualAmount.cap);
     // The synthetic row names the service line, so the engine counts lawn applications only (the bottle is also the pest bifenthrin).
     const row = caps.syntheticAmountLimit(cross, 'p1');
-    expect(row).toMatchObject({ match_type: caps.V13_AMOUNT, limit_type: 'annual_max_rate', limit_value: 1.01, severity: 'hard_block', history_service_line: 'lawn' });
+    expect(row).toMatchObject({ match_type: caps.V13_AMOUNT, limit_type: 'annual_max_rate', limit_value: 1, severity: 'hard_block', history_service_line: 'lawn' });
     expect(row.history_epa_reg_number).toBeUndefined();
     expect(caps.syntheticAmountLimit(entry('Tetrino Insecticide'), 'p2').history_service_line).toBeUndefined();
     for (const track of TRACKS) {

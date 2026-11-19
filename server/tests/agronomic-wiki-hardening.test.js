@@ -671,6 +671,36 @@ describe('updateProductPage', () => {
     expect(state.deletes.knowledge_entries).toBeUndefined();
   });
 
+  // Owner 2026-11-18: "Talstar P" named the Atticus Talak bottle, then moved to LESCO Crosscheck Plus with the house bifenthrin.
+  // A past visit's stored product id, not today's alias, decides which page its outcome counts on.
+  test('a name that moved products: each outcome counts on the page of the product its visit recorded', async () => {
+    const outcomes = [
+      { id: 'o-talak', service_record_id: 'sr-1', treatment_date: '2026-07-04', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
+      { id: 'o-cross', service_record_id: 'sr-2', treatment_date: '2026-12-04', grass_track: 'st_augustine', products_applied: [{ name: 'LESCO Crosscheck Plus' }] },
+      { id: 'o-typed', service_record_id: 'sr-3', treatment_date: '2026-12-05', grass_track: 'st_augustine', products_applied: [{ name: 'Talstar P' }] },
+    ];
+    const servicePrd = [
+      { service_record_id: 'sr-1', product_id: 'pc-talak', product_name: 'Talstar P' },
+      { service_record_id: 'sr-2', product_id: 'pc-cross', product_name: 'LESCO Crosscheck Plus' },
+      { service_record_id: 'sr-3', product_id: null, product_name: 'Talstar P' }, // a typed name with no product: the name decides
+    ];
+    const state = useDb({
+      products_catalog: [{ id: 'pc-cross', name: 'LESCO Crosscheck Plus' }],
+      // an exact catalog name: the only alias read is the product's alias listing
+      product_aliases: [{ alias_name: 'Talstar P' }],
+      treatment_outcomes: outcomes,
+      service_products: servicePrd,
+      knowledge_entries: [],
+    });
+
+    await wiki.updateProductPage('LESCO Crosscheck Plus');
+
+    expect(JSON.parse(state.inserts.knowledge_entries[0].source_treatment_ids).sort()).toEqual(['o-cross', 'o-typed']);
+    // The outcome query also takes every visit that recorded the product by id, whatever name it carried then.
+    const outcomeOps = state.calls.treatment_outcomes[0].ops.filter(([m]) => m === 'orWhereRaw').map(([, a]) => a);
+    expect(outcomeOps).toContainEqual(['service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', ['pc-cross']]);
+  });
+
   test('a failed refresh of a real canonical page does not absorb variants', async () => {
     const responses = productResponses();
     // canonical page exists with REAL (non-stub) content

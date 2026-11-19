@@ -79,7 +79,7 @@ function daysFrom(date, days) {
 // Returns the canonical name plus every known name variant (catalog name +
 // aliases) so outcome aggregation covers all spellings.
 async function resolveCanonicalProduct(productName) {
-  const fallback = { canonicalName: productName, variants: [productName] };
+  const fallback = { canonicalName: productName, variants: [productName], productId: null };
   if (!productName) return fallback;
   try {
     let catalogRow = await db('products_catalog')
@@ -103,11 +103,40 @@ async function resolveCanonicalProduct(productName) {
     const variants = [...new Set(
       [catalogRow.name, ...aliasRows.map((a) => a.alias_name), productName].filter(Boolean)
     )];
-    return { canonicalName: catalogRow.name, variants };
+    return { canonicalName: catalogRow.name, variants, productId: catalogRow.id };
   } catch (err) {
     logger.warn(`[agronomic-wiki] Canonical product lookup failed for "${productName}": ${err.message}`);
     return fallback;
   }
+}
+
+// The outcomes one catalog product's page aggregates. A name can move to another product (owner 2026-11-18: "Talstar P" named the
+// Atticus Talak bottle until the house bifenthrin became LESCO Crosscheck Plus, and names Crosscheck after), so a name match alone
+// does not prove what a past visit applied: the product id its service_products row stored decides. An outcome counts when its
+// visit recorded this product under any name, or recorded a matching name with no product id; it does not count when every
+// matching row on its visit recorded another product. With no catalog product (productId null) the name match decides, as before.
+async function outcomesForProduct(variants, productId) {
+  const outcomes = await db('treatment_outcomes')
+    .where(function () {
+      for (const variant of variants) {
+        this.orWhereRaw("products_applied::text ILIKE ? ESCAPE '\\'", [`%${escapeLike(variant)}%`]);
+      }
+      if (productId) this.orWhereRaw('service_record_id IN (SELECT service_record_id FROM service_products WHERE product_id = ?)', [productId]);
+    })
+    .orderBy('treatment_date', 'desc');
+  const visits = [...new Set(outcomes.map((o) => o.service_record_id).filter(Boolean).map(String))];
+  if (!productId || !visits.length) return outcomes;
+  const rows = await db('service_products').whereIn('service_record_id', visits).select('service_record_id', 'product_id', 'product_name');
+  const names = variants.map((variant) => String(variant || '').toLowerCase()).filter(Boolean);
+  const counts = new Map(); // visit -> true (this product's) | false (only another product's rows matched)
+  for (const row of rows || []) {
+    const visit = String(row.service_record_id);
+    const mine = row.product_id != null && String(row.product_id) === String(productId);
+    const named = names.some((name) => String(row.product_name || '').toLowerCase().includes(name));
+    if (mine || (named && row.product_id == null)) counts.set(visit, true);
+    else if (named && !counts.has(visit)) counts.set(visit, false);
+  }
+  return outcomes.filter((o) => counts.get(String(o.service_record_id)) !== false);
 }
 
 function getSeason(month) {
@@ -855,17 +884,12 @@ const AgronomicWiki = {
     try {
       // One page per catalog product: resolve the applied-product string to
       // its canonical catalog name and aggregate outcomes across every known
-      // name variant, so vendor-listing spellings don't split the data.
-      const { canonicalName, variants } = await resolveCanonicalProduct(productName);
+      // name variant, so vendor-listing spellings don't split the data; the visit's stored product id
+      // settles a name that moved between products (outcomesForProduct).
+      const { canonicalName, variants, productId } = await resolveCanonicalProduct(productName);
       const slug = `product/${slugify(canonicalName)}`;
 
-      const outcomes = await db('treatment_outcomes')
-        .where(function () {
-          for (const variant of variants) {
-            this.orWhereRaw("products_applied::text ILIKE ? ESCAPE '\\'", [`%${escapeLike(variant)}%`]);
-          }
-        })
-        .orderBy('treatment_date', 'desc');
+      const outcomes = await outcomesForProduct(variants, productId);
 
       if (!outcomes.length) {
         logger.info(`[agronomic-wiki] No outcomes found for product ${productName}`);

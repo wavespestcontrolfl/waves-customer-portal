@@ -215,3 +215,22 @@ describe('task-line classification', () => {
     }
   });
 });
+
+// Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin. The gate-off July chinch rescue is the product to use when the June
+// bifenthrin failed, so its line may name only Arena: with the full Crosscheck name in it, the matcher took Crosscheck (the longer name).
+describe('the gate-off July chinch rescue line', () => {
+  test('resolves to Arena 50 WDG with LESCO Crosscheck Plus in the catalog, never to the bifenthrin that failed', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const real = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'protocols.json'), 'utf8'));
+    const july = real.lawn.st_augustine.visits.find((visit) => visit.month === 'Jul');
+    const line = july.secondary.split('\n').find((text) => text.includes('Arena 50 WDG'));
+    expect(line).toBeTruthy();
+    const catalog = [...CATALOG, {
+      id: 'crosscheck', name: 'LESCO Crosscheck Plus', aliases: ['Crosscheck Plus', 'Talstar P'],
+      default_rate_per_1000: 0.5, rate_unit: 'fl_oz', cost_per_unit: 0.2414, cost_unit: 'fl_oz',
+    }];
+    const items = resolveProtocolItems(parseProtocolLines(line, 'conditional'), catalog, {}, {});
+    expect(items.map((item) => item.product?.id)).toEqual(['arena']);
+  });
+});

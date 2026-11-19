@@ -26,12 +26,25 @@ beforeEach(() => { LimitChecker.checkLimits.mockClear(); mockOwned.value = true;
 test('a named property is passed to the checker', async () => {
   const res = await post({ customerId: C1, propertyId: P1, products: [{ productId: 'prod-1', name: 'X' }] });
   expect(res.body.allowed).toBe(true);
-  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: P1, proposal: true });
+  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: P1, proposal: true, serviceType: null });
 });
 
 test('no property: the checker is asked without one (it then judges the busiest property of the customer)', async () => {
   await post({ customerId: C1, products: [{ productId: 'prod-1' }] });
-  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: null, proposal: true });
+  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: null, proposal: true, serviceType: null });
+});
+
+// A yearly cap kept to lawn applications (LESCO Crosscheck Plus) passes a pest perimeter proposal only when the checker knows the visit's type.
+test('a named visit type is passed to the checker; one that is not a short string is a 400 and nothing is checked', async () => {
+  await post({ customerId: C1, products: [{ productId: 'prod-1' }], serviceType: 'Quarterly Pest Control Service' });
+  expect(LimitChecker.checkLimits).toHaveBeenCalledWith(C1, 'prod-1', expect.any(Date), undefined, { propertyId: null, proposal: true, serviceType: 'Quarterly Pest Control Service' });
+  LimitChecker.checkLimits.mockClear();
+  for (const serviceType of [42, { line: 'pest' }, 'x'.repeat(201)]) {
+    const res = await post({ customerId: C1, products: [{ productId: 'prod-1' }], serviceType });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.code).toBe('invalid_service_type');
+  }
+  expect(LimitChecker.checkLimits).not.toHaveBeenCalled();
 });
 
 test('customerId and products are still required', async () => {
