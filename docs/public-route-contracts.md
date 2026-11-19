@@ -1393,15 +1393,6 @@ above. The estimate surface follows the same rule in hour mode: the offer filter
 (`filterCollidingSlots`), the ASAP packing dates and the hold/commit probes in
 `slot-reservation.js` count only the slot technician's rows plus unassigned ones
 while the gate is on, so an offered estimate hour reserves and commits.
-The estimate picker's south-zone day funnel follows it too (owner 2026-11-19):
-a far-south slot is on a cluster day only when its own technician has a zone
-stop that day or the day has an unassigned zone stop (`zone-day-funnel.js`
-`onZoneDay`); a slot with no technician counts any zone stop. One opening per
-start is chosen after that filter (the collapse waits for it), and the customer
-route check runs before it, over every truck's openings, so the check's floor
-never keeps an opening that makes another customer late while another truck has
-a feasible one. The lead assessment link keeps the fleet's zone days (see that
-link below). Off, every zone day is the fleet's, byte for byte.
 Callers that never pass `technicianId` — the zone-engine confirm, auto-dispatch's
 all-day read and some follow-up seeders — are unchanged. The
 date-wide occupancy advisory lock (rung 1) that every one of these writers takes
@@ -7548,11 +7539,8 @@ can see fewer days, or one. A lead outside those zones, a gate-off request and
 any zone or stop lookup failure get the unfunneled list. The funnel is
 offer-time only, like the route check: the commit's single-day anti-forgery
 build and the location re-validation omit the address and are not funneled, so
-a time the funnel hid can still be committed by a request built by hand. With
-`GATE_MULTI_TECH_CONFIRM` on, this funnel keeps the fleet's zone days: the
-builder keeps one technician per date and start before the funnel and the route
-check run, so a per-truck filter here could hide the other truck's feasible
-start. No field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
+a time the funnel hid can still be committed by a request built by hand. No
+field, status, error code, limiter or header changes. `POST /:token/find-slots` is the same natural-language search
 reservice uses, READ-ONLY, same booking-window clamp on both ends, and
 (same P1) is likewise routed through `finalizeBookingLocation` rather than
 a raw `resolveServiceAddress` — a directly supplied out-of-area address

@@ -43,12 +43,15 @@
  *     slug OR customer city, both case-insensitive) so the two can't drift.
  *
  * Per truck (GATE_MULTI_TECH_CONFIRM, the tech-aware switch; owner 2026-11-19
- * "build south"): a zone day belongs to the technician whose stop it is. A
- * slot is on a cluster day only when its own technician has a zone stop that
- * day, or the day has an unassigned zone stop (any truck may take it); a slot
- * with no technician counts any zone stop (onZoneDay). Off, every zone day is
- * the fleet's, as with one truck. The night run's far-south rule
- * (auto-dispatch/south-day-kept.js) reads the same days the same way.
+ * "build south"): getZoneFunnelDays also returns each zone day's technicians
+ * (techDays), and onZoneDay decides whether a date is a zone day for one
+ * technician: a stop of that technician, or an unassigned stop (any truck may
+ * take it). The night run's far-south rule (auto-dispatch/south-day-kept.js)
+ * reads it. The booking funnels here (the estimate page, the assessment link)
+ * keep the fleet's zone days: their slot builders choose among trucks around
+ * the funnel (one technician per start, the customer route check's floor, the
+ * seed day), so per truck there needs those choices made per truck too
+ * (follow-up). Off, every zone day is the fleet's, as with one truck.
  *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.
@@ -240,20 +243,19 @@ function onZoneDay(date, techId, days, techDays) {
 }
 
 // Pure pool filter. funnelDays null → untouched. Otherwise clustered mode
-// keeps only slots on a zone-stop day (onZoneDay; per truck when techDays is
-// given); when none of those slots survives in the pool (no zone stop in the
-// window, or every zone day's windows are taken or filtered — seeding on a
-// full cluster day is deliberate, see header), seeded mode keeps exactly one
-// day: the first preferredSeedDate present in the pool (callers pass
-// find-time's score-ordered dates, so this is the cheapest-detour day) or the
-// soonest date. Returns the surviving slots plus a metadata descriptor — null
-// when the funnel didn't apply, INCLUDING the empty-input case, so cache
-// decisions must key off funnelDays, not this.
-function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [], techDays = null } = {}) {
+// keeps only zone-stop days; when none of those days survives in the pool
+// (no zone stop in the window, or every zone day's windows are taken or
+// filtered — seeding on a full cluster day is deliberate, see header),
+// seeded mode keeps exactly one day: the first preferredSeedDate present in
+// the pool (callers pass find-time's score-ordered dates, so this is the
+// cheapest-detour day) or the soonest date. Returns the surviving slots plus
+// a metadata descriptor — null when the funnel didn't apply, INCLUDING the
+// empty-input case, so cache decisions must key off funnelDays, not this.
+function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = {}) {
   const pool = Array.isArray(bookable) ? bookable : [];
   if (!funnelDays || !pool.length) return { slots: pool, funnel: null };
 
-  const clustered = pool.filter((s) => s?.date && onZoneDay(s.date, s.techId ?? null, funnelDays, techDays));
+  const clustered = pool.filter((s) => s?.date && funnelDays.has(s.date));
   if (clustered.length) return { slots: clustered, funnel: { mode: 'clustered' } };
 
   const poolDates = new Set(pool.map((s) => s?.date).filter(Boolean));
@@ -275,10 +277,6 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [], tec
 // Returns `pool` itself — same array — whenever the funnel does not apply
 // (gate off, no address, no funneled zone) or cannot be resolved (zone or
 // lookup failure: logged, fail open, exactly as the estimate page does).
-// The zone days stay the fleet's here, also with GATE_MULTI_TECH_CONFIRM on:
-// /book keeps one technician per date and start before this funnel and the
-// customer route check run, so a per-truck filter could hide the other
-// truck's feasible start (follow-up: per-truck candidates in that builder).
 async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn }) {
   if (!address || !Array.isArray(pool) || !pool.length || !isEnabled('southZoneDayFunnel')) return pool;
   let estimateZone = null;
