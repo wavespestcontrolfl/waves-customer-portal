@@ -43,10 +43,11 @@ describe('emailSourceEvidence: tagged website email links', () => {
     expect(result.basis.length).toBeLessThanOrEqual(240);
   });
 
-  test('names the page and a non-hub domain', () => {
-    expect(to('contact+gads_pest-control-bradenton-fl@palmettoexterminator.com').detail)
-      .toBe('Google Ads · email link, page pest-control-bradenton-fl on palmettoexterminator.com');
-    expect(to('contact+site_home@waveslawncare.com')).toMatchObject({ kind: 'website', label: 'Website' });
+  test('a tag on a spoke or lawn-care domain is not read: the site tags hub links only', () => {
+    expect(to('contact+gads_pest-control-bradenton-fl@palmettoexterminator.com'))
+      .toMatchObject({ kind: 'website', label: 'Website', detail: 'palmettoexterminator.com' });
+    expect(to('contact+site_home@waveslawncare.com'))
+      .toMatchObject({ kind: 'website', label: 'Website', detail: 'waveslawncare.com' });
   });
 
   test('reads the display-name header form, casing and a Cc recipient', () => {
@@ -99,7 +100,8 @@ describe('emailSourceEvidence: no tag', () => {
         kind: 'website', label: 'Website', detail: domain.split('@')[1],
       });
     }
-    expect(to('contact@veniceflpestcontrol.com').basis).toMatch(/address shown on the veniceflpestcontrol\.com website/);
+    expect(to('contact@veniceflpestcontrol.com').basis)
+      .toMatch(/the address the veniceflpestcontrol\.com website shows\. It is a hint, not proof/);
   });
 
   test('main domain without a tag, a non-contact mailbox, a foreign domain and blanks give null', () => {
@@ -119,9 +121,9 @@ describe('emailSourceEvidence: no tag', () => {
 });
 
 describe('ownMailboxAddress', () => {
-  test('strips a +tag on our own domains only', () => {
+  test('strips a +tag on the hub domain only', () => {
     expect(ownMailboxAddress('Contact+GBP-Sarasota_home@WavesPestControl.com')).toBe('contact@wavespestcontrol.com');
-    expect(ownMailboxAddress('contact+x@palmettoexterminator.com')).toBe('contact@palmettoexterminator.com');
+    expect(ownMailboxAddress('contact+x@palmettoexterminator.com')).toBe('contact+x@palmettoexterminator.com');
     expect(ownMailboxAddress('jane+shopping@example.test')).toBe('jane+shopping@example.test');
     expect(ownMailboxAddress(' Contact@wavespestcontrol.com ')).toBe('contact@wavespestcontrol.com');
     expect(ownMailboxAddress(null)).toBe('');

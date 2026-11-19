@@ -96,22 +96,24 @@ function splitAddress(address) {
 
 /**
  * Our own mailbox address without a "+tag", so contact+gbp-sarasota_home@
- * reads as contact@. Narrow: the tag is stripped only on our own website
- * domains. Any other address (a customer's included) comes back lowercased and
+ * reads as contact@. Narrow: the tag is stripped only on the hub domain, the
+ * one mailbox the site tags (Google Workspace delivers plus-addresses; spoke
+ * and lawn-care mail forwards through Cloudflare, and the site never tags it).
+ * Any other address (a customer's included) comes back lowercased and
  * untouched.
  */
 function ownMailboxAddress(value) {
   const address = String(value || '').trim().toLowerCase();
   const parts = splitAddress(address);
-  if (!parts || !OWN_DOMAINS.has(parts.domain)) return address;
+  if (!parts || !HUB_DOMAINS.has(parts.domain)) return address;
   const plus = parts.local.indexOf('+');
   return plus > 0 ? `${parts.local.slice(0, plus)}@${parts.domain}` : address;
 }
 
-// A valid tag on one of our own domains: { code, page, domain, descriptor } or null.
+// A valid tag on the hub domain: { code, page, domain, descriptor } or null.
 function parseTaggedAddress(address) {
   const parts = splitAddress(address);
-  if (!parts || !OWN_DOMAINS.has(parts.domain)) return null;
+  if (!parts || !HUB_DOMAINS.has(parts.domain)) return null;
   const match = TAGGED_LOCAL_RE.exec(parts.local);
   if (!match || !PAGE_RE.test(match[2])) return null;
   const descriptor = describeCode(match[1]);
@@ -120,11 +122,10 @@ function parseTaggedAddress(address) {
 
 function taggedEvidence({ page, domain, descriptor }) {
   const pageText = page === 'home' ? 'home page' : `page ${page}`;
-  const where = HUB_DOMAINS.has(domain) ? '' : ` on ${domain}`;
   return evidence(
     descriptor.kind,
     descriptor.label,
-    `${descriptor.detail} · email link, ${pageText}${where}`,
+    `${descriptor.detail} · email link, ${pageText}`,
     `The email was sent to a tagged website email link on ${domain} (${pageText}). The tag is written by the site, so it is a hint, not proof.`,
   );
 }
@@ -134,14 +135,14 @@ function ownSiteEvidence(domain) {
     'website',
     'Website',
     domain,
-    `The email was sent to the address shown on the ${domain} website. That site had no source tag on its email link.`,
+    `The email went to contact@${domain}, the address the ${domain} website shows. It is a hint, not proof: that site does not tag its email links.`,
   );
 }
 
 /**
  * Source evidence for an inbound email row, or null (the lead keeps its
  * "Email inquiry" label).
- *   1. A valid tagged address on any of our domains wins (first one found).
+ *   1. A valid tagged address on the hub domain wins (first one found).
  *   2. No valid tag, but the mail went to contact@ on a spoke or lawn-care
  *      domain: website evidence naming that domain.
  *   3. Anything else (contact@ on the main domain, a foreign address): null.
