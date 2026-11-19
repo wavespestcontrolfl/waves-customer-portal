@@ -287,8 +287,9 @@ describe("useSpeechDictation with server dictation on", () => {
       return answer(url, opts);
     });
   };
-  const recordAndStop = async (onTranscript) => {
-    const { result } = renderHook(() => useSpeechDictation(onTranscript));
+  // By default the mic's field can always take the words, so it asks the resend question.
+  const recordAndStop = async (onTranscript, options = { resendWanted: () => true }) => {
+    const { result } = renderHook(() => useSpeechDictation(onTranscript, options));
     await waitFor(() => expect(result.current.mode).toBe("upload"));
     await act(async () => { result.current.toggle(); });
     await waitFor(() => expect(result.current.listening).toBe(true));
@@ -323,6 +324,19 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(postsTo(fetchMock)).toHaveLength(2);
     expect(alert).not.toHaveBeenCalled();
+  });
+
+  it("a mic without resendWanted (no check of its field's limits) shows the error and asks nothing", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
+    await recordAndStop(onTranscript, {});
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(postsTo(fetchMock)).toHaveLength(1);
+    expect(onTranscript).not.toHaveBeenCalled();
   });
 
   it("no to the question: no second send, no words and no error box", async () => {
@@ -375,7 +389,7 @@ describe("useSpeechDictation with server dictation on", () => {
     const removed = vi.spyOn(document, "removeEventListener");
     try {
       failFirstPost(fetchMock, () => { visibility = "hidden"; throw new TypeError("Load failed"); });
-      const { result, unmount } = renderHook(() => useSpeechDictation(vi.fn()));
+      const { result, unmount } = renderHook(() => useSpeechDictation(vi.fn(), { resendWanted: () => true }));
       await waitFor(() => expect(result.current.mode).toBe("upload"));
       await act(async () => { result.current.toggle(); });
       await waitFor(() => expect(result.current.listening).toBe(true));

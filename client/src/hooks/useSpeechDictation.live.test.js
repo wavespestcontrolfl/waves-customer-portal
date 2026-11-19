@@ -107,6 +107,23 @@ describe("useSpeechDictation live words", () => {
     expect(stop).toHaveBeenCalled();
   });
 
+  it("another tab switches the login while recording: the recording stops, the preview ends and nothing is sent", async () => {
+    stubServer();
+    const { result } = await recording({ dictationContext: { customerId: CUSTOMER } });
+    expect(sessions).toHaveLength(1);
+    act(() => sessions[0].args.onText("Treated the"));
+    // a storage write that leaves the login alone changes nothing
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "admin_ib_recents" })); });
+    expect(result.current.listening).toBe(true);
+    localStorage.setItem("waves_admin_token", "other-staff-jwt");
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage", { key: "waves_admin_token" })); });
+    await waitFor(() => expect(result.current.listening).toBe(false));
+    expect(sessions[0].stop).toHaveBeenCalled();
+    await waitFor(() => expect(result.current.liveText).toBe(""));
+    expect(sessions[0].abort).toHaveBeenCalled();
+    expect(fetch.mock.calls.filter(([, o]) => o?.method === "POST")).toHaveLength(0);
+  });
+
   it("opens no session when the server did not offer live words", async () => {
     stubServer({ liveWords: false });
     const { result } = await recording({});

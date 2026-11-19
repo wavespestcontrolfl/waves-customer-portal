@@ -69,6 +69,10 @@ function dismissedThreadKey() {
   return uid ? `${DISMISSED_THREAD_KEY}:${uid}` : DISMISSED_THREAD_KEY;
 }
 const RECENTS_MAX = 5;
+// The bar's mic may ask to resend a recording whose send got no answer (useSpeechDictation): the
+// prompt has no length limit and is never locked while the mic shows (the mic is gone while a
+// question runs), so the words can always go in.
+const PROMPT_TAKES_WORDS = () => true;
 const D = {
   bg: "#F1F5F9",
   card: "#FFFFFF",
@@ -1233,6 +1237,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                   title="Dictate your question"
                   size={30}
                   dictationContext={dictationContext}
+                  resendWanted={PROMPT_TAKES_WORDS}
                   palette={{ accent: accentColor, muted: D.muted, red: D.red, card: "#fff" }}
                 />
               )}
@@ -1775,6 +1780,7 @@ function MobileSheet({
                   title="Tap to talk"
                   size={44}
                   dictationContext={dictationContext}
+                  resendWanted={PROMPT_TAKES_WORDS}
                   palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
                 />{" "}
               </div>

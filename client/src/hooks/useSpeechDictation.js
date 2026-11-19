@@ -77,10 +77,12 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  * `liveText` is cleared when they land (or the clip fails, or the mic is cancelled, unmounted or moved to
  * another customer or visit). A live session that fails only drops the preview.
  *
- * A send that got no answer (iOS "Load failed", or a 2xx answer cut off) keeps the clip and asks
- * "Send it again?" once the page is visible, while the field still belongs to the recording; it
- * is never resent on its own. Pass `{ resendWanted: () => boolean }` when the caller can tell its
- * field is gone while the hook stays mounted (FocusedBoxMic): false means no question.
+ * A send that got no answer (iOS "Load failed", or a 2xx answer cut off) shows "The words did not
+ * come back." A caller that passes `{ resendWanted: () => boolean }`, true while its field can
+ * still take the words (FocusedBoxMic: its box is there, unlocked and has room; the IB bar: its
+ * prompt takes any words), is asked "Send the recording again?" instead, once the page is visible
+ * and while the field still belongs to the recording and its login. Never resent on its own.
+ * Each field has its own limits and only its caller can check them: no check, no question.
  *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
@@ -265,9 +267,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // The round trip can outlive the field: unmounted, the mic now belongs to another customer or
       // visit, or another tab switched the login. Never append into the wrong field.
       const stillWanted = () => mountedRef.current && targetRef.current.key === clip.key && readToken() === token;
-      // The caller can also say its field can no longer take the words (FocusedBoxMic: the box left
-      // the page, locked or filled up), so no paid resend is offered for words with nowhere to go.
-      const canResend = () => stillWanted() && resendWantedRef.current?.() !== false;
+      // Only a caller that checks its own field asks (`resendWanted` true: the field can still take
+      // the words), so no paid resend is offered for words with nowhere to go.
+      const canResend = () => stillWanted() && resendWantedRef.current?.() === true;
       try {
         // A send with no answer asks to send the same recording again (null = the person said no).
         const answer = await transcribeClipWithResend(blob, durationSeconds, clip, token, canResend, unmountSignalRef.current);
@@ -371,7 +373,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // mic on a visible page (a phone on a mount) ends by itself at the cutoff:
     // the clip stops and what was recorded is handed over.
     const guarded = clipMode || serverMode;
-    const unguard = guarded ? guardRecording(stopRecording, clipMaxMs) : () => {};
+    const unguard = guarded ? guardRecording(stopRecording, clipMaxMs, () => readToken() === clip.token) : () => {};
     if (!unguard) {
       // Hidden while the permission prompt was open: the clip never starts.
       stream.getTracks().forEach((t) => t.stop());
