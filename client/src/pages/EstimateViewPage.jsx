@@ -7306,13 +7306,23 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           recoveryInFlightRef.current = false;
           return null;
         }
-        return loadEstimate({ preserveSelection: false }).then(() => {
+        return loadEstimate({ preserveSelection: false }).then((body) => {
           // Fully recovered — the contract no longer offers the dead hold.
           pendingRecoveryHoldRef.current = null;
           setRecoveryStuck(false);
           recoveryStuckRef.current = false;
           setRecoveryInFlight(false);
           recoveryInFlightRef.current = false;
+          // This page's own hold is released, so a live hold the refreshed contract still offers is another window's
+          // or device's (OTHER_LIVE_HOLD, or a re-hold that failed before reaching that check). Whatever started the
+          // recovery, the page follows the server: the normal step adopts that hold, and the notice says why. Without
+          // this, an expiry phase would say "Pick a time below" over a picker the held appointment hides.
+          const refreshed = body?.estimate?.acceptance;
+          if (refreshed?.mode === 'existing_appointment' && refreshed.appointment?.isHold) {
+            setCtaPhase('configure');
+            setDeadHoldNote(null);
+            setOtherHoldNotice(true);
+          }
         });
       })
       .catch(() => {
@@ -8151,10 +8161,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       return true;
     }
     if (again.otherHold) {
-      // The server kept another window's newer hold. Reload in the normal phase, so the page adopts that hold (its card
-      // says the time is held), and say why. Only this page's own expired hold is released.
-      recoverFromDeadHold('configure');
-      setOtherHoldNotice(true);
+      // The server kept another window's newer hold. The recovery releases only this page's own expired hold and
+      // reloads; the reload shows that hold with its notice (recoverFromDeadHold), or, if it is gone too, the plain
+      // expiry copy with the picker back.
+      recoverFromDeadHold('reservation_expired');
       return true;
     }
     if (again.review) {
@@ -10930,6 +10940,21 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         setSlotsRefreshSignal((v) => v + 1);
       }}
     />
+  ) : otherHoldNotice && ctaPhase === 'configure' ? (
+    // After a recovery found another window's hold: the reloaded page shows it (the held-time card below), and this
+    // says why. If that hold is gone too, the plain expiry copy (the picker is back).
+    <SlotIssueBanner kind={existingAppointment?.isHold ? 'other_hold' : 'expired'} />
+  ) : null;
+
+  // The configure step's held-time card, shared by both layouts: the website checkout shows the replacement time too.
+  const configureAppointmentCard = existingAppointment ? (
+    <ExistingAppointmentCard
+      appointment={existingAppointment}
+      secondsRemaining={countdownSeconds}
+      holdLimitReached={holdLimitReached}
+      onPickNewTime={() => recoverFromDeadHold('reservation_expired')}
+      busy={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
+    />
   ) : null;
 
   if (websiteMode) {
@@ -10939,7 +10964,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
-        bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        bookingContent={<>{slotIssueBanner}{bookingContent}{configureAppointmentCard}{paymentContent}</>} reviewContent={reviewContent}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
           <HoldCountdownBarWhenTimed
@@ -11098,19 +11123,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               })
             : null}
 
-          {/* After the re-hold found another window's hold, the reloaded page shows that hold here; if it is gone too,
-              the plain expiry copy (the picker is back). */}
-          {otherHoldNotice && ctaPhase === 'configure'
-            ? <SlotIssueBanner kind={existingAppointment?.isHold ? 'other_hold' : 'expired'} /> : null}
-          {existingAppointment ? (
-            <ExistingAppointmentCard
-                appointment={existingAppointment}
-                secondsRemaining={countdownSeconds}
-                holdLimitReached={holdLimitReached}
-                onPickNewTime={() => recoverFromDeadHold('reservation_expired')}
-                busy={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
-              />
-          ) : null}
+          {configureAppointmentCard}
 
           {paymentContent}
 
