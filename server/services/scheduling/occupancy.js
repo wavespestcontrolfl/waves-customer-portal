@@ -49,9 +49,8 @@
  *   - Overlap:  window_start < :end  AND
  *               COALESCE(window_end, window_start + COALESCE(NULLIF(
  *                 estimated_duration_minutes, 0), 60) minutes) > :start
- *   - Holds:    reservation_expires_at IS NULL OR > NOW() — a live
- *     estimate-slot hold occupies real route time; an expired one is dead
- *     weight awaiting cleanup and never blocks.
+ *   - A customer-linked visit occupies its time even if it retains its hold
+ *     timestamp. An unclaimed estimate hold occupies time until database expiry.
  *   - Windowless rows (window_start IS NULL — converter/seeder placeholder
  *     rows): the SQL overlap predicate above evaluates NULL for them, so
  *     every existing gate ignores them. This module deliberately keeps that

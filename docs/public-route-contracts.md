@@ -2034,9 +2034,11 @@ ASAP expansion. At reservation and confirmation, a visit linked to a customer
 still occupies its booked time after its original hold expires. An unclaimed
 hold releases that time at expiry. A checkout presenting another customer's
 booked reservation ID receives the existing missing-reservation response,
-including after cleanup clears the timestamp. The zone picker removes the
-booked hour. Fixed-hour writes check for overlap and arrival-window writes
-recheck the remaining route capacity under lock.
+including after cleanup clears the timestamp. Zone and estimate pickers remove
+the occupied hour. A cached estimate rechecks affected arrival windows locally.
+Fixed-hour writes check for overlap and arrival-window writes recheck the
+remaining route capacity under lock. A restored booking can affect the
+displayed times without starting another road or hourly forecast request.
 Public acceptance and one-tap prepare route traffic before opening their write
 transaction, then acquire the date, selected-technician and unassigned fences
 before their first row lock. Commit verifies the prepared date/technician,

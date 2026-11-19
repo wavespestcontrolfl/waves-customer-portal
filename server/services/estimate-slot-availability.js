@@ -31,6 +31,7 @@ const db = require('../models/db');
 const { applyAssignable, absentTechDays } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
+const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
 const { capacityEnabled, selfServeArrivalGraceMinutes } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
@@ -1719,6 +1720,11 @@ async function filterCollidingSlots(slots, {
   // scheduled_services id -> minutes. Each row counts at its own window shifted
   // by those minutes (shiftMovedRows).
   shiftedServiceMinutes,
+  // A warm result has already passed route/capability/travel checks. Re-read
+  // only local occupancy so a newly staff-claimed hold cannot leave its hour
+  // displayed for the wrapper TTL; never regenerate or buy route data.
+  cachedOccupancyVeto = false,
+  onStampedBooking,
   conn = db,
 } = {}) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
@@ -1739,9 +1745,10 @@ async function filterCollidingSlots(slots, {
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    });
+    // A staff claim turns an estimate hold into a booked visit by attaching
+    // its customer. It remains occupied even when the old hold timestamp has
+    // elapsed; only an expired, still-unclaimed hold is free.
+    .andWhere(bookedVisitOrLiveHold);
   if (excludeServiceIds.length) collisionQuery = collisionQuery.whereNotIn('scheduled_services.id', excludeServiceIds);
   if (ownEstimateId) {
     // This estimate's own UNCOMMITTED hold is not a collision for itself
@@ -1759,6 +1766,7 @@ async function filterCollidingSlots(slots, {
   }
   // Mode on: a live make-room hold also holds each move's destination (see the loop below), so its moves ride along.
   const readMakeRoomMoves = makeRoomOffersOn(makeRoomModeNow());
+  const checkTravelGap = travelGapEnabled() && !cachedOccupancyVeto;
   const rows = shiftMovedRows(await collisionQuery
     .select(
       'scheduled_services.id',
@@ -1775,14 +1783,15 @@ async function filterCollidingSlots(slots, {
       // Coordinates + service identity are only needed for the optional
       // travel-gap check (expected-minutes padding, owner ruling 2026-09-23).
       // Hold identity above also serves the unconditional global overlap check.
-      ...(travelGapEnabled()
+      ...(checkTravelGap
         ? [...guardedCoordSelects(conn), 'scheduled_services.service_type', 'scheduled_services.service_key_snapshot',
           // Planning-minute inputs (stopExpectedMinutesSync), as the booking check's reader selects them.
           'scheduled_services.is_recurring', 'scheduled_services.is_callback']
         : []),
     ), shiftedServiceMinutes);
+  if (onStampedBooking && rows.some(row => row.customer_id != null && row.reservation_expires_at != null)) onStampedBooking();
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
-  if (travelGapEnabled()) await ensureCatalogLoaded(conn);
+  if (checkTravelGap) await ensureCatalogLoaded(conn);
 
   const zoneSlug = zoneSlugOf(estimateZone);
   const zoneCities = new Set(
@@ -1822,7 +1831,7 @@ async function filterCollidingSlots(slots, {
       // 2026-09-23) — only resolved when the travel-gap check runs; the
       // same per-stop rule the booking check credits (planning table while
       // live, else the catalog; no match falls back to the window length).
-      ...(travelGapEnabled() && startMin != null && busyEndMin != null ? {
+      ...(checkTravelGap && startMin != null && busyEndMin != null ? {
         windowMinutes: busyEndMin - startMin,
         expectedMinutes: stopExpectedMinutesSync(row, busyEndMin - startMin),
       } : {}),
@@ -1848,7 +1857,7 @@ async function filterCollidingSlots(slots, {
         hold: false,
         lat: moved.lat ?? null,
         lng: moved.lng ?? null,
-        ...(travelGapEnabled() ? { windowMinutes: widthMin, expectedMinutes: stopExpectedMinutesSync(moved, widthMin) } : {}),
+        ...(checkTravelGap ? { windowMinutes: widthMin, expectedMinutes: stopExpectedMinutesSync(moved, widthMin) } : {}),
       };
       byTechDate.get(key).push(destination);
       allByDate.get(date).push(destination);
@@ -1886,6 +1895,7 @@ async function filterCollidingSlots(slots, {
     if (overlapsAny(committed, slotStart, slotEnd)) return false;
     if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
     if (overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd)) return false;
+    if (cachedOccupancyVeto) return true;
     // Travel gap is tech-blind (one field tech) — every live row that day; with
     // GATE_MULTI_TECH_CONFIRM on, the slot technician's rows plus unassigned ones.
     // The candidate's own expected-minutes padding credit (owner ruling
@@ -1904,6 +1914,70 @@ async function filterCollidingSlots(slots, {
       dayRows,
     );
   });
+}
+
+// Capacity offers are arrival promises, not fixed blocks: a normal flexible
+// visit may overlap their displayed hour and still fit sequentially. Only a
+// customer-linked row that still carries a reservation stamp identifies the
+// staff-claim transition this cache repair targets. A cleanup may clear that
+// stamp after the cache was built, so a customer-linked row updated since the
+// build counts too. Re-evaluate just those technician-days with the local
+// arrival model; no road/provider preload.
+async function recheckCachedCapacitySlots(slots, { dateFrom, dateTo, estimateId, coords, durationMinutes, prospective, cachedAt, conn = db }) {
+  if (!coords) return slots;
+  const rows = await conn('scheduled_services')
+    .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .andWhere((query) => {
+      query.whereNotNull('scheduled_services.customer_id').andWhere((changed) => {
+        changed.whereNotNull('scheduled_services.reservation_expires_at')
+          .orWhere('scheduled_services.updated_at', '>=', cachedAt);
+      });
+    })
+    .select('scheduled_services.technician_id', 'scheduled_services.scheduled_date');
+  const affected = new Set(rows.map(row => {
+    const date = row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : row.scheduled_date;
+    return `${date}|${row.technician_id ?? ''}`;
+  }));
+  const arrivalRoute = require('./scheduling/arrival-route');
+  const contexts = new Map();
+  const kept = [];
+  for (const slot of slots) {
+    const key = `${slot.date}|${slot.techId}`;
+    // In capacity mode an unassigned booking affects every technician.
+    if (!affected.has(key) && !affected.has(`${slot.date}|`)) {
+      kept.push(slot);
+      continue;
+    }
+    if (!slot.techId) continue;
+    if (!contexts.has(key)) {
+      contexts.set(key, arrivalRoute.loadArrivalRouteContext({
+        conn,
+        date: slot.date,
+        technicianId: slot.techId,
+        prospective: {
+          ...(prospective || {}),
+          lat: coords.lat,
+          lng: coords.lng,
+          estimated_duration_minutes: durationMinutes,
+        },
+        excludeEstimateId: estimateId,
+        includeClaimedReservations: true,
+      }).catch(() => null));
+    }
+    const context = await contexts.get(key);
+    if (!context) continue;
+    const fit = arrivalRoute.evaluateArrivalPlacement(context, {
+      windowStart: slot.windowStart,
+      windowEnd: slot.windowEnd,
+      durationMinutes: Number(slot.durationMinutes) || durationMinutes,
+      bufferMinutes: 0,
+      dayEndMin: currentDayEndMinutes(),
+    });
+    const arrivalGrace = require('../utils/slot-offer-token').splitSignedSlotId(slot.slotId)?.arrivalGrace || 0;
+    if (fit?.feasible && !arrivalRoute._internals.arrivalExceedsGrace(fit, arrivalGrace)) kept.push(slot);
+  }
+  return kept;
 }
 
 // GATE_BOOKING_MAKE_ROOM on, capacity mode (Codex #7796 P2): a make-room hold made in hour mode keeps its moved stops'
@@ -1994,16 +2068,16 @@ function dateHasStop(stopDates, slot) {
   return stopDates.has(slot.date) || (!!slot.techId && stopDates.has(`${slot.techId}|${slot.date}`));
 }
 
-async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
+async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null, onStampedBooking = null) {
   if (!dateFrom || !dateTo) return new Set();
   try {
     let query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('window_start')
-      .where((q) => {
-        q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
-      });
+      // Keep the fixed-hour fallback pool aligned with the collision mirror:
+      // a claimed hold is now a booked stop even after its hold timestamp.
+      .where(bookedVisitOrLiveHold);
     if (ownEstimateId) {
       query = query.whereNot((own) => {
         own.where('source_estimate_id', ownEstimateId)
@@ -2012,18 +2086,16 @@ async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
       });
     }
     const dayOf = (d) => (typeof d === 'string' ? d.slice(0, 10) : new Date(d).toISOString().slice(0, 10));
-    if (featureGates.multiTechConfirmLive()) {
-      // GATE_MULTI_TECH_CONFIRM: a technician's stop packs only that technician's day. The set
-      // holds the date of every unassigned stop (blocks every technician) and a
-      // `<techId>|<date>` key per assigned stop; read it with dateHasStop().
-      const scoped = await query.distinct('scheduled_date', 'technician_id');
-      return new Set(scoped.map((r) => (r.technician_id ? `${r.technician_id}|${dayOf(r.scheduled_date)}` : dayOf(r.scheduled_date))));
+    const scoped = featureGates.multiTechConfirmLive();
+    if (scoped || onStampedBooking) {
+      const rows = await query.distinct('scheduled_date', ...(scoped ? ['technician_id'] : []),
+        ...(onStampedBooking ? [db.raw('customer_id IS NOT NULL AND reservation_expires_at <= NOW() AS restored_booking')] : []));
+      if (onStampedBooking && rows.some(row => row.restored_booking)) onStampedBooking();
+      return new Set(rows.map(r => r.technician_id ? `${r.technician_id}|${dayOf(r.scheduled_date)}` : dayOf(r.scheduled_date)));
     }
-    const rows = await query
-      .distinct('scheduled_date')
-      .pluck('scheduled_date');
-    return new Set(rows.map(dayOf));
+    return new Set((await query.distinct('scheduled_date').pluck('scheduled_date')).map(dayOf));
   } catch (err) {
+    onStampedBooking?.();
     logger.warn(`[estimate-slots] stop-date lookup failed — ASAP windows left unfiltered: ${err.message}`);
     return new Set();
   }
@@ -2347,7 +2419,11 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // scheduling/customer-windows.js (Codex r1 P2s on #4663).
   await refreshCustomerBookingWindowConfig();
 
-  const estimate = await db('estimates').where({ id: estimateId }).first();
+  // Measure cache changes from before the calendar is read, on the same
+  // database clock as the appointments. A claim can be swept during a build.
+  const readAt = new Date().toISOString();
+  const clockColumn = db.raw?.('statement_timestamp()::text AS occupancy_read_at');
+  const estimate = await db('estimates').where({ id: estimateId }).first('*', ...(clockColumn ? [clockColumn] : []));
   if (!estimate) {
     const err = new Error('estimate not found');
     err.code = 'ESTIMATE_NOT_FOUND';
@@ -2476,9 +2552,64 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // bookable window from the full pool, so invalidate and recompute below.
     const cachedPrimary = cached.result.primary || [];
     const cachedExpander = cached.result.expander || [];
-    const primary = filterPastSlotsForToday(cachedPrimary, { minimumLeadMinutes: opts.minimumLeadMinutes });
-    const expander = filterPastSlotsForToday(cachedExpander, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    let primary = filterPastSlotsForToday(cachedPrimary, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    let expander = filterPastSlotsForToday(cachedExpander, { minimumLeadMinutes: opts.minimumLeadMinutes });
     if (primary.length === cachedPrimary.length && expander.length === cachedExpander.length) {
+      // Do not trust a warm list's local occupancy for the full five-minute
+      // TTL: the office can claim an estimate hold after this entry was
+      // built. Recheck the already-signed hours against current DB rows only
+      // (no find-time call, geocode or route provider). Capacity entries
+      // re-evaluate only staff-claimed technician-days (still stamped, or
+      // customer-linked and changed since this entry) with the local arrival
+      // model, preserving flexible arrival promises.
+      // A failed local read fails closed for this response
+      // without evicting the still-useful cache or triggering regeneration.
+      const cachedSlots = [...primary, ...expander];
+      const cachedDates = cachedSlots.map((slot) => slot?.date).filter(Boolean).sort();
+      if (cachedDates.length) {
+        try {
+          let kept;
+          if (capacityEnabled()) {
+            kept = await recheckCachedCapacitySlots(cachedSlots, {
+              dateFrom: cachedDates[0],
+              dateTo: cachedDates[cachedDates.length - 1],
+              estimateId,
+              coords: cached.occupancyContext?.coords,
+              durationMinutes: cached.occupancyContext?.durationMinutes,
+              prospective: cached.occupancyContext?.prospective,
+              cachedAt: cached.occupancyContext?.readAt,
+            });
+          } else {
+            // A make-room offer intentionally overlaps the stop its signed
+            // policy moves; replaying the plain fixed-hour mirror would
+            // erase it. Recheck ordinary cached hours and carry that signed
+            // exception through unchanged for reserve-time verification.
+            const makeRoomIds = new Set(cached.occupancyContext?.makeRoomSlotIds || []);
+            const ordinary = cachedSlots.filter((slot) => !makeRoomIds.has(slot.slotId));
+            const ordinaryKept = await filterCollidingSlots(ordinary, {
+              dateFrom: cachedDates[0],
+              dateTo: cachedDates[cachedDates.length - 1],
+              ownEstimateId: estimateId,
+              cachedOccupancyVeto: true,
+            });
+            const ordinaryIds = new Set(ordinaryKept.map((slot) => slot.slotId));
+            kept = cachedSlots.filter((slot) => makeRoomIds.has(slot.slotId) || ordinaryIds.has(slot.slotId));
+          }
+          const keptIds = new Set(kept.map((slot) => slot.slotId));
+          primary = primary.filter((slot) => keptIds.has(slot.slotId));
+          expander = expander.filter((slot) => keptIds.has(slot.slotId));
+        } catch (err) {
+          logger.warn(`[estimate-slots] cached occupancy recheck failed for estimate ${estimateId} — withholding cached slots: ${err.message}`);
+          primary = [];
+          expander = [];
+        }
+      }
+      const occupancyChanged = primary.length !== cachedPrimary.length || expander.length !== cachedExpander.length;
+      const cacheMetadata = {
+        ...cached.result.metadata,
+        cacheHit: true,
+        ...(occupancyChanged ? { firstDayAvailability: firstDayAvailability([...primary, ...expander]) } : {}),
+      };
       // Gate-off must win over a cache entry written while the rain-chip
       // gate was on: the gate resolves at process start and this cache is
       // in-memory, so today the two can't actually disagree — but if the
@@ -2496,10 +2627,17 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
           ...cached.result,
           primary: strip(primary),
           expander: strip(expander),
-          metadata: { ...cached.result.metadata, cacheHit: true },
+          nearby: [...primary, ...expander].some((slot) => slot.routeOptimal),
+          metadata: cacheMetadata,
         };
       }
-      return { ...cached.result, metadata: { ...cached.result.metadata, cacheHit: true } };
+      return {
+        ...cached.result,
+        primary,
+        expander,
+        nearby: [...primary, ...expander].some((slot) => slot.routeOptimal),
+        metadata: cacheMetadata,
+      };
     }
     wrapperCache.delete(cacheKey);
   }
@@ -2652,6 +2790,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
   // ascending, so this includes far more candidates than we'll surface.
+  let restoredBookingUsed = false;
+  const onStampedBooking = featureGates.gateEnvValue?.('GATE_CUSTOMER_RAIN_RANK')
+    ? () => { restoredBookingUsed = true; } : null;
   const [rawLists, asapLists, stopDates] = await Promise.all([
     Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
@@ -2661,6 +2802,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       serviceType: serviceProfile.services.map(service => service.label || service.service).join(' '),
       serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       capacityPlacement: true,
+      // The public estimate surface mirrors the authoritative reservation
+      // write: staff-claimed holds remain occupied after their old expiry.
+      includeClaimedReservations: true,
       // This estimate's own uncommitted hold must not occupy the route it is
       // asking about (codex r16 P1) — the non-capacity collision query
       // already excludes it; capacity generation needs the same.
@@ -2704,8 +2848,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       includeWeekends: opts.includeWeekends,
       minimumLeadMinutes: opts.minimumLeadMinutes,
     }))),
-    stopDatesInRange(dateFrom, dateTo, estimateId),
+    stopDatesInRange(dateFrom, dateTo, estimateId, onStampedBooking),
   ]);
+  // Request-local signal from find-time: at least one route/calendar read
+  // restored a staff-booked visit whose old hold timestamp is already past.
+  // Those rows must shape availability, but must not be the reason this cold
+  // public request starts the conditional hourly forecast/provider ladder.
+  restoredBookingUsed ||= rawLists.some((result) => result?.restored_booking_used === true);
   const raw = { slots: rawLists.flatMap((r) => r?.slots || []) };
   // A date with a committed stop offers ONLY the packed find-time ends — a
   // synthetic hourly ASAP window there is the exact hole-maker the bug
@@ -2716,12 +2865,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes)), lineRanking);
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, onStampedBooking, ownEstimateId: estimateId });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, ownEstimateId: estimateId });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, candidateExpectedMinutes, onStampedBooking, ownEstimateId: estimateId });
   // LIVE line map: with a ranked list, the home-first choice at one start and the
   // one-per-hour collapse wait for the customer route check below, so a home slot that
   // check rejects leaves the gap technician's slot at that start. No ranking: today's
@@ -2803,7 +2952,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = await slotRainTierOf(funneledBookable, {
+  const rainTierOf = restoredBookingUsed ? null : await slotRainTierOf(funneledBookable, {
     profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
   });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
@@ -2822,11 +2971,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   stampSlotRainChances(primary, rainOutlook);
   stampSlotRainChances(expander, rainOutlook);
 
+  const signedPrimary = signCustomerFacingSlots(primary, estimateId);
+  const signedExpander = signCustomerFacingSlots(expander, estimateId);
+  const makeRoomSlotIds = [
+    ...primary.map((slot, i) => (slot.makeRoom === true ? signedPrimary[i]?.slotId : null)),
+    ...expander.map((slot, i) => (slot.makeRoom === true ? signedExpander[i]?.slotId : null)),
+  ].filter(Boolean);
+
   const result = {
     // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
     // well inside the offer TTL (see slot-offer-token.js).
-    primary: signCustomerFacingSlots(primary, estimateId),
-    expander: signCustomerFacingSlots(expander, estimateId),
+    primary: signedPrimary,
+    expander: signedExpander,
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
       // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -2861,7 +3017,22 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // estimates are a small slice of traffic; recomputing beats versioning
   // the cache by schedule state. Non-funneled results keep today's caching.
   if (funnelDays == null && !skipResultCache && !bypassCache && routeDayPolicyKey != null) {
-    wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
+    wrapperCache.set(cacheKey, {
+      result,
+      expiresAt: Date.now() + WRAPPER_TTL_MS,
+      // Private cache-only inputs for the DB/local-model occupancy recheck;
+      // never copied into the public result payload.
+      occupancyContext: {
+        readAt: estimate.occupancy_read_at || readAt,
+        coords: coords ? { lat: coords.lat, lng: coords.lng } : null,
+        durationMinutes: serviceProfile.durationMinutes,
+        prospective: {
+          service_type: serviceProfile.services.map(service => service.label || service.service).join(' '),
+          ...(serviceProfile.services.length > 1 ? { combined_services: true } : {}),
+        },
+        makeRoomSlotIds,
+      },
+    });
   }
   return result;
 }
@@ -2967,6 +3138,8 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     durationMinutes: serviceProfile.durationMinutes,
     serviceTypes: serviceProfile.services.map(service => service.label || service.service),
     capacityPlacement: true,
+    // Mirror the live customer offer generator's claimed-hold occupancy.
+    includeClaimedReservations: true,
     // Same own-hold exclusion as the live path, so the debug surface
     // reflects what the customer is actually offered (codex r16 P1).
     excludeEstimateId: estimateId,

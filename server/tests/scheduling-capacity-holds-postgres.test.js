@@ -90,6 +90,10 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
           .update({ customer_id: bookedCustomer, status: 'confirmed' });
       }
       await f.db('scheduled_services').where({ id: first.scheduledServiceId }).update({ reservation_expires_at: f.db.fn.now() });
+      const offered = await findAvailableSlots({ ...f.PIN, dateFrom: f.date, dateTo: f.date, technicianId: f.ids.technician,
+        excludeEstimateId: secondEstimate, includeClaimedReservations: true, customerFacing: true, earliestStartMin: 600,
+        serviceType: 'Pest Control', durationMinutes, includeWeekends: true, topN: 99, providerTravel: false });
+      expect(offered.slots.some(slot => slot.start_time === '10:00')).toBe(!claimed);
       const second = reserveSlot({ estimateId: secondEstimate, slotId: f.signedSlot(secondEstimate, durationMinutes) });
       if (claimed) {
         await expect(second).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
@@ -100,6 +104,56 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
         await expect(second).resolves.toHaveProperty('scheduledServiceId');
       }
     });
+  });
+
+  test('capacity offers use the original road requests when an unassigned office booking occupies the hour', async () => {
+    const optimizer = require('../services/route-optimizer');
+    const travel = optimizer.createSchedulingTravel({ maxRequests: 0 });
+    const requests = [];
+    const preload = async legs => requests.push(legs.map(({ date, departureMin, from, to }) =>
+      [date, Math.ceil(departureMin), from.lat, from.lng, to.lat, to.lng]));
+    const factory = jest.spyOn(optimizer, 'createSchedulingTravel').mockReturnValue({ ...travel, preload });
+    try {
+      await f.db('scheduled_services').insert(f.baseStop({ window_start: '08:00', window_end: '08:30', route_order: 1 }));
+      const options = { lat: Number(f.PIN.lat) + 0.01, lng: f.PIN.lng, dateFrom: f.date, dateTo: f.date, technicianId: f.ids.technician,
+        excludeEstimateId: f.ids.estimates[0], includeClaimedReservations: true, customerFacing: true, serviceType: 'Pest Control',
+        durationMinutes: 30, includeWeekends: true, topN: 99 };
+      expect((await findAvailableSlots(options)).slots.some(slot => slot.start_time === '10:00')).toBe(true);
+      const before = requests.splice(0);
+      expect(before.some(pass => pass.length)).toBe(true);
+      await f.db('scheduled_services').insert(f.baseStop({ technician_id: null, window_start: '10:00', window_end: '11:00',
+        source_estimate_id: f.ids.estimates[0], reservation_expires_at: f.db.raw("NOW() + interval '15 minutes'") }));
+      expect((await findAvailableSlots(options)).slots.some(slot => slot.start_time === '10:00')).toBe(false);
+      expect(requests).toEqual(before);
+    } finally {
+      factory.mockRestore();
+    }
+  });
+
+  test.each([false, true])('the estimate page drops a staff-booked opening on refresh and on a fresh search (swept: %s)', async swept => {
+    const { getAvailableSlots, invalidateEstimate } = require('../services/estimate-slot-availability');
+    const id = f.ids.estimates[0];
+    const options = { dateFrom: f.date, dateTo: f.date, includeWeekends: true,
+      maxResults: 50, expanderMaxResults: 0, minimumLeadMinutes: 0, paidCalls: false };
+    const shown = result => [...result.primary, ...result.expander].map(slot => slot.windowStart);
+    await f.db('tech_schedule_blocks').insert([
+      { date: f.date, block_type: 'blocked', start_time: '08:00', end_time: '10:00' },
+      { date: f.date, block_type: 'blocked', start_time: '11:00', end_time: '18:00' },
+    ]);
+    try {
+      invalidateEstimate(id);
+      expect(shown(await getAvailableSlots(id, options))).toContain('10:00');
+      const booked = f.baseStop({ technician_id: null, window_start: '10:00', window_end: '11:00',
+        source_estimate_id: f.ids.estimates[1], reservation_expires_at: f.db.fn.now() });
+      await f.db('scheduled_services').insert(booked);
+      if (swept) await f.db('scheduled_services').where({ id: booked.id }).update({ reservation_expires_at: null, updated_at: f.db.fn.now() });
+      const refresh = await getAvailableSlots(id, options);
+      expect(refresh.metadata.cacheHit).toBe(true);
+      expect(shown(refresh)).not.toContain('10:00');
+      expect(shown(await getAvailableSlots(id, { ...options, bypassCache: true }))).not.toContain('10:00');
+    } finally {
+      invalidateEstimate(id);
+    }
   });
 
   test.each([

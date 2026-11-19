@@ -13,7 +13,7 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
-const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
+const { bookedVisitOrLiveHold, reservationRoadContext } = require('./reservation-occupancy');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
@@ -1171,8 +1171,7 @@ async function prepareArrivalCapacity(options) {
   if (!context) throw capacityError('route_unverified');
   // Keep the existing road requests. The locked fit below includes every booked
   // visit and uses the conservative travel model for any leg without a road time.
-  const travelContext = { ...context, rows: context.rows.filter(row => !row.reservation_lapsed
-    && !(options.excludeEstimateId && row.source_estimate_id === options.excludeEstimateId && row.reservation_expires_at)) };
+  const travelContext = reservationRoadContext(context, options.excludeEstimateId);
   await certifyArrivalPlacement(travelContext, options);
   return { options, fingerprint: routeFingerprint(context), travel: travelContext.travel };
 }
