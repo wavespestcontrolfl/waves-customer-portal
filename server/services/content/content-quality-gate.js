@@ -1161,9 +1161,15 @@ const PUBLIC_BODIES = [
   'United States Department of Agriculture', 'U.S. Department of Agriculture', 'USDA',
   'American Mosquito Control Association', 'Entomological Society of America', 'National Pesticide Information Center',
   'Florida Fish and Wildlife Conservation Commission', 'Florida Medical Entomology Laboratory', 'National Weather Service',
-  // Sources the 2026-11-18 customer-question briefs cite by name, and the
-  // building code they cite. Penn State is listed only under its full name:
-  // the "the <first word>" pairs below would otherwise clear "The Penn family".
+];
+
+// Sources the 2026-11-18 customer-question briefs cite by name, and the
+// building code they cite. They add their own word pairs but no "the <first
+// word>" pair: "the federal" would clear "The Federal family", a surname with
+// no agency named (pre-push audit). A sentence that opens "The Federal Trade
+// Commission" still holds the draft for review, as it did before this list;
+// the briefs never open a sentence with "The" and a capitalized word.
+const PUBLIC_BODIES_NO_ARTICLE_PAIR = [
   'NC State Extension', 'North Carolina State University', 'Pennsylvania State University Extension',
   'Federal Trade Commission', 'National Park Service', 'Florida Building Code',
 ];
@@ -1186,14 +1192,15 @@ function approvedCompetitorNames() {
 function approvedEntityPairs() {
   const pairs = new Set();
   const words = (name) => String(name).toLowerCase().split(/\s+/).filter(Boolean);
-  for (const name of [...approvedCompetitorNames(), ...PUBLIC_BODIES]) {
+  for (const name of [...approvedCompetitorNames(), ...PUBLIC_BODIES, ...PUBLIC_BODIES_NO_ARTICLE_PAIR]) {
     const w = words(name);
     for (let i = 0; i + 1 < w.length; i += 1) pairs.add(`${w[i]} ${w[i + 1]}`);
   }
   // "The University of Florida ..." opens a sentence, and the redactor reads
   // the capitalized "The University" as a pair. Public bodies only: some
   // competitor names start with a surname ("Massey", "Turner"), and "The
-  // Massey family" must still hold the draft.
+  // Massey family" must still hold the draft. PUBLIC_BODIES_NO_ARTICLE_PAIR
+  // is left out on purpose (see its comment).
   for (const name of PUBLIC_BODIES) {
     const w = words(name);
     if (w.length > 1) pairs.add(`the ${w[0]}`);

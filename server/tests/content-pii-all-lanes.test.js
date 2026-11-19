@@ -151,7 +151,7 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     'a university extension citation': 'The University of Florida IFAS Extension recommends inspecting mulch beds near the slab.',
     'a state agency citation': 'The Florida Department of Agriculture and Consumer Services licenses every pest control operator.',
     'an out-of-state extension citation': 'NC State Extension and Pennsylvania State University Extension both say not to cut a hammerhead worm found in a Sarasota yard.',
-    'a federal agency citation': 'The Federal Trade Commission and the National Park Service both publish guidance for homeowners in Venice.',
+    'a federal agency citation': 'Homeowners in Venice can read guidance from the Federal Trade Commission and the National Park Service.',
     'a building code citation': 'The Florida Building Code requires termite protection for every new home in Bradenton.',
   };
 
@@ -208,6 +208,14 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
   test('live: "The Penn family" still holds the draft (Penn State is listed only by its full name)', () => {
     process.env[GATE] = 'true';
     const r = evalLane(brief, 'The Penn family in Parrish had ants in the kitchen again.');
+    expect(r.checks.redaction_passed.ok).toBe(false);
+  });
+
+  // Pre-push audit: a "the federal" pair would clear this sentence, which
+  // names a family and no agency. The federal agency citation above passes.
+  test('live: "The Federal family" still holds the draft (the newly cited bodies add no "the <first word>" pair)', () => {
+    process.env[GATE] = 'true';
+    const r = evalLane(brief, 'The Federal family in Venice called about rats.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
