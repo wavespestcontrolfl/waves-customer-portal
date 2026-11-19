@@ -472,7 +472,7 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
   const plain = () => normalizePreferences({ mowing_days: ['Mon'] }, LAWN);
 
   // service_zones rows, the funnel's stop read (the only chain that calls andWhere) and the mowing preferences row.
-  function southDb({ stops = [], zonesFail = false, prefs, memberRows = [] } = {}) {
+  function southDb({ stops = [], zonesFail = false, prefs } = {}) {
     const counters = { stopReads: 0 };
     const fn = jest.fn((name) => {
       const c = {};
@@ -482,8 +482,6 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       c.select = async () => {
         if (name === 'service_zones') { if (zonesFail) throw new Error('zones down'); return [VENICE]; }
         if (name === 'scheduled_services' && c.funnel) { counters.stopReads += 1; return stops; }
-        // makeMemberGuard's read of the grouped siblings' committed rows.
-        if (name === 'scheduled_services as ss') return memberRows;
         return [];
       };
       c.pluck = async () => [];
@@ -590,37 +588,20 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       expect(out.drops.south_day_kept).toBe(1);
     });
 
-    test('on: a grouped visit is also held by each member\'s current technician, where the unit move commits first', async () => {
+    test('on: a grouped visit keeps the fleet\'s zone days (each member commits on its own technician first)', async () => {
       techScopedConfirmActive.mockReturnValue(true);
       findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '10:00', 't2')] });
-      const offered = async (stops, primaryTech, siblingTech, { primary = NORTH, sibling = {} } = {}) => {
-        const grouped = siblingTech !== undefined;
-        const siblings = [{ id: 's2', scheduled_date: TUE, technician_id: siblingTech, ...sibling }];
-        const out = await findValidCandidateSlots({ ...primary, visit_id: grouped ? 'v1' : null, technician_id: primaryTech }, plain(), ctx({
-          db: southDb({ stops }),
-          ...(grouped ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings, visitWindowStart: null } } : {}),
+      const offered = async (visitId) => {
+        const out = await findValidCandidateSlots({ ...NORTH, visit_id: visitId, technician_id: 't1' }, plain(), ctx({
+          db: southDb({ stops: stopOf('t1') }),
+          ...(visitId ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2', scheduled_date: TUE, technician_id: 't1' }], visitWindowStart: null } } : {}),
         }));
         return out.candidates.map((c) => `${c.date} ${c.technician_id}`);
       };
-      // Alone, the visit may take t2's slot: the far-south stop is not t2's.
-      expect(await offered(stopOf('t1'), 't1')).toEqual([`${WED} t2`]);
-      expect(await offered(stopOf('t3'), null)).toEqual([`${WED} t2`]);
-      // Grouped, each member's date commits on its current technician before the re-point to t2 (visit-groups
-      // alignMember): that technician's far-south stop holds the date, the primary's or a sibling's, and any far-south
-      // stop holds an unassigned member's.
-      expect(await offered(stopOf('t1'), 't1', 't1')).toEqual([]);
-      expect(await offered(stopOf('t3'), 't1', 't3')).toEqual([]);
-      expect(await offered(stopOf('t3'), null, null)).toEqual([]);
-      // A stop of no member's technician leaves the date open.
-      expect(await offered(stopOf('t3'), 't1', 't1')).toEqual([`${WED} t2`]);
-      // Each member on its own zone, as apply time: a north sibling of a far-south visit holds the unit (its own
-      // technician's day, or the slot's) ...
-      const northSibling = { sibling: { zone: 'parrish', customer_city: 'Parrish' }, primary: SOUTH };
-      expect(await offered(stopOf('t3'), 't1', 't3', northSibling)).toEqual([]);
-      expect(await offered(stopOf('t2'), 't1', 't3', northSibling)).toEqual([]);
-      expect(await offered(stopOf('t1'), 't1', 't3', northSibling)).toEqual([`${WED} t2`]);
-      // ... and a far-south sibling's technician holds nothing.
-      expect(await offered(stopOf('t3'), 't1', 't3', { sibling: { zone: 'venice', customer_city: 'Venice' } })).toEqual([`${WED} t2`]);
+      // Alone, the visit may take t2's slot: the far-south stop is t1's.
+      expect(await offered(null)).toEqual([`${WED} t2`]);
+      // Grouped, any far-south stop holds the date, as with the gate off.
+      expect(await offered('v1')).toEqual([]);
     });
 
     test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
@@ -698,50 +679,17 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
     });
 
-    test('per truck: the member guard checks each sibling before the first write, for its own and the receiving technician', async () => {
-      const { assertUnitClear } = require('../services/auto-dispatch/south-day-kept');
-      const { makeMemberGuard } = require('../services/auto-dispatch/apply');
-      const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
-      const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED', id });
-      const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
-      const sibling = (techId, over = {}) => ({ ...NORTH, id: 's2', technician_id: techId, ...over });
-      const unit = (stops, rows) => assertUnitClear(southDb({ stops }), rows, NORTH, WED, refuse, 't1');
-      try {
-        techScopedConfirmActive.mockReturnValue(true);
-        // A sibling still on t3 commits its date there first, so t3's far-south day holds the unit; so does the
-        // receiving technician's (t1), and any far-south stop holds an unassigned sibling.
-        await expect(unit(stopOf('t3'), [sibling('t3')])).rejects.toMatchObject({ code: 'REFUSED', id: 's2' });
-        await expect(unit(stopOf('t1'), [sibling('t3')])).rejects.toMatchObject({ code: 'REFUSED', id: 's2' });
-        await expect(unit(stopOf('t3'), [sibling(null)])).rejects.toMatchObject({ code: 'REFUSED', id: 's2' });
-        await expect(unit(stopOf('t2'), [sibling('t3')])).resolves.toBeUndefined();
-        // A sibling already on that date, or a far-south one, is not held.
-        await expect(unit(stopOf('t3'), [sibling('t3', { scheduled_date: WED })])).resolves.toBeUndefined();
-        await expect(unit(stopOf('t3'), [sibling('t3', { zone: 'venice', customer_city: 'Venice' })])).resolves.toBeUndefined();
-        // makeMemberGuard runs it on the siblings' committed rows, before any member's write.
-        const guard = makeMemberGuard({ service: NORTH, best: { date: WED, start_time: '08:00', technician_id: 't1' } });
-        const members = [{ id: 's1', status: 'confirmed' }, { id: 's2', status: 'confirmed' }];
-        await expect(guard({ trx: southDb({ stops: stopOf('t3'), memberRows: [sibling('t3')] }), members, targets: [] }))
-          .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('far-south stop') });
-        // Off (the fleet view): no read at all; the primary's own check decides for the unit.
-        techScopedConfirmActive.mockReturnValue(false);
-        const offDb = southDb({ stops: stopOf('t3') });
-        await expect(assertUnitClear(offDb, [sibling('t3')], NORTH, WED, refuse, 't1')).resolves.toBeUndefined();
-        expect(offDb).not.toHaveBeenCalled();
-      } finally {
-        techScopedConfirmActive.mockImplementation(() => true);
-      }
-    });
-
-    test('per truck (GATE_MULTI_TECH_CONFIRM on): each technician the visit can sit with decides, and the move guard passes them', async () => {
+    test('per truck (GATE_MULTI_TECH_CONFIRM on): each technician a single visit can sit with decides, and the move guard passes them; a grouped visit keeps the fleet\'s view', async () => {
       const { assertDestinationClear } = require('../services/auto-dispatch/south-day-kept');
       const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
       const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
-      const check = (stops, techIds) => assertDestinationClear(southDb({ stops }), NORTH, NORTH, WED, refuse, techIds);
+      const check = (stops, techIds, row = NORTH, snapshot = NORTH) => assertDestinationClear(southDb({ stops }), row, snapshot, WED, refuse, techIds);
       // The guard's far-south verdict for a move to t1 (best.technician_id) whose transaction writes `written`.
-      const guardHeld = async (stops, written) => {
-        const err = await guardFor(NORTH)({ trx: southDb({ stops }), technicianId: written }).then(() => null, (e) => e);
+      const guardHeld = async (stops, written, service = NORTH) => {
+        const err = await guardFor(service)({ trx: southDb({ stops }), technicianId: written }).then(() => null, (e) => e);
         return String(err?.message || '').includes('far-south stop');
       };
+      const GROUPED = { ...NORTH, visit_id: 'v1' };
       const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
       try {
         techScopedConfirmActive.mockReturnValue(true);
@@ -751,13 +699,17 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
         await expect(check(STOP_WED, ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
         // A move whose transaction writes t1 (the rebooker's kept technician) is not held by t2's day.
         expect(await guardHeld(stopOf('t2'), 't1')).toBe(false);
-        // A grouped member's date commits on its old technician (t2) before the unit mover re-points it to t1 in its
-        // own transaction (visit-groups alignMember): t2's day holds it, and any stop holds an unassigned row.
+        // A transaction that writes t2 (the visit was reassigned after the run ranked it) is held by t2's day, and any
+        // stop holds an unassigned row.
         expect(await guardHeld(stopOf('t2'), 't2')).toBe(true);
         expect(await guardHeld(stopOf('t2'), null)).toBe(true);
         // The receiving technician's own day holds it, whatever this transaction writes.
         expect(await guardHeld(stopOf('t1'), 't2')).toBe(true);
         expect(await guardHeld(stopOf('t3'), 't2')).toBe(false);
+        // A grouped visit (the moving row or the pass-1 snapshot) keeps the fleet's view: t2's stop holds a move to t1.
+        await expect(check(stopOf('t2'), ['t1'], GROUPED, NORTH)).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(stopOf('t2'), ['t1'], NORTH, GROUPED)).rejects.toMatchObject({ code: 'REFUSED' });
+        expect(await guardHeld(stopOf('t2'), 't1', GROUPED)).toBe(true);
         // Off: t2's far-south stop holds the date for t1 as well.
         techScopedConfirmActive.mockReturnValue(false);
         await expect(check(stopOf('t2'), ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });

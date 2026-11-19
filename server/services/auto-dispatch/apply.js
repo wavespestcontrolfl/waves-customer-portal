@@ -367,10 +367,10 @@ function makeMoveGuard({ service, best, config = {} }) {
     await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
-    // With GATE_MULTI_TECH_CONFIRM: a stop of each technician the visit can sit with that day, or an unassigned one.
-    // That is the receiving technician and the one this transaction writes (`technicianId`, the rebooker's kept
-    // technician; null = unassigned): the unit mover commits a member's date on its old technician and re-points it
-    // after, in its own transaction (visit-groups alignMember), so a failed re-point leaves it there.
+    // With GATE_MULTI_TECH_CONFIRM, for a single visit: a stop of each technician it can sit with that day, or an
+    // unassigned one. That is the receiving technician and the one this transaction writes (`technicianId`, the
+    // rebooker's kept technician; null = unassigned), which differ only when the visit was reassigned after the run
+    // ranked it. A grouped visit keeps the fleet's view (south-day-kept.js).
     const southTechs = technicianId === undefined ? [receiving] : [receiving, technicianId || null];
     await southDayKept.assertDestinationClear(trx, row, service, best.date, refuse, southTechs);
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
@@ -578,10 +578,6 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
         'c.address_line1 as customer_address_line1', 'c.city as customer_city', 'c.zip as customer_zip',
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
-    // GATE_SOUTH_ZONE_DAY_FUNNEL, per truck: every sibling against the destination's far-south stops before the first
-    // write, for the receiving technician and its own current one (south-day-kept.js assertUnitClear). Each member's
-    // own write still rechecks it (makeMoveGuard).
-    await southDayKept.assertUnitClear(trx, rows, service, best.date, refuse, best.technician_id || service.technician_id || null);
     const memberIds = (members || []).map((m) => m.id);
     const today = etDateString(new Date());
     const { guardMode } = config;

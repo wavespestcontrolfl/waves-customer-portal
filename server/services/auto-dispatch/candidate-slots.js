@@ -331,8 +331,6 @@ async function loadGroupContext(db, service) {
         .whereIn('id', siblingIds)
         .select(
           'id', 'scheduled_date', 'technician_id', 'window_start', 'window_end', 'route_order', 'created_at',
-          // The far-south rule judges each member on its own zone (south-day-kept.js ruleFor).
-          'zone', 'service_address_city',
           'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback', 'reservation_policy_version',
         ),
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
@@ -865,8 +863,7 @@ async function movingUnitIds(service, ctx) {
 //     Lawn Care Service unit never lands on or next to a mowing day.
 //   south_day_kept (GATE_SOUTH_ZONE_DAY_FUNNEL, south-day-kept.js): a visit outside the
 //     funneled far-south zones never moves onto another DATE that holds a far-south stop
-//     (with GATE_MULTI_TECH_CONFIRM: a stop of the slot's technician, of a grouped visit's member's current
-//     technician, or an unassigned one).
+//     (with GATE_MULTI_TECH_CONFIRM, for a single visit: a stop of the slot's technician, or an unassigned one).
 //   other_tech (GATE_AUTO_DISPATCH_KEEP_TECH, ctx.keepTech): a visit that has
 //     a technician stays with that technician. An unassigned visit is not
 //     filtered.
@@ -1240,11 +1237,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // or null — gate off, nothing is read.
   const mowing = await unitMowingRule(service, prefs, ctx);
   // Far-south days stay far-south: null (rule off, a far-south visit, zone unresolved) = no filter.
-  // Per truck, a grouped visit is judged member by member, as apply time judges it (south-day-kept.js ruleFor): else
-  // the guard refuses a ranked move (not SLOT_TAKEN) and the run skips this visit's lower-ranked dates. The group is
-  // read only then.
-  const perTruck = !!service.visit_id && require('../scheduling/zone-day-funnel').perTruckLive();
-  const south = await southDayKept.ruleFor(service, ctx, perTruck ? (await groupContextFor(service, ctx)).siblings : []);
+  const south = await southDayKept.ruleFor(service, ctx);
 
   const { dateFrom, dateTo } = searchWindow(service, ctx);
   if (dateFrom > dateTo) {
