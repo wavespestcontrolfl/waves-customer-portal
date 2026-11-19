@@ -281,6 +281,19 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
   });
 
+  test('a service page whose protected live metaTitle holds a ranking word still refreshes, with the live metaTitle kept (owner rule 2026-07-16)', async () => {
+    const liveTitle = 'Pest Control Near Me in Sarasota, FL | Best Pest Control Near Me in Sarasota, FL';
+    gh.getFile.mockResolvedValue({ content: EXISTING.replace('metaTitle: "Old meta title"', `metaTitle: "${liveTitle}"`), sha: 'existing-sha' });
+    const res = await pub.publishRefresh(refreshDraft(), BRIEF);
+    expect(res.status).toBe('pr_open');
+    expect(fm.parse(gh.putFile.mock.calls[0][0].content).data.metaTitle).toBe(liveTitle);
+    // A ranking word the DRAFT writes into the body is still refused.
+    gh.putFile.mockClear();
+    await expect(pub.publishRefresh(refreshDraft({ body: 'Waves is the best pest control company in Sarasota for drywood termites.' }), BRIEF))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
   test('a refreshed SERVICE page body that links a competitor is refused before any branch (owner rulings 2026-09-28: every page; refuse, don\'t rewrite)', async () => {
     await expect(pub.publishRefresh(refreshDraft({
       body: 'Fresh Sarasota guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
