@@ -334,15 +334,23 @@ describe("PropertyLookupResult — a sized commercial suite", () => {
     expect(sizeRow().getByText("State restaurant license (84 seats)")).toBeInTheDocument();
   });
 
-  it("a size staff verified in this session still wins", () => {
+  it("a size staff verified in this session still wins, with no link to the building's record", () => {
     renderPanel({
-      profile: suiteProfile({ value: 2500, source: "suite_type_default" }, { fieldVerifyFlags: [] }),
+      profile: suiteProfile({ value: 2500, source: "suite_type_default" }, {
+        fieldEvidence: {
+          squareFootage: { value: 58940, sourceType: "county", sourceLabel: "county record", winningSource: "https://county.example/parcel/1" },
+        },
+        propertyDataQuality: { missingCriticalFields: [] },
+        fieldVerifyFlags: [],
+      }),
       form: { ...form, homeSqFt: "2210" },
       verification: { squareFootage: "saved" },
     });
     expect(sizeRow().getByText("2,210 sq ft")).toBeInTheDocument();
     expect(sizeRow().getByText("Verified by you")).toBeInTheDocument();
+    expect(sizeRow().getByText("Field verification saved")).toBeInTheDocument();
     expect(sizeRow().queryByText("Estimate, not measured")).not.toBeInTheDocument();
+    expect(sizeRow().queryByRole("link", { name: "View source" })).not.toBeInTheDocument();
   });
 
   it("an open scope question (no suite size yet) leaves the row as it was", () => {

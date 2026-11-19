@@ -94,8 +94,16 @@ function PropertyMeasurement({ field, profile, form, addressIssue, verification 
 // list still describe the county record: none, or the whole building's. So
 // this row reports the suite and where its size came from, never the record
 // (owner report 2026-11-19: the row read "Not found" beside a filled size).
-function SuiteSizeMeasurement({ label, suite }) {
-  // A suite's only link is its own listing; the record's link is the building's.
+function SuiteSizeMeasurement({ label, suite, verifiedSqFt }) {
+  // A size staff verified in this session wins. Its source is their own
+  // check, so it carries no link: the record's link is the building's.
+  if (verifiedSqFt > 0) {
+    return (
+      <MeasurementRow label={label} value={`${verifiedSqFt.toLocaleString("en-US")} sq ft`}
+        status="Verified by you" source="Field verification saved" />
+    );
+  }
+  // A suite's only link is its own listing.
   const sourceUrl = suite.source === "listing_verified_text" && /^https?:\/\//i.test(suite.url) ? suite.url : null;
   return (
     <MeasurementRow
@@ -239,9 +247,9 @@ export default function PropertyLookupResult({ profile, form, meta, refreshing, 
       <CampusParcelBuildings campus={meta?.campusParcel} />
       <dl className="mt-2 grid grid-cols-1 divide-y divide-zinc-200 sm:grid-cols-2 sm:gap-x-6">
         {fields.map((field) => (
-          // A size staff verified in this session wins over the suite's own row.
-          field.key === "squareFootage" && suite && verification.squareFootage !== "saved"
-            ? <SuiteSizeMeasurement key={field.key} label={field.label} suite={suite} />
+          field.key === "squareFootage" && suite
+            ? <SuiteSizeMeasurement key={field.key} label={field.label} suite={suite}
+              verifiedSqFt={verification.squareFootage === "saved" ? Number(form.homeSqFt) : 0} />
             : <PropertyMeasurement key={field.key} field={field} profile={profile} form={form}
               addressIssue={addressIssue} verification={verification} />
         ))}
