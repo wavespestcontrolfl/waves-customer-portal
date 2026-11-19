@@ -224,6 +224,43 @@ function smsOrigin(threadKey) {
   };
 }
 
+// Who texted, for the owed-quote bell. One short, bounded lookup of live
+// customers by the thread phone. Exactly one unambiguous match names the
+// customer and opens their thread; anything else (no match, a shared line,
+// an error, a timeout) falls back to the last four digits and a compose link
+// on the number. Fail-soft: this must never block or fail the durable bell
+// (the Twilio webhook awaits it), so every failure returns the fallback.
+const SENDER_LOOKUP_TIMEOUT_MS = 1000;
+async function threadSenderInfo(phone, digits) {
+  const info = {
+    label: `Texter …${digits.slice(-4)}`,
+    link: `/admin/communications?phone=${encodeURIComponent(`+1${digits}`)}`,
+    named: false,
+  };
+  let timer;
+  try {
+    const { loadCustomerByPhone } = require('./context-builder');
+    const lookup = loadCustomerByPhone(phone, null, { timeoutMs: SENDER_LOOKUP_TIMEOUT_MS });
+    // The knex timeout bounds the query; the race also bounds a stuck pool wait.
+    const guard = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ unavailable: true }), SENDER_LOOKUP_TIMEOUT_MS + 500);
+    });
+    const match = await Promise.race([lookup, guard]);
+    const customer = match && !match.unavailable && !match.ambiguous ? match.customer : null;
+    const name = customer ? [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() : '';
+    if (customer?.id && name) {
+      info.label = name;
+      info.link = `/admin/communications?thread=${customer.id}`;
+      info.named = true;
+    }
+  } catch (err) {
+    logger.warn(`[estimator-sms] sender lookup failed (using phone label): ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  return info;
+}
+
 // The heavy detached phase: context build → shared pipeline. Non-throwing.
 // groundedCustomerId (scope guards only, else null): the customer the triage
 // grounding matched by address/sender when it matched exactly one — rides
@@ -264,6 +301,7 @@ async function runThreadDraft({
           threadKey: origin.threadKey,
           title: origin.strings.redTitle,
           body: `A text thread asked for a quote the estimator engine could not read (${context.error}). Review the conversation and send the estimate manually.`,
+          link: origin.bellLink || null,
         });
       }
       return result;
@@ -471,6 +509,9 @@ async function startSmsThreadDraft({
       // failed insert means NO durable artifact exists: report not-started
       // so callers keep their own fallback (lead-intake keeps the shell).
       const { notify } = require('./index');
+      const sender = await threadSenderInfo(phone, digits);
+      // Outcome bells (red, blocked, error) reuse this link: one lookup.
+      origin.bellLink = sender.link;
       const belled = await notify({
         call: null,
         context: null,
@@ -478,7 +519,9 @@ async function startSmsThreadDraft({
         quotePromised: true,
         threadKey: origin.threadKey,
         title: origin.strings.redTitle,
-        body: 'A customer text is asking for a quote. The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.',
+        body: `${sender.label} asked for a quote by text. The estimator is drafting it; if no draft comes, send one by hand.`,
+        link: sender.link,
+        placeholder: true,
       });
       if (!belled) {
         result.skipped = 'durable_bell_failed';

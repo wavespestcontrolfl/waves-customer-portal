@@ -46,8 +46,10 @@ jest.mock('../services/estimator-engine/index', () => ({
 }));
 
 const mockBuildSmsThreadContext = jest.fn();
+const mockLoadCustomerByPhone = jest.fn();
 jest.mock('../services/estimator-engine/context-builder', () => ({
   buildSmsThreadContext: (...args) => mockBuildSmsThreadContext(...args),
+  loadCustomerByPhone: (...args) => mockLoadCustomerByPhone(...args),
 }));
 
 // Scope guards (GATE_ESTIMATOR_SCOPE_GUARDS) — controllable per test; the
@@ -89,6 +91,7 @@ beforeEach(() => {
   mockBuildSmsThreadContext.mockResolvedValue({ call: null, transcript: 'x'.repeat(60), phone: PHONE });
   mockRunDraftPipeline.mockImplementation(async ({ result }) => ({ ...result, lane: 'yellow', created: true }));
   mockNotify.mockResolvedValue(true);
+  mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
 });
 
 afterAll(() => {
@@ -152,6 +155,81 @@ describe('startSmsThreadDraft', () => {
     expect(args.origin.threadKey).toBe('sms:9415550123');
     expect(args.quotePromised).toBe(true);
     expect(args.context.origin).toBe(args.origin);
+  });
+
+  describe('the placeholder names who texted and links to where to act', () => {
+    const PHONE_LINK = '/admin/communications?phone=%2B19415550123';
+    const placeholderArgs = () => mockNotify.mock.calls[0][0];
+
+    test('one unambiguous customer: name in the body, thread link, placeholder marker', async () => {
+      mockLoadCustomerByPhone.mockResolvedValue({
+        customer: { id: 'cust-42', first_name: 'Jane', last_name: 'Doe' }, ambiguous: false,
+      });
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(mockLoadCustomerByPhone).toHaveBeenCalledWith(PHONE, null, { timeoutMs: 1000 });
+      const args = placeholderArgs();
+      expect(args.title).toBe('Quote asked by text — send it');
+      expect(args.body).toMatch(/^Jane Doe asked for a quote by text\./);
+      expect(args.link).toBe('/admin/communications?thread=cust-42');
+      expect(args.placeholder).toBe(true);
+      await result.draftPromise;
+      // The outcome bells reuse the same link: one lookup only.
+      expect(mockRunDraftPipeline.mock.calls[0][0].origin.bellLink).toBe('/admin/communications?thread=cust-42');
+      expect(mockLoadCustomerByPhone).toHaveBeenCalledTimes(1);
+    });
+
+    test('no customer on file: last four digits and a phone compose link', async () => {
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      const args = placeholderArgs();
+      expect(args.body).toMatch(/^Texter …0123 asked for a quote by text\./);
+      expect(args.body).not.toMatch(/9415550123/);
+      expect(args.link).toBe(PHONE_LINK);
+      expect(args.placeholder).toBe(true);
+    });
+
+    test('an ambiguous shared line is not named', async () => {
+      mockLoadCustomerByPhone.mockResolvedValue({
+        customer: { id: 'cust-1', first_name: 'Jane', last_name: 'Doe' }, ambiguous: true,
+      });
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      expect(placeholderArgs().link).toBe(PHONE_LINK);
+    });
+
+    test('lookup unavailable or throwing keeps the phone copy and the bell is still written', async () => {
+      mockLoadCustomerByPhone.mockResolvedValueOnce({ customer: null, ambiguous: false, unavailable: true });
+      let result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(result.started).toBe(true);
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      mockNotify.mockClear();
+      mockLoadCustomerByPhone.mockRejectedValueOnce(new Error('db down'));
+      result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(result.started).toBe(true);
+      expect(placeholderArgs().link).toBe(PHONE_LINK);
+      expect(placeholderArgs().placeholder).toBe(true);
+    });
+
+    test('a lookup that never answers is cut off and the bell is still written', async () => {
+      mockLoadCustomerByPhone.mockReturnValueOnce(new Promise(() => {}));
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      expect(result.started).toBe(true);
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+    }, 10000);
+
+    test('a dry run writes no bell and does no lookup', async () => {
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?', dryRun: true });
+      expect(mockLoadCustomerByPhone).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+    });
+
+    test('the unreadable-thread red bell carries the same link', async () => {
+      mockBuildSmsThreadContext.mockResolvedValue({ error: 'thread_unreadable' });
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'what would a quote for pest control run me?' });
+      await result.draftPromise;
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      expect(mockNotify.mock.calls[1][0].link).toBe(PHONE_LINK);
+      expect(mockNotify.mock.calls[1][0].placeholder).toBeUndefined();
+    });
   });
 
   test('a clarify-reply re-draft carries the draft it supersedes into the pipeline context (retired atomically on insert)', async () => {
