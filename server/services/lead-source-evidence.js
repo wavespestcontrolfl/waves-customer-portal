@@ -51,6 +51,9 @@ const PAID_MEDIA = new Set([
   'paid_social', 'paidsocial',
 ]);
 
+const CALL_ORIGIN_CHANNELS = new Set(['phone', 'call', 'inbound_call']);
+const CALL_ORIGIN_LEAD_TYPES = new Set(['inbound_call', 'voicemail']);
+
 const GOOGLE_SOURCES = new Set(['google', 'adwords', 'google_ads', 'googleads']);
 const META_SOURCES = new Set(['facebook', 'fb', 'meta', 'instagram', 'ig']);
 const PAID_PLACEMENTS = [
@@ -95,6 +98,31 @@ function text(value) {
 
 function normalized(value) {
   return text(value).toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+/**
+ * The call writers preserve first_contact_channel when a later browser form
+ * attaches to the same row. Older call rows can lack that field, so their
+ * call-only lead_type is the fallback. A CallSid alone is deliberately not
+ * proof: a web-first lead can be linked to a later call without changing its
+ * original acquisition channel.
+ */
+function isCallOriginLead(lead = {}) {
+  const contact = text(lead.first_contact_channel).toLowerCase();
+  if (CALL_ORIGIN_CHANNELS.has(contact)) return true;
+  return !contact && CALL_ORIGIN_LEAD_TYPES.has(text(lead.lead_type).toLowerCase());
+}
+
+// `facebook` is a historically shared web/call source row. Positively calling
+// it Meta Ads therefore needs the complete phone-placement proof, not merely
+// the shared source_type: a call-only lead type, call-origin channel, its
+// initiating CallSid, and the registry row's paid channel.
+function hasMetaCallPlacementEvidence(lead = {}) {
+  return CALL_ORIGIN_LEAD_TYPES.has(text(lead.lead_type).toLowerCase())
+    && CALL_ORIGIN_CHANNELS.has(text(lead.first_contact_channel).toLowerCase())
+    && !!text(lead.twilio_call_sid)
+    && text(lead.source_type).toLowerCase() === 'facebook'
+    && text(lead.source_channel).toLowerCase() === 'paid';
 }
 
 function attributionParts(attribution = {}) {
@@ -279,10 +307,15 @@ function sourceEvidenceForLead(lead = {}) {
   const persisted = safePersistedEvidence(extracted.source_evidence);
   if (persisted) return persisted;
 
-  if ([lead.gclid, lead.wbraid, lead.gbraid].some((value) => text(value))) {
+  // A later quote can attach to an open call lead and populate browser click
+  // ids on that same row. Those ids describe the later browser visit, not the
+  // original call acquisition. The original registry placement below wins for
+  // call-origin rows; web-first rows continue to use their click ids.
+  const callOrigin = isCallOriginLead(lead);
+  if (!callOrigin && [lead.gclid, lead.wbraid, lead.gbraid].some((value) => text(value))) {
     return evidence('google_ads', 'Google Ads', 'Paid search click', 'A Google Ads click identifier is stored on this lead.');
   }
-  if ([lead.fbclid, lead.fbc].some((value) => text(value))) {
+  if (!callOrigin && [lead.fbclid, lead.fbc].some((value) => text(value))) {
     return evidence('meta_ads', 'Meta Ads', 'Meta-routed click', 'Waves groups links that carry a Facebook click identifier under Meta Ads.');
   }
 
@@ -295,7 +328,7 @@ function sourceEvidenceForLead(lead = {}) {
     return evidence('google_business', 'Google Business Profile', sourceName || null, 'The recorded lead source is a Google Business Profile.');
   }
   if ((type === 'main_site' || type === 'spoke_site' || channel === 'website_organic')
-    && ['phone', 'call', 'inbound_call'].includes(contact)) {
+    && callOrigin) {
     return evidence('unknown', 'Source unknown', 'Shared phone line', 'The historical source record names a shared website phone line and does not prove how the caller found Waves.');
   }
   if (type === 'main_site' || type === 'spoke_site' || channel === 'website_organic') {
@@ -312,6 +345,9 @@ function sourceEvidenceForLead(lead = {}) {
   // assistant sent the visit. Do not invent precision from either.
   if (type === 'ai_assistant') {
     return evidence('other_ai', 'AI assistant referral', 'Provider unverified', 'The recorded source proves an AI assistant referral, but the provider was not captured.');
+  }
+  if (hasMetaCallPlacementEvidence(lead)) {
+    return evidence('meta_ads', 'Meta Ads', sourceName || 'Meta Ads call line', 'The originating call used the recorded paid Meta call placement.');
   }
   if (type === 'facebook') {
     return evidence('unknown', 'Source unknown', null, 'The historical source record is shared and does not prove the specific acquisition source.');
@@ -340,23 +376,38 @@ function withSourceEvidence(rows) {
  * intentionally stay conservative.
  */
 function sourceEvidenceLabelSql(db) {
+  // SQL twins of isCallOriginLead and hasMetaCallPlacementEvidence. Keep the
+  // predicates and branch order aligned with sourceEvidenceForLead so source
+  // sorting before LIMIT/OFFSET uses the same label the row later displays.
+  const contactSql = "LOWER(BTRIM(COALESCE(leads.first_contact_channel, '')))";
+  const typeSql = "LOWER(BTRIM(COALESCE(leads.lead_type, '')))";
+  const callOriginSql = `((${contactSql}) IN ('phone', 'call', 'inbound_call')
+    OR ((${contactSql}) = '' AND (${typeSql}) IN ('inbound_call', 'voicemail')))`;
+  const metaCallPlacementSql = `((${typeSql}) IN ('inbound_call', 'voicemail')
+    AND (${contactSql}) IN ('phone', 'call', 'inbound_call')
+    AND NULLIF(BTRIM(leads.twilio_call_sid), '') IS NOT NULL
+    AND LOWER(BTRIM(COALESCE(lead_sources.source_type, ''))) = 'facebook'
+    AND LOWER(BTRIM(COALESCE(lead_sources.channel, ''))) = 'paid')`;
   return db.raw(`LOWER(CASE
     WHEN (leads.extracted_data->'source_evidence'->>'kind') IN (${[...EVIDENCE_KINDS].map(() => '?').join(', ')})
       AND NULLIF(BTRIM(leads.extracted_data->'source_evidence'->>'label'), '') IS NOT NULL
       AND NULLIF(BTRIM(leads.extracted_data->'source_evidence'->>'basis'), '') IS NOT NULL
       THEN LEFT(BTRIM(leads.extracted_data->'source_evidence'->>'label'), 80)
-    WHEN COALESCE(NULLIF(BTRIM(leads.gclid), ''), NULLIF(BTRIM(leads.wbraid), ''), NULLIF(BTRIM(leads.gbraid), '')) IS NOT NULL THEN 'Google Ads'
-    WHEN COALESCE(NULLIF(BTRIM(leads.fbclid), ''), NULLIF(BTRIM(leads.fbc), '')) IS NOT NULL THEN 'Meta Ads'
+    WHEN NOT ${callOriginSql}
+      AND COALESCE(NULLIF(BTRIM(leads.gclid), ''), NULLIF(BTRIM(leads.wbraid), ''), NULLIF(BTRIM(leads.gbraid), '')) IS NOT NULL THEN 'Google Ads'
+    WHEN NOT ${callOriginSql}
+      AND COALESCE(NULLIF(BTRIM(leads.fbclid), ''), NULLIF(BTRIM(leads.fbc), '')) IS NOT NULL THEN 'Meta Ads'
     WHEN lead_sources.source_type = 'google_ads' THEN 'Google Ads'
     WHEN lead_sources.source_type = 'gbp'
       OR (lead_sources.source_type = 'website_organic' AND lead_sources.name ILIKE '%Google Business%') THEN 'Google Business Profile'
     WHEN (lead_sources.source_type IN ('main_site', 'spoke_site') OR lead_sources.channel = 'website_organic')
-      AND leads.first_contact_channel IN ('phone', 'call', 'inbound_call') THEN 'Source unknown'
+      AND ${callOriginSql} THEN 'Source unknown'
     WHEN lead_sources.source_type IN ('main_site', 'spoke_site') OR lead_sources.channel = 'website_organic' THEN 'Website'
     WHEN lead_sources.source_type = 'referral' THEN 'Referral'
     WHEN lead_sources.source_type = 'email' THEN 'Email inquiry'
     WHEN lead_sources.source_type IN ('vehicle', 'walk_in') OR lead_sources.channel = 'offline' THEN COALESCE(NULLIF(lead_sources.name, ''), 'Offline')
     WHEN lead_sources.source_type = 'ai_assistant' THEN 'AI assistant referral'
+    WHEN ${metaCallPlacementSql} THEN 'Meta Ads'
     WHEN lead_sources.source_type = 'facebook' THEN 'Source unknown'
     WHEN leads.first_contact_channel IN ('form', 'website_quote') THEN 'Website'
     WHEN leads.first_contact_channel = 'email' THEN 'Email inquiry'

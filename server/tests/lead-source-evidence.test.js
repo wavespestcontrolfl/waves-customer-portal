@@ -158,6 +158,8 @@ describe('sourceEvidenceFromAttribution', () => {
 });
 
 describe('sourceEvidenceForLead', () => {
+  const CALL_SID = 'CA0123456789abcdef0123456789abcdef';
+
   test('returns persisted server evidence on list/detail rows', () => {
     const persisted = {
       kind: 'organic_search', label: 'Organic search', detail: 'Google',
@@ -174,13 +176,64 @@ describe('sourceEvidenceForLead', () => {
     expect(sourceEvidenceForLead(lead)).toMatchObject({ kind: 'unknown' });
   });
 
-  test('historical shared Facebook is unknown; known AI channel keeps provider unverified', () => {
+  test('historical shared Facebook is unknown; a proved paid call placement is Meta', () => {
     expect(sourceEvidenceForLead({ source_type: 'facebook', source_name: 'Facebook Ads' })).toMatchObject({
       kind: 'unknown', label: 'Source unknown',
     });
+    expect(sourceEvidenceForLead({
+      lead_type: 'inbound_call', first_contact_channel: 'call', twilio_call_sid: CALL_SID,
+      source_type: 'facebook', source_channel: 'paid', source_name: 'Facebook Ads — Pest (call-extension)',
+    })).toMatchObject({ kind: 'meta_ads', label: 'Meta Ads' });
+    // The shared Facebook FK and a call channel are not enough to assert a
+    // paid placement when the initiating CallSid is absent.
+    expect(sourceEvidenceForLead({
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'facebook', source_channel: 'paid', source_name: 'Facebook Ads — Pest (call-extension)',
+    })).toMatchObject({ kind: 'unknown', label: 'Source unknown' });
     expect(sourceEvidenceForLead({ source_type: 'ai_assistant', source_name: 'AI Assistant Referrals' })).toMatchObject({
       kind: 'other_ai', label: 'AI assistant referral', detail: 'Provider unverified',
     });
+  });
+
+  test.each([
+    ['GBP call', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'gbp', source_name: 'GBP — Sarasota', gclid: 'later-google', fbclid: 'later-meta',
+    }, 'google_business'],
+    ['shared-line call', {
+      lead_type: 'voicemail', first_contact_channel: 'phone',
+      source_type: 'main_site', source_name: 'Main Site', gclid: 'later-google',
+    }, 'unknown'],
+    ['paid Google call', {
+      lead_type: 'inbound_call', first_contact_channel: 'inbound_call',
+      source_type: 'google_ads', source_name: 'Google Ads — Pest (call-extension)', fbclid: 'later-meta',
+    }, 'google_ads'],
+    ['older call with blank first-contact channel', {
+      lead_type: 'inbound_call', first_contact_channel: '', fbc: 'later-meta',
+    }, 'unknown'],
+    ['older shared-line call with blank first-contact channel', {
+      lead_type: 'voicemail', first_contact_channel: '',
+      source_type: 'main_site', source_name: 'Main Site', gclid: 'later-google',
+    }, 'unknown'],
+  ])('%s ignores click IDs from a later attached browser quote', (_name, lead, expectedKind) => {
+    expect(sourceEvidenceForLead(lead).kind).toBe(expectedKind);
+  });
+
+  test('a missing CallSid still protects call origin, while a later CallSid alone never changes web-first origin', () => {
+    expect(sourceEvidenceForLead({
+      lead_type: 'inbound_call', first_contact_channel: 'call', twilio_call_sid: null,
+      source_type: 'gbp', source_name: 'GBP — Parrish', gclid: 'later-google',
+    })).toMatchObject({ kind: 'google_business', label: 'Google Business Profile' });
+
+    expect(sourceEvidenceForLead({
+      // Even a call-shaped type must defer to the explicit original web channel.
+      lead_type: 'inbound_call', first_contact_channel: 'form', twilio_call_sid: CALL_SID,
+      gclid: 'first-web-google',
+    })).toMatchObject({ kind: 'google_ads', label: 'Google Ads' });
+    expect(sourceEvidenceForLead({
+      lead_type: 'quote_wizard', first_contact_channel: 'website_quote', twilio_call_sid: CALL_SID,
+      fbclid: 'first-web-meta',
+    })).toMatchObject({ kind: 'meta_ads', label: 'Meta Ads' });
   });
 
   test('self-reported-only history stays unknown and says why', () => {
@@ -221,6 +274,10 @@ describe('persistence and sorting helpers', () => {
     const raw = sourceEvidenceLabelSql(db);
     expect(raw.sql).toContain("extracted_data->'source_evidence'->>'label'");
     expect(raw.sql).toContain("extracted_data->'source_evidence'->>'basis'");
+    expect(raw.sql).toContain("COALESCE(leads.first_contact_channel, '')");
+    expect(raw.sql).toContain("COALESCE(leads.lead_type, '')");
+    expect(raw.sql).toContain('NULLIF(BTRIM(leads.twilio_call_sid)');
+    expect(raw.sql).toContain('WHEN NOT');
     expect(raw.sql).toContain("THEN 'Source unknown'");
     expect(raw.bindings.length).toBeGreaterThan(5);
   });

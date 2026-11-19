@@ -10,6 +10,7 @@ const knexFactory = require('knex');
 const { _test: webhookTest } = require('../routes/lead-webhook');
 const { _test: propertyTest } = require('../routes/public-property-lookup');
 const { _internals: quoteTest } = require('../routes/public-quote');
+const { sourceEvidenceForLead, sourceEvidenceLabelSql } = require('../services/lead-source-evidence');
 
 const connection = process.env.INTAKE_SOURCE_EVIDENCE_TEST_DATABASE_URL;
 const describePg = connection ? describe : describe.skip;
@@ -64,6 +65,33 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
       [JSON.stringify(incoming), JSON.stringify(existing), ...(leadType == null ? [] : [leadType])],
     );
     return rows[0].out;
+  }
+
+  async function sortedSourceLabel(row) {
+    const expression = sourceEvidenceLabelSql(db).toSQL();
+    const { rows } = await db.raw(
+      `SELECT ${expression.sql} AS label
+       FROM (SELECT
+         ?::jsonb AS extracted_data,
+         ?::text AS gclid, ?::text AS wbraid, ?::text AS gbraid,
+         ?::text AS fbclid, ?::text AS fbc,
+         ?::text AS lead_type, ?::text AS first_contact_channel,
+         ?::text AS twilio_call_sid, ?::text AS heard_about
+       ) AS leads
+       LEFT JOIN (SELECT
+         ?::text AS source_type, ?::text AS channel, ?::text AS name
+       ) AS lead_sources ON TRUE`,
+      [
+        ...expression.bindings,
+        JSON.stringify(row.extracted_data || {}),
+        row.gclid || null, row.wbraid || null, row.gbraid || null,
+        row.fbclid || null, row.fbc || null,
+        row.lead_type || null, row.first_contact_channel || null,
+        row.twilio_call_sid || null, row.heard_about || null,
+        row.source_type || null, row.source_channel || null, row.source_name || null,
+      ],
+    );
+    return rows[0].label;
   }
 
   const callAttach = (sql, existing, incomingEvidence) => evaluate(sql, {
@@ -150,5 +178,42 @@ describePg('intake source evidence SQL (PostgreSQL 16)', () => {
 
     const stillMissing = await quoteUpdate({}, 'quote_wizard', null);
     expect(stillMissing).not.toHaveProperty('source_evidence');
+  });
+
+  test.each([
+    ['GBP call without SID plus later Google click', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'gbp', source_name: 'GBP — Sarasota', gclid: 'later-google',
+    }],
+    ['shared phone line plus later Meta click', {
+      lead_type: 'voicemail', first_contact_channel: 'phone',
+      source_type: 'main_site', source_name: 'Main Site', fbclid: 'later-meta',
+    }],
+    ['older shared-line call with blank first-contact channel', {
+      lead_type: 'voicemail', first_contact_channel: null,
+      source_type: 'main_site', source_name: 'Main Site', gclid: 'later-google',
+    }],
+    ['Google paid call plus later Meta click', {
+      lead_type: 'inbound_call', first_contact_channel: 'inbound_call',
+      source_type: 'google_ads', source_channel: 'paid', source_name: 'Google Ads call line', fbc: 'later-meta',
+    }],
+    ['older call type with blank first-contact channel plus later Google click', {
+      lead_type: 'inbound_call', first_contact_channel: null, gclid: 'later-google',
+    }],
+    ['web-first lead with a later CallSid and original Google click', {
+      lead_type: 'inbound_call', first_contact_channel: 'form',
+      twilio_call_sid: 'CA0123456789abcdef0123456789abcdef', gclid: 'web-google',
+    }],
+    ['proved paid Meta call placement', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      twilio_call_sid: 'CA0123456789abcdef0123456789abcdef',
+      source_type: 'facebook', source_channel: 'paid', source_name: 'Facebook Ads call line',
+    }],
+    ['generic historical Facebook call without placement proof', {
+      lead_type: 'inbound_call', first_contact_channel: 'call',
+      source_type: 'facebook', source_channel: 'paid', source_name: 'Facebook Ads call line',
+    }],
+  ])('display and pre-pagination sort agree for %s', async (_name, row) => {
+    expect(await sortedSourceLabel(row)).toBe(sourceEvidenceForLead(row).label.toLowerCase());
   });
 });
