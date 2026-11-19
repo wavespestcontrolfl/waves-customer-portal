@@ -86,6 +86,26 @@ describe('email shouldSkipAutoAction — operational-sender guard', () => {
     }
   });
 
+  test.each([['unset', undefined], ['true', 'true']])('Google\'s own DMARC pass keeps the operational exemption where Gmail quotes the SPF sender and DKIM did not verify (GATE_EMAIL_AUTH_STRICT %s)', (_label, gateValue) => {
+    const saved = process.env.GATE_EMAIL_AUTH_STRICT;
+    if (gateValue) process.env.GATE_EMAIL_AUTH_STRICT = gateValue;
+    else delete process.env.GATE_EMAIL_AUTH_STRICT;
+    try {
+      // The shape in email-auth-strict.test.js. The strict SPF/DKIM reader finds nothing in it.
+      const quotedSpf = (d) => `mx.google.com; dkim=permerror (no key for signature) header.i=@${d} header.s=s1 header.b=abc; spf=pass (google.com: domain of bounces+1-2@em1.${d} designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.${d}"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=${d}`;
+      const forgedDmarc = (d) => `mx.google.com; dkim=none; spf=pass (google.com: domain of "x dmarc=pass header.from=${d} y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dmarc=pass header.from=${d} y"@evil.example; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=${d}`;
+      expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', quotedSpf('grow.siteone.com'))).toBe(true);
+      expect(shouldSkipAutoAction('marketing_newsletter', 'billing@stripe.com', quotedSpf('stripe.com'))).toBe(true);
+      // A dmarc=pass typed into a quoted MAIL FROM is never read. Google's verdict in that header is dmarc=fail.
+      expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', forgedDmarc('grow.siteone.com'))).toBe(false);
+      // Google's DMARC pass for another From domain proves nothing for this sender.
+      expect(shouldSkipAutoAction('spam', 'marketing@grow.siteone.com', quotedSpf('evil.example'))).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_EMAIL_AUTH_STRICT;
+      else process.env.GATE_EMAIL_AUTH_STRICT = saved;
+    }
+  });
+
   test('external newsletters and spam still get auto-actioned', () => {
     expect(shouldSkipAutoAction('marketing_newsletter', 'deals@retailer.example.com')).toBe(false);
     expect(shouldSkipAutoAction('spam', 'winner@lottery.example.biz')).toBe(false);

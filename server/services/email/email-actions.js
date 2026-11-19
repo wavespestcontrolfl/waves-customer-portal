@@ -29,7 +29,8 @@ function shouldSkipAutoAction(category, fromAddress, authResults) {
   // below: a regulator's notice is never quarantined or unsubscribed on a
   // classifier verdict, while a spoofed .gov that fails auth still is.
   const senderDomain = domainFromAddress(fromAddress);
-  if (!isOperationalDomain(senderDomain) && !isGovernmentDomain(senderDomain)) return false;
+  const operationalSender = isOperationalDomain(senderDomain);
+  if (!operationalSender && !isGovernmentDomain(senderDomain)) return false;
   // Gmail stamps EVERY inbound SMTP message with a trusted
   // Authentication-Results header, so:
   //   - header present → this is inbound; the skip only applies when it
@@ -40,14 +41,18 @@ function shouldSkipAutoAction(category, fromAddress, authResults) {
   //     unconditional operational skip — a misclassification must never
   //     archive/quarantine our own outbox.
   if (authResults == null) return true;
-  const { hasAlignedAuth } = require('./inbox-hygiene');
+  const { hasAlignedAuth, hasOperationalSenderAuth } = require('./inbox-hygiene');
   // An exemption by DOMAIN always reads the strict parser. With
   // GATE_EMAIL_AUTH_STRICT dark, the legacy whole-string match aligns a quoted
   // MAIL FROM local part ("x dkim=pass header.d=fdacs.gov y"@evil.example)
   // that Gmail echoes into its header, and a spoof the model called spam
   // would stay out of quarantine (Codex security P2, #6668: government
   // senders; 2026-11-18: operational domains too, when siteone.com joined).
-  return hasAlignedAuth(authResults, senderDomain, { strict: true });
+  // An operational sender may also show Google's own DMARC pass
+  // (hasOperationalSenderAuth); the government rule is unchanged.
+  return operationalSender
+    ? hasOperationalSenderAuth(authResults, senderDomain)
+    : hasAlignedAuth(authResults, senderDomain, { strict: true });
 }
 
 // ── Email → draft-estimate (GATE_EMAIL_QUOTE_DRAFTS, default OFF) ────────
@@ -467,11 +472,10 @@ async function executeAutoAction(email, classification) {
  * @returns true when the destructive action was skipped.
  */
 async function skipIfAuthenticatedKnownSender(email, categoryLabel) {
-  const { isKnownSender, hasAlignedAuth } = require('./inbox-hygiene');
+  const { isKnownSender, knownSenderAuthenticated } = require('./inbox-hygiene');
   const verdict = await isKnownSender(email.from_address);
   if (!verdict.known) return false;
-  // A sender known only by its operational DOMAIN reads the strict parser (see shouldSkipAutoAction).
-  const alignedAuth = hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address), { strict: verdict.kind === 'operational' });
+  const alignedAuth = knownSenderAuthenticated(verdict, email.authentication_results, email.from_address);
   if (!alignedAuth) {
     logger.warn(`[email-actions] known-looking ${verdict.kind} sender FAILED authentication (${categoryLabel}, email ${email.id})`);
     return false;

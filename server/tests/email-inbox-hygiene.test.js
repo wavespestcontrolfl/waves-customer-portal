@@ -303,74 +303,95 @@ describe('rescueSpamFolder', () => {
 });
 
 // A sender known only by its operational DOMAIN (isKnownSender kind 'operational': ours, Google, Stripe, SiteOne)
-// keeps its exemption only on the strict Authentication-Results reader. The loose reader, still the default while
-// GATE_EMAIL_AUTH_STRICT is unset, accepts a pass result that the sender quoted inside the SMTP MAIL FROM.
-describe('operational-domain sender: every exemption reads the strict parser with GATE_EMAIL_AUTH_STRICT unset', () => {
+// keeps its exemption only on strict proof from Gmail's Authentication-Results: aligned SPF or DKIM read by the strict
+// parser, or Google's own DMARC pass for the From domain. The answer is the same whatever GATE_EMAIL_AUTH_STRICT says.
+// The legacy reader, still the default while the gate is unset, accepts a pass result that the sender quoted inside
+// the SMTP MAIL FROM.
+describe('operational-domain sender: every exemption needs strict proof, GATE_EMAIL_AUTH_STRICT on or off', () => {
   const { handleSpam } = require('../services/email/email-actions');
   const { rescueSpamFolder, sweepQuarantine, hasAlignedAuth } = require('../services/email/inbox-hygiene');
   const SENDER = 'marketing@grow.siteone.com';
   const REAL = 'mx.google.com; dkim=pass header.i=@grow.siteone.com header.s=s1 header.b=abc; spf=pass (google.com: domain of bounce@bounce.grow.siteone.com designates 192.0.2.1 as permitted sender) smtp.mailfrom=bounce@bounce.grow.siteone.com';
+  // The shape in email-auth-strict.test.js: DKIM did not verify and Gmail quotes the whole SPF envelope address, so
+  // the strict SPF/DKIM reader finds nothing. Google's DMARC pass for the From domain is the proof.
+  const QUOTED_SPF_DMARC = 'mx.google.com; dkim=permerror (no key for signature) header.i=@grow.siteone.com header.s=s1 header.b=abc; spf=pass (google.com: domain of bounces+1-2@em1.grow.siteone.com designates 192.0.2.1 as permitted sender) smtp.mailfrom="bounces+1-2@em1.grow.siteone.com"; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=grow.siteone.com';
   const FORGED = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dkim=pass header.d=siteone.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dkim=pass header.d=siteone.com y"@evil.example';
+  const FORGED_DMARC = 'mx.google.com; dkim=none; spf=pass (google.com: domain of "x dmarc=pass header.from=grow.siteone.com y"@evil.example designates 192.0.2.1 as permitted sender) smtp.mailfrom="x dmarc=pass header.from=grow.siteone.com y"@evil.example; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=grow.siteone.com';
   const quarantinedRow = (auth) => ({ id: 'e-so', gmail_id: 'g-so', from_address: SENDER, authentication_results: auth });
+  const spamFolderHolds = (auth) => {
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-so' }], truncated: false });
+    gmailClient.getMessage.mockResolvedValueOnce({ from_address: SENDER, from_name: 'SiteOne', subject: 'Pest specials', authentication_results: auth });
+  };
   let saved;
 
   beforeEach(() => { saved = process.env.GATE_EMAIL_AUTH_STRICT; delete process.env.GATE_EMAIL_AUTH_STRICT; });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_EMAIL_AUTH_STRICT; else process.env.GATE_EMAIL_AUTH_STRICT = saved; });
 
-  test('the forged header is one the loose reader accepts and the strict reader refuses', () => {
+  test('the fixtures: the legacy reader accepts the forged pass, and the strict SPF/DKIM reader finds nothing in the quoted-SPF header', () => {
     expect(hasAlignedAuth(FORGED, 'grow.siteone.com')).toBe(true);
     expect(hasAlignedAuth(FORGED, 'grow.siteone.com', { strict: true })).toBe(false);
     expect(hasAlignedAuth(REAL, 'grow.siteone.com', { strict: true })).toBe(true);
+    expect(hasAlignedAuth(QUOTED_SPF_DMARC, 'grow.siteone.com', { strict: true })).toBe(false);
   });
 
-  test('spam verdict, real header: kept in the inbox', async () => {
-    const state = setupDb();
-    await handleSpam({ ...EMAIL, from_address: SENDER, authentication_results: REAL });
-    expect(gmailClient.ensureLabel).not.toHaveBeenCalled();
-    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('spam_skipped_known_operational');
-  });
+  describe.each([['unset', undefined], ['true', 'true']])('GATE_EMAIL_AUTH_STRICT %s', (_gate, gateValue) => {
+    beforeEach(() => { if (gateValue) process.env.GATE_EMAIL_AUTH_STRICT = gateValue; });
 
-  test('spam verdict, forged header: quarantined', async () => {
-    const state = setupDb();
-    await handleSpam({ ...EMAIL, from_address: SENDER, authentication_results: FORGED });
-    expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
-    expect(gmailClient.modifyLabels).not.toHaveBeenCalledWith('g-1', ['IMPORTANT'], []);
-    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('spam_quarantined');
-  });
+    describe.each([
+      ['aligned DKIM', REAL],
+      ['Google DMARC pass, SPF sender quoted, DKIM not verified', QUOTED_SPF_DMARC],
+    ])('real header (%s)', (_shape, auth) => {
+      test('spam verdict: kept in the inbox', async () => {
+        const state = setupDb();
+        await handleSpam({ ...EMAIL, from_address: SENDER, authentication_results: auth });
+        expect(gmailClient.ensureLabel).not.toHaveBeenCalled();
+        expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('spam_skipped_known_operational');
+      });
 
-  test('Gmail Spam rescue, real header: moved back to the inbox', async () => {
-    setupDb();
-    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-so' }], truncated: false });
-    gmailClient.getMessage.mockResolvedValueOnce({ from_address: SENDER, from_name: 'SiteOne', subject: 'Pest specials', authentication_results: REAL });
-    expect(await rescueSpamFolder()).toEqual({ scanned: 1, rescued: 1, customers: 0, unauthenticated: 0 });
-    expect(gmailClient.modifyLabels).toHaveBeenCalledWith('spam-so', ['INBOX', 'IMPORTANT'], ['SPAM']);
-  });
+      test('Gmail Spam rescue: moved back to the inbox', async () => {
+        setupDb();
+        spamFolderHolds(auth);
+        expect(await rescueSpamFolder()).toEqual({ scanned: 1, rescued: 1, customers: 0, unauthenticated: 0 });
+        expect(gmailClient.modifyLabels).toHaveBeenCalledWith('spam-so', ['INBOX', 'IMPORTANT'], ['SPAM']);
+      });
 
-  test('Gmail Spam rescue, forged header: left in Spam with the review bell', async () => {
-    const state = setupDb();
-    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-so' }], truncated: false });
-    gmailClient.getMessage.mockResolvedValueOnce({ from_address: SENDER, from_name: 'SiteOne', subject: 'Pest specials', authentication_results: FORGED });
-    expect(await rescueSpamFolder()).toEqual({ scanned: 1, rescued: 0, customers: 0, unauthenticated: 1 });
-    expect(gmailClient.modifyLabels).not.toHaveBeenCalled();
-    expect(state.inserts.find((i) => i.table === 'notifications').row.category).toBe('email_rescue_review');
-  });
+      test('quarantine sweep: restored to the inbox, never trashed', async () => {
+        const state = setupDb({}, { emails: [[], [], [], [], [], [], [quarantinedRow(auth)]] });
+        expect(await sweepQuarantine(new Date('2026-07-28T12:00:00Z'))).toEqual({ trashed: 0, restored: 1 });
+        expect(gmailClient.modifyLabels).toHaveBeenCalledWith('g-so', ['INBOX'], ['Label_42']);
+        expect(gmailClient.trashMessage).not.toHaveBeenCalled();
+        expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('quarantine_restored_known_sender');
+      });
+    });
 
-  test('quarantine sweep, real header: restored to the inbox, never trashed', async () => {
-    const state = setupDb({}, { emails: [[], [], [], [], [], [], [quarantinedRow(REAL)]] });
-    const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
-    expect(result).toEqual({ trashed: 0, restored: 1 });
-    expect(gmailClient.modifyLabels).toHaveBeenCalledWith('g-so', ['INBOX'], ['Label_42']);
-    expect(gmailClient.trashMessage).not.toHaveBeenCalled();
-    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('quarantine_restored_known_sender');
-  });
+    describe.each([
+      ['a dkim=pass quoted inside the MAIL FROM', FORGED],
+      ['a dmarc=pass quoted inside the MAIL FROM, Google reports dmarc=fail', FORGED_DMARC],
+    ])('forged header (%s)', (_shape, auth) => {
+      test('spam verdict: quarantined', async () => {
+        const state = setupDb();
+        await handleSpam({ ...EMAIL, from_address: SENDER, authentication_results: auth });
+        expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
+        expect(gmailClient.modifyLabels).not.toHaveBeenCalledWith('g-1', ['IMPORTANT'], []);
+        expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('spam_quarantined');
+      });
 
-  test('quarantine sweep, forged header: trashed, and the real sender is never put on the block list', async () => {
-    const state = setupDb({}, { emails: [[], [], [], [], [], [], [quarantinedRow(FORGED)]] });
-    const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
-    expect(result).toEqual({ trashed: 1, restored: 0 });
-    expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-so');
-    expect(state.updates.map((u) => u.patch.auto_action)).not.toContain('quarantine_restored_known_sender');
-    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
+      test('Gmail Spam rescue: left in Spam with the review notification', async () => {
+        const state = setupDb();
+        spamFolderHolds(auth);
+        expect(await rescueSpamFolder()).toEqual({ scanned: 1, rescued: 0, customers: 0, unauthenticated: 1 });
+        expect(gmailClient.modifyLabels).not.toHaveBeenCalled();
+        expect(state.inserts.find((i) => i.table === 'notifications').row.category).toBe('email_rescue_review');
+      });
+
+      test('quarantine sweep: trashed, and the real sender is never put on the block list', async () => {
+        const state = setupDb({}, { emails: [[], [], [], [], [], [], [quarantinedRow(auth)]] });
+        expect(await sweepQuarantine(new Date('2026-07-28T12:00:00Z'))).toEqual({ trashed: 1, restored: 0 });
+        expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-so');
+        expect(state.updates.map((u) => u.patch.auto_action)).not.toContain('quarantine_restored_known_sender');
+        expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
+      });
+    });
   });
 });
 

@@ -47,8 +47,8 @@ async function isKnownSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return { known: false };
   // kind 'operational' = known by its DOMAIN alone (ours, Google, Stripe, SiteOne ...), not as a person on file.
-  // Every caller reads that sender's Authentication-Results with { strict: true }, whatever
-  // GATE_EMAIL_AUTH_STRICT says: the legacy reader accepts a result forged inside a quoted MAIL FROM (#6668).
+  // Callers check that sender through knownSenderAuthenticated (below), never with the reader
+  // GATE_EMAIL_AUTH_STRICT selects.
   if (isOperationalDomain(domainFromAddress(normalized))) return { known: true, kind: 'operational' };
   const customer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).whereNull('deleted_at').first();
   if (customer) return { known: true, kind: 'customer', customer };
@@ -385,7 +385,7 @@ async function sweepQuarantine(now = new Date()) {
       // authenticated known-sender check before anything destructive and
       // restore instead of trash.
       const verdict = await isKnownSender(row.from_address);
-      if (verdict.known && hasAlignedAuth(row.authentication_results, domainFromAddress(row.from_address), { strict: verdict.kind === 'operational' })) {
+      if (verdict.known && knownSenderAuthenticated(verdict, row.authentication_results, row.from_address)) {
         try {
           await gmailClient.modifyLabels(row.gmail_id, ['INBOX'], [quarantineLabelId]);
         } catch (e) {
@@ -568,6 +568,24 @@ function hasStrictDmarcPass(authResults, fromDomain) {
     && [...clause.matchAll(/\bheader\.from=([a-z0-9.-]+)/g)].some((m) => m[1] === domain));
 }
 
+// The proof a sender owes when only its DOMAIN makes it exempt (OPERATIONAL_EMAIL_DOMAINS: isKnownSender kind
+// 'operational', and the same list in shouldSkipAutoAction). It never depends on GATE_EMAIL_AUTH_STRICT: the legacy
+// reader accepts a pass result forged inside a quoted MAIL FROM (#6668). Google's own DMARC pass counts as well,
+// because the strict reader finds nothing where Gmail quotes the whole SPF envelope address and DKIM did not verify
+// (#6904); without it a spam verdict would quarantine that real mail and the sweep would trash it.
+function hasOperationalSenderAuth(authResults, fromDomain) {
+  return hasAlignedAuth(authResults, fromDomain, { strict: true }) || hasStrictDmarcPass(authResults, fromDomain);
+}
+
+// Whether a sender that isKnownSender recognised really authenticated as its From domain. A customer, an open lead
+// and a vendor-table sender keep the reader GATE_EMAIL_AUTH_STRICT selects.
+function knownSenderAuthenticated(verdict, authResults, fromAddress) {
+  const fromDomain = domainFromAddress(fromAddress);
+  return verdict.kind === 'operational'
+    ? hasOperationalSenderAuth(authResults, fromDomain)
+    : hasAlignedAuth(authResults, fromDomain);
+}
+
 /**
  * Rescue known senders out of Gmail's spam folder. Recent window only —
  * Gmail purges spam at 30 days and yesterday's sweep covered yesterday.
@@ -617,7 +635,7 @@ async function rescueSpamFolder(now = new Date()) {
         const fromAddress = full?.from_address;
         const verdict = await isKnownSender(fromAddress);
         if (!verdict.known) continue;
-        if (!hasAlignedAuth(full?.authentication_results, domainFromAddress(fromAddress), { strict: verdict.kind === 'operational' })) {
+        if (!knownSenderAuthenticated(verdict, full?.authentication_results, fromAddress)) {
           // Looks like someone we know but did not authenticate as them —
           // exactly what a phish looks like. Never auto-reverse Gmail's
           // verdict; park a review notification instead.
@@ -882,6 +900,8 @@ module.exports = {
   isKnownSender,
   hasAlignedAuth,
   hasStrictDmarcPass,
+  hasOperationalSenderAuth,
+  knownSenderAuthenticated,
   quarantineMessage,
   cancelQuarantine,
   settleDeferredBlock,
