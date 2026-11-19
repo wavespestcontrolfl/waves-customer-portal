@@ -116,9 +116,22 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }), { onlyIfSaved: true });
   // A verified session with the switch on readies Today too, once per page:
   // after a deploy the app can open on another page (a push tap), and the
-  // next open with no signal still lands on Today.
+  // next open with no signal still lands on Today. A failed try runs again
+  // when the signal returns. A worker that takes control of the page tries
+  // anew: the app registers it after the page loads, and a new worker may
+  // hold other storage.
   useEffect(() => {
-    if (enabled && fieldView) void warmFieldViewLanding();
+    if (!enabled || !fieldView) return undefined;
+    const warm = () => { void warmFieldViewLanding(); };
+    const warmAgain = () => { void warmFieldViewLanding({ again: true }); };
+    const worker = typeof navigator === 'undefined' ? null : navigator.serviceWorker;
+    warm();
+    window.addEventListener('online', warm);
+    worker?.addEventListener?.('controllerchange', warmAgain);
+    return () => {
+      window.removeEventListener('online', warm);
+      worker?.removeEventListener?.('controllerchange', warmAgain);
+    };
   }, [enabled, fieldView]);
 
   return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>

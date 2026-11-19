@@ -138,7 +138,9 @@ describe('warmFieldViewLanding', () => {
     vi.restoreAllMocks();
   });
 
-  it('asks only for the files the phone lacks, and reports true once the worker stored each', async () => {
+  // Pre-push P1 (round 8): the worker claims a stored file for this build only
+  // when it answers a request for it, so the warm asks for every file.
+  it('asks the worker for every file, stored or not, and reports true once it stored each', async () => {
     vi.useFakeTimers();
     listTodayFiles();
     controlledBy({ stored: ['/assets/TodayShell-b2.js'] });
@@ -146,7 +148,7 @@ describe('warmFieldViewLanding', () => {
     const ready = warm();
     await vi.advanceTimersByTimeAsync(2000);
     await expect(ready).resolves.toBe(true);
-    expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/assets/TechFieldShell-c3.css', '/assets/TechHomePage-d4.js']);
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(TODAY_FILES);
   });
 
   it('reports false when the worker could not store a file (full storage)', async () => {
@@ -159,12 +161,27 @@ describe('warmFieldViewLanding', () => {
     await expect(ready).resolves.toBe(false);
   });
 
-  it('reports true at once, and asks for nothing, when the phone holds every file', async () => {
+  it('reports true at once when the phone holds every file, after asking the worker for each', async () => {
     listTodayFiles();
     controlledBy({ stored: TODAY_FILES });
     const warm = await freshWarm();
     await expect(warm()).resolves.toBe(true);
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(TODAY_FILES);
+  });
+
+  // Pre-push P1 (round 8): a try before the worker took control must not
+  // block the next one for the rest of the page.
+  it('keeps only a success: the next call after a failed try runs again', async () => {
+    listTodayFiles();
+    controlledBy({ stored: TODAY_FILES });
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: null } });
+    const warm = await freshWarm();
+    await expect(warm()).resolves.toBe(false);
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { controller: {} } });
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
+    await expect(warm()).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(TODAY_FILES.length);
   });
 
   it('with no signal reports false and asks for nothing; the next try with signal runs', async () => {

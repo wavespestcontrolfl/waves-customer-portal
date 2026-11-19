@@ -30,6 +30,25 @@ describe('Field view preference', () => {
     mount({ id: 'acct-1', role: 'admin' });
     expect(warmFieldViewLanding).toHaveBeenCalledTimes(2);
   });
+  // Pre-push P1 (round 8): the module keeps only a success, so a try that
+  // failed (no worker in control yet, no signal) needs a later call.
+  it('tries again when the signal returns, and anew when a worker takes control, until the switch turns off', () => {
+    const worker = new EventTarget();
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: worker });
+    try {
+      mount({ id: 'acct-1', role: 'admin' });
+      act(() => navigation.setFieldView(true));
+      window.dispatchEvent(new Event('online'));
+      worker.dispatchEvent(new Event('controllerchange'));
+      expect(warmFieldViewLanding.mock.calls).toEqual([[], [], [{ again: true }]]);
+      act(() => navigation.setFieldView(false));
+      window.dispatchEvent(new Event('online'));
+      worker.dispatchEvent(new Event('controllerchange'));
+      expect(warmFieldViewLanding).toHaveBeenCalledTimes(3);
+    } finally {
+      delete navigator.serviceWorker;
+    }
+  });
   it('a login not verified yet, or one that is not an admin, never readies Today', () => {
     for (const id of ['acct-1', 'acct-3']) localStorage.setItem(`waves_admin_navigation:${id}`, JSON.stringify({ version: 2, fieldView: true }));
     render(<MemoryRouter><AdminNavigationProvider user={{ id: 'acct-1', role: 'admin' }} enabled={false}><Probe /></AdminNavigationProvider></MemoryRouter>);

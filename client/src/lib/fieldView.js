@@ -38,11 +38,13 @@ export function fieldViewLanding(pathname) {
 
 // Field view opens on Today, so an open with no signal needs Today's code on
 // the phone, and the service worker keeps a file only once the app asked for
-// it. This asks for each of Today's files that this build listed
-// (fieldViewAssets.js) and the phone lacks, then checks that the worker
-// stored every one. It fetches the files and never imports them: a failed
-// import() leaves Vite treating Today's CSS as loaded for the rest of the
-// tab, and Today's code does not run early.
+// it. This asks the worker for each of Today's files that this build listed
+// (fieldViewAssets.js), then checks that the worker stored every one. It asks
+// for the stored files too: the worker answers those from storage and claims
+// each for this build as it does, or its prune drops a file once the builds
+// that stored it are two deploys old. It fetches the files and never imports
+// them: a failed import() leaves Vite treating Today's CSS as loaded for the
+// rest of the tab, and Today's code does not run early.
 // The worker writes one file at a time, so a slow phone gets about 3 s.
 const STORE_CHECKS = 10;
 const STORE_CHECK_MS = 300;
@@ -55,10 +57,9 @@ async function unstored(files) {
 
 async function warmTodayFiles(files) {
   if (typeof caches === 'undefined' || !navigator.serviceWorker?.controller) return false;
-  let missing = await unstored(files);
-  if (!missing.length) return true;
-  await Promise.all(missing.map((file) => fetch(file).then((response) => response.arrayBuffer()).catch(() => null)));
+  await Promise.all(files.map((file) => fetch(file).then((response) => response.arrayBuffer()).catch(() => null)));
   // The worker stores a file after it answered the request.
+  let missing = await unstored(files);
   for (let check = 0; missing.length && check < STORE_CHECKS; check += 1) {
     await new Promise((resolve) => { setTimeout(resolve, STORE_CHECK_MS); });
     missing = await unstored(missing);
@@ -67,15 +68,23 @@ async function warmTodayFiles(files) {
 }
 
 // Resolves true when the phone holds every file, false when it does not (no
-// signal, no service worker, full storage, a file a newer deploy removed, or
-// a build with no list), and null on the dev server, which has no list. A
-// session tries once per page; the switch's own tap (`again`) tries anew. A
-// try with no signal is not kept, so the next one with signal runs.
+// signal, no service worker in control yet, full storage, a file a newer
+// deploy removed, or a build with no list), and null on the dev server,
+// which has no list. Only a success is kept for the page, so a call after a
+// failed try runs again (the provider calls when the signal returns or a
+// worker takes control). The switch's own tap and a new worker (`again`)
+// always try anew.
 export function warmFieldViewLanding({ again = false } = {}) {
   const files = readFieldViewAssets();
   if (!files) return Promise.resolve(import.meta.env.DEV ? null : false);
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return Promise.resolve(false);
-  if (again || !pageWarm) pageWarm = warmTodayFiles(files);
+  if (again || !pageWarm) {
+    const warm = warmTodayFiles(files).then((ready) => {
+      if (!ready && pageWarm === warm) pageWarm = null;
+      return ready;
+    });
+    pageWarm = warm;
+  }
   return pageWarm;
 }
 
