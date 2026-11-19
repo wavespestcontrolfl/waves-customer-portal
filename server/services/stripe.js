@@ -369,20 +369,32 @@ async function claimInvoiceSavedCardCharge({
   }
 }
 
+// This field belongs exclusively to the worker that called Stripe. Repeated
+// bookkeeping may confirm its own response but may never replace another ID.
+function compatibleWorkerIntent(query, id) {
+  if (!id) return query;
+  return query.where(function originalWorkerIntent() {
+    this.whereNull('worker_payment_intent_id').orWhere('worker_payment_intent_id', id);
+  });
+}
+
 async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = db) {
   const workerPaymentIntentId = updates.stripe_payment_intent_id || null;
   const updatedAt = new Date();
-  const updated = await database('stripe_invoice_charge_attempts')
-    .where({ id: attemptId })
-    .whereIn('status', ['claimed', 'ambiguous'])
-    .whereNull('resolved_at')
-    .update({
+  const active = compatibleWorkerIntent(database('stripe_invoice_charge_attempts'), workerPaymentIntentId)
+    .where({ id: attemptId }).whereIn('status', ['claimed', 'ambiguous']).whereNull('resolved_at');
+  if (workerPaymentIntentId) {
+    active.where(function compatibleObservedIntent() {
+      this.whereNull('stripe_payment_intent_id').orWhere('stripe_payment_intent_id', workerPaymentIntentId);
+    });
+  }
+  const updated = await active.update({
       ...updates,
       // Every caller of this helper runs in the original charge worker. Stamp
       // provenance in the same write that attaches a PI returned by create;
       // webhook resolvers deliberately write the ID through their own paths
       // and must never manufacture this evidence.
-      ...(workerPaymentIntentId ? { stripe_payment_intent_bound_at: updatedAt } : {}),
+      ...(workerPaymentIntentId ? { worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt } : {}),
       updated_at: updatedAt,
     });
   if (!updated && workerPaymentIntentId) {
@@ -390,11 +402,18 @@ async function markInvoiceSavedCardChargeAttempt(attemptId, updates, database = 
     // before this worker records the response. Preserve the terminal outcome,
     // and add worker provenance only when that webhook already attached the
     // exact same PI. A webhook-only or mismatched PI remains untrusted.
-    const provenanceStamped = await database('stripe_invoice_charge_attempts')
+    const provenanceStamped = await compatibleWorkerIntent(database('stripe_invoice_charge_attempts'), workerPaymentIntentId)
       .where({ id: attemptId, stripe_payment_intent_id: workerPaymentIntentId })
       .whereNotNull('resolved_at')
-      .update({ stripe_payment_intent_bound_at: updatedAt, updated_at: updatedAt });
+      .update({ worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt, updated_at: updatedAt });
     if (provenanceStamped) return;
+    // Preserve both identities if an older writer completed a different PI.
+    // The submitted charge can still settle. Refuse every new collection.
+    await compatibleWorkerIntent(database('stripe_invoice_charge_attempts'), workerPaymentIntentId)
+      .where({ id: attemptId, status: 'failed' })
+      .whereNot('stripe_payment_intent_id', workerPaymentIntentId)
+      .update({ worker_payment_intent_id: workerPaymentIntentId, stripe_payment_intent_bound_at: updatedAt,
+        error_message: 'Conflicting saved-card PaymentIntents require reconciliation', updated_at: updatedAt });
   }
   if (!updated) {
     const err = new Error(`Saved-card charge attempt ${attemptId} could not be updated`);
@@ -538,20 +557,33 @@ async function resolveNoFundsSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'status');
+      .first('id', 'status', 'worker_payment_intent_id', 'stripe_payment_intent_id');
     if (!attempt) {
       // A signed failure can resolve this claim while the create request is
       // still returning. Only the original worker has that response's PI.
       if (declineCode !== 'authentication_required' || !authenticationIntentId) return false;
-      const bound = await trx('stripe_invoice_charge_attempts')
-        .where({
-          id: attemptId, invoice_id: invoiceId, status: 'failed', decline_code: 'authentication_required',
-          stripe_payment_intent_id: authenticationIntentId,
-        })
+      const recordedAt = new Date();
+      const bound = await compatibleWorkerIntent(trx('stripe_invoice_charge_attempts'), authenticationIntentId)
+        .where({ id: attemptId, invoice_id: invoiceId, status: 'failed' })
         .whereNotNull('resolved_at')
-        .whereNull('stripe_payment_intent_bound_at')
-        .update({ stripe_payment_intent_bound_at: new Date(), updated_at: new Date() });
+        .update({
+          worker_payment_intent_id: authenticationIntentId,
+          stripe_payment_intent_bound_at: recordedAt,
+          // Preserve a different webhook PI. A release requires the worker,
+          // the observed PI, and the verified cancellation all to agree.
+          stripe_payment_intent_id: trx.raw('COALESCE(stripe_payment_intent_id, ?)', [authenticationIntentId]),
+          decline_code: 'authentication_required',
+          updated_at: recordedAt,
+        });
       return bound ? { resolved: true, reopened: false } : false;
+    }
+    if (authenticationIntentId && attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== authenticationIntentId) return false;
+    if (authenticationIntentId && attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== authenticationIntentId) {
+      await trx('stripe_invoice_charge_attempts').where({ id: attempt.id }).update({
+        worker_payment_intent_id: authenticationIntentId, stripe_payment_intent_bound_at: new Date(),
+        status: 'ambiguous', error_message: 'Conflicting saved-card PaymentIntents require reconciliation', updated_at: new Date(),
+      });
+      return { resolved: false, reopened: false };
     }
 
     // A second request can promote a five-minute claim and park the invoice
@@ -582,6 +614,7 @@ async function resolveNoFundsSavedCardChargeAttempt({
         decline_code: declineCode,
         ...(authenticationIntentId ? {
           stripe_payment_intent_id: authenticationIntentId,
+          worker_payment_intent_id: authenticationIntentId,
           stripe_payment_intent_bound_at: new Date(),
         } : {}),
         resolved_at: new Date(),
@@ -630,8 +663,17 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'stripe_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
+      .first('id', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
     if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
+    if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
+    if (!attempt.worker_payment_intent_id && invoice.stripe_payment_intent_id !== stripePaymentIntentId) {
+      // Stripe can deliver failure before the original create returns. Retry
+      // the signed event after the worker has bound its exact response. No
+      // invoice, reserved credit or attempt state has changed in this path.
+      throw Object.assign(new Error('Saved-card failure awaits its original worker PaymentIntent'), {
+        code: 'SAVED_CARD_WORKER_INTENT_PENDING',
+      });
+    }
 
     // A timeout ambiguity may have committed the credit reservation even
     // though the Stripe PI ultimately failed. Return only the portion this
@@ -658,7 +700,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       status: invoiceStatus === 'processing'
         ? nextInvoiceStatusAfterFailedPayment(invoice)
         : invoice.status,
-      stripe_payment_intent_id: null,
+      ...(invoice.stripe_payment_intent_id === stripePaymentIntentId ? { stripe_payment_intent_id: null } : {}),
       credit_applied: invoice.credit_applied,
       paid_at: null,
       ach_processing_notified_at: null,

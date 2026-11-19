@@ -120,7 +120,7 @@ what was asked; never dump full tables or the variable store.
 
 ### Verify a historical saved-card cancellation
 
-Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. The row must already contain the exact `stripe_payment_intent_id` recorded by the original charge worker and a non-null `stripe_payment_intent_bound_at`; Stripe metadata or cancellation history cannot create that binding. Supply a reachable `SAVED_CARD_CANCELLATION_DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. The verifier deliberately ignores the application's ambient `DATABASE_URL`. Apply both cancellation-evidence migrations first. A legacy ID alone cannot establish who wrote it. An earlier failure webhook could have populated it before the worker returned. Those cases stay held.
+Find the saved-card attempt UUID on the held invoice's `stripe_invoice_charge_attempts` row. The row must already contain the exact `stripe_payment_intent_id` recorded by the original charge worker and the same ID in the independent `worker_payment_intent_id` column; Stripe metadata or cancellation history cannot create that binding. Supply a reachable `SAVED_CARD_CANCELLATION_DATABASE_URL` and the corresponding account's `STRIPE_SECRET_KEY` in the operator environment. The verifier deliberately ignores the application's ambient `DATABASE_URL`. Apply the cancellation-evidence and worker-identity migrations first. A legacy ID alone cannot establish who wrote it. An earlier failure webhook could have populated it before the worker returned. Those cases stay held.
 
 ```sh
 SAVED_CARD_CANCELLATION_DATABASE_URL=<postgres-url> \

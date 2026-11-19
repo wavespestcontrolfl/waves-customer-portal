@@ -10,6 +10,7 @@ const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const migration = require('../models/migrations/20261119081500_saved_card_authentication_cancellation');
 const provenanceMigration = require('../models/migrations/20261119160000_saved_card_intent_binding_provenance');
+const workerIdentityMigration = require('../models/migrations/20261119190000_original_saved_card_payment_intent');
 const { recordAuthenticationCancellation, verifySavedCardCancellation } = require('../services/invoice-payment-authentication');
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 jest.mock('../services/completion-balance-sweep', () => ({ dunningStoppedInvoiceIds: jest.fn(async () => new Set()) }));
@@ -88,6 +89,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     });
     await migration.up(app);
     await provenanceMigration.up(app);
+    await workerIdentityMigration.up(app);
     StripeService = require('../services/stripe');
   });
 
@@ -143,6 +145,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
   async function bindAttempt(conn, { attemptId, intentId }) {
     await conn('stripe_invoice_charge_attempts').where({ id: attemptId }).update({
       stripe_payment_intent_id: intentId,
+      worker_payment_intent_id: intentId,
       stripe_payment_intent_bound_at: new Date(),
       updated_at: new Date(),
     });
@@ -219,8 +222,10 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await attempt().update({ stripe_payment_intent_id: 'pi_different' });
     expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
     expect(await verdict(invoiceId, app)).toBeNull(); // settlement of existing money still runs
+    await attempt().update({ decline_code: 'card_declined' }); // an older webhook overwrote both fields
     await recordAuthenticationCancellation({ ...intent, id: 'pi_different' }, app);
-    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    expect(await attempt().first()).toMatchObject({ worker_payment_intent_id: intent.id });
   });
 
   test('additive migration holds exact IDs copied by the published cancellation backfill', async () => {
@@ -293,18 +298,19 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     });
   });
 
-  test('only the matching worker response can bind an already resolved failure webhook', async () => {
+  test.each(['card_declined', 'authentication_required'])('a preceding %s webhook for another PI preserves both identities and keeps checkout held', async (declineCode) => {
     const { attemptId, invoiceId, intent } = await authenticationFixture(app);
-    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ stripe_payment_intent_id: intent.id });
-    await recordAuthenticationCancellation(intent, app);
+    await app('stripe_invoice_charge_attempts').where({ id: attemptId }).update({ stripe_payment_intent_id: 'pi_webhook', decline_code: declineCode });
     const worker = (authenticationIntentId) => StripeService.resolveNoFundsSavedCardChargeAttempt({
       attemptId, invoiceId, declineCode: 'authentication_required', authenticationIntentId, database: app,
     });
-    expect(await worker('pi_unrelated')).toBe(false);
+    await worker(intent.id);
+    expect(await app('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ worker_payment_intent_id: intent.id, stripe_payment_intent_id: 'pi_webhook' });
+    await recordAuthenticationCancellation({ ...intent, id: 'pi_webhook' }, app);
+    await recordAuthenticationCancellation(intent, app);
     expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
-    expect(await worker(intent.id)).toEqual({ resolved: true, reopened: false });
-    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
-    expect(await worker(intent.id)).toBe(false);
+    expect(await worker('pi_webhook')).toBe(false);
   });
 
   test('a create-returned nonterminal PI binds in one write and can bind after its exact webhook wins', async () => {
@@ -354,7 +360,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       resolved_at: null,
     }, app)).rejects.toMatchObject({ code: 'STRIPE_CHARGE_ATTEMPT_FENCE_LOST' });
     expect(await app('stripe_invoice_charge_attempts').where({ id: webhookOnly.attemptId }).first())
-      .toMatchObject({ stripe_payment_intent_id: 'pi_webhook_only', stripe_payment_intent_bound_at: null });
+      .toMatchObject({ stripe_payment_intent_id: 'pi_webhook_only', worker_payment_intent_id: 'pi_different_worker_response' });
   });
 
   test('a failure webhook waiting on the worker-bound attempt cannot refund credit or attach a different intent', async () => {
@@ -644,7 +650,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       await charge('invoices').where({ id: sibling.invoiceId }).forUpdate().first();
       await charge('stripe_invoice_charge_attempts').where({ id: nextId }).update({
         status: 'failed', resolved_at: new Date(), decline_code: 'authentication_required',
-        stripe_payment_intent_id: nextIntent.id, stripe_payment_intent_bound_at: new Date(),
+        stripe_payment_intent_id: nextIntent.id, worker_payment_intent_id: nextIntent.id, stripe_payment_intent_bound_at: new Date(),
       });
       let identifyCheckout;
       const connectionReady = new Promise((resolve) => { identifyCheckout = resolve; });

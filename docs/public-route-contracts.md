@@ -801,7 +801,8 @@ Combined checkout omits a held sibling. If the hold appears after selection,
 checkout returns HTTP 409 with `staleBalance` so the page can reload the
 amount. Setup, tender changes, and finalization check the affected invoices
 under lock. A cancellation clears the hold only when the original charging
-worker recorded that exact PaymentIntent on the attempt. A legacy ID without
+worker recorded that exact PaymentIntent independently of the webhook. If the
+worker and webhook IDs disagree, checkout stays held. A legacy ID without
 worker provenance keeps checkout on HTTP 409, including when Stripe verifies
 that the supplied intent was canceled. The `/confirm` endpoint can still record money
 the processor has already accepted.
