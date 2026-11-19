@@ -44,6 +44,102 @@ function terminalChargeFenceResponse(err) {
   };
 }
 
+async function terminalProcessingRefusal(invoice, database, ordinaryResponse) {
+  if (invoice?.status !== 'processing') return null;
+  try {
+    await assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true, checkout: true });
+    return ordinaryResponse;
+  } catch (err) {
+    if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
+    return terminalChargeFenceResponse(err);
+  }
+}
+
+async function terminalPaymentIntentStatusRefusal(invoice, database) {
+  if (!invoice || ['paid', 'prepaid', 'void', 'refunded'].includes(invoice.status)) {
+    return {
+      error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
+      code: 'invoice_status_changed',
+    };
+  }
+  return terminalProcessingRefusal(
+    invoice, database, { error: 'Invoice is processing', code: 'invoice_status_changed' },
+  );
+}
+
+function terminalCombinedReleaseRefusal(err) {
+  if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
+    return { ok: false, chargeFence: terminalChargeFenceResponse(err) };
+  }
+  if (err.statusCode === 409) return { ok: false, combinedReleaseError: err };
+  return null;
+}
+
+async function terminalAllocationChargeFence(database, rows) {
+  for (const row of rows) {
+    try {
+      await assertInvoiceDepositSettlementReady(database, row);
+      await assertNoInvoiceChargeReconciliationPending(row.id, database, { checkout: true });
+    } catch (err) {
+      if (err.code !== 'DEPOSIT_RECONCILIATION_REQUIRED'
+        && !savedCardChargeSuppressesAlternateCollection(err)) throw err;
+      return terminalChargeFenceResponse(err);
+    }
+  }
+  return null;
+}
+
+async function lockTerminalPreviousCheckout(trx, invoice, terminalPaymentIntentId) {
+  const PayCombined = require('../services/pay-combined');
+  await PayCombined.lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id);
+  const reserved = await trx('invoices').where({ id: invoice.id }).first();
+  let locked = null;
+  if (reserved?.stripe_payment_intent_id
+    && String(reserved.stripe_payment_intent_id) !== String(terminalPaymentIntentId)) {
+    let openIntent;
+    try {
+      openIntent = await require('../services/stripe').retrievePaymentIntent(reserved.stripe_payment_intent_id);
+    } catch (retrieveErr) {
+      return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: retrieveErr.message } };
+    }
+    if (!openIntent) return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'payment service unavailable' } };
+    if (PayCombined.isCombinedPiMetadata(openIntent.metadata)) {
+      let allocation;
+      try {
+        allocation = PayCombined.parseCombinedAllocation(openIntent.metadata);
+      } catch (allocationErr) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: allocationErr.message } };
+      }
+      if (!allocation.some((entry) => String(entry.invoiceId) === String(invoice.id))) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation does not own invoice' } };
+      }
+      const allocationIds = [...new Set(allocation.map((entry) => String(entry.invoiceId)))].sort();
+      const allocationRows = await trx('invoices').whereIn('id', allocationIds).orderBy('id', 'asc').forUpdate();
+      if (allocationRows.length !== allocationIds.length) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation member missing' } };
+      }
+      locked = allocationRows.find((row) => String(row.id) === String(invoice.id)) || null;
+      if (!locked || String(locked.stripe_payment_intent_id || '') !== String(openIntent.id)) {
+        return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation anchor changed' } };
+      }
+      const chargeFence = await terminalAllocationChargeFence(trx, allocationRows);
+      if (chargeFence) return { ok: false, chargeFence };
+      if (openIntent.status === 'canceled') {
+        await PayCombined.releaseCombinedSessionBeforeCollection(trx, locked, { context: 'collecting at the terminal' });
+        locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      } else {
+        const verifiedRows = await PayCombined.verifyAllocationLocked(trx, allocation, {
+          anchorInvoiceId: invoice.id,
+          expectPaymentIntentId: reserved.stripe_payment_intent_id,
+        });
+        locked = verifiedRows.find((row) => String(row.id) === String(invoice.id)) || null;
+      }
+    }
+  }
+  if (!locked) locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+  return { ok: true, locked, PayCombined };
+}
+
 function terminalHandoffNeedsReissue(handoff) {
   const usedAt = new Date(handoff?.used_at || '').getTime();
   const expiresAt = new Date(handoff?.expires_at || '').getTime();
@@ -277,7 +373,10 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // touch a terminal invoice) only to then reject the in-person collection.
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
     if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
-    if (invoice.status === 'processing') return res.status(409).json({ error: 'Bank payment is already processing' });
+    const processingRefusal = await terminalProcessingRefusal(
+      invoice, db, { error: 'Bank payment is already processing' },
+    );
+    if (processingRefusal) return res.status(409).json(processingRefusal);
     // Third-party Bill-To: never mint an in-person collection handoff for a
     // payer-billed invoice — the tech must not collect the AP's invoice from the
     // service recipient. AR routes to the payer AP inbox.
@@ -1415,12 +1514,8 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     // office, or adjusted. These checks run against the current invoice
     // state and the mint-time snapshot in handoff.amount_cents.
     const invoice = await db('invoices').where({ id: handoff.invoice_id }).first();
-    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
-      return res.status(409).json({
-        error: invoice ? `Invoice is ${invoice.status}` : 'Invoice not found',
-        code: 'invoice_status_changed',
-      });
-    }
+    const statusRefusal = await terminalPaymentIntentStatusRefusal(invoice, db);
+    if (statusRefusal) return res.status(409).json(statusRefusal);
     if (invoiceWithdrawnFromCustomer(invoice)) {
       return res.status(409).json({
         error: 'Invoice is billed to a third-party payer — do not collect in person',
@@ -1486,47 +1581,23 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
     let bound;
     try {
       bound = await db.transaction(async (trx) => {
-      const PayCombined = require('../services/pay-combined');
       // Reserve the customer's combined-checkout namespace BEFORE any row
       // lock, matching /setup. Read the live binding under that reservation;
       // if it is shared, take the canonical sorted allocation locks before
       // checking the saved-card hold. A racing saved-card claim takes one of
       // these same invoice locks, so one side must commit before the other can
       // decide whether any checkout may be retired.
-      await PayCombined.lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id);
-      const reserved = await trx('invoices').where({ id: invoice.id }).first();
-      let locked = null;
-      if (reserved?.stripe_payment_intent_id
-        && String(reserved.stripe_payment_intent_id) !== String(pi.id)) {
-        let openIntent;
-        try {
-          openIntent = await require('../services/stripe').retrievePaymentIntent(reserved.stripe_payment_intent_id);
-        } catch (retrieveErr) {
-          return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: retrieveErr.message } };
-        }
-        if (!openIntent) {
-          return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'payment service unavailable' } };
-        }
-        if (PayCombined.isCombinedPiMetadata(openIntent.metadata)) {
-          let allocation;
-          try {
-            allocation = PayCombined.parseCombinedAllocation(openIntent.metadata);
-          } catch (allocationErr) {
-            return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: allocationErr.message } };
-          }
-          if (!allocation.some((entry) => String(entry.invoiceId) === String(invoice.id))) {
-            return { ok: false, piGuard: { reason: 'payment_session_unverifiable', detail: 'combined allocation does not own invoice' } };
-          }
-          const allocationRows = await PayCombined.verifyAllocationLocked(trx, allocation, {
-            anchorInvoiceId: invoice.id,
-            expectPaymentIntentId: reserved.stripe_payment_intent_id,
-          });
-          locked = allocationRows.find((row) => String(row.id) === String(invoice.id)) || null;
-        }
-      }
-      if (!locked) locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-      if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
+      const previousCheckout = await lockTerminalPreviousCheckout(trx, invoice, pi.id);
+      if (!previousCheckout.ok) return previousCheckout;
+      let { locked } = previousCheckout;
+      const { PayCombined } = previousCheckout;
+      if (!locked || ['paid', 'prepaid', 'void', 'refunded'].includes(locked.status)) {
         return { ok: false, status: locked ? locked.status : null };
+      }
+      if (locked.status === 'processing') {
+        const chargeFence = await terminalProcessingRefusal(locked, trx, null);
+        if (chargeFence) return { ok: false, chargeFence };
+        return { ok: false, status: locked.status };
       }
       // The withdrawal re-read UNDER THE LOCK, like every other money seam:
       // a Bill-To assignment can commit while this transaction waits here.
@@ -1605,11 +1676,8 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       // reservation surface are retryable conflicts. Route them through the
       // common refusal cleanup below so the just-created Terminal PI is
       // canceled and this handoff cannot replay it.
-      if (releaseErr.statusCode === 409) {
-        bound = { ok: false, combinedReleaseError: releaseErr };
-      } else {
-        throw releaseErr;
-      }
+      bound = terminalCombinedReleaseRefusal(releaseErr);
+      if (!bound) throw releaseErr;
     }
 
     if (!bound.ok) {
