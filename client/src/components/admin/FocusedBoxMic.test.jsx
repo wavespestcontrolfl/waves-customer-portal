@@ -208,7 +208,24 @@ describe("FocusedBoxMic", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Transcribing" })).toBeInTheDocument());
     await act(async () => { fireEvent.click(screen.getByText("Close")); });
     await act(async () => { rejectClip(new TypeError("Load failed")); });
-    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The recording did not go through."));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(clipRequests).toHaveLength(1);
+  });
+
+  it("box locked when the send gets no answer: no resend is offered (the words could not go in)", async () => {
+    stubServer({ available: true, everyBox: true });
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    await mount(<textarea aria-label="notes" defaultValue="" />);
+    await focusBox();
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    const stop = await screen.findByRole("button", { name: "Stop dictation" });
+    await act(async () => { fireEvent.click(stop); });
+    await waitFor(() => expect(clipRequests).toHaveLength(1));
+    screen.getByLabelText("notes").readOnly = true;
+    await act(async () => { rejectClip(new TypeError("Load failed")); });
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
     expect(confirm).not.toHaveBeenCalled();
     expect(clipRequests).toHaveLength(1);
   });

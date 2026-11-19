@@ -82,7 +82,7 @@ function clipForm(blob, durationSeconds) {
 // 10:49, the IB mic: the server got the request headers and no audio), or a 2xx answer was cut
 // off before its words (reading `{}` there used to drop the recording without a word).
 // `unsent` lets the hook offer to send the same recording again.
-export const UNSENT_MESSAGE = "The recording did not go through.";
+export const UNSENT_MESSAGE = "The words did not come back.";
 function unsentError() {
   const err = new Error(UNSENT_MESSAGE);
   err.unsent = true;
@@ -129,7 +129,8 @@ export function transcribeClip(blob, durationSeconds, clip, token) {
     : transcribeServiceClip(blob, durationSeconds, clip.serviceId, token);
 }
 
-export const RESEND_QUESTION = `${UNSENT_MESSAGE} Send it again?`;
+// Worded for both cases: no answer at all, or a 2xx answer cut off (the server may have heard it).
+export const RESEND_QUESTION = `${UNSENT_MESSAGE} Send the recording again?`;
 
 // A hidden page (the app went to the background as the recording stopped) may not show a
 // question at all, and a suppressed confirm() reads as "no": ask only once the page is back.

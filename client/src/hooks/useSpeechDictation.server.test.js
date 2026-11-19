@@ -304,7 +304,7 @@ describe("useSpeechDictation with server dictation on", () => {
     failFirstPost(fetchMock, () => { throw new TypeError("Load failed"); });
     await recordAndStop(onTranscript);
     await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
-    expect(confirm).toHaveBeenCalledWith("The recording did not go through. Send it again?");
+    expect(confirm).toHaveBeenCalledWith("The words did not come back. Send the recording again?");
     const [first, second] = postsTo(fetchMock).map(([, o]) => o.body.get("audio"));
     expect(second.size).toBe(first.size);
     expect(postsTo(fetchMock)).toHaveLength(2);

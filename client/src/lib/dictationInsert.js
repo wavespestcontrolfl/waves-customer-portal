@@ -71,9 +71,13 @@ function nativeSet(el, value) {
  * does the same job for React.
  * Returns { ok: true } or { ok: false, reason: "gone" | "locked" | "full" }.
  */
+/** True while a box can still take dictated words: on the page, and neither disabled nor read-only. */
+export function boxTakesWords(el) {
+  return Boolean(el?.isConnected) && !el.disabled && !el.readOnly;
+}
+
 export function insertDictatedText(el, text, selection) {
-  if (!el || !el.isConnected) return { ok: false, reason: "gone" };
-  if (el.disabled || el.readOnly) return { ok: false, reason: "locked" };
+  if (!boxTakesWords(el)) return { ok: false, reason: el?.isConnected ? "locked" : "gone" };
   const words = String(text || "").trim();
   if (!words) return { ok: true };
   const before = el.value;
