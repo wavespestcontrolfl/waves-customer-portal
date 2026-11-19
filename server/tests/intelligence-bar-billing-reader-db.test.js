@@ -362,7 +362,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
       // Fence passes -> collectible, even for the invoice the real fence holds.
       const list = await read('get_customer_invoices', { customer_id: A, limit: 50 });
       expect(by(list, 'amb')).toMatchObject({ collectible: true, balance_due: 45 });
-      expect(spy).toHaveBeenCalledWith(inv.amb.id, expect.anything(), { readOnly: true });
+      expect(spy).toHaveBeenCalledWith(inv.amb.id, expect.anything(), { readOnly: true, checkout: true });
       // ... on the call's snapshot connection, not the pool.
       expect(spy.mock.calls.find(([id]) => id === inv.amb.id)[1]).not.toBe(db);
       // An attached PaymentIntent still holds it: Stripe does not confirm that it moved no money (the suite's guard mock).
