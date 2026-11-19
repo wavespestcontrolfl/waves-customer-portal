@@ -338,9 +338,11 @@ describe('one decision per customer', () => {
     expect(p.decideCustomer([cleared, flagged(540)])).toMatchObject({ action: 'flag', verdict: { distanceM: 540 }, explained });
     expect(p.decideCustomer([cleared, unknown])).toEqual({ action: 'skip', explained });
     expect(p.decideCustomer([cleared, atPin()]).action).toBe('ok');
-    // the neighbour rule explains a stop the same way; a grouped visit carries its visit_id
-    const neighbour = { visit: visit({ id: 'visit-2', visit_id: 'group-7' }), verdict: { flag: false, reason: 'neighbour_visit' } };
-    expect(p.decideCustomer([neighbour]).explained).toEqual([{ serviceId: 'visit-2', visitId: 'group-7', reason: 'neighbour_visit' }]);
+    // the neighbour rule explains a stop the same way, but only for a neighbour's visit on the day of the stop;
+    // a grouped visit carries its visit_id
+    const neighbour = (verdict) => ({ visit: visit({ id: 'visit-2', visit_id: 'group-7' }), verdict: { flag: false, reason: 'neighbour_visit', ...verdict } });
+    expect(p.decideCustomer([neighbour({ sameDayNeighbour: true })]).explained).toEqual([{ serviceId: 'visit-2', visitId: 'group-7', reason: 'neighbour_visit' }]);
+    expect(p.decideCustomer([neighbour({})])).toEqual({ action: 'none' });
     // nothing explained: the decision is exactly what it was
     expect(p.decideCustomer([flagged(540)])).not.toHaveProperty('explained');
     expect(p.decideCustomer([judged({ flag: false, reason: 'stop_too_short' })])).toEqual({ action: 'none' });
@@ -382,6 +384,24 @@ describe("a short stop at the pin, then the long stop at another customer's", ()
     expect(judgeDay([parkedShort(19, 5), stop(310, 29)])[0].verdict).toEqual({ flag: false, reason: 'stop_at_pin' });
     // a short gap is never the suggested spot and never a stop that is too short or too far
     expect(judgeDay([parkedShort(540, 3)])[0].verdict).toEqual({ flag: false, reason: 'no_stops' });
+  });
+
+  test("the neighbour exclusion stays generous; only a neighbour's visit on the ET day of the stop is marked as proof", () => {
+    const neighbourOn = (...days) => ({ ...NO_EXCLUSIONS, neighbours: [{ ...at(520), days }] });
+    // stop() is on Oct 8 (11:00 ET)
+    expect(judge([stop(540)], {}, neighbourOn('2026-10-08'))).toEqual({ flag: false, reason: 'neighbour_visit', sameDayNeighbour: true });
+    expect(judge([stop(540)], {}, neighbourOn('2026-10-07', '2026-10-08'))).toEqual({ flag: false, reason: 'neighbour_visit', sameDayNeighbour: true });
+    // a neighbour's visit on another day still prevents a suggestion, as before, but proves nothing about this stop
+    expect(judge([stop(540)], {}, neighbourOn('2026-10-09'))).toEqual({ flag: false, reason: 'neighbour_visit' });
+    // one neighbour on the day but elsewhere, another at the stop on another day: not proof
+    const split = { ...NO_EXCLUSIONS, neighbours: [{ ...at(3000), days: ['2026-10-08'] }, { ...at(520), days: ['2026-10-09'] }] };
+    expect(judge([stop(540)], {}, split)).toEqual({ flag: false, reason: 'neighbour_visit' });
+    // the pins a run builds carry the days of the neighbour's visit
+    const mine = visit();
+    const theirs = visit({ id: 'visit-2', customer_id: 'customer-2', service_lat: at(520).lat, service_lng: at(520).lng, customer_latitude: at(520).lat, customer_longitude: at(520).lng, arrived_at: new Date('2026-10-07T15:00:00Z') });
+    expect(p.neighbourPins(mine, [mine, theirs]).map((pin) => [...pin.days].sort())).toEqual([['2026-10-07', '2026-10-08'], ['2026-10-07', '2026-10-08']]);
+    // home base and fences are not "another customer's": no mark
+    expect(p.excludedVerdict('home_base', stop(540), { radius: RADIUS, neighbours: [{ ...at(520), days: ['2026-10-08'] }] })).toEqual({ flag: false, reason: 'home_base' });
   });
 
   test('no short stop at the pin, or one somewhere else, leaves briefAtPin false', () => {

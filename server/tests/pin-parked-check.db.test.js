@@ -436,6 +436,22 @@ describeDb('pin check after a visit (PostgreSQL)', () => {
       expect(await later()).toMatchObject({ created: 0, closed: 0 });
     });
 
+    test("a neighbour's visit on another day than the stop does not retire the suggestion", async () => {
+      // Our visit: the truck stood 540 m away on Oct 7; the visit was closed out on Oct 8.
+      const techId = await technician();
+      const customerId = await customer();
+      const neighbourPin = north(520);
+      const neighbourId = await customer(neighbourPin);
+      await completedVisit(customerId, techId, { scheduled_date: '2026-10-07', completed_at: new Date('2026-10-08T13:00:00Z') });
+      await truckStopsAt(north(540), 30, { at: '2026-10-07T14:20:00Z' });
+      expect(await run()).toMatchObject({ visits: 1, created: 1 });
+      // The neighbour's only visit is on Oct 8: it shares a day with ours, but not the day of the stop.
+      await completedVisit(neighbourId, techId, { lat: neighbourPin.lat, lng: neighbourPin.lng, completed_at: new Date('2026-10-09T13:00:00Z') });
+      const result = await runPinParkedCheck({ now: new Date('2026-10-10T12:00:00Z'), conn: mockPg });
+      expect(result).toMatchObject({ visits: 2, created: 0, closed: 0, neighbour_visit: 1 });
+      expect(await open(customerId)).toHaveLength(1);
+    });
+
     test('a grouped partner completed after the bell is the row judged next; the suggestion of the first partner is still retired', async () => {
       const techId = await technician();
       const customerId = await customer();
