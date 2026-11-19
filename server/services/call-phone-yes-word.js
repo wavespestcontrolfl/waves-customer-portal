@@ -14,8 +14,12 @@
  */
 
 const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+const { callStartedAt } = require('../utils/call-timeline');
 
-const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
+// A call's columns, with what callStartedAt reads: a row inserted after the call (a recording recovery, a terminal
+// status callback) backs its own length out of created_at, so every time here is when the call began.
+const CALL_COLUMNS = ['id', 'customer_id', 'created_at', 'metadata', 'duration_seconds', 'recording_duration_seconds',
+  'direction', 'processing_status', 'answered_by', 'v2_extraction_status', 'ai_extraction_enriched'];
 // A call's columns for its word: the extraction and the transcript come from one row read.
 const WORD_COLUMNS = [...CALL_COLUMNS, 'transcription'];
 // The extraction's evidence pointer for the caller's plan choice (JSON pointer; a dotted path in older rows).
@@ -31,23 +35,29 @@ const CANCEL_FLAG = 'cancellation_request';
 // unlabeled line still makes the transcript ungroundable.
 const SEGMENT_HEADER = /^\s*\[(?:AI|Staff|Voicemail) segment\]\s*$/;
 
-// How long a call can still be read for the first time or retried: the processor reads a call within minutes, its
-// retries come 10 minutes apart, and a call with no recording is recovered from its live text soon after it ends.
+// How long a call can still be read for the first time or retried after its row last changed: the processor reads a
+// call within minutes, its retries come 10 minutes apart, and a call with no recording is recovered from its live text
+// soon after it ends.
 const OWED_READ_HOURS = 2;
 
-// A call that still owes a read: a recent call (OWED_READ_HOURS) not in a final state, or one a pass holds now. Final:
-// read ('processed'), judged not a conversation ('voicemail', 'spam'), or failed at its retry cap (the
-// exhaustedExtractionSql rule in call-commitments; its 7-day window never applies inside 2 hours). Bounded in time on
-// purpose, so no processor path is copied here: a row no pass will finish (a missed call with nothing to read, a dead
-// claim) delays a card by at most OWED_READ_HOURS and never blocks it. Never NULL, so NOT owed is exact.
+// A call that still owes a read: one not in a final state whose row changed in the last OWED_READ_HOURS. Final: read
+// ('processed'), judged not a conversation ('voicemail', 'spam'), or failed at its retry cap (the exhaustedExtractionSql
+// rule in call-commitments; its 7-day window never applies inside 2 hours). The row's last change is its insert, a
+// claim's heartbeat, or replaced audio (the recording webhook sets the status back to NULL and bumps updated_at), so
+// an old call with new audio waits for its re-read too. Bounded in time on purpose, so no processor path is copied
+// here: a row no pass will finish (a missed call with nothing to read, a dead claim) delays a card by at most
+// OWED_READ_HOURS after its last change and never blocks it. Never NULL, so NOT owed is exact.
 function owedReadSql(t) {
   const atCap = `COALESCE(${t}.extraction_attempts, 0) >= ${Number(CALL_EXTRACTION_MAX_ATTEMPTS)}`;
   const final = `(${t}.processing_status IN ('processed', 'voicemail', 'spam')`
     + ` OR (${t}.processing_status IN ('extraction_failed', 'no_transcription') AND ${atCap}))`;
-  const recent = (column) => `${t}.${column} > now() - interval '${OWED_READ_HOURS} hours'`;
-  return `COALESCE((((${t}.processing_status IS NULL OR NOT ${final}) AND ${recent('created_at')})`
-    + ` OR (${t}.processing_status = 'processing' AND ${recent('updated_at')})), false)`;
+  const changed = `GREATEST(${t}.created_at, COALESCE(${t}.updated_at, ${t}.created_at))`;
+  return `COALESCE(((${t}.processing_status IS NULL OR NOT ${final})`
+    + ` AND ${changed} > now() - interval '${OWED_READ_HOURS} hours'), false)`;
 }
+
+// When the call began, as SQL (the twin of callStartedAt).
+const startedSql = () => require('./sms-pending-conversations').callStartedAtSql('call_log');
 
 // The caller's own words for the plan choice (a string), or null. The shared grounding tools ground each billing_choice
 // evidence quote labeled the caller's (a short one must be a whole caller turn), with outbound labels oriented the way
@@ -80,15 +90,15 @@ function wordOfCall(row) {
   if (!extraction || !isRealConversation(row, extraction)) return null;
   // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
   const cancelFlag = Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes(CANCEL_FLAG);
-  if (cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: row.created_at };
+  if (cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent)) return { contrary: true, callLogId: row.id, at: callStartedAt(row) };
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!choice) return null;
   const quote = callerWordsOf(extraction, { transcript: row.transcription, outbound: String(row.direction || '').startsWith('outbound') });
-  return { choice, callLogId: row.id, at: row.created_at, quote };
+  return { choice, callLogId: row.id, at: callStartedAt(row), quote };
 }
 
-// The customer's latest word on a call since `since`: the newest read, valid, two-party call whose extraction names a
-// billing choice or a cancellation (intent or flag) or one-time ask, as wordOfCall gives it, or null. SQL keeps only rows that name a
+// The customer's latest word on a call that began since `since`: the newest read, valid, two-party call whose
+// extraction names a billing choice or a cancellation (intent or flag) or one-time ask, as wordOfCall gives it, or null. SQL keeps only rows that name a
 // word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation, so voicemails never hide the last
 // word. Sandbox calls do not count.
 async function latestBillingChoice(conn, { customerId, since }) {
@@ -96,14 +106,14 @@ async function latestBillingChoice(conn, { customerId, since }) {
   const { BILLING_CHOICES } = require('./call-prepay-choice');
   const query = conn('call_log')
     .where({ customer_id: customerId, processing_status: 'processed', v2_extraction_status: 'valid' })
-    .where('created_at', '>=', since)
+    .whereRaw(`${startedSql()} >= ?`, [since])
     .whereRaw(`NOT ${owedReadSql('call_log')}`)
     .where((qb) => qb
       .whereRaw("ai_extraction_enriched -> 'service_request' ->> 'billing_choice' = ANY(?)", [[...BILLING_CHOICES]])
       .orWhereRaw("ai_extraction_enriched -> 'service_request' ->> 'service_intent' = ANY(?)", [[...CONTRARY_INTENTS]])
       .orWhereRaw("ai_extraction_enriched -> 'triage_flags' @> ?::jsonb", [JSON.stringify([CANCEL_FLAG])]))
     .modify((qb) => whereNotSandboxCall(qb))
-    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .orderByRaw(`${startedSql()} DESC, id DESC`)
     .select(WORD_COLUMNS);
   for (let offset = 0; ; offset += CHOICE_SCAN_LIMIT) {
     const rows = await query.clone().offset(offset).limit(CHOICE_SCAN_LIMIT);
@@ -115,13 +125,13 @@ async function latestBillingChoice(conn, { customerId, since }) {
   }
 }
 
-// True when a call from the customer since `since` still owes a read (owedReadSql): it may hold the yes or take it
-// back. Sandbox calls do not count.
+// True when a call from the customer that began since `since` still owes a read (owedReadSql): it may hold the yes or
+// take it back. Sandbox calls do not count.
 async function unreadCallSince(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   return !!(await conn('call_log')
     .where({ customer_id: customerId })
-    .where('created_at', '>=', since)
+    .whereRaw(`${startedSql()} >= ?`, [since])
     .whereRaw(owedReadSql('call_log'))
     .modify((qb) => whereNotSandboxCall(qb))
     .first('id'));
@@ -131,15 +141,17 @@ async function unreadCallSince(conn, { customerId, since }) {
 //   yes_after_booking    the yes came on a later call than the booking (the visit was not booked for the plan);
 //   booking_call_unread  the booking call's last read did not finish (a failed re-read or an invalid extraction may
 //                        hide a no);
-//   newer_call           another call from the customer came since the yes (or, with no yes, since the booking).
-// Call it once every call in the window is read (unreadCallSince). Sandbox calls do not count.
+//   newer_call           another call from the customer began since the yes (or, with no yes, since the booking).
+// Times are when each call began (callStartedAt). Call it once every call in the window is read (unreadCallSince).
+// Sandbox calls do not count.
 async function laterWordProblem(conn, { customerId, yes, booking }) {
-  if (yes && new Date(yes.at) > new Date(booking.created_at)) return 'yes_after_booking';
+  const bookingAt = callStartedAt(booking);
+  if (yes && new Date(yes.at) > bookingAt) return 'yes_after_booking';
   if (booking.processing_status !== 'processed' || booking.v2_extraction_status !== 'valid') return 'booking_call_unread';
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const later = await conn('call_log')
     .where({ customer_id: customerId })
-    .where('created_at', '>', yes ? yes.at : booking.created_at)
+    .whereRaw(`${startedSql()} > ?`, [yes ? yes.at : bookingAt])
     .whereNotIn('id', [yes?.callLogId, booking.id].filter(Boolean))
     .modify((qb) => whereNotSandboxCall(qb))
     .first('id');

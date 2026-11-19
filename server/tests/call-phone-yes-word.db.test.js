@@ -103,8 +103,12 @@ describeDb("the caller's word (PostgreSQL)", () => {
       [{ processing_status: null, created_at: old, updated_at: old }, false],
       [{ processing_status: 'extraction_failed', extraction_attempts: 1, created_at: old, updated_at: old }, false],
       [{ processing_status: 'processing', created_at: old, updated_at: old }, false],
-      // An old call a pass holds now (a re-read of replaced audio) is owed.
+      // An old call a pass holds now (a re-read of replaced audio) is owed, and so is one whose replaced audio is
+      // still waiting for a claim (the recording webhook set the status back to NULL and bumped updated_at).
       [{ processing_status: 'processing', created_at: old, updated_at: recent }, true],
+      [{ processing_status: null, created_at: old, updated_at: recent }, true],
+      // A final row is never owed, however recently it changed.
+      [{ processing_status: 'processed', created_at: old, updated_at: recent }, false],
     ];
     const ids = [];
     for (const [state] of cases) ids.push(await call(customerId, null, state));
@@ -160,6 +164,21 @@ describeDb("the caller's word (PostgreSQL)", () => {
     const customerId = await customer();
     for (const [choice, over, intent] of calls) await call(customerId, choice, over, intent);
     await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual(expected);
+  });
+
+  test('a row written after the call counts from when the call began: a call that began before the send is no yes', async () => {
+    const at = since();
+    // A recording recovery inserts the row after hangup; the 10-minute call began 9 minutes before the send.
+    const recovered = { created_at: new Date(at.getTime() + 60000), duration_seconds: 600, metadata: JSON.stringify({ source: 'twilio_recording_status_recovered' }) };
+    const customerId = await customer();
+    await call(customerId, 'per_application', recovered);
+    await expect(callerWord(trx, { customerId, since: at })).resolves.toEqual({ yes: null, noYes: 'no_yes_heard' });
+    // The same row written when the call began is after the send: a yes, timed at its start.
+    const other = await customer();
+    const yesCallId = await call(other, 'per_application', { ...recovered, metadata: JSON.stringify({ source: 'voice_webhook' }) });
+    await expect(callerWord(trx, { customerId: other, since: at })).resolves.toEqual({
+      yes: { callLogId: yesCallId, at: recovered.created_at, quote: WORDS }, noYes: null,
+    });
   });
 
   test("a condition in the caller's turn stays in front of the office: the yes carries the whole turn", async () => {
