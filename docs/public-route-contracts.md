@@ -6498,11 +6498,12 @@ never shows prices that disagree with the charge; a failure building them
 returns empty lists, never an error, because the jti is already burned. No
 contact field, address, note or other invoice rides this reply.
 
-For an invoice with a saved-card payment awaiting bank verification,
-`POST /api/stripe/terminal/payment-intent` returns HTTP 409 with
-`code: payment_charge_in_progress`. Terminal checks before creating the
-card-present intent and under the invoice lock before returning its client
-secret. If the hold appears during creation, the handoff must be reissued
+For an invoice with a saved-card payment awaiting bank verification, both
+`POST /api/stripe/terminal/handoff` and `/payment-intent` return HTTP 409
+with `code: payment_charge_in_progress`. Handoff creation checks under the
+invoice lock before applying account credit or issuing the token. Terminal
+checks again before creating the card-present intent and under the invoice
+lock before returning its client secret. If the hold appears during creation, the handoff must be reissued
 and the response includes `newHandoffRequired: true`. The post-tap
 `/apply-surcharge` request also checks the hold under lock before the
 device can continue. A surcharge-disabled session that already holds a

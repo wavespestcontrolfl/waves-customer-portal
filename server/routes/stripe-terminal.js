@@ -316,6 +316,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       await trx('invoices').where({ id: invoice_id }).forUpdate().first('id');
       if (invoice.customer_id) await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
       if (!(await technicianMayCollectInvoiceLocked(trx, req, invoice))) return false;
+      await assertNoInvoiceChargeReconciliationPending(invoice_id, trx, { readOnly: true, checkout: true });
       handoffCreditResult = await autoApplyAccountCreditIfEnabled(invoice_id, { trx, deferFullCoverageSideEffects: true });
       return true;
     });
@@ -509,7 +510,6 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       expires_at: mintedExpiresAt.toISOString(),
     });
   } catch (err) {
-    logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
     // No handoff token was minted but we already applied credit above — return it
     // so an aborted mint doesn't strand the customer's credit + edit-lock the invoice.
     if (!handoffTokenMinted && handoffAppliedCredit > 0) {
@@ -520,6 +520,10 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         logger.warn(`[stripe-terminal] credit reversal after failed handoff mint skipped: ${e.message}`);
       }
     }
+    if (savedCardChargeSuppressesAlternateCollection(err)) {
+      return res.status(409).json(terminalChargeFenceResponse(err));
+    }
+    logger.error(`[stripe-terminal] handoff mint failed: ${err.message}`);
     res.status(500).json({ error: 'Handoff mint failed' });
   }
 });
