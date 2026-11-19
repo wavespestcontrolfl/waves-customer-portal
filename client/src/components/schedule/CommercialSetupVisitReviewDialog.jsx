@@ -2,6 +2,7 @@ import React from 'react';
 import { Button, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle, buttonStyles } from '../ui';
 
 export const COMMERCIAL_SETUP_VISIT_REVIEW = 'COMMERCIAL_SETUP_VISIT_REVIEW';
+export const COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE = 'The appointment changed. Review the updated booking and save again.';
 
 const cents = (value) => {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
@@ -32,10 +33,28 @@ export function commercialSetupDecision(review, resolution) {
   };
 }
 
-export default function CommercialSetupVisitReviewDialog({ review, changed = false, busy = false, onResolve, onCancel }) {
+// Compare the payloads exactly as fetch will see them. JSON.stringify drops
+// undefined object fields, which is important here: those fields are not part
+// of the reviewed request and therefore must not make an otherwise identical
+// retry look changed.
+export function commercialSetupPayloadUnchanged(reviewedPayload, currentPayload) {
+  return JSON.stringify(reviewedPayload) === JSON.stringify(currentPayload);
+}
+
+export default function CommercialSetupVisitReviewDialog({
+  review,
+  changed = false,
+  busy = false,
+  bookedGroups = [],
+  remainingGroups = [],
+  onResolve,
+  onCancel,
+}) {
   if (!review) return null;
   const prepaidAmount = money(review.prepaidAmountCents);
   const visitFee = money(review.visitFeeCents);
+  const partialSave = bookedGroups.length > 0;
+  const remainingNoun = remainingGroups.length === 1 ? 'booking' : 'bookings';
   return (
     <Dialog open onClose={busy ? undefined : onCancel} size="sm" layer={1400}>
       <DialogHeader>
@@ -46,6 +65,16 @@ export default function CommercialSetupVisitReviewDialog({ review, changed = fal
           <p role="alert" className="border border-warn-fg bg-warn-bg p-3 text-warn-fg">
             The source invoice or setup amount changed. Review these updated amounts and choose again.
           </p>
+        )}
+        {partialSave && (
+          <div role="alert" className="border border-warn-fg bg-warn-bg p-3 text-warn-fg">
+            <p><strong>These appointments are already booked:</strong> {bookedGroups.join(', ')}.</p>
+            <p className="mt-2">
+              <strong>Remaining {remainingNoun}:</strong>{' '}
+              {remainingGroups.length ? remainingGroups.join(', ') : `the remaining ${remainingNoun}`}.
+              Stopping here leaves the remaining {remainingNoun} unsaved.
+            </p>
+          </div>
         )}
         <p>
           The source invoice already carries a <strong>{prepaidAmount}</strong> commercial rodent setup. This booking's independent setup is <strong>{visitFee}</strong>.
@@ -64,7 +93,7 @@ export default function CommercialSetupVisitReviewDialog({ review, changed = fal
       </DialogBody>
       <DialogFooter className="flex-col sm:flex-row">
         <Button variant="ghost" className="w-full sm:w-auto" onClick={onCancel} disabled={busy}>
-          Cancel without saving
+          {partialSave ? `Stop — leave remaining ${remainingNoun} unsaved` : 'Cancel without saving'}
         </Button>
         <Button variant="secondary" className="w-full sm:w-auto" onClick={() => onResolve('separate')} disabled={busy}>
           Bill this booking's {visitFee} setup separately

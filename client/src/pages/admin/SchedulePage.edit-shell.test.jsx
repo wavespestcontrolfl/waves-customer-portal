@@ -167,6 +167,70 @@ it('requires an explicit commercial setup choice and retries the exact recurring
   });
 });
 
+it('stops a stale setup choice without writing, then requests fresh review after staff save the changed editor', async () => {
+  const setupFeeReview = {
+    invoiceId: 'invoice-source-55',
+    visitKey: 'opaque-visit-property-time-token',
+    prepaidAmountCents: 5500,
+    visitFeeCents: 7300,
+  };
+  const freshSetupFeeReview = {
+    invoiceId: 'invoice-source-89',
+    visitKey: 'fresh-opaque-visit-property-time-token',
+    prepaidAmountCents: 8900,
+    visitFeeCents: 9700,
+  };
+  let putCount = 0;
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (isPut(url, options)) {
+      putCount += 1;
+      if (putCount <= 2) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+            error: 'Choose which setup this prepayment covers.',
+            setupFeeReview: putCount === 1 ? setupFeeReview : freshSetupFeeReview,
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ success: true }) };
+    }
+    return okJson(url);
+  });
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await clickSave();
+  await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  const firstBody = body(0);
+
+  fireEvent.change(screen.getByDisplayValue('Existing note'), { target: { value: 'Note changed during review' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled(), { timeout: 2000 });
+  fireEvent.click(screen.getByRole('button', { name: 'Apply $55.00 prepayment to this booking' }));
+
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument());
+  expect(writes()).toHaveLength(1);
+  expect(screen.getByRole('alert')).toHaveTextContent('The appointment changed. Review the updated booking and save again.');
+  await clickSave();
+
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(body(1)).toMatchObject({ notes: 'Note changed during review' });
+  expect(body(1)).not.toHaveProperty('commercialSetupDecision');
+  expect(body(1)).not.toEqual(firstBody);
+  const refreshedDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  expect(refreshedDialog).toHaveTextContent('$89.00');
+  fireEvent.click(screen.getByRole('button', { name: 'Apply $89.00 prepayment to this booking' }));
+
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  expect(writes()).toHaveLength(3);
+  expect(body(2)).toEqual({
+    ...body(1),
+    commercialSetupDecision: { ...freshSetupFeeReview, resolution: 'covered' },
+  });
+});
+
 it('keeps a failed cancellation open for retry and blocks duplicate cancellation while pending', async () => {
   let rejectCancel;
   let attempts = 0;

@@ -62,7 +62,9 @@ import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 import CommercialSetupVisitReviewDialog, {
+  COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE,
   commercialSetupDecision,
+  commercialSetupPayloadUnchanged,
   commercialSetupReviewFromError,
 } from "../../components/schedule/CommercialSetupVisitReviewDialog";
 
@@ -3674,7 +3676,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               ? null
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         };
-      submittedSetupPayload = commercialSetupRetry
+      const setupRetryPayloadUnchanged = commercialSetupRetry
+        && commercialSetupPayloadUnchanged(commercialSetupRetry.body, savePayload);
+      if (commercialSetupRetry && !setupRetryPayloadUnchanged) {
+        setCommercialSetupReview(null);
+        setSaveError(COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE);
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
+      submittedSetupPayload = setupRetryPayloadUnchanged
         ? {
             ...commercialSetupRetry.body,
             commercialSetupDecision: commercialSetupDecision(

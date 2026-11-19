@@ -57,7 +57,9 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
 import CommercialSetupVisitReviewDialog, {
+  COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE,
   commercialSetupDecision,
+  commercialSetupPayloadUnchanged,
   commercialSetupReviewFromError,
 } from './CommercialSetupVisitReviewDialog';
 
@@ -4581,7 +4583,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             body.expected_price = verdict.price;
           }
           setupRetryForGroup = commercialSetupRetry?.key === key ? commercialSetupRetry : null;
-          submittedSetupPayload = setupRetryForGroup
+          const setupRetryPayloadUnchanged = setupRetryForGroup
+            && commercialSetupPayloadUnchanged(setupRetryForGroup.body, body);
+          if (setupRetryForGroup && !setupRetryPayloadUnchanged) {
+            setCommercialSetupReview(null);
+            setToast(COMMERCIAL_SETUP_BOOKING_CHANGED_NOTICE);
+            return false;
+          }
+          submittedSetupPayload = setupRetryPayloadUnchanged
             ? {
               ...setupRetryForGroup.body,
               commercialSetupDecision: commercialSetupDecision(
@@ -4635,6 +4644,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               key,
               body: originalPayload,
               separateProgram,
+              bookedGroups: groups
+                .filter((candidate) => createdGroupKeysRef.current.has(groupKey(candidate)) || groupAlreadyCommitted(candidate))
+                .map((candidate) => `${groupLabel(candidate)}: ${candidate.lines.map((line) => line.name).filter(Boolean).join(', ')}`),
+              remainingGroups: groups
+                .filter((candidate) => !createdGroupKeysRef.current.has(groupKey(candidate)) && !groupAlreadyCommitted(candidate))
+                .map((candidate) => `${groupLabel(candidate)}: ${candidate.lines.map((line) => line.name).filter(Boolean).join(', ')}`),
             });
             setupReviewPending = true;
             break;
@@ -5433,6 +5448,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <CommercialSetupVisitReviewDialog
           review={commercialSetupReview?.review}
           changed={commercialSetupReview?.changed}
+          bookedGroups={commercialSetupReview?.bookedGroups}
+          remainingGroups={commercialSetupReview?.remainingGroups}
           busy={saving}
           onResolve={resolveCommercialSetupReview}
           onCancel={() => {

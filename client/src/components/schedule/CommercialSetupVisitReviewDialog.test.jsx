@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import CommercialSetupVisitReviewDialog, {
   commercialSetupDecision,
+  commercialSetupPayloadUnchanged,
   commercialSetupReviewFromError,
 } from './CommercialSetupVisitReviewDialog';
 
@@ -38,6 +39,17 @@ it('rejects malformed cents instead of coercing null or an empty value to zero',
   }
 });
 
+it('compares the request body as it will be serialized on the wire', () => {
+  expect(commercialSetupPayloadUnchanged(
+    { scheduledDate: '2035-01-02', optional: undefined },
+    { scheduledDate: '2035-01-02' },
+  )).toBe(true);
+  expect(commercialSetupPayloadUnchanged(
+    { scheduledDate: '2035-01-02' },
+    { scheduledDate: '2035-01-03' },
+  )).toBe(false);
+});
+
 it('shows exact amounts, source invoice, both choices, and cancellation without a default', () => {
   const onResolve = vi.fn();
   const onCancel = vi.fn();
@@ -58,4 +70,21 @@ it('shows exact amounts, source invoice, both choices, and cancellation without 
 it('warns when a retry returned refreshed invoice evidence', () => {
   render(<CommercialSetupVisitReviewDialog review={review} changed onResolve={vi.fn()} onCancel={vi.fn()} />);
   expect(screen.getByRole('alert')).toHaveTextContent('source invoice or setup amount changed');
+});
+
+it('names committed and remaining groups and scopes stopping to only the unsaved bookings', () => {
+  const onCancel = vi.fn();
+  render(<CommercialSetupVisitReviewDialog
+    review={review}
+    bookedGroups={['Quarterly: Pest Control']}
+    remainingGroups={['Seasonal (Feb–Oct): Mosquito Control']}
+    onResolve={vi.fn()}
+    onCancel={onCancel}
+  />);
+  const notice = screen.getByRole('alert');
+  expect(notice).toHaveTextContent('These appointments are already booked: Quarterly: Pest Control');
+  expect(notice).toHaveTextContent('Remaining booking: Seasonal (Feb–Oct): Mosquito Control');
+  expect(notice).toHaveTextContent('Stopping here leaves the remaining booking unsaved');
+  fireEvent.click(screen.getByRole('button', { name: 'Stop — leave remaining booking unsaved' }));
+  expect(onCancel).toHaveBeenCalledOnce();
 });
