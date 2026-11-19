@@ -8,7 +8,7 @@ const { excludeHoldDeferralPlaceholders } = require('./collections/collection-ho
 const StripeService = require('./stripe');
 const logger = require('./logger');
 const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, paymentInvoiceIds, isCombinedPayment, descriptionInvoiceNumberOf } = require('./payer-linkage');
-const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer, isCollectionPendingFenceError } = require('./invoice-helpers');
+const { invoiceAmountDue, isCollectibleOwnInvoice, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { isNeverAttemptedDeferral } = require('./failed-payments');
 const { isParkedOrSupersededAttempt } = require('./retry-collectibility');
 
@@ -110,23 +110,22 @@ async function receiptIndexFor(customerId, visiblePayments, database = db) {
   return { receiptTokenByInvoiceId, receiptTokenByIntentId, receiptTokenByChargeId, receiptTokenByNumber };
 }
 
-async function recoveryInvoiceAvailableNow(invoice, database) {
+async function recoveryInvoiceAvailableNow(customerId, invoice, database) {
   try {
+    // Re-read the full current row and apply checkout's shared ownership,
+    // amount, deposit, and charge-reconciliation checks. customerId makes a
+    // profile merge fail closed instead of returning the former owner's token.
+    const verdict = await require('./pay-combined').memberCollectionPending(invoice, { database, customerId });
+    if (!verdict?.row) return null;
+    const current = verdict.row;
     // A packet invoice's representative visit is not enough: any billed
     // member can move the whole packet to a third-party payer.
-    if (invoice.visit_completion_packet_id
-      && await require('./visit-completion-packets').invoicePayerOwnedNow(invoice.id, database)) return false;
-    // Match checkout's read-only money fences. A deposit or saved-card attempt
-    // may already be settling even though an older failed row remains visible.
-    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(database, invoice, { lock: false });
-    const stripe = await StripeService;
-    await stripe.assertNoInvoiceChargeReconciliationPending(invoice.id, database, { readOnly: true });
-    return true;
+    if (current.visit_completion_packet_id
+      && await require('./visit-completion-packets').invoicePayerOwnedNow(current.id, database)) return null;
+    return current;
   } catch (err) {
-    if (!isCollectionPendingFenceError(err)) {
-      logger.warn(`[billing] failed-payment invoice ${invoice.id} is not safely collectible: ${err.message}`);
-    }
-    return false;
+    logger.warn(`[billing] failed-payment invoice ${invoice.id} is not safely collectible: ${err.message}`);
+    return null;
   }
 }
 
@@ -282,22 +281,35 @@ async function recoveryInvoiceIndexFor(customerId, visiblePayments, database = d
   );
   if (ownership.unverifiable) return new Map();
 
-  const availableInvoiceIds = new Set();
+  const availableInvoices = new Map();
   for (const invoice of identifiedInvoices) {
     const ownDraft = String(invoice.status || '').toLowerCase() === 'draft'
       && !invoice.payer_id && !invoice.payer_statement_id && !invoiceWithdrawnFromCustomer(invoice);
     const basePayable = !ownership.ownedIds.has(String(invoice.id))
       && invoice.token && (ownDraft || isCollectibleOwnInvoice(invoice)) && invoiceAmountDue(invoice) > 0;
-    if (basePayable && await recoveryInvoiceAvailableNow(invoice, database)) availableInvoiceIds.add(String(invoice.id));
+    if (!basePayable) continue;
+    const current = await recoveryInvoiceAvailableNow(customerId, invoice, database);
+    const currentDraft = String(current?.status || '').toLowerCase() === 'draft'
+      && !current?.payer_id && !current?.payer_statement_id && !invoiceWithdrawnFromCustomer(current);
+    const currentPayable = current?.token
+      && (currentDraft || isCollectibleOwnInvoice(current)) && invoiceAmountDue(current) > 0;
+    if (currentPayable) availableInvoices.set(String(invoice.id), current);
   }
 
   const recoveryByPaymentId = new Map();
   for (const [paymentId, invoice] of invoiceByPaymentId) {
-    if (!availableInvoiceIds.has(String(invoice.id))) continue;
+    const current = availableInvoices.get(String(invoice.id));
+    if (!current) continue;
+    const payment = failedPayments.find((row) => String(row.id) === paymentId);
+    // If the fresh row moved back to draft after identity resolution, retain
+    // Billing's stricter rule: only its canonical explicit invoice id may
+    // publish that otherwise-undelivered debt.
+    if (String(current.status || '').toLowerCase() === 'draft'
+      && String(invoiceIdOf(payment)).toLowerCase() !== String(current.id).toLowerCase()) continue;
     recoveryByPaymentId.set(paymentId, {
-      payUrl: `/pay/${invoice.token}`,
-      amountDue: invoiceAmountDue(invoice),
-      invoiceNumber: invoice.invoice_number || null,
+      payUrl: `/pay/${current.token}`,
+      amountDue: invoiceAmountDue(current),
+      invoiceNumber: current.invoice_number || null,
     });
   }
   return recoveryByPaymentId;

@@ -7108,9 +7108,13 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       // skips and no card update clears (there is no resume path today), and
       // it renders with Auto Pay off. Both actions are stated plainly and
       // nothing is guaranteed about what happens next.
-      detail: primaryOpenInvoice
-        ? 'Your last payment could not be processed. Review your open invoices or update your saved payment method below.'
-        : 'Your last payment could not be processed. Update your saved card below.',
+      detail: cancelledAccount
+        ? (primaryOpenInvoice
+          ? 'Your last payment could not be processed. Review your open invoices above.'
+          : 'Your last payment could not be processed. Contact us to review your balance.')
+        : primaryOpenInvoice
+          ? 'Your last payment could not be processed. Review your open invoices or update your saved payment method below.'
+          : 'Your last payment could not be processed. Update your saved card below.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',

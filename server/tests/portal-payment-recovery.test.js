@@ -2,13 +2,12 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn() }));
 jest.mock('../services/stripe', () => ({
   getPaymentHistory: jest.fn(),
-  assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
 }));
 jest.mock('../services/invoice-payer-ownership', () => ({
   liveInvoiceOwnership: jest.fn(async () => ({ ownedIds: new Set(), unverifiable: false })),
 }));
-jest.mock('../services/estimate-deposits', () => ({
-  assertInvoiceDepositSettlementReady: jest.fn(async () => {}),
+jest.mock('../services/pay-combined', () => ({
+  memberCollectionPending: jest.fn(async (invoice) => ({ row: invoice })),
 }));
 jest.mock('../services/visit-completion-packets', () => ({
   invoicePayerOwnedNow: jest.fn(async () => false),
@@ -16,8 +15,7 @@ jest.mock('../services/visit-completion-packets', () => ({
 
 const { recoveryInvoiceIndexFor } = require('../services/portal-payment-history');
 const { liveInvoiceOwnership } = require('../services/invoice-payer-ownership');
-const { assertNoInvoiceChargeReconciliationPending } = require('../services/stripe');
-const { assertInvoiceDepositSettlementReady } = require('../services/estimate-deposits');
+const { memberCollectionPending } = require('../services/pay-combined');
 const { invoicePayerOwnedNow } = require('../services/visit-completion-packets');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
@@ -46,8 +44,7 @@ function invoice(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   liveInvoiceOwnership.mockResolvedValue({ ownedIds: new Set(), unverifiable: false });
-  assertNoInvoiceChargeReconciliationPending.mockResolvedValue();
-  assertInvoiceDepositSettlementReady.mockResolvedValue();
+  memberCollectionPending.mockImplementation(async (current) => ({ row: current }));
   invoicePayerOwnedNow.mockResolvedValue(false);
 });
 
@@ -115,7 +112,7 @@ test('recovery enrichment is capped to the ten newest failed rows', async () => 
 
   expect(recovery.size).toBe(10);
   expect(recovery.has('pay-11')).toBe(false);
-  expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledTimes(10);
+  expect(memberCollectionPending).toHaveBeenCalledTimes(10);
 });
 
 test('combined ACH shares keep their invoice-specific recovery links after a bounce', async () => {
@@ -281,7 +278,6 @@ test('a packet owned by any billed payer member never exposes its bearer pay lin
 
   expect(recovery.has('pay-a')).toBe(false);
   expect(invoicePayerOwnedNow).toHaveBeenCalledWith(INV_A, database);
-  expect(assertInvoiceDepositSettlementReady).not.toHaveBeenCalled();
 });
 
 test('unverifiable packet ownership withholds the recovery link', async () => {
@@ -294,13 +290,48 @@ test('unverifiable packet ownership withholds the recovery link', async () => {
 });
 
 test.each([
-  ['deposit settlement', assertInvoiceDepositSettlementReady, 'DEPOSIT_RECONCILIATION_REQUIRED'],
-  ['saved-card reconciliation', assertNoInvoiceChargeReconciliationPending, 'STRIPE_AMBIGUOUS_OUTCOME'],
-])('%s holds suppress the recovery link', async (_label, guard, code) => {
-  guard.mockRejectedValueOnce(Object.assign(new Error('collection pending'), { code }));
+  ['deposit settlement', 'deposit_settlement'],
+  ['saved-card reconciliation', 'charge_reconciliation'],
+])('%s holds suppress the recovery link', async (_label, reason) => {
+  memberCollectionPending.mockResolvedValueOnce({ reason });
   const recovery = await recoveryInvoiceIndexFor('cust-1', [{
     id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
   }], reader([invoice()]));
+
+  expect(recovery.has('pay-a')).toBe(false);
+});
+
+test('the current-row verifier withholds an invoice reassigned to another customer', async () => {
+  memberCollectionPending.mockResolvedValueOnce({ reason: 'customer_changed' });
+  const database = reader([invoice()]);
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+  }], database);
+
+  expect(recovery.has('pay-a')).toBe(false);
+  expect(memberCollectionPending).toHaveBeenCalledWith(expect.objectContaining({ id: INV_A }), {
+    database, customerId: 'cust-1',
+  });
+});
+
+test('the recovery link and amount come from the verified current invoice row', async () => {
+  memberCollectionPending.mockResolvedValueOnce({ row: invoice({
+    token: 'tok-current', invoice_number: 'WPC-CURRENT', total: '80.00', credit_applied: '5.00',
+  }) });
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', metadata: { invoice_id: INV_A },
+  }], reader([invoice()]));
+
+  expect(recovery.get('pay-a')).toEqual({
+    payUrl: '/pay/tok-current', amountDue: 75, invoiceNumber: 'WPC-CURRENT',
+  });
+});
+
+test('a fresh draft still requires the payment canonical invoice id', async () => {
+  memberCollectionPending.mockResolvedValueOnce({ row: invoice({ status: 'draft' }) });
+  const recovery = await recoveryInvoiceIndexFor('cust-1', [{
+    id: 'pay-a', status: 'failed', stripe_payment_intent_id: 'pi-a',
+  }], reader([invoice({ status: 'sent' })]));
 
   expect(recovery.has('pay-a')).toBe(false);
 });

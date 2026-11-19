@@ -85,4 +85,15 @@ describe('failed payment recovery', () => {
       .toHaveAttribute('href', '#billing-open-invoices');
     expect(within(row).queryByRole('link', { name: /^Pay / })).not.toBeInTheDocument();
   });
+
+  it('does not send a cancelled customer to hidden payment-method controls', async () => {
+    api.getPayments.mockResolvedValue({ payments: [failedPayment()] });
+    api.getBalance.mockResolvedValue({ currentBalance: 95, lastPaymentFailed: true, openInvoices: [openInvoices[1]] });
+
+    render(<BillingTab customer={{ ...customer, cancelled: true }} />);
+
+    expect(await screen.findByText('Your last payment could not be processed. Review your open invoices above.'))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/update your saved payment method below/i)).not.toBeInTheDocument();
+  });
 });
