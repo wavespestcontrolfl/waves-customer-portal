@@ -43,6 +43,16 @@ function isSendablePacketStatus(status) {
   return ["approved", "sent", "viewed"].includes(String(status || "").toLowerCase());
 }
 
+function regenerationNotice({ packet, sourcePacket }) {
+  const message = packet?.status === "draft" ? "New outline saved as a draft." : "New outline generated.";
+  if (sourcePacket?.revokedAt || sourcePacket?.status === "revoked") return message + " Previous link is revoked.";
+  if (isSendablePacketStatus(sourcePacket?.status) && sourcePacket.validationStatus !== "blocked" &&
+    (!sourcePacket.expiresAt || Date.parse(sourcePacket.expiresAt) > Date.now())) {
+    return message + " Previous link remains active.";
+  }
+  return message;
+}
+
 function validationIcon(status) {
   if (status === "passed") return <CheckCircle2 size={16} strokeWidth={1.75} />;
   return <AlertTriangle size={16} strokeWidth={1.75} />;
@@ -307,7 +317,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
         validation: data.validation || current?.validation,
       }));
       loadEvents(data.packet?.id);
-      setNotice(revokeOldOnRegenerate ? "New outline generated. Previous link revoked." : "New outline generated. Previous link remains active.");
+      setNotice(regenerationNotice(data));
     } catch (err) {
       setError(err.message || "Regenerate failed");
     } finally {
@@ -426,7 +436,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                   )}
                   <label className="mt-2 flex items-start gap-2 text-sm text-zinc-700">
                     <input type="checkbox" checked={revokeOldOnRegenerate} onChange={(event) => setRevokeOldOnRegenerate(event.target.checked)} className="mt-1" />
-                    <span>Revoke previous link after regenerating</span>
+                    <span>Revoke previous link only if the new outline is ready to share</span>
                   </label>
                   <Button type="button" variant="secondary" className="mt-3 w-full justify-center" onClick={regenerate} disabled={saving || loading || (confirmJurisdiction && !selectedJurisdiction)}>
                     <RefreshCw size={14} strokeWidth={1.75} className="mr-2" />

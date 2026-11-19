@@ -3,6 +3,8 @@ const {
   currentMonthNumber,
   normalizeTurfType,
   resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
+  estimateSnapshot,
   validateContent,
 } = require('../services/lawn-service-outline');
 
@@ -133,6 +135,9 @@ describe('lawn service outline composer', () => {
       expect(resolveJurisdictionId({ county: 'Sarasota', address })).toBe('north_port_fl');
     }
     expect(resolveJurisdictionId({ county: 'Sarasota', address: '100 North Port Drive, FL 34286' })).toBe('generic_swfl');
+    expect(resolveJurisdictionId({ county: 'Sarasota', address: 'North Port Drive, FL 34286' })).toBe('generic_swfl');
+    expect(resolveJurisdictionId({ county: 'Charlotte', address: 'Englewood, FL 34223' })).toBe('charlotte_county_fl');
+    expect(resolveJurisdictionId('North Port, FL')).toBe('north_port_fl');
     expect(resolveJurisdictionId('100 Test Way, North Port, NY 10001')).toBe('generic_swfl');
   });
 
@@ -162,6 +167,33 @@ describe('lawn service outline composer', () => {
     });
   });
 
+  test.each([
+    ['Englewood', '34223', 'Charlotte County', 'charlotte_county_fl'],
+    ['Sarasota', '34243', 'Manatee', 'manatee_county_fl'],
+    ['Lakewood Ranch', '', 'Sarasota', 'sarasota_county_fl'],
+    ['Englewood', '34223', '', 'generic_swfl'],
+    ['Sarasota', '34243', '', 'generic_swfl'],
+    ['Lakewood Ranch', '', '', 'generic_swfl'],
+    ['Rotonda West', '', '', 'charlotte_county_fl'],
+  ])('resolves %s %s with county "%s" to %s', (city, zip, county, rule) => {
+    expect(resolveJurisdictionId({ city, zip, county })).toBe(rule);
+  });
+
+  test.each([
+    [{ enabled: true, provenance: { source: 'proposal-editor' } }, 'north_port_fl'],
+    [{ enabled: true, buildings: [{ name: 'Building A' }] }, 'north_port_fl'],
+    [{ enabled: true, correctiveWork: [{ description: 'One-time service' }] }, 'north_port_fl'],
+    [{ enabled: true }, 'sarasota_county_fl'],
+    [{ enabled: false, scaffold: true, buildings: [{}] }, 'sarasota_county_fl'],
+  ])('uses the effective commercial property for both the rule and snapshot', (proposal, rule) => {
+    const corrected = '101 Test Way, North Port, FL 34286';
+    const address = '100 Test Way, Venice, FL 34285';
+    const data = { property: { city: 'Venice', county: 'Sarasota' }, proposal: { ...proposal, propertyAddress: corrected } };
+    const estimate = { address, service_address_city: 'Venice', estimate_data: data };
+    expect(resolveOutlineJurisdictionId({}, estimate, data)).toBe(rule);
+    expect(estimateSnapshot(estimate, data).address).toBe(rule === 'north_port_fl' ? corrected : address);
+  });
+
   test('builds May St. Augustine outline with spring focus and conditional protocol language', async () => {
     const db = makeDb();
     const outline = await buildOutline({
@@ -169,7 +201,7 @@ describe('lawn service outline composer', () => {
       estimate: {
         id: 'estimate-1',
         customer_name: 'Jane Client',
-        address: '123 Main St, Sarasota, FL',
+        address: '123 Main St, Sarasota, FL 34240',
         service_interest: 'Lawn care',
         waveguard_tier: 'Premium',
         token: 'estimate-token',

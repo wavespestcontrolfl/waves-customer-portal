@@ -462,17 +462,25 @@ function roundAsNeededSteps(round, months, trackKey, kit) {
 }
 
 // The nine rounds of the program year that holds `now`, with dates, day counts and derived steps.
-function roundFacts(programYear, trackKey, kit) {
+function roundFacts(programYear, trackKey, kit, jurisdictionId) {
   return lawnRounds.LAWN_ROUND_TABLE.map(({ round }) => {
     const start = lawnRounds.roundStart(programYear, round);
     const end = lawnRounds.roundEnd(programYear, round);
+    const splitSpring = round === 3 && jurisdictionId === 'north_port_fl';
     return {
       n: round,
       start,
       end,
       days: dayDiff(start, end) + 1,
       window: windowText(start, end),
-      main: roundMainSteps(round, trackKey, kit),
+      main: splitSpring ? ['inspection'] : roundMainSteps(round, trackKey, kit),
+      words: splitSpring ? {
+        ...ROUND_WORDS[round - 1],
+        short: 'Feed in March only',
+        title: 'March feeding and April inspection',
+        why: 'A March visit can include the spring feeding. From April 1 we hold nitrogen and phosphorus on turf. We inspect for take-all root rot and check damaged areas for chinch bugs before choosing spot treatments.',
+        extra: 'If this is your first visit, we check whether a spring weed barrier fits your lawn. A barrier that contains nitrogen or phosphorus can be used only during the March part of this round.',
+      } : ROUND_WORDS[round - 1],
       asNeeded: roundAsNeededSteps(round, monthsInRange(start, end), trackKey, kit),
     };
   });
@@ -514,13 +522,16 @@ function roundsBar({ rounds, programYear, rule, kit }) {
     days: r.days,
     window: r.window,
     main: r.main,
-    short: ROUND_SHORT[r.n - 1],
+    short: r.words.short || ROUND_SHORT[r.n - 1],
     from: r.start.slice(5),
     to: r.end.slice(5),
-    now: `You are here: round ${r.n} (${r.window}).`,
+    now: `You are here: round ${r.n} (${r.window}).${r.words.short ? ` ${r.words.title}.` : ''}`,
     aside: `Round ${r.n} · ${r.window}`,
   }));
-  const bullets = rounds.map((r) => stepsLine(`Round ${r.n} (${r.window})`, r.main, kit.stepLabels));
+  const bullets = rounds.map((r) => {
+    const label = `Round ${r.n} (${r.window})`;
+    return r.words.short ? `${label}: ${r.words.short}. ${r.words.why}` : stepsLine(label, r.main, kit.stepLabels);
+  });
   if (band) bullets.push(band.caption);
   return barSection('Your Year In Nine Rounds', 'Nine visits a year, one in each round. Each round has set dates and one main job. Tap a round to jump to it.', bullets, {
     blocks,
@@ -534,17 +545,17 @@ function roundsBar({ rounds, programYear, rule, kit }) {
   }, kit);
 }
 
-function monthsBar({ plan, trackKey, year, rule, kit }) {
+function monthsBar({ plan, months, year, rule, kit }) {
   const words = MONTH_BAR_WORDS[plan] || MONTH_BAR_WORDS.unknown;
   const barStart = ymd(year, 1, 1);
   const band = limitBand(rule, barStart, year);
-  const blocks = MONTH_ABBR.map((label, index) => ({
+  const blocks = months.map(({ label, main }, index) => ({
     key: index + 1,
     label,
     days: daysInMonth(year, index + 1),
     window: label,
-    main: kit.monthSteps(kit.protocolVisitForMonth(trackKey, index + 1)).main,
-    short: MONTH_SHORT[index],
+    main,
+    short: index === 3 && main.includes('inspection') ? 'Inspection' : MONTH_SHORT[index],
     from: `${pad(index + 1)}-01`,
     to: `${pad(index + 1)}-${pad(daysInMonth(LEAP_YEAR, index + 1))}`,
     now: `You are here: ${MONTH_FULL[index]}.`,
@@ -573,7 +584,7 @@ function roundLinks(n, words, jurisdictionId) {
 
 function roundsSection(rounds, jurisdictionId, kit) {
   const cards = rounds.map((r) => {
-    const words = ROUND_WORDS[r.n - 1];
+    const words = r.words;
     return {
       n: r.n,
       window: r.window,
@@ -650,19 +661,20 @@ function faqSection(plan, kit) {
 
 // ── entry points ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 // The program year holding `now` (ET) and its nine rounds.
-function roundsContext(now, trackKey, kit) {
+function roundsContext(now, trackKey, kit, jurisdictionId) {
   const { programYear } = lawnRounds.roundOf(etDateString(now));
-  return { programYear, rounds: roundFacts(programYear, trackKey, kit) };
+  return { programYear, rounds: roundFacts(programYear, trackKey, kit, jurisdictionId) };
 }
 
 // The outline's sections under the gate, in the approved order. `parts` carries what the outline builds itself: the visit steps,
 // the exclusions and, for a monthly plan, today's month list (called only then).
 function visualSections({ plan, trackKey, jurisdictionRule, productList, now, kit, parts }) {
   const jurisdictionId = jurisdictionRule?.jurisdiction_id;
-  const rounding = plan === 'rounds' ? roundsContext(now, trackKey, kit) : null;
+  const rounding = plan === 'rounds' ? roundsContext(now, trackKey, kit, jurisdictionId) : null;
+  const months = rounding ? null : parts.monthList();
   const head = rounding
     ? [roundsBar({ ...rounding, rule: jurisdictionRule, kit }), roundsSection(rounding.rounds, jurisdictionId, kit)]
-    : [monthsBar({ plan, trackKey, year: Number(etDateString(now).slice(0, 4)), rule: jurisdictionRule, kit }), parts.monthList()];
+    : [monthsBar({ plan, months: months.visual.months, year: Number(etDateString(now).slice(0, 4)), rule: jurisdictionRule, kit }), months];
   return [
     ...head,
     parts.typicalVisit,

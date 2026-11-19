@@ -99,8 +99,8 @@ const estimateOf = (jurisdictionId, line) => ({
 });
 const ROUNDS_LINE = lawnLine(9, 'every_6_weeks');
 const MONTHLY_LINE = lawnLine(12, 'monthly');
-const build = ({ line, jurisdictionId = 'manatee_county_fl', now = OCT_26 } = {}) => outline.buildOutline({
-  db: makeDb({ jurisdictionId }), estimate: estimateOf(jurisdictionId, line), input: { month: 10 }, now,
+const build = ({ line, jurisdictionId = 'manatee_county_fl', month = 10, now = OCT_26 } = {}) => outline.buildOutline({
+  db: makeDb({ jurisdictionId }), estimate: estimateOf(jurisdictionId, line), input: { month }, now,
 });
 const section = (result, key) => result.content.sections.find((s) => s.key === key);
 const keys = (result) => result.content.sections.map((s) => s.key);
@@ -211,6 +211,42 @@ describe('a 9-visit rounds estimate', () => {
       expect(sarasota.inputSnapshot.jurisdictionId).toBe('sarasota_county_fl');
       expect(section(sarasota, 'year_bar').visual.caption)
         .toBe('Your rule area: Sarasota County, FL. No nitrogen or phosphorus from June 1 to September 30; micronutrients keep the color instead.');
+    });
+  });
+
+  test('North Port April holds nutrient products in the monthly bar, cards, plain outline and stored HTML', async () => {
+    const input = { line: MONTHLY_LINE, jurisdictionId: 'north_port_fl', month: 4 };
+    await withGates(DETAIL, async () => {
+      const result = await build(input);
+      expect(section(result, 'year_bar').visual.blocks[3]).toMatchObject({ short: 'Inspection', main: ['inspection'] });
+      const april = section(result, 'program_year').visual.months[3];
+      expect(april).toMatchObject({ main: ['inspection'], visit: expect.stringContaining('hold fertilizer') });
+      expect(april.asNeeded).toEqual(expect.arrayContaining(['insects', 'disease', 'dry_spots']));
+      expect(april.asNeeded).not.toContain('barrier');
+      expect(result.contentHtml).toContain('April: Inspection');
+      expect(result.contentHtml).not.toContain('44-0-0');
+      const sarasota = await build({ ...input, jurisdictionId: 'sarasota_county_fl' });
+      expect(section(sarasota, 'year_bar').visual.blocks[3]).toMatchObject({ short: 'Feed', main: ['feeding'] });
+      expect(sarasota.contentHtml).toContain('44-0-0');
+    });
+    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
+      const result = await build(input);
+      expect(section(result, 'season_focus').body).toContain('April 1');
+      expect(section(result, 'season_focus').visual.items.map((i) => i.key)).not.toContain('feeding');
+      expect(section(result, 'program_year').visual.months[3].main).toEqual(['inspection']);
+      expect(result.contentHtml).toContain('April: Inspection');
+    });
+  });
+
+  test('the North Port nine-visit spring round distinguishes the March feeding window from April inspections', async () => {
+    await withGates(DETAIL, async () => {
+      const result = await build({ line: ROUNDS_LINE, jurisdictionId: 'north_port_fl' });
+      const bar = section(result, 'year_bar');
+      expect(bar.visual.blocks[1].main).toContain('feeding');
+      expect(bar.visual.blocks[2]).toMatchObject({ short: 'Feed in March only', main: ['inspection'] });
+      expect(bar.bullets[2]).toContain('Feed in March only');
+      expect(section(result, 'rounds').visual.rounds[2].why).toMatch(/March visit can include.*From April 1 we hold/);
+      expect(result.contentHtml).toContain('March feeding and April inspection');
     });
   });
 

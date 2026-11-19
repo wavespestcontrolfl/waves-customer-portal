@@ -47,20 +47,16 @@ function chain(overrides = {}) {
   };
 }
 
-function appServer() {
+async function withServer(fn) {
   const app = express();
   app.use(express.json());
   app.use('/admin/service-outlines', adminServiceOutlines);
   app.use((err, _req, res, _next) => {
     res.status(err.status || 500).json({ error: err.message });
   });
-  const server = app.listen(0);
+  let server;
+  await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
-  return { server, baseUrl };
-}
-
-async function withServer(fn) {
-  const { server, baseUrl } = appServer();
   try {
     return await fn(baseUrl);
   } finally {
@@ -175,8 +171,9 @@ describe('admin service outline regeneration', () => {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       });
       const conflict = await post({});
-      expect(conflict.status).toBe(409);
-      expect(await conflict.json()).toMatchObject({ code: 'outline_jurisdiction_confirmation_required' });
+      expect({ status: conflict.status, body: await conflict.json() }).toMatchObject({
+        status: 409, body: { code: 'outline_jurisdiction_confirmation_required' },
+      });
       expect((await post({ jurisdictionId: null })).status).toBe(409);
       expect(db.transaction).not.toHaveBeenCalled();
       const confirmed = await post({ jurisdictionId: 'north_port_fl' });
@@ -186,6 +183,19 @@ describe('admin service outline regeneration', () => {
         input_snapshot_json: expect.objectContaining({ jurisdictionSource: 'staff' }),
       }));
     });
+  });
+
+  test('a concurrent revocation prevents the stale request from issuing another replacement', async () => {
+    const { packetQuery } = setupRegenerate();
+    packetQuery.returning.mockReset().mockResolvedValue([]);
+    await withServer(async (baseUrl) => {
+      const response = await fetch(baseUrl + '/admin/service-outlines/packet-1/regenerate', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+      });
+      expect(response.status).toBe(409);
+    });
+    expect(packetQuery.where).toHaveBeenCalledWith({ id: 'packet-1', revoked_at: null });
+    expect(packetQuery.insert).not.toHaveBeenCalled();
   });
 
   test.each([['estimate', null], ['staff', 'sarasota_county_fl']])(

@@ -10,6 +10,10 @@ const { estimateHasBahiaLawn, estimateLawnGrassValues } = require('./estimate-ba
 const featureGates = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { parseRawAddress } = require('../utils/address-normalizer');
+const { analysesIn } = require('../utils/fertilizer-analysis');
+const { resolveAddressCounty } = require('../config/address-county');
+const { CITY_TO_LOCATION } = require('../config/locations');
+const { normalizeProposal, isProposalAuthoredByEditor } = require('./estimate-proposal');
 const { NORTH_PORT_FERTILIZER_SETBACKS } = require('./lawn-fertilizer-safety');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -232,40 +236,58 @@ function v13TrackKey(turfType) {
   return lawnProtocols()?.[turfType] ? turfType : lawnV13AnyGrassTrack(turfType);
 }
 
-function jurisdictionForPlace(value) {
-  const place = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\b(?:city of|county)\b/g, ' ').replace(/\s+/g, ' ').trim();
-  if (place === 'north port') return 'north_port_fl';
-  if (['sarasota', 'venice', 'nokomis', 'osprey', 'englewood'].includes(place)) return 'sarasota_county_fl';
-  if (['manatee', 'bradenton', 'palmetto', 'parrish', 'lakewood ranch', 'ellenton', 'anna maria'].includes(place)) return 'manatee_county_fl';
-  if (['charlotte', 'port charlotte', 'punta gorda', 'rotunda'].includes(place)) return 'charlotte_county_fl';
-  return null;
-}
-
 function resolveJurisdictionId(address) {
   const place = typeof address === 'string' ? { address } : (address || {});
   const jurisdictionId = firstNonEmpty(place.jurisdictionId, place.jurisdiction_id, place.resolvedJurisdictionId, place.resolved_jurisdiction_id);
   if (jurisdictionId) return jurisdictionId;
   const formatted = firstNonEmpty(place.formattedAddress, place.formatted_address, place.address);
   const parsed = parseRawAddress(formatted);
-  if (parsed.state && parsed.state !== 'FL') return 'generic_swfl';
-  // A street name alone cannot establish a city. Keep supported "City, FL" inputs too.
+  const state = firstNonEmpty(parsed.state, place.state, place.address_state).toLowerCase();
+  if (state && !['fl', 'florida'].includes(state)) return 'generic_swfl';
+  // In a "City, FL" address the parser puts the city in line1. Only accept a known place name there.
   const addressCity = formatted.includes(',') || parsed.state || parsed.zip ? parsed.city : '';
-  const municipality = firstNonEmpty(place.municipality, place.city, place.locality, place.address_city, addressCity);
-  const cityRule = jurisdictionForPlace(municipality || (parsed.state === 'FL' && parsed.line1));
-  if (cityRule) return cityRule;
-  const countyRule = jurisdictionForPlace(firstNonEmpty(place.county, place.address_county));
+  const firstLine = firstNonEmpty(parsed.line1).toLowerCase().replace(/^city of\s+/, '');
+  const cityOnly = parsed.state === 'FL' && Object.hasOwn(CITY_TO_LOCATION, firstLine) ? firstLine : '';
+  const city = firstNonEmpty(place.municipality, place.city, place.locality, place.address_city, addressCity, cityOnly)
+    .toLowerCase().replace(/^city of\s+/, '');
+  if (city === 'north port') return 'north_port_fl';
+  const county = firstNonEmpty(place.county, place.address_county, resolveAddressCounty({
+    zip: firstNonEmpty(place.zip, place.address_zip, parsed.zip), city,
+  })).toLowerCase().replace(/\s+county$/, '');
   // Sarasota County alone cannot distinguish North Port's April start from the county's June start.
-  if (!municipality && countyRule === 'sarasota_county_fl') return 'generic_swfl';
-  return countyRule || 'generic_swfl';
+  if (county === 'sarasota' && !city) return 'generic_swfl';
+  return ['sarasota', 'manatee', 'charlotte'].includes(county) ? `${county}_county_fl` : 'generic_swfl';
+}
+
+function outlineServiceAddress(estimate, estimateData) {
+  const proposal = estimateData.proposal;
+  const address = firstNonEmpty(estimate.address);
+  const proposalAddress = firstNonEmpty(proposal?.propertyAddress);
+  if (proposal?.enabled !== true || !proposalAddress) return address;
+  if (isProposalAuthoredByEditor(proposal)) return proposalAddress;
+  // Legacy itemized proposals predate the editor's provenance stamp.
+  const normalized = normalizeProposal(estimate);
+  return normalized.synthesized ? address : firstNonEmpty(normalized.propertyAddress, address);
 }
 
 function resolveOutlineJurisdictionId(input, estimate, estimateData) {
   if (input.jurisdictionId) return input.jurisdictionId;
+  const formattedAddress = outlineServiceAddress(estimate, estimateData);
+  // A proposal can move to another property without updating the estimate's structured locality.
+  if (formattedAddress.toLowerCase() !== firstNonEmpty(estimate.address).toLowerCase()) {
+    const original = parseRawAddress(estimate.address);
+    const corrected = parseRawAddress(formattedAddress);
+    if (['line1', 'city', 'state', 'zip'].some((key) => original[key] !== corrected[key])) {
+      return resolveJurisdictionId({ formattedAddress, municipality: input.municipality || input.city, county: input.county });
+    }
+  }
   const property = estimateData.property || {};
   return resolveJurisdictionId({
     municipality: firstNonEmpty(input.municipality, input.city, estimate.service_address_city, property.municipality, property.city, estimate.municipality, estimate.city, estimateData.municipality, estimateData.city),
     county: firstNonEmpty(input.county, estimate.service_address_county, property.county, estimate.county, estimateData.county),
-    formattedAddress: estimate.address,
+    zip: firstNonEmpty(estimate.service_address_zip, property.zip, estimate.zip, estimateData.zip),
+    state: firstNonEmpty(estimate.service_address_state, property.state, estimate.state, estimateData.state),
+    formattedAddress,
   });
 }
 
@@ -393,6 +415,33 @@ function protocolVisitForMonth(turfType, month) {
   return (track.visits || []).find((visit) => String(visit.month || '').toLowerCase() === monthName.toLowerCase()) || null;
 }
 
+function northPortApril(rule, month) {
+  return rule?.jurisdiction_id === 'north_port_fl' && Number(month) === 4 && isRestrictedSeason(rule, month);
+}
+
+function monthlyOutlineVisit(visit, rule) {
+  if (!visit || !northPortApril(rule, MONTHS.indexOf(visit.month) + 1)) return visit;
+  // Filter the product's analysis, leaving allowed spot work and nutrient-free barriers on the visit.
+  const allowedLines = (text) => protocolLines(text).filter((line) =>
+    !analysesIn(line.split(' — ')[0]).some((analysis) => {
+      const [nitrogen, phosphorus] = analysis.split('-').map(Number);
+      return nitrogen > 0 || phosphorus > 0;
+    })).join('\n');
+  const allowedStep = (step) => ({
+    ...step, primary: allowedLines(step.primary) || 'Lawn inspection', secondary: allowedLines(step.secondary),
+  });
+  return {
+    ...allowedStep(visit),
+    cadenceVariants: Object.fromEntries(Object.entries(visit.cadenceVariants || {}).map(([cadence, step]) => [cadence, allowedStep(step)])),
+  };
+}
+
+function monthVisitText(rule, month, fallback) {
+  return northPortApril(rule, month)
+    ? 'We inspect the lawn for disease, chinch bugs and dry spots. North Port’s turf restriction starts April 1, so we hold fertilizer containing nitrogen or phosphorus.'
+    : fallback;
+}
+
 function protocolTrack(turfType) {
   return lawnProtocols()?.[turfType] || null;
 }
@@ -436,7 +485,7 @@ function estimateSnapshot(estimate = {}, estimateData = {}) {
     customerName: estimate.customer_name || estimate.customerName || null,
     customerId: estimate.customer_id || estimate.customerId || null,
     leadId: estimate.lead_id || estimate.leadId || null,
-    address: estimate.address || null,
+    address: outlineServiceAddress(estimate, estimateData) || null,
     customerPhone: estimate.customer_phone || estimate.customerPhone || null,
     customerEmail: estimate.customer_email || estimate.customerEmail || null,
     monthlyTotal: estimate.monthly_total || estimate.monthlyTotal || null,
@@ -650,7 +699,7 @@ function v13YearVisual(trackKey, jurisdictionRule) {
   const months = MONTHS.map((label, index) => ({
     month: index + 1,
     label,
-    ...v13MonthSteps(protocolVisitForMonth(trackKey, index + 1)),
+    ...v13MonthSteps(monthlyOutlineVisit(protocolVisitForMonth(trackKey, index + 1), jurisdictionRule)),
     limited: isRestrictedSeason(jurisdictionRule, index + 1),
   }));
   return { type: 'year', months, labels: V13_STEP_LABELS, limitLabel: months.some((m) => m.limited) ? V13_COPY.limitLabel : null };
@@ -786,14 +835,14 @@ function renderOutlineHtml(content) {
   `;
 }
 
-const jurisdictionValidationWarnings = (rule) => rule?.jurisdiction_id === 'generic_swfl'
+const jurisdictionValidationWarnings = (rule, serviceLine = 'lawn_care') => ['lawn_care', 'tree_shrub'].includes(serviceLine) && rule?.jurisdiction_id === 'generic_swfl'
   ? ['Confirm the service property\'s city or county before relying on fertilizer dates.']
   : [];
 
 function validateContent(content, { turfType, includeProductCards, jurisdictionRule, noProgram = false }) {
   const text = JSON.stringify(content).toLowerCase();
   const errors = [];
-  const warnings = jurisdictionValidationWarnings(jurisdictionRule);
+  const warnings = jurisdictionValidationWarnings(jurisdictionRule, content.serviceLine);
   for (const phrase of BANNED_PHRASES) {
     if (text.includes(phrase)) errors.push(`Banned phrase detected: ${phrase}`);
   }
@@ -847,7 +896,7 @@ function legacySections({ modules, snapshot, tier, turf, turfText, month, season
       ],
     ),
     makeSection('your_turf_type', `Your Turf Type: ${turf.label}`, turfText, turfPriorities(turf.turfType)),
-    makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, seasonText, visit ? customerProtocolBullets(visit) : []),
+    makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, monthVisitText(jurisdictionRule, month, seasonText), visit ? customerProtocolBullets(visit) : []),
     makeSection(
       'typical_visit',
       'What A Typical Visit Includes',
@@ -1010,7 +1059,7 @@ function v13MonthsVisual(trackKey, jurisdictionRule, month) {
     months: year.months.map((m) => ({
       ...m,
       name: FULL_MONTHS[m.month - 1],
-      visit: PROGRAM_DETAIL_V13[m.month]?.whyNow || '',
+      visit: monthVisitText(jurisdictionRule, m.month, PROGRAM_DETAIL_V13[m.month]?.whyNow || ''),
       atHome: V13_DETAIL_COPY.atHome[m.month],
       open: open.has(m.month),
     })),
@@ -1028,10 +1077,10 @@ function v13MonthLines(visual) {
 const NOT_PROGRAM_LINE_RE = /optional add-on/i;
 const NOT_PROGRAM_NAME_RE = /nonionic surfactant/i;
 
-function v13TrackProducts(trackKey) {
+function v13TrackProducts(trackKey, rule) {
   const byName = new Map();
   for (const visit of lawnProtocols()?.[trackKey]?.visits || []) {
-    for (const line of v13StepLines(visit)) {
+    for (const line of v13StepLines(monthlyOutlineVisit(visit, rule))) {
       const cut = line.indexOf(' — ');
       const steps = v13OutlineCategory(line)?.[2] || [];
       if (cut <= 0 || !steps.length || NOT_PROGRAM_LINE_RE.test(line)) continue;
@@ -1082,8 +1131,8 @@ async function loadActiveCatalogRows(db, names) {
 
 // The catalog read is one query by exact name (the v13 recipe uses catalog names). A failed read leaves the section
 // out rather than showing names without their ingredients.
-async function loadV13ProductList(db, trackKey) {
-  const products = v13TrackProducts(trackKey);
+async function loadV13ProductList(db, trackKey, rule) {
+  const products = v13TrackProducts(trackKey, rule);
   if (!products.length) return [];
   let rows;
   try {
@@ -1138,7 +1187,7 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
     const year = v13YearVisual(trackKey, jurisdictionRule);
     return [
       tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, V13_COPY.programTiles),
-      makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, PROGRAM_DETAIL_V13[month]?.whyNow || '', visit ? v13FullOutlineBullets(visit) : [], v13FocusVisual(visit)),
+      makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, monthVisitText(jurisdictionRule, month, PROGRAM_DETAIL_V13[month]?.whyNow || ''), visit ? v13FullOutlineBullets(visit) : [], v13FocusVisual(visit)),
       makeSection('program_year', V13_COPY.yearTitle, V13_COPY.yearBody, v13YearLines(year), year),
       treatments,
       typicalVisit,
@@ -1147,8 +1196,10 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
   }
   // GATE_LAWN_OUTLINE_DETAIL: the new layout (lawn-outline-visual.js) from the same pieces; it folds the rest into its own
   // sections. A plan drawn by month keeps the month list, whose open month replaces the Service Focus box.
-  const months = v13MonthsVisual(trackKey, jurisdictionRule, month);
-  const monthList = () => makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months);
+  const monthList = () => {
+    const months = v13MonthsVisual(trackKey, jurisdictionRule, month);
+    return makeSection('program_year', V13_COPY.yearTitle, V13_DETAIL_COPY.yearBody, v13MonthLines(months), months);
+  };
   return lawnOutlineVisual().visualSections({
     plan: visualPlan, trackKey, jurisdictionRule, productList, now, kit: visualKit(), parts: { typicalVisit, notIncluded: closing[3], monthList },
   });
@@ -1240,10 +1291,10 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
   const trackKey = variant.trackKey(turf.turfType);
   const track = protocolTrack(trackKey);
-  const visit = protocolVisitForMonth(trackKey, month);
+  const visit = monthlyOutlineVisit(protocolVisitForMonth(trackKey, month), jurisdictionRule);
   const includeProductCards = input.includeProductCards === true;
   const productCards = await loadEligibleProductCards(db, { turfType: turf.turfType, visit, includeProductCards, productCardReason: variant.productCardReason });
-  const productList = outlineDetailLive() ? await loadV13ProductList(db, trackKey) : [];
+  const productList = outlineDetailLive() ? await loadV13ProductList(db, trackKey, jurisdictionRule) : [];
   const visualPlan = visualPlanFor(estimateData);
   const seasonText = approvedModuleText(modules, SEASON_MODULE_KEYS[seasonBand]);
   const turfText = approvedModuleText(modules, TURF_MODULE_KEYS[turf.turfType], approvedModuleText(modules, 'unknown_turf_summary'));

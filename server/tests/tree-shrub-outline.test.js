@@ -17,7 +17,7 @@ const { NORTH_PORT_RULE } = require('../models/migrations/20261118190000_north_p
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 const RULE_NAMES = { sarasota_county_fl: 'Sarasota County, FL', manatee_county_fl: 'Manatee County, FL', charlotte_county_fl: 'Charlotte County, FL' };
-const ADDRESSES = { sarasota_county_fl: '1 Palm Way, Sarasota, FL', manatee_county_fl: '1 Palm Way, Bradenton, FL', charlotte_county_fl: '1 Palm Way, Punta Gorda, FL' };
+const ADDRESSES = { sarasota_county_fl: '1 Palm Way, Sarasota, FL 34240', manatee_county_fl: '1 Palm Way, Bradenton, FL', charlotte_county_fl: '1 Palm Way, Punta Gorda, FL' };
 
 function makeDb(jurisdictionId) {
   const rule = jurisdictionId === 'north_port_fl' ? NORTH_PORT_RULE : {

@@ -38,7 +38,10 @@ describe('ServiceOutlineComposerModal', () => {
     const adminFetch = vi.fn(async (path) => {
       if (path.endsWith('/preview')) return { summary: { jurisdictionId: 'north_port_fl' }, validation: {} };
       if (path.endsWith('/lawn-packet')) return { packet: { id: 'lawn-packet', legacySarasotaRule: true } };
-      if (path.endsWith('/regenerate')) return { packet: { id: 'new-packet', summary: { jurisdictionId } } };
+      if (path.endsWith('/regenerate')) return {
+        packet: { id: 'new-packet', status: 'approved', summary: { jurisdictionId } },
+        sourcePacket: { status: 'revoked', revokedAt: '2026-10-24T12:00:00Z' },
+      };
       return { events: [] };
     });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -53,6 +56,25 @@ describe('ServiceOutlineComposerModal', () => {
     expect(JSON.parse(request.body)).toMatchObject({ jurisdictionId, revokeOld: true });
     await waitFor(() => expect(choice).not.toBeInTheDocument());
     expect(screen.getByText(jurisdictionId)).toBeInTheDocument();
+    expect(screen.getByText('New outline generated. Previous link is revoked.')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['viewed', 'New outline saved as a draft. Previous link remains active.'],
+    ['draft', 'New outline saved as a draft.'],
+  ])('reports the actual link state when a replacement is blocked and the original is %s', async (status, message) => {
+    const adminFetch = vi.fn(async (path) => {
+      if (path.endsWith('/preview')) return { summary: {}, validation: {} };
+      if (path.endsWith('/lawn-packet')) return { packet: { id: 'lawn-packet', status } };
+      if (path.endsWith('/regenerate')) return {
+        packet: { id: 'new-packet', status: 'draft' }, sourcePacket: { status }, validation: { status: 'blocked' },
+      };
+      return { events: [] };
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<ServiceOutlineComposerModal estimate={ESTIMATE} adminFetch={adminFetch} onClose={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Regenerate' }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
   });
 
   it('a Tree & Shrub open asks for the Tree & Shrub outline, with no grass and no product cards', async () => {
