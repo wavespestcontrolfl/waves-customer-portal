@@ -684,10 +684,22 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
       const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
       const check = (stops, techIds, row = NORTH, snapshot = NORTH) => assertDestinationClear(southDb({ stops }), row, snapshot, WED, refuse, techIds);
-      // The guard's far-south verdict for a move to t1 (best.technician_id) whose transaction writes `written`.
+      // The verdict of the guard's own far-south check, for a move to t1 (best.technician_id) whose transaction writes
+      // `written`: true = refused for a far-south stop, false = passed. The guard must reach that check; its later
+      // checks (this mock cannot answer them) are not this test's, and any other error from the check fails the test.
       const guardHeld = async (stops, written, service = NORTH) => {
-        const err = await guardFor(service)({ trx: southDb({ stops }), technicianId: written }).then(() => null, (e) => e);
-        return String(err?.message || '').includes('far-south stop');
+        const southDayKept = require('../services/auto-dispatch/south-day-kept');
+        const spy = jest.spyOn(southDayKept, 'assertDestinationClear');
+        try {
+          await guardFor(service)({ trx: southDb({ stops }), technicianId: written }).catch(() => {});
+          expect(spy).toHaveBeenCalledTimes(1);
+          return await spy.mock.results[0].value.then(() => false, (e) => {
+            if (!String(e.message).includes('far-south stop')) throw e;
+            return true;
+          });
+        } finally {
+          spy.mockRestore();
+        }
       };
       const GROUPED = { ...NORTH, visit_id: 'v1' };
       const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
