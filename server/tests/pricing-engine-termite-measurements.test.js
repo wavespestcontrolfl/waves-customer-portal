@@ -839,3 +839,60 @@ describe('termite bait per-application cadence (owner 2026-07-20)', () => {
     expect(row.mo).toBe(34);
   });
 });
+
+// Owner 2026-11-18: talstar_p and bifen_it name LESCO Crosscheck Plus under the same keys, so a bifenthrin label check saved before
+// the swap (an engineRequest without the builder's bottle mark) was made for the earlier bottle. The server replay of such a request,
+// with no builder involved, must bring its label review back.
+describe('saved bifenthrin label checks follow the bottle on server replay', () => {
+  const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+  const saved = (options) => ({
+    engineRequest: {
+      profile: { homeSqFt: 2400, stories: 1, lotSqFt: 9000 },
+      selectedServices: ['TRENCHING', 'PRESLAB'],
+      options: { trenchingPerimeterLF: 240, trenchingLabelConfirmed: true, preslabSqft: 2500, preslabLabelConfirmed: true, ...options },
+    },
+  });
+  const replayLines = async (estData) => {
+    const replay = await serverRecomputeFromEstimateData(estData, { replaySavedPricingKnobs: true, needsSync: () => false });
+    expect(replay.recomputed).toBe(true);
+    const items = replay.rawEngineResult.lineItems;
+    return {
+      trench: items.find((item) => item.service === 'trenching'),
+      preslab: items.find((item) => item.service === 'pre_slab_termiticide'),
+    };
+  };
+
+  test.each([
+    ['talstar_p', 'talstar_p'], ['bifen_it', 'bifen_it'], ['crosscheck', 'talstar_p'], ['talak', 'talstar_p'],
+  ])('a %s check saved without the mark reprices with its label review back on; with the mark it counts', async (key, resolved) => {
+    const old = await replayLines(saved({ trenchingProductKey: key, preslabProductKey: key }));
+    expect(old.trench).toMatchObject({ productKey: resolved, labelConfirmed: false });
+    expect(old.trench.manualReviewReasons).toContain('label_confirmation_required');
+    expect(old.preslab).toMatchObject({ productKey: resolved, labelConfirmed: false });
+    expect(old.preslab.manualReviewReasons).toContain('pre_slab_label_confirmation_required');
+
+    const marked = await replayLines(saved({ trenchingProductKey: key, preslabProductKey: key, bifenthrinLabelBottle: 'lesco_crosscheck_plus' }));
+    expect(marked.trench.labelConfirmed).toBe(true);
+    expect(marked.trench.manualReviewReasons).not.toContain('label_confirmation_required');
+    expect(marked.preslab.labelConfirmed).toBe(true);
+    expect(marked.preslab.manualReviewReasons).not.toContain('pre_slab_label_confirmation_required');
+  });
+
+  test('fipronil checks count without the mark; an unticked bifenthrin box stays unticked with it', async () => {
+    const fipronil = await replayLines(saved({ trenchingProductKey: 'taurus_sc', preslabProductKey: 'termidor_sc' }));
+    expect(fipronil.trench.labelConfirmed).toBe(true);
+    expect(fipronil.preslab.labelConfirmed).toBe(true);
+    const unticked = await replayLines(saved({
+      trenchingProductKey: 'talstar_p', preslabProductKey: 'bifen_it', trenchingLabelConfirmed: false, preslabLabelConfirmed: false,
+      bifenthrinLabelBottle: 'lesco_crosscheck_plus',
+    }));
+    expect(unticked.trench.labelConfirmed).toBe(false);
+    expect(unticked.preslab.labelConfirmed).toBe(false);
+  });
+
+  test('another bottle mark does not count for Crosscheck Plus', async () => {
+    const other = await replayLines(saved({ trenchingProductKey: 'talstar_p', preslabProductKey: 'talstar_p', bifenthrinLabelBottle: 'atticus_talak' }));
+    expect(other.trench.labelConfirmed).toBe(false);
+    expect(other.preslab.labelConfirmed).toBe(false);
+  });
+});

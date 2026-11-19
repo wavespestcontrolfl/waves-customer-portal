@@ -125,7 +125,9 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
 
     fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
     await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
-    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options.preslabLabelConfirmed).toBe(false);
+    // The form now carries the Crosscheck Plus bottle mark, so a check ticked again counts on the server and on its replay.
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options)
+      .toMatchObject({ preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
   });
 
   it('keeps a label check the form made for Crosscheck Plus', async () => {
@@ -143,6 +145,6 @@ describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck P
     fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
     await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
     const options = JSON.parse(callsTo('/calculate-estimate')[0][1].body).options;
-    expect(options).toMatchObject({ preslabProductKey: 'talstar_p', preslabLabelConfirmed: false });
+    expect(options).toMatchObject({ preslabProductKey: 'talstar_p', preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
   });
 });

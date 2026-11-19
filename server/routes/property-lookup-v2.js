@@ -75,7 +75,9 @@ const {
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
-const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
+const {
+  normalizeRoachType, normalizePreSlabTermiticideProduct, normalizeTrenchingTermiticideProduct,
+} = require('../services/pricing-engine/service-pricing');
 const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -5372,6 +5374,17 @@ function isAssociationCommercialJob({ commercialRiskType = null, commercialSubty
     || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
 }
 
+// Owner 2026-11-18: talstar_p and bifen_it name LESCO Crosscheck Plus now, under the same keys. A label check on either counts only
+// when the request carries the bottle mark the builder sends since then (options.bifenthrinLabelBottle), so an engineRequest saved
+// for the earlier bottle reprices with its label review back on. Checks on the fipronil products are unchanged.
+const BIFENTHRIN_LABEL_BOTTLE = 'lesco_crosscheck_plus';
+const BIFENTHRIN_TERMITICIDE_KEYS = new Set(['talstar_p', 'bifen_it']);
+function labelCheckCounts(checked, normalizeProduct, productKey, o) {
+  if (!checked) return false;
+  const { productKey: resolved } = normalizeProduct(productKey, { allowIngredientAliases: true });
+  return !BIFENTHRIN_TERMITICIDE_KEYS.has(resolved) || o.bifenthrinLabelBottle === BIFENTHRIN_LABEL_BOTTLE;
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -5803,8 +5816,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
 
   // Specialty
   if (sel.has('TRENCHING')) {
+    const trenchingProductKey = o.trenchingProductKey || o.trenchingTermiticideProductKey || o.productKey || 'taurus_sc';
     services.trenching = {
-      productKey: o.trenchingProductKey || o.trenchingTermiticideProductKey || o.productKey || 'taurus_sc',
+      productKey: trenchingProductKey,
       applicationRate: o.trenchingApplicationRate || o.applicationRate || 'standard',
       // 0.5 ft (6 in) is the canonical baseline trench depth (SPECIALTY.trenching
       // .defaultTrenchDepthFt) — must match the admin-form default so a V2/server
@@ -5813,8 +5827,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       trenchDepthFt: o.trenchingDepthFt || o.trenchDepthFt || 0.5,
       concreteVolumePadPct: o.trenchingConcreteVolumePadPct || o.concreteVolumePadPct,
       warrantyTier: o.trenchingWarrantyTier || o.warrantyTier || 'one_year_retreat',
-      labelConfirmed: o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
-        o.trenchingLabelConfirmed === 'true' || o.labelConfirmed === 'true',
+      labelConfirmed: labelCheckCounts(o.trenchingLabelConfirmed === true || o.labelConfirmed === true ||
+        o.trenchingLabelConfirmed === 'true' || o.labelConfirmed === 'true', normalizeTrenchingTermiticideProduct, trenchingProductKey, o),
       measurements: trenchingMeasurements,
       allowComputedPerimeterFromFootprint: !!o.trenchingEstimateFromFootprint,
     };
@@ -5828,16 +5842,17 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     };
   }
   if (sel.has('PRESLAB')) {
+    const preslabProductKey = o.preslabProductKey || o.preSlabProductKey || o.productKey || 'termidor_sc';
     services.preSlabTermiticide = {
-      productKey: o.preslabProductKey || o.preSlabProductKey || o.productKey || 'termidor_sc',
+      productKey: preslabProductKey,
       slabSqFt: o.preslabSqft,
       measurements: preSlabMeasurements,
       volumeDiscount: o.preslabVolume && o.preslabVolume !== 'NONE' ? o.preslabVolume.toLowerCase() : 'none',
       jobContext: o.preslabJobContext || o.preSlabJobContext,
       warranty: o.preslabWarranty || 'BASIC',
       includeWarrantyExtended: !!o.includePreSlabWarrantyExtended || o.preslabWarranty === 'EXTENDED',
-      labelConfirmed: o.preslabLabelConfirmed === true || o.preSlabLabelConfirmed === true ||
-        o.preslabLabelConfirmed === 'true' || o.preSlabLabelConfirmed === 'true',
+      labelConfirmed: labelCheckCounts(o.preslabLabelConfirmed === true || o.preSlabLabelConfirmed === true ||
+        o.preslabLabelConfirmed === 'true' || o.preSlabLabelConfirmed === 'true', normalizePreSlabTermiticideProduct, preslabProductKey, o),
     };
   }
   if (sel.has('FOAM')) {

@@ -4563,6 +4563,9 @@ export default function EstimateToolViewV2({
         preslabSqft,
         preslabProductKey: form.preslabProductKey || "termidor_sc",
         preslabLabelConfirmed: !!form.preslabLabelConfirmed,
+        // The bottle the form's label checks were made for: the server counts a bifenthrin check only with it, so a request saved
+        // before the Crosscheck Plus swap reprices with its label review back on.
+        bifenthrinLabelBottle: form._bifenthrinLabelBottle,
         preslabWarranty: form.preslabWarranty || "BASIC",
         preslabVolume: form.preslabVolume || "NONE",
         preslabJobContext: resolvePreSlabJobContextForForm(form),
