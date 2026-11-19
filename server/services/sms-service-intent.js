@@ -67,6 +67,10 @@ const LAWN_KEYWORDS = [
   'yard', 'yellow grass', 'brown grass', 'crabgrass',
 ];
 
+// One-word spellings of the two service names ("lawncare", "pestcontrol")
+// read as the two words, so the keyword lists and the pair both see them.
+const SERVICE_COMPOUNDS = [[/\blawncare\b/g, 'lawn care'], [/\bpestcontrol\b/g, 'pest control']];
+
 // "one time" / "one-time" / "just once" / "single visit"
 const ONE_TIME_RE = /\b(one[\s-]?time|just once|one visit|single visit|one[\s-]?off|one shot)\b/i;
 
@@ -110,7 +114,7 @@ function regexClassify(body) {
   if (!body || typeof body !== 'string') return null;
   // "chinch bug", "army worm" and "sod web worm" collapse to the turf word
   // (the photo pick's rule, codex #4810 r11/r14).
-  const lower = normalizeLawnPests(body.toLowerCase());
+  const lower = SERVICE_COMPOUNDS.reduce((text, [re, words]) => text.replace(re, words), normalizeLawnPests(body.toLowerCase()));
 
   const hasPest = tokenMatches(lower, PEST_KEYWORDS);
   const hasLawn = tokenMatches(lower, LAWN_KEYWORDS);

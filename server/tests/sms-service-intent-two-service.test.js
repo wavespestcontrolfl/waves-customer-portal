@@ -30,6 +30,9 @@ const PAIR_REPLIES = [
   'pest&lawn',
   'Pest , and lawn',
   'Pest and lawn services, like on the form',
+  // One-word spellings of the service names.
+  'Pest control & lawncare',
+  'pestcontrol and lawncare',
 ];
 
 describe('a reply that is the pest + lawn pair classifies as both, with no model call', () => {
@@ -90,6 +93,8 @@ describe('unchanged single-service and one-time answers', () => {
     ['one-time pest and lawn', 'one_time'],
     // "lawnmower" is not the lawn service, so this is not a pair.
     ['pest and lawnmower repair', 'pest'],
+    // Main sent this to the model (no keyword matched); the one-word spelling reads as lawn now.
+    ['lawncare please', 'lawn'],
   ])('%j => %s', async (body, interest) => {
     await expect(classifyServiceIntent(body)).resolves.toMatchObject({ interest, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
