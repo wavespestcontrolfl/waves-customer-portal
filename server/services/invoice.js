@@ -847,9 +847,19 @@ function assertVoidPiStatus(pi, expected) {
 // target alone), assert the bar card's version when supplied, then check the
 // saved-card fence before any Stripe cancel. A known conflict is returned so
 // the caller can commit a stale-claim promotion before raising its 409.
-async function voidLockAndGuard(trx, { id, piId, customerId, status, expected }) {
+async function voidLockAndGuard(trx, {
+  id, piId, customerId, status, expected, requireUnsettled = false,
+}) {
   const locked = await lockInvoicePaymentIntentAllocation(trx, { id, piId, customerId });
   if (!locked) throw new Error("Invoice not found");
+  // A renewal lapse/withdrawal can wait here while account credit settles the
+  // invoice to prepaid. Preserve requireUnsettled's typed classification before
+  // the generic snapshot-mismatch error hides it from those callers. When the
+  // status did not drift, the existing full classifier still runs below after
+  // the saved-card/payment-plan fences, preserving their precedence.
+  if (requireUnsettled && locked.status !== status) {
+    await assertInvoiceGenuinelyUnsettledLocked(trx, id);
+  }
   if (expected) assertVoidExpected(locked, expected);
   else {
     if (locked.status !== status) {
@@ -11998,6 +12008,7 @@ const InvoiceService = {
         customerId: current.customer_id,
         status: current.status,
         expected,
+        requireUnsettled,
       });
       if (guard.chargeConflict) return { chargeConflict: guard.chargeConflict };
       const lockedVoidInvoice = guard.locked;

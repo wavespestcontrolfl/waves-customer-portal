@@ -68,6 +68,10 @@ describe('shouldAttemptPrepaidReceipt', () => {
 
 describe('Schedule prepaid invoice writers share the locked saved-card fence', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const allocationLockSource = fs.readFileSync(
+    path.join(__dirname, '../services/invoice-payment-intent-allocation.js'),
+    'utf8',
+  );
   const receiptStart = source.indexOf('async function generatePrepaidReceiptForService(');
   const receipt = source.slice(receiptStart, source.indexOf('// POST /api/admin/schedule/:id/prepaid', receiptStart));
   const applyStart = source.indexOf('const applyPrepaidCredit = async (invoice');
@@ -82,11 +86,22 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
     }
   }
 
-  test('direct receipt posting locks, fences null-PI authentication, then retires checkout and writes invoice + ledger atomically', () => {
+  test('direct receipt posting reserves checkout, locks its canonical allocation, fences, deducts prior exact allocations, then retires checkout and writes atomically', () => {
     expectInOrder(receipt, [
       'lockCombinedCustomerStable(',
-      ".forUpdate().first()",
+      "const reservedInvoice = await trx('invoices')",
+      'String(reservedInvoice.customer_id',
+      'lockInvoicePaymentIntentAllocation(trx, {',
+      'combinedCustomerLocked: true',
+      'targetForUpdate: true',
+      'String(locked.customer_id',
+      "String(svc.customer_id || '')",
+      '(locked.stripe_payment_intent_id || null) !== reservedPiId',
       'schedulePrepaidCollectionFence(locked.id, trx)',
+      "const priorAllocation = await trx('payments')",
+      "metadata::jsonb ->> 'invoice_id'",
+      "metadata::jsonb ->> 'scheduled_service_id'",
+      'prepaidCents: availablePrepaidCents',
       'guardOpenPaymentIntentForPrepaid(locked, { database: trx })',
       "trx('invoices')",
       ".update({",
@@ -96,10 +111,17 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
     expect(receipt).toContain('reason: outcome.reason,');
   });
 
-  test('Charge Now applying an earlier visit prepayment fences before checkout release, amount change, or ledger insert and maps the committed hold to 409', () => {
+  test('Charge Now locks the fresh checkout allocation before its fence, checkout release, amount change, or ledger insert', () => {
     expectInOrder(apply, [
       'lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id)',
-      '.forUpdate()',
+      "const reservedInvoice = await trx('invoices')",
+      'String(reservedInvoice.customer_id',
+      'lockInvoicePaymentIntentAllocation(trx, {',
+      'combinedCustomerLocked: true',
+      'targetForUpdate: true',
+      'String(lockedInvoice.customer_id',
+      "String(svc.customer_id || '')",
+      '(lockedInvoice.stripe_payment_intent_id || null) !== reservedPiId',
       'schedulePrepaidCollectionFence(lockedInvoice.id, trx)',
       'guardOpenPaymentIntentForPrepaid(lockedInvoice, { database: trx })',
       ".update({",
@@ -108,6 +130,16 @@ describe('Schedule prepaid invoice writers share the locked saved-card fence', (
       'throw httpError(409',
     ]);
     expect(apply).toContain('return { invoice: lockedInvoice, prepaidCredit: 0, collectionHold };');
+  });
+
+  test('the shared allocation helper locks every collectible PI member in canonical order', () => {
+    expectInOrder(allocationLockSource, [
+      "if (!piId)",
+      "trx('invoices')",
+      "'id = ? OR (stripe_payment_intent_id = ? AND status NOT IN (?, ?, ?))'",
+      ".orderBy('id', 'asc')",
+      '.forUpdate()',
+    ]);
   });
 
   test.each([

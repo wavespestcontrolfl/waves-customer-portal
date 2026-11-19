@@ -312,6 +312,37 @@ describe('saved-card ambiguous webhook binding', () => {
     })).toBe(false);
   });
 
+  test('metadata-only cancellation requires the independent original-worker PI', () => {
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: { ...attempt, worker_payment_intent_id: 'pi-1' },
+      invoice,
+      paymentIntent,
+      requireWorkerPaymentIntent: true,
+    })).toBe(true);
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt,
+      invoice,
+      paymentIntent,
+      requireWorkerPaymentIntent: true,
+    })).toBe(false);
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: { ...attempt, worker_payment_intent_id: 'pi-other' },
+      invoice,
+      paymentIntent,
+      requireWorkerPaymentIntent: true,
+    })).toBe(false);
+    const legacyPaymentIntent = { ...paymentIntent, metadata: { ...paymentIntent.metadata } };
+    delete legacyPaymentIntent.metadata.saved_card_attempt_id;
+    expect(savedCardAttemptMatchesPaymentIntent({
+      attempt: {
+        ...attempt, stripe_payment_intent_id: 'pi-1', worker_payment_intent_id: 'pi-1',
+      },
+      invoice,
+      paymentIntent: legacyPaymentIntent,
+      requireWorkerPaymentIntent: true,
+    })).toBe(false);
+  });
+
   test('can bind a resolved succeeded attempt only for final orphan cleanup', () => {
     expect(savedCardAttemptMatchesPaymentIntent({
       attempt: {

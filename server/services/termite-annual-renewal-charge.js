@@ -588,11 +588,10 @@ function whereAttemptPresented(attempts) {
       // lapse. Share the exact predicate used by checkout/credit collection
       // so cancellation identity cannot drift between the two fences.
       .where(function notAwaitingAuthentication() {
-        // Preserve legacy PI-backed attempts whose nullable decline_code was
-        // never populated. Without the explicit NULL arm, SQL evaluates
-        // NOT(decline_code = 'authentication_required' AND ...) as UNKNOWN
-        // and silently drops valid historical presentation evidence.
-        this.whereNull('a.decline_code').orWhereNot(function unresolvedAuthenticationChallenge() {
+        // whereAwaitingAuthentication makes its nullable decline comparison
+        // two-valued, so NOT preserves ordinary historical NULL declines while
+        // still excluding conflicting worker/provider PI identities.
+        this.whereNot(function unresolvedAuthenticationChallenge() {
           require('./invoice-payment-authentication').whereAwaitingAuthentication(this, 'a');
         });
       });

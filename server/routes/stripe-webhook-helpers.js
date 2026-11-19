@@ -50,17 +50,20 @@ function savedCardAttemptMatchesPaymentIntent({
   invoice,
   paymentIntent,
   allowResolvedSucceeded = false,
+  requireWorkerPaymentIntent = false,
 }) {
   if (!attempt || !invoice || !paymentIntent) return false;
   const metadata = paymentIntent.metadata || {};
-  const paymentMethodId = typeof paymentIntent.payment_method === 'string'
-    ? paymentIntent.payment_method
-    : paymentIntent.payment_method?.id;
+  const method = paymentIntent.payment_method || paymentIntent.last_payment_error?.payment_method;
+  const paymentMethodId = typeof method === 'string' ? method : method?.id;
   const metadataAttemptId = metadata.saved_card_attempt_id
     ? String(metadata.saved_card_attempt_id)
     : '';
   const attachedPaymentIntentId = attempt.stripe_payment_intent_id
     ? String(attempt.stripe_payment_intent_id)
+    : '';
+  const workerPaymentIntentId = attempt.worker_payment_intent_id
+    ? String(attempt.worker_payment_intent_id)
     : '';
   const paymentIntentId = String(paymentIntent.id || '');
   // A customer can reuse the same saved card for multiple attempts on the same
@@ -74,6 +77,7 @@ function savedCardAttemptMatchesPaymentIntent({
   const settledAttempt = allowResolvedSucceeded && attempt.status === 'succeeded' && attempt.resolved_at;
   return (activeAttempt || settledAttempt)
     && exactAttemptBinding
+    && (!requireWorkerPaymentIntent || (Boolean(metadataAttemptId) && workerPaymentIntentId === paymentIntentId))
     && (!attachedPaymentIntentId || attachedPaymentIntentId === paymentIntentId)
     && String(attempt.invoice_id) === String(invoice.id)
     && metadata.source === 'admin_card_on_file'

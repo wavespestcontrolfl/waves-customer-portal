@@ -96,6 +96,7 @@ function setupHandoffDb({ assigned = true, transactionState = null, invoiceStatu
     }
     query.forUpdate = () => { rowLocks.push(table); return query; };
     query.first = async () => row;
+    query.update = async (patch) => { Object.assign(row, patch); return 1; };
     query.insert = async (value) => { tokenInserts.push(value); return 1; };
     return query;
   };
@@ -106,6 +107,7 @@ function setupHandoffDb({ assigned = true, transactionState = null, invoiceStatu
     if (table === 'terminal_handoff_tokens') return queryFor(table, null);
     throw new Error(`unexpected table ${table}`);
   });
+  db.fn = { now: () => new Date() };
   db.transaction = jest.fn(async (callback) => {
     const snapshot = transactionState ? { ...transactionState } : null;
     try {
@@ -275,6 +277,7 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(status).toBe(409);
     expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
     expect(transactionState.attemptStatus).toBe('ambiguous');
+    expect(state.invoice).toMatchObject({ status: 'processing', stripe_payment_intent_id: null });
     expect(mockAutoApplyCredit).not.toHaveBeenCalled();
     expect(state.tableReads).not.toContain('terminal_handoff_tokens');
     expect(state.tokenInserts).toEqual([]);
@@ -322,6 +325,7 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(status).toBe(409);
     expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
     expect(transactionState.attemptStatus).toBe('ambiguous');
+    expect(state.invoice).toMatchObject({ status: 'processing', stripe_payment_intent_id: null });
     expect(mockChargeFence).toHaveBeenCalledTimes(2);
     expect(mockChargeFence.mock.calls).toEqual([
       ['inv-1', db, { checkout: true }],

@@ -692,7 +692,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       .whereIn('status', ['claimed', 'ambiguous'])
       .whereNull('resolved_at')
       .forUpdate()
-      .first('id', 'status', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'credit_applied_delta', 'credit_applied_total');
+      .first('id', 'status', 'submitted_at', 'idempotency_key', 'stripe_payment_intent_id', 'worker_payment_intent_id', 'worker_create_timed_out_at', 'credit_applied_delta', 'credit_applied_total');
     if (!attempt || (attempt.stripe_payment_intent_id && attempt.stripe_payment_intent_id !== stripePaymentIntentId)) return false;
     if (attempt.worker_payment_intent_id && attempt.worker_payment_intent_id !== stripePaymentIntentId) return false;
     const originalCreateFailed = Boolean(attempt.submitted_at && requestIdempotencyKey
@@ -701,7 +701,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
       // Even the invoice's pointer may have been written by a processing
       // webhook. A timed-out worker cannot supply further proof. Acknowledge
       // that observation while retaining the ambiguous claim and its credit.
-      if (attempt.status === 'ambiguous') return false;
+      if (attempt.worker_create_timed_out_at) return false;
       // Stripe can deliver failure before the original create returns. Retry
       // the signed event after the worker has bound its exact response. No
       // invoice, reserved credit or attempt state has changed in this path.
@@ -3249,6 +3249,7 @@ const StripeService = {
           if (creditReservationReady) {
             await markInvoiceSavedCardChargeAttempt(chargeAttempt.id, {
               status: 'ambiguous',
+              worker_create_timed_out_at: new Date(),
               error_message: String(err.message).slice(0, 1000),
               resolved_at: null,
             }).catch((attemptErr) => {
@@ -4229,10 +4230,22 @@ const StripeService = {
           }
           if (setupCreditEnabled) setupCreditCustomerId = ownerId;
         }
-        const lockedInvoice = await trx('invoices')
-          .where({ id: invoiceId })
-          .forUpdate()
-          .first();
+        // An older combined checkout can still stamp siblings after the
+        // feature is disabled. Lock that whole PI allocation in canonical
+        // invoice-id order before taking the target row or doing any Stripe
+        // cancel/stamp cleanup. Gate-on setup already holds the stable customer
+        // reservation above; gate-off setup cannot grow an allocation, so it
+        // deliberately keeps the pre-gate advisory-lock behavior while still
+        // serializing every stale stamped row.
+        const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+        const setupPiId = invoice.stripe_payment_intent_id || null;
+        const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+          id: invoiceId,
+          piId: setupPiId,
+          customerId: invoice.customer_id,
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
         if (!lockedInvoice) throw new Error('Invoice not found');
         const lockedCustomerId = lockedInvoice.customer_id ? String(lockedInvoice.customer_id) : null;
         if (setupCreditCustomerId && lockedCustomerId !== setupCreditCustomerId) {
@@ -4242,6 +4255,15 @@ const StripeService = {
           throw ownerErr;
         }
         assertInvoiceCollectible(lockedInvoice);
+        // The canonical query locked the allocation from the unlocked setup
+        // snapshot. A replacement checkout that won meanwhile may have a
+        // different sibling set, so refuse before touching either intent.
+        if ((lockedInvoice.stripe_payment_intent_id || null) !== setupPiId) {
+          const staleErr = new Error('Payment session changed. Please refresh the invoice and try again.');
+          staleErr.statusCode = 409;
+          staleErr.staleBalance = true;
+          throw staleErr;
+        }
         // Preserve the original collectible status and provenance. Full
         // account-credit coverage below changes lockedInvoice to prepaid,
         // which the deposit guard correctly skips for pre-existing invoices.
@@ -5419,10 +5441,11 @@ const StripeService = {
         // Stable-owner lock (codex r37 P1) — same contract as setup.
         await PayCombined.lockCombinedCustomerStable(trx, invoiceId, invoice.customer_id);
       }
-      const lockedInvoice = await trx('invoices')
-        .where({ id: invoiceId })
-        .forUpdate()
-        .first();
+      const { lockInvoicePaymentIntentAllocation } = require('./invoice-payment-intent-allocation');
+      const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+        id: invoiceId, piId: oldPaymentIntentId, customerId: invoice.customer_id,
+        combinedCustomerLocked: true, targetForUpdate: true,
+      });
       if (!lockedInvoice) throw new Error('Invoice not found');
       assertInvoiceCollectible(lockedInvoice);
       await assertNoInvoiceChargeReconciliationPending(invoiceId, trx, { checkout: true });
@@ -5491,7 +5514,11 @@ const StripeService = {
         .where({ stripe_payment_intent_id: oldPaymentIntentId })
         .whereNotIn('id', [invoiceId])
         .whereNotIn('status', ['paid', 'processing', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-        .update({ processor: 'stripe', stripe_payment_intent_id: newIntent.id, updated_at: new Date() });
+        .update({
+          processor: replacementAllocation ? 'stripe' : null,
+          stripe_payment_intent_id: replacementAllocation ? newIntent.id : null,
+          updated_at: new Date(),
+        });
       if (replacementAllocation && repointed !== replacementAllocation.length - 1) {
         const err = new Error('The account balance changed since this page loaded — refreshing to the latest amounts.');
         err.statusCode = 409;

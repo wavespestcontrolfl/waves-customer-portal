@@ -25,6 +25,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
   let app;
   let StripeService;
   let schedulePrepaidCollectionFence;
+  let resolveMetadataCanceledSavedCardAttempt;
 
   beforeAll(async () => {
     const target = new URL(connection);
@@ -36,7 +37,7 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 2 } });
     await app.schema.createTable('customers', (t) => {
       t.uuid('id').primary();
-      t.decimal('account_credits', 12, 2);
+      t.decimal('account_credits', 12, 2).defaultTo(0);
     });
     await app.schema.createTable('invoices', (t) => {
       t.uuid('id').primary();
@@ -44,7 +45,12 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.string('status');
       t.string('invoice_number');
       t.decimal('total');
-      t.decimal('credit_applied', 12, 2);
+      t.decimal('credit_applied', 12, 2).defaultTo(0);
+      t.date('due_date');
+      t.timestamp('viewed_at');
+      t.timestamp('paid_at');
+      t.timestamp('ach_processing_notified_at');
+      t.timestamp('updated_at');
       t.string('stripe_payment_intent_id');
     });
     await app.schema.createTable('customer_merge_journal', (t) => {
@@ -64,8 +70,8 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.string('idempotency_key');
       t.string('decline_code');
       t.string('stripe_payment_method_id');
-      t.decimal('credit_applied_delta', 12, 2);
-      t.decimal('credit_applied_total', 12, 2);
+      t.decimal('credit_applied_delta', 12, 2).defaultTo(0);
+      t.decimal('credit_applied_total', 12, 2).defaultTo(0);
       t.text('error_message');
       t.timestamp('submitted_at');
       t.timestamp('resolved_at');
@@ -76,6 +82,8 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
       t.uuid('invoice_id');
       t.boolean('resolved');
       t.string('stripe_payment_intent_id');
+      t.timestamp('resolved_at');
+      t.text('resolution_notes');
     });
     await app.schema.createTable('payments', (t) => {
       t.uuid('id').primary();
@@ -93,8 +101,10 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await migration.up(app);
     await provenanceMigration.up(app);
     await workerIdentityMigration.up(app);
+    await require('../models/migrations/20261119190100_saved_card_worker_timeout').up(app);
     StripeService = require('../services/stripe');
     ({ schedulePrepaidCollectionFence } = require('../routes/admin-schedule')._test);
+    ({ _resolveMetadataCanceledSavedCardAttempt: resolveMetadataCanceledSavedCardAttempt } = require('../routes/stripe-webhook'));
   });
 
   afterAll(async () => {
@@ -264,6 +274,74 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect(held).toMatchObject({ reason: 'payment_in_flight', code: 'STRIPE_AMBIGUOUS_OUTCOME' });
     expect(await app('stripe_invoice_charge_attempts').where({ id: f.id }).first('status'))
       .toMatchObject({ status: 'ambiguous' });
+  });
+
+  test('metadata-only cancellation releases only the exact worker-bound parked attempt and is idempotent', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const intent = {
+      id: `pi_${attemptId.replaceAll('-', '')}`,
+      payment_method: 'pm_worker_bound',
+      metadata: {
+        source: 'admin_card_on_file', saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoiceId, waves_customer_id: customerId,
+      },
+    };
+    await app('customers').insert({ id: customerId });
+    await app('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'processing', invoice_number: invoiceId,
+      total: 25, credit_applied: 0, due_date: '2099-01-01', stripe_payment_intent_id: null,
+    });
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: invoiceId, status: 'ambiguous',
+      stripe_payment_method_id: intent.payment_method,
+      stripe_payment_intent_id: intent.id,
+      worker_payment_intent_id: intent.id,
+      created_at: new Date(),
+    });
+
+    await expect(resolveMetadataCanceledSavedCardAttempt(intent, app)).resolves.toBe(true);
+    expect(await app('invoices').where({ id: invoiceId }).first())
+      .toMatchObject({ status: 'sent', stripe_payment_intent_id: null });
+    expect(await app('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ status: 'failed', stripe_payment_intent_id: intent.id, worker_payment_intent_id: intent.id });
+    await expect(resolveMetadataCanceledSavedCardAttempt(intent, app)).resolves.toBe(false);
+  });
+
+  test.each([
+    ['no original-worker binding', null],
+    ['a different original-worker PI', 'pi_other_worker'],
+  ])('metadata-only cancellation preserves the parked hold with %s', async (_label, workerPaymentIntentId) => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const attemptId = randomUUID();
+    const intent = {
+      id: `pi_${attemptId.replaceAll('-', '')}`,
+      payment_method: 'pm_unproven',
+      metadata: {
+        source: 'admin_card_on_file', saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoiceId, waves_customer_id: customerId,
+      },
+    };
+    await app('customers').insert({ id: customerId });
+    await app('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'processing', invoice_number: invoiceId,
+      total: 25, due_date: '2099-01-01', stripe_payment_intent_id: null,
+    });
+    await app('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: invoiceId, status: 'ambiguous',
+      stripe_payment_method_id: intent.payment_method,
+      stripe_payment_intent_id: intent.id,
+      worker_payment_intent_id: workerPaymentIntentId,
+      created_at: new Date(),
+    });
+
+    await expect(resolveMetadataCanceledSavedCardAttempt(intent, app)).resolves.toBe(false);
+    expect(await app('invoices').where({ id: invoiceId }).first('status'))
+      .toEqual({ status: 'processing' });
+    expect(await app('stripe_invoice_charge_attempts').where({ id: attemptId }).first('status', 'resolved_at'))
+      .toEqual({ status: 'ambiguous', resolved_at: null });
   });
 
   test('additive migration holds exact IDs copied by the published cancellation backfill', async () => {

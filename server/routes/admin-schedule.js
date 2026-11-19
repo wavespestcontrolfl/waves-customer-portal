@@ -19114,6 +19114,7 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
 // shared with the completion-side prepaid application so both close the same
 // double-charge window. See services/prepaid-pi-guard.
 const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
+const { lockInvoicePaymentIntentAllocation } = require('../services/invoice-payment-intent-allocation');
 
 // Shared pre-completion mint moved to services/scheduled-invoice-mint (the
 // dispatch completion mint shares it — see that module's header). Re-imported
@@ -19451,22 +19452,12 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
     return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated });
   }
 
-  // Coverage gate: only finalize when the cash fully covers the amount due. A
-  // partial prepayment stays recorded on scheduled_services (already stamped) and
-  // is collected/closed at completion — we never write a partial payment row here,
-  // so a later top-up to the full amount applies cleanly.
+  // The locked transaction below decides coverage after subtracting any part
+  // of this cumulative marker that Charge Now already allocated. A partial
+  // remainder stays recorded on scheduled_services and is collected/closed at
+  // completion — we never write a partial payment row here, so a later top-up
+  // to the full amount applies cleanly.
   const prepaidCents = Math.round((Number(svc.prepaid_amount) || 0) * 100);
-  if (prepaidCents < Math.round(invoiceAmountDue(invoice) * 100)) {
-    return {
-      sent: false,
-      reason: 'not_paid_in_full',
-      invoiceId: invoice.id,
-      invoiceNumber: invoice.invoice_number,
-      // What's still owed AFTER the cash already recorded on the visit — not the
-      // full amount due — so the modal doesn't over-state the top-up needed.
-      balance: Math.max(0, Math.round(invoiceAmountDue(invoice) * 100) - prepaidCents) / 100,
-    };
-  }
 
   // Atomic finalize under the combined-checkout reservation + invoice row lock
   // (mirrors the other off-page collection rails). The saved-card fence runs
@@ -19482,21 +19473,65 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
         invoice.id,
         invoice.customer_id,
       );
-      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      // Read the current checkout only after the stable-owner reservation, but
+      // before taking any invoice row lock. The allocation helper then locks
+      // the target and every collectible sibling stamped with that exact PI in
+      // canonical id order, so cancel + stamp cleanup cannot deadlock with a
+      // combined checkout finalizing from another member.
+      const reservedInvoice = await trx('invoices').where({ id: invoice.id })
+        .first('id', 'customer_id', 'stripe_payment_intent_id');
+      if (!reservedInvoice) return { reason: 'not_collectible' };
+      if (String(reservedInvoice.customer_id || '') !== String(invoice.customer_id || '')) {
+        return { reason: 'payment_session_changed' };
+      }
+      const reservedPiId = reservedInvoice.stripe_payment_intent_id || null;
+      const locked = await lockInvoicePaymentIntentAllocation(trx, {
+        id: invoice.id,
+        piId: reservedPiId,
+        customerId: invoice.customer_id,
+        combinedCustomerLocked: true,
+        targetForUpdate: true,
+      });
       if (!locked) return { reason: 'not_collectible' };
+      // A customer merge or a new checkout can win between the unlocked read
+      // above and the canonical allocation locks. Refuse before Stripe triage:
+      // the reservation belongs to the old owner and the locks cover the old
+      // PI allocation, so canceling here could touch unrelated collateral. The
+      // invoice must still belong to this visit's customer too: a legacy or
+      // concurrently merged invoice can agree with the invoice snapshot while
+      // belonging to somebody other than the service we are settling.
+      if (String(locked.customer_id || '') !== String(invoice.customer_id || '')
+        || String(locked.customer_id || '') !== String(svc.customer_id || '')
+        || (locked.stripe_payment_intent_id || null) !== reservedPiId) {
+        return { reason: 'payment_session_changed' };
+      }
       if (['paid', 'prepaid'].includes(locked.status)) return { invoice: locked, alreadyPaid: true };
       if (!isInvoiceCollectibleStatus(locked.status)) return { reason: 'not_collectible' };
       const collectionHold = await schedulePrepaidCollectionFence(locked.id, trx);
       if (collectionHold) return collectionHold;
+      // Charge Now can already have allocated part of this visit's cumulative
+      // prepaid marker to this invoice, reducing invoices.total while leaving
+      // scheduled_services.prepaid_amount intact. Only the unallocated
+      // remainder can cover this receipt attempt; otherwise the same cash is
+      // booked again against the invoice's smaller remainder.
+      const priorAllocation = await trx('payments')
+        .where({ customer_id: svc.customer_id, status: 'paid' })
+        .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [locked.id])
+        .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [svc.id])
+        .sum({ amount: 'amount' })
+        .first();
+      const allocatedPrepaidCents = Math.max(0, Math.round((Number(priorAllocation?.amount) || 0) * 100));
+      const availablePrepaidCents = Math.max(0, prepaidCents - allocatedPrepaidCents);
       // Both amount refusals leave the checkout and ledger untouched. A part
       // payment is settled from Invoices; a short visit prepayment remains an
       // independent marker until the visit closes.
       const amountRefusal = schedulePrepaidAmountRefusal({
         dueCents: Math.round(invoiceAmountDue(locked) * 100),
         amountPaidCents: Math.round((Number(locked.amount_paid) || 0) * 100),
-        prepaidCents,
+        prepaidCents: availablePrepaidCents,
       });
-      if (amountRefusal) return { reason: amountRefusal, invoice: locked };
+      if (amountRefusal) return { reason: amountRefusal, invoice: locked, availablePrepaidCents };
       // P0: cancel/refuse the locked invoice's open PaymentIntent only AFTER
       // the saved-card hold and every no-write eligibility check. A cancelable
       // PI is retired; money in flight or an unverifiable session leaves both
@@ -19549,7 +19584,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       invoiceId: invoice.id,
       invoiceNumber: invoice.invoice_number,
       ...(outcome.reason === 'not_paid_in_full'
-        ? { balance: Math.max(0, Math.round(invoiceAmountDue(outcome.invoice) * 100) - prepaidCents) / 100 }
+        ? { balance: Math.max(0, Math.round(invoiceAmountDue(outcome.invoice) * 100) - outcome.availablePrepaidCents) / 100 }
         : {}),
     };
   }
@@ -19902,10 +19937,30 @@ router.post('/:id/invoice', async (req, res, next) => {
         // the locked saved-card fence and before the amount/ledger writes.
         const PayCombined = require('../services/pay-combined');
         await PayCombined.lockCombinedCustomerStable(trx, invoice.id, invoice.customer_id);
-        const lockedInvoice = await trx('invoices')
-          .where({ id: invoice.id })
-          .forUpdate()
-          .first();
+        // Select the current checkout under the stable combined reservation
+        // before taking any invoice row lock, then acquire its complete
+        // collectible PI allocation in canonical order before any guard can
+        // cancel the intent and clear sibling stamps.
+        const reservedInvoice = await trx('invoices').where({ id: invoice.id })
+          .first('id', 'customer_id', 'stripe_payment_intent_id');
+        if (!reservedInvoice
+          || String(reservedInvoice.customer_id || '') !== String(invoice.customer_id || '')) {
+          return { invoice, prepaidCredit: 0, checkoutRefusal: 'payment_session_changed' };
+        }
+        const reservedPiId = reservedInvoice.stripe_payment_intent_id || null;
+        const lockedInvoice = await lockInvoicePaymentIntentAllocation(trx, {
+          id: invoice.id,
+          piId: reservedPiId,
+          customerId: invoice.customer_id,
+          combinedCustomerLocked: true,
+          targetForUpdate: true,
+        });
+        if (!lockedInvoice
+          || String(lockedInvoice.customer_id || '') !== String(invoice.customer_id || '')
+          || String(lockedInvoice.customer_id || '') !== String(svc.customer_id || '')
+          || (lockedInvoice.stripe_payment_intent_id || null) !== reservedPiId) {
+          return { invoice, prepaidCredit: 0, checkoutRefusal: 'payment_session_changed' };
+        }
         // Ownership after the invoice lock and the customer KEY SHARE (the
         // lock the payments FK insert below takes anyway, hoisted as in
         // scheduled-invoice-mint.js): the billing order invoice → customer →

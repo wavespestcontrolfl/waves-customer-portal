@@ -63,11 +63,16 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     };
     lockedInvoiceQuery = {
       where: jest.fn(() => lockedInvoiceQuery),
+      whereRaw: jest.fn(() => lockedInvoiceQuery),
+      orderBy: jest.fn(() => lockedInvoiceQuery),
       forUpdate: jest.fn(() => lockedInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
       whereNotIn: jest.fn(() => lockedInvoiceQuery),
       update: updateInvoice,
     };
+    // Canonical allocation locking awaits the query itself when an older PI
+    // is attached, returning the target among every stamped member.
+    lockedInvoiceQuery.then = (resolve, reject) => Promise.resolve([invoiceRow]).then(resolve, reject);
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
       whereNull: jest.fn(() => paymentsQuery),
@@ -1396,6 +1401,7 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
 
 describe('StripeService.updateInvoicePaymentIntentMethod', () => {
   let invoiceRow;
+  let tenderInvoiceUpdates;
   let stripeClient;
   let dbMock;
   let checkoutAttempt;
@@ -1438,12 +1444,16 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     };
     // Transaction-scoped invoice query: supports the forUpdate read and the
     // guarded repoint update used by replaceInvoicePaymentIntentForTender.
+    tenderInvoiceUpdates = [];
     const trxInvoiceQuery = {
       where: jest.fn(() => trxInvoiceQuery),
       forUpdate: jest.fn(() => trxInvoiceQuery),
+      whereRaw: jest.fn(() => trxInvoiceQuery),
+      orderBy: jest.fn(() => trxInvoiceQuery),
+      then: (resolve, reject) => Promise.resolve([invoiceRow]).then(resolve, reject),
       whereNotIn: jest.fn(() => trxInvoiceQuery),
       first: jest.fn().mockResolvedValue(invoiceRow),
-      update: jest.fn().mockResolvedValue(1),
+      update: jest.fn(async (patch) => { tenderInvoiceUpdates.push(patch); return 1; }),
     };
     dbMock = jest.fn(table => {
       if (table === 'invoices') return rootInvoiceQuery;
@@ -1759,6 +1769,8 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
 
     const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
 
+    // An anchor-only replacement must not give any stale combined sibling the new PI.
+    expect(tenderInvoiceUpdates).toContainEqual(expect.objectContaining({ processor: null, stripe_payment_intent_id: null }));
     // Fresh PI minted for the selected tender, lock preserved.
     expect(stripeClient.paymentIntents.create).toHaveBeenCalledWith(
       expect.objectContaining({

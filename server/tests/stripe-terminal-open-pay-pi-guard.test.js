@@ -293,6 +293,45 @@ describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', (
     expect(mockCancelCreated).toHaveBeenCalledTimes(1);
   });
 
+  test('a bind that already committed never issues its secret to a second request', async () => {
+    const handoff = baseHandoff();
+    let reads = 0;
+    setup({
+      invoice: baseInvoice(), handoff,
+      handoffRead: () => (++reads === 1 ? handoff : { ...handoff, stripe_payment_intent_id: TERMINAL_PI.id }),
+    });
+    const { status, body } = await postPaymentIntent();
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_intent_already_created', paymentIntentId: TERMINAL_PI.id });
+    expect(body).not.toHaveProperty('clientSecret');
+    expect(mockCancelCreated).not.toHaveBeenCalled();
+    expect(invoiceUpdates).toEqual([]);
+    expect(handoffUpdates).toEqual([]);
+  });
+
+  test.each(['canceled', 'cancelled'])('refuses a %s invoice before creating a Terminal intent', async (status) => {
+    setup({ invoice: baseInvoice({ status }), handoff: baseHandoff() });
+    const result = await postPaymentIntent();
+    expect(result.status).toBe(409);
+    expect(result.body).toMatchObject({ code: 'invoice_status_changed' });
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  test('cancellation between preflight and bind invalidates the handoff before returning its secret', async () => {
+    const invoice = baseInvoice();
+    setup({ invoice, handoff: baseHandoff() });
+    mockCreate.mockImplementationOnce(async () => {
+      invoice.status = 'cancelled';
+      return TERMINAL_PI;
+    });
+    const { status, body } = await postPaymentIntent();
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'invoice_status_changed' });
+    expect(body).not.toHaveProperty('clientSecret');
+    expect(mockCancelCreated).toHaveBeenCalledTimes(1);
+    expect(invoiceUpdates).toEqual([]);
+  });
+
   test('a concurrent successful bind wins the handoff lock and its published PI is never canceled by refusal cleanup', async () => {
     const handoff = baseHandoff();
     let reads = 0;
@@ -513,7 +552,7 @@ describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', (
     expect(mockCreate).not.toHaveBeenCalled();
   });
 
-  test('an open pay-page PI is cancelled before the card-present PI is bound', async () => {
+  test('a pay-page PI preserved by saved-card failure recovery is inspected and canceled before the Terminal retry binds', async () => {
     setup({ invoice: baseInvoice({ stripe_payment_intent_id: 'pi_pay_page' }), handoff: baseHandoff() });
     mockRetrieve.mockResolvedValue({ id: 'pi_pay_page', status: 'requires_payment_method', metadata: {} });
 
@@ -521,6 +560,7 @@ describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', (
 
     expect(status).toBe(200);
     expect(body).toEqual({ clientSecret: TERMINAL_PI.client_secret, paymentIntentId: TERMINAL_PI.id, amount: 10000 });
+    expect(mockRetrieve).toHaveBeenCalledWith('pi_pay_page');
     expect(mockCancelPi).toHaveBeenCalledTimes(1);
     expect(mockCancelPi).toHaveBeenCalledWith('pi_pay_page', { cancellation_reason: 'abandoned' });
     expect(boundPointer()).toBeTruthy();

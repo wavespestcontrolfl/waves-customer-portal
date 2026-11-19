@@ -279,11 +279,16 @@ async function loadAuthenticationRecoveryStates(customerId, invoices, database) 
         }).orWhere((q) => whereAwaitingAuthentication(q, 'attempt'));
       })
       .whereIn('attempt.invoice_id', invoiceIds)
-      .select('attempt.invoice_id', 'attempt.status', 'attempt.decline_code', 'attempt.resolved_at');
+      .select('attempt.invoice_id', 'attempt.status', 'attempt.decline_code', 'attempt.resolved_at',
+        'attempt.worker_payment_intent_id', 'attempt.stripe_payment_intent_id');
     const states = new Map();
     for (const row of rows) {
       const id = String(row.invoice_id);
-      if (row.status === 'failed' && row.decline_code === 'authentication_required' && row.resolved_at) {
+      const identityConflict = row.worker_payment_intent_id && row.stripe_payment_intent_id
+        && row.worker_payment_intent_id !== row.stripe_payment_intent_id;
+      if (identityConflict) {
+        states.set(id, 'authentication_unknown');
+      } else if (row.status === 'failed' && row.decline_code === 'authentication_required' && row.resolved_at && states.get(id) !== 'authentication_unknown') {
         states.set(id, 'authentication_pending');
       } else if (!row.resolved_at && ['claimed', 'ambiguous'].includes(row.status) && !states.has(id)) {
         states.set(id, 'authentication_unknown');

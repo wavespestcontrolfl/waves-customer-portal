@@ -159,7 +159,7 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
     ['paid', 'paid', false, false, true],
     ['disputed', 'overdue', true, false, false],
     ['refunded', 'refunded', false, true, false],
-  ])('repairs exact locally settled %s evidence after the invoice is %s', async (
+  ])('repairs retained attempt-specific success with exact locally settled %s evidence after the invoice is %s', async (
     paymentStatus,
     invoiceStatus,
     paymentMethodAsObject,
@@ -184,7 +184,7 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
     ['paid', 'paid'],
     ['disputed', 'overdue'],
     ['refunded', 'refunded'],
-  ])('repairs an exact durable PI binding with %s ledger evidence after event expiry', async (
+  ])('keeps a legacy PI binding with %s ledger evidence held after attempt-specific event expiry', async (
     paymentStatus,
     invoiceStatus,
   ) => {
@@ -198,10 +198,10 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
     await migration.up(app);
 
     expect(await attempt(ids.attemptId)).toMatchObject({
-      status: 'succeeded',
+      status: 'failed',
       stripe_payment_intent_id: ids.piId,
-      decline_code: null,
-      error_message: null,
+      decline_code: 'authentication_required',
+      error_message: 'Card verification required',
     });
   });
 
@@ -361,8 +361,38 @@ postgres('saved-card authentication success backfill (PostgreSQL)', () => {
     expect(await app('payments').where({ stripe_payment_intent_id: unrecordedPi })).toHaveLength(0);
   });
 
+  test('keeps exact success and ledger held when the retained PI also names a different attempt', async () => {
+    const ids = await fixture({ bindAttemptToIntent: true });
+    await app('stripe_webhook_events').insert({
+      id: `evt_${randomUUID().replaceAll('-', '')}`,
+      event_type: 'payment_intent.succeeded',
+      processed: true,
+      payload: {
+        object: {
+          id: ids.piId,
+          status: 'succeeded',
+          payment_method: ids.stripePaymentMethodId,
+          metadata: {
+            source: 'admin_card_on_file',
+            saved_card_attempt_id: randomUUID(),
+            waves_invoice_id: ids.invoiceId,
+            waves_customer_id: ids.customerId,
+          },
+        },
+      },
+    });
+
+    await migration.up(app);
+
+    expect(await attempt(ids.attemptId)).toMatchObject({
+      status: 'failed',
+      decline_code: 'authentication_required',
+      stripe_payment_intent_id: ids.piId,
+    });
+  });
+
   test('keeps a bound success held when the same PI has exact cancellation evidence', async () => {
-    const ids = await fixture({ bindAttemptToIntent: true, includeEvent: false });
+    const ids = await fixture({ bindAttemptToIntent: true });
     await app('stripe_invoice_charge_attempts').where({ id: ids.attemptId }).update({
       authentication_canceled_intent_id: ids.piId,
     });

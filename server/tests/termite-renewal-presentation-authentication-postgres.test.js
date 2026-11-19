@@ -51,6 +51,7 @@ postgres('termite renewal presentation authentication fence (PostgreSQL)', () =>
     const unresolvedId = randomUUID();
     const ordinaryProviderFailureId = randomUUID();
     const legacyNullDeclineId = randomUUID();
+    const conflictingNullDeclineId = randomUUID();
     const submittedOnlyId = randomUUID();
     const unresolvedIntentId = `pi_${unresolvedId.replaceAll('-', '')}`;
 
@@ -84,6 +85,18 @@ postgres('termite renewal presentation authentication fence (PostgreSQL)', () =>
         status: 'failed',
         decline_code: null,
         stripe_payment_intent_id: `pi_${legacyNullDeclineId.replaceAll('-', '')}`,
+        submitted_at: new Date(),
+        resolved_at: new Date(),
+      },
+      {
+        // NULL itself is ordinary, but two different PI identities always
+        // mean money may still be in motion and cannot count as presentation.
+        id: conflictingNullDeclineId,
+        invoice_id: invoiceId,
+        status: 'failed',
+        decline_code: null,
+        stripe_payment_intent_id: `pi_webhook_${conflictingNullDeclineId.replaceAll('-', '')}`,
+        worker_payment_intent_id: `pi_worker_${conflictingNullDeclineId.replaceAll('-', '')}`,
         submitted_at: new Date(),
         resolved_at: new Date(),
       },

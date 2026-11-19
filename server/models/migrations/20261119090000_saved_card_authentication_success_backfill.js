@@ -7,11 +7,11 @@
  * therefore also requires the invoice to be paid and bound to the same PI.
  * A later dispute or refund can legitimately reopen/unbind the invoice, so an
  * exact disputed/refunded ledger row remains independent settlement evidence.
- * Every repair still requires an exact, non-conflicting Stripe payment ledger
- * row for the same PI, customer and invoice. The attempt's durable PI binding
- * is sufficient identity after webhook retention expires; only an unbound
- * attempt requires a processed retained payment_intent.succeeded event whose
- * immutable attempt/invoice/customer metadata and saved method match it.
+ * Every repair requires two independent records: a retained, processed
+ * payment_intent.succeeded event whose immutable attempt/invoice/customer/card
+ * identity matches, and an exact Stripe payment ledger row for that PI. This
+ * migration predates worker_payment_intent_id, so the legacy general PI column
+ * cannot identify the attempt: a failure webhook may have written it first.
  *
  * Multiple candidate PIs or any conflicting local linkage fail closed. The
  * update mirrors recordAuthenticationSettlement and is idempotent.
@@ -25,50 +25,45 @@ exports.up = async function up(knex) {
       WHERE a.status = 'failed'
         AND a.decline_code = 'authentication_required'
         AND a.resolved_at IS NOT NULL
-    ), candidate_intents AS (
-      -- A durable attempt -> PI binding plus the independently linked local
-      -- ledger is sufficient even after the 90-day webhook purge.
+    ), retained_successes AS (
       SELECT
-        attempt.id AS attempt_id,
-        attempt.invoice_id,
-        attempt.customer_id,
-        attempt.payment_method_id,
-        attempt.authentication_canceled_intent_id,
-        attempt.stripe_payment_intent_id AS pi_id
-      FROM eligible_attempts attempt
-      WHERE attempt.stripe_payment_intent_id IS NOT NULL
-
-      UNION ALL
-
-      -- Exact retained successes also expose a second capture conflicting
-      -- with a known binding, even when only the bound PI reached the ledger.
+        NULLIF(webhook.payload->'object'->>'id', '') AS pi_id,
+        COALESCE(
+          CASE
+            WHEN jsonb_typeof(webhook.payload->'object'->'payment_method') = 'object'
+              THEN NULLIF(webhook.payload#>>'{object,payment_method,id}', '')
+          END,
+          CASE
+            WHEN jsonb_typeof(webhook.payload->'object'->'payment_method') = 'string'
+              THEN NULLIF(webhook.payload->'object'->>'payment_method', '')
+          END
+        ) AS stripe_payment_method_id,
+        webhook.payload->'object'->'metadata'->>'source' AS source,
+        webhook.payload->'object'->'metadata'->>'saved_card_attempt_id' AS saved_card_attempt_id,
+        webhook.payload->'object'->'metadata'->>'waves_invoice_id' AS waves_invoice_id,
+        webhook.payload->'object'->'metadata'->>'waves_customer_id' AS waves_customer_id
+      FROM stripe_webhook_events webhook
+      WHERE webhook.processed = true
+        AND webhook.event_type = 'payment_intent.succeeded'
+        AND webhook.payload->'object'->>'status' = 'succeeded'
+    ), candidate_intents AS (
+      -- Only retained attempt-specific success is independent identity proof.
       SELECT DISTINCT
         attempt.id AS attempt_id,
         attempt.invoice_id,
         attempt.customer_id,
         attempt.payment_method_id,
+        attempt.stripe_payment_method_id,
         attempt.authentication_canceled_intent_id,
-        NULLIF(webhook.payload->'object'->>'id', '') AS pi_id
+        success.pi_id
       FROM eligible_attempts attempt
-      JOIN stripe_webhook_events webhook
-        ON webhook.processed = true
-       AND webhook.event_type = 'payment_intent.succeeded'
-       AND webhook.payload->'object'->>'status' = 'succeeded'
-       AND webhook.payload->'object'->'metadata'->>'source' = 'admin_card_on_file'
-       AND NULLIF(webhook.payload->'object'->>'id', '') IS NOT NULL
-       AND COALESCE(
-         CASE
-           WHEN jsonb_typeof(webhook.payload->'object'->'payment_method') = 'object'
-             THEN NULLIF(webhook.payload#>>'{object,payment_method,id}', '')
-         END,
-         CASE
-           WHEN jsonb_typeof(webhook.payload->'object'->'payment_method') = 'string'
-             THEN NULLIF(webhook.payload->'object'->>'payment_method', '')
-         END
-       ) = attempt.stripe_payment_method_id
-       AND webhook.payload->'object'->'metadata'->>'saved_card_attempt_id' = attempt.id::text
-       AND webhook.payload->'object'->'metadata'->>'waves_invoice_id' = attempt.invoice_id::text
-       AND webhook.payload->'object'->'metadata'->>'waves_customer_id' = attempt.customer_id::text
+      JOIN retained_successes success
+        ON success.pi_id IS NOT NULL
+       AND success.source = 'admin_card_on_file'
+       AND success.stripe_payment_method_id = attempt.stripe_payment_method_id
+       AND success.saved_card_attempt_id = attempt.id::text
+       AND success.waves_invoice_id = attempt.invoice_id::text
+       AND success.waves_customer_id = attempt.customer_id::text
     ), unique_candidates AS (
       SELECT attempt_id, MIN(pi_id) AS pi_id
       FROM candidate_intents
@@ -103,6 +98,24 @@ exports.up = async function up(knex) {
          OR payment.payment_method_id = candidate.payment_method_id
        )
       WHERE candidate.authentication_canceled_intent_id IS DISTINCT FROM candidate.pi_id
+        -- A retained success that reuses either this PI or this attempt while
+        -- naming a different identity makes the historical evidence ambiguous.
+        AND NOT EXISTS (
+          SELECT 1
+          FROM retained_successes conflicting_event
+          WHERE (
+            conflicting_event.pi_id = candidate.pi_id
+            OR conflicting_event.saved_card_attempt_id = candidate.attempt_id::text
+          )
+            AND (
+              conflicting_event.pi_id IS DISTINCT FROM candidate.pi_id
+              OR conflicting_event.source IS DISTINCT FROM 'admin_card_on_file'
+              OR conflicting_event.stripe_payment_method_id IS DISTINCT FROM candidate.stripe_payment_method_id
+              OR conflicting_event.saved_card_attempt_id IS DISTINCT FROM candidate.attempt_id::text
+              OR conflicting_event.waves_invoice_id IS DISTINCT FROM candidate.invoice_id::text
+              OR conflicting_event.waves_customer_id IS DISTINCT FROM candidate.customer_id::text
+            )
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM payments conflicting

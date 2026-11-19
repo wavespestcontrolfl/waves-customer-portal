@@ -426,7 +426,7 @@ async function findMatchingSavedCardAttempt(
   database,
   invoice,
   paymentIntent,
-  { lock = false, allowResolvedSucceeded = false } = {},
+  { lock = false, allowResolvedSucceeded = false, requireWorkerPaymentIntent = false } = {},
 ) {
   if (!invoice || paymentIntent.metadata?.source !== 'admin_card_on_file') return null;
   let query = database('stripe_invoice_charge_attempts')
@@ -444,7 +444,7 @@ async function findMatchingSavedCardAttempt(
   );
   if (!allowResolvedSucceeded) query = query.whereNull('resolved_at');
   if (lock) query = query.forUpdate();
-  const candidate = await query.first(
+  const attemptFields = [
     'id',
     'invoice_id',
     'status',
@@ -455,12 +455,18 @@ async function findMatchingSavedCardAttempt(
     'idempotency_key',
     'credit_applied_delta',
     'credit_applied_total',
-  );
+  ];
+  // Added by the bound-recovery dependency. Keep the unpublished column out
+  // of every existing matcher query; only the new metadata-cancellation path
+  // depends on A's migration and original-worker proof.
+  if (requireWorkerPaymentIntent) attemptFields.push('worker_payment_intent_id');
+  const candidate = await query.first(...attemptFields);
   return savedCardAttemptMatchesPaymentIntent({
     attempt: candidate,
     invoice,
     paymentIntent,
     allowResolvedSucceeded,
+    requireWorkerPaymentIntent,
   }) ? candidate : null;
 }
 
@@ -7169,6 +7175,33 @@ async function alertCanceledMonthlyAutopay(paymentIntent, row) {
 /**
  * payment_intent.canceled — Stale or admin-cancelled PI. Mark payment cancelled.
  */
+async function resolveMetadataCanceledSavedCardAttempt(paymentIntent, database = db) {
+  const metadataInvoiceId = paymentIntent.metadata?.waves_invoice_id || null;
+  const metadataAttemptId = paymentIntent.metadata?.saved_card_attempt_id || null;
+  if (paymentIntent.metadata?.source !== 'admin_card_on_file' || !metadataInvoiceId || !metadataAttemptId) {
+    return false;
+  }
+  const metadataInvoice = await database('invoices').where({ id: metadataInvoiceId }).first();
+  if (!metadataInvoice
+    || String(metadataInvoice.status || '').toLowerCase() !== 'processing'
+    || metadataInvoice.stripe_payment_intent_id) {
+    return false;
+  }
+  const metadataAttempt = await findMatchingSavedCardAttempt(database, metadataInvoice, paymentIntent, {
+    requireWorkerPaymentIntent: true,
+  });
+  if (!metadataAttempt) return false;
+  const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
+  return resolveFailedInvoiceSavedCardChargeAttempt({
+    attemptId: metadataAttempt.id,
+    invoiceId: metadataInvoice.id,
+    customerId: metadataInvoice.customer_id,
+    stripePaymentIntentId: paymentIntent.id,
+    failureMessage: 'PaymentIntent canceled before settling',
+    database,
+  });
+}
+
 async function handlePaymentIntentCanceled(paymentIntent) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent canceled: ${piId}`);
@@ -7216,6 +7249,7 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   // re-acknowledges. No customer notification — nothing was collected.
   const canceledStamped = await db('invoices')
     .where({ stripe_payment_intent_id: piId, status: 'processing' });
+  let canceledInvoiceReopens = 0;
   for (const stampedRow of canceledStamped) {
     // A saved-card (admin_card_on_file) PI holds an unresolved
     // stripe_invoice_charge_attempts claim and may have reserved account
@@ -7235,12 +7269,23 @@ async function handlePaymentIntentCanceled(paymentIntent) {
       });
       if (attemptResolved) {
         logger.info(`[stripe-webhook] Released saved-card attempt ${canceledSavedCardAttempt.id} for canceled PI ${piId}`);
-        continue;
+      } else {
+        logger.warn(`[stripe-webhook] Saved-card attempt ${canceledSavedCardAttempt.id} changed before canceled PI ${piId} could resolve; preserving its processing invoice`);
       }
+      // Recognition alone excludes the generic reopen: a false resolver means
+      // the attempt changed under its lock, not that an ACH-style clear is safe.
+      continue;
+    }
+    if (paymentIntent.metadata?.source === 'admin_card_on_file') {
+      // A saved-card-labeled cancellation with mismatched/unproven attempt,
+      // customer, invoice or card evidence must not use the generic ACH reopen.
+      // Keep the processing hold until exact reconciliation proof arrives.
+      logger.warn(`[stripe-webhook] canceled saved-card PI ${piId} could not prove its active attempt for invoice ${stampedRow.id}; preserving the hold`);
+      continue;
     }
     // PI ownership in the predicate: a replacement PI rebinding this invoice
     // between the read and this write must not have its binding cleared.
-    await db('invoices')
+    canceledInvoiceReopens += await db('invoices')
       .where({ id: stampedRow.id, status: 'processing', stripe_payment_intent_id: piId })
       .update({
         status: nextInvoiceStatusAfterFailedPayment(stampedRow),
@@ -7251,8 +7296,21 @@ async function handlePaymentIntentCanceled(paymentIntent) {
         updated_at: db.fn.now(),
       });
   }
-  if (canceledStamped.length) {
-    logger.warn(`[stripe-webhook] canceled PI ${piId} — reopened ${canceledStamped.length} invoice(s) from 'processing'`);
+
+  // An ambiguous saved-card create can park an invoice as processing without
+  // adopting the PI: a different pay-page checkout may own the invoice pointer,
+  // or no pointer may have been published before the timeout. The cancellation
+  // still carries our immutable attempt/invoice/customer/method metadata, but a
+  // webhook can populate the legacy observed-PI field before the create worker
+  // returns. Release a NULL-pointer park only when the independent worker-bound
+  // PI from the bound-recovery migration proves this is that original intent.
+  // Legacy attempts without worker provenance stay held for reconciliation.
+  const metadataAttemptResolved = await resolveMetadataCanceledSavedCardAttempt(paymentIntent);
+  if (metadataAttemptResolved) {
+    logger.info(`[stripe-webhook] Released metadata-bound saved-card attempt ${paymentIntent.metadata.saved_card_attempt_id} for canceled PI ${piId}`);
+  }
+  if (canceledInvoiceReopens) {
+    logger.warn(`[stripe-webhook] canceled PI ${piId} — reopened ${canceledInvoiceReopens} invoice(s) from 'processing'`);
   }
 
   if (require('../services/pay-combined').isCombinedPiMetadata(paymentIntent.metadata)) {
@@ -9402,6 +9460,7 @@ module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._handlePaymentIntentCanceled = handlePaymentIntentCanceled;
+module.exports._resolveMetadataCanceledSavedCardAttempt = resolveMetadataCanceledSavedCardAttempt;
 module.exports._dispatchAchProcessingAcknowledgment = dispatchAchProcessingAcknowledgment;
 module.exports._isMachineInitiatedPaymentIntent = isMachineInitiatedPaymentIntent;
 module.exports._isCustomerInitiatedPaymentIntent = isCustomerInitiatedPaymentIntent;

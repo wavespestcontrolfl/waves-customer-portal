@@ -21,7 +21,7 @@ const schema = `auth_settlement_${randomUUID().replaceAll('-', '')}`;
 jest.setTimeout(20000);
 
 (connection ? describe : describe.skip)('authenticated saved-card settlement with account credit', () => {
-  const tables = ['customers', 'invoices', 'payments', 'stripe_invoice_charge_attempts', 'stripe_orphan_charges',
+  const tables = ['customers', 'customer_merge_journal', 'invoices', 'payments', 'stripe_invoice_charge_attempts', 'stripe_orphan_charges',
     'customer_credit_ledger', 'payment_plans', 'stripe_payment_notification_log', 'invoice_followup_sequences', 'notifications'];
   let customerId;
   let invoiceId;
@@ -79,9 +79,90 @@ jest.setTimeout(20000);
     expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id })).toHaveLength(0);
   }
 
+  async function insertMergeOwner(id, accountCredits = 40) {
+    await mockDatabase('customers').insert({
+      id,
+      first_name: 'Merged',
+      last_name: 'Owner',
+      phone: `+1${id.replace(/\D/g, '').padEnd(10, '0').slice(0, 10)}`,
+      email: `${id}@example.invalid`,
+      account_credits: accountCredits,
+    });
+  }
+
+  async function recordInvoiceMerge(loserId, winnerId) {
+    await mockDatabase('customer_merge_journal').insert({
+      winner_customer_id: winnerId,
+      loser_customer_id: loserId,
+      loser_snapshot: { id: loserId },
+      repointed: { 'invoices.customer_id': 1 },
+      winner_backfills: {},
+      tier: 'manual',
+      evidence: {},
+      performed_by: 'test:authentication-settlement',
+      repointed_ids: { version: 1, tables: { 'invoices.customer_id': [invoiceId] } },
+    });
+  }
+
   test('two deliveries settle $75 cash and $25 credit once on a $100 invoice', async () => {
     await Promise.all([settle(intent), settle(intent)]);
     await expectSettled('15.00', '-25.00');
+  });
+
+  test('a proven invoice-owner merge chain settles against the locked current owner and its credit', async () => {
+    const middleOwnerId = randomUUID();
+    const currentOwnerId = randomUUID();
+    await insertMergeOwner(middleOwnerId);
+    await insertMergeOwner(currentOwnerId);
+    await recordInvoiceMerge(customerId, middleOwnerId);
+    await recordInvoiceMerge(middleOwnerId, currentOwnerId);
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ customer_id: currentOwnerId });
+
+    await settle(intent);
+
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      customer_id: currentOwnerId,
+      status: 'paid',
+      credit_applied: '25.00',
+      stripe_payment_intent_id: intent.id,
+    });
+    expect(await mockDatabase('customers').where({ id: customerId }).first()).toMatchObject({ account_credits: '40.00' });
+    expect(await mockDatabase('customers').where({ id: middleOwnerId }).first()).toMatchObject({ account_credits: '40.00' });
+    expect(await mockDatabase('customers').where({ id: currentOwnerId }).first()).toMatchObject({ account_credits: '15.00' });
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toEqual([
+      expect.objectContaining({ customer_id: currentOwnerId, delta: '-25.00' }),
+    ]);
+    expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id })).toEqual([
+      expect.objectContaining({ customer_id: currentOwnerId, status: 'paid', amount: '75.00' }),
+    ]);
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first()).toMatchObject({
+      status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null,
+    });
+  });
+
+  test('an ambiguous invoice-owner merge fork cannot settle or debit either possible owner', async () => {
+    const currentOwnerId = randomUUID();
+    const competingOwnerId = randomUUID();
+    await insertMergeOwner(currentOwnerId);
+    await insertMergeOwner(competingOwnerId);
+    await recordInvoiceMerge(customerId, currentOwnerId);
+    await recordInvoiceMerge(customerId, competingOwnerId);
+    await mockDatabase('invoices').where({ id: invoiceId }).update({ customer_id: currentOwnerId });
+
+    await settle(intent);
+
+    expect(await mockDatabase('invoices').where({ id: invoiceId }).first()).toMatchObject({
+      customer_id: currentOwnerId, status: 'sent', credit_applied: '0.00', stripe_payment_intent_id: null,
+    });
+    expect(await mockDatabase('customers').whereIn('id', [customerId, currentOwnerId, competingOwnerId]).pluck('account_credits'))
+      .toEqual(['40.00', '40.00', '40.00']);
+    expect(await mockDatabase('customer_credit_ledger').where({ invoice_id: invoiceId })).toHaveLength(0);
+    expect(await mockDatabase('payments').where({ stripe_payment_intent_id: intent.id })).toHaveLength(0);
+    expect(await mockDatabase('stripe_invoice_charge_attempts').where({ id: attemptId }).first()).toMatchObject({
+      status: 'failed', decline_code: 'authentication_required',
+    });
+    expect(await mockDatabase('stripe_orphan_charges').where({ stripe_payment_intent_id: intent.id }).first())
+      .toMatchObject({ invoice_id: invoiceId, resolved: false });
   });
 
   test('a delayed authenticated success records Stripe settlement time and its Eastern cash-basis day', async () => {

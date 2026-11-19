@@ -5,7 +5,13 @@ const { validate: isUuid } = require('uuid');
 function whereAwaitingAuthentication(query, table) {
   return query.where(function awaitingOriginalIntent() {
     this.where(function authenticationDecline() {
-      this.where({ [`${table}.status`]: 'failed', [`${table}.decline_code`]: 'authentication_required' })
+      // Keep this comparison two-valued. Callers such as the termite renewal
+      // presentation guard negate this whole predicate; a historical NULL
+      // decline is an ordinary provider failure, not SQL UNKNOWN. Conflicting
+      // worker/provider identities below still remain held regardless of the
+      // nullable decline code.
+      this.where({ [`${table}.status`]: 'failed' })
+        .whereRaw('COALESCE(?? = ?, FALSE)', [`${table}.decline_code`, 'authentication_required'])
         .whereNotNull(`${table}.resolved_at`).where(function withoutMatchingCancellation() {
           this.whereNull(`${table}.authentication_canceled_intent_id`)
             .orWhereNull(`${table}.stripe_payment_intent_id`)
@@ -61,9 +67,18 @@ function matchingSavedCardIntent(intent, database, { lockInvoice = false, settle
   if (![meta.waves_invoice_id, meta.waves_customer_id, meta.saved_card_attempt_id].every(isUuid)) return;
   const methodId = (typeof intent.payment_method === 'string' ? intent.payment_method : intent.payment_method?.id)
     || (intent.status === 'canceled' && intent.last_payment_error?.payment_method?.id) || null;
-  const invoice = database('invoices').select('id')
-    .where({ id: meta.waves_invoice_id, customer_id: meta.waves_customer_id });
-  if (settled) invoice.where({ status: 'paid', stripe_payment_intent_id: intent.id });
+  const invoiceAlias = 'authentication_invoice';
+  const invoice = database(`invoices as ${invoiceAlias}`).select(`${invoiceAlias}.id`)
+    .where(`${invoiceAlias}.id`, meta.waves_invoice_id);
+  whereProvenInvoiceOwner(invoice, {
+    invoiceAlias,
+    invoiceId: meta.waves_invoice_id,
+    metadataCustomerId: meta.waves_customer_id,
+  });
+  if (settled) invoice.where({
+    [`${invoiceAlias}.status`]: 'paid',
+    [`${invoiceAlias}.stripe_payment_intent_id`]: intent.id,
+  });
   if (lockInvoice) invoice.forShare();
   const query = database('stripe_invoice_charge_attempts')
     .where({ id: meta.saved_card_attempt_id, invoice_id: meta.waves_invoice_id })
@@ -149,8 +164,9 @@ async function withCancellationInvoiceLock(database, identity, write) {
 }
 
 async function findSettlingAuthenticationAttempt(intent, invoice, database, { lock = false } = {}) {
-  if (intent.status !== 'succeeded' || !invoice || intent.metadata?.waves_invoice_id !== invoice.id
-    || intent.metadata?.waves_customer_id !== invoice.customer_id) return null;
+  const metadataInvoiceId = intent.metadata?.waves_invoice_id;
+  if (intent.status !== 'succeeded' || !invoice || !isUuid(metadataInvoiceId)
+    || String(metadataInvoiceId).toLowerCase() !== String(invoice.id).toLowerCase()) return null;
   const match = matchingSavedCardIntent(intent, database);
   if (!match) return null;
   const { query, methodId } = match;
@@ -209,10 +225,14 @@ async function recordAuthenticationSettlement(intent, trx) {
   if (!match) return;
   const { query, methodId } = match;
   if (!methodId) query.where({ stripe_payment_intent_id: intent.id });
+  const currentInvoiceOwner = trx('invoices')
+    .select('customer_id')
+    .where({ id: intent.metadata.waves_invoice_id });
   return whereAwaitingAuthentication(query, 'stripe_invoice_charge_attempts')
-    .whereExists(trx('payments').select('id').where({
-      customer_id: intent.metadata.waves_customer_id, stripe_payment_intent_id: intent.id, status: 'paid',
-    }).whereRaw("(metadata->>'invoice_id' IS NULL OR metadata->>'invoice_id' = ?)", [intent.metadata.waves_invoice_id]))
+    .whereExists(trx('payments').select('id')
+      .whereIn('customer_id', currentInvoiceOwner)
+      .where({ stripe_payment_intent_id: intent.id, status: 'paid' })
+      .whereRaw("(metadata->>'invoice_id' IS NULL OR metadata->>'invoice_id' = ?)", [intent.metadata.waves_invoice_id]))
     .update({
       status: 'succeeded', stripe_payment_intent_id: intent.id, decline_code: null, error_message: null,
       resolved_at: trx.fn.now(), updated_at: trx.fn.now(),

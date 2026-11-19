@@ -502,13 +502,13 @@ describe('saved-card succeeded-webhook attempt repair', () => {
   });
 });
 
-function failedAttemptDb({ invoiceStatus = 'processing' } = {}) {
+function failedAttemptDb({ invoiceStatus = 'processing', invoicePaymentIntentId = null } = {}) {
   const state = {
     invoice: {
       id: 'inv-1',
       customer_id: 'cust-1',
       status: invoiceStatus,
-      stripe_payment_intent_id: null,
+      stripe_payment_intent_id: invoicePaymentIntentId,
       credit_applied: 25,
       due_date: '2099-01-01',
     },
@@ -598,6 +598,7 @@ describe('saved-card failed-webhook attempt repair', () => {
   test('withholds invoice and credit writes until the original worker binds a webhook-first failure', async () => {
     const { database, state } = failedAttemptDb();
     state.attempt.worker_payment_intent_id = null;
+    state.attempt.status = 'ambiguous'; // a concurrent checkout promoted the claim while the worker is still waiting
     await expect(resolveFailedInvoiceSavedCardChargeAttempt({
       attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database,
     })).rejects.toMatchObject({ code: 'SAVED_CARD_WORKER_INTENT_PENDING' });
@@ -607,7 +608,7 @@ describe('saved-card failed-webhook attempt repair', () => {
 
   test('a completed create timeout stays held without independent request proof, even if processing stamped the invoice', async () => {
     const { database, state } = failedAttemptDb();
-    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, submitted_at: new Date(), idempotency_key: 'original-create' });
+    Object.assign(state.attempt, { status: 'ambiguous', worker_payment_intent_id: null, worker_create_timed_out_at: new Date(), submitted_at: new Date(), idempotency_key: 'original-create' });
     state.invoice.stripe_payment_intent_id = 'pi-failed';
     const failure = { attemptId: 'attempt-1', invoiceId: 'inv-1', customerId: 'cust-1', stripePaymentIntentId: 'pi-failed', database };
     await expect(resolveFailedInvoiceSavedCardChargeAttempt({ ...failure, requestIdempotencyKey: 'other-create' })).resolves.toBe(false);
@@ -636,6 +637,25 @@ describe('saved-card failed-webhook attempt repair', () => {
       database,
     })).resolves.toBe(false);
     expect(state.updates).toHaveLength(0);
+  });
+
+  test('preserves a different pay-page PI on a still-collectible invoice', async () => {
+    const { database, state } = failedAttemptDb({
+      invoiceStatus: 'sent', invoicePaymentIntentId: 'pi_pay_page',
+    });
+    state.attempt.worker_payment_intent_id = 'pi_failed_saved_card';
+
+    await expect(resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: 'attempt-1',
+      invoiceId: 'inv-1',
+      customerId: 'cust-1',
+      stripePaymentIntentId: 'pi_failed_saved_card',
+      database,
+    })).resolves.toBe(true);
+
+    expect(state.invoice.stripe_payment_intent_id).toBe('pi_pay_page');
+    expect(state.updates.find(({ table }) => table === 'invoices').payload)
+      .not.toHaveProperty('stripe_payment_intent_id');
   });
 });
 

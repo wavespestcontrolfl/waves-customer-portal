@@ -13,11 +13,22 @@ postgres('invoice PaymentIntent allocation locking', () => {
   let database;
   let InvoiceService;
   let StripeService;
+  let stripeClient;
   let customerId;
   let invoiceIds;
   let piId;
+  let previousPayIncludeBalanceGate;
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function waitForBlockedBackend(blocker) {
+    const { rows: [session] } = await blocker.raw('select pg_backend_pid() as pid');
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const result = await database.raw('select exists(select 1 from pg_stat_activity a where ? = any(pg_blocking_pids(a.pid))) as waiting', [session.pid]);
+      if (result.rows[0].waiting) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('No competing allocation query waited for the blocker');
+  }
 
   beforeAll(() => {
     const target = new URL(connection);
@@ -28,12 +39,31 @@ postgres('invoice PaymentIntent allocation locking', () => {
     if (!privateQa && !ciTest) {
       throw new Error('Use a verified, task-private QA database or the isolated CI database');
     }
+    // The setup regression drives the real service/transaction path with a
+    // deterministic local Stripe double. No provider call can leave this test.
+    stripeClient = {
+      paymentIntents: {
+        retrieve: jest.fn(),
+        cancel: jest.fn(),
+        create: jest.fn(),
+        update: jest.fn(),
+      },
+    };
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config/stripe-config', () => ({
+      secretKey: 'sk_test_local_allocation_lock',
+      publishableKey: 'pk_test_local_allocation_lock',
+    }));
+    previousPayIncludeBalanceGate = process.env.GATE_PAY_INCLUDE_BALANCE;
+    delete process.env.GATE_PAY_INCLUDE_BALANCE;
     database = knex({ client: 'pg', connection, pool: { min: 0, max: 6 } });
     InvoiceService = require('../services/invoice');
     StripeService = require('../services/stripe');
   });
 
   beforeEach(async () => {
+    jest.clearAllMocks();
+    for (const fn of Object.values(stripeClient.paymentIntents)) fn.mockReset();
     customerId = randomUUID();
     invoiceIds = [randomUUID(), randomUUID()].sort();
     piId = `pi_lock_${randomUUID().replaceAll('-', '')}`;
@@ -65,6 +95,8 @@ postgres('invoice PaymentIntent allocation locking', () => {
   afterAll(async () => {
     if (database) await database.destroy();
     await require('../models/db').destroy();
+    if (previousPayIncludeBalanceGate == null) delete process.env.GATE_PAY_INCLUDE_BALANCE;
+    else process.env.GATE_PAY_INCLUDE_BALANCE = previousPayIncludeBalanceGate;
   });
 
   test('waits on the first canonical sibling before locking the target row', async () => {
@@ -83,7 +115,7 @@ postgres('invoice PaymentIntent allocation locking', () => {
         waiterFinished = true;
         return locked;
       });
-      await sleep(200);
+      await waitForBlockedBackend(blocker);
       expect(waiterFinished).toBe(false);
 
       // The allocation query is blocked on the lower-id sibling and has not
@@ -102,22 +134,72 @@ postgres('invoice PaymentIntent allocation locking', () => {
     }
   });
 
+  test('gate-off setup waits on a stale lower-id PI sibling before locking the target or canceling', async () => {
+    const targetId = invoiceIds[1];
+    const blocker = await database.transaction();
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: piId,
+      status: 'requires_payment_method',
+      amount: 20000,
+      client_secret: `${piId}_secret`,
+      metadata: {
+        waves_invoice_id: targetId,
+        combined_allocation: 'old-combined-allocation',
+      },
+    });
+    stripeClient.paymentIntents.cancel.mockResolvedValue({ id: piId, status: 'canceled' });
+    stripeClient.paymentIntents.create.mockResolvedValue({
+      id: `${piId}_replacement`,
+      status: 'requires_payment_method',
+      client_secret: `${piId}_replacement_secret`,
+    });
+    try {
+      await blocker('invoices').where({ id: invoiceIds[0] }).forUpdate().first('id');
+
+      const setup = StripeService.createInvoicePaymentIntent(targetId, { includeOpenBalance: true });
+      await waitForBlockedBackend(blocker);
+
+      // Before the canonical setup lock, this request held the higher-id
+      // target and had already canceled the old PI while waiting to clear the
+      // lower sibling. It must now be blocked before both effects.
+      expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+      await database.transaction(async (probe) => {
+        await probe.raw("SET LOCAL lock_timeout = '250ms'");
+        await expect(probe('invoices').where({ id: targetId }).forUpdate().first('id'))
+          .resolves.toMatchObject({ id: targetId });
+      });
+
+      await blocker.commit();
+      await expect(setup).resolves.toMatchObject({
+        paymentIntentId: `${piId}_replacement`,
+      });
+      expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith(piId);
+      await expect(database('invoices').where({ id: invoiceIds[0] }).first('stripe_payment_intent_id'))
+        .resolves.toMatchObject({ stripe_payment_intent_id: null });
+      await expect(database('invoices').where({ id: targetId }).first('stripe_payment_intent_id'))
+        .resolves.toMatchObject({ stripe_payment_intent_id: `${piId}_replacement` });
+    } finally {
+      await blocker.rollback().catch(() => {});
+    }
+  });
+
   test('a page void that waited and finds changed status rejects without canceling or clearing the PI', async () => {
     const targetId = invoiceIds[1];
     const blocker = await database.transaction();
-    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent');
-    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent');
+    const retrieve = jest.spyOn(StripeService, 'retrievePaymentIntent').mockRejectedValue(new Error('Unexpected simulated Stripe retrieval'));
+    const cancel = jest.spyOn(StripeService, 'cancelPaymentIntent').mockRejectedValue(new Error('Unexpected simulated Stripe cancellation'));
     try {
       await blocker('invoices').where({ id: targetId }).forUpdate().first('id');
 
       // The outer snapshot sees `sent`; the transaction then waits for this
       // row lock. Commit a status-only change while retaining the exact PI.
-      const voidPromise = InvoiceService.voidInvoice(targetId);
-      await sleep(200);
+      const voidOutcome = InvoiceService.voidInvoice(targetId).then(() => null, (err) => err);
+      await waitForBlockedBackend(blocker);
       await blocker('invoices').where({ id: targetId }).update({ status: 'viewed' });
       await blocker.commit();
 
-      await expect(voidPromise).rejects.toThrow(/status changed while voiding/i);
+      expect((await voidOutcome)?.message).toMatch(/status changed while voiding/i);
       expect(retrieve).not.toHaveBeenCalled();
       expect(cancel).not.toHaveBeenCalled();
       await expect(database('invoices').where({ id: targetId }).first('status', 'stripe_payment_intent_id'))
