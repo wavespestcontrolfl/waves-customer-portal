@@ -1401,7 +1401,18 @@ async function buildCustomerPricingResponse({
     property: summarizeProperty(propertyContext),
     currentMonthly: currentMonthly || null,
     options,
+    // Hint only (GATE_PORTAL_PLAN_START): the card may offer "See my price and book" for an
+    // account with no current or owned recurring service that is not cancelled. The
+    // start-plan route re-decides under its locks; absent when the gate is off or the
+    // account does not qualify, so every other response stays byte-identical.
+    ...(planStartHint(customer, currentServiceKeys, ownedServiceKeys) ? { planStart: { available: true } } : {}),
   };
+}
+
+function planStartHint(customer, currentServiceKeys, ownedServiceKeys) {
+  if (!require('../config/feature-gates').portalPlanStartLive()) return false;
+  if (customer.active === false || customer.pipeline_stage === 'churned') return false;
+  return currentServiceKeys.length === 0 && ownedServiceKeys.length === 0;
 }
 
 function summarizeProperty(context) {

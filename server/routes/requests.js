@@ -1135,6 +1135,47 @@ router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, 
   }
 });
 
+// POST /api/requests/start-plan (GATE_PORTAL_PLAN_START, owner 2026-11-19) — a
+// signed-in customer with NO live recurring plan taps the priced option on the
+// portal pricing card. Mints (or reuses) a normal server-priced estimate for
+// THAT option through the same mint core restart uses and hands back its
+// /estimate path; they pick a time and save a card there, through the existing
+// public accept flow. Nothing is sent, no request row, no bell. 404 dark; 409
+// { error, code } for a member, a cancelled account, an option or price that
+// changed, or anything that cannot be priced online (the card then files its
+// ordinary request).
+const startPlanSchema = Joi.object({
+  serviceKey: Joi.string().valid('pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite').required(),
+  optionId: Joi.string().trim().max(60).required(),
+  shownMonthly: Joi.number().greater(0).max(100000).required(),
+});
+
+router.post('/start-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').portalPlanStartLive()) return res.status(404).json({ error: 'Not found' });
+    const { value, error } = startPlanSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { mintPlanStartEstimate } = require('../services/cancellation-resolution/restart');
+    let minted;
+    try {
+      minted = await mintPlanStartEstimate({
+        customer: req.customer,
+        serviceKey: value.serviceKey,
+        optionId: value.optionId,
+        shownMonthly: value.shownMonthly,
+      });
+    } catch (err) {
+      if (err && err.restartUnavailable) {
+        return res.status(409).json({ error: err.message, code: err.code });
+      }
+      throw err;
+    }
+    res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 const cancelResolutionAcceptSchema = Joi.object({
   reasonCode: Joi.string().valid(...REASON_CODE_VALUES).required(),
   families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),

@@ -4735,3 +4735,68 @@ describe('accept — lawn limits attestation (GATE_ESTIMATE_LAWN_LIMITS)', () =>
     expect((await putAccept(again, {})).status).toBe(200);
   });
 });
+
+describe('GATE_PORTAL_PLAN_START — plan-start accept revalidation runs inside the accept txn', () => {
+  // A plan_start estimate (the portal pricing card's first-plan quote) accepts through the SAME public path;
+  // the revalidation re-checks under the estimate row lock that the account is still active, not cancelled,
+  // and owns none of the quoted families. Refusal shapes are pinned in plan-start.test.js; this pins the WIRING.
+  const planStartEstimate = (overrides = {}) => recurringPestEstimate({
+    id: 'est-plan-start-1',
+    token: 'tok-plan-start-1-x012345',
+    source: 'plan_start',
+    customer_id: 'cust-9',
+    estimate_data: JSON.stringify({
+      planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T00:00:00Z' },
+      result: {
+        recurring: { discount: 0, services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] },
+        oneTime: { items: [], membershipFee: 99 },
+      },
+    }),
+    ...overrides,
+  });
+  const leadCustomer = (overrides = {}) => ({
+    id: 'cust-9', active: true, pipeline_stage: 'new_lead', deleted_at: null,
+    first_name: 'Pat', last_name: 'Tester', phone: '(941) 555-0123', email: 'pat@example.com',
+    ...overrides,
+  });
+
+  test('an account cancelled after the mint refuses the accept (409) and rolls back', async () => {
+    resetStore(planStartEstimate());
+    db.__state.tables.customers = [leadCustomer({ active: false, pipeline_stage: 'churned' })];
+    const res = await putAccept('tok-plan-start-1-x012345');
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/changed since this estimate was created/);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('a plan started some other way after the mint refuses the accept (a live row owns the family)', async () => {
+    resetStore(planStartEstimate({ id: 'est-plan-start-2', token: 'tok-plan-start-2-x012345' }));
+    db.__state.tables.customers = [leadCustomer()];
+    db.__state.tables.scheduled_services = [
+      { id: 'live-1', customer_id: 'cust-9', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'Quarterly Pest Control' },
+    ];
+    const res = await putAccept('tok-plan-start-2-x012345');
+    expect(res.status).toBe(409);
+    expect(storedEstimate().status).toBe('sent');
+  });
+
+  test('a still-plain account passes the revalidation and the accept commits', async () => {
+    resetStore(planStartEstimate({ id: 'est-plan-start-3', token: 'tok-plan-start-3-x012345' }));
+    db.__state.tables.customers = [leadCustomer()];
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-9',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+    const res = await putAccept('tok-plan-start-3-x012345');
+    expect(res.status).toBe(200);
+    expect(storedEstimate().status).toBe('accepted');
+  });
+});

@@ -755,6 +755,12 @@ export class ApiClient {
     return this.request('/requests/restart-plan', { method: 'POST', body: '{}' });
   }
 
+  // GATE_PORTAL_PLAN_START: a customer with no recurring plan taps the priced option on the
+  // pricing card — the server mints a normal estimate for that option and answers { url }.
+  startPlan({ serviceKey, optionId, shownMonthly }) {
+    return this.request('/requests/start-plan', { method: 'POST', body: JSON.stringify({ serviceKey, optionId, shownMonthly }) });
+  }
+
   queryCustomerPricing(prompt, targetTier) {
     return this.request('/customer-pricing/query', {
       method: 'POST',

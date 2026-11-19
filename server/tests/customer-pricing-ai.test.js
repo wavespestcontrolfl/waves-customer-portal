@@ -2113,3 +2113,36 @@ describe('r9: field-confident tree counts, story evidence, authoritative types, 
     expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
   });
 });
+
+describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
+  const ask = (customer, db = null) => buildCustomerPricingResponse({
+    db,
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+    prompt: 'I am interested in adding lawn care',
+    customer,
+  });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; });
+
+  test('present only when the gate is on and the account has no recurring service and is not cancelled', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(propertyCustomer({ id: 'cust-lead', active: true, pipeline_stage: 'new_lead' }));
+    expect(result.ok).toBe(true);
+    expect(result.planStart).toEqual({ available: true });
+  });
+
+  test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
+    const result = await ask(propertyCustomer({ id: 'cust-lead', active: true, pipeline_stage: 'new_lead' }));
+    expect('planStart' in result).toBe(false);
+  });
+
+  test('absent for a member (a current or owned recurring service) and for a churned account', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const member = propertyCustomer({ id: 'cust-member', active: true, pipeline_stage: 'active_customer' });
+    const owned = await ask(member, activePlanDb(member.id, ['Quarterly Pest Control']));
+    expect(owned.ok).toBe(true);
+    expect('planStart' in owned).toBe(false);
+
+    const churned = await ask(propertyCustomer({ id: 'cust-gone', active: false, pipeline_stage: 'churned' }));
+    expect('planStart' in churned).toBe(false);
+  });
+});

@@ -12492,6 +12492,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         const { assertRestartAcceptEligible } = require('../services/cancellation-resolution/restart');
         await assertRestartAcceptEligible(trx, estimate);
       }
+      // Plan-start accept revalidation (GATE_PORTAL_PLAN_START): same point, same
+      // lock — the account must still be active, not cancelled, and own none of
+      // the quoted families. Drift refuses with a 409 the estimate page renders.
+      if (estimate.source === 'plan_start') {
+        const { assertPlanStartAcceptEligible } = require('../services/cancellation-resolution/restart');
+        await assertPlanStartAcceptEligible(trx, estimate);
+      }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
         .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])

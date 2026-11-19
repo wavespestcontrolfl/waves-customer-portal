@@ -35,7 +35,13 @@ const { FAMILY_LABELS } = require('./templates');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 
 const SOURCE = 'plan_restart';
+const HAND_PRICED_RESTART = 'This restart needs to be set up by hand — please call or text us and we will take care of it.';
 const RESTARTABLE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
+// Plan start (GATE_PORTAL_PLAN_START): the portal pricing card's first-plan estimate for an account with NO live
+// recurring service. Same mint core as restart; its own estimates.source lineage.
+const PLAN_START_SOURCE = 'plan_start';
+const PLAN_START_SERVICE_KEYS = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite'];
+const HAND_PRICED_PLAN_START = 'This plan needs to be priced by hand — please call or text us and we will take care of it.';
 // Pricing-ai speaks 'termite' for the termite_bait family (LINE_SERVICE_KEYS).
 const pricingKeyFor = (family) => (family === 'termite_bait' ? 'termite' : family);
 
@@ -466,15 +472,402 @@ function liveRestartEstimate(rows, now) {
   });
 }
 
+// Commercial properties never get an online price (codex pre-push P0 — same
+// doctrine as BOTH offer surfaces, cross-sell report + portal offer: the engine
+// refuses real prices there and commercial expansion is a proposal
+// conversation; variantsForService only knows residential defaults). The
+// entries check the STORED type under their lock, BEFORE any reuse or mint,
+// and the shared core re-checks the RESOLVED type after the property context
+// is built — a cached lookup classifying the property commercial must refuse
+// too. FAIL CLOSED: a check that cannot be evaluated refuses.
+function makeCommercialGuard(fresh, deps, { logTag, handMessage }) {
+  const isCommercial = deps.isCommercialProperty
+    || require('../pricing-engine/commercial-helpers').isCommercialProperty;
+  return (property, label) => {
+    let commercial = true;
+    try {
+      commercial = isCommercial(property);
+    } catch (err) {
+      logger.warn(`[${logTag}] commercial check (${label}) failed for ${fresh.id} — refusing: ${err.message}`);
+      throw new RestartUnavailableError('pricing_unavailable', handMessage);
+    }
+    if (commercial) throw new RestartUnavailableError('pricing_unavailable', handMessage);
+  };
+}
+
+// The collaborators every mint resolves BEFORE it opens its transaction.
+function resolveMintDeps(deps) {
+  return {
+    persistence: deps.persistence || require('../admin-estimate-persistence'),
+    pricingAi: deps.pricingAi || require('../customer-pricing-ai'),
+    pricingBundleMatchesEstimateTotals: (deps.bundleUtils || require('../estimate-pricing-bundle-utils')).pricingBundleMatchesEstimateTotals,
+    // Route adapter, lazy for the same service→route load-order reason the
+    // click-mint cites.
+    buildEstimateSendSnapshot: deps.buildEstimateSendSnapshot
+      || require('../../routes/admin-estimates').buildEstimateSendSnapshot,
+  };
+}
+
+// THE shared mint core (plan restart + plan start — one mechanism, two
+// entries). Runs inside the caller's transaction, under the locks the entry
+// already took (comms advisory lock, then the customers row FOR UPDATE), with
+// the entry's own eligibility checks already passed:
+//   trx               the caller's transaction
+//   fresh             the locked customers row
+//   source            estimates.source ('plan_restart' | 'plan_start'); also
+//                     the lineage this mint reuses or archives
+//   families          the families this mint quotes (already minus owned ones)
+//   ownedFamilies     the account's residual-owned families (combined-tier
+//                     qualifiers; fed to the recompute)
+//   optionFor         (pricingKey, pricingAi) => the option to price per family
+//   estimateBlock     { key, value } stored beside the engine inputs in
+//                     estimate_data (planRestart / planStart)
+//   matchesLive       (liveEstimateData) => the entry's own scope/identity
+//                     test for reusing a live quote (the core adds the
+//                     cent-exact totals + full-offer fingerprint checks)
+//   assertOffer       optional ({ monthlyTotal, annualTotal, onetimeTotal }) =>
+//                     throws when the server's totals are not the offer the
+//                     entry expects
+//   note              (estimateId) => { subject, body } for the timeline
+//   logTag / logDetail / handMessage   wording that stays per-source
+// Returns { estimateId, token, url, reused }.
+async function mintPricedEstimate({
+  trx, fresh, source, families, ownedFamilies, optionFor, estimateBlock, matchesLive,
+  assertOffer = null, note, logTag, logDetail = '', handMessage,
+  assertNotCommercial, nowDate, now, randomBytes, deps, mintDeps,
+}) {
+  const {
+    persistence, pricingAi, pricingBundleMatchesEstimateTotals, buildEstimateSendSnapshot,
+  } = mintDeps;
+  const toPrice = families.map(pricingKeyFor);
+
+  // Single-premises proof BEFORE any URL is handed out (codex GH r4 P1):
+  // the cancelled-family and residual queries above are scoped by
+  // customer_id alone, but the estimate is priced and addressed at the
+  // single primary street — a family cancelled at a SECONDARY premises
+  // would otherwise be quoted at the primary property's measurements.
+  // Same proof the portal offer runs (customerHasOnlyPrimaryPremises,
+  // cross-sell): a multi-premises profile — or a proof that cannot be
+  // evaluated, a missing primary street, or a street without provable
+  // locality — is the priced-by-hand 409, never an online price.
+  const crossSell = deps.crossSell || require('../service-report/cross-sell');
+  const linkage = require('../estimate-property-linkage');
+  const primaryStreet = linkage.normalizedStampedStreet(fresh.address_line1, fresh.address_line2, fresh.city, fresh.zip);
+  let singlePremises = false;
+  try {
+    const premisesProof = deps.customerHasOnlyPrimaryPremises
+      || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
+    singlePremises = Boolean(primaryStreet)
+      && !linkage.scopeKeyLacksLocality(primaryStreet)
+      && await premisesProof(trx, fresh.id, fresh, primaryStreet);
+  } catch (err) {
+    logger.warn(`[${logTag}] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
+    singlePremises = false;
+  }
+  if (!singlePremises) {
+    throw new RestartUnavailableError('pricing_unavailable', handMessage);
+  }
+
+  // Any prior lineage rows — the reuse decision itself is deferred until
+  // TODAY's inputs have been resolved and priced (below): reusing here
+  // would hand back a quote the current property context no longer
+  // supports (codex pre-push P0 — a corrected measurement, a cache/
+  // override update, or a commercial reclassification since mint).
+  const priorRows = await trx('estimates')
+    .where({ customer_id: fresh.id, source })
+    .whereNull('archived_at')
+    .orderBy('created_at', 'desc')
+    .limit(10);
+
+  // Property context: profile first, then the SAME cache-only lookup +
+  // accepted-estimate seed discipline the portal offer surfaces price
+  // under (cross-sell/one-tap). No LIVE lookup spend from a restart tap —
+  // a cached lookup row or a prior accepted estimate for THIS street
+  // supplies the footprint the stored profile lacks.
+  let propertySeed = null;
+  try {
+    // Savepoint (codex GH r10 P2): the seed is best-effort, but a
+    // statement error raised on the OUTER trx aborts the whole mint
+    // ("current transaction is aborted" on the very next query) — the
+    // nested transaction scopes the rollback to the lookup so the mint
+    // continues on profile/cache evidence as intended.
+    propertySeed = await trx.transaction((sp) => crossSell.loadEstimateSeed(sp, fresh.id, primaryStreet));
+  } catch (err) {
+    logger.warn(`[${logTag}] estimate property seed skipped for ${fresh.id}: ${err.message}`);
+  }
+  // Savepoint-isolated like the seed and prepay lookups (codex GH r23
+  // P2): loadTurfProfile's own safeSelect catch returns null on a pg
+  // statement error, but the OUTER trx would already be aborted — the
+  // mint could not continue on the property/cache/seed fallbacks it
+  // documents and would 500 on the next transactional query. A null
+  // profile from a rolled-back savepoint degrades exactly as intended.
+  let turfProfile = null;
+  try {
+    turfProfile = await trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id));
+  } catch (err) {
+    logger.warn(`[${logTag}] turf profile skipped for ${fresh.id}: ${err.message}`);
+  }
+  // Verified-correction probe discipline (codex GH r4 P1), mirrored from
+  // BOTH offer paths (cross-sell report + portal offer): only a USABLE
+  // lookup result carries staff's verified overrides folded in, so record
+  // whether one came back. When none does — a miss, a payload the resolver
+  // rejects (global verify flag), or no lookup at all — the price falls
+  // back to stored fields + the accepted-estimate seed, both OLDER than a
+  // technician's verified correction. Probed below, after the resolve.
+  const providedLookup = 'propertyLookup' in deps ? deps.propertyLookup : crossSell.cacheOnlyPropertyLookup;
+  const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+  let lookupProducedResult = false;
+  const trackedLookup = typeof providedLookup === 'function'
+    ? async (address) => {
+      const found = await providedLookup(address);
+      if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
+      return found;
+    }
+    : providedLookup;
+  const propertyContext = await pricingAi.resolvePropertyContext({
+    customer: fresh,
+    turfProfile,
+    propertyLookup: trackedLookup,
+    propertySeed,
+  });
+  // Commercial re-check on the RESOLVED type (codex pre-push P0, same as
+  // the offer paths' post-resolve re-check): the stored column can be
+  // blank/stale while the cached lookup or the accepted-estimate seed
+  // classified the property commercial — that resolution must refuse,
+  // not price through residential defaults.
+  assertNotCommercial({ propertyType: propertyContext?.propertyInput?.propertyType }, 'resolved');
+  const missing = pricingAi.missingPropertyFor(toPrice, propertyContext);
+  if (missing) {
+    throw new RestartUnavailableError('pricing_unavailable', 'We need a property measurement on file before we can price this online.');
+  }
+  // No lookup result means any verified correction on this address was NOT
+  // applied to the price. FAIL CLOSED, same as the offer paths' demote: an
+  // unreadable probe is not evidence that no corrections exist, and a
+  // correction on file makes this the priced-by-hand 409 instead of an
+  // exact price on a fact staff already fixed.
+  if (!lookupProducedResult) {
+    let correctionsUnapplied = false;
+    try {
+      const probe = deps.hasVerifiedOverrides
+        || require('../property-lookup/lookup-cache').hasVerifiedOverrides;
+      correctionsUnapplied = await probe(pricingAi.addressForCustomer(fresh));
+    } catch (err) {
+      correctionsUnapplied = true;
+      logger.warn(`[${logTag}] verified-override probe failed for ${fresh.id} — refusing: ${err.message}`);
+    }
+    if (correctionsUnapplied) {
+      throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
+    }
+  }
+
+  const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
+  const services = {};
+  for (const key of toPrice) {
+    const option = optionFor(key, pricingAi);
+    if (!option) continue;
+    Object.assign(services, pricingAi.optionServices(option, context));
+  }
+  if (!Object.keys(services).length) {
+    throw new RestartUnavailableError('pricing_unavailable', 'We could not price this plan online.');
+  }
+
+  const estimateData = {
+    engineInputs: { ...propertyContext.propertyInput, services },
+    // No follow-up / engagement automation may ever message the customer
+    // about an estimate they asked for and are looking at (click-mint
+    // doctrine; enforced centrally in estimate-engagement-engine).
+    noEngagementAutomation: true,
+    [estimateBlock.key]: estimateBlock.value,
+  };
+  // priorQualifyingServices from the SERVER-derived residual set —
+  // normally empty for a cancelled customer, so the engine prices at
+  // today's list; a family they somehow still hold prices the restart at
+  // the combined tier instead of standalone. Already family-canonical.
+  const priorQualifyingServices = [...ownedFamilies];
+  // Persist the qualifiers WITH the inputs (click-mint pattern, codex GH
+  // r8 P1): buildEstimateSendSnapshot replays engineInputs through
+  // extractEngineInputs, which restores combined-tier context only from
+  // estimate_data.priorQualifyingServices — omitting them recomputes the
+  // partial-residual case standalone and fails the totals-match check.
+  if (priorQualifyingServices.length) estimateData.priorQualifyingServices = priorQualifyingServices;
+  const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
+    priorQualifyingServices,
+    recurringCustomer: priorQualifyingServices.length > 0,
+  });
+  if (!recomputed?.recomputed) {
+    throw new Error(`${logTag} recompute failed (${recomputed?.reason || 'unknown'})`);
+  }
+
+  // FAIL CLOSED on review markers, the same demotion the offer path's
+  // optionIsPriceable applies: an engine result flagged for on-site
+  // verification, manual review, or low confidence — or a seed whose
+  // source estimate carried its own verification markers — never becomes
+  // a customer-visible price. The customer gets the priced-by-hand 409.
+  const raw = recomputed.rawEngineResult || {};
+  // The CANONICAL review predicates (draft-builder, same trio proposal
+  // generation gates on — codex GH r12 P1): a hand-rolled subset missed
+  // heuristic turf BASES (plausibleMaxTurfCap reports MEDIUM confidence
+  // yet means "capped at the parcel's plausible maximum") and the other
+  // review markers lineRequiresReview covers (requiresMeasurement,
+  // manualReviewReasons, the zero-tree underquote, …).
+  const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
+  const flaggedLine = (raw.lineItems || []).some((l) => l && (
+    lineRequiresReview(l)
+    || lineHasHeuristicTurf(l)
+    || String(l.pricingConfidence || '').toLowerCase() === 'low'
+  ));
+  if (flaggedLine
+    || (Array.isArray(raw.fieldVerify) && raw.fieldVerify.length > 0)
+    || propertySeed?.requiresFieldVerification === true) {
+    throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
+  }
+
+  estimateData.result = recomputed.serverResult;
+  if (recomputed.pestPricingVersion && estimateData.engineInputs.services.pest
+    && typeof estimateData.engineInputs.services.pest === 'object') {
+    estimateData.engineInputs.services.pest.version = recomputed.pestPricingVersion;
+  }
+
+  const totals = recomputed.serverTotals || {};
+  const monthlyTotal = Number(totals.monthlyTotal || 0);
+  const annualTotal = Number(totals.annualTotal || 0) || monthlyTotal * 12;
+  const onetimeTotal = Number(totals.onetimeTotal || 0);
+  const serverTier = recomputed.rawEngineResult?.waveGuard?.tier
+    || recomputed.rawEngineResult?.waveGuard?.label || null;
+  // Source-specific offer check on the SERVER's own totals (plan_start: the
+  // price the customer was shown must still be today's price).
+  if (assertOffer) assertOffer({ monthlyTotal, annualTotal, onetimeTotal });
+
+  // Reuse decision — only NOW, with today's property context resolved,
+  // the commercial / verified-override / review-marker gates passed, and
+  // TODAY's recompute in hand (codex pre-push P0): a live quote is handed
+  // back only when it names exactly today's eligible families AND today's
+  // totals land on its frozen dollars. Anything else — price-config
+  // drift, corrected measurements, a changed scope — retires the lineage
+  // and mints fresh (owner ruling: restart ALWAYS reprices at the
+  // current price; idempotent button, one honorable price at a time).
+  const live = liveRestartEstimate(priorRows, nowDate);
+  if (live) {
+    const liveData = parseJson(live.estimate_data, {});
+    const cents = (v) => Math.round(Number(v || 0) * 100);
+    // Full-offer fingerprint, not just the three aggregates (codex GH r9
+    // P1): offsetting price changes across families can keep the totals
+    // identical while per-service application prices or the default
+    // option drifted — and acceptance converts the STORED estimate_data,
+    // so reuse requires the stored offer to EQUAL today's recompute:
+    // engine inputs, qualifiers, and the full server result.
+    const offerFingerprint = (data) => stableStringify({
+      engineInputs: data?.engineInputs ?? null,
+      priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
+      result: data?.result ?? null,
+    });
+    if (matchesLive(liveData)
+      && cents(monthlyTotal) === cents(live.monthly_total)
+      && cents(annualTotal) === cents(live.annual_total)
+      && cents(onetimeTotal) === cents(live.onetime_total)
+      && offerFingerprint(liveData) === offerFingerprint(estimateData)) {
+      return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
+    }
+  }
+  // Mid-delivery lineage refuses the mint FIRST (codex GH r19 P0 — the
+  // same guard click-estimate-mint applies): an operator send claims the
+  // row 'sending' and its finalization does not reject an archived row,
+  // so archiving here would let the provider deliver a token we just
+  // killed; a 'scheduled' send would be silently retired before its
+  // worker runs. Query-shaped like the archive below so no straggler
+  // hides past the limit-10 reuse read. A crashed 'sending' claim
+  // (expiry window lapsed) is dead and archives normally —
+  // priorMintStillLive draws the same live/stale line the click-mint
+  // uses. Sends finish in seconds; the customer's next tap proceeds.
+  const { priorMintStillLive } = require('../service-report/click-estimate-mint');
+  const midDelivery = (await trx('estimates')
+    .where({ customer_id: fresh.id, source })
+    .whereNull('archived_at')
+    .whereIn('status', ['sending', 'scheduled'])
+    .select('id', 'status', 'archived_at', 'expires_at'))
+    .find((row) => priorMintStillLive(row, nowDate));
+  if (midDelivery) {
+    throw new RestartUnavailableError('delivery_in_flight', 'This quote is on its way to you right now — give it a moment, then try again.');
+  }
+  // Minting a replacement: archive the WHOLE unaccepted restart lineage
+  // first — an EXPIRED restart quote left unarchived stays revivable for
+  // seven days through /extension-request (restart mints stamp sent_at),
+  // which would put an older price or cancellation scope back in the wild
+  // beside the new quote (codex GH r6 P1). Query-shaped (not the limit-10
+  // id list) so no straggler row survives; accepted rows are history and
+  // stay.
+  await trx('estimates')
+    .where({ customer_id: fresh.id, source })
+    .whereNull('archived_at')
+    .whereNot('status', 'accepted')
+    .update({ archived_at: nowDate, updated_at: nowDate });
+
+  const token = randomBytes(16).toString('hex');
+  const [created] = await trx('estimates').insert({
+    estimate_data: JSON.stringify(estimateData),
+    address: pricingAi.addressForCustomer(fresh) || null,
+    customer_id: fresh.id,
+    customer_name: `${fresh.first_name || ''} ${fresh.last_name || ''}`.trim() || null,
+    customer_phone: fresh.phone || null,
+    customer_email: fresh.email || null,
+    monthly_total: monthlyTotal,
+    annual_total: annualTotal,
+    onetime_total: onetimeTotal,
+    waveguard_tier: serverTier,
+    token,
+    expires_at: persistence.estimateExpiresAt(now),
+    notes: null,
+    // Publish without delivery (click-mint pattern): viewable + acceptable
+    // now, every follow-up flag pre-burned.
+    status: 'sent',
+    sent_at: nowDate,
+    followup_unviewed_sent: true,
+    followup_viewed_sent: true,
+    followup_final_sent: true,
+    followup_expiring_sent: true,
+    source,
+    service_interest: families.map((f) => FAMILY_LABELS[f] || f).join(' + '),
+    category: fresh.property_type === 'commercial' ? 'COMMERCIAL' : 'RESIDENTIAL',
+    pricing_authority: 'SERVER',
+    server_computed_price: annualTotal > 0 ? annualTotal : null,
+    ...(typeof recomputed.serverResult?.engineVersion === 'string'
+      ? { pricing_version: recomputed.serverResult.engineVersion.slice(0, 80) }
+      : {}),
+  }).returning('*');
+
+  // Freeze the send snapshot so the public page replays the shown price
+  // instead of live config — a snapshot that failed to freeze is a
+  // publication failure (sibling-publication rule), never a warning.
+  const withSnapshot = await buildEstimateSendSnapshot(created, now);
+  if (!withSnapshot?.sendSnapshot || withSnapshot.sendSnapshot.pricingBundleError) {
+    throw new Error(`${logTag} send snapshot did not freeze pricing${withSnapshot?.sendSnapshot?.pricingBundleError ? `: ${withSnapshot.sendSnapshot.pricingBundleError}` : ''}`);
+  }
+  if (!pricingBundleMatchesEstimateTotals(withSnapshot.sendSnapshot.pricingBundle, created)) {
+    throw new Error(`${logTag} send snapshot does not match the minted totals`);
+  }
+  await trx('estimates').where({ id: created.id }).update({
+    estimate_data: JSON.stringify(withSnapshot),
+    updated_at: nowDate,
+  });
+
+  // Audit trail on the customer's timeline — no bell, no customer send.
+  // NOT swallowed: a failed statement aborts the whole Postgres
+  // transaction, so "tolerating" it would turn the COMMIT into a silent
+  // ROLLBACK while we still hand back a URL for an estimate that no
+  // longer exists. The mint fails atomically instead.
+  await trx('customer_interactions').insert({
+    customer_id: fresh.id,
+    interaction_type: 'note',
+    ...note(created.id),
+  });
+
+  logger.info(`[${logTag}] minted estimate ${created.id} for customer ${fresh.id} (${families.join(',')} ${logDetail})`);
+  return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };
+}
+
 async function mintRestartEstimate({ customer, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {} }) {
   if (!customer || !customer.id) throw new Error('mintRestartEstimate requires a customer row');
-  const persistence = deps.persistence || require('../admin-estimate-persistence');
-  const pricingAi = deps.pricingAi || require('../customer-pricing-ai');
-  const { pricingBundleMatchesEstimateTotals } = deps.bundleUtils || require('../estimate-pricing-bundle-utils');
-  // Route adapter, lazy for the same service→route load-order reason the
-  // click-mint cites.
-  const buildEstimateSendSnapshot = deps.buildEstimateSendSnapshot
-    || require('../../routes/admin-estimates').buildEstimateSendSnapshot;
+  const mintDeps = resolveMintDeps(deps);
   const dbh = deps.db || db;
   const nowDate = now();
 
@@ -498,28 +891,8 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
       throw new RestartUnavailableError('not_cancelled', 'This account is not cancelled.');
     }
 
-    // Commercial properties never get an online restart price (codex
-    // pre-push P0 — same doctrine as BOTH offer surfaces, cross-sell
-    // report + portal offer: the engine refuses real prices there and
-    // commercial expansion is a proposal conversation; variantsForService
-    // below only knows residential defaults). Checked on the STORED type
-    // here, BEFORE any reuse or mint, and re-checked on the RESOLVED type
-    // after the property context is built — a cached lookup classifying
-    // the property commercial must refuse too. FAIL CLOSED: a check that
-    // cannot be evaluated refuses.
-    const isCommercial = deps.isCommercialProperty
-      || require('../pricing-engine/commercial-helpers').isCommercialProperty;
-    const refuseCommercial = () => new RestartUnavailableError('pricing_unavailable', 'This restart needs to be set up by hand — please call or text us and we will take care of it.');
-    const assertNotCommercial = (property, label) => {
-      let commercial = true;
-      try {
-        commercial = isCommercial(property);
-      } catch (err) {
-        logger.warn(`[plan-restart] commercial check (${label}) failed for ${fresh.id} — refusing: ${err.message}`);
-        throw refuseCommercial();
-      }
-      if (commercial) throw refuseCommercial();
-    };
+    const logTag = 'plan-restart';
+    const assertNotCommercial = makeCommercialGuard(fresh, deps, { logTag, handMessage: HAND_PRICED_RESTART });
     assertNotCommercial({ propertyType: fresh.property_type }, 'stored');
 
     const { families, caseId, requestId, source } = await cancelledFamiliesFor(fresh.id, trx);
@@ -540,357 +913,153 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
     const owned = new Set(ownedFamilies.map(pricingKeyFor));
     // The families this mint may actually quote: cancelled minus residual.
     const eligibleFamilies = families.filter((f) => !owned.has(pricingKeyFor(f)));
-    const toPrice = eligibleFamilies.map(pricingKeyFor);
-    if (!toPrice.length) {
+    if (!eligibleFamilies.length) {
       throw new RestartUnavailableError('nothing_to_restart', 'Those services are already active on this account.');
     }
 
-    // Single-premises proof BEFORE any URL is handed out (codex GH r4 P1):
-    // the cancelled-family and residual queries above are scoped by
-    // customer_id alone, but the estimate is priced and addressed at the
-    // single primary street — a family cancelled at a SECONDARY premises
-    // would otherwise be quoted at the primary property's measurements.
-    // Same proof the portal offer runs (customerHasOnlyPrimaryPremises,
-    // cross-sell): a multi-premises profile — or a proof that cannot be
-    // evaluated, a missing primary street, or a street without provable
-    // locality — is the priced-by-hand 409, never an online price.
-    const crossSell = deps.crossSell || require('../service-report/cross-sell');
-    const linkage = require('../estimate-property-linkage');
-    const primaryStreet = linkage.normalizedStampedStreet(fresh.address_line1, fresh.address_line2, fresh.city, fresh.zip);
-    let singlePremises = false;
-    try {
-      const premisesProof = deps.customerHasOnlyPrimaryPremises
-        || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
-      singlePremises = Boolean(primaryStreet)
-        && !linkage.scopeKeyLacksLocality(primaryStreet)
-        && await premisesProof(trx, fresh.id, fresh, primaryStreet);
-    } catch (err) {
-      logger.warn(`[plan-restart] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
-      singlePremises = false;
-    }
-    if (!singlePremises) {
-      throw new RestartUnavailableError('pricing_unavailable', 'This restart needs to be set up by hand — please call or text us and we will take care of it.');
-    }
-
-    // Any prior lineage rows — the reuse decision itself is deferred until
-    // TODAY's inputs have been resolved and priced (below): reusing here
-    // would hand back a quote the current property context no longer
-    // supports (codex pre-push P0 — a corrected measurement, a cache/
-    // override update, or a commercial reclassification since mint).
-    const priorRows = await trx('estimates')
-      .where({ customer_id: fresh.id, source: SOURCE })
-      .whereNull('archived_at')
-      .orderBy('created_at', 'desc')
-      .limit(10);
-
-    // Property context: profile first, then the SAME cache-only lookup +
-    // accepted-estimate seed discipline the portal offer surfaces price
-    // under (cross-sell/one-tap). No LIVE lookup spend from a restart tap —
-    // a cached lookup row or a prior accepted estimate for THIS street
-    // supplies the footprint the stored profile lacks.
-    let propertySeed = null;
-    try {
-      // Savepoint (codex GH r10 P2): the seed is best-effort, but a
-      // statement error raised on the OUTER trx aborts the whole mint
-      // ("current transaction is aborted" on the very next query) — the
-      // nested transaction scopes the rollback to the lookup so the mint
-      // continues on profile/cache evidence as intended.
-      propertySeed = await trx.transaction((sp) => crossSell.loadEstimateSeed(sp, fresh.id, primaryStreet));
-    } catch (err) {
-      logger.warn(`[plan-restart] estimate property seed skipped for ${fresh.id}: ${err.message}`);
-    }
-    // Savepoint-isolated like the seed and prepay lookups (codex GH r23
-    // P2): loadTurfProfile's own safeSelect catch returns null on a pg
-    // statement error, but the OUTER trx would already be aborted — the
-    // mint could not continue on the property/cache/seed fallbacks it
-    // documents and would 500 on the next transactional query. A null
-    // profile from a rolled-back savepoint degrades exactly as intended.
-    let turfProfile = null;
-    try {
-      turfProfile = await trx.transaction((sp) => pricingAi.loadTurfProfile(sp, fresh.id));
-    } catch (err) {
-      logger.warn(`[plan-restart] turf profile skipped for ${fresh.id}: ${err.message}`);
-    }
-    // Verified-correction probe discipline (codex GH r4 P1), mirrored from
-    // BOTH offer paths (cross-sell report + portal offer): only a USABLE
-    // lookup result carries staff's verified overrides folded in, so record
-    // whether one came back. When none does — a miss, a payload the resolver
-    // rejects (global verify flag), or no lookup at all — the price falls
-    // back to stored fields + the accepted-estimate seed, both OLDER than a
-    // technician's verified correction. Probed below, after the resolve.
-    const providedLookup = 'propertyLookup' in deps ? deps.propertyLookup : crossSell.cacheOnlyPropertyLookup;
-    const { hasGlobalVerifyFlag } = require('../lookup-confidence');
-    let lookupProducedResult = false;
-    const trackedLookup = typeof providedLookup === 'function'
-      ? async (address) => {
-        const found = await providedLookup(address);
-        if (found && !hasGlobalVerifyFlag(found.enriched || {})) lookupProducedResult = true;
-        return found;
-      }
-      : providedLookup;
-    const propertyContext = await pricingAi.resolvePropertyContext({
-      customer: fresh,
-      turfProfile,
-      propertyLookup: trackedLookup,
-      propertySeed,
-    });
-    // Commercial re-check on the RESOLVED type (codex pre-push P0, same as
-    // the offer paths' post-resolve re-check): the stored column can be
-    // blank/stale while the cached lookup or the accepted-estimate seed
-    // classified the property commercial — that resolution must refuse,
-    // not price through residential defaults.
-    assertNotCommercial({ propertyType: propertyContext?.propertyInput?.propertyType }, 'resolved');
-    const missing = pricingAi.missingPropertyFor(toPrice, propertyContext);
-    if (missing) {
-      throw new RestartUnavailableError('pricing_unavailable', 'We need a property measurement on file before we can price this online.');
-    }
-    // No lookup result means any verified correction on this address was NOT
-    // applied to the price. FAIL CLOSED, same as the offer paths' demote: an
-    // unreadable probe is not evidence that no corrections exist, and a
-    // correction on file makes this the priced-by-hand 409 instead of an
-    // exact price on a fact staff already fixed.
-    if (!lookupProducedResult) {
-      let correctionsUnapplied = false;
-      try {
-        const probe = deps.hasVerifiedOverrides
-          || require('../property-lookup/lookup-cache').hasVerifiedOverrides;
-        correctionsUnapplied = await probe(pricingAi.addressForCustomer(fresh));
-      } catch (err) {
-        correctionsUnapplied = true;
-        logger.warn(`[plan-restart] verified-override probe failed for ${fresh.id} — refusing: ${err.message}`);
-      }
-      if (correctionsUnapplied) {
-        throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
-      }
-    }
-
-    const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
-    const services = {};
-    for (const key of toPrice) {
-      const [option] = pricingAi.variantsForService(key, '', true);
-      if (!option) continue;
-      Object.assign(services, pricingAi.optionServices(option, context));
-    }
-    if (!Object.keys(services).length) {
-      throw new RestartUnavailableError('pricing_unavailable', 'We could not price this plan online.');
-    }
-
-    const estimateData = {
-      engineInputs: { ...propertyContext.propertyInput, services },
-      // No follow-up / engagement automation may ever message the customer
-      // about an estimate they asked for and are looking at (click-mint
-      // doctrine; enforced centrally in estimate-engagement-engine).
-      noEngagementAutomation: true,
-      planRestart: {
-        // The QUOTED families (reuse compares against these); the raw
-        // cancellation scope rides alongside for the audit trail.
-        families: eligibleFamilies,
-        cancelledFamilies: families,
-        familiesSource: source,
-        cancellationCaseId: caseId,
-        // Attempt identity for the accept path (codex GH r14 P1): a
-        // reactivate-then-recancel of the SAME families passes every
-        // set/churn/residual check, so the accept must also prove the
-        // quote belongs to the CURRENT attempt, not a prior one whose
-        // frozen price skipped the required recompute.
-        cancellationRequestId: requestId,
-        mintedAt: nowDate.toISOString(),
-      },
-    };
-    // priorQualifyingServices from the SERVER-derived residual set —
-    // normally empty for a cancelled customer, so the engine prices at
-    // today's list; a family they somehow still hold prices the restart at
-    // the combined tier instead of standalone. Already family-canonical.
-    const priorQualifyingServices = [...ownedFamilies];
-    // Persist the qualifiers WITH the inputs (click-mint pattern, codex GH
-    // r8 P1): buildEstimateSendSnapshot replays engineInputs through
-    // extractEngineInputs, which restores combined-tier context only from
-    // estimate_data.priorQualifyingServices — omitting them recomputes the
-    // partial-residual case standalone and fails the totals-match check.
-    if (priorQualifyingServices.length) estimateData.priorQualifyingServices = priorQualifyingServices;
-    const recomputed = await persistence.serverRecomputeFromEstimateData(estimateData, {
-      priorQualifyingServices,
-      recurringCustomer: priorQualifyingServices.length > 0,
-    });
-    if (!recomputed?.recomputed) {
-      throw new Error(`plan-restart recompute failed (${recomputed?.reason || 'unknown'})`);
-    }
-
-    // FAIL CLOSED on review markers, the same demotion the offer path's
-    // optionIsPriceable applies: an engine result flagged for on-site
-    // verification, manual review, or low confidence — or a seed whose
-    // source estimate carried its own verification markers — never becomes
-    // a customer-visible price. The customer gets the priced-by-hand 409.
-    const raw = recomputed.rawEngineResult || {};
-    // The CANONICAL review predicates (draft-builder, same trio proposal
-    // generation gates on — codex GH r12 P1): a hand-rolled subset missed
-    // heuristic turf BASES (plausibleMaxTurfCap reports MEDIUM confidence
-    // yet means "capped at the parcel's plausible maximum") and the other
-    // review markers lineRequiresReview covers (requiresMeasurement,
-    // manualReviewReasons, the zero-tree underquote, …).
-    const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
-    const flaggedLine = (raw.lineItems || []).some((l) => l && (
-      lineRequiresReview(l)
-      || lineHasHeuristicTurf(l)
-      || String(l.pricingConfidence || '').toLowerCase() === 'low'
-    ));
-    if (flaggedLine
-      || (Array.isArray(raw.fieldVerify) && raw.fieldVerify.length > 0)
-      || propertySeed?.requiresFieldVerification === true) {
-      throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
-    }
-
-    estimateData.result = recomputed.serverResult;
-    if (recomputed.pestPricingVersion && estimateData.engineInputs.services.pest
-      && typeof estimateData.engineInputs.services.pest === 'object') {
-      estimateData.engineInputs.services.pest.version = recomputed.pestPricingVersion;
-    }
-
-    const totals = recomputed.serverTotals || {};
-    const monthlyTotal = Number(totals.monthlyTotal || 0);
-    const annualTotal = Number(totals.annualTotal || 0) || monthlyTotal * 12;
-    const onetimeTotal = Number(totals.onetimeTotal || 0);
-    const serverTier = recomputed.rawEngineResult?.waveGuard?.tier
-      || recomputed.rawEngineResult?.waveGuard?.label || null;
-
-    // Reuse decision — only NOW, with today's property context resolved,
-    // the commercial / verified-override / review-marker gates passed, and
-    // TODAY's recompute in hand (codex pre-push P0): a live quote is handed
-    // back only when it names exactly today's eligible families AND today's
-    // totals land on its frozen dollars. Anything else — price-config
-    // drift, corrected measurements, a changed scope — retires the lineage
-    // and mints fresh (owner ruling: restart ALWAYS reprices at the
-    // current price; idempotent button, one honorable price at a time).
-    const live = liveRestartEstimate(priorRows, nowDate);
-    if (live) {
-      const liveData = parseJson(live.estimate_data, {});
-      const liveFamilies = liveData?.planRestart?.families;
-      const sameScope = Array.isArray(liveFamilies)
-        && liveFamilies.length === eligibleFamilies.length
-        && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
-      const cents = (v) => Math.round(Number(v || 0) * 100);
-      // Same ATTEMPT, not just same scope (codex GH r16 P1): after a
-      // reactivate-then-recancel of the same families, the accept-time
-      // identity check refuses a prior attempt's token — reusing it here
-      // would hand back the same unusable token on every tap. A live quote
-      // from another attempt falls through to the archive + fresh mint.
-      const sameAttempt = String(liveData?.planRestart?.cancellationCaseId ?? '') === String(caseId ?? '')
-        && String(liveData?.planRestart?.cancellationRequestId ?? '') === String(requestId ?? '');
-      // Full-offer fingerprint, not just the three aggregates (codex GH r9
-      // P1): offsetting price changes across families can keep the totals
-      // identical while per-service application prices or the default
-      // option drifted — and acceptance converts the STORED estimate_data,
-      // so reuse requires the stored offer to EQUAL today's recompute:
-      // engine inputs, qualifiers, and the full server result.
-      const offerFingerprint = (data) => stableStringify({
-        engineInputs: data?.engineInputs ?? null,
-        priorQualifyingServices: Array.isArray(data?.priorQualifyingServices) ? [...data.priorQualifyingServices].sort() : [],
-        result: data?.result ?? null,
-      });
-      if (sameScope
-        && sameAttempt
-        && cents(monthlyTotal) === cents(live.monthly_total)
-        && cents(annualTotal) === cents(live.annual_total)
-        && cents(onetimeTotal) === cents(live.onetime_total)
-        && offerFingerprint(liveData) === offerFingerprint(estimateData)) {
-        return { estimateId: live.id, token: live.token, url: `/estimate/${live.token}`, reused: true };
-      }
-    }
-    // Mid-delivery lineage refuses the mint FIRST (codex GH r19 P0 — the
-    // same guard click-estimate-mint applies): an operator send claims the
-    // row 'sending' and its finalization does not reject an archived row,
-    // so archiving here would let the provider deliver a token we just
-    // killed; a 'scheduled' send would be silently retired before its
-    // worker runs. Query-shaped like the archive below so no straggler
-    // hides past the limit-10 reuse read. A crashed 'sending' claim
-    // (expiry window lapsed) is dead and archives normally —
-    // priorMintStillLive draws the same live/stale line the click-mint
-    // uses. Sends finish in seconds; the customer's next tap proceeds.
-    const { priorMintStillLive } = require('../service-report/click-estimate-mint');
-    const midDelivery = (await trx('estimates')
-      .where({ customer_id: fresh.id, source: SOURCE })
-      .whereNull('archived_at')
-      .whereIn('status', ['sending', 'scheduled'])
-      .select('id', 'status', 'archived_at', 'expires_at'))
-      .find((row) => priorMintStillLive(row, nowDate));
-    if (midDelivery) {
-      throw new RestartUnavailableError('delivery_in_flight', 'This quote is on its way to you right now — give it a moment, then try again.');
-    }
-    // Minting a replacement: archive the WHOLE unaccepted restart lineage
-    // first — an EXPIRED restart quote left unarchived stays revivable for
-    // seven days through /extension-request (restart mints stamp sent_at),
-    // which would put an older price or cancellation scope back in the wild
-    // beside the new quote (codex GH r6 P1). Query-shaped (not the limit-10
-    // id list) so no straggler row survives; accepted rows are history and
-    // stay.
-    await trx('estimates')
-      .where({ customer_id: fresh.id, source: SOURCE })
-      .whereNull('archived_at')
-      .whereNot('status', 'accepted')
-      .update({ archived_at: nowDate, updated_at: nowDate });
-
-    const token = randomBytes(16).toString('hex');
-    const [created] = await trx('estimates').insert({
-      estimate_data: JSON.stringify(estimateData),
-      address: pricingAi.addressForCustomer(fresh) || null,
-      customer_id: fresh.id,
-      customer_name: `${fresh.first_name || ''} ${fresh.last_name || ''}`.trim() || null,
-      customer_phone: fresh.phone || null,
-      customer_email: fresh.email || null,
-      monthly_total: monthlyTotal,
-      annual_total: annualTotal,
-      onetime_total: onetimeTotal,
-      waveguard_tier: serverTier,
-      token,
-      expires_at: persistence.estimateExpiresAt(now),
-      notes: null,
-      // Publish without delivery (click-mint pattern): viewable + acceptable
-      // now, every follow-up flag pre-burned.
-      status: 'sent',
-      sent_at: nowDate,
-      followup_unviewed_sent: true,
-      followup_viewed_sent: true,
-      followup_final_sent: true,
-      followup_expiring_sent: true,
+    return mintPricedEstimate({
+      trx,
+      fresh,
       source: SOURCE,
-      service_interest: eligibleFamilies.map((f) => FAMILY_LABELS[f] || f).join(' + '),
-      category: fresh.property_type === 'commercial' ? 'COMMERCIAL' : 'RESIDENTIAL',
-      pricing_authority: 'SERVER',
-      server_computed_price: annualTotal > 0 ? annualTotal : null,
-      ...(typeof recomputed.serverResult?.engineVersion === 'string'
-        ? { pricing_version: recomputed.serverResult.engineVersion.slice(0, 80) }
-        : {}),
-    }).returning('*');
-
-    // Freeze the send snapshot so the public page replays the shown price
-    // instead of live config — a snapshot that failed to freeze is a
-    // publication failure (sibling-publication rule), never a warning.
-    const withSnapshot = await buildEstimateSendSnapshot(created, now);
-    if (!withSnapshot?.sendSnapshot || withSnapshot.sendSnapshot.pricingBundleError) {
-      throw new Error(`plan-restart send snapshot did not freeze pricing${withSnapshot?.sendSnapshot?.pricingBundleError ? `: ${withSnapshot.sendSnapshot.pricingBundleError}` : ''}`);
-    }
-    if (!pricingBundleMatchesEstimateTotals(withSnapshot.sendSnapshot.pricingBundle, created)) {
-      throw new Error('plan-restart send snapshot does not match the minted totals');
-    }
-    await trx('estimates').where({ id: created.id }).update({
-      estimate_data: JSON.stringify(withSnapshot),
-      updated_at: nowDate,
+      families: eligibleFamilies,
+      ownedFamilies,
+      optionFor: (key, pricingAi) => pricingAi.variantsForService(key, '', true)[0],
+      estimateBlock: {
+        key: 'planRestart',
+        value: {
+          // The QUOTED families (reuse compares against these); the raw
+          // cancellation scope rides alongside for the audit trail.
+          families: eligibleFamilies,
+          cancelledFamilies: families,
+          familiesSource: source,
+          cancellationCaseId: caseId,
+          // Attempt identity for the accept path (codex GH r14 P1): a
+          // reactivate-then-recancel of the SAME families passes every
+          // set/churn/residual check, so the accept must also prove the
+          // quote belongs to the CURRENT attempt, not a prior one whose
+          // frozen price skipped the required recompute.
+          cancellationRequestId: requestId,
+          mintedAt: nowDate.toISOString(),
+        },
+      },
+      matchesLive: (liveData) => {
+        const liveFamilies = liveData?.planRestart?.families;
+        const sameScope = Array.isArray(liveFamilies)
+          && liveFamilies.length === eligibleFamilies.length
+          && [...liveFamilies].sort().join(',') === [...eligibleFamilies].sort().join(',');
+        // Same ATTEMPT, not just same scope (codex GH r16 P1): after a
+        // reactivate-then-recancel of the same families, the accept-time
+        // identity check refuses a prior attempt's token — reusing it here
+        // would hand back the same unusable token on every tap. A live quote
+        // from another attempt falls through to the archive + fresh mint.
+        const sameAttempt = String(liveData?.planRestart?.cancellationCaseId ?? '') === String(caseId ?? '')
+          && String(liveData?.planRestart?.cancellationRequestId ?? '') === String(requestId ?? '');
+        return sameScope && sameAttempt;
+      },
+      note: (estimateId) => ({
+        subject: `Restart estimate requested from portal — ${eligibleFamilies.map((f) => FAMILY_LABELS[f] || f).join(', ')}`,
+        body: `Customer opened a restart estimate (${estimateId}) priced at today's rates. Accepting it restarts the plan.`,
+      }),
+      logTag,
+      logDetail: `via ${source}`,
+      handMessage: HAND_PRICED_RESTART,
+      assertNotCommercial,
+      nowDate,
+      now,
+      randomBytes,
+      deps,
+      mintDeps,
     });
+  });
+}
 
-    // Audit trail on the customer's timeline — no bell, no customer send.
-    // NOT swallowed: a failed statement aborts the whole Postgres
-    // transaction, so "tolerating" it would turn the COMMIT into a silent
-    // ROLLBACK while we still hand back a URL for an estimate that no
-    // longer exists. The mint fails atomically instead.
-    await trx('customer_interactions').insert({
-      customer_id: fresh.id,
-      interaction_type: 'note',
-      subject: `Restart estimate requested from portal — ${eligibleFamilies.map((f) => FAMILY_LABELS[f] || f).join(', ')}`,
-      body: `Customer opened a restart estimate (${created.id}) priced at today's rates. Accepting it restarts the plan.`,
+
+// Plan start (GATE_PORTAL_PLAN_START, owner 2026-11-19) — a signed-in customer
+// with NO live recurring service prices ONE option on the portal pricing card
+// and opens a normal, server-priced estimate for it, which they book through
+// the existing public accept flow (pick a time, save a card, confirm). Same
+// mint core as restart (publish without delivery, frozen send snapshot, no
+// customer message). Members, churned accounts and anything that cannot be
+// priced online keep the request flow: every refusal is a RestartUnavailableError
+// (the route maps it to 409 { error, code }). `shownMonthly` is only COMPARED
+// with the server's own recompute (offer_changed on drift) — never persisted.
+async function mintPlanStartEstimate({
+  customer, serviceKey, optionId, shownMonthly, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
+}) {
+  if (!customer || !customer.id) throw new Error('mintPlanStartEstimate requires a customer row');
+  const notEligible = () => new RestartUnavailableError('not_eligible', 'This plan cannot be priced online right now.');
+  const shown = Number(shownMonthly);
+  if (!PLAN_START_SERVICE_KEYS.includes(serviceKey) || !Number.isFinite(shown) || !(shown > 0)) throw notEligible();
+  const mintDeps = resolveMintDeps(deps);
+  // The exact option the card showed: only a member of today's offered ladder
+  // is priced (never the generic first one, never a client-shaped option).
+  const option = mintDeps.pricingAi.variantsForService(serviceKey, '', false)
+    .find((candidate) => candidate && candidate.id === optionId);
+  if (!option) throw notEligible();
+  const family = serviceKey === 'termite' ? 'termite_bait' : serviceKey;
+  const dbh = deps.db || db;
+  const nowDate = now();
+
+  return dbh.transaction(async (trx) => {
+    // Same lock order as the restart mint and the public accept (contract §1).
+    await lockCustomerComms(trx, customer.id);
+    const fresh = await trx('customers').where({ id: customer.id }).whereNull('deleted_at').forUpdate().first();
+    // A churned account restarts; an inactive or unreadable one goes by hand.
+    if (!fresh || fresh.active === false || fresh.pipeline_stage === 'churned') throw notEligible();
+
+    const logTag = 'plan-start';
+    const assertNotCommercial = makeCommercialGuard(fresh, deps, { logTag, handMessage: HAND_PRICED_PLAN_START });
+    assertNotCommercial({ propertyType: fresh.property_type }, 'stored');
+
+    // Ownership — FAIL CLOSED, and ANY live recurring family refuses (members
+    // keep the request flow): the same residual read the accept re-runs.
+    let ownedFamilies;
+    try {
+      ownedFamilies = await ownedResidualFamilies(trx, fresh.id);
+    } catch (err) {
+      logger.warn(`[${logTag}] residual ownership lookup failed for ${fresh.id} — refusing: ${err.message}`);
+      throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
+    }
+    if (ownedFamilies.length) throw notEligible();
+
+    return mintPricedEstimate({
+      trx,
+      fresh,
+      source: PLAN_START_SOURCE,
+      families: [family],
+      ownedFamilies,
+      optionFor: () => option,
+      estimateBlock: {
+        key: 'planStart',
+        value: {
+          families: [family],
+          serviceKey,
+          optionId: option.id,
+          mintedAt: nowDate.toISOString(),
+        },
+      },
+      // Reuse only the quote for THIS option (the core adds today's-offer equality).
+      matchesLive: (liveData) => liveData?.planStart?.serviceKey === serviceKey
+        && liveData?.planStart?.optionId === option.id,
+      assertOffer: ({ monthlyTotal }) => {
+        if (Math.abs(Number(monthlyTotal) - shown) > 0.005) {
+          throw new RestartUnavailableError('offer_changed', 'The price changed since you last looked. Please check the new price.');
+        }
+      },
+      note: (estimateId) => ({
+        subject: `Plan estimate opened from portal — ${FAMILY_LABELS[family] || family}`,
+        body: `Customer opened a plan estimate (${estimateId}) priced at today's rates. Accepting it books the first visit.`,
+      }),
+      logTag,
+      logDetail: `option ${option.id}`,
+      handMessage: HAND_PRICED_PLAN_START,
+      assertNotCommercial,
+      nowDate,
+      now,
+      randomBytes,
+      deps,
+      mintDeps,
     });
-
-    logger.info(`[plan-restart] minted estimate ${created.id} for customer ${fresh.id} (${eligibleFamilies.join(',')} via ${source})`);
-    return { estimateId: created.id, token, url: `/estimate/${token}`, reused: false };
   });
 }
 
@@ -990,6 +1159,46 @@ async function assertRestartAcceptEligible(trx, estimate) {
     || !sameId(quotedAttempt?.requestId, latestAttempt.requestId)) throw changed();
 }
 
+// Plan-start accept revalidation (GATE_PORTAL_PLAN_START) — same call point and
+// locks as assertRestartAcceptEligible. The published estimate stays
+// acceptable until expiry, so under the estimate row lock re-check that the
+// account is still a plain active customer (not churned, not deleted) and owns
+// none of the quoted families (a plan added since the mint would be re-priced
+// beside its live rate). FAIL CLOSED: drift or an unreadable state is the
+// 409 the estimate page renders.
+async function assertPlanStartAcceptEligible(trx, estimate) {
+  const refuse = (message) => {
+    const err = new Error(message);
+    err.status = 409;
+    err.code = 'PLAN_START_STATE_CHANGED';
+    return err;
+  };
+  let quoted;
+  let fresh;
+  let ownedFamilies;
+  try {
+    const row = await trx('estimates').where({ id: estimate.id }).first('customer_id', 'estimate_data');
+    const planStart = parseJson(row?.estimate_data, {})?.planStart;
+    quoted = Array.isArray(planStart?.families) ? planStart.families : null;
+    // Same lock order as the restart accept: comms advisory key, then the
+    // customers row FOR UPDATE, then the reads.
+    await lockCustomerComms(trx, row?.customer_id);
+    fresh = row?.customer_id
+      ? await trx('customers').where({ id: row.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'active', 'pipeline_stage')
+      : null;
+    ownedFamilies = fresh ? await ownedResidualFamilies(trx, fresh.id) : [];
+  } catch (err) {
+    logger.warn(`[plan-start] accept revalidation could not read state for estimate ${estimate.id} — refusing: ${err.message}`);
+    throw refuse('We could not re-verify this estimate just now — please try again in a moment.');
+  }
+  const changed = () => refuse('This account changed since this estimate was created — please go back to your portal for a current price.');
+  // A plan_start estimate without its quoted families (or its customer) is malformed — never accept it.
+  if (!quoted || !quoted.length || !fresh) throw changed();
+  if (fresh.active === false || fresh.pipeline_stage === 'churned') throw changed();
+  const owned = new Set(ownedFamilies.map(pricingKeyFor));
+  if (quoted.some((f) => owned.has(pricingKeyFor(f)))) throw changed();
+}
+
 module.exports = {
   SOURCE,
   RESTARTABLE_FAMILIES,
@@ -997,5 +1206,9 @@ module.exports = {
   cancelledFamiliesFor,
   mintRestartEstimate,
   assertRestartAcceptEligible,
+  PLAN_START_SOURCE,
+  PLAN_START_SERVICE_KEYS,
+  mintPlanStartEstimate,
+  assertPlanStartAcceptEligible,
   _test: { liveRestartEstimate, ownedResidualFamilies },
 };

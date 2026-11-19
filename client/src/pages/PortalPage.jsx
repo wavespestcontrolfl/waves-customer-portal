@@ -10985,10 +10985,17 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [error, setError] = useState('');
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
+  const [startingPlan, setStartingPlan] = useState(false);
+  const [planStartUrl, setPlanStartUrl] = useState('');
+  const planStartTimer = useRef(null);
+  useEffect(() => () => { if (planStartTimer.current) clearTimeout(planStartTimer.current); }, []);
 
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const options = result?.options || [];
   const selected = options.find((option) => option.id === selectedId) || options[0] || null;
+  // GATE_PORTAL_PLAN_START: a customer with no recurring plan books through a real estimate instead of
+  // filing a request. The server hint only offers it; the start-plan route decides.
+  const canStartPlan = result?.planStart?.available === true && Number(selected?.monthly) > 0 && selected?.manualReview !== true;
 
   const runPricing = async (nextPrompt = prompt) => {
     const cleanPrompt = String(nextPrompt || '').trim();
@@ -10996,6 +11003,9 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     setLoading(true);
     setError('');
     setRequested(false);
+    if (planStartTimer.current) clearTimeout(planStartTimer.current);
+    setPlanStartUrl('');
+    setStartingPlan(false);
     try {
       const data = await api.queryCustomerPricing(cleanPrompt);
       setResult(data);
@@ -11020,6 +11030,24 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     } finally {
       setRequesting(false);
     }
+  };
+
+  // Opens the priced estimate (pick a time, save a card there). Any refusal or error falls back to
+  // today's request, so the customer never hits a dead end.
+  const startPlan = async () => {
+    if (startingPlan || requesting || !selected) return;
+    setStartingPlan(true);
+    try {
+      const out = await api.startPlan({ serviceKey: selected.serviceKey, optionId: selected.id, shownMonthly: selected.monthly });
+      if (!out?.url) throw new Error('No estimate was returned.');
+      // Same hand-off as the cancelled-plan restart: a beat on screen, plus a link if navigation is blocked.
+      setPlanStartUrl(out.url);
+      planStartTimer.current = setTimeout(() => window.location.assign(out.url), 1500);
+      return;
+    } catch {
+      setStartingPlan(false);
+    }
+    await submitRequest();
   };
 
   const promptChips = [
@@ -11236,6 +11264,28 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
                       <Icon name="check" size={15} strokeWidth={2} /> Request sent
                     </span>
+                  ) : planStartUrl ? (
+                    <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
+                      Opening your estimate... <a href={planStartUrl} style={{ color: B.wavesBlue }}>Open it now</a>
+                    </span>
+                  ) : canStartPlan ? (
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      <button type="button" onClick={startPlan} disabled={requesting || startingPlan} data-glass-accent="" data-glass-size="primary" style={{
+                        ...primaryButton,
+                        width: compact ? '100%' : 'fit-content',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        opacity: requesting || startingPlan ? 0.65 : 1,
+                        cursor: requesting || startingPlan ? 'wait' : 'pointer',
+                      }}>
+                        <Icon name="plus" size={15} strokeWidth={2} />
+                        {requesting || startingPlan ? 'Opening...' : 'See my price and book'}
+                      </button>
+                      <div style={{ color: '#475569', fontSize: 14, lineHeight: 1.45 }}>
+                        Your estimate shows the full price and open times. Pick a time to book.
+                      </div>
+                    </div>
                   ) : (
                     <button type="button" onClick={submitRequest} disabled={requesting} data-glass-accent="" data-glass-size="primary" style={{
                       ...primaryButton,
