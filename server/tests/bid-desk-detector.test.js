@@ -513,7 +513,8 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
   });
 
   test('every solicitation type is filed; an Agency Decision, an information request or a notice is not', () => {
-    for (const type of ['Invitation to Bid', 'Request for Proposals', 'Request for Proposal', 'Invitation to Negotiate', 'Request for Quote', 'Request for Quotation', 'invitation to bid']) {
+    for (const type of ['Invitation to Bid', 'Request for Proposals', 'Request for Proposal', 'Invitation to Negotiate', 'Request for Quote', 'Request for Quotation', 'invitation to bid',
+      'State Term Contract Request for Quotes', 'Request for Statement of Qualifications', 'Request for Qualifications']) {
       expect(detectBidEmail(mfmpNotice({}, { type }))).toMatchObject({ bid: true, source: 'gov_email' });
     }
     for (const type of ['Agency Decision', 'Request for Information', 'Public Meeting', 'Notice of Intent']) {

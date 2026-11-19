@@ -457,7 +457,7 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('addendum')).toHaveLength(0);
     });
 
-    test('a second MFMP notice of one advertisement in a new thread joins the first bid, which is filed with its Close Date confirmed', async () => {
+    test('a repeat MFMP notice joins its bid in a new thread and after a decision; the day-only Close Date waits for the operator', async () => {
       // MFMP sends each notice as its own Gmail thread. Its stored header as delivered: DKIM and DMARC pass for dms.myflorida.com.
       const mfmpEmail = (threadId, receivedAt) => storeEmail({
         from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId, received_at: receivedAt,
@@ -474,13 +474,22 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(first.created).toBe(true);
       expect(await bidRow(first.bidId)).toMatchObject({
         source: 'gov_email', gc_or_agency: 'Sample Water Management District', project_title: 'ITB 99Z-001 Sample Site Preparation and Weed Control',
-        solicitation_number: 'ITB-17200', location: null, due_confirmed: true, due_source_line: 'Close Date: Oct 29, 2026',
+        solicitation_number: 'ITB-17200', location: null, due_confirmed: false, due_source_line: 'Close Date: Oct 29, 2026',
       });
       expect((await bidRow(first.bidId)).due_at.toISOString()).toBe('2026-10-30T03:59:00.000Z');
       const second = await service.ingestEmail(await mfmpEmail('t-mfmp-2', new Date(NOW.getTime() - 60000)));
       expect(second).toMatchObject({ created: false, bidId: first.bidId });
       expect(await mockPg('bid_opportunities').where({ solicitation_number: 'ITB-17200' })).toHaveLength(1);
       expect(await links(first.bidId)).toHaveLength(2);
+      // Declined, then the state sends the advertisement again: it joins the declined bid and rings nothing.
+      await mockPg('bid_opportunities').where({ id: first.bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      const third = await service.ingestEmail(await mfmpEmail('t-mfmp-3', new Date(NOW.getTime() - 30000)));
+      expect(third).toMatchObject({ created: false, bidId: first.bidId });
+      expect(await mockPg('bid_opportunities').where({ solicitation_number: 'ITB-17200' })).toHaveLength(1);
+      expect(await links(first.bidId)).toHaveLength(3);
+      expect(await bidRow(first.bidId)).toMatchObject({ status: 'no_bid' });
+      expect(rung('new')).toHaveLength(0);
     });
 
     test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {

@@ -82,9 +82,10 @@ const TRADE_WORDS = /\b(?:pests?|termites?|mosquito(?:es)?|rodents?|rats?|exterm
 const CC_NOTICE = /^Addendum Notification for (?:Bid|Quote|Proposal|RFP|RFQ|ITB|ITN)\s+(\d{2}-\d{2,5})$/i;
 const CC_ADDED = /^An addendum has been added to Charlotte County Purchasing Request for (?:Bid|Quote|Proposal)s?\s*:\s*(?:\d{6,10}\s*-\s*)?(.+?)\.?$/i;
 const CC_DIVISION = /^Charlotte County Purchasing\b/i;
-// MFMP Advertisement Type values that are a solicitation we may bid on. Agency Decision, Request for Information,
-// notices and meetings are not.
-const MFMP_SOLICITATION = /^(?:invitations? to (?:bid|negotiate)|requests? for (?:proposals?|quotes?|quotations?))$/i;
+// MFMP Advertisement Type values that are a solicitation we may bid on, as the state names them ("Invitation to Bid",
+// "State Term Contract Request for Quotes", "Request for Statement of Qualifications"). Agency Decision, Request for
+// Information, notices and meetings are not.
+const MFMP_SOLICITATION = /\b(?:invitations? to (?:bid|negotiate)|requests? for (?:proposals?|quotes?|quotations?|(?:statements? of )?qualifications))\b/i;
 const PLAIN_ADDRESS = /^[^\s@<>,;()]+@[^\s@<>,;()]+\.[a-z]{2,}$/i;
 // MFMP's Close Date is a bare day ("Dec 3, 2026"). Any other shape (a time added, another format) is not read: a date
 // prefix with its time dropped would become a confirmed deadline hours late.

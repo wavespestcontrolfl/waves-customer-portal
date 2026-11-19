@@ -95,8 +95,12 @@ const columnsFor = () => [...BID_COLUMNS, ...BID_CHECKLIST_COLUMNS];
 // ---------- one email ----------
 
 const ADDS_TO_EXISTING = new Set(['addendum', 'reminder']);
+// MFMP re-sends one advertisement as a new notice (ITB-17200 came three times in Nov 2026). Its key carries the state's
+// advertisement number, which never names new work, so a repeat joins the bid even after a decision and rings
+// nothing there (attachPatch: closed).
+const REPEAT_JOINS_DECIDED = new Set(['mfmp']);
 
-async function findBid(trx, email, groupKey, groupBase = null, kind = null) {
+async function findBid(trx, email, groupKey, groupBase = null, kind = null, template = null) {
   const thread = email.gmail_thread_id;
   if (thread) {
     const byThread = await trx('bid_opportunities')
@@ -122,7 +126,7 @@ async function findBid(trx, email, groupKey, groupBase = null, kind = null) {
   // An addendum or a reminder is never new work: with no open bid to join, one for a bid already decided joins that
   // bid (the newest with the key), so a county's addendum to a bid we declined does not file it again. It rings
   // nothing there (attachPatch: closed).
-  if (!ADDS_TO_EXISTING.has(kind)) return null;
+  if (!ADDS_TO_EXISTING.has(kind) && !REPEAT_JOINS_DECIDED.has(template)) return null;
   return (await trx('bid_opportunities').where({ group_key: groupKey }).orderBy('created_at', 'desc').first()) || null;
 }
 
@@ -143,8 +147,11 @@ async function detectWithThread(email) {
 // A date read from a provider's fixed template counts as confirmed when the bid is first
 // filed. Not history, and not a first email that is an addendum (the date may have moved). A later email still goes
 // through attachPatch, which flags a changed or late date for the operator.
+// MFMP's Close Date names a day and no hour: 23:59 is our default, not the agency's, so it stays for the operator to
+// confirm (reminders ring once it is confirmed). An unconfirmed date still closes a lapsed new bid (rules.lapsedBid).
+const DAY_ONLY_TEMPLATES = new Set(['mfmp']);
 function autoConfirmsDate(parsed, kind, historical) {
-  return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum';
+  return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum' && !DAY_ONLY_TEMPLATES.has(parsed.template);
 }
 
 async function ingestEmail(rawEmail, { historical = false, manual = false } = {}) {
@@ -164,7 +171,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
 
-    const found = await findBid(trx, email, parsed.group_key, parsed.group_base, kind);
+    const found = await findBid(trx, email, parsed.group_key, parsed.group_base, kind, parsed.template);
     // Re-read the bid under a row lock: an operator saving a date between the read and the update must not be
     // overwritten (the advisory lock only orders intake writers).
     const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;
