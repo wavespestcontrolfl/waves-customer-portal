@@ -147,6 +147,43 @@ it.each([
   }
 });
 
+it('a second start waits until the first settles: the mint archives the account\'s other live quote (codex pre-push P1)', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const assign = vi.fn();
+  const original = window.location;
+  Object.defineProperty(window, 'location', { configurable: true, value: { ...original, assign } });
+  try {
+    const LAWN = { ...OPTION, id: 'lawn-enhanced', serviceKey: 'lawn_care', label: 'Enhanced lawn care', cadence: '9 visits/year', monthly: 52, perVisit: 69.33 };
+    const settle = {};
+    api.startPlan
+      .mockReturnValueOnce(new Promise((resolve) => Object.assign(settle, { resolve })))
+      .mockResolvedValueOnce({ ok: true, url: '/estimate/lawn', estimateId: 'e2', reused: false });
+    await priceIt({ ok: true, message: 'Priced.', currentServices: [], options: [OPTION, LAWN], planStart: { optionIds: ['pest-quarterly', 'lawn-enhanced'] } });
+    fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
+    await waitFor(() => expect(api.startPlan).toHaveBeenCalledOnce());
+    const select = screen.getAllByRole('combobox').find((el) => el.querySelector('option[value="lawn-enhanced"]'));
+    fireEvent.change(select, { target: { value: 'lawn-enhanced' } });
+    // The pest start is still minting: the lawn button stays off, and a tap starts nothing.
+    const lawnStart = await screen.findByRole('button', { name: 'See my price and book' });
+    expect(lawnStart).toBeDisabled();
+    fireEvent.click(lawnStart);
+    expect(api.startPlan).toHaveBeenCalledOnce();
+    // The pest reply lands: dropped (the customer left that option), and the lawn button comes back.
+    await act(async () => { settle.resolve({ ok: true, url: '/estimate/pest', estimateId: 'e1', reused: false }); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'See my price and book' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'See my price and book' }));
+    await waitFor(() => expect(api.startPlan).toHaveBeenCalledTimes(2));
+    expect(api.startPlan).toHaveBeenLastCalledWith(expect.objectContaining({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced' }));
+    await screen.findByRole('link', { name: 'Open it now' });
+    vi.advanceTimersByTime(1600);
+    expect(assign).toHaveBeenCalledOnce();
+    expect(assign).toHaveBeenCalledWith('/estimate/lawn');
+  } finally {
+    Object.defineProperty(window, 'location', { configurable: true, value: original });
+    vi.useRealTimers();
+  }
+});
+
 it('a fallback request that lands after the customer picked another option never marks that option as sent', async () => {
   api.startPlan.mockRejectedValue(Object.assign(new Error('The price changed.'), { status: 409 }));
   const settle = {};

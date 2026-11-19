@@ -40,6 +40,8 @@ const planStartData = (tier) => ({
   noEngagementAutomation: true,
   planStart: { families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T12:00:00.000Z' },
   result: pestResult(tier),
+  // The disclosed setup fee, frozen where the accept bills it (EstimateConverter.frozenSetupFeeAmount).
+  setupFeeQuote: { amount: 99, kind: 'waveguard_membership' },
 });
 // Each row gets its own id: the page's pricing cache is keyed by estimate.
 const planStartRow = (id, estimateData, extra = {}) => ({
@@ -82,14 +84,17 @@ describe('a plan-start quote reopens on its frozen snapshot', () => {
     // the page itemizes the fee on its own line (result.oneTime.membershipFee).
     const CARD = { monthly: 37.67, perVisit: 113, dueAtStart: null, oneTime: null, setupFee: 99 };
     const { planStartQuoteMismatch } = require('../services/cancellation-resolution/restart')._test;
-    const check = (row, { bundle = frozen, shown = CARD } = {}) => planStartQuoteMismatch({
-      bundle, row, data: sentData, family: 'pest_control', shown, servesAsIs: sentSnapshotServesAsIs,
+    const check = (row, { bundle = frozen, shown = CARD, data = sentData } = {}) => planStartQuoteMismatch({
+      bundle, row, data, family: 'pest_control', shown, servesAsIs: sentSnapshotServesAsIs,
     });
     expect(frozen.oneTimeBreakdown).toMatchObject({ total: 99, items: [expect.objectContaining({ service: 'waveguard_setup', amount: 99, kind: 'charge' })] });
     expect(check(planStartRow('ps-check', sentData))).toBeNull();
     expect(check(planStartRow('ps-check-row', sentData, { onetime_total: 0 }))).toBe('one-time charges differ from the card');
     expect(check(planStartRow('ps-check-card', sentData), { shown: { ...CARD, dueAtStart: 50 } })).toBe('one-time charges differ from the card');
     expect(check(planStartRow('ps-check-fee', sentData), { shown: { ...CARD, setupFee: null } })).toBe('one-time charges differ from the card');
+    // A quote that does not freeze the card's fee would bill the code constant at accept.
+    const { setupFeeQuote: _frozen, ...unfrozen } = sentData;
+    expect(check(planStartRow('ps-check-unfrozen', unfrozen), { data: unfrozen })).toBe('one-time charges differ from the card');
     expect(check(planStartRow('ps-check-price', sentData), { shown: { ...CARD, perVisit: 112 } })).toBe('opening entry quarterly shows another price');
     expect(check(planStartRow('ps-check-gone', sentData), { bundle: null })).toBe('no page snapshot');
   });

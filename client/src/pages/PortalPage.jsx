@@ -11007,6 +11007,10 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   const [startingPlan, setStartingPlan] = useState(false);
   const [planStartUrl, setPlanStartUrl] = useState('');
   const planStartTimer = useRef(null);
+  // A start the server is still minting, whatever option is on screen now. The mint archives
+  // the account's other live plan-start quote, so a second start before the first settles could
+  // archive the quote the browser then opens: starts run one at a time (codex pre-push P1).
+  const [minting, setMinting] = useState(false);
   // Bumped whenever the answer or the option changes, and when the card goes away: a start still
   // in flight for the old one is dropped, never opened, and a request that lands for the old one
   // never marks the new one as sent (codex pre-push P1s).
@@ -11074,25 +11078,30 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
   };
 
   // Opens the priced estimate (pick a time, save a card there). Any refusal or error falls back to
-  // today's request, so the customer never hits a dead end. Off while a new answer loads: the
-  // option on screen is the old answer's (codex pre-push P1).
+  // today's request, so the customer never hits a dead end. Off while a new answer loads (the
+  // option on screen is the old answer's) and while an earlier start still mints (codex pre-push P1s).
   const startPlan = async () => {
-    if (startingPlan || requesting || loading || !selected) return;
+    if (minting || startingPlan || requesting || loading || !selected) return;
     const seq = planStartSeq.current;
+    setMinting(true);
     setStartingPlan(true);
+    let out = null;
     try {
       const { serviceKey, id: optionId, monthly, perVisit, dueAtStart, oneTime, setupFee } = selected;
-      const out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
-      if (seq !== planStartSeq.current) return; // another option or a new answer took over
-      if (!out?.url) throw new Error('No estimate was returned.');
+      out = await api.startPlan({ serviceKey, optionId, shown: { monthly, perVisit, dueAtStart, oneTime, setupFee } });
+    } catch {
+      // Any refusal or error files today's request below.
+    } finally {
+      setMinting(false);
+    }
+    if (seq !== planStartSeq.current) return; // another option or a new answer took over
+    if (out?.url) {
       // Same hand-off as the cancelled-plan restart: a beat on screen, plus a link if navigation is blocked.
       setPlanStartUrl(out.url);
       planStartTimer.current = setTimeout(() => window.location.assign(out.url), 1500);
       return;
-    } catch {
-      if (seq !== planStartSeq.current) return;
-      setStartingPlan(false);
     }
+    setStartingPlan(false);
     await submitRequest();
   };
 
@@ -11319,7 +11328,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </span>
                   ) : canStartPlan ? (
                     <div style={{ display: 'grid', gap: 6 }}>
-                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} disabled={loading} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
+                      <PricingActionButton onClick={startPlan} busy={requesting || startingPlan} disabled={loading || minting} label="See my price and book" busyLabel="Opening..." compact={compact} primaryButton={primaryButton} />
                       <div style={{ color: '#475569', fontSize: 14, lineHeight: 1.45 }}>
                         Your estimate shows the full price and open times. Pick a time to book.
                       </div>

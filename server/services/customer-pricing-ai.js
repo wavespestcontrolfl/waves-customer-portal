@@ -1410,8 +1410,9 @@ async function buildCustomerPricingResponse({
 
 // The pricing answer's plan-start fields: { planStart: { optionIds } }, the options the
 // start-plan route can book for this account, or none. It mirrors the mint's bar without
-// its locks: an account with no plan (planStartAccountOpen) and no live recurring service
-// of any kind, and per option an id on today's ladder that the route books
+// its locks: an account with no plan (planStartAccountOpen), no live recurring service
+// of any kind and one provable premises (singlePremisesStreet: a multi-home account keeps
+// the request, codex pre-push P1), and per option an id on today's ladder that the route books
 // (planStartOptionBookable: pest quarterly only), a monthly price, no review marker and
 // no low confidence (the mint refuses a low-confidence line, codex pre-push P1).
 async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys) {
@@ -1431,8 +1432,9 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
     // A live row the pricing loaders skip (a rodent plan, a commercial row) or a prepay
     // term still covering today owns a plan: no offer.
     if (await restart.ownsAnyRecurringService(db, customer.id)) return {};
+    if (!(await restart.singlePremisesStreet(db, customer))) return {};
   } catch (err) {
-    logger.warn(`[customer-pricing-ai] plan-start ownership read failed — no offer: ${err.message}`);
+    logger.warn(`[customer-pricing-ai] plan-start account read failed — no offer: ${err.message}`);
     return {};
   }
   return { planStart: { optionIds } };

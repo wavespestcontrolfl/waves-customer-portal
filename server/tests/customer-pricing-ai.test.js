@@ -2126,9 +2126,16 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
   const plain = (overrides = {}) => propertyCustomer({
     id: 'cust-lead', active: true, pipeline_stage: 'new_lead', waveguard_tier: null, monthly_rate: null, ...overrides,
   });
+  const crossSell = require('../services/service-report/cross-sell');
+  const realPremisesProof = crossSell.customerHasOnlyPrimaryPremises;
   let owns;
-  beforeEach(() => { owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false); });
-  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); });
+  let premises;
+  beforeEach(() => {
+    owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false);
+    // The mint's single-premises proof, at its home (cross-sell); the street checks run for real.
+    premises = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises').mockResolvedValue(true);
+  });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); });
 
   test('lists the options the route can book, only when the gate is on and the account has no plan', async () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
@@ -2139,6 +2146,30 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     expect(result.planStart).toEqual({ optionIds: bookable });
     // The account-wide read (rodent and commercial rows, prepay terms) runs only for a plain account.
     expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ id: 'cust-lead' }), expect.any(String));
+  });
+
+  test('absent for a multi-home account: the mint prices only an account on one provable premises (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    premises.mockImplementation(realPremisesProof);
+    expect('planStart' in await ask(plain({ has_multi_home: true }))).toBe(false);
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ has_multi_home: true }), expect.any(String));
+  });
+
+  test('absent when the premises proof says no or fails, or the account has no street with a city or zip', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    premises.mockResolvedValueOnce(false);
+    expect('planStart' in await ask(plain())).toBe(false);
+    premises.mockRejectedValueOnce(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+    premises.mockClear();
+    for (const street of [{ address_line1: null }, { city: null, zip: null }]) {
+      const result = await ask(plain(street));
+      // Still priced: only the street check turns booking off.
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+      expect('planStart' in result).toBe(false);
+    }
+    expect(premises).not.toHaveBeenCalled();
   });
 
   test('never lists a mosquito option: a mosquito-only plan adds a setup fee its line does not declare', async () => {

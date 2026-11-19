@@ -499,6 +499,19 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
+  test('the restart freezes the setup fee its quote discloses, where the accept bills it (codex pre-push P0)', async () => {
+    recompute.mockResolvedValueOnce({
+      recomputed: true,
+      serverResult: { engineVersion: 'v9.9', lineItems: [], oneTime: { membershipFee: 79, total: 79 } },
+      rawEngineResult: { waveGuard: { tier: 'Silver' }, lineItems: [] },
+      serverTotals: { monthlyTotal: 138, annualTotal: 1656, onetimeTotal: 79 },
+    });
+    await actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: deps(), randomBytes: () => Buffer.from('abcdef0123456789') });
+    const stored = JSON.parse(tables.estimates[0].estimate_data);
+    expect(stored.setupFeeQuote).toEqual({ amount: 79, kind: 'waveguard_membership' });
+    expect(require('../services/estimate-converter').frozenSetupFeeAmount(stored)).toBe(79);
+  });
+
   test('a Tree & Shrub restart on a seed whose zero tree count is ambiguous is priced by hand (codex pre-push P0)', async () => {
     tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['tree_shrub']), created_at: '2026-08-22' }];
     const seeded = (seed) => deps({ crossSell: { loadEstimateSeed: async () => seed } });

@@ -71,8 +71,9 @@ function planStartOptionBookable(serviceKey, option) {
 //     per-application price the page's price card leads with.
 //   - One-time money is the card's setup, one-time and WaveGuard setup-fee
 //     amounts, on the row and in the stored result (the fee is
-//     result.oneTime.membershipFee), and itemized on the page (the fee on its
-//     own waveguard_setup line). The accept invoices the fee.
+//     result.oneTime.membershipFee, frozen as setupFeeQuote.amount, the
+//     amount the accept bills), and itemized on the page (the fee on its own
+//     waveguard_setup line).
 //   - The page serves this snapshot as is (its own sentSnapshotServesAsIs).
 function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }) {
   if (!bundle) return 'no page snapshot';
@@ -97,6 +98,7 @@ function planStartQuoteMismatch({ bundle, row, data, family, shown, servesAsIs }
     [toCents(stored.total), cardOneTime + setupFee],
     [toCents(breakdown.total), cardOneTime + setupFee],
     [toCents(stored.membershipFee), setupFee],
+    [toCents(data?.setupFeeQuote?.amount), setupFee],
     [toCents(bundle.setupFee?.amount), setupFee],
     [itemized(true), setupFee],
     [itemized(false), cardOneTime],
@@ -619,6 +621,21 @@ function resolveMintDeps(deps) {
   };
 }
 
+// The account's primary street when it provably has one premises, else null
+// (codex GH r4 P1): the mint prices and addresses its estimate at that
+// street, so a multi-premises profile, a missing primary street or a street
+// without provable locality is priced by hand. Same proof as the portal
+// offer (customerHasOnlyPrimaryPremises, cross-sell); an unreadable proof
+// throws and each caller refuses. The plan-start hint runs it too, so a
+// multi-home account keeps the request (codex pre-push P1).
+async function singlePremisesStreet(dbh, customer, premisesProof) {
+  const linkage = require('../estimate-property-linkage');
+  const street = linkage.normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
+  if (!street || linkage.scopeKeyLacksLocality(street)) return null;
+  const proof = premisesProof || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
+  return (await proof(dbh, customer.id, customer, street)) ? street : null;
+}
+
 // THE shared mint core (plan restart + plan start — one mechanism, two
 // entries). Runs inside the caller's transaction, under the locks the entry
 // already took (comms advisory lock, then the customers row FOR UPDATE), with
@@ -672,19 +689,13 @@ async function mintPricedEstimate({
   // locality — is the priced-by-hand 409, never an online price.
   const crossSell = deps.crossSell || require('../service-report/cross-sell');
   const linkage = require('../estimate-property-linkage');
-  const primaryStreet = linkage.normalizedStampedStreet(fresh.address_line1, fresh.address_line2, fresh.city, fresh.zip);
-  let singlePremises = false;
+  let primaryStreet = null;
   try {
-    const premisesProof = deps.customerHasOnlyPrimaryPremises
-      || require('../service-report/cross-sell').customerHasOnlyPrimaryPremises;
-    singlePremises = Boolean(primaryStreet)
-      && !linkage.scopeKeyLacksLocality(primaryStreet)
-      && await premisesProof(trx, fresh.id, fresh, primaryStreet);
+    primaryStreet = await singlePremisesStreet(trx, fresh, deps.customerHasOnlyPrimaryPremises);
   } catch (err) {
     logger.warn(`[${logTag}] single-premises proof failed for ${fresh.id} — refusing: ${err.message}`);
-    singlePremises = false;
   }
-  if (!singlePremises) {
+  if (!primaryStreet) {
     throw new RestartUnavailableError('pricing_unavailable', handMessage);
   }
 
@@ -846,6 +857,14 @@ async function mintPricedEstimate({
   }
 
   estimateData.result = recomputed.serverResult;
+  // Freeze the WaveGuard setup fee the quote discloses where every charging
+  // path reads it (estimate_data.setupFeeQuote, as the website quote does):
+  // the public accept stamps and invoices EstimateConverter.
+  // frozenSetupFeeAmount, which falls back to the code constant without it,
+  // so a fee live config prices otherwise would show one amount and bill
+  // another (codex pre-push P0).
+  const disclosedSetupFee = toCents(recomputed.serverResult?.oneTime?.membershipFee);
+  if (disclosedSetupFee > 0) estimateData.setupFeeQuote = { amount: disclosedSetupFee / 100, kind: 'waveguard_membership' };
   if (recomputed.pestPricingVersion && estimateData.engineInputs.services.pest
     && typeof estimateData.engineInputs.services.pest === 'object') {
     estimateData.engineInputs.services.pest.version = recomputed.pestPricingVersion;
@@ -1385,6 +1404,7 @@ module.exports = {
   planStartAccountOpen,
   planStartOptionBookable,
   ownsAnyRecurringService,
+  singlePremisesStreet,
   mintPlanStartEstimate,
   assertPlanStartAcceptEligible,
   _test: { liveRestartEstimate, ownedResidualFamilies, planStartQuoteMismatch },

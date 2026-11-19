@@ -684,6 +684,29 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates[0].onetime_total).toBe(99);
     });
 
+    test('the mint freezes the setup fee where the accept bills it: a $79 fee bills $79, not the $99 code constant (codex pre-push P0)', async () => {
+      const FEE_LINE_79 = { ...PEST_LINE, initialFee: 79 };
+      recompute.mockResolvedValue(pricedAs(FEE_LINE_79, { setupFee: 79 }));
+      await mint({ shown: shownOf(FEE_LINE_79) });
+      const stored = JSON.parse(tables.estimates[0].estimate_data);
+      expect(stored.setupFeeQuote).toEqual({ amount: 79, kind: 'waveguard_membership' });
+      // The public accept stamps acceptedSetupFeeAmount and invoices the fee through this resolver.
+      expect(require('../services/estimate-converter').frozenSetupFeeAmount(stored)).toBe(79);
+    });
+
+    test('a live quote that does not freeze the card\'s setup fee is archived and re-minted, never handed back (codex pre-push P0)', async () => {
+      recompute.mockResolvedValue(withSetupFee);
+      const first = await mint(pestWithFee);
+      const { setupFeeQuote, ...unfrozen } = JSON.parse(tables.estimates[0].estimate_data);
+      expect(setupFeeQuote).toEqual({ amount: 99, kind: 'waveguard_membership' });
+      tables.estimates[0].estimate_data = JSON.stringify(unfrozen);
+      const next = await mint({ ...pestWithFee, randomBytes: () => Buffer.from('0123456789abcdef') });
+      expect(next.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).setupFeeQuote)
+        .toEqual({ amount: 99, kind: 'waveguard_membership' });
+    });
+
     test.each([
       ['another amount than the card showed', { ...PEST_FEE_LINE, initialFee: 129 }, pestWithFee],
       ['a fee the card did not show', PEST_FEE_LINE, {}],
