@@ -299,7 +299,7 @@ function TermsSection({ terms }) {
   );
 }
 
-function TextConsent({ token, initial, onPending, onStale, onInvalid, locked }) {
+function TextConsent({ token, initial, onPending, onStale, onSnapshot, onInvalid, locked }) {
   const [checked, setChecked] = useState(Boolean(initial));
   const [saving, setSaving] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
@@ -316,7 +316,7 @@ function TextConsent({ token, initial, onPending, onStale, onInvalid, locked }) 
       setUnconfirmed(false);
       setError('');
       onPending(false);
-      if (body.state !== 'open') onStale();
+      if (body.state !== 'open') onSnapshot(body);
     } catch (err) {
       if (err.notFound) onInvalid();
       else setUnconfirmed(true);
@@ -334,6 +334,11 @@ function TextConsent({ token, initial, onPending, onStale, onInvalid, locked }) 
     try {
       res = await postJson(token, '/text-consent', { consent: next });
     } catch {
+      await confirm();
+      return;
+    }
+    if (res.status >= 500) {
+      // A gateway error can arrive after the write committed: ask the server.
       await confirm();
       return;
     }
@@ -406,6 +411,7 @@ function useOfferAction({ token, onApplied, onReload, onInvalid }) {
     try {
       const res = await postJson(token, suffix, payload);
       if (res.status === 404) return onInvalid();
+      if (res.status >= 500) throw new Error('unknown outcome'); // may have committed: re-read below
       if (res.status === 409) {
         const after = await onReload();
         if (after === 'failed') setError(REFRESH_ERROR);
@@ -521,7 +527,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
         <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
           Please don&rsquo;t give notice at your current job until you have signed this offer.
         </p>
-        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy} />
+        <TextConsent token={token} initial={data.textConsent} onPending={setConsentPending} onStale={onReload} onSnapshot={onApplied} onInvalid={onInvalid} locked={accept.busy || dateReq.busy || decline.busy} />
         <SignBlock
           name={name}
           onName={setName}
