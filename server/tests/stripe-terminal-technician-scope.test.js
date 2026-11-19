@@ -253,6 +253,25 @@ describe('POST /handoff checkout reconciliation fence', () => {
     expect(Stripe).not.toHaveBeenCalled();
   });
 
+  test('preserves partial credit used to price a competing card when handoff issuance is refused', async () => {
+    const state = setupHandoffDb();
+    mockTechRole = 'admin';
+    mockAutoApplyCredit.mockImplementationOnce(async () => {
+      state.invoice.credit_applied = 25;
+      return { applied: 25, fullyCovered: false };
+    });
+    mockChargeFence.mockResolvedValueOnce(undefined).mockRejectedValueOnce(Object.assign(
+      new Error('An earlier card payment is awaiting verification.'), { code: 'STRIPE_CHARGE_IN_PROGRESS' },
+    ));
+
+    const { status, body } = await postHandoff();
+    expect(status).toBe(409);
+    expect(body.code).toBe('payment_charge_in_progress');
+    expect(state.invoice.credit_applied).toBe(25);
+    expect(require('../services/customer-credit').reverseAppliedCredit).not.toHaveBeenCalled();
+    expect(state.tableReads).not.toContain('terminal_handoff_tokens');
+  });
+
   test.each(['admin', 'technician'])('rechecks the locked fence in the %s token-insert transaction', async (role) => {
     const transactionState = { attemptStatus: 'claimed' };
     const state = setupHandoffDb({ transactionState });

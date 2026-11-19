@@ -238,11 +238,15 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
   });
 
-  test('an operator can preview and execute a cancellation after its invoice was merged', async () => {
+  test('an operator can preview and record a merged invoice cancellation with uppercase UUIDs in Stripe metadata', async () => {
     const oldOwner = randomUUID();
     const { invoiceId, attemptId, intent } = await authenticationFixture(app, oldOwner);
     await recordInvoiceMerge(app, { invoiceId, loserId: oldOwner, winnerId: randomUUID() });
-    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
+    const stripeIntent = { ...intent, metadata: { ...intent.metadata,
+      waves_invoice_id: invoiceId.toUpperCase(),
+      saved_card_attempt_id: attemptId.toUpperCase(),
+    } };
+    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(stripeIntent) } };
     const options = { stripe, attemptId, intentId: intent.id };
 
     await expect(inReadOnly((database) => verifySavedCardCancellation({ ...options, database })))
@@ -328,6 +332,18 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     await attempt().update({ stripe_payment_intent_id: null });
     await recordAuthenticationCancellation({ ...intent, payment_method: 'pm_other' }, app);
     expect(await attempt().first()).toMatchObject({ authentication_canceled_intent_id: null });
+
+    await attempt().update({ authentication_canceled_intent_id: 'pi_previousCandidate' });
+    await recordAuthenticationCancellation(intent, app);
+    expect(await attempt().first()).toMatchObject({
+      stripe_payment_intent_id: null, authentication_canceled_intent_id: 'pi_previousCandidate',
+    });
+    expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+    // Once the charging worker binds the exact PI, its verified cancellation
+    // is conclusive even if a different, unbound candidate arrived first.
+    await attempt().update({ stripe_payment_intent_id: intent.id });
+    await recordAuthenticationCancellation(intent, app);
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
   });
 
   test('an operator can preview and record one old cancellation without a retained webhook or a stored PI', async () => {
@@ -395,20 +411,44 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
   });
 
-  test('an operator recording a cancellation waits for a concurrent invoice owner change and refuses the old owner', async () => {
+  test.each([
+    ['an operator', 'operator'],
+    ['a signed webhook', 'signed webhook'],
+  ])('%s cancellation waits for a concurrent invoice owner change and keeps the old owner held', async (_label, source) => {
     const { invoiceId, attemptId, intent } = await authenticationFixture(app);
     const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
     const change = await app.transaction();
     try {
       await change('invoices').where({ id: invoiceId }).update({ customer_id: randomUUID() });
-      const refusal = await commitWithWaitingCheckout(change, (database) => verifySavedCardCancellation({
-        database, stripe, attemptId, intentId: intent.id, execute: true,
-      }));
-      expect(refusal?.message).toMatch(/does not match/);
+      const refusal = await commitWithWaitingCheckout(change, (database) => source === 'operator'
+        ? verifySavedCardCancellation({ database, stripe, attemptId, intentId: intent.id, execute: true })
+        : recordAuthenticationCancellation(intent, database));
+      if (source === 'operator') expect(refusal?.message).toMatch(/does not match/);
+      else expect(refusal).toBeNull();
     } finally {
       if (!change.isCompleted()) await change.rollback();
     }
     expect(await verdict(invoiceId, app, { checkout: true })).toMatchObject({ chargeAttemptId: attemptId });
+  }, 15000);
+
+  test.each([
+    ['an operator', 'operator'],
+    ['a signed webhook', 'signed webhook'],
+  ])('%s cancellation waits for a row-precise merge, then records against its committed owner', async (_label, source) => {
+    const { invoiceId, attemptId, intent, customerId } = await authenticationFixture(app);
+    const stripe = { paymentIntents: { retrieve: jest.fn().mockResolvedValue(intent) } };
+    const merge = await app.transaction();
+    try {
+      await recordInvoiceMerge(merge, { invoiceId, loserId: customerId, winnerId: randomUUID() });
+      await commitWithWaitingCheckout(merge, (database) => source === 'operator'
+        ? verifySavedCardCancellation({ database, stripe, attemptId, intentId: intent.id, execute: true })
+        : recordAuthenticationCancellation(intent, database));
+    } finally {
+      if (!merge.isCompleted()) await merge.rollback();
+    }
+    expect(await app('stripe_invoice_charge_attempts').where({ id: attemptId }).first())
+      .toMatchObject({ authentication_canceled_intent_id: intent.id, stripe_payment_intent_id: intent.id });
+    expect(await verdict(invoiceId, app, { checkout: true })).toBeNull();
   }, 15000);
 
   test('only the locally settled authentication challenge stays resolved when a dispute reopens its invoice', async () => {

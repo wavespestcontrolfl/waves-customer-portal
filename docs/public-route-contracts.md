@@ -6559,9 +6559,10 @@ For an invoice with a saved-card payment awaiting bank verification, both
 `POST /api/stripe/terminal/handoff` and `/payment-intent` return HTTP 409
 with `code: payment_charge_in_progress`. Handoff creation checks under the
 invoice lock before applying account credit or issuing the token. It can release
-an expired claim with no sign of submission. A submitted claim with an unknown
-outcome stays blocked for reconciliation. Terminal
-checks again before creating the card-present intent and under the invoice
+an expired claim with no sign of submission. An unknown outcome or a payment
+received by Stripe that still needs local posting returns HTTP 409 with
+`code: payment_reconciliation_pending` and `reconciliationRequired: true`.
+Terminal checks again before creating the card-present intent and under the invoice
 lock before returning its client secret. If the hold appears during creation, the handoff must be reissued
 and the response includes `newHandoffRequired: true`. The post-tap
 `/apply-surcharge` request also checks the hold under lock before the

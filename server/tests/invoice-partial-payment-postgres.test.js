@@ -208,6 +208,37 @@ postgres('Partial payments against migrated PostgreSQL', () => {
     }
   });
 
+  it('keeps a recorded part while the card priced for the remainder awaits authentication', async () => {
+    const invoice = await makeInvoice();
+    await record(invoice.id, { amountCents: 4000 });
+    const postedId = await shownPaymentId(invoice.id);
+    const attemptId = randomUUID();
+    const intent = {
+      id: `pi_rest_${attemptId}`, status: 'canceled', payment_method: 'pm_synthetic_rest',
+      metadata: {
+        source: 'admin_card_on_file', saved_card_attempt_id: attemptId,
+        waves_invoice_id: invoice.id, waves_customer_id: invoice.customer_id,
+      },
+    };
+    await database('stripe_invoice_charge_attempts').insert({
+      id: attemptId, invoice_id: invoice.id, idempotency_key: `synthetic-rest-${attemptId}`,
+      stripe_payment_method_id: intent.payment_method, stripe_payment_intent_id: intent.id,
+      status: 'failed', decline_code: 'authentication_required', resolved_at: new Date(),
+    });
+
+    await recordAuthenticationCancellation({ ...intent, id: `pi_other_${attemptId}` }, database);
+    expect((await describeManualPaymentUndo(invoice.id)).code).toBe('card_charge_pending');
+    expect(await refusalOf(undo(invoice.id, { paymentId: postedId })))
+      .toMatchObject({ statusCode: 409, code: 'card_charge_pending' });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(40);
+    expect((await database('payments').where({ id: postedId }).first()).status).toBe('paid');
+
+    await recordAuthenticationCancellation(intent, database);
+    await undo(invoice.id, { paymentId: postedId });
+    expect(Number((await row(invoice.id)).amount_paid)).toBe(0);
+    expect((await database('payments').where({ id: postedId }).first()).status).toBe('canceled');
+  });
+
   it('a part payment waits while a card dispute on the invoice is undecided, and is taken once the dispute is decided', async () => {
     const invoice = await makeInvoice();
     const [disputed] = await database('payments').insert({

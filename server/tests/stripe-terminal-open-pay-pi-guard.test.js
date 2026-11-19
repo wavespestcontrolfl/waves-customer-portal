@@ -145,6 +145,25 @@ describe('POST /payment-intent retires the open pay-page PaymentIntent (B07)', (
     expect(mockCancelCreated).not.toHaveBeenCalled();
   });
 
+  test('a received card payment awaiting local posting returns the reconciliation hold before mint', async () => {
+    setup({ invoice: baseInvoice(), handoff: baseHandoff() });
+    const fence = Object.assign(new Error('received payment has no local posting'), {
+      code: 'STRIPE_CHARGED_DB_FAILED',
+      reconciliationRequired: true,
+    });
+    mockChargeFence.mockRejectedValueOnce(fence);
+
+    const { status, body } = await postPaymentIntent();
+
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ code: 'payment_reconciliation_pending', reconciliationRequired: true });
+    expect(require('../services/stripe').parkInvoiceForSavedCardReconciliation)
+      .toHaveBeenCalledWith({ invoiceId: 'inv-1', error: fence });
+    expect(mockCreate).not.toHaveBeenCalled();
+    expect(invoiceUpdates).toEqual([]);
+    expect(handoffUpdates).toEqual([]);
+  });
+
   test('checkout-aware locked bind holds a racing attempt and retires only the new Terminal PI', async () => {
     setup({ invoice: baseInvoice(), handoff: baseHandoff() });
     mockChargeFence

@@ -380,8 +380,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       } catch (err) {
         if (!savedCardChargeSuppressesAlternateCollection(err)) throw err;
         // A stale submitted claim may have been promoted to ambiguous here.
-        // Return from the callback so that promotion commits, then throw the
-        // established conflict after the transaction closes.
+        // Return from the callback so the promotion commits before the 409.
         mintChargeRefusal = err;
         return;
       }
@@ -455,7 +454,8 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
       mintedExpiresAt = expires_at;
     });
 
-    if (mintChargeRefusal) throw mintChargeRefusal;
+    // The competing card may already be priced from the applied credit.
+    if (mintChargeRefusal) return res.status(409).json(terminalChargeFenceResponse(mintChargeRefusal));
 
     if (ownershipLostAtMint) {
       // Same refusal as the pre-check above. Reverse the credit this seam
@@ -1439,9 +1439,7 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       await assertNoInvoiceChargeReconciliationPending(invoice.id, db, { checkout: true });
       await assertInvoiceDepositSettlementReady(db, invoice, { lock: false });
     } catch (fenceErr) {
-      if (fenceErr.code !== 'DEPOSIT_RECONCILIATION_REQUIRED'
-        && fenceErr.code !== 'STRIPE_CHARGE_IN_PROGRESS'
-        && fenceErr.code !== 'STRIPE_AMBIGUOUS_OUTCOME') throw fenceErr;
+      if (!savedCardChargeSuppressesAlternateCollection(fenceErr)) throw fenceErr;
       if (fenceErr.reconciliationRequired) {
         await parkInvoiceForSavedCardReconciliation({ invoiceId: invoice.id, error: fenceErr });
       }
