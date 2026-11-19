@@ -1647,6 +1647,13 @@ describe('deferred-replay registry', () => {
     db.mockReset();
   });
 
+  test('the estimate follow-up recheck hands the queued row\'s stage to the eligibility check', async () => {
+    const { deferredFollowupStillEligible } = require('../services/estimate-follow-up');
+    deferredFollowupStillEligible.mockClear();
+    await recheckDeferredReplay('estimate_follow_up_deferred', { estimate_id: 'est-1', followup_stage: 'unviewed' });
+    expect(deferredFollowupStillEligible).toHaveBeenCalledWith('est-1', { stage: 'unviewed' });
+  });
+
   test('terminal-hook sweep (r16): re-runs stamped rows bounded, clears loudly at exhaustion', async () => {
     const { sweepPendingTerminalHooks } = require('../services/messaging/deferred-replay-registry');
     const makeSelectChain = (rows) => {

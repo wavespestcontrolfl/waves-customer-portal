@@ -867,6 +867,7 @@ async function processDueBatch(now = new Date()) {
         await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
         continue;
       }
+      const sendOutcome = {};
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
@@ -888,7 +889,7 @@ async function processDueBatch(now = new Date()) {
             } : {}),
           }),
         },
-      });
+      }, sendOutcome);
       if (ok) {
         // The email is SENT — the ledger row must survive any bookkeeping
         // failure below (codex 2736 r4: releasing it would let a retry
@@ -898,6 +899,13 @@ async function processDueBatch(now = new Date()) {
         await followupShared.bumpFollowupCounters(est.id, rule.rule_key);
         await markJob(job.id, 'done', null);
         sent++;
+      } else if (sendOutcome.midCheckout) {
+        // The customer started checkout while the email was being prepared;
+        // the provider-boundary check refused before any request. Not a failed
+        // send: give the claim back and look again later, uncounted.
+        await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+        claimed = false;
+        await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
       } else {
         await followupShared.releaseFollowupSend(est.id, rule.rule_key);
         claimed = false;

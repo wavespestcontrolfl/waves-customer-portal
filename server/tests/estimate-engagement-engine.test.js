@@ -454,6 +454,7 @@ describe('processDueJobs', () => {
       expect.objectContaining({
         email: expect.objectContaining({ templateKey: 'estimate.engage_gone_quiet' }),
       }),
+      {}, // the outcome object the engine reads a mid-checkout hold from
     );
     // Non-expiring stages keep the plain per-(stage, estimate) key.
     expect(followupShared.sendDualChannel.mock.calls[0][1].email.idempotencySuffix).toBeUndefined();
@@ -1001,6 +1002,31 @@ describe('processDueJobs', () => {
     expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
   });
 
+  test('a checkout hold found at the provider boundary releases the claim and defers the job, uncounted', async () => {
+    // sendDualChannel reports the veto through the outcome object and returns false.
+    followupShared.sendDualChannel.mockImplementationOnce(async (_est, _spec, outcome) => {
+      outcome.midCheckout = true;
+      return false;
+    });
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+      rules: RULE_ROWS,
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.sendDualChannel).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.any(Object));
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'return_visit_hot');
+    expect(followupShared.bumpFollowupCounters).not.toHaveBeenCalled();
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined();
+    expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
+    // Not a failed send: the attempt counter is not bumped.
+    expect(JSON.stringify(defer.payload)).not.toMatch(/attempts/);
+  });
+
   test('once the customer is no longer booking, the same job sends', async () => {
     followupShared.estimateMidCheckout.mockResolvedValue(false);
     enqueueProcessorHappyPath({
@@ -1153,6 +1179,7 @@ describe('processDueJobs', () => {
       expect.objectContaining({
         email: expect.objectContaining({ idempotencySuffix: expires.toISOString() }),
       }),
+      expect.any(Object),
     );
     // codex 2736 r12: the claim is PINNED to the deadline the copy was
     // validated against — a concurrent extension makes it a lost-claim skip

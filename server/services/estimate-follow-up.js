@@ -327,10 +327,15 @@ function replayHoldVerdict(reason, est, nowMs) {
 // authorizing delivery on an unchecked condition could nudge a customer who
 // already declined or paid — the executor reschedules the row and re-checks
 // on the next pass instead.
-async function deferredFollowupStillEligible(estimateId) {
+// `stage` is the queued row's followup_stage. The unviewed stage means "sent
+// and never opened": once the customer has opened the estimate that reminder
+// is moot for good, so it is a final verdict, not a timed wait. Every other
+// stage still applies after a view and keeps the timed retry.
+async function deferredFollowupStillEligible(estimateId, { stage = null } = {}) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
     if (!est) return { eligible: false, reason: "estimate-missing" };
+    if (stage === "unviewed" && est.viewed_at) return { eligible: false, reason: "estimate-viewed" };
     // replay:true — the reply-pause lookup THROWS on a transient failure
     // here (codex r27) instead of the cron path's fail-open false, so an
     // unverifiable reply state lands in the catch below and holds the row.
@@ -580,6 +585,45 @@ function averageProviderHandoff(estimateId, expectedText, pdfHandoff = null) {
   });
 }
 
+// Provider-boundary check for the customer being mid-checkout. The customer
+// can reserve a visit time or reach the card step while sendDualChannel waits
+// on the PDF render and its retries, and neither write touches the estimate
+// row, so the check runs inside the handoff, after every other await and
+// right before the provider request. A veto is a definite non-send (the
+// stage claim is released by the caller); `outcome.midCheckout` tells the
+// caller the cause, so it can look again later instead of counting a failed
+// attempt.
+function checkoutBoundaryCheck(est, outcome) {
+  return async () => {
+    if (await estimateMidCheckout(est.id, { groupId: est.estimate_group_id })) {
+      if (outcome) outcome.midCheckout = true;
+      const veto = new Error(`estimate ${est.id} not sent: customer_mid_checkout`);
+      veto.providerBoundaryBlocked = true;
+      veto.reason = "customer_mid_checkout";
+      throw veto;
+    }
+    return { ok: true };
+  };
+}
+
+// Composes the checkout check after whatever handoff the send already has (the
+// PDF fence, the monthly-average check, both, or none), as averageProviderHandoff does.
+function checkoutProviderHandoff(est, outcome, inner = null) {
+  const check = checkoutBoundaryCheck(est, outcome);
+  if (!inner) {
+    return async (dispatch) => {
+      await dispatch(undefined, check);
+      return { ok: true };
+    };
+  }
+  return (dispatch) => inner(async (database, innerCheck) => {
+    await dispatch(database, async (args) => {
+      if (innerCheck) await innerCheck(args);
+      return check();
+    });
+  });
+}
+
 function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
   const serviceSummary = inferEstimateServiceInterest({
     ...est,
@@ -665,7 +709,9 @@ async function withFollowupPropertyRow(est, payload) {
   return address ? { ...payload, property_full_address: address } : payload;
 }
 
-async function sendDualChannel(est, { sms, email }) {
+// `outcome` (optional): set to { midCheckout: true } when the email was held at the
+// provider boundary because the customer is mid-checkout.
+async function sendDualChannel(est, { sms, email }, outcome = null) {
   let attempted = false;
   let smsHold = null;
   // A phone the customer typed on the accept card gets no follow-up text
@@ -800,6 +846,9 @@ async function sendDualChannel(est, { sms, email }) {
       // carries the PDF copy plus its one-line note. Empty (document gate off, other
       // template, estimate no longer open, render failed) = sent as before.
       const pdfCopy = await openEstimateEmailPdf({ estimateId: est.id, templateKey: email.templateKey, recipient: est.customer_email });
+      const innerHandoff = email.averageText
+        ? averageProviderHandoff(est.id, email.averageText, pdfCopy.withProviderHandoff)
+        : pdfCopy.withProviderHandoff;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
         // Set only with the monthly average: pins the send to the template version
@@ -811,8 +860,11 @@ async function sendDualChannel(est, { sms, email }) {
         // The fence rides every prepared send, with the file or without it. With the
         // monthly average the send-time average check rides too (composed with it).
         ...(email.averageText
-          ? { withProviderHandoff: averageProviderHandoff(est.id, email.averageText, pdfCopy.withProviderHandoff) }
+          ? { withProviderHandoff: innerHandoff }
           : (pdfCopy.withProviderHandoff ? { withProviderHandoff: pdfCopy.withProviderHandoff } : {})),
+        // A caller that passes `outcome` (the engagement engine) also gets the
+        // mid-checkout check, composed last, after those two.
+        ...(outcome ? { withProviderHandoff: checkoutProviderHandoff(est, outcome, innerHandoff) } : {}),
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
         triggerEventId: idempotencyKey,

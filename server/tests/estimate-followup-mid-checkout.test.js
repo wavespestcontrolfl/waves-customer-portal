@@ -44,12 +44,17 @@ jest.mock('../services/estimate-conversion-guard', () => ({
 jest.mock('../services/estimate-lead-linkage', () => ({
   leadIdForEstimate: jest.fn(async () => null),
 }));
+const mockPdf = { copy: { attachments: [], payload: {} } };
+jest.mock('../services/estimate-email-pdf', () => ({
+  openEstimateEmailPdf: jest.fn(async () => mockPdf.copy),
+}));
 jest.mock('../services/estimate-group-navigation', () => ({
   publishedGroupLinks: jest.fn(async () => []),
 }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
+const EmailTemplateLibrary = require('../services/email-template-library');
 const { _private } = require('../services/estimate-follow-up');
 const { publishedGroupLinks } = require('../services/estimate-group-navigation');
 
@@ -219,6 +224,23 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
     await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({ eligible: false, reason: 'terminal-status:accepted' });
   });
 
+  test('the unopened-estimate reminder is final once the estimate was opened; other stages keep the timed retry', async () => {
+    const viewedAt = new Date(NOW.getTime() - 10 * 60000);
+    arrangeReplay({ est: { viewed_at: viewedAt, last_viewed_at: viewedAt } });
+
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'unviewed' }))
+      .resolves.toEqual({ eligible: false, reason: 'estimate-viewed' });
+    for (const stage of ['viewed', 'final', 'expiring', null]) {
+      const verdict = await deferredFollowupStillEligible('est-1', { stage });
+      expect(verdict).toMatchObject({ reason: 'recently-opened', retryable: true });
+    }
+  });
+
+  test('the unopened-estimate reminder on an estimate that was never opened stays eligible', async () => {
+    arrangeReplay();
+    await expect(deferredFollowupStillEligible('est-1', { stage: 'unviewed' })).resolves.toEqual({ eligible: true });
+  });
+
   test('a lookup error on the checkout check fails closed and retryable (never authorizes the replay)', async () => {
     arrangeReplay({ hold: Object.assign(new Error('db down'), { code: '57P01' }) });
 
@@ -232,5 +254,59 @@ describe('deferredFollowupStillEligible (quiet-hours text replay)', () => {
   test('no checkout activity: the replay stays eligible', async () => {
     arrangeReplay();
     await expect(deferredFollowupStillEligible('est-1')).resolves.toEqual({ eligible: true });
+  });
+});
+
+describe('provider-boundary checkout check (sendDualChannel with an outcome)', () => {
+  const est = { id: 'est-1', status: 'sent', customer_id: null, customer_phone: null, customer_email: 'pat@example.com', estimate_group_id: null };
+  const email = { templateKey: 'estimate.engage_x', stage: 'engage_x', payload: {} };
+
+  beforeEach(() => {
+    mockPdf.copy = { attachments: [], payload: {} };
+    EmailTemplateLibrary.sendTemplate.mockClear();
+  });
+
+  // Hands the library's dispatch to the installed handoff; returns the check it was given.
+  async function installedCheck(outcome) {
+    await _private.sendDualChannel(est, { email }, outcome);
+    const handoff = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].withProviderHandoff;
+    let check;
+    await handoff(async (_database, providerCheck) => { check = providerCheck; });
+    return check;
+  }
+
+  test('a customer who starts checkout after preparation vetoes the send at the provider boundary and says why', async () => {
+    arrange();
+    const outcome = {};
+    const check = await installedCheck(outcome);
+    // Idle when the email was prepared; booking by the time the request is due.
+    arrange({ hold: { id: 'hold-1' } });
+
+    await expect(check()).rejects.toMatchObject({ providerBoundaryBlocked: true, reason: 'customer_mid_checkout' });
+    expect(outcome.midCheckout).toBe(true);
+  });
+
+  test('an idle customer passes the boundary check', async () => {
+    arrange();
+    const outcome = {};
+    const check = await installedCheck(outcome);
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(outcome.midCheckout).toBeUndefined();
+  });
+
+  test('runs after the PDF fence; a PDF veto stops it first and is not read as a checkout hold', async () => {
+    arrange({ hold: { id: 'hold-1' } });
+    const pdfCheck = jest.fn(async () => { throw Object.assign(new Error('pdf veto'), { providerBoundaryBlocked: true, reason: 'estimate_changed_since_render' }); });
+    mockPdf.copy = { attachments: [], payload: {}, withProviderHandoff: async (dispatch) => { await dispatch(undefined, pdfCheck); return { ok: true }; } };
+    const outcome = {};
+    const check = await installedCheck(outcome);
+
+    await expect(check()).rejects.toMatchObject({ reason: 'estimate_changed_since_render' });
+    expect(outcome.midCheckout).toBeUndefined();
+  });
+
+  test('without an outcome (the stage cron) the send is installed exactly as before', async () => {
+    await _private.sendDualChannel(est, { email });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].withProviderHandoff).toBeUndefined();
   });
 });
