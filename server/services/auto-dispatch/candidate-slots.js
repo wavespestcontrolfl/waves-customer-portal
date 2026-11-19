@@ -46,7 +46,7 @@ const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
-const { ROUTE_POSITION, routeStamp, targetStamp, routeFits, positionFor } = require('./route-position');
+const { ROUTE_POSITION, routeStamp, targetStamp, routeFits, positionFor, hasStaffPinnedStop } = require('./route-position');
 const {
   techStartPointsLive, techStartPoint, assertStartPointUnchanged, START_COLUMNS,
 } = require('../scheduling/tech-start-point');
@@ -93,6 +93,8 @@ const DAY_STOP_COLUMNS = [
   'scheduled_services.customer_id',
   'scheduled_services.route_order',
   'scheduled_services.created_at',
+  'scheduled_services.auto_dispatch_locked',
+  'scheduled_services.auto_dispatch_excluded',
   'scheduled_services.reservation_policy_version',
   'scheduled_services.reservation_service_mix',
   'scheduled_services.time_window',
@@ -142,6 +144,8 @@ function rowToDayStop(r) {
     customer_id: r.customer_id,
     route_order: r.route_order,
     created_at: r.created_at,
+    auto_dispatch_locked: r.auto_dispatch_locked === true,
+    auto_dispatch_excluded: r.auto_dispatch_excluded === true,
     time_window: r.time_window,
     preserveCapacity: preservesCapacity(r),
     scheduled_date: r.scheduled_date,
@@ -639,7 +643,8 @@ async function verifyScoredPosition(trx, service, date, technicianId, window, po
   const others = rows.filter(r => r.id !== service.id);
   const source = stopsForTechDay(others, service.technician_id, sourceDate);
   const targetDay = stopsForTechDay(others, technicianId, date);
-  if (!moving || moving.visit_id || routeStamp(source, moving) !== position.sourceStamp || routeStamp(targetDay) !== position.destinationStamp) throw changed();
+  if (!moving || moving.visit_id || moving.reservation_service_mix?.version === 2 || hasStaffPinnedStop(targetDay)
+      || routeStamp(source, moving) !== position.sourceStamp || routeStamp(targetDay) !== position.destinationStamp) throw changed();
   const { unpricedDays, blocks } = await loadPositionConstraints(trx, [date], [technicianId]);
   if (unpricedDays.size) throw changed();
   const target = { ...moving, technician_id: technicianId, window_start: window.start, window_end: window.end };

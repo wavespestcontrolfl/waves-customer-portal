@@ -377,7 +377,12 @@ function groupRouteStops(rows) {
     const rawEstimate = members.length === 1
       ? ('raw_estimate_minutes' in first ? first.raw_estimate_minutes : first.estimated_duration_minutes)
       : duration;
-    result.push({ ...first, memberIds: members.map(row => row.id),
+    result.push({ ...first,
+      // `memberIds` means additive work to planning-minutes and the route
+      // writers. A singleton stays row-shaped so plan/capacity mode can still
+      // resolve its own table match (or preserve a missing raw estimate for a
+      // legacy co-visit); only a real multi-row unit is additive.
+      ...(members.length > 1 ? { memberIds: members.map(row => row.id) } : {}),
       estimated_duration_minutes: duration, raw_estimate_minutes: rawEstimate,
       arrivalRange: Number.isFinite(startMin) ? { startMin, endMin } : null });
   }

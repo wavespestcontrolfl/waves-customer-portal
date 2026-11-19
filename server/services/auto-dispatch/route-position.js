@@ -15,6 +15,7 @@ const ROUTE_POSITION = Symbol('dispatch route position');
 function routeStamp(rows, movingFrom = null) {
   const facts = [...rows].sort((a, b) => String(a.id).localeCompare(String(b.id))).map(r => [
     r.id, r.visit_id, r.technician_id, r.status, r.window_start, r.window_end, r.route_order, r.created_at,
+    r.auto_dispatch_locked === true, r.auto_dispatch_excluded === true,
     r.reservation_expires_at, r.reservation_service_mix, r.estimated_duration_minutes, r.service_type, r.is_recurring, r.is_callback,
     r.preserveCapacity, r.geo?.lat, r.geo?.lng, r.customer_id,
     r.service_address_line1, r.service_address_line2, r.service_address_city, r.service_address_zip,
@@ -25,6 +26,13 @@ function routeStamp(rows, movingFrom = null) {
     movingFrom.technician_id ?? null, movingFrom.route_order ?? null,
     String(movingFrom.window_start).slice(0, 5), String(movingFrom.window_end).slice(0, 5)];
   return createHash('sha256').update(JSON.stringify([facts, sourcePlacement])).digest('hex');
+}
+
+// The nightly route writer freezes the whole technician-day when any stop is
+// staff locked or permanently excluded: renumbering its neighbours still
+// changes that pinned stop's real place in the run.
+function hasStaffPinnedStop(rows) {
+  return rows.some(row => row.auto_dispatch_locked === true || row.auto_dispatch_excluded === true);
 }
 
 function targetStamp(row) {
@@ -64,6 +72,7 @@ function positionFor(stops, target, {
   // stop. The unit mover supports visit_id groups; allocation-only units do
   // not have a corresponding writer, so fail closed instead of mispricing.
   if (target.reservation_service_mix?.version === 2) return null;
+  if (hasStaffPinnedStop(stops)) return null;
   if (!sourceStamp || !target.technician_id || target.visit_id
       || stops.some(r => r.technician_id !== target.technician_id || isHoldStop(r)
         || !['pending', 'confirmed'].includes(r.status) || r.geo == null)) return undefined;
@@ -77,4 +86,4 @@ function positionFor(stops, target, {
   };
 }
 
-module.exports = { ROUTE_POSITION, routeStamp, targetStamp, routeFits, positionFor };
+module.exports = { ROUTE_POSITION, routeStamp, targetStamp, routeFits, positionFor, hasStaffPinnedStop };

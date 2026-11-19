@@ -206,6 +206,17 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
     expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
   });
 
+  test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('a destination %s stops the scored renumbering, including the locked re-read', async (flag) => {
+    const { date, left, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: left.id }).update({ [flag]: true });
+
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
   test('dispatch keeps a grouped visit together when ranking a route and when saving it', async () => {
     const { ROUTE_POSITION } = require('../services/auto-dispatch/route-position');
     const { date, left, right, mover, position } = await scoredCrossDay();
@@ -269,6 +280,75 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
       { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position })).rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
     expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY, route_order: 8 }).first('id')).toBeTruthy();
     expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('a mover that joins a version-2 allocation after scoring cannot use the saved route position', async () => {
+    const { date, mover, position } = await scoredCrossDay();
+    await mockConn('scheduled_services').where({ id: mover.id }).update({
+      reservation_service_mix: {
+        version: 2,
+        allocatedServiceIds: [mover.id, randomUUID()],
+        durationMinutes: 120,
+      },
+    });
+
+    await expect(rebooker.reschedule(mover.id, date, { start: '14:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch',
+      { seriesPolicy: 'single', keepStatus: true, notifyCustomer: false, dispatchRoutePosition: position }))
+      .rejects.toMatchObject({ code: 'ROUTE_CHANGED' });
+    expect(await mockConn('scheduled_services').where({ id: mover.id, scheduled_date: DAY }).first('id')).toBeTruthy();
+    expect(await mockConn('reschedule_log').where({ scheduled_service_id: mover.id }).first('id')).toBeUndefined();
+  });
+
+  test('the apply CAS loses to a concurrent version-2 attachment after its null read', async () => {
+    const schemaName = `route_allocation_${randomUUID().replaceAll('-', '')}`;
+    const rowId = randomUUID();
+    let allocationTrx;
+    let moveTrx;
+    let schemaCreated = false;
+    try {
+      await contentionDatabase.schema.createSchema(schemaName);
+      schemaCreated = true;
+      await contentionDatabase.schema.withSchema(schemaName).createTable('scheduled_services', (table) => {
+        table.uuid('id').primary();
+        table.jsonb('reservation_service_mix').nullable();
+        table.text('window_start');
+      });
+      await contentionDatabase.withSchema(schemaName).table('scheduled_services').insert({ id: rowId, window_start: '09:00' });
+      // The apply preflight saw NULL. Before its conditional UPDATE reaches
+      // the row, allocation conversion attaches v2 and holds that write.
+      allocationTrx = await contentionDatabase.transaction();
+      moveTrx = await contentionDatabase.transaction();
+      await allocationTrx.raw('SELECT set_config(\'search_path\', ?, true)', [schemaName]);
+      await moveTrx.raw('SELECT set_config(\'search_path\', ?, true)', [schemaName]);
+      await allocationTrx('scheduled_services').where({ id: rowId }).update({
+        reservation_service_mix: { version: 2, allocatedServiceIds: [rowId, randomUUID()] },
+      });
+      const pidResult = await moveTrx.raw('SELECT pg_backend_pid() AS pid');
+      const movePid = pidResult.rows[0].pid;
+      const pendingMove = Promise.resolve(moveTrx('scheduled_services')
+        .where({ id: rowId, reservation_service_mix: null })
+        .update({ window_start: '10:00' }).returning('id'));
+      const deadline = Date.now() + 5000;
+      let waiting = false;
+      while (Date.now() < deadline && !waiting) {
+        const activity = await contentionDatabase('pg_stat_activity').where({ pid: movePid }).first('wait_event_type');
+        waiting = activity?.wait_event_type === 'Lock';
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+
+      await allocationTrx.commit();
+      allocationTrx = null;
+      expect(await pendingMove).toEqual([]);
+      expect(await moveTrx('scheduled_services').where({ id: rowId }).first('window_start', 'reservation_service_mix'))
+        .toMatchObject({ window_start: '09:00', reservation_service_mix: { version: 2 } });
+      await moveTrx.commit();
+      moveTrx = null;
+    } finally {
+      if (allocationTrx) await allocationTrx.rollback();
+      if (moveTrx) await moveTrx.rollback();
+      if (schemaCreated) await contentionDatabase.schema.dropSchema(schemaName, true);
+    }
   });
 
   test('a second scoring pass refreshes the mover stop number with its source-day neighbors', async () => {

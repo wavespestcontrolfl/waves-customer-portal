@@ -934,6 +934,23 @@ test.each([
   })).toBeNull();
 });
 
+test.each(['auto_dispatch_locked', 'auto_dispatch_excluded'])('a destination with a %s stop is not renumbered', (flag) => {
+  const { positionFor } = require('../services/auto-dispatch/route-position');
+  const origin = { lat: 27.4, lng: -82.5 };
+  const stop = {
+    id: 'pinned', technician_id: 't1', status: 'confirmed', window_start: '10:00', window_end: '11:00',
+    route_order: 1, created_at: '2026-07-01T00:00:00Z', lat: origin.lat, lng: origin.lng, geo: origin,
+    [flag]: true,
+  };
+  const target = {
+    id: 'moving', technician_id: 't1', status: 'confirmed', window_start: '09:00', window_end: '10:00',
+    created_at: '2026-07-01T00:00:00Z', lat: origin.lat, lng: origin.lng, geo: origin,
+  };
+  expect(positionFor([stop], target, {
+    sourceStamp: 'source', origin, departureMin: 8 * 60, dayEndMin: 17 * 60,
+  })).toBeNull();
+});
+
 // Codex pre-push P1: group siblings are excluded from the day's stops because
 // they move with the visit, so both the current placement and every candidate
 // must charge their work as part of the moving unit.
@@ -1014,12 +1031,24 @@ test('routeFits keeps two estimate-less legacy co-visits to their one shared hou
   });
   const rows = [coVisit('pest', 1), coVisit('lawn', 2)];
   expect(groupRouteStops(rows).map((row) => row.raw_estimate_minutes)).toEqual([null, null]);
+  expect(groupRouteStops(rows).every((row) => row.memberIds === undefined)).toBe(true);
 
   // Depart at 08:00 and close at 09:30. One shared 60-minute visit fits;
   // the former phantom 120 minutes does not.
   expect(routeFits(rows, rows.map((row) => row.id), {
     origin, departureMin: 8 * 60, dayEndMin: 9 * 60 + 30,
   })).toBe(true);
+
+  const originalCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+  try {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    expect(routeFits(rows, rows.map((row) => row.id), {
+      origin, departureMin: 8 * 60, dayEndMin: 9 * 60 + 30,
+    })).toBe(true);
+  } finally {
+    if (originalCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = originalCapacity;
+  }
 
   // A real allocation remains additive when folded to one arrival.
   const mix = { version: 2, allocatedServiceIds: ['pest', 'lawn'] };

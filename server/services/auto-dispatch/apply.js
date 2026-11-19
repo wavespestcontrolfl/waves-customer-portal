@@ -70,7 +70,8 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed',
+      'reservation_service_mix', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -85,6 +86,9 @@ async function revalidatePlacement(service) {
   }
   if (fresh.customer_confirmed === true) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
+  }
+  if (fresh.reservation_service_mix?.version === 2) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Visit joined a version-2 allocation after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -965,7 +969,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
     // location fields, null when absent. customer_confirmed for every visit
     // (owner 2026-10-09): a confirmation that lands between the read above
     // and the move fails the atomic match.
-    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS]
+    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', 'reservation_service_mix', ...LOCATION_FIELDS]
       .map((field) => [field, fresh[field] ?? null])),
   };
 
