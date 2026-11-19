@@ -2616,19 +2616,58 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// A technician's Messages badge: the same needs-a-reply count, over texts from the customers on its own route
-// only. A text from a number that matches no customer is office work and never counts.
+const READ_BEFORE_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+// POST /api/admin/communications/messages/read-all — the inbox's Mark all read (owner 2026-11-19), and with
+// contactPhone a row's Mark read (that sender only): every unread inbound text the inbox can show up to readBefore
+// (the newest text the caller's list showed), through the one read writer. Internal admin-phone traffic stays out,
+// as in /log. Office roles only: a technician reads one thread at a time through /messages/read, which checks each
+// text against its own customers.
+router.post('/messages/read-all', async (req, res, next) => {
+  try {
+    if (isTechnicianRequest(req)) return res.status(403).json({ error: 'Mark all read is for the office' });
+    // An ISO instant with Z or an offset: a bare wall-clock time would be read in the server's zone.
+    const rawBefore = req.body?.readBefore;
+    const readBefore = typeof rawBefore === 'string' && READ_BEFORE_INSTANT_RE.test(rawBefore) ? new Date(rawBefore) : null;
+    if (!readBefore || Number.isNaN(readBefore.getTime())) return res.status(400).json({ error: 'readBefore required (an ISO time with Z or an offset)' });
+    // contactPhone: one inbox row's Mark read (that sender's texts only). Only a request without the field reads the
+    // whole inbox; a present but empty or invalid phone is refused, never widened.
+    const hasSender = Object.prototype.hasOwnProperty.call(req.body || {}, 'contactPhone');
+    const contactPhone = hasSender ? req.body.contactPhone : null;
+    if (hasSender && (typeof contactPhone !== 'string' || !phoneIdentityKey(contactPhone))) {
+      return res.status(400).json({ error: 'contactPhone must be a phone number' });
+    }
+    const { markAllInboundSmsRead } = require('../services/inbound-sms-read');
+    const { updated, notificationsCleared } = await markAllInboundSmsRead({
+      readBefore,
+      adminUserId: req.technicianId || null,
+      role: req.techRole,
+      excludePhones: ADMIN_PHONES,
+      contactPhone,
+    });
+    res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// A technician's Messages badge: the same unread needs-a-reply count, over the texts its inbox shows: threads whose
+// conversation belongs to a customer on its own route (as /log scopes it), so Mark all read can clear every one. A
+// text in a thread with no customer is office work and never counts.
 async function technicianUnreadCount(req, customerId) {
   const { loadPendingSmsConversations } = require('../services/sms-pending-conversations');
-  const owned = new Set((await technicianCustomerIdsSubquery(req, db)).map((row) => row.customer_id));
-  const rows = (await loadPendingSmsConversations({
-    excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE,
-  })).filter((row) => row.customer_id && owned.has(row.customer_id));
+  const pending = await loadPendingSmsConversations({ excludePhones: ADMIN_PHONES, customerId, since: NEEDS_REPLY_SINCE });
+  const ids = pending.map((row) => row.id).filter(Boolean);
+  const visible = new Set(ids.length ? await db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .whereIn('m.id', ids)
+    .whereIn('c.customer_id', technicianCustomerIdsSubquery(req, db))
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .pluck('m.id') : []);
+  const rows = pending.filter((row) => visible.has(row.id));
   return { conversations: new Set(rows.map((row) => row.peer)).size, messages: rows.length };
 }
 
-// Shared inbox count; Customer 360 may scope it to the selected customer. A technician gets the count for its own
-// customers only (Messages badge).
+// Shared inbox count: needs-a-reply texts nobody has read (owner 2026-11-19); Customer 360 may scope it to the
+// selected customer. A technician gets the count for its own customers only (Messages badge).
 router.get('/unread-count', async (req, res, next) => {
   try {
     const { customerId } = req.query;
@@ -2641,7 +2680,7 @@ router.get('/unread-count', async (req, res, next) => {
     }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
     return res.json(await countUnreadInboundSms({
-      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE,
+      excludePhones: ADMIN_PHONES, customerId, role: req.techRole, since: NEEDS_REPLY_SINCE, unreadOnly: true,
     }));
   } catch (err) { return next(err); }
 });
