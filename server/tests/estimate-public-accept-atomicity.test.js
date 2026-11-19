@@ -515,6 +515,51 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
   });
 
+  test('annual coverage rechecks the converter\'s final normalized start when dispatch removes the booked anchor', async () => {
+    resetStore(recurringPestEstimate());
+    const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 40 * 86400000));
+    db.__state.tables.scheduled_services = [{
+      id: 'ss-prepay-race', source_estimate_id: 'est-atomic-1',
+      customer_id: null, technician_id: null, status: 'pending',
+      scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60,
+      reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    }];
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    const overlap = new Error('Annual coverage already exists at the fallback start');
+    overlap.annualPrepayOverlap = { activeTermId: 'term-old', activeTermEnd: scheduledDate };
+    lockAndAssertNoAnnualPrepayOverlap
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(overlap);
+    // Deliberately differs from whichever date this route's in-memory DB
+    // fixture exposed to preflight; the real converter supplies today's
+    // normalized fallback after the booked row disappears.
+    const fallbackStart = '2000-01-01';
+    EstimateConverter.convertEstimate.mockImplementationOnce(async (_id, opts) => {
+      await opts.verifyAnnualPrepayTermStart(fallbackStart);
+      return { draftInvoiceId: 'should-not-mint' };
+    });
+
+    const response = await putAccept('tok-atomic-1-x0123456789', {
+      paymentMethodPreference: 'prepay_annual',
+      slotId: `${scheduledDate}_09-00_unassigned`,
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.data).toEqual({
+      code: 'ANNUAL_PREPAY_OVERLAP',
+      error: expect.stringContaining('already has an active annual prepay plan'),
+    });
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenNthCalledWith(
+      1, expect.anything(), expect.any(String), expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), false, expect.any(String), 'est-atomic-1',
+    );
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenNthCalledWith(
+      2, expect.anything(), expect.any(String), fallbackStart, false, expect.any(String), 'est-atomic-1',
+    );
+    expect(storedEstimate().status).toBe('sent');
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+  });
+
   test('codex #4819 r6 P2: a deferred (sign-before-pay) accept quotes the park\'s FROZEN total — Station Setup included — never the setup-less display figure', async () => {
     resetStore(recurringPestEstimate());
     // Prepay requires a picked appointment; a sign-before-pay accept keeps it

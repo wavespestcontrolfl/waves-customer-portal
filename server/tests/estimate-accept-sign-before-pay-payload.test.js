@@ -17,7 +17,7 @@ describe('estimate accept — sign-before-pay payloads', () => {
     const db = jest.fn((table) => {
       const builder = {};
       const chain = () => builder;
-      ['where', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'orderBy', 'select', 'limit'].forEach((m) => {
+      ['where', 'whereRaw', 'whereNot', 'whereNotNull', 'whereNull', 'whereIn', 'whereNotIn', 'orderBy', 'select', 'limit'].forEach((m) => {
         builder[m] = jest.fn((...args) => { calls.push({ table, method: m, args }); return chain(); });
       });
       builder.first = jest.fn(async () => (typeof firstByTable[table] === 'function' ? firstByTable[table]() : (firstByTable[table] ?? null)));

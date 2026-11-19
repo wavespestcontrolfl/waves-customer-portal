@@ -94,9 +94,10 @@ const {
   isManualAnnualPrepayEligibleServiceMix,
   prepayBookingEligibility,
   markEstimateManuallyAccepted,
+  estimateLinkedVisitsQuery,
 } = require('../services/estimate-manual-acceptance');
 
-function makeDb(estimate, claimedOverrides = null) {
+function makeDb(estimate, claimedOverrides = null, bookedStart = null) {
   const updates = [];
   const inserts = [];
   const database = jest.fn((table) => {
@@ -116,6 +117,10 @@ function makeDb(estimate, claimedOverrides = null) {
         this.statusList = { column, values };
         return this;
       },
+      leftJoin() { return this; },
+      whereNotNull() { return this; },
+      orderBy() { return this; },
+      select() { return this; },
       whereNotIn() {
         return this;
       },
@@ -132,6 +137,7 @@ function makeDb(estimate, claimedOverrides = null) {
       },
       first: async () => {
         if (table === 'estimates') return estimate;
+        if (table === 'scheduled_services' && bookedStart && builder.clause?.['scheduled_services.source_estimate_id']) return { scheduled_date: bookedStart };
         return null;
       },
       update(patch) {
@@ -460,6 +466,7 @@ describe('estimate manual acceptance', () => {
       skipWelcomeSms: true,
       deferCommercialScheduleNotification: true,
       autoSendInvoice: false,
+      verifyAnnualPrepayTermStart: expect.any(Function),
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
       // The prepay invoice bills a misting install when the estimate carries one (misting PR 2a): the install office bell is armed.
@@ -1576,7 +1583,7 @@ describe('commercial proposal win paths (#1917)', () => {
 });
 
 describe('prepay-on-book (one-step annual prepay while booking)', () => {
-  test('threads the booked term start + coverage config to the converter and takes the atomic overlap lock', async () => {
+  test('checks the first paid visit for overlap even when the requested term starts later', async () => {
     const estimate = {
       id: 'estimate-prepay-onbook',
       status: 'viewed',
@@ -1595,7 +1602,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
         oneTime: { total: 99, items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
       },
     };
-    const { database } = makeDb(estimate);
+    const { database } = makeDb(estimate, null, '2026-07-12');
     const estimateConverter = {
       convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-onbook', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-onbook' }),
     };
@@ -1629,7 +1636,47 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     // anchored to the booked date) before conversion.
     const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
     expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenCalledWith(
-      database, 'customer-onbook', '2026-07-30', false, expect.any(String), 'estimate-prepay-onbook',
+      database, 'customer-onbook', '2026-07-12', false, expect.any(String), 'estimate-prepay-onbook',
+    );
+  });
+
+  test('rechecks the final normalized term start when the booked anchor disappears during conversion', async () => {
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    lockAndAssertNoAnnualPrepayOverlap.mockClear();
+    const overlapErr = new Error('Customer already has an annual prepay term through 2026-07-01. Use a start date after 2026-07-01.');
+    overlapErr.annualPrepayOverlap = { activeTermId: 'term-old', activeTermEnd: '2026-07-01' };
+    lockAndAssertNoAnnualPrepayOverlap
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(overlapErr);
+    const estimate = {
+      id: 'estimate-prepay-anchor-race', status: 'viewed', customer_id: 'customer-race',
+      sent_at: '2026-05-10T12:00:00.000Z', monthly_total: '55.00', annual_total: '660.00',
+      estimate_data: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly' }] } },
+    };
+    const { database } = makeDb(estimate, null, '2026-07-12');
+    const estimateConverter = {
+      convertEstimate: jest.fn(async (_id, opts) => {
+        await opts.verifyAnnualPrepayTermStart('2026-06-01');
+        return { customerId: 'customer-race', billingTerm: 'prepay_annual', draftInvoiceId: 'inv-race' };
+      }),
+    };
+
+    await expect(markEstimateManuallyAccepted({
+      estimateId: estimate.id,
+      adminUserId: 'admin-race',
+      billingTerm: 'prepay_annual',
+      database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter,
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      annualPrepayOverlap: expect.objectContaining({ activeTermEnd: '2026-07-01' }),
+    });
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenNthCalledWith(
+      1, database, 'customer-race', '2026-07-12', false, expect.any(String), estimate.id,
+    );
+    expect(lockAndAssertNoAnnualPrepayOverlap).toHaveBeenNthCalledWith(
+      2, database, 'customer-race', '2026-06-01', false, expect.any(String), estimate.id,
     );
   });
 
@@ -2141,6 +2188,20 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
     customerBilling: 'per_application|49||active_customer|',
   };
+
+  test('the no-linked-visit pin includes a booked row with an old hold stamp', () => {
+    const query = {};
+    query.where = jest.fn(() => query);
+    query.whereNotNull = jest.fn(() => query);
+    query.whereNull = jest.fn(() => query);
+    const conn = jest.fn(() => query);
+
+    estimateLinkedVisitsQuery(conn, 'estimate-pins');
+
+    expect(query.where).toHaveBeenCalledWith({ source_estimate_id: 'estimate-pins' });
+    expect(query.whereNotNull).toHaveBeenCalledWith('customer_id');
+    expect(query.whereNull).not.toHaveBeenCalled();
+  });
   function dbWith(estimate, customer, { linkedVisit = null, bookedRows = [], addon = null } = {}) {
     const made = makeDb(estimate);
     const inner = made.database;

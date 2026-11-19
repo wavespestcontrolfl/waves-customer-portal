@@ -19,6 +19,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 
 const ASSESSMENT_DISPLAY_NAME = 'Waves Assessment';
 const ASSESSMENT_NAME_RE = /^waves assessment$/i;
@@ -76,6 +77,26 @@ function excludeAssessmentBookings(query, bookingAlias = 'scheduled_services', s
       `${bookingAlias}.service_type`, ASSESSMENT_DISPLAY_NAME.toLowerCase(),
     ],
   );
+}
+
+// The paid visit this estimate actually converted must satisfy one rule at
+// both accept-time overlap checking and conversion. A claimed booking keeps
+// its appointment even when an old reservation stamp remains, while an
+// unclaimed hold, another customer's row, retained history, and a free Waves
+// Assessment can never anchor the paid plan.
+function paidEstimateVisitsQuery(database, { estimateId, customerId }) {
+  const query = database('scheduled_services')
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+    .where({
+      'scheduled_services.source_estimate_id': estimateId,
+      'scheduled_services.customer_id': customerId,
+    })
+    .whereNotNull('scheduled_services.customer_id')
+    .whereRaw('scheduled_services.is_callback IS NOT TRUE')
+    .whereNotIn('scheduled_services.status', RETAINED_HISTORY_STATUSES);
+  return excludeAssessmentBookings(query)
+    .orderBy('scheduled_services.scheduled_date', 'asc')
+    .select('scheduled_services.*');
 }
 
 // Drops assessment visits from loaded scheduled_services rows (no catalog
@@ -150,6 +171,7 @@ module.exports = {
   isAssessmentServiceType,
   isAssessmentServiceRow,
   isAssessmentVisit,
+  paidEstimateVisitsQuery,
   withoutAssessmentVisits,
   excludeAssessmentBookings,
   scopeToAssessmentBookings,

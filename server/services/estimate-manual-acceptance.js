@@ -1,6 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
+const { paidEstimateVisitsQuery } = require('./assessment-booking');
 const EstimateConverter = require('./estimate-converter');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 const AcceptEffects = require('./estimate-accept-effects');
@@ -549,11 +551,12 @@ function cardChanged() {
   return err;
 }
 
-// Visits linked to an estimate: the rows the converter's reservation path
-// starts from (estimate-converter.js reservation lookup — any status).
+// Every customer-linked row stamped to an estimate, including a booked visit
+// that retains an old hold expiry. This is the converter's separate refusal
+// pin, before paid-visit eligibility is applied.
 function estimateLinkedVisitsQuery(conn, estimateId) {
   return conn('scheduled_services').where({ source_estimate_id: estimateId })
-    .whereNotNull('customer_id').whereNull('reservation_expires_at');
+    .whereNotNull('customer_id');
 }
 
 // The customer billing fields the accept reads and rewrites; the converter
@@ -1124,15 +1127,34 @@ async function applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayA
     convertOptions.coverageVisitCount = annualPrepayCoverage.coverageVisitCount;
     convertOptions.coverageCadence = annualPrepayCoverage.coverageCadence;
   }
+  const booked = updatedEstimate.customer_id && await paidEstimateVisitsQuery(trx, {
+    estimateId: updatedEstimate.id, customerId: updatedEstimate.customer_id,
+  }).first('scheduled_services.scheduled_date');
+  const termStart = dateOnlyString(booked?.scheduled_date) || annualPrepayTermStart || etDateString();
   const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
   await lockAndAssertNoAnnualPrepayOverlap(
     trx,
     updatedEstimate.customer_id,
-    annualPrepayTermStart || etDateString(),
+    termStart,
     false,
     'Customer already has an annual prepay term through',
     updatedEstimate.id,
   );
+  // The converter re-reads linked visits after this preflight. Dispatch can
+  // cancel or move the anchor meanwhile, making createTermForAnnualPrepay
+  // normalize a different start (often today). Re-check that exact final
+  // value under the advisory lock already held by this transaction.
+  convertOptions.verifyAnnualPrepayTermStart = async (normalizedStart) => {
+    if (dateOnlyString(normalizedStart) === termStart) return;
+    await lockAndAssertNoAnnualPrepayOverlap(
+      trx,
+      updatedEstimate.customer_id,
+      dateOnlyString(normalizedStart),
+      false,
+      'Customer already has an annual prepay term through',
+      updatedEstimate.id,
+    );
+  };
 }
 
 // Manual Mark Won keeps scheduling under operator control. Standard verbal

@@ -250,6 +250,22 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect(acceptance.appointment.id).toBe(lawnId);
   });
 
+  test('a booked paid visit with an expired hold stamp stays selectable and can be accepted by id', async () => {
+    const { customerId, estimateId, token } = await fixture(mockTransaction);
+    const id = await visit(mockTransaction, {
+      customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+      extra: { source_estimate_id: estimateId, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
+    });
+    const { appointment } = await getAcceptance(token);
+    expect(appointment.id).toBe(id);
+    expect(appointment).not.toHaveProperty('reservationExpiresAt');
+    const res = await putAccept(token, { existingAppointmentId: id, paymentMethodPreference: 'pay_at_visit' });
+    expect({ status: res.status, error: (await res.json()).error }).toEqual({ status: 200, error: undefined });
+    const booked = await mockTransaction('scheduled_services')
+      .where({ source_estimate_id: estimateId, customer_id: customerId, scheduled_date: CHOSEN_DATE }).pluck('id');
+    expect(booked).toEqual([id]);
+  });
+
   test('/data: an unlinked legacy assessment row (name only) is not offered either', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await visit(mockTransaction, { customerId, key: null, type: 'Waves Assessment', date: ASSESSMENT_DATE });
@@ -321,6 +337,25 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     const EstimateConverter = () => require('../services/estimate-converter');
     const convertOpts = { skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true };
 
+    test.each(['cancelled', 'rescheduled', 'skipped', 'no_show'])('a %s visit cannot become the plan start', async (status) => {
+      const { customerId, estimateId } = await fixture(mockTransaction);
+      const earlier = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: ASSESSMENT_DATE,
+        extra: { status, source_estimate_id: estimateId, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
+      });
+      const chosen = await visit(mockTransaction, {
+        customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
+        extra: { source_estimate_id: estimateId, estimated_price: 55, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
+      });
+      await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+
+      const result = await EstimateConverter().convertEstimate(estimateId, { database: mockTransaction, ...convertOpts });
+
+      expect(result.firstScheduledServiceId).toBe(chosen);
+      expect(dateOnly(result.membershipEmail.effectiveDate)).toBe(CHOSEN_DATE);
+      expect(await mockTransaction('scheduled_services').where({ id: earlier }).first('status')).toEqual({ status });
+    });
+
     test('an assessment stamped to the estimate (older build) does not become the plan start', async () => {
       const { customerId, estimateId } = await fixture(mockTransaction);
       // The earlier-dated assessment carries the estimate's stamp, as the
@@ -329,7 +364,7 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
       const assessmentId = await assessmentVisit(mockTransaction, customerId, { source_estimate_id: estimateId });
       const chosenId = await visit(mockTransaction, {
         customerId, key: 'lawn_care_monthly', type: 'Monthly Lawn Care Service', date: CHOSEN_DATE,
-        extra: { source_estimate_id: estimateId, estimated_price: 55 },
+        extra: { source_estimate_id: estimateId, estimated_price: 55, reservation_expires_at: mockTransaction.raw("NOW() - INTERVAL '1 day'") },
       });
       await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
 

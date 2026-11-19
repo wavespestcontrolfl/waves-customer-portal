@@ -411,21 +411,25 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
       // accept) must fail this activation CLOSED (bell, estimate stays
       // awaiting, no invoice) rather than mint a second year.
       const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
-      try {
-        await lockAndAssertNoAnnualPrepayOverlap(
-          trx,
-          estimate.customer_id,
-          acceptContext.annualPrepayTermStart || etDateString(),
-          false,
-          'Customer already has an annual prepay term through',
-          estimateId,
-        );
-      } catch (overlapErr) {
-        if (overlapErr?.annualPrepayOverlap) {
-          throw new Error(`overlapping annual coverage — ${overlapErr.annualPrepayOverlap.error}`);
+      const assertAnnualPrepayStart = async (termStart) => {
+        try {
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx,
+            estimate.customer_id,
+            termStart,
+            false,
+            'Customer already has an annual prepay term through',
+            estimateId,
+          );
+        } catch (overlapErr) {
+          if (overlapErr?.annualPrepayOverlap) {
+            throw new Error(`overlapping annual coverage — ${overlapErr.annualPrepayOverlap.error}`);
+          }
+          throw overlapErr;
         }
-        throw overlapErr;
-      }
+      };
+      const overlapTermStart = dateOnlyString(acceptContext.annualPrepayTermStart) || etDateString();
+      await assertAnnualPrepayStart(overlapTermStart);
 
       // Codex P1 (round 2): the ordinary prepay_annual path owns invoice
       // creation, dueDate, the setup line, tax, and service seeding —
@@ -448,6 +452,14 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         skipMembershipEmail: true,
         skipWelcomeSms: acceptContext.skipWelcomeSms === true,
         annualPlanVersion: contract.annual_plan_version || DEFAULT_ANNUAL_PLAN_VERSION,
+        // The converter can choose a linked paid visit after this preflight.
+        // Verify the exact normalized start it is about to write while this
+        // transaction still owns the same per-customer overlap lock.
+        verifyAnnualPrepayTermStart: async (normalizedStart) => {
+          const finalStart = dateOnlyString(normalizedStart) || etDateString();
+          if (finalStart === overlapTermStart) return;
+          await assertAnnualPrepayStart(finalStart);
+        },
       });
 
       // Defense in depth: convertEstimate either throws or returns

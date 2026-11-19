@@ -2689,6 +2689,12 @@ sent to the customer. The accept notification (customer account feed) says
 nothing is charged today and the fee bills with the first visit. No message is sent
 because of these fields.
 
+For annual prepay, `PUT /api/estimates/:token/accept` checks for an overlapping term
+using the first qualifying service booked for that customer and estimate. Conversion
+uses the same visit. A staff-booked service still qualifies after its old hold expires.
+Free assessments and callbacks, unclaimed holds and cancelled, skipped, no-show or rescheduled visits
+do not set the term start. When there is no qualifying visit, the overlap check uses today.
+
 Pay after the first visit, annual prepay (PR-D, `GATE_PAF_PREPAY`; live only when
 `GATE_PAY_AFTER_FIRST_VISIT`, `GATE_PAF_PREPAY`, `RECURRING_CARD_ON_FILE` and
 `GATE_PREPAY_CARD_AND_CHARGE` are all on; owner rulings 2026-09-30 / 2026-10-01). It changes

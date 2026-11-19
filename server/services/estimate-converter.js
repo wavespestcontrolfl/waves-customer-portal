@@ -16,7 +16,7 @@ const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
-const { withoutAssessmentVisits } = require('./assessment-booking');
+const { paidEstimateVisitsQuery } = require('./assessment-booking');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
 const { estimateLawnFloorArmed, lawnRowsShowFloorEnforcement } = require('./estimate-floor-signal-replay');
 // Canonical service-key tier membership (aliased: this module's local
@@ -5670,6 +5670,9 @@ const EstimateConverter = {
     const annualPrepayTermStart = typeof opts.annualPrepayTermStart === 'string' && opts.annualPrepayTermStart
       ? opts.annualPrepayTermStart
       : null;
+    const verifyAnnualPrepayTermStart = typeof opts.verifyAnnualPrepayTermStart === 'function'
+      ? opts.verifyAnnualPrepayTermStart
+      : null;
     // Coverage override for a prepay accept made WHILE booking: the booked
     // scheduled_services rows are the coverage series, so the term's
     // coverage_service_type must equal the BOOKED service_type (and the visit
@@ -6609,13 +6612,12 @@ const EstimateConverter = {
       })
       : fn(database));
     const registerSeededRowsInline = !seedsInOwnTransaction && !deferFollowUpReminderRegistration;
-    const existingFromReservation = await database('scheduled_services')
+    const linkedVisit = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })
       .whereNotNull('customer_id')
-      .whereNull('reservation_expires_at')
       .count('id as count')
       .first();
-    const linkedVisitCount = Number(existingFromReservation?.count || 0);
+    const linkedVisitCount = Number(linkedVisit?.count || 0);
     // The Intelligence Bar card promised no visit linked to this estimate
     // (opts.refuseLinkedVisits, set by markEstimateManuallyAccepted from the
     // card's pin): a row linked since — booking.js can link one outside the
@@ -6631,11 +6633,7 @@ const EstimateConverter = {
     // start nor be priced as a plan visit, and the normal auto-schedule path
     // runs when it was the only stamped row.
     const reservedRows = linkedVisitCount > 0
-      ? await withoutAssessmentVisits(await database('scheduled_services')
-        .where({ source_estimate_id: estimateId })
-        .whereNotNull('customer_id')
-        .whereNull('reservation_expires_at')
-        .orderBy('scheduled_date', 'asc'), database)
+      ? await paidEstimateVisitsQuery(database, { estimateId, customerId })
       : [];
     const reservationRowsExist = reservedRows.length > 0;
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
@@ -8792,6 +8790,7 @@ const EstimateConverter = {
                     * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
+              ...(verifyAnnualPrepayTermStart ? { verifyNormalizedStart: verifyAnnualPrepayTermStart } : {}),
               // Coverage config for the single recurring service → visits get
               // stamped on payment. A single service that couldn't be derived
               // fails closed above, so a single-service term always ships WITH
