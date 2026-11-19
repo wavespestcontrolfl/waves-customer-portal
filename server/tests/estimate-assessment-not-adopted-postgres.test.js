@@ -458,6 +458,70 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     expect((await mockTransaction('scheduled_services').where({ id }).first()).customer_id).toBe(other.customerId);
   });
 
+  test('locked recovery refuses a booking whose customer owner is cleared before its row lock', async () => {
+    await mockTransaction.rollback();
+    mockTransaction = null;
+    let seeded;
+    let bookedId;
+    await db.transaction(async (seedTrx) => {
+      seeded = await fixture(seedTrx);
+      bookedId = await visit(seedTrx, {
+        customerId: seeded.customerId,
+        key: 'lawn_care_monthly',
+        type: 'Monthly Lawn Care Service',
+        date: CHOSEN_DATE,
+        extra: { source_estimate_id: seeded.estimateId },
+      });
+    });
+    mockTransaction = await db.transaction();
+    const ownerChange = await db.transaction();
+    const observer = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 1 } });
+    let ownerChangeOpen = true;
+    let request;
+    try {
+      const { rows: [{ pid }] } = await ownerChange.raw('SELECT pg_backend_pid()::int AS pid');
+      await ownerChange('scheduled_services').where({ id: bookedId }).forUpdate().first();
+      await ownerChange('scheduled_services').where({ id: bookedId }).update({ customer_id: null });
+
+      // Both unlocked probes still see the committed owner. The request then
+      // waits at its final FOR UPDATE, where the expected customer must be
+      // part of the predicate rather than restored from the stale preflight.
+      request = putAccept(seeded.token, {
+        slotId: `${CHOSEN_DATE}_09-00_unassigned`,
+        paymentMethodPreference: 'pay_at_visit',
+      });
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const result = await observer.raw(`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND ?::int = ANY(pg_blocking_pids(pid))
+        ) AS waiting`, [pid]);
+        waiting = result.rows[0].waiting;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      await ownerChange.commit();
+      ownerChangeOpen = false;
+
+      const response = await request;
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: expect.stringContaining('no longer available') });
+      expect((await mockTransaction('estimates').where({ id: seeded.estimateId }).first()).status).toBe('sent');
+      expect((await mockTransaction('scheduled_services').where({ id: bookedId }).first()).customer_id).toBeNull();
+    } finally {
+      if (ownerChangeOpen) await ownerChange.rollback().catch(() => {});
+      if (request) await request.catch(() => {});
+      await observer.destroy();
+      await mockTransaction?.rollback().catch(() => {});
+      mockTransaction = null;
+      if (seeded) {
+        await db('scheduled_services').where({ source_estimate_id: seeded.estimateId }).del();
+        await db('estimates').where({ id: seeded.estimateId }).del();
+        await db('customers').where({ id: seeded.customerId }).del();
+      }
+    }
+  });
+
   test('/data: a booked assessment is not offered — the normal slot-picker flow renders', async () => {
     const { customerId, token } = await fixture(mockTransaction);
     await assessmentVisit(mockTransaction, customerId);

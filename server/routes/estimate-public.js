@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, paidEstimateVisitsQuery } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -10810,6 +10810,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // + under-lock UPDATE) — see adoptableAppointmentStatuses.
     const acceptAdoptableStatuses = adoptableAppointmentStatuses();
     let bookedSlotMatch = null;
+    let bookedSlotCoordinates = null;
     let recoveredAppointment = null;
     let reservationRow = null;
     if (slotId) {
@@ -10826,7 +10827,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       const claim = await checkBooking();
       if (claim.claimed) {
         if (!claim.appointment) return res.status(409).json(HOLD_EXPIRED_409);
-        bookedSlotMatch = bookedCoordinates;
+        bookedSlotCoordinates = bookedCoordinates;
+        bookedSlotMatch = { ...bookedCoordinates, 'scheduled_services.customer_id': estimate.customer_id };
         recoveredAppointment = claim.appointment;
         existingAppointmentId = recoveredAppointment.id;
         slotId = '';
@@ -10853,7 +10855,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // the row between the linked-row probe and this hold query.
           recoveredAppointment = (await checkBooking()).appointment;
           if (!recoveredAppointment) return res.status(409).json(HOLD_EXPIRED_409);
-          bookedSlotMatch = bookedCoordinates;
+          bookedSlotCoordinates = bookedCoordinates;
+          bookedSlotMatch = { ...bookedCoordinates, 'scheduled_services.customer_id': estimate.customer_id };
           existingAppointmentId = recoveredAppointment.id;
           slotId = '';
           reservationRow = null;
@@ -12247,7 +12250,12 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // Public reserve and staff schedule writers take the same day lock.
         // Prove uniqueness again before the transaction takes any row locks.
         await acquireOccupancyLock(trx, bookedSlotMatch['scheduled_services.scheduled_date']);
-        const { appointment } = await bookedAtSubmittedSlot(trx, estimate, estData, bookedSlotMatch, acceptAdoptableStatuses);
+        // Probe the raw signed coordinates again so a foreign claim or an
+        // ambiguous second booking cannot hide behind the expected-owner
+        // match used by the final locked read below.
+        const { appointment } = await bookedAtSubmittedSlot(
+          trx, estimate, estData, bookedSlotCoordinates, acceptAdoptableStatuses,
+        );
         if (!appointment || String(appointment.id) !== String(existingAppointmentRow?.id)) {
           throw Object.assign(new Error(HOLD_EXPIRED_409.error), { status: 409, code: 'RESERVATION_EXPIRED' });
         }
@@ -13785,34 +13793,35 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // where createTermForAnnualPrepay defaults the start). Guarding with
         // bare "today" 409'd a legitimate next-term renewal whose current
         // term ends before the booked first visit.
-        const reservedStartRow = await trx('scheduled_services')
-          .where({ source_estimate_id: estimate.id })
-          .whereNotNull('customer_id')
-          .whereNull('reservation_expires_at')
-          .orderBy('scheduled_date', 'asc')
-          .first('scheduled_date');
+        const reservedStartRow = await paidEstimateVisitsQuery(trx, {
+          estimateId: estimate.id,
+          customerId,
+        }).first('scheduled_services.scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        try {
-          await lockAndAssertNoAnnualPrepayOverlap(
-            trx,
-            customerId,
-            overlapTermStart,
-            false,
-            'Customer already has an annual prepay term through',
-            estimate.id,
-          );
-        } catch (overlapErr) {
-          if (overlapErr && overlapErr.annualPrepayOverlap) {
-            const conflict = estimateAcceptError(
-              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-              409,
+        const assertAnnualPrepayStart = async (termStart) => {
+          try {
+            await lockAndAssertNoAnnualPrepayOverlap(
+              trx,
+              customerId,
+              termStart,
+              false,
+              'Customer already has an annual prepay term through',
+              estimate.id,
             );
-            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-            throw conflict;
+          } catch (overlapErr) {
+            if (overlapErr && overlapErr.annualPrepayOverlap) {
+              const conflict = estimateAcceptError(
+                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+                409,
+              );
+              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+              throw conflict;
+            }
+            throw overlapErr;
           }
-          throw overlapErr;
-        }
+        };
+        await assertAnnualPrepayStart(overlapTermStart);
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13888,6 +13897,14 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
+          // Re-check the exact normalized start the term writer is about to
+          // persist. Dispatch can cancel or move the booked anchor after the
+          // preflight above while this transaction retains the customer lock.
+          verifyAnnualPrepayTermStart: async (normalizedStart) => {
+            const finalStart = dateOnly(normalizedStart) || etDateString();
+            if (finalStart === overlapTermStart) return;
+            await assertAnnualPrepayStart(finalStart);
+          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation

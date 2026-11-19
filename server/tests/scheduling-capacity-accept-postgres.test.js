@@ -104,6 +104,49 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
     expect((await f.db('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
   });
 
+  test('capacity commit counts an already-booked own-estimate row whose former hold stamp expired', async () => {
+    const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0]) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    const booked = f.baseStop({
+      source_estimate_id: f.ids.estimates[0],
+      reservation_expires_at: f.db.raw("NOW() - INTERVAL '1 hour'"),
+      window_start: '10:00',
+      window_end: '12:00',
+    });
+    await f.db('scheduled_services').insert(booked);
+
+    await expect(f.db.transaction(trx => commitReservation({
+      scheduledServiceId: held.scheduledServiceId,
+      customerId: f.ids.customer,
+      preparedCapacity,
+      trx,
+    }))).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+
+    expect(await f.db('scheduled_services').where({ id: booked.id }).first())
+      .toMatchObject({ customer_id: f.ids.customer, source_estimate_id: f.ids.estimates[0] });
+    expect(await f.db('scheduled_services').where({ id: held.scheduledServiceId }).first())
+      .toMatchObject({ customer_id: null, reservation_expires_at: expect.anything() });
+  });
+
+  test('a restored booking uses local route capacity without buying additional road legs', async () => {
+    const { prepareArrivalCapacity } = require('../services/scheduling/arrival-route');
+    const optimizer = require('../services/route-optimizer');
+    const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0]) });
+    const travel = optimizer.createSchedulingTravel();
+    travel.preload = jest.fn(async () => {});
+    const options = { conn: f.db, serviceId: held.scheduledServiceId, technicianId: f.ids.technician,
+      date: f.date, windowStart: '10:00', windowEnd: '10:30', durationMinutes: 30,
+      excludeEstimateId: f.ids.estimates[0], travel };
+    await prepareArrivalCapacity(options);
+    expect(travel.preload).toHaveBeenCalled();
+    travel.preload.mockClear();
+    await f.db('scheduled_services').insert(f.baseStop({
+      source_estimate_id: f.ids.estimates[0], reservation_expires_at: f.db.raw("NOW() + INTERVAL '1 hour'"),
+    }));
+    await prepareArrivalCapacity(options);
+    expect(travel.preload).not.toHaveBeenCalled();
+  });
+
   test('a combined hold preserves each resolved allowance when the release gate is disabled', async () => {
     await f.db('estimates').where({ id: f.ids.estimates[0] }).update({ estimate_data: f.estimateData(['pest_control', 'lawn_care']) });
     const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], 70) });

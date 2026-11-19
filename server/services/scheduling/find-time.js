@@ -320,6 +320,11 @@ async function findCapacitySlots(opts) {
       if (absentDays.has(`${tech.id}:${date}`)) continue;
       const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
         excludeServiceIds: opts.excludeServiceIds,
+        // Capacity offers and their reserve/commit writers must see the same
+        // claimed bookings, including rows that retain an expired hold stamp.
+        // arrival-route keeps any newly exposed route on cached/conservative
+        // travel, so this consistency check never buys incremental road legs.
+        includeClaimedBookings: true,
         // The requesting estimate's OWN uncommitted hold must not occupy the
         // route it is asking about (codex r16 P1) — the legacy/SSR page no
         // longer adopts that hold, so a tight route could otherwise omit the

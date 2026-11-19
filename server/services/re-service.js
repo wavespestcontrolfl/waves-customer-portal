@@ -33,4 +33,19 @@ function isReService({ serviceKey, serviceName, serviceType } = {}) {
   return RE_SERVICE_NAME_RE.test(`${serviceName || ''} ${serviceType || ''}`);
 }
 
-module.exports = { RE_SERVICE_SERVICE_KEYS, isReService };
+// SQL twin of isReService for a scheduled_services query joined to services.
+// The label checks intentionally mirror annual-prepay-renewals' legacy-row
+// predicate: completed callbacks pre-dating is_callback can have only their
+// catalog key or re-service text left as evidence.
+function excludeReServices(query, bookingAlias = 'scheduled_services', serviceAlias = 'services') {
+  return query
+    .whereRaw(`COALESCE(??, '') NOT IN (${Array.from(RE_SERVICE_SERVICE_KEYS).map(() => '?').join(', ')})`, [
+      `${serviceAlias}.service_key`, ...RE_SERVICE_SERVICE_KEYS,
+    ])
+    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${serviceAlias}.name`, '%re-service%'])
+    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${serviceAlias}.name`, '%reservice%'])
+    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${bookingAlias}.service_type`, '%re-service%'])
+    .whereRaw("COALESCE(??, '') NOT ILIKE ?", [`${bookingAlias}.service_type`, '%reservice%']);
+}
+
+module.exports = { RE_SERVICE_SERVICE_KEYS, isReService, excludeReServices };

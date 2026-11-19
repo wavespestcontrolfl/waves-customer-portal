@@ -546,6 +546,10 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(response.data.invoiceAmount).toBe(448);
     expect(response.data.prepayInvoiceAmount).toBe(448);
     expect(response.data.invoicePayUrl == null).toBe(true);
+    expect(EstimateConverter.convertEstimate).toHaveBeenCalledWith(
+      'est-atomic-1',
+      expect.objectContaining({ verifyAnnualPrepayTermStart: expect.any(Function) }),
+    );
     const NotificationService = require('../services/notification-service');
     const estimateNotice = NotificationService.notifyAdmin.mock.calls.find((call) => call[0] === 'estimate');
     // The full admin text (the bell's detail since the who-and-what copy, #5576)
