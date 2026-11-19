@@ -38,9 +38,9 @@ const extractionWith = (choice, intent = null) => ({
     { field_path: '/service_request/billing_choice', quote: WORDS, speaker: 'caller', transcript_offset_ms: 1200 },
   ] : [],
 });
-// The same extraction from a tenant with no authority on the account, and no model flag (the flag is derived).
-const thirdParty = (choice, intent = null) => JSON.stringify({
-  ...extractionWith(choice, intent), caller: { relationship_to_property: 'tenant', on_site_authorization: false },
+// The same extraction from someone the call reader names (a tenant, by default), with no model flag.
+const thirdParty = (choice, intent = null, caller = {}) => JSON.stringify({
+  ...extractionWith(choice, intent), caller: { relationship_to_property: 'tenant', on_site_authorization: false, ...caller },
 });
 // A labeled two-speaker transcript: the caller says WORDS on a call that names the plan.
 const transcriptWith = (choice) => (choice
@@ -172,21 +172,30 @@ describeDb("the caller's word (PostgreSQL)", () => {
     ["the transcript does not hold the caller's words", [['per_application', { transcription: transcriptWith(null) }]], { yes: null, noYes: 'yes_without_words' }],
     // A call with no recording keeps its live text, which can cut a turn with no mark: never the caller's words.
     ['the words are only in the live-text backup', [['per_application', { transcription_provider: 'twilio_realtime' }]], { yes: null, noYes: 'yes_without_words' }],
-    // A third party with no authority speaks for no one, and their word still hides an older yes. The verdict is the
-    // routing one (canAutoRoute's merge): derived from the caller fields with no model flag, and a model flag the
-    // fields do not support is dropped.
-    ['the caller on the yes call is a third party with no authority', [['per_application', { ai_extraction_enriched: thirdParty('per_application') }]],
-      { yes: null, noYes: 'caller_not_authorized' }],
-    ['an unauthorized caller after a yes', [['per_application', { created_at: hoursAgo(5) }], ['per_application', {
+    // Only the account holder's side speaks for the account; anyone else's word still hides an older yes.
+    ['the caller on the yes call is a tenant', [['per_application', { ai_extraction_enriched: thirdParty('per_application') }]],
+      { yes: null, noYes: 'caller_not_account_holder' }],
+    ['a tenant allowed on site is still not the account holder', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { on_site_authorization: true }),
+    }]], { yes: null, noYes: 'caller_not_account_holder' }],
+    // Booking lets a relative with a confirmed time book (owner 2026-09-28); agreeing to a price is not booking.
+    ['a relative with a confirmed time is not the account holder for a price', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'family_member' }),
+    }]], { yes: null, noYes: 'caller_not_account_holder' }],
+    ['someone else after a yes', [['per_application', { created_at: hoursAgo(5) }], ['per_application', {
       created_at: hoursAgo(2), ai_extraction_enriched: thirdParty('per_application'),
-    }]], { yes: null, noYes: 'caller_not_authorized' }],
-    ["an unauthorized caller's cancel closes nothing", [['per_application', { created_at: hoursAgo(5) }], [null, {
+    }]], { yes: null, noYes: 'caller_not_account_holder' }],
+    ["someone else's cancel closes nothing", [['per_application', { created_at: hoursAgo(5) }], [null, {
       created_at: hoursAgo(2), ai_extraction_enriched: thirdParty(null, 'cancellation_request'),
-    }]], { yes: null, noYes: 'caller_not_authorized' }],
-    ['an unauthorized call with no word is no word', [['per_application', { created_at: hoursAgo(5) }], [null, {
+    }]], { yes: null, noYes: 'caller_not_account_holder' }],
+    ["someone else's call with no word is no word", [['per_application', { created_at: hoursAgo(5) }], [null, {
       created_at: hoursAgo(2), ai_extraction_enriched: thirdParty(null),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
-    ['a model flag the caller fields do not support is dropped: the yes stands', [['per_application', {
+    ['a spouse speaks for the account', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'spouse_partner' }),
+    }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
+    // The model's flag with no third party named is unsupported (the processor drops it too): the yes stands.
+    ['a model flag with no third party named', [['per_application', {
       ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['caller_not_authorized'] }),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
   ])('%s', async (_name, calls, expected) => {
@@ -235,6 +244,17 @@ describeDb("the caller's word (PostgreSQL)", () => {
     await call(customerId, 'per_application', { created_at: hoursAgo(5) });
     await call(customerId, null, { created_at: hoursAgo(4) }, 'cancellation_request');
     for (let n = 0; n < 55; n += 1) await call(customerId, choice, { created_at: new Date(Date.now() - 3 * 3600000 + n * 1000), ...over });
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
+  });
+
+  test('each page starts after the last row read: calls with one start time, to the microsecond, are never skipped', async () => {
+    const customerId = await customer();
+    await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    // One start time for all (now() is fixed inside the transaction), with microseconds a JS Date would drop.
+    const at = trx.raw("now() - interval '3 hours'");
+    for (let n = 0; n < 120; n += 1) await call(customerId, 'per_application', { created_at: at, answered_by: 'voicemail' });
+    // The lowest id sorts last among the ties: the third page.
+    await call(customerId, null, { id: '00000000-0000-4000-8000-000000000000', created_at: at }, 'cancellation_request');
     await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
   });
 

@@ -31,9 +31,6 @@ const CHOICE_SCAN_LIMIT = 50;
 const CONTRARY_INTENTS = new Set(['cancellation_request', 'preventative_one_time']);
 // The call reader's cancel flag (triage_flags) takes it back the same way, whatever service_intent says.
 const CANCEL_FLAG = 'cancellation_request';
-// The call reader's flag for a caller who is explicitly a third party with no authority on the account
-// (prompts/call-extraction-v1.js; call-triage-flags.js derives and filters it).
-const UNAUTHORIZED_FLAG = 'caller_not_authorized';
 
 // How long a call can still be read for the first time or retried after its row last changed: the processor reads a
 // call within minutes, its retries come 10 minutes apart, and a call with no recording is recovered from its live text
@@ -92,26 +89,28 @@ function callerWordsOf(extraction, { transcript, outbound = false } = {}) {
   return turn ? String(turn.raw || '').replace(/\s+/g, ' ').trim() : null;
 }
 
-// One call's word (row: WORD_COLUMNS, one read): an unauthorized caller's word ({ unauthorized: true, callLogId, at }),
-// a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing choice with the caller's words
-// ({ choice, callLogId, at, quote }; quote from callerWordsOf, null without words), or null (no word, not a two-party
-// conversation, or not read: only a 'processed' row's extraction is its last read, as a failed re-read keeps the old
-// one).
+// One call's word (row: WORD_COLUMNS, one read): a word from someone who is not the account holder ({ notHolder: true,
+// callLogId, at }), a cancellation or one-time ask ({ contrary: true, callLogId, at }), a billing choice with the
+// caller's words ({ choice, callLogId, at, quote }; quote from callerWordsOf, null without words), or null (no word,
+// not a two-party conversation, or not read: only a 'processed' row's extraction is its last read, as a failed re-read
+// keeps the old one).
 function wordOfCall(row) {
   if (row.processing_status !== 'processed' || row.v2_extraction_status !== 'valid') return null;
   const { parseExtraction, isRealConversation } = require('./call-held-visits');
   const extraction = parseExtraction(row.ai_extraction_enriched);
   if (!extraction || !isRealConversation(row, extraction)) return null;
-  // The routing verdict's flags, merged the way canAutoRoute merges them: the stored triage_flags are the model's own,
-  // so a flag its fields do not support is dropped and the derived flags are added.
-  const { suppressUnsupportedModelFlags, computeDeterministicTriageFlags, mergeTriageFlags } = require('./call-triage-flags');
-  const flags = mergeTriageFlags(suppressUnsupportedModelFlags(extraction.triage_flags, extraction), computeDeterministicTriageFlags(extraction));
-  const contrary = flags.includes(CANCEL_FLAG) || CONTRARY_INTENTS.has(extraction.service_request?.service_intent);
+  const cancelFlag = Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes(CANCEL_FLAG);
+  const contrary = cancelFlag || CONTRARY_INTENTS.has(extraction.service_request?.service_intent);
   const choice = require('./call-prepay-choice').billingChoiceOf(extraction);
   if (!contrary && !choice) return null;
-  // A third party with no authority speaks for no one: their word is the latest word, so an older yes never shows
-  // through it, but it is never the customer's yes, choice or cancellation.
-  if (flags.includes(UNAUTHORIZED_FLAG)) return { unauthorized: true, callLogId: row.id, at: callStartedAt(row) };
+  // Only the account holder's side speaks for the account. A caller the call reader names as anyone else (a tenant, a
+  // relative, an agent: the processor's isExplicitlyNonOwner; owner, spouse or partner, and unknown are the holder's
+  // side) is never the customer's yes, choice or cancellation, and their word still hides an older yes. Booking keeps
+  // its own exceptions (a relative with a confirmed time, owner 2026-09-28); agreeing to a price takes none here, so
+  // the office decides.
+  if (require('./call-triage-flags').isExplicitlyNonOwner(extraction.caller?.relationship_to_property)) {
+    return { notHolder: true, callLogId: row.id, at: callStartedAt(row) };
+  }
   // Checked before the choice: a call that both names a plan and asks to cancel or for a one-time visit is no yes.
   if (contrary) return { contrary: true, callLogId: row.id, at: callStartedAt(row) };
   // Only the recording's transcript is evidence (the processor's recordedFallbackOf). The voice agent's own text and
@@ -126,7 +125,9 @@ function wordOfCall(row) {
 // The customer's latest word on a call that began since `since`: the newest read, valid, two-party call whose
 // extraction names a billing choice or a cancellation (intent or flag) or one-time ask, as wordOfCall gives it, or
 // null. SQL keeps only rows that name a word; pages of CHOICE_SCAN_LIMIT follow until one is a two-party conversation,
-// so voicemails never hide the last word. Sandbox calls do not count.
+// so voicemails never hide the last word. Each page starts after the last row read (start time, then id), never at an
+// offset: a row that leaves the set between pages (a re-read starts) cannot shift another row past a page. The start
+// time is carried as text, so no microsecond is lost. Sandbox calls do not count.
 async function latestBillingChoice(conn, { customerId, since }) {
   const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
   const { BILLING_CHOICES } = require('./call-prepay-choice');
@@ -140,14 +141,17 @@ async function latestBillingChoice(conn, { customerId, since }) {
       .orWhereRaw("ai_extraction_enriched -> 'triage_flags' @> ?::jsonb", [JSON.stringify([CANCEL_FLAG])]))
     .modify((qb) => whereNotSandboxCall(qb))
     .orderByRaw(`${startedSql()} DESC, id DESC`)
-    .select(WORD_COLUMNS);
-  for (let offset = 0; ; offset += CHOICE_SCAN_LIMIT) {
-    const rows = await query.clone().offset(offset).limit(CHOICE_SCAN_LIMIT);
+    .limit(CHOICE_SCAN_LIMIT)
+    .select([...WORD_COLUMNS, conn.raw(`(${startedSql()})::text AS started_key`)]);
+  for (let after = null; ;) {
+    const page = after ? query.clone().whereRaw(`(${startedSql()}, id) < (?::timestamptz, ?::uuid)`, [after.started_key, after.id]) : query;
+    const rows = await page;
     for (const row of rows) {
       const word = wordOfCall(row);
       if (word) return word;
     }
     if (rows.length < CHOICE_SCAN_LIMIT) return null;
+    after = rows[rows.length - 1];
   }
 }
 
@@ -186,11 +190,11 @@ async function laterWordProblem(conn, { customerId, yes, booking }) {
 
 // The customer's word since `since`, as the cards read it: a reason for no card ({ skip: 'took_back' |
 // 'chose_annual_prepay' }), or the yes and, when there is none, why ({ yes: null, noYes: 'no_yes_heard' |
-// 'yes_without_words' | 'caller_not_authorized' }). A yes is the call reader's pay-per-application choice WITH the
+// 'yes_without_words' | 'caller_not_account_holder' }). A yes is the call reader's pay-per-application choice WITH the
 // caller's own words ({ yes: { callLogId, at, quote }, noYes: null }); any other choice is no yes a card shows.
 async function callerWord(conn, { customerId, since }) {
   const word = await latestBillingChoice(conn, { customerId, since });
-  if (word?.unauthorized) return { yes: null, noYes: 'caller_not_authorized' };
+  if (word?.notHolder) return { yes: null, noYes: 'caller_not_account_holder' };
   if (word?.contrary) return { skip: 'took_back' };
   if (word?.choice === 'annual_prepay') return { skip: 'chose_annual_prepay' };
   if (word?.choice !== 'per_application') return { yes: null, noYes: 'no_yes_heard' };
