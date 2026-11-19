@@ -140,6 +140,14 @@ describe('where the van is now (today)', () => {
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 640, completed, onSite }).clockMin).toBe(660); // 11:00, not 11:30
   });
 
+  test('a schedule block during the on-site work pauses it', () => {
+    const job = { ...sibling('s1'), estimated_duration_minutes: 90 };
+    const onSite = rc.onSiteStays(rc.physicalStops([job]), new Map([['s1', '2026-11-19T15:00:00Z']])); // 10:00, 90 min
+    const blocks = [{ startMin: 660, endMin: 720 }]; // 11-noon
+    expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 630, completed: [], onSite, blocks }).clockMin).toBe(750); // 12:30
+    expect(rc.pastBlocks(600, 690, [])).toBe(690);
+  });
+
   test('nothing done yet: the start point at the departure minute', () => {
     expect(rc.vanNow({ day, home, departureMin: 480, nowMin: 450, onSite: [], completed: [] })).toEqual({ origin: home, clockMin: 480, source: 'start_point' });
   });
@@ -249,17 +257,9 @@ describe('the totals and the ad rule shadow', () => {
     expect(rc.summarize([b, a], '2026-11-19', { techBlind: true }).totals.next.slots).toBe(2);
   });
 
-  test('the day\'s first opening: the drive may start before the working day, the service may not', () => {
-    // Leaves at 7:30, a block from 9 AM: an 8-9 AM service fits, its drive before 8.
+  test("the first job's drive starts with the working day: an earlier departure is not credited (a lower bound)", () => {
     const fig = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 540, endMin: 1020 }] });
-    expect(fig.openings).toEqual([expect.objectContaining({ start: 480, min: 60, slots: 1, noticeSlots: 0 })]);
-    expect(rc.hourSlots({ start: 480, min: 60 })).toBe(0); // without the early drive it would not fit
-    // A block to 8:00 too: the van cannot drive before 8, so 8-9 holds no job.
-    const boxed = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 450, endMin: 480 }, { startMin: 540, endMin: 1020 }] });
-    expect(boxed.slots).toBe(0);
-    // A block to 7:35 only: the 25 free minutes after it still carry the drive.
-    const brief = rc.measureTechDay({ ...open, rows: [], departureMin: 450, openMin: 480, blocks: [{ startMin: 450, endMin: 455 }, { startMin: 540, endMin: 1020 }] });
-    expect(brief.slots).toBe(1);
+    expect(fig.openings).toEqual([]); // 8-9 AM: the drive to 8:20, no 8 AM service
   });
 
   test('a legacy time_window promise is a promised time, not an untimed stop', () => {

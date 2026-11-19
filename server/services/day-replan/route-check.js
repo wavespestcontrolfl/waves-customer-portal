@@ -85,16 +85,18 @@ const hasCoords = (row) => {
  * { origin, clockMin, source }; source 'start_point' when nothing is done or under way, 'unknown' (origin null)
  * when the latest stop done has no place or a stop done has no finish time today.
  */
-function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
+function vanNow({ completed, onSite, home, departureMin, nowMin, day, blocks = [] }) {
   // The latest stop done by its full timestamp (two in one minute: the later one), then its ET minute.
   const done = completed.filter((row) => etMinuteOn(row.completed_at, day) != null)
     .reduce((top, row) => (!top || new Date(row.completed_at) > new Date(top.completed_at) ? row : top), null);
   const lastDone = done ? etMinuteOn(done.completed_at, day) : -Infinity;
   // Busy until the stay as the simulator charges it from the arrival (a shared window counted once), and, when a
   // service of the stop finished after the arrival, until the work still to do after that finish.
+  // A schedule block during the work pauses it (pastBlocks).
   const onSiteClock = (row) => {
     const arrived = etMinuteOn(row.arrived_at, day) ?? nowMin;
-    return Math.max(nowMin, arrived + row.stayMin, lastDone > arrived ? lastDone + row.workMin : -Infinity);
+    const afterDone = lastDone > arrived ? pastBlocks(lastDone, lastDone + row.workMin, blocks) : -Infinity;
+    return Math.max(nowMin, pastBlocks(arrived, arrived + row.stayMin, blocks), afterDone);
   };
   const seen = [
     ...(done ? [{ row: done, clockMin: lastDone, source: 'completed' }] : []),
@@ -110,6 +112,15 @@ function vanNow({ completed, onSite, home, departureMin, nowMin, day }) {
 }
 
 const sameStopTuple = (a, b) => String(a.customer_id) === String(b.customer_id) && String(a.property_id || '') === String(b.property_id || '');
+
+/** When work from `fromMin` to `endMin` ends once each schedule block it meets pauses it (pure). */
+function pastBlocks(fromMin, endMin, blocks) {
+  let end = endMin;
+  for (const b of [...blocks].sort((x, y) => x.startMin - y.startMin)) {
+    if (b.startMin < end && b.endMin > fromMin) end += b.endMin - Math.max(b.startMin, fromMin);
+  }
+  return end;
+}
 
 /**
  * The physical stops of a day's rows (pure), in promised-window order: each is a list of co-visit groups (app-sim
@@ -152,13 +163,13 @@ function onSiteStays(stops, arrivedById) {
 
 /**
  * Jobs that fit one opening (pure): for each, the drive, then a JOB_MIN service that starts on the hour, inside the
- * opening. driveFrom: when the first drive may begin, earlier than the opening for the day's first opening (the van
- * leaves at its departure minute; the working day bounds the service, not the drive).
+ * opening. The drive never starts before the opening, so a first job's drive before the working day is not credited
+ * (a lower bound).
  */
-function hourSlots(o, { driveFrom = o.start } = {}) {
+function hourSlots(o) {
   let count = 0;
   const end = o.start + o.min;
-  for (let at = ceilHour(Math.max(o.start, Math.min(driveFrom, o.start) + DRIVE_MIN)); at + JOB_MIN <= end; at = ceilHour(at + JOB_MIN + DRIVE_MIN)) count += 1;
+  for (let at = ceilHour(o.start + DRIVE_MIN); at + JOB_MIN <= end; at = ceilHour(at + JOB_MIN + DRIVE_MIN)) count += 1;
   return count;
 }
 
@@ -244,18 +255,10 @@ function measureTechDay({ rows, first = [], blocks, held, origin, end = origin, 
     : [];
   // Kept: an opening that holds a job either way. The one at the start of the working day may begin its drive at the
   // departure minute, before the day, so it can hold a job in under SLOT_MIN.
-  // The early drive uses the free minutes between the departure (or a block or booking) and the opening.
-  const driveFrom = (o) => {
-    if (!(o.start <= openMin && departureMin < o.start)) return o.start;
-    // From the end of the last block or booking before the opening: only the free minutes right before it count.
-    const busyEnd = [...blocks, ...held].filter((b) => b.startMin < o.start && b.endMin > departureMin)
-      .reduce((end, b) => Math.max(end, b.endMin), departureMin);
-    return Math.min(o.start, busyEnd);
-  };
   const openings = open.filter((b) => !(first.length && b.kind === 'start'))
     .map((b) => ({ kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min) }))
-    .map((o) => ({ ...o, slots: hourSlots(o, { driveFrom: driveFrom(o) }), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
-    .filter((o) => o.slots > 0 || o.noticeSlots > 0);
+    .map((o) => ({ ...o, slots: hourSlots(o), noticeSlots: Math.floor(o.min / SLOT_MIN) }))
+    .filter((o) => o.noticeSlots > 0);
   return {
     stops: all.length,
     driveMin: Math.round(sim.travelMin),
@@ -372,19 +375,20 @@ async function eligibility(conn, from, to) {
   return { blackout, techIds, absent };
 }
 
-// Today's stops and their progress read as of one moment (the FINAL_CHECK_SNAPSHOT pattern, visit-prep.js).
-const TODAY_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+// Every read of one run as of one moment (the FINAL_CHECK_SNAPSHOT pattern, visit-prep.js): stops, progress,
+// bookings, blocks and interviews all agree, so nothing booked, finished or moved between two reads is half-seen.
+const RUN_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
 
-/**
- * Today's rows and progress from one consistent snapshot, so a stop finished, cancelled or moved between two reads
- * shows the same in both. Either read failing returns nulls (today is then FAILED). A transaction or a test double
- * reads on its own connection.
- */
+/** Runs `read` in one read-only snapshot. A transaction or a test double reads on its own connection. */
+function inSnapshot(conn, read) {
+  if (typeof conn.transaction !== 'function' || conn.isTransaction) return read(conn);
+  return conn.transaction((trx) => read(trx), RUN_SNAPSHOT);
+}
+
+/** Today's rows and progress; either read failing returns nulls (today is then FAILED). */
 async function readToday(conn, today) {
-  const read = async (c) => ({ rows: await replan.loadDayStops(c, today), progress: await loadProgress(c, today) });
   try {
-    if (typeof conn.transaction !== 'function' || conn.isTransaction) return await read(conn);
-    return await conn.transaction((trx) => read(trx), TODAY_SNAPSHOT);
+    return { rows: await replan.loadDayStops(conn, today), progress: await loadProgress(conn, today) };
   } catch (err) {
     logger.warn(`[route-check] ${today}: today's read failed (${err.message})`);
     return { rows: null, progress: null };
@@ -472,7 +476,7 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
     const van = vanNow({
       completed: mine.filter((p) => p.status === 'completed'),
       onSite: onSiteStays(onSite, new Map(mine.map((p) => [String(p.id), p.arrived_at]))),
-      home, departureMin: env.departureMin, nowMin: env.nowMin, day,
+      home, departureMin: env.departureMin, nowMin: env.nowMin, day, blocks,
     });
     if (!van.origin) return { stops: live.length, skip: van.clockMin == null ? 'COMPLETION_WITHOUT_TIME' : 'LAST_STOP_WITHOUT_COORDINATES' };
     const first = enRoute.flatMap((s) => s.flat());
@@ -488,28 +492,34 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy })
 }
 
 /**
- * One hourly run: one route_check_runs row. A run-wide read failing (technicians, blackout days, absences, start
- * points, departure time) still writes the hour's row, status 'failed' and decision 'unknown'.
+ * One hourly run: every read in one read-only snapshot, then one route_check_runs row written outside it. A run-wide
+ * read failing (technicians, blackout days, absences, start points, departure time) still writes the hour's row,
+ * status 'failed' and decision 'unknown'.
  */
 async function runRouteCheck({ conn = db, now = new Date() } = {}) {
+  const today = etDateString(now);
+  let run;
   try {
-    return await measureRun(conn, now);
+    run = await inSnapshot(conn, (reader) => measureRun(reader, now));
   } catch (err) {
-    const today = etDateString(now);
     logger.warn(`[route-check] ${today}: run failed (${err.message}); recorded as unknown`);
     const ad = { decision: 'unknown', error: String(err.message).slice(0, 200) };
-    await conn(TABLE).insert({
-      run_at: now, service_date: today, status: 'failed', days: JSON.stringify([]), totals: JSON.stringify({}), ad_shadow: JSON.stringify(ad),
-    });
-    return { status: 'failed', totals: {}, ad, days: 0 };
+    run = { status: 'failed', days: [], totals: {}, ad };
   }
+  await conn(TABLE).insert({
+    run_at: now, service_date: today, status: run.status, days: JSON.stringify(run.days), totals: JSON.stringify(run.totals), ad_shadow: JSON.stringify(run.ad),
+  });
+  if (run.status !== 'failed') {
+    logger.info(`[route-check] ${run.status}: today slots=${run.totals.today.slots}; next ${run.totals.next.dates.length} staffed days slots=${run.totals.next.slots}; ad=${run.ad.decision}`);
+  }
+  return { status: run.status, totals: run.totals, ad: run.ad, days: run.days.length };
 }
 
 async function measureRun(conn, now) {
   const today = etDateString(now);
   const p = etParts(now);
   const elig = await eligibility(conn, today, dayAfter(today, SCAN_DAYS));
-  // Today's rows and progress from one snapshot. A failed read marks what it affects (FAILED), never loses the row.
+  // A failed read marks what it affects (FAILED), never loses the row.
   const { rows: todayRows, progress } = await readToday(conn, today);
   const rowsOn = rowReader(conn, new Map([[today, todayRows]]));
   // A technician with a stop that day (null when the read failed); today counts the stops already done too (a Sunday
@@ -553,18 +563,13 @@ async function measureRun(conn, now) {
   }
   const { totals, ad } = summarize(days, today, { techBlind: env.techBlind });
   const status = days.some((d) => d.skip === 'FAILED') ? 'completed_with_errors' : 'completed';
-  const adShadow = { ...ad, live: await liveAdModes(conn) };
-  await conn(TABLE).insert({
-    run_at: now, service_date: today, status, days: JSON.stringify(days), totals: JSON.stringify(totals), ad_shadow: JSON.stringify(adShadow),
-  });
-  logger.info(`[route-check] ${status}: today slots=${totals.today.slots}; next ${totals.next.dates.length} staffed days slots=${totals.next.slots}; ad=${ad.decision}`);
-  return { status, totals, ad: adShadow, days: days.length };
+  return { status, days, totals, ad: { ...ad, live: await liveAdModes(conn) } };
 }
 
 module.exports = {
   runRouteCheck,
   _internals: {
-    vanNow, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, routeOrder, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
+    vanNow, pastBlocks, physicalStops, onSiteStays, todaysStops, heldSpans, hourSlots, routeOrder, enRouteDeparture, measureTechDay, staffed, datesToMeasure, summarize, unmeasurable,
     etMinuteOn, STAFFED_DAYS, DEMAND_DAYS,
   },
 };
