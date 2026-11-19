@@ -630,6 +630,20 @@ describe('bundle split survives 1-cent per-service rounding drift (buildPricingB
     );
     expect(defaultCombo.monthly).toBe(84.08);
   });
+
+  // EST-7df56f0f (2026-11-06): the page offered "pay the year" on a bundle, because
+  // only mosquito-axis combos were stamped and the estimate-level flag read the
+  // service mix alone; accept then refused it ("annual prepay is not available
+  // for this estimate"). A plan with more than one recurring service cannot
+  // prepay (the converter fails it closed too), so /data must not offer it.
+  test('a multi-service plan never offers annual prepay: the flag and every combo say false', async () => {
+    const bundle = await buildPricingBundle(driftEstimate());
+    expect(bundle.annualPrepayEligible).toBe(false);
+    expect(bundle.serviceCadenceCombos.length).toBeGreaterThan(0);
+    for (const combo of bundle.serviceCadenceCombos) {
+      expect(combo.annualPrepayEligible).toBe(false);
+    }
+  });
 });
 
 describe('palm-care bullet survives the fast-path split (Codex round 5 P0 on #4789)', () => {

@@ -2123,6 +2123,8 @@ creates a placeholder first name. The explicitly linked profile
 name through `propagateCustomerNameChange`; phone-matched or sibling profiles
 never do.
 
+Annual prepay on a multi-service plan (2026-11-19). GET `/api/estimates/:token/data` stamps `annualPrepayEligible: false` on EVERY entry of `pricing.serviceCadenceCombos` (it used to stamp only the combos with a mosquito axis) and sends `pricing.annualPrepayEligible: false` when the plan has more than one recurring unit (counted as accept counts them: `annualPrepayRecurringUnitCount` over the supplemented rows). `PUT /api/estimates/:token/accept` already refused annual prepay for a bundle choice and the converter already fails a multi-service prepay closed, so no accept result changes; what changes is that the page no longer offers "pay the year" (or the setup-fee waiver line that rides it) where it always ended in a refusal. A single-service plan is unchanged. No new key, no new route, no new exposure, and no amount, price or message changes.
+
 Greeting name (2026-10-02, precursor to #5559). GET `/api/estimates/:token/data`
 `estimate.customerFirstName` is the greeting token, not blindly the first word of
 `customer_name`: when the linked customer (`estimates.customer_id`) has a blank first

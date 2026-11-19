@@ -28346,6 +28346,33 @@ function applyPresentationOverridesToBundle(payload = {}, estData = {}) {
   return next;
 }
 
+// A plan with more than one recurring service cannot prepay the year: accept
+// refuses a bundle choice ("annual prepay is not available for this estimate")
+// and the converter fails the rest closed (ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED).
+// The page offered it anyway, because the estimate-level flag only reads the
+// service mix and only the mosquito-axis combos were stamped, so a customer on a
+// lawn + pest plan picked "pay the year" (it waives the setup fee) and was
+// refused at Approve (estimate EST-7df56f0f, 2026-11-06; 28 of 30 multi-service
+// estimates since Aug 28 carried the false flag). Stamp every combo FALSE and
+// drop the estimate-level flag for a multi-unit plan, so the page never offers
+// it and its setup-fee waiver line (tierAwareFee) follows. Counts units the way
+// accept does (supplemented rows); a count that cannot be read leaves the flag
+// alone. Changes what /data offers only, never an amount.
+function withMultiServicePrepayClosed(payload, estData) {
+  const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
+  let units = 0;
+  try {
+    units = require('../services/estimate-converter')
+      .annualPrepayRecurringUnitCount(withSupplementedRecurringServices(estData || {}) || estData || {});
+  } catch { units = 0; }
+  if (!combos.length && !(units > 1)) return payload;
+  return {
+    ...payload,
+    ...(units > 1 && payload.annualPrepayEligible === true ? { annualPrepayEligible: false } : {}),
+    ...(combos.length ? { serviceCadenceCombos: combos.map((combo) => ({ ...combo, annualPrepayEligible: false })) } : {}),
+  };
+}
+
 function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts = {}) {
   // Engine-invocation path: the displayed frequencies were priced from a
   // freshly generated anchorEngineResult, NOT the stored estData (codex
@@ -28362,7 +28389,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     payload.measuredBasisAnchor = Object.keys(anchorBasis).length ? anchorBasis : null;
   }
   const alignedPayload = alignOneTimeChoiceBreakdown(stripStaleWaveGuardSetupFromBundle(payload, estData), estimate, estData);
-  const withQuoteState = attachQuoteRequirement(alignedPayload, estData);
+  let withQuoteState = attachQuoteRequirement(alignedPayload, estData);
   // Floor-capped prepay has no sellable incentive — mirror the SSR
   // showAnnualPrepayOption gate here so the React /data flow hides the
   // annual-prepay option too (it renders off annualPrepayEligible alone).
@@ -28370,6 +28397,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
   }
+  withQuoteState = withMultiServicePrepayClosed(withQuoteState, estData);
   // Per-tier prepay eligibility for the mosquito ladder (codex r10 P1): the
   // estimate-level flag reflects the STORED default row, but seasonal9 can't
   // prepay while monthly12 can — stamp each mosquito frequency so the client
