@@ -2134,7 +2134,7 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     process.env.GATE_PORTAL_PLAN_START = 'true';
     const result = await ask(plain());
     expect(result.ok).toBe(true);
-    const bookable = result.options.filter((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview).map((o) => o.id);
+    const bookable = result.options.filter((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence !== 'low').map((o) => o.id);
     expect(bookable.length).toBeGreaterThan(0);
     expect(result.planStart).toEqual({ optionIds: bookable });
     // The account-wide read (rodent and commercial rows, prepay terms) runs only for a plain account.
@@ -2146,6 +2146,25 @@ describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
     const result = await ask(plain(), null, 'I am interested in adding mosquito service');
     expect(result.options.some((o) => o.serviceKey === 'mosquito' && o.monthly > 0 && !o.manualReview)).toBe(true);
     expect((result.planStart?.optionIds || []).filter((id) => id.startsWith('mosquito'))).toEqual([]);
+  });
+
+  test('never lists a low-confidence option, even with no manual-review flag: the mint refuses that line (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const engine = require('../services/pricing-engine');
+    const real = engine.generateEstimate;
+    // Today's engine answer with one field changed: every line graded LOW (any case), no review flag.
+    const spy = jest.spyOn(engine, 'generateEstimate').mockImplementation((...args) => {
+      const estimate = real(...args);
+      for (const line of estimate?.lineItems || []) if (line) line.pricingConfidence = 'LOW';
+      return estimate;
+    });
+    try {
+      const result = await ask(plain());
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence === 'LOW')).toBe(true);
+      expect('planStart' in result).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {

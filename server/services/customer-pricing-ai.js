@@ -1412,7 +1412,8 @@ async function buildCustomerPricingResponse({
 // start-plan route can book for this account, or none. It mirrors the mint's bar without
 // its locks: an account with no plan (planStartAccountOpen) and no live recurring service
 // of any kind, and per option an id on today's ladder that the route books
-// (planStartOptionBookable: pest quarterly only), a monthly price and no review marker.
+// (planStartOptionBookable: pest quarterly only), a monthly price, no review marker and
+// no low confidence (the mint refuses a low-confidence line, codex pre-push P1).
 async function planStartHint(db, customer, options, currentServiceKeys, ownedServiceKeys) {
   // Optional call: hundreds of suites mock feature-gates whole; a bare mock reads as off.
   if (require('../config/feature-gates').portalPlanStartLive?.() !== true) return {};
@@ -1421,6 +1422,7 @@ async function planStartHint(db, customer, options, currentServiceKeys, ownedSer
   const optionIds = options
     .filter((option) => restart.PLAN_START_SERVICE_KEYS.includes(option.serviceKey)
       && Number(option.monthly) > 0 && option.manualReview !== true
+      && String(option.confidence || '').toLowerCase() !== 'low'
       && restart.planStartOptionBookable(option.serviceKey,
         variantsForService(option.serviceKey, '', false).find((variant) => variant?.id === option.id)))
     .map((option) => option.id);

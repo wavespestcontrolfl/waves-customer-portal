@@ -499,6 +499,16 @@ describe('mintRestartEstimate', () => {
     expect(tables.estimates).toHaveLength(0);
   });
 
+  test('a Tree & Shrub restart on a seed whose zero tree count is ambiguous is priced by hand (codex pre-push P0)', async () => {
+    tables.cancellation_cases = [{ id: 'case-1', customer_id: 'cust-1', status: 'committed', scope: JSON.stringify(['tree_shrub']), created_at: '2026-08-22' }];
+    const seeded = (seed) => deps({ crossSell: { loadEstimateSeed: async () => seed } });
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: seeded({ homeSqFt: 2200, zeroTreeCountAmbiguous: true }) }))
+      .rejects.toMatchObject({ code: 'pricing_unavailable' });
+    expect(tables.estimates).toHaveLength(0);
+    // A known tree count restarts as before.
+    await expect(actualRestart.mintRestartEstimate({ customer: CUSTOMER, deps: seeded({ homeSqFt: 2200 }) })).resolves.toMatchObject({ reused: false });
+  });
+
   test('whole-account scope ([]) recovers the families from the rows the processor pulled', async () => {
     tables.cancellation_cases[0].scope = '[]';
     tables.scheduled_services = [

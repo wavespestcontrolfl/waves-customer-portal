@@ -429,6 +429,31 @@ describe('mintPlanStartEstimate', () => {
     expect(JSON.parse(tables.estimates[0].estimate_data).planStart.optionId).toBe('lawn-premium');
   });
 
+  // codex pre-push P0: cross-sell's tree guard. A seed whose stored zero tree count has no
+  // provenance never prices Tree & Shrub: the fill could price trees a confirmed zero rules out.
+  describe('a seed whose zero tree count is ambiguous', () => {
+    const TREE_LINE = engineLine('tree_shrub', 36.92, { visitsPerYear: 6 });
+    const tree = { serviceKey: 'tree_shrub', optionId: 'tree-standard', shown: shownOf(TREE_LINE) };
+    const seeded = (seed) => ({ crossSell: { loadEstimateSeed: async () => seed } });
+    const AMBIGUOUS = { homeSqFt: 2200, zeroTreeCountAmbiguous: true };
+
+    test('a Tree & Shrub quote is priced by hand: nothing minted', async () => {
+      recompute.mockResolvedValue(pricedAs(TREE_LINE));
+      await expect(mint(tree, seeded(AMBIGUOUS))).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+      expect(tables.estimates).toHaveLength(0);
+    });
+
+    test('the same quote on a seed with a known tree count mints', async () => {
+      recompute.mockResolvedValue(pricedAs(TREE_LINE));
+      await expect(mint(tree, seeded({ homeSqFt: 2200 }))).resolves.toMatchObject({ reused: false });
+    });
+
+    test('a pest quote ignores the tree flag', async () => {
+      recompute.mockResolvedValue(pricedAs(PEST_LINE));
+      await expect(mint({}, seeded(AMBIGUOUS))).resolves.toMatchObject({ reused: false });
+    });
+  });
+
   test('freezes the page snapshot with no delivery stamp: nothing was delivered', async () => {
     const snapshot = jest.fn(snapshotWith({}));
     await mint({}, { buildEstimateSendSnapshot: snapshot });
@@ -466,6 +491,18 @@ describe('mintPlanStartEstimate', () => {
       // Past-dated and not a rebook row: the restart read alone drops it.
       tables.scheduled_services = [{ id: 'ip-1', customer_id: 'cust-1', status: 'on_site', is_recurring: true, scheduled_date: '2000-01-01', service_type: 'Quarterly Pest Control' }];
       expect(await actualRestart._test.ownedResidualFamilies(fakeTrx(), 'cust-1')).toEqual([]);
+      await refused('not_eligible');
+    });
+
+    // codex pre-push P1: the shared live-plan reader skips one-time booking sources, so the
+    // restart read beside it must too, unless staff re-armed the series.
+    test('a future one-time booking flagged recurring is not a plan: it mints', async () => {
+      tables.scheduled_services = [{ id: 'ot-1', customer_id: 'cust-1', status: 'scheduled', is_recurring: true, scheduled_date: '2099-01-01', service_type: 'General Pest Control', source: 'estimate-accept' }];
+      await expect(mint()).resolves.toMatchObject({ reused: false });
+    });
+
+    test('a series anchor staff re-armed is a plan, whatever booking source it came from', async () => {
+      tables.scheduled_services = [{ id: 'anchor-1', customer_id: 'cust-1', status: 'completed', is_recurring: true, recurring_ongoing: true, scheduled_date: '2026-10-01', service_type: 'Quarterly Pest Control', source: 'estimate-accept' }];
       await refused('not_eligible');
     });
 

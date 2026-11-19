@@ -545,7 +545,11 @@ async function ownedResidualFamilies(dbh, customerId) {
 async function ownsAnyRecurringService(dbh, customerId) {
   const { loadLiveRecurringObligationRows } = require('../waveguard-existing-services');
   if ((await loadLiveRecurringObligationRows(dbh, customerId)).length) return true;
-  if ((await liveRecurringRows(dbh, customerId)).length) return true;
+  // A one-time booking source is not a plan here either, as in the shared
+  // reader (codex pre-push P1), unless staff re-armed its series.
+  const { isOneTimeBookingSource } = require('../self-booking-plan-sync');
+  const supplemental = await liveRecurringRows(dbh, customerId);
+  if (supplemental.some((row) => row.recurring_ongoing === true || !isOneTimeBookingSource(row.source))) return true;
   const { coveredTermsAsOf } = require('../annual-prepay-renewals');
   const { etDateString } = require('../../utils/datetime-et');
   const terms = await coveredTermsAsOf(dbh, etDateString()).where('t.customer_id', customerId).select('t.id');
@@ -817,8 +821,10 @@ async function mintPricedEstimate({
   // FAIL CLOSED on review markers, the same demotion the offer path's
   // optionIsPriceable applies: an engine result flagged for on-site
   // verification, manual review, or low confidence — or a seed whose
-  // source estimate carried its own verification markers — never becomes
-  // a customer-visible price. The customer gets the priced-by-hand 409.
+  // source estimate carried its own verification markers, or (for a Tree &
+  // Shrub price) a stored zero tree count of unknown provenance, cross-sell's
+  // own tree guard (codex pre-push P0) — never becomes a customer-visible
+  // price. The customer gets the priced-by-hand 409.
   const raw = recomputed.rawEngineResult || {};
   // The CANONICAL review predicates (draft-builder, same trio proposal
   // generation gates on — codex GH r12 P1): a hand-rolled subset missed
@@ -834,7 +840,8 @@ async function mintPricedEstimate({
   ));
   if (flaggedLine
     || (Array.isArray(raw.fieldVerify) && raw.fieldVerify.length > 0)
-    || propertySeed?.requiresFieldVerification === true) {
+    || propertySeed?.requiresFieldVerification === true
+    || (toPrice.includes('tree_shrub') && propertySeed?.zeroTreeCountAmbiguous === true)) {
     throw new RestartUnavailableError('pricing_unavailable', 'This one needs a quick hand-check before we can price it online.');
   }
 
