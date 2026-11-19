@@ -200,10 +200,10 @@ function PointList({ icon, tone, heading, points }) {
   );
 }
 
-function SheetActions({ primary, onPrimary, secondary, onSecondary }) {
+function SheetActions({ primary, onPrimary, primaryDisabled, secondary, onSecondary }) {
   return (
     <div style={{ display: 'grid', gap: 10, marginTop: 20 }}>
-      <PrimaryButton onClick={onPrimary}>{primary}</PrimaryButton>
+      <PrimaryButton onClick={onPrimary} disabled={primaryDisabled}>{primary}</PrimaryButton>
       <button type="button" data-glass="chip" onClick={onSecondary} style={{
         ...buttonBase, minHeight: 44, borderRadius: 10, border: '1px solid #D8D0C0', background: 'rgba(255,255,255,0.78)',
         color: B.glassNavy, fontSize: 14, fontWeight: 700,
@@ -493,7 +493,6 @@ const LIVE_CALLOUT = {
   connected: RunCallout, paused: PausedCallout, running: RunningCallout,
   auto: AutoCallout, rainskip: RainSkipCallout, missed: MissedCallout,
 };
-const AUTO_RUN_VIEWS = ['auto', 'rainskip', 'missed'];
 const ACTIVITY = {
   paused: () => [
     { when: 'Today', what: `Paused your turf zones after weed control, until ${weekday(1)} at 10:14 AM.` },
@@ -519,22 +518,26 @@ const ACTIVITY = {
   ],
 };
 
-// connected | paused | running | auto | rainskip | missed
-function LiveView({ view, go, openSheet, editZones, turfZones, turfCount, totalMinutes, model, schedule }) {
-  const [autoPause, setAutoPause] = useState(true);
-  const autoRun = AUTO_RUN_VIEWS.includes(view);
-  const LiveCallout = LIVE_CALLOUT[view];
+// The screen is the timer's status: connected | paused | running. The two settings are the
+// customer's own and live on the card, so a pause, a run or a zone edit never changes them.
+function LiveView({ view, go, openSheet, editZones, turfZones, turfCount, totalMinutes, model, schedule, auto, setAuto, autoPause, setAutoPause }) {
+  // A pause or a run in progress always shows. Automatic runs only replace the Run button of a normal week.
+  const callout = view === 'connected' && auto.on ? (auto.lastRun || 'auto') : view;
+  const LiveCallout = LIVE_CALLOUT[callout];
   return (
     <>
       <StatusLine tone="ok" label="Connected" detail={`${model} · ${zoneCount(turfCount, 'turf ')}`} />
       <LiveCallout go={go} openSheet={openSheet} turfZones={turfZones} turfCount={turfCount} totalMinutes={totalMinutes} schedule={schedule} />
+      {auto.on && view !== 'connected' && (
+        <p style={{ ...meta, margin: '0 0 16px' }}>Automatic runs are on: {DAY_NAMES[schedule.day]} at {clock(schedule.time)}.</p>
+      )}
       <div style={{ display: 'grid', gap: 10 }}>
         <SettingRow label="Pause the lawn after treatments" checked={autoPause} onChange={() => setAutoPause((on) => !on)}
           detail="When your service report says to skip turf watering after a treatment, we pause your turf zones until that time." />
-        <SettingRow label="Run the weekly plan for me" checked={autoRun} onChange={() => (autoRun ? go('connected') : openSheet('auto'))}
+        <SettingRow label="Run the weekly plan for me" checked={auto.on} onChange={() => (auto.on ? setAuto({ on: false, lastRun: null }) : openSheet('auto'))}
           detail="Each week we start your turf zones for that week's minutes, on the day and time you pick." />
       </div>
-      <ActivityList rows={(ACTIVITY[view] || ACTIVITY.usual)()} />
+      <ActivityList rows={(ACTIVITY[callout] || ACTIVITY.usual)()} />
       <ManageRow onZones={editZones} onDisconnect={() => go('ready')} />
     </>
   );
@@ -566,21 +569,27 @@ function ConnectSheet({ byRequest, onClose, onContinue }) {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const START_TIMES = ['4 AM', '5 AM', '6 AM', '8 PM'];
+// The watering days on file in Irrigation settings ("tuesday"), as the short names the chips use.
+const savedDayChips = (wateringDays) => WEEKDAYS.filter((day) => wateringDays.includes(DAY_NAMES[day].toLowerCase()));
+// The next of those days after today; none on file means the customer has to pick one.
+const nextSavedDay = (savedDays) => [1, 2, 3, 4, 5, 6, 7].map(weekdayShort).find((day) => savedDays.includes(day)) || null;
 
-function AutoRunSheet({ schedule, onClose, onSave }) {
+function AutoRunSheet({ schedule, savedDays, onClose, onSave }) {
   const [day, setDay] = useState(schedule.day);
   const [time, setTime] = useState(schedule.time);
+  const onFile = savedDays.length > 0;
   return (
     <Sheet label="Run the weekly plan for me" onClose={onClose}>
       <p style={{ margin: '0 0 16px', color: BODY }}>Each week we start your turf zones for that week's minutes, on the day and time you pick. No run in a week the plan says skip.</p>
-      <ChoiceGroup heading="Your watering day" hint="From your Irrigation settings. It must be a day your address may water." options={WEEKDAYS} value={day} onChange={setDay} />
+      <ChoiceGroup heading="Your watering day" options={onFile ? savedDays : WEEKDAYS} value={day} onChange={setDay}
+        hint={onFile ? 'From your Irrigation settings. Change your watering days there.' : 'No watering day is on file. Pick the day your address may water.'} />
       <ChoiceGroup heading="Start time" hint="Pick a time inside your area's allowed hours." options={START_TIMES} value={time} onChange={setTime} />
       <PointList icon="alert" tone={AMBER} heading="Before you turn this on" points={[
         'Clear the lawn schedule in your Hydrawise app first, or your lawn gets watered twice.',
         'We skip a run after half an inch or more of rain.',
         'If we can\'t reach your timer, the run does not happen. You can start it from this page.',
       ]} />
-      <SheetActions primary="Turn on automatic runs" onPrimary={() => onSave({ day, time })} secondary="Not now" onSecondary={onClose} />
+      <SheetActions primary="Turn on automatic runs" onPrimary={() => onSave({ day, time })} primaryDisabled={!day} secondary="Not now" onSecondary={onClose} />
     </Sheet>
   );
 }
@@ -588,20 +597,27 @@ function AutoRunSheet({ schedule, onClose, onSave }) {
 const VIEWS = {
   pick: PickView, x2: X2View, xcore: GuideOnlyView, proc: GuideOnlyView, rainbird: GuideOnlyView, ready: ReadyView, approve: ApproveView,
   zones: ZonesView, offline: OfflineView, connected: LiveView, paused: LiveView, running: LiveView,
-  auto: LiveView, rainskip: LiveView, missed: LiveView,
 };
-// These ?timer= values open a screen with its sheet already up.
-const SHEET_VIEWS = {
-  consent: ['ready', 'consent'], request: ['ready', 'request'], confirm: ['connected', 'run'], autosetup: ['connected', 'auto'],
+// These ?timer= values open a screen with its sheet already up, or with automatic runs already on.
+const START_VIEWS = {
+  consent: { view: 'ready', sheet: 'consent' }, request: { view: 'ready', sheet: 'request' },
+  confirm: { view: 'connected', sheet: 'run' }, autosetup: { view: 'connected', sheet: 'auto' },
+  auto: { view: 'connected', auto: { on: true, lastRun: null } },
+  rainskip: { view: 'connected', auto: { on: true, lastRun: 'rainskip' } },
+  missed: { view: 'connected', auto: { on: true, lastRun: 'missed' } },
 };
+const AUTO_OFF = { on: false, lastRun: null };
 
-export default function SprinklerTimerCard({ initialView = 'pick' }) {
-  const [start, startSheet] = SHEET_VIEWS[initialView] || [VIEWS[initialView] ? initialView : 'pick', null];
-  const [view, setView] = useState(start);
-  const [sheet, setSheet] = useState(startSheet);
+export default function SprinklerTimerCard({ initialView = 'pick', wateringDays = [] }) {
+  const start = START_VIEWS[initialView] || { view: VIEWS[initialView] ? initialView : 'pick' };
+  const savedDays = savedDayChips(wateringDays);
+  const [view, setView] = useState(start.view);
+  const [sheet, setSheet] = useState(start.sheet || null);
   const [zones, setZones] = useState(ZONES);
   const [model, setModel] = useState(DEFAULT_MODEL);
-  const [schedule, setSchedule] = useState({ day: weekdayShort(2), time: '5 AM' });
+  const [schedule, setSchedule] = useState({ day: nextSavedDay(savedDays), time: '5 AM' });
+  const [auto, setAuto] = useState(start.auto || AUTO_OFF);
+  const [autoPause, setAutoPause] = useState(true);
   // Editing turf zones returns to the screen it was opened from, so a pause or an offline warning is not lost.
   const [zonesReturn, setZonesReturn] = useState('connected');
   const turfZones = zones.filter((zone) => zone.turf);
@@ -618,7 +634,8 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
       <section data-glass="card" data-prototype="sprinkler-timer" style={cardStyle} aria-label="Your sprinkler timer">
         <h2 style={title}>Your sprinkler timer</h2>
         <View view={view} go={setView} openSheet={setSheet} zones={zones} setZones={setZones} turfZones={turfZones} turfCount={turfCount}
-          totalMinutes={totalMinutes} model={model} schedule={schedule} pickModel={pickModel} editZones={editZones} saveZones={saveZones} />
+          totalMinutes={totalMinutes} model={model} schedule={schedule} pickModel={pickModel} editZones={editZones} saveZones={saveZones}
+          auto={auto} setAuto={setAuto} autoPause={autoPause} setAutoPause={setAutoPause} />
       </section>
 
       {(sheet === 'consent' || sheet === 'request') && (
@@ -627,7 +644,8 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
       )}
 
       {sheet === 'auto' && (
-        <AutoRunSheet schedule={schedule} onClose={closeSheet} onSave={(next) => { setSchedule(next); closeSheet(); setView('auto'); }} />
+        <AutoRunSheet schedule={schedule} savedDays={savedDays} onClose={closeSheet}
+          onSave={(next) => { setSchedule(next); setAuto({ on: true, lastRun: null }); closeSheet(); }} />
       )}
 
       {sheet === 'run' && (
@@ -637,7 +655,7 @@ export default function SprinklerTimerCard({ initialView = 'pick' }) {
             'Only run on your permitted watering day, during your area\'s allowed hours.',
             'If half an inch or more of rain has fallen since your last watering day, skip this run.',
           ]} />
-          <SheetActions primary="Start watering" onPrimary={() => { closeSheet(); setView('running'); }} secondary="Cancel" onSecondary={closeSheet} />
+          <SheetActions primary="Start watering" onPrimary={() => { closeSheet(); setAuto((now) => ({ ...now, lastRun: null })); setView('running'); }} secondary="Cancel" onSecondary={closeSheet} />
         </Sheet>
       )}
     </>

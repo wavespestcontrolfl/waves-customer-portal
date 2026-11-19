@@ -292,6 +292,13 @@ and the link table stores the Hydrawise customer and controller ids only.
   plan's action is `run`, refuses during a pause, refuses when no
   restriction policy can be established for the home, and refuses more
   runs in a plan week than the plan prescribes. It starts only turf zones.
+- **Run needs minutes for every zone it starts.** The plan can say `run`
+  with no minutes: for a yard with spray and rotor zones,
+  `minutesPerEvent` is null (`packages/irrigation-runtime/index.js:238`).
+  A tap supplies no minutes of its own. So the card shows Run only when
+  every selected turf zone has a positive number of minutes. Until then it
+  shows the hand-run guide, as today. The same rule holds for automatic
+  runs in step 4.
 - **Disconnect and account deletion** destroy the tokens. Deletion today is
   a soft delete, so this is explicit code, not something inherited.
 - **Gate** `GATE_IRRIGATION_CONTROLLER_CONNECT`, with a customer pilot list
@@ -347,6 +354,18 @@ and 3.
   `server/services/irrigation-weekly-email.js`): NOAA radar rainfall at the
   home's coordinates first, Open-Meteo second (owner ruling 2026-07-30,
   `server/services/mrms-qpe.js`). It skips at half an inch or more.
+- **Which rain counts.** The card promises "rain since your last watering
+  day". The helper returns a seven-day window, and its total can hold rain
+  from before that day. So the worker does not use the total. It sums the
+  helper's `dailyRain` rows from the day after the home's previous
+  watering day through the run day. For a home that waters twice a week,
+  the previous watering day is the nearer one, so the interval is three or
+  four days. The previous watering day comes from `watering_days`, not
+  from whether a run happened: the timer may have watered on its own
+  before automatic runs were on. A missing row inside the interval makes
+  the reading missing (decision 8); it is never counted as zero. A window
+  that ends today is still filling, and the helper caches it for 30
+  minutes, so the read is made within the hour before the run.
 - **A reading can be missing.** Both rungs are outside services, and the
   radar rung is a free university relay with no uptime promise. On
   2026-11-02 both failed for one home in 45.
@@ -365,8 +384,13 @@ and 3.
   still shows lawn runs of its own. Beds and drip keep their schedule.
 - **Minutes.** The plan gives minutes only when the turf has one head type
   (`packages/irrigation-runtime/index.js:238`). A yard with spray and rotor
-  zones needs each zone's head type marked on the zone screen. Until then
-  it stays on the tap.
+  zones needs each zone's head type marked on the zone screen, so the plan
+  can give minutes for each zone. Until then the home has neither Run nor
+  automatic runs, and the card shows the guide (the step 2 rule).
+- **State kept apart.** The two settings (pause after treatments,
+  automatic runs) and the day and time are the customer's own. A pause, a
+  run in progress, an offline timer or a zone edit never changes them, and
+  turning a setting on never hides a pause or the Stop button.
 - **When a run cannot happen** (timer offline, Hunter unreachable, Waves
   down) the lawn is not watered. This is the reverse of today, where the
   timer waters no matter what the plan says. The card shows the missed run

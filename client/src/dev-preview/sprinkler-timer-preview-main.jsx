@@ -64,6 +64,11 @@ const PLAN_CARD = 'section[aria-label="This week\'s watering plan"]';
 
 function PrototypeSlot() {
   const [slot, setSlot] = useState(null);
+  // Step 4 offers the watering days already on file in Irrigation settings.
+  const [wateringDays, setWateringDays] = useState(null);
+  useEffect(() => {
+    api.getPropertyPreferences().then((prefs) => setWateringDays(prefs.preferences?.wateringDays || []));
+  }, []);
   useEffect(() => {
     const node = document.createElement('div');
     const place = () => {
@@ -77,7 +82,7 @@ function PrototypeSlot() {
     setSlot(node);
     return () => { observer.disconnect(); node.remove(); };
   }, []);
-  return slot ? createPortal(<SprinklerTimerCard initialView={view} />, slot) : null;
+  return slot && wateringDays ? createPortal(<SprinklerTimerCard initialView={view} wateringDays={wateringDays} />, slot) : null;
 }
 
 const host = document.createElement('div');
