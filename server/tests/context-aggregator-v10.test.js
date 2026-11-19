@@ -149,30 +149,40 @@ describe('customerSafeVisitNotes — the ONLY sanctioned tech-notes egress', () 
     // only completion-time screening, the web report (which runs the same
     // technicianReportDrivesSummary) and this rule call the parse (Codex
     // #5522: the legacy public report and its PDF went through it directly).
+    // The readers of the technician's own note (reportNoteCustomerCopy, and
+    // visitReportCustomerCopy: the note, else the titled report) are held to
+    // a list too: no customer render calls them yet.
     const fs = require('fs');
     const path = require('path');
     const root = path.join(__dirname, '../..');
-    const callers = [];
+    const callers = { 'technicianReportCustomerCopy(': [], 'visitReportCustomerCopy(': [], 'reportNoteCustomerCopy(': [] };
     const walk = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           if (!['node_modules', 'tests'].includes(entry.name)) walk(full);
-        } else if (entry.name.endsWith('.js') && fs.readFileSync(full, 'utf8').includes('technicianReportCustomerCopy(')) {
-          callers.push(path.relative(root, full).split(path.sep).join('/'));
+        } else if (entry.name.endsWith('.js')) {
+          const source = fs.readFileSync(full, 'utf8');
+          for (const call of Object.keys(callers)) {
+            if (source.includes(call)) callers[call].push(path.relative(root, full).split(path.sep).join('/'));
+          }
         }
       }
     };
     walk(path.join(root, 'server'));
-    callers.sort();
-    expect(callers).toEqual([
-      'server/routes/admin-schedule.js',
-      'server/services/complete-scheduled-service.js',
-      'server/services/context-aggregator.js',
-      'server/services/service-report/report-data.js',
-      'server/services/service-report/report-reconciliation.js',
-      'server/services/service-report/technician-report-copy.js',
-    ]);
+    Object.values(callers).forEach((files) => files.sort());
+    expect(callers).toEqual({
+      'technicianReportCustomerCopy(': [
+        'server/routes/admin-schedule.js',
+        'server/services/complete-scheduled-service.js',
+        'server/services/context-aggregator.js',
+        'server/services/service-report/report-data.js',
+        'server/services/service-report/report-reconciliation.js',
+        'server/services/service-report/technician-report-copy.js',
+      ],
+      'visitReportCustomerCopy(': ['server/services/service-report/technician-report-copy.js'],
+      'reportNoteCustomerCopy(': ['server/services/service-report/technician-report-copy.js'],
+    });
   });
 
   test('a four-section report shows only while the writer rules are on, like the web report', () => {
