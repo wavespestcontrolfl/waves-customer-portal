@@ -227,6 +227,11 @@ function ResultState({ data }) {
       <div style={EYEBROW}>Waves</div>
       <h1 style={H1_STYLE}>Your job offer</h1>
       <BrandCard padding={24}>
+        {data.state === 'date_requested' && data.requestedStartDate && (
+          <p style={{ ...BODY_STYLE, marginBottom: 10, fontWeight: 700, color: TEXT }}>
+            You asked to start on {formatLongDate(data.requestedStartDate)}.
+          </p>
+        )}
         <p style={BODY_STYLE} role="status">{resultMessage(data)}</p>
       </BrandCard>
     </Column>
@@ -512,7 +517,8 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
   const [rechecking, setRechecking] = useState(false);
   const markUnknown = useCallback(() => setUnknown(true), []);
   const accept = useOfferAction({ token, onApplied: (b) => onApplied({ ...b, signedName: name.trim() }), onReload, onInvalid, onUnknown: markUnknown });
-  const dateReq = useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown: markUnknown });
+  const askedDate = useRef('');
+  const dateReq = useOfferAction({ token, onApplied: (b) => onApplied({ requestedStartDate: askedDate.current, ...b }), onReload, onInvalid, onUnknown: markUnknown });
   const decline = useOfferAction({ token, onApplied, onReload, onInvalid, onUnknown: markUnknown });
   const [consentPending, setConsentPending] = useState(false);
   // The last write may or may not have gone through and the offer could not be
@@ -573,7 +579,7 @@ function OpenOffer({ token, data, onApplied, onReload, onInvalid }) {
             locked={anyBusy}
             error={dateReq.error}
             onCancel={() => setPanel('none')}
-            onSubmit={(payload) => dateReq.run('/date-request', payload)}
+            onSubmit={(payload) => { askedDate.current = payload.requestedStartDate; dateReq.run('/date-request', payload); }}
           />
         )}
         {panel === 'decline' && (

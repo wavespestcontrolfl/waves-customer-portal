@@ -240,6 +240,7 @@ describe('CareersOfferPage — open state', () => {
     expect(screen.getByLabelText('Note (optional)')).toHaveAttribute('maxlength', '500');
     fireEvent.click(send);
     expect(await screen.findByText(/Thanks\. Sam will look at your new date\. If it works, he will send you an updated offer\./)).toBeInTheDocument();
+    expect(screen.getByText('You asked to start on Mon, Jan 11, 2027.')).toBeInTheDocument();
     expect(fetchMock.mock.calls[1][0]).toMatch(/\/date-request$/);
     expect(bodyOf(fetchMock, 1)).toEqual({ requestedStartDate: '2027-01-11', note: 'Need a week' });
   });
@@ -376,9 +377,10 @@ describe('CareersOfferPage — other states', () => {
     const first = renderPage();
     expect(await screen.findByText('You declined this offer. Thank you for your time.')).toBeInTheDocument();
     first.unmount();
-    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'date_requested' })));
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'date_requested', requestedStartDate: '2027-01-11' })));
     renderPage();
     expect(await screen.findByText(/Sam will look at your new date/)).toBeInTheDocument();
+    expect(screen.getByText('You asked to start on Mon, Jan 11, 2027.')).toBeInTheDocument();
   });
 
   it.each(['expired', 'withdrawn', 'superseded'])('shows only the message and the phone for %s', async (state) => {
