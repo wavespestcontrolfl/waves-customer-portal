@@ -104,8 +104,8 @@ describe('the reviewed tool list', () => {
       "const { buildIssue } = require('./services/pest-insider');",
       "const { POSTS } = require('./services/pest-insider/posts');",
       "const { tools: TOOLS, problems: TOOL_PROBLEMS } = require('./services/pest-insider/tools').loadTools();",
-      "const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS), liveToolIds: ['acurite-glass-rain-gauge', 'stuff-it-copper-mesh'] });",
-      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, toolId: r.toolId, tools: TOOLS.length, problems: TOOL_PROBLEMS }) + '\\n');",
+      `const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: Object.keys(POSTS), liveToolUrls: ${JSON.stringify(TOOLS.map((t) => t.url))} });`,
+      "process.stdout.write('\\nRESULT ' + JSON.stringify({ ok: r.ok, tool: r.tool, tools: TOOLS.length, problems: TOOL_PROBLEMS }) + '\\n');",
     ].join('\n');
     const out = execFileSync(process.execPath, ['-e', probe], {
       cwd: path.join(__dirname, '..'),
@@ -115,13 +115,13 @@ describe('the reviewed tool list', () => {
     });
     const line = out.split('\n').find((l) => l.startsWith('RESULT '));
     expect(JSON.parse(line.slice('RESULT '.length))).toEqual({
-      ok: true, toolId: null, tools: 0, problems: data.tools.map((t) => `${t.product_id}: is not in the affiliate registry`),
+      ok: true, tool: null, tools: 0, problems: data.tools.map((t) => `${t.product_id}: is not in the affiliate registry`),
     });
   }, 60000);
 });
 
 describe('the registry as it is now (pre-push PR 3 r3)', () => {
-  test('a row paused or relinked while the process runs takes effect at the next pick and render', () => {
+  test('a row paused or relinked while the process runs takes effect at the next pick and render; a relinked tool waits for a check of its new link (r4)', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-registry-'));
     const file = path.join(dir, 'registry.json');
     const base = registry.loadRegistry();
@@ -132,7 +132,9 @@ describe('the registry as it is now (pre-push PR 3 r3)', () => {
     };
     const NEW_URL = 'https://www.amazon.com/dp/B000000001?tag=wavespestcont-20';
     const FEB = '2027-02-04'; // leads with a pest fact: copper mesh fits it
-    const plan = (liveToolIds) => planIssue({ sendDate: FEB, livePostFactIds: FACTS.map((f) => f.id), liveToolIds }).tool;
+    const plan = (liveToolUrls) => planIssue({ sendDate: FEB, livePostFactIds: FACTS.map((f) => f.id), liveToolUrls }).tool;
+    const mesh = TOOLS.find((t) => t.productId === MESH);
+    const gauge = TOOLS.find((t) => t.productId === 'acurite-glass-rain-gauge');
     const shared = renderIssue({
       subject: 's', preview: 'p', lead: { headline: 'h', sentences: [{ text: 'a' }], postUrl: POST_URLS[0] },
       idItem: { text: 'x', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
@@ -142,7 +144,8 @@ describe('the registry as it is now (pre-push PR 3 r3)', () => {
       process.env.AFFILIATE_REGISTRY_PATH = file;
       write((row) => row, new Date('2026-11-01T00:00:00Z'));
       expect(loadTools()).toEqual({ tools: TOOLS, problems: [] });
-      expect(plan([MESH]).productId).toBe(MESH);
+      expect(plan([mesh.url]).productId).toBe(MESH);
+      expect(withToolBlock(shared, gauge).html_body).toContain(`href="${gauge.url}"`);
 
       write((row) => {
         if (row.product_id === MESH) return { ...row, status: 'paused' };
@@ -151,10 +154,14 @@ describe('the registry as it is now (pre-push PR 3 r3)', () => {
       }, new Date('2026-11-02T00:00:00Z'));
       expect(loadTools().problems).toEqual([`${MESH}: its registry row is inactive, not active`]);
       expect(toolById(MESH)).toBeNull();
-      expect(plan([MESH])).toBeNull();
-      expect(withToolBlock(shared, MESH)).toBe(shared);
-      expect(toolById('acurite-glass-rain-gauge').url).toBe(NEW_URL);
-      expect(withToolBlock(shared, 'acurite-glass-rain-gauge').html_body).toContain(`href="${NEW_URL}"`);
+      expect(plan([mesh.url])).toBeNull();
+      expect(withToolBlock(shared, mesh)).toBe(shared);
+      // relinked: only the old link passed a check, so the tool waits for a check of the new one
+      expect(toolById(gauge.productId).url).toBe(NEW_URL);
+      expect(plan([gauge.url])).toBeNull();
+      expect(withToolBlock(shared, gauge)).toBe(shared);
+      expect(plan([NEW_URL]).productId).toBe(gauge.productId);
+      expect(withToolBlock(shared, { productId: gauge.productId, url: NEW_URL }).html_body).toContain(`href="${NEW_URL}"`);
     } finally {
       if (before === undefined) delete process.env.AFFILIATE_REGISTRY_PATH;
       else process.env.AFFILIATE_REGISTRY_PATH = before;

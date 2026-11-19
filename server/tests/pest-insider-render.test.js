@@ -56,7 +56,7 @@ describe('renderIssue', () => {
   test('withToolBlock adds the tool after "What\'s this?", with Amazon\'s sentence right after the link', () => {
     const gauge = toolById('acurite-glass-rain-gauge');
     const shared = renderIssue(BASE);
-    const r = withToolBlock(shared, gauge.productId);
+    const r = withToolBlock(shared, gauge);
     expect(r.subject).toBe(shared.subject);
     expect(r.preview).toBe(shared.preview);
     // the shared copy, unchanged, then the tool block
@@ -75,10 +75,17 @@ describe('renderIssue', () => {
       .toBe(`\nA TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n`);
   });
 
-  test('withToolBlock leaves the shared copy for a tool that is not usable now (pre-push PR 3 r3)', () => {
+  test('withToolBlock leaves the shared copy for a tool not usable now, or whose link is not the checked one (pre-push PR 3 r3, r4)', () => {
+    const gauge = toolById('acurite-glass-rain-gauge');
     const shared = renderIssue(BASE);
-    for (const toolId of ['ks-adjustable-door-sweep', 'no-such-tool', '', null, 7]) {
-      expect(withToolBlock(shared, toolId)).toBe(shared);
+    for (const picked of [
+      { productId: 'ks-adjustable-door-sweep', url: gauge.url },
+      { productId: 'no-such-tool', url: gauge.url },
+      { productId: gauge.productId, url: 'https://www.amazon.com/dp/B000000001?tag=wavespestcont-20' },
+      { productId: gauge.productId },
+      gauge.productId, null, 7,
+    ]) {
+      expect(withToolBlock(shared, picked)).toBe(shared);
     }
   });
 

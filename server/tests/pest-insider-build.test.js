@@ -41,7 +41,7 @@ const WFA = SPECIES.find((s) => s.slug === 'white-footed-ant');
 // A fixed plan: fact A01 (white-footed ants) and the White-footed Ant species,
 // so these cases test check -> render -> validate, not the planner's rotation.
 const usePlan = (leadFact, idItem = WFA, tool = null) => planIssue.mockImplementation(() => ({ leadFact, idItem, tool }));
-const ALL_TOOLS = loadTools().tools.map((t) => t.productId);
+const ALL_URLS = loadTools().tools.map((t) => t.url);
 
 afterEach(() => {
   planIssue.mockReset();
@@ -54,7 +54,7 @@ describe('buildIssue', () => {
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE });
     expect(r.ok).toBe(true);
     expect(planIssue).toHaveBeenCalledWith({
-      sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE, liveToolIds: [], recentToolIds: [],
+      sendDate: '2026-12-03', recentFactIds: [], recentSpeciesSlugs: [], recheckedFactIds: [], livePostFactIds: LIVE, liveToolUrls: [], recentToolIds: [],
     });
     expect(r.issue.subject).toBe(`🐜 ${A01.title}`);
     expect(r.issue.preview).toBe("What's this? White-footed Ant");
@@ -68,19 +68,19 @@ describe('buildIssue', () => {
     expect(r.issue.text_body).toContain(`${POST_LINK_TEXT}: ${postUrl('A01')}`);
     expect(r.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, problems: [] });
     // no live tool named: no tool, and no Amazon link anywhere
-    expect(r.toolId).toBeNull();
+    expect(r.tool).toBeNull();
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
   });
 
-  test('a live tool comes back as toolId, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
+  test('a live tool comes back as `tool`, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
     const mesh = toolById('stuff-it-copper-mesh');
     usePlan(A01, WFA, mesh);
-    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: [mesh.productId] });
-    expect(r).toMatchObject({ ok: true, reason: null, toolId: 'stuff-it-copper-mesh' });
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
+    expect(r).toMatchObject({ ok: true, reason: null, tool: { productId: 'stuff-it-copper-mesh', url: mesh.url } });
     expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
     // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1)
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
-    const optedIn = withToolBlock(r.issue, r.toolId);
+    const optedIn = withToolBlock(r.issue, r.tool);
     expect(optedIn.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
     expect(optedIn.text_body).toContain(`${mesh.lines.join(' ')}\n\n${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
     // No newsletter type may carry it yet: PR 4 adds the per-recipient check with opt-in evidence.
@@ -90,15 +90,15 @@ describe('buildIssue', () => {
     expect(errors.join(' ')).toMatch(/AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL/);
   });
 
-  test('the builder refuses a tool the planner returns without a live check', () => {
+  test('the builder refuses a tool the planner returns without a live check of its link', () => {
     usePlan(A01, WFA, toolById('stuff-it-copper-mesh'));
-    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: ['acurite-glass-rain-gauge'] }))
+    expect(buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [toolById('acurite-glass-rain-gauge').url] }))
       .toMatchObject({ ok: false, issue: null, reason: 'no_live_tool: stuff-it-copper-mesh' });
   });
 
-  test('the live tools and the recent tools are passed to the plan', () => {
-    buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolIds: ALL_TOOLS, recent: { toolIds: ['stuff-it-copper-mesh'] } });
-    expect(planIssue).toHaveBeenCalledWith(expect.objectContaining({ liveToolIds: ALL_TOOLS, recentToolIds: ['stuff-it-copper-mesh'] }));
+  test('the live tool links and the recent tools are passed to the plan', () => {
+    buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: ALL_URLS, recent: { toolIds: ['stuff-it-copper-mesh', null] } });
+    expect(planIssue).toHaveBeenCalledWith(expect.objectContaining({ liveToolUrls: ALL_URLS, recentToolIds: ['stuff-it-copper-mesh', null] }));
   });
 
   test('with no live-post list, no issue builds: every issue links its lead fact\'s post', () => {

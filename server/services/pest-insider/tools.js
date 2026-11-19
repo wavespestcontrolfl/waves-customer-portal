@@ -25,8 +25,9 @@
  * issue without a tool still builds (pre-push PR 3 r2).
  *
  * A product page can die or change after review (the door sweep's did), so
- * a send names the tools whose page passed a live check (`liveToolIds`) and
- * no other tool is picked. An issue with no live tool has no tool item.
+ * a send names the tool links whose page passed a live check
+ * (`liveToolUrls`), and a tool is picked and rendered only while its link is
+ * one of them. An issue with no live tool has no tool item.
  */
 'use strict';
 

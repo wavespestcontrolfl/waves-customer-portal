@@ -109,8 +109,8 @@ async function main() {
   console.log(`blog posts: ${livePosts} of ${POST_URLS.length} reviewed posts ${assumeLive ? 'counted as live (--assume-live)' : 'answered as live'}; ${livePostFactIds.length} of ${Object.keys(POSTS).length} linked facts can lead`);
   fs.mkdirSync(outDir, { recursive: true });
   const tools = loadTools();
-  const liveToolIds = assumeTools ? tools.tools.map((t) => t.productId) : [];
-  console.log(`tools: ${liveToolIds.length} of ${tools.tools.length} reviewed tools ${assumeTools ? 'counted as live (--assume-tools)' : 'live (this script checks no Amazon page)'}`);
+  const liveToolUrls = assumeTools ? tools.tools.map((t) => t.url) : [];
+  console.log(`tools: ${liveToolUrls.length} of ${tools.tools.length} reviewed tools ${assumeTools ? 'counted as live (--assume-tools)' : 'live (this script checks no Amazon page)'}`);
   for (const p of tools.problems) console.log(`tool left out: ${p}`);
   const recent = { factIds: [], speciesSlugs: [], toolIds: [] };
   let failed = 0;
@@ -120,7 +120,7 @@ async function main() {
     const result = buildIssue({
       sendDate,
       livePostFactIds,
-      liveToolIds,
+      liveToolUrls,
       recent: { factIds: recent.factIds.slice(-RECENT_WINDOW), speciesSlugs: recent.speciesSlugs.slice(-RECENT_WINDOW), toolIds: recent.toolIds.slice(-RECENT_WINDOW) },
     });
     const d = result.diagnostics;
@@ -128,11 +128,11 @@ async function main() {
     if (result.ok) {
       console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
       console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
-      if (result.toolId) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, withToolBlock(result.issue, result.toolId))}.html and .txt (opted-in readers: + "A tool we'd use")`);
+      if (result.tool) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, withToolBlock(result.issue, result.tool))}.html and .txt (opted-in readers: + "A tool we'd use")`);
       // Only a built issue counts toward the rotation, like a sent one will.
       recent.factIds.push(d.factId);
       recent.speciesSlugs.push(d.speciesSlug);
-      if (d.toolId) recent.toolIds.push(d.toolId);
+      recent.toolIds.push(d.toolId); // one entry per issue, null without a tool (pre-push PR 3 r4)
     } else {
       failed += 1;
       console.log(`   NOT BUILT: ${result.reason}`);

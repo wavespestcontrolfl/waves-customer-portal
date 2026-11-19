@@ -112,6 +112,9 @@ describe('planIssue', () => {
 
 describe('planIssue: "A tool we\'d use"', () => {
   const ALL_TOOLS = TOOLS.map((t) => t.productId);
+  // The live check's proof is a link: the tool links whose page passed it.
+  const urls = (productIds) => TOOLS.filter((t) => productIds.includes(t.productId)).map((t) => t.url);
+  const ALL_URLS = urls(ALL_TOOLS);
   const ids = (list) => list.map((t) => t.productId);
   // With no recent issues, Dec 3 leads with a termite fact (T03), Feb 4 with a
   // pest fact (R02) and May 6 with a mosquito fact (M04; no tool lists mosquito).
@@ -119,19 +122,19 @@ describe('planIssue: "A tool we\'d use"', () => {
   const FEB = '2027-02-04';
   const MAY = '2027-05-06';
 
-  test('no live tool: no tool item, and the issue still plans', () => {
+  test('no live tool link: no tool item, and the issue still plans', () => {
     const r = plan({ sendDate: DEC });
     expect(r.tool).toBeNull();
     expect(r.leadFact).not.toBeNull();
     expect(r.idItem).not.toBeNull();
   });
 
-  test("a tool for the lead fact's service comes first, and only a live tool is picked", () => {
+  test("a tool for the lead fact's service comes first, and only a tool whose link passed the live check is picked", () => {
     for (const sendDate of [DEC, FEB]) {
-      const { leadFact, tool } = plan({ sendDate, liveToolIds: ALL_TOOLS });
+      const { leadFact, tool } = plan({ sendDate, liveToolUrls: ALL_URLS });
       expect(tool.services).toContain(leadFact.service);
       const others = ALL_TOOLS.filter((id) => id !== tool.productId);
-      const next = plan({ sendDate, liveToolIds: others }).tool;
+      const next = plan({ sendDate, liveToolUrls: urls(others) }).tool;
       expect(others).toContain(next.productId);
     }
     expect([plan({ sendDate: DEC }).leadFact.service, plan({ sendDate: FEB }).leadFact.service]).toEqual(['termite', 'pest']);
@@ -141,32 +144,37 @@ describe('planIssue: "A tool we\'d use"', () => {
     const { leadFact } = plan({ sendDate: DEC });
     const otherService = ids(TOOLS.filter((t) => !t.services.includes(leadFact.service)));
     expect(otherService.length).toBeGreaterThan(0);
-    expect(otherService).toContain(plan({ sendDate: DEC, liveToolIds: otherService }).tool.productId);
+    expect(otherService).toContain(plan({ sendDate: DEC, liveToolUrls: urls(otherService) }).tool.productId);
     // no tool lists mosquito: a mosquito lead still gets a live tool
-    const may = plan({ sendDate: MAY, liveToolIds: ALL_TOOLS });
+    const may = plan({ sendDate: MAY, liveToolUrls: ALL_URLS });
     expect(may.leadFact.service).toBe('mosquito');
     expect(TOOLS.some((t) => t.services.includes('mosquito'))).toBe(false);
     expect(ALL_TOOLS).toContain(may.tool.productId);
   });
 
-  test('the last two issues\' tools are skipped; an older one may come back', () => {
+  test('the last two issues\' tools are skipped, and an issue without a tool counts as one of them', () => {
     expect(TOOL_RECENT_WINDOW).toBe(2);
-    const first = plan({ sendDate: DEC, liveToolIds: ALL_TOOLS }).tool.productId;
-    const again = plan({ sendDate: DEC, liveToolIds: ALL_TOOLS, recentToolIds: [first] }).tool.productId;
+    const first = plan({ sendDate: DEC, liveToolUrls: ALL_URLS }).tool.productId;
+    const again = plan({ sendDate: DEC, liveToolUrls: ALL_URLS, recentToolIds: [first] }).tool.productId;
     expect(again).not.toBe(first);
-    const recentTwo = plan({ sendDate: DEC, liveToolIds: ALL_TOOLS, recentToolIds: [again, first] }).tool.productId;
+    const recentTwo = plan({ sendDate: DEC, liveToolUrls: ALL_URLS, recentToolIds: [again, first] }).tool.productId;
     expect([first, again]).not.toContain(recentTwo);
     // three issues ago is outside the window: the first pick comes back
     const older = ALL_TOOLS.filter((id) => id !== first).slice(0, 2);
-    expect(plan({ sendDate: DEC, liveToolIds: ALL_TOOLS, recentToolIds: [first, ...older] }).tool.productId).toBe(first);
+    expect(plan({ sendDate: DEC, liveToolUrls: ALL_URLS, recentToolIds: [first, ...older] }).tool.productId).toBe(first);
+    // one entry per issue, null without a tool (pre-push PR 3 r4)
+    const only = urls([first]);
+    expect(plan({ sendDate: DEC, liveToolUrls: only, recentToolIds: [first, null] }).tool).toBeNull();
+    expect(plan({ sendDate: DEC, liveToolUrls: only, recentToolIds: [first, null, null] }).tool.productId).toBe(first);
     // every live tool used in the last two issues: no tool item
-    expect(plan({ sendDate: DEC, liveToolIds: [first, again], recentToolIds: [first, again] }).tool).toBeNull();
+    expect(plan({ sendDate: DEC, liveToolUrls: urls([first, again]), recentToolIds: [first, again] }).tool).toBeNull();
   });
 
-  test('is deterministic, ignores an unknown tool id, and refuses a tool list that is not a list', () => {
-    expect(plan({ sendDate: DEC, liveToolIds: ALL_TOOLS })).toEqual(plan({ sendDate: DEC, liveToolIds: ALL_TOOLS }));
-    expect(plan({ sendDate: DEC, liveToolIds: ['ks-adjustable-door-sweep'] }).tool).toBeNull();
-    expect(() => plan({ sendDate: DEC, liveToolIds: 'stuff-it-copper-mesh' })).toThrow(/must be lists/);
+  test('is deterministic, counts only a usable tool\'s link, and refuses a list that is not a list', () => {
+    expect(plan({ sendDate: DEC, liveToolUrls: ALL_URLS })).toEqual(plan({ sendDate: DEC, liveToolUrls: ALL_URLS }));
+    // a product id is not a link, and a link no tool has counts for nothing
+    expect(plan({ sendDate: DEC, liveToolUrls: [...ALL_TOOLS, 'https://www.amazon.com/dp/B000000000?tag=wavespestcont-20'] }).tool).toBeNull();
+    expect(() => plan({ sendDate: DEC, liveToolUrls: ALL_URLS[0] })).toThrow(/must be lists/);
     expect(() => plan({ sendDate: DEC, recentToolIds: null })).toThrow(/must be lists/);
   });
 });

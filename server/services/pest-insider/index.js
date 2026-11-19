@@ -15,14 +15,17 @@
  * leads only when the caller names it in `livePostFactIds`: the facts whose
  * post answered as live for this send (posts.checkLivePosts). With no list,
  * no issue builds. "A tool we'd use" is a reviewed tool (tools.js) whose
- * product page passed this send's live check (the caller names those tools
- * in `liveToolIds`). It is not in `issue`: the result's `toolId` names it,
- * and the send path adds it per recipient, for opted-in readers only
- * (render.withToolBlock), so the shared body, which the archive serves,
- * never carries an Amazon link.
- * Returns { ok, reason, issue, toolId, diagnostics } where `issue` is
- * { subject, preview, html_body, text_body } and `toolId` is the live tool
- * or null, when ok.
+ * link passed this send's live check (the caller names those links in
+ * `liveToolUrls`). It is not in `issue`: the result's `tool` names it (its
+ * productId and the checked link `url`), and the send path adds it per
+ * recipient, for opted-in readers only (render.withToolBlock, which renders
+ * it only while the tool's link is still the checked one), so the shared
+ * body, which the archive serves, never carries an Amazon link. The send
+ * path records one `recent.toolIds` entry per issue: the tool's product id,
+ * or null for an issue without one.
+ * Returns { ok, reason, issue, tool, diagnostics } where `issue` is
+ * { subject, preview, html_body, text_body } and `tool` is the live tool or
+ * null, when ok.
  */
 'use strict';
 
@@ -54,11 +57,11 @@ function sendGateErrors(issue) {
 }
 
 /**
- * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[], toolIds?: string[] },
- *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolIds?: string[] }} input
+ * @param {{ sendDate: string|Date, recent?: { factIds?: string[], speciesSlugs?: string[], toolIds?: (string|null)[] },
+ *   recheckedFactIds?: string[], livePostFactIds?: string[], liveToolUrls?: string[] }} input
  *   The issue is one email for every subscriber and takes no caller text (render.js says why).
  */
-function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolIds = [] }) {
+function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFactIds = [], liveToolUrls = [] }) {
   const dateET = sendDateET(sendDate);
   const diagnostics = { sendDate: dateET, factId: null, speciesSlug: null, toolId: null, problems: [] };
 
@@ -68,7 +71,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     recentSpeciesSlugs: recent.speciesSlugs || [],
     recheckedFactIds,
     livePostFactIds,
-    liveToolIds,
+    liveToolUrls,
     recentToolIds: recent.toolIds || [],
   });
   const toolId = tool ? tool.productId : null;
@@ -85,8 +88,8 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
   if (!post || !livePostFactIds.includes(leadFact.id)) {
     return { ok: false, reason: `no_live_post: ${leadFact.id}`, issue: null, diagnostics };
   }
-  // The same for the tool: the planner picks only a live tool.
-  if (toolId && !liveToolIds.includes(toolId)) {
+  // The same for the tool: the planner picks only a tool whose link is live.
+  if (tool && !liveToolUrls.includes(tool.url)) {
     return { ok: false, reason: `no_live_tool: ${toolId}`, issue: null, diagnostics };
   }
 
@@ -106,7 +109,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
     diagnostics.problems = errors.map((err) => ({ part: 'send_validator', text: '', reason: err }));
     return { ok: false, reason: `send_validator_blocked: ${errors[0]}`, issue: null, diagnostics };
   }
-  return { ok: true, reason: null, issue, toolId, diagnostics };
+  return { ok: true, reason: null, issue, tool, diagnostics };
 }
 
 module.exports = { buildIssue, NEWSLETTER_TYPE };

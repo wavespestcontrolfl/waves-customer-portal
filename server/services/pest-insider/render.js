@@ -134,16 +134,18 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
  * readers who opted in, so the shared issue (renderIssue), which the archive
  * serves to anyone, never has the tool. The send path (PR 4) adds it per
  * recipient, only for a reader with opt-in evidence, and checks that body
- * before it sends. The tool is looked up in the registry as it is now: a
- * tool that is not usable now (paused or relinked since the build, unknown,
- * or the registry cannot be read) is left out, and the same `issue` object
- * comes back, so the reader gets the shared copy.
+ * before it sends. The tool is looked up in the registry as it is now, and
+ * renders only while its link is still the one that passed the live check
+ * (pre-push PR 3 r4). A tool that is not usable now (paused since the build,
+ * unknown, or the registry cannot be read), or whose link changed since the
+ * check, is left out: the same `issue` object comes back, so the reader
+ * gets the shared copy.
  * @param {{ subject: string, preview: string, html_body: string, text_body: string }} issue  renderIssue's result
- * @param {string} toolId  a reviewed tool's product id (tools.js)
+ * @param {{ productId: string, url: string }|null} picked  buildIssue's `tool`: its product id and checked link
  */
-function withToolBlock(issue, toolId) {
-  const tool = toolById(toolId);
-  if (!tool) return issue;
+function withToolBlock(issue, picked) {
+  const tool = picked ? toolById(picked.productId) : null;
+  if (!tool || tool.url !== picked.url) return issue;
   const block = toolBlock(tool);
   return { ...issue, html_body: `${issue.html_body}\n${wrapBlock(block)}`, text_body: `${issue.text_body}\n${block.text}\n` };
 }
