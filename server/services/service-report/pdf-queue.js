@@ -18,7 +18,7 @@ const {
   applicatorRenderedPdfSignature,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
-const { summaryCopySignature, reportDependsOnWriterRules } = require('./technician-report-copy');
+const { summaryCopySignature, reportDependsOnWriterRules, carriesReportNote } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
@@ -297,7 +297,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // pre-reconciliation copy into the deterministic PDF cache key and the
     // direct route would then serve that stale render as current (codex P2
     // #3197 r6).
-    applyLawnReportReconciliation(data, data.dynamicContext);
+    // A note record's summary keeps the technician's words, as on the route.
+    applyLawnReportReconciliation(data, data.dynamicContext, { ownNote: carriesReportNote(service.structured_notes) });
     // Termite V2 rides the SAME composer the public route uses — this key
     // carries termiteReportV2PdfSignature, so the render must carry the
     // dashboard or the direct route would serve a legacy PDF as current

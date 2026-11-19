@@ -197,11 +197,14 @@ describe('the report payload', () => {
     });
     // A [Found] line of the raw note, saved as a bare title; a form label
     // the record proves; a finding with its own detail.
-    const findings = [row('Dog loose in the side yard'), row('Light ant activity'), row('Mulch against the slab', 'Mulch touches the slab by the lanai.')];
+    // A row whose detail and recommendation are only spaces is bare too.
+    const spaces = { ...row('Gate code 4471 at the side gate', '   '), recommendation: ' \n ' };
+    const findings = [row('Dog loose in the side yard'), row('Light ant activity'), row('Mulch against the slab', 'Mulch touches the slab by the lanai.'), spaces];
     const structured = JSON.stringify({ ...stored(), formObservations: ['Light ant activity'] });
     const data = await build({ structured_notes: structured }, { service_findings: findings });
     expect(data.findings.map((f) => f.title)).toEqual(['Light ant activity', 'Mulch against the slab']);
     expect(JSON.stringify(data)).not.toContain('side yard');
+    expect(JSON.stringify(data)).not.toContain('4471');
     // Only the bare row: nothing is left, and no "no activity" row is added.
     const bare = await build({}, { service_findings: [row('Dog loose in the side yard')] });
     expect(bare.findings).toEqual([]);
@@ -215,6 +218,49 @@ describe('the report payload', () => {
   test('the PDF key hashes the summary the report prints', async () => {
     const data = await build();
     expect(summaryCopySignature(SERVICE)).toBe(`${keyOf(data.summary)}-rn`);
+  });
+});
+
+describe("the lawn reconciliation never rewrites the technician's own note", () => {
+  const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
+  // Radar rain well over target with a drought signal: on any other summary
+  // the pass rewrites a stale weekly rain figure and a drought guess.
+  const reportV2 = () => ({ water: { rainInches: 2.96, targetInches: 0.75, droughtSignal: true }, insights: [] });
+  const RAIN_NOTE = 'Rain this week totaled 0.4 inches, so I watered in the feeding. — Dana';
+  const DROUGHT_NOTE = 'The thin patch by the driveway looks like drought stress. — Dana';
+  const apply = (summary, options) => applyLawnReportReconciliation({ summary, serviceLine: 'lawn', reportV2: reportV2() }, null, options);
+
+  test('a note record keeps its rain figure and its drought wording', () => {
+    expect(apply(RAIN_NOTE).summary).toContain('2.96 inches');
+    expect(apply(DROUGHT_NOTE).summary).not.toContain('drought stress');
+    expect(apply(RAIN_NOTE, { ownNote: true }).summary).toBe(RAIN_NOTE);
+    expect(apply(DROUGHT_NOTE, { ownNote: true }).summary).toBe(DROUGHT_NOTE);
+  });
+
+  test('every caller passes the own-note state of the record it renders', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '..');
+    const calls = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== 'node_modules') walk(full);
+        } else if (entry.name.endsWith('.js') && !full.endsWith(path.join('service-report', 'report-consistency.js'))) {
+          const src = fs.readFileSync(full, 'utf8');
+          for (const m of src.matchAll(/(?:applyLawnReportReconciliation|reconcileLawnReport)\(([^;]*?)\)(?: \|\||;)/g)) {
+            calls.push({ file: path.relative(root, full), args: m[1] });
+          }
+        }
+      }
+    };
+    walk(path.join(root, 'routes'));
+    walk(path.join(root, 'services'));
+    expect(calls.map((c) => c.file).sort()).toEqual([
+      'routes/reports-public.js', 'services/service-report/lawn-report-write-gate.js', 'services/service-report/pdf-queue.js',
+    ]);
+    for (const call of calls) expect(call.args).toMatch(/ownNote: carriesReportNote\((?:service|record)\.structured_notes\)/);
   });
 });
 

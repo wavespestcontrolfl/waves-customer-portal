@@ -13,6 +13,12 @@
  * texting prompt (context-aggregator loadLatestVisitFindings) and the voice
  * relay (voice-agent/relay-visit.js) drop bare titles the same way.
  */
+// A row the findings pipeline wrote: a detail or a recommendation with
+// visible text. A value of spaces is no text.
+function findingHasOwnText(row) {
+  return Boolean(String(row?.detail || '').trim() || String(row?.recommendation || '').trim());
+}
+
 function provenFindingRows(rows, structuredNotes) {
   let notes = structuredNotes;
   if (typeof notes === 'string') {
@@ -20,9 +26,8 @@ function provenFindingRows(rows, structuredNotes) {
   }
   const labels = notes && typeof notes === 'object' && Array.isArray(notes.formObservations) ? notes.formObservations : [];
   const formTitles = new Set(labels.filter((label) => typeof label === 'string').map((label) => label.trim().toLowerCase()));
-  return (Array.isArray(rows) ? rows : []).filter((row) => String(row?.detail || '').trim()
-    || String(row?.recommendation || '').trim()
+  return (Array.isArray(rows) ? rows : []).filter((row) => findingHasOwnText(row)
     || formTitles.has(String(row?.title || '').trim().toLowerCase()));
 }
 
-module.exports = { provenFindingRows };
+module.exports = { provenFindingRows, findingHasOwnText };

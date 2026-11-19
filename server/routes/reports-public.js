@@ -169,7 +169,7 @@ const {
   applicatorIdentityPdfSignature,
   applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
-const { summaryCopySignature, renderWriterRulesState, reportDependsOnWriterRules } = require('../services/service-report/technician-report-copy');
+const { summaryCopySignature, renderWriterRulesState, reportDependsOnWriterRules, carriesReportNote } = require('../services/service-report/technician-report-copy');
 const { treeShrubTechParagraphPdfSignature } = require('../services/service-report/tree-shrub-tech-paragraph-gate');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
@@ -587,7 +587,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   // queue render never bakes pre-reconciliation copy into the PDF cache.
   {
     const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
-    applyLawnReportReconciliation(data, dynamicContext);
+    // A record that carries the technician's own note keeps its words: the
+    // reconciliation never rewrites its summary (report-consistency.js).
+    applyLawnReportReconciliation(data, dynamicContext, { ownNote: carriesReportNote(service.structured_notes) });
   }
 
   // Pest Report V2 — protection-first dashboard (flag-gated). Surfaces the

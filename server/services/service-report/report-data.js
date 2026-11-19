@@ -46,6 +46,7 @@ const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { dayOnlyIds, dayOnlyFields } = require('../time-display');
 const { applyRodentReportNarrative, applyTypedReportNarrative, isTypedNarrativeFallback } = require('./rodent-report-narrative');
 const { visitReportCustomerCopy, carriesReportNote, printedReportSummary, customerCopyViolations } = require('./technician-report-copy');
+const { findingHasOwnText } = require('./finding-provenance');
 const {
   PROPERTY_SCOPE_COLUMNS, loadRodentCatalogIndex, isSameLineVisit, nextSameLineVisitAtProperty,
 } = require('./same-line-visit');
@@ -4697,10 +4698,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     });
   }
   // A record that carries the technician's own note: a row with a bare title
-  // (no detail, no recommendation) is free text the form's observations
-  // carried, a [Found] line of the raw note among them, never proven form
-  // copy. It never reaches the report (ServiceReportDocument drops it too).
-  if (ownNote) findings = findings.filter((finding) => finding.detail || finding.recommendation);
+  // (no detail, no recommendation; a value of spaces counts as none) is free
+  // text the form's observations carried, a [Found] line of the raw note among
+  // them, never proven form copy. It never reaches the report
+  // (ServiceReportDocument drops it too). The screened form labels above
+  // already carry their detail.
+  if (ownNote) findings = findings.filter(findingHasOwnText);
 
   let lawnHistory = opts.lawnHistory || null;
   if (propertyHistoryEnabled && serviceLine === 'lawn' && !lawnHistory) {

@@ -237,7 +237,10 @@ async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowe
     const reportV2 = data && data.reportV2;
     if (!reportV2) return emptyWithFacts();
 
-    const fix = reconcileLawnReport({ data, reportV2 }) || { warnings: [] };
+    // The frozen todaysResult leads with a note record's own first sentence,
+    // never one the reconciliation rewrote (the same rule as the render).
+    const { carriesReportNote } = require('./technician-report-copy');
+    const fix = reconcileLawnReport({ data, reportV2, ownNote: carriesReportNote(record.structured_notes) }) || { warnings: [] };
     const warnings = fix.warnings || [];
 
     // Surface contradictions to the office without blocking completion.

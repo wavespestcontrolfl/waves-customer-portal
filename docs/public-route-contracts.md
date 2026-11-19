@@ -3074,8 +3074,12 @@ completion form recorded (`structured_notes.formProtocolActions`,
 and each value passes `customerCopyViolations` as it renders. Completion writes
 `formProtocolActions` (the picked labels that pass that screen) beside the
 merged `protocolActionsCompleted` on every visit. `findings` drops a row with a
-bare title (no detail, no recommendation), and the render adds no "no
-activity" row: the completion writes that row from the merged lists. The PDF
+bare title (no detail, no recommendation; text of only spaces counts as none),
+and the render adds no "no activity" row: the completion writes that row from
+the merged lists. The lawn reconciliation (`report-consistency.js`) never
+rewrites such a record's `summary`: a weekly rain figure or a drought guess
+stays as the technician wrote it. Each of its callers (the live view, the PDF
+queue and the lawn write gate) passes the stored record's note state. The PDF
 key hashes the summary as it prints, and on such a record it always carries
 `-rn` (just before any `-fson`/`-fsoff` part), summary or not. The visit notes on the
 other surfaces (`customerSafeVisitNotes`) run the same rule. The payload adds
