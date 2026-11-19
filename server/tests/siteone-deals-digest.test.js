@@ -46,7 +46,7 @@ describe('isDealEmail', () => {
     ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
     ['case price with a product code', { subject: '10% off by the case: SKU12345' }],
     ['case price with a CS-like product code', { subject: '10% off by the case: CS12345XL' }],
-    ['case code in the middle of a deal subject', { subject: 'Save 10% by the case: CS0012345' }],
+    ['case code in the middle of a deal subject', { subject: 'Fall promo by the case: CS0012345' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
