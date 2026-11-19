@@ -3,17 +3,40 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import useAdminNavigation, { AdminNavigationProvider } from './useAdminNavigation';
+import { warmFieldViewLanding } from '../lib/fieldView';
+
+vi.mock('../lib/fieldView', async (importOriginal) => ({ ...(await importOriginal()), warmFieldViewLanding: vi.fn(async () => true) }));
 
 let navigation;
 function Probe() { navigation = useAdminNavigation(); return null; }
 const mount = (user) => render(<MemoryRouter><AdminNavigationProvider user={user} enabled><Probe /></AdminNavigationProvider></MemoryRouter>);
 const saved = (id) => JSON.parse(localStorage.getItem(`waves_admin_navigation:${id}`) || 'null');
 
-afterEach(() => { cleanup(); localStorage.clear(); navigation = null; });
+afterEach(() => { cleanup(); localStorage.clear(); navigation = null; warmFieldViewLanding.mockClear(); });
 
 describe('Field view preference', () => {
+  // Pre-push P1 (round 7): after a deploy the app can open on another page (a
+  // push tap), so a verified session with the switch on readies Today too.
+  // The module keeps one try per page; the provider asks on each mount.
+  it('a verified admin session readies Today while the switch is on, from the moment it turns on', () => {
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(warmFieldViewLanding).not.toHaveBeenCalled();
+    act(() => navigation.setFieldView(true));
+    expect(warmFieldViewLanding).toHaveBeenCalledTimes(1);
+    expect(warmFieldViewLanding).toHaveBeenCalledWith();
+    cleanup();
+    mount({ id: 'acct-1', role: 'admin' });
+    expect(warmFieldViewLanding).toHaveBeenCalledTimes(2);
+  });
+  it('a login not verified yet, or one that is not an admin, never readies Today', () => {
+    for (const id of ['acct-1', 'acct-3']) localStorage.setItem(`waves_admin_navigation:${id}`, JSON.stringify({ version: 2, fieldView: true }));
+    render(<MemoryRouter><AdminNavigationProvider user={{ id: 'acct-1', role: 'admin' }} enabled={false}><Probe /></AdminNavigationProvider></MemoryRouter>);
+    cleanup();
+    mount({ id: 'acct-3', role: 'technician' });
+    expect(warmFieldViewLanding).not.toHaveBeenCalled();
+  });
   it('is off by default', () => {
     mount({ id: 'acct-1', role: 'admin' });
     expect(navigation.fieldView).toBe(false);

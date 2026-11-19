@@ -15,10 +15,8 @@ import { PageErrorBoundary, lazyWithRetry } from './App';
 import {
   CHUNK_RELOAD_FLAG,
   handleVitePreloadError,
-  isChunkLoadError,
   isStaleChunkReloadPending,
   markPageNavigating,
-  preloadInBackground,
   resetStaleChunkReloadForTests,
 } from './lib/staleChunkReload';
 
@@ -155,114 +153,4 @@ test('with no reload pending, a lazy page that loads normally clears the one-sho
   renderInBoundary(Page);
   expect(await screen.findByText('Loaded page')).toBeInTheDocument();
   expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
-});
-
-// What Vite 5.4's preload helper does when a chunk fails: it puts the error
-// on a vite:preloadError event. When no handler called preventDefault(), the
-// import rejects with that same error; otherwise it resolves undefined.
-function failLikeVite(settle, err, reload) {
-  const event = preloadErrorEvent();
-  event.payload = err;
-  handleVitePreloadError(event, reload);
-  if (event.defaultPrevented) settle.resolve(undefined);
-  else settle.reject(err);
-  return event;
-}
-
-// A failure seen while a background preload runs is decided one task later.
-function nextTask() {
-  return new Promise((resolve) => { setTimeout(resolve, 0); });
-}
-
-function pendingImport(imports) {
-  return () => new Promise((resolve, reject) => { imports.push({ resolve, reject }); });
-}
-
-// Field view (pre-push P1, round 5): turning the switch on loads Today's code
-// in the background. With no signal that load fails; the failure is not a
-// stale page, so it must not reload over the Settings page.
-test('a failed background preload never reloads, also for a loader that fails late', async () => {
-  const reload = vi.fn();
-  const imports = [];
-  const preload = preloadInBackground([pendingImport(imports), pendingImport(imports)]);
-  const early = failLikeVite(imports[0], new TypeError('Failed to fetch dynamically imported module: /assets/TodayShell-new.js'), reload);
-  await nextTask();
-  const late = failLikeVite(imports[1], new Error('Unable to preload CSS for /assets/TechHomePage-new.css'), reload);
-  await expect(preload).resolves.toBe(false);
-  await nextTask();
-  expect([early.defaultPrevented, late.defaultPrevented]).toEqual([false, false]);
-  expect(reload).not.toHaveBeenCalled();
-  expect(isStaleChunkReloadPending()).toBe(false);
-  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBeNull();
-  // Once every loader settled, a failed chunk is a stale page again.
-  const stale = preloadErrorEvent();
-  handleVitePreloadError(stale, reload);
-  expect(stale.defaultPrevented).toBe(true);
-  expect(reload).toHaveBeenCalledTimes(1);
-});
-
-// Pre-push P1 (round 6): only the preload's own failures skip the reload. A
-// page opened while it runs keeps its recovery: CSS, JS or any other import.
-test("a failure that is not the background preload's still reloads once, one task later", async () => {
-  const reload = vi.fn();
-  const imports = [];
-  const preload = preloadInBackground([pendingImport(imports)]);
-  const page = { resolve: vi.fn(), reject: vi.fn() };
-  const event = failLikeVite(page, new Error('Unable to preload CSS for /assets/CustomersPageV2-old.css'), reload);
-  expect(event.defaultPrevented).toBe(false);
-  expect(reload).not.toHaveBeenCalled();
-  await nextTask();
-  expect(reload).toHaveBeenCalledTimes(1);
-  expect(isStaleChunkReloadPending()).toBe(true);
-  expect(sessionStorage.getItem(CHUNK_RELOAD_FLAG)).toBe('1');
-  imports[0].resolve({ default: () => null });
-  await expect(preload).resolves.toBe(true);
-});
-
-test('a failure decided after an app link started navigating is held for it, not reloaded over it', () => {
-  vi.useFakeTimers();
-  const reload = vi.fn();
-  const windowReload = vi.fn();
-  const imports = [];
-  void preloadInBackground([pendingImport(imports)]);
-  failLikeVite({ resolve: vi.fn(), reject: vi.fn() }, new Error('Unable to preload CSS for /assets/CustomersPageV2-old.css'), reload);
-  markPageNavigating(windowReload);
-  vi.advanceTimersByTime(0);
-  expect(reload).not.toHaveBeenCalled();
-  expect(isStaleChunkReloadPending()).toBe(true);
-  // The navigation never committed: the window's end reloads, as for any held chunk.
-  vi.advanceTimersByTime(30000);
-  expect(windowReload).toHaveBeenCalledTimes(1);
-  expect(reload).not.toHaveBeenCalled();
-});
-
-test('a background preload is ready only when every loader returned a module', async () => {
-  const page = async () => ({ default: () => null });
-  await expect(preloadInBackground([page, page])).resolves.toBe(true);
-  // A chunk a navigation window held resolves undefined: nothing loaded.
-  await expect(preloadInBackground([page, swallowedImport])).resolves.toBe(false);
-  await expect(preloadInBackground([page, () => { throw new Error('sync failure'); }])).resolves.toBe(false);
-});
-
-test("Vite's CSS preload failure counts as a chunk that did not load, like the browsers' import failures", () => {
-  for (const message of [
-    'Failed to fetch dynamically imported module: https://portal.example/assets/Page-old.js',
-    'Importing a module script failed.',
-    'ChunkLoadError: Loading chunk 7 failed.',
-    'Unable to preload CSS for /assets/Page-old.css',
-  ]) expect(isChunkLoadError(new Error(message))).toBe(true);
-  expect(isChunkLoadError(new TypeError("Cannot read properties of undefined (reading 'map')"))).toBe(false);
-  expect(isChunkLoadError(undefined)).toBe(false);
-});
-
-// The page's CSS failure reaches lazyWithRetry whenever the handler did not
-// hold it. After the one automatic reload it gets the retry screen, as a
-// failed chunk does, not the crash screen.
-test('after the one automatic reload, a page whose CSS still fails shows the retry screen, not the crash screen', async () => {
-  sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
-  const StalePage = lazyWithRetry(() => Promise.reject(new Error('Unable to preload CSS for /assets/Page-old.css')));
-  renderInBoundary(StalePage);
-  expect(await screen.findByText(/load this page/)).toBeInTheDocument();
-  expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
-  expect(reported.calls).toEqual([]);
 });

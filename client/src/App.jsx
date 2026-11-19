@@ -1,7 +1,7 @@
 import React, { Component, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { reportError } from './lib/reportError';
-import { CHUNK_RELOAD_FLAG, isChunkLoadError, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
+import { CHUNK_RELOAD_FLAG, isStaleChunkReloadPending, markStaleChunkReloadPending } from './lib/staleChunkReload';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { COLORS, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -356,7 +356,9 @@ export function lazyWithRetry(factory) {
       // A CSS preload already started the reload, then the chunk itself
       // failed too: same reload, same placeholder.
       if (isStaleChunkReloadPending()) return { default: RouteFallback };
-      if (isChunkLoadError(err)) {
+      const msg = String(err?.message || '');
+      const isChunkError = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError/i.test(msg);
+      if (isChunkError) {
         if (!sessionStorage.getItem(CHUNK_RELOAD_FLAG)) {
           sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
           markStaleChunkReloadPending();

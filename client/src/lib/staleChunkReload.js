@@ -30,7 +30,6 @@ const NAVIGATION_WINDOW_MS = 30000;
 let reloadPending = false;
 let navigatingUntil = 0;
 let chunkHeld = false;
-let backgroundPreloads = 0;
 
 function pageNavigating() {
   return Date.now() < navigatingUntil;
@@ -72,48 +71,14 @@ export function markPageNavigating(reload = () => window.location.reload()) {
   };
 }
 
-// A background preload readies a page's code before anyone opens the page
-// (Field view loads Today's code when its switch turns on, for a later open
-// with no signal). With no signal it fails, and that failure is not a stale
-// page, so it must not reload the page the person is on. Vite rejects the
-// import with the same error object it put on the vite:preloadError event,
-// so the preload keeps the errors its own imports rejected with. While one
-// runs, the handler leaves each failure to its import and decides on the
-// next task, when the preload has kept its errors: a kept one is ignored,
-// any other (a page opened in that moment, CSS or JS, or any other import)
-// reloads once as usual. Resolves true when every loader returned a module
-// (a held chunk returns none).
-const backgroundFailures = new WeakSet();
-const canKeep = (value) => value !== null && (typeof value === 'object' || typeof value === 'function');
-
-export async function preloadInBackground(loaders) {
-  backgroundPreloads += 1;
-  try {
-    const results = await Promise.allSettled(loaders.map(async (load) => {
-      try {
-        return await load();
-      } catch (err) {
-        if (canKeep(err)) backgroundFailures.add(err);
-        throw err;
-      }
-    }));
-    return results.every((result) => result.status === 'fulfilled' && Boolean(result.value));
-  } finally {
-    backgroundPreloads -= 1;
-  }
-}
-
-// A chunk that did not load: the import's own failure (Chrome's or Safari's
-// wording, or a ChunkLoadError) or Vite's CSS preload failure, which reaches
-// the page's import whenever the handler did not hold it.
-const CHUNK_LOAD_ERROR = /Failed to fetch dynamically imported module|Importing a module script failed|ChunkLoadError|Unable to preload CSS/i;
-export function isChunkLoadError(err) {
-  return CHUNK_LOAD_ERROR.test(String(err?.message || ''));
-}
-
 // One-shot guard (App.jsx clears the flag on a successful lazy load) so a
 // genuine outage still surfaces instead of reload-looping.
-function reloadOnce(event, reload) {
+export function handleVitePreloadError(event, reload = () => window.location.reload()) {
+  if (pageNavigating()) {
+    chunkHeld = true;
+    event.preventDefault();
+    return;
+  }
   try {
     if (sessionStorage.getItem(CHUNK_RELOAD_FLAG)) return;
     sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1');
@@ -121,30 +86,8 @@ function reloadOnce(event, reload) {
     return;
   }
   markStaleChunkReloadPending();
-  event?.preventDefault();
+  event.preventDefault();
   reload();
-}
-
-export function handleVitePreloadError(event, reload = () => window.location.reload()) {
-  if (pageNavigating()) {
-    chunkHeld = true;
-    event.preventDefault();
-    return;
-  }
-  if (backgroundPreloads > 0) {
-    const failure = event.payload;
-    setTimeout(() => {
-      if (canKeep(failure) && backgroundFailures.has(failure)) return;
-      // A navigation that started meanwhile holds it, as above.
-      if (pageNavigating()) {
-        chunkHeld = true;
-        return;
-      }
-      reloadOnce(null, reload);
-    }, 0);
-    return;
-  }
-  reloadOnce(event, reload);
 }
 
 // Test-only reset; module state otherwise lives for the page's lifetime.
@@ -152,5 +95,4 @@ export function resetStaleChunkReloadForTests() {
   reloadPending = false;
   navigatingUntil = 0;
   chunkHeld = false;
-  backgroundPreloads = 0;
 }

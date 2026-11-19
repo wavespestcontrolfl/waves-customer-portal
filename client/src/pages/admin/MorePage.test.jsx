@@ -6,14 +6,14 @@ import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../hooks/useIsMobile", () => ({ default: () => true }));
-vi.mock("../../lib/fieldView", async (importOriginal) => ({ ...(await importOriginal()), preloadFieldViewLanding: vi.fn(async () => true) }));
+vi.mock("../../lib/fieldView", async (importOriginal) => ({ ...(await importOriginal()), warmFieldViewLanding: vi.fn(async () => true) }));
 vi.mock("../../hooks/useFeatureFlag", () => ({
   useFeatureFlag: () => false,
   refetchFlags: vi.fn(),
 }));
 
 import MorePage from "./MorePage";
-import { preloadFieldViewLanding } from "../../lib/fieldView";
+import { warmFieldViewLanding } from "../../lib/fieldView";
 import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
 import { clearEmailDrafts, loadEmailDrafts, setEmailSending, updateEmailDrafts } from "../../lib/emailDrafts";
 
@@ -32,7 +32,7 @@ function renderMore(role = "admin", navigation = true, name) {
   );
 }
 
-afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); preloadFieldViewLanding.mockClear(); });
+afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); warmFieldViewLanding.mockClear(); });
 
 describe("MorePage — the mobile Settings tab", () => {
   it('is the one phone menu: every page that is not a bottom tab, with no row named after a tab (owner 2026-10-29)', () => {
@@ -159,25 +159,28 @@ describe("MorePage — the mobile Settings tab", () => {
       } finally { Storage.prototype.setItem = setItem; }
       expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "false");
       expect(screen.getByText("Not saved on this phone: its storage is full or blocked. Field view stays off.")).toHaveAttribute("role", "alert");
-      expect(preloadFieldViewLanding).not.toHaveBeenCalled();
+      expect(warmFieldViewLanding).not.toHaveBeenCalled();
       fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
       expect(screen.getByRole("switch", { name: "Field view" })).toHaveAttribute("aria-checked", "true");
       expect(screen.queryByText(/Not saved on this phone/)).not.toBeInTheDocument();
     });
 
-    // Pre-push P1 (round 5): turning it on loads Today's code, so the next
-    // open works with no signal; the row says when that load failed.
-    it("turning it on loads Today's code, and says nothing when that worked", async () => {
+    // Pre-push P1 (rounds 5 to 7): turning it on readies Today's code for an
+    // open with no signal; the row says when it could not. Only the row's own
+    // tries count here (`again`); the session's try is the provider's test.
+    const rowTries = () => warmFieldViewLanding.mock.calls.filter(([options]) => options?.again === true).length;
+
+    it("turning it on readies Today's code, and says nothing when that worked", async () => {
       renderMore("admin");
       await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
-      expect(preloadFieldViewLanding).toHaveBeenCalledTimes(1);
+      expect(rowTries()).toBe(1);
       expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
       await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
-      expect(preloadFieldViewLanding).toHaveBeenCalledTimes(1);
+      expect(rowTries()).toBe(1);
     });
 
-    it("says when Today's code could not load, until the switch turns off", async () => {
-      preloadFieldViewLanding.mockResolvedValueOnce(false);
+    it("says when Today's code is not on the phone, until the switch turns off", async () => {
+      warmFieldViewLanding.mockResolvedValueOnce(false);
       renderMore("admin");
       fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
       expect(await screen.findByText("Today is not ready for no signal yet. Open Today once with signal.")).toHaveAttribute("role", "status");
@@ -185,9 +188,17 @@ describe("MorePage — the mobile Settings tab", () => {
       expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
     });
 
-    it("a failed load answered after the switch turned off says nothing", async () => {
+    it("says nothing when this page cannot tell (the dev server has no file list)", async () => {
+      warmFieldViewLanding.mockResolvedValueOnce(null);
+      renderMore("admin");
+      await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Field view" })); });
+      expect(rowTries()).toBe(1);
+      expect(screen.queryByText(/not ready for no signal/)).not.toBeInTheDocument();
+    });
+
+    it("an answer that comes after the switch turned off says nothing", async () => {
       let answer;
-      preloadFieldViewLanding.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+      warmFieldViewLanding.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
       renderMore("admin");
       fireEvent.click(screen.getByRole("switch", { name: "Field view" }));
       fireEvent.click(screen.getByRole("switch", { name: "Field view" }));

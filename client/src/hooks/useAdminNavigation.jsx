@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { adminNavigationPreferenceKey as preferenceKey } from '../lib/fieldView';
+import { adminNavigationPreferenceKey as preferenceKey, warmFieldViewLanding } from '../lib/fieldView';
 import { ADMIN_WORKSPACE_DESTINATIONS, ADMIN_WORKSPACE_GROUP_IDS, getAdminWorkspaceGroups, getAdminWorkspaceSelection } from '../config/adminNavigation';
 
 export const AdminNavigationContext = createContext(null);
@@ -114,6 +114,12 @@ export function AdminNavigationProvider({ user, enabled, agentEstimateEnabled, c
   // row the save failed, so the row can say why the switch did not move.
   const fieldView = user?.role === 'admin' && preferences.fieldView === true;
   const setFieldView = (on) => updatePreferences((current) => ({ ...current, fieldView: on === true }), { onlyIfSaved: true });
+  // A verified session with the switch on readies Today too, once per page:
+  // after a deploy the app can open on another page (a push tap), and the
+  // next open with no signal still lands on Today.
+  useEffect(() => {
+    if (enabled && fieldView) void warmFieldViewLanding();
+  }, [enabled, fieldView]);
 
   return <AdminNavigationContext.Provider value={enabled ? { groups, expanded, toggleGroup, selection, publishView, pinnedItems, togglePin, fieldView, setFieldView } : null}>
     {children}

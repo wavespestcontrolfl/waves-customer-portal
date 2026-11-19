@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { clearStaffDeviceData } from "../../lib/adminAuth";
-import { preloadFieldViewLanding } from "../../lib/fieldView";
+import { warmFieldViewLanding } from "../../lib/fieldView";
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
@@ -39,9 +39,9 @@ const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
 
 // The Field view switch (owner 2026-11-19), for an admin login. It moves
 // only when this phone saved it (setFieldView returns false when it could
-// not). Turning it on also loads Today's code for a later open with no
-// signal. The row says when either failed; only the newest tap's load
-// answer counts.
+// not). Turning it on also readies Today's code on the phone for a later
+// open with no signal (warmFieldViewLanding). The row says when either
+// failed; only the newest tap's answer counts.
 function FieldViewRow({ navigation }) {
   const fieldView = navigation.fieldView === true;
   const [notSaved, setNotSaved] = useState(false);
@@ -53,8 +53,8 @@ function FieldViewRow({ navigation }) {
     setNotSaved(saved === false);
     setTodayNotReady(false);
     if (saved !== true || !on) return;
-    void preloadFieldViewLanding().then((ready) => {
-      if (tap === lastTap.current) setTodayNotReady(!ready);
+    void warmFieldViewLanding({ again: true }).then((ready) => {
+      if (tap === lastTap.current) setTodayNotReady(ready === false);
     });
   };
   return (
