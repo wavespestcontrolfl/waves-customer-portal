@@ -77,7 +77,7 @@ function appointmentRefreshRequired() {
 
 function appointmentOfficeReviewRequired() {
   return Object.assign(new Error(
-    'We found more than one booked visit for this service. Please call or text the Waves office so we can confirm the right appointment before completing your purchase.',
+    'We have an appointment on file for this service. Please call or text the Waves office to confirm the right visit before completing your purchase.',
   ), {
     status: 422,
     statusCode: 422,

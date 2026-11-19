@@ -171,15 +171,19 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
   // The first two steps a customer walks: tap a service in the My Plan list
   // and pick a time. Split from confirm so deterministic interleavings can
   // complete or staff-claim the selected hold before the first confirm moves.
-  async function openPurchase(serviceKey) {
+  async function initPurchaseFor(serviceKey) {
     const { offers } = await oneTap.listOffers({ customerId: ids.customer });
     const offer = offers.find((candidate) => candidate.serviceKey === serviceKey);
     expect(offer).toMatchObject({ serviceKey, mode: 'priced' });
     // The four fields the buy button posts (routes/one-tap-purchase.js).
-    const init = await oneTap.initPurchase({ customerId: ids.customer, clicked: {
+    return oneTap.initPurchase({ customerId: ids.customer, clicked: {
       fingerprint: offer.fingerprint, serviceKey: offer.serviceKey,
       optionId: offer.option.id, perApplication: offer.option.perVisit,
     } });
+  }
+
+  async function openPurchase(serviceKey) {
+    const init = await initPurchaseFor(serviceKey);
     const slotId = await offerOpening(init.estimateId);
     await oneTap.reserve({ customerId: ids.customer, purchaseId: init.purchaseId, slotId });
     return init;
@@ -320,6 +324,127 @@ postgres('one-tap purchase against migrated PostgreSQL', () => {
       .toBe(73);
     expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first('customer_id'))
       .toEqual({ customer_id: null });
+  });
+
+  test('a marked office review survives hold cleanup and a new unrelated offer until staff resolves the booking', async () => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const lawn = await trx('services').where({ service_key: 'lawn_care_6week' }).first('id');
+    const competitorId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: competitorId,
+      source_estimate_id: init.estimateId,
+      customer_id: ids.customer,
+      technician_id: ids.technician,
+      service_id: lawn.id,
+      service_type: 'Every 6 Weeks Lawn Care Service',
+      scheduled_date: openDay(18),
+      window_start: '13:00',
+      window_end: '14:00',
+      status: 'confirmed',
+      is_recurring: true,
+      recurring_pattern: 'every_6_weeks',
+      estimated_price: 73,
+      reservation_expires_at: null,
+    });
+
+    await expect(oneTap.confirm({
+      customerId: ids.customer, purchaseId: init.purchaseId, termsAccepted: true,
+    })).rejects.toMatchObject({ status: 422, code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED' });
+    const marked = await trx('estimates').where({ id: init.estimateId }).first('estimate_data');
+    expect(marked.estimate_data.oneTapPurchase.officeReview).toMatchObject({
+      version: 1,
+      selectedHoldId: purchase.scheduled_service_id,
+      bookedVisitIds: [competitorId],
+    });
+
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id })
+      .update({ reservation_expires_at: trx.raw("NOW() - INTERVAL '1 hour'") });
+    await require('../services/slot-reservation').releaseExpiredReservations();
+    expect(await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first()).toBeUndefined();
+    await expect(oneTap.release({ customerId: ids.customer, purchaseId: init.purchaseId }))
+      .resolves.toEqual({ released: false, preservedForOfficeReview: true });
+    await expect(oneTap.reserve({
+      customerId: ids.customer, purchaseId: init.purchaseId, slotId: purchase.slot_id,
+    })).rejects.toMatchObject({ status: 422, code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED' });
+
+    const next = await initPurchaseFor('tree_shrub');
+    expect(next.purchaseId).not.toBe(init.purchaseId);
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
+      .toEqual({ status: 'reserved', scheduled_service_id: purchase.scheduled_service_id });
+    expect(await trx('estimates').where({ id: init.estimateId }).first('status', 'archived_at'))
+      .toEqual({ status: 'draft', archived_at: null });
+
+    await trx('scheduled_services').where({ id: competitorId }).update({ status: 'cancelled' });
+    await expect(oneTap.release({ customerId: ids.customer, purchaseId: init.purchaseId }))
+      .resolves.toEqual({ released: true });
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status'))
+      .toEqual({ status: 'voided' });
+    expect((await trx('estimates').where({ id: init.estimateId }).first('archived_at')).archived_at).toBeTruthy();
+  });
+
+  test('office review committed after the advisory read refuses re-reserve before deleting the prior hold', async () => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    const priorHold = await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).first();
+    const slotId = await offerOpening(init.estimateId);
+    const reservations = require('../services/slot-reservation');
+    const reserveSlot = reservations.reserveSlot;
+    const reserveSpy = jest.spyOn(reservations, 'reserveSlot').mockImplementationOnce(async (options) => {
+      const estimate = await trx('estimates').where({ id: init.estimateId }).first('estimate_data');
+      await trx('estimates').where({ id: init.estimateId }).update({
+        estimate_data: {
+          ...(estimate.estimate_data || {}),
+          oneTapPurchase: {
+            ...(estimate.estimate_data?.oneTapPurchase || {}),
+            officeReview: { version: 1, requiredAt: new Date().toISOString() },
+          },
+        },
+      });
+      await trx('scheduled_services').insert({
+        id: randomUUID(), source_estimate_id: init.estimateId, customer_id: ids.customer,
+        technician_id: ids.technician, service_type: 'Lawn Care', scheduled_date: openDay(18),
+        window_start: '13:00', window_end: '14:00', status: 'confirmed', is_recurring: false,
+        estimated_price: 73, reservation_expires_at: null,
+      });
+      return reserveSlot(options);
+    });
+
+    try {
+      await expect(oneTap.reserve({ customerId: ids.customer, purchaseId: init.purchaseId, slotId }))
+        .rejects.toMatchObject({ status: 422, code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED' });
+    } finally {
+      reserveSpy.mockRestore();
+    }
+
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
+      .toEqual({ status: 'reserved', scheduled_service_id: purchase.scheduled_service_id });
+    expect(await trx('scheduled_services').where({ id: priorHold.id }).first('id', 'reservation_expires_at'))
+      .toEqual({ id: priorHold.id, reservation_expires_at: priorHold.reservation_expires_at });
+  });
+
+  test('a missing selected hold recovers to time selection before a different staff booking can cause 422', async () => {
+    await seedOwnedService('pest_control');
+    const init = await openPurchase('lawn_care');
+    const purchase = await trx('one_tap_purchases').where({ id: init.purchaseId }).first();
+    await trx('scheduled_services').insert({
+      id: randomUUID(), source_estimate_id: init.estimateId, customer_id: ids.customer,
+      technician_id: ids.technician, service_type: 'Lawn Care', scheduled_date: openDay(18),
+      window_start: '13:00', window_end: '14:00', status: 'confirmed', is_recurring: false,
+      estimated_price: 73, reservation_expires_at: null,
+    });
+    await trx('scheduled_services').where({ id: purchase.scheduled_service_id }).del();
+
+    await expect(oneTap.confirm({
+      customerId: ids.customer, purchaseId: init.purchaseId, termsAccepted: true,
+    })).rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
+    expect(await trx('one_tap_purchases').where({ id: init.purchaseId }).first('status', 'scheduled_service_id'))
+      .toEqual({ status: 'initiated', scheduled_service_id: null });
+    const estimate = await trx('estimates').where({ id: init.estimateId }).first('status', 'archived_at', 'estimate_data');
+    expect(estimate).toMatchObject({ status: 'draft', archived_at: null });
+    expect(estimate.estimate_data.oneTapPurchase.officeReview).toBeUndefined();
   });
 
   test('a staff booking committed between the advisory booking and ownership reads preserves the purchase', async () => {

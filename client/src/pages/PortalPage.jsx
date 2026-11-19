@@ -1507,6 +1507,13 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
     }
   };
 
+  const showOfficeReview = (err) => {
+    if (err?.status !== 422 || err.code !== 'APPOINTMENT_OFFICE_REVIEW_REQUIRED') return false;
+    preserveOfficeReviewRef.current = true;
+    setOfficeReviewMessage(err.message || 'Call Waves so we can confirm the right appointment before you continue.');
+    return true;
+  };
+
   const pickSlot = async (slot) => {
     if (!init || reserving) return;
     setReserving(true);
@@ -1524,6 +1531,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       setSelectedSlot(slot);
       setStep('confirm');
     } catch (err) {
+      if (showOfficeReview(err)) return;
       if (err?.code === 'SLOT_UNAVAILABLE') {
         setStepError('That time was just taken — pick another slot.');
         refreshSlots();
@@ -1624,13 +1632,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       setResult(r);
       setStep('done');
     } catch (err) {
-      if (err?.status === 422 && err?.code === 'APPOINTMENT_OFFICE_REVIEW_REQUIRED') {
-        // Preserve the exact hold and frozen price on screen. This terminal
-        // state has no retry, refresh, re-reserve, release or change-time
-        // control; office review must resolve the competing booking.
-        preserveOfficeReviewRef.current = true;
-        setOfficeReviewMessage(err?.message || 'Call Waves so we can confirm the right appointment before you continue.');
-      } else if (err?.status === 402) {
+      if (showOfficeReview(err)) return;
+      if (err?.status === 402) {
         setNeedsCard(true);
         setCardSaved(false);
         setStepError('Save a payment method above to finish.');
@@ -1832,10 +1835,10 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                 {summaryRow('Service', init.label)}
                 <div style={{ height: 6 }} />
                 {priceRows(init.pricing, init.perVisit)}
-                <div style={{ height: 6 }} />
-                {summaryRow('Held visit', selectedSlot
-                  ? `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`
-                  : '—')}
+                {selectedSlot && <>
+                  <div style={{ height: 6 }} />
+                  {summaryRow('Time you selected', `${oneTapDayLabel(selectedSlot.date)}, ${oneTapTime12(selectedSlot.windowStart)}–${oneTapTime12(selectedSlot.windowEnd)}`)}
+                </>}
               </div>
               {existingServicesBox(init.pricing, { officeReview: true })}
               <div style={softBox}>
@@ -1851,7 +1854,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   Call Waves — (941) 297-5749
                 </a>
                 <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>
-                  Nothing was purchased. Your held visit and price are unchanged on this screen.
+                  You can close this screen. The office has your quote.
                 </div>
               </div>
             </>

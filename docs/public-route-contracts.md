@@ -2056,16 +2056,15 @@ callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
 
-Authenticated one-tap confirmation graduates only the unclaimed hold that still
-belongs to its synthesized estimate. The ownership check runs before capacity
-preparation and again on the locked reservation row. Conversion is pinned to
-that exact graduated visit; a second current staff booking returns HTTP 422
-`APPOINTMENT_OFFICE_REVIEW_REQUIRED` without changing the hold, office-entered
-price, draft estimate or invoices. A visit already en route or on site continues
-to count after Eastern midnight. The Portal displays the frozen visit, price
-and office number. Closing this review keeps the purchase for staff. A competing confirmation
-that already completed returns the existing frozen purchase receipt; ordinary
-expired/unavailable holds retain the compare-and-swap pick-a-time recovery.
+Authenticated one-tap confirmation checks the exact selected reservation and its estimate
+before preparing capacity and again under the reservation lock. If a live hold and a
+separate current office booking both qualify, the API records the conflict on the draft
+and returns HTTP 422 `APPOINTMENT_OFFICE_REVIEW_REQUIRED`. The portal shows the frozen
+visit, price and office phone number. Closing the review or opening another offer preserves
+the office booking and its draft. The physical hold still expires on its normal schedule.
+An en-route or on-site visit counts while it is in progress across Eastern midnight.
+When the selected hold has already expired, disappeared or been claimed, the customer can
+choose another time. A concurrent completed purchase returns its original frozen receipt.
 
 An estimate can still show an hour after staff book its last opening. If the
 new reservation no longer fits, `/reserve` returns the existing 409

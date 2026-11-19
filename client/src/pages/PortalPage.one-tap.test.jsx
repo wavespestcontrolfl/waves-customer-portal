@@ -179,8 +179,13 @@ describe('one-tap purchase CTA gating', () => {
     expect(screen.getByText(/confirmation email and an app notification/)).toBeInTheDocument();
   });
 
-  it('parks office-review conflicts without retrying, re-reserving or changing the held price', async () => {
-    api.getPropertyRecommendations.mockResolvedValue(recommendations());
+  it.each(['reserve', 'confirm'])('shows office review after %s and preserves its purchase when the next offer opens', async (step) => {
+    const mosquito = {
+      ...PRICED_OFFER_CARD, id: 'mosquito_offer', title: 'Mosquito Control', serviceKey: 'mosquito',
+      option: { id: 'mosquito-plan', label: 'Mosquito Control', cadence: '12 applications/yr', perVisit: 61 },
+      fingerprint: 'fp-mosquito',
+    };
+    api.getPropertyRecommendations.mockResolvedValue(recommendations({ cards: [PRICED_OFFER_CARD, mosquito] }));
     api.oneTapInit.mockResolvedValue({
       purchaseId: 'p-1',
       estimateId: 'est-1',
@@ -205,7 +210,8 @@ describe('one-tap purchase CTA gating', () => {
       scheduledServiceId: 'ss-1', expiresAt: new Date(Date.now() + 900000).toISOString(), holdMinutes: 15,
     });
     const guidance = 'We found more than one current booked visit. Call Waves so we can confirm the right appointment before you continue.';
-    api.oneTapConfirm.mockRejectedValue(Object.assign(new Error(guidance), {
+    const refused = step === 'confirm' ? api.oneTapConfirm : api.oneTapReserve;
+    refused.mockRejectedValueOnce(Object.assign(new Error(guidance), {
       status: 422,
       code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED',
     }));
@@ -214,18 +220,21 @@ describe('one-tap purchase CTA gating', () => {
     fireEvent.click(await screen.findByText('Add now — $84.00 per application'));
     fireEvent.click(await screen.findByText('Agree and choose a time'));
     fireEvent.click(await screen.findByText(/Arrival 8:00 AM–10:00 AM/));
-    await screen.findByText(/held for 15 minutes/);
-    fireEvent.click(screen.getByText('Confirm'));
+    if (step === 'confirm') {
+      await screen.findByText(/held for 15 minutes/);
+      fireEvent.click(screen.getByText('Confirm'));
+    }
 
     expect(await screen.findByText(guidance)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Call Waves/i })).toHaveAttribute('href', 'tel:+19412975749');
-    expect(screen.getByText('Thursday, Aug 20, 8:00 AM–10:00 AM')).toBeInTheDocument();
+    if (step === 'confirm') expect(screen.getByText('Thursday, Aug 20, 8:00 AM–10:00 AM')).toBeInTheDocument();
+    else expect(screen.queryByText('Time you selected')).not.toBeInTheDocument();
     expect(screen.getAllByText('$84.00 per application').length).toBeGreaterThan(0);
-    expect(screen.getByText('Nothing was purchased. Your held visit and price are unchanged on this screen.')).toBeInTheDocument();
+    expect(screen.getByText('You can close this screen. The office has your quote.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Change time' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Refresh times' })).not.toBeInTheDocument();
-    expect(api.oneTapConfirm).toHaveBeenCalledTimes(1);
+    expect(api.oneTapConfirm).toHaveBeenCalledTimes(step === 'confirm' ? 1 : 0);
     expect(api.oneTapReserve).toHaveBeenCalledTimes(1);
     expect(api.oneTapRelease).not.toHaveBeenCalled();
     expect(api.oneTapSlots).not.toHaveBeenCalled();
@@ -235,6 +244,18 @@ describe('one-tap purchase CTA gating', () => {
     fireEvent.click(screen.getByLabelText('Close purchase'));
     expect(screen.queryByRole('dialog', { name: /Add Lawn Care/ })).not.toBeInTheDocument();
     expect(api.oneTapRelease).not.toHaveBeenCalled();
+
+    api.oneTapInit.mockResolvedValueOnce({
+      purchaseId: 'p-2', estimateId: 'est-2', serviceKey: 'mosquito', label: 'Mosquito Control',
+      perVisit: 61, cadenceLabel: '12 applications/yr', visitsPerYear: 12,
+      terms: { version: 'v1', text: 'Terms for the mosquito service.' }, hasCardOnFile: true,
+      slots: { primary: [], expander: [], nearby: false },
+    });
+    fireEvent.click(screen.getByText('Add now — $61.00 per application'));
+    expect(await screen.findByText('Terms for the mosquito service.')).toBeInTheDocument();
+    expect(api.oneTapRelease).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText('Close purchase'));
+    await vi.waitFor(() => expect(api.oneTapRelease.mock.calls).toEqual([['p-2']]));
   });
 
   it('ordinary close still releases an incomplete purchase', async () => {
