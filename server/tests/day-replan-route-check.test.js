@@ -58,7 +58,7 @@ describe('online count: the customer booking rules', () => {
     expect(rc.onlineStarts({ startMin: 560, min: 80 }, admit)).toEqual([]); // 9:20-10:40: dispatch fits one, no hourly start does
     expect(rc.onlineStarts({ startMin: 540, min: 480 }, admit)).toEqual([540, 600, 660, 720, 780, 840, 900]); // 4 PM would run past 5
     expect(rc.spaced(rc.onlineStarts({ startMin: 540, min: 480 }, admit))).toEqual([540, 660, 780, 900]); // 4 jobs
-    expect(rc.onlineAdmit('2026-11-22', AHEAD, [], CONFIG)).toBeNull(); // a Sunday: the picker offers no day
+    expect(rc.onlineAdmit('2026-11-22', AHEAD, [], CONFIG)).not.toBeNull(); // /book offers weekends: a staffed Sunday counts
   });
 
   test("the /book page's own rules: its first day and its configured opening hour", () => {
@@ -121,6 +121,15 @@ describe('online count: the customer booking rules', () => {
     const busy = rc.onlineBusy({ techId: TECH, techBlind: false, occupancy: pair, interviews: [] });
     expect(busy[0]).toEqual({ startMin: 540, endMin: 660 });
     expect(rc.onlineStarts({ startMin: 540, min: 240 }, rc.onlineAdmit(MONDAY, AHEAD, busy, CONFIG))).toEqual([660]); // 10 AM is held
+  });
+
+  test('append-only /book (insertion off): only the time after the last stop is online room', () => {
+    const rows = [stop('a', '09:00:00', '10:00:00'), stop('b', '13:00:00', '14:00:00', { lat: 27.45, lng: -82.4 })];
+    const insert = rc.measureTechDay({ ...open, rows });
+    const append = rc.measureTechDay({ ...open, rows, appendOnly: true });
+    expect(insert.openings.map((o) => [o.kind, o.online])).toEqual([['wait', 1], ['tail', 1]]);
+    expect(append.openings.map((o) => [o.kind, o.online])).toEqual([['wait', 0], ['tail', 1]]);
+    expect(append.slots).toBe(insert.slots); // dispatch room is the same
   });
 
   test('no online room while self-booking is closed; dispatch room is unchanged', () => {
@@ -330,7 +339,7 @@ describe('runRouteCheck', () => {
     expect(totals.next.dates).toEqual(['2026-11-20', '2026-11-21', '2026-11-23']);
     expect(JSON.parse(row.ad_shadow)).toMatchObject({ decision: 'full', live: [{ id: 'c1', status: 'paused', mode: 'stop' }] });
     // Only the measured dates and the Sundays are read, never the whole 14-day scan.
-    expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-22', '2026-11-29', '2026-11-19', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
+    expect(replan.loadDayStops.mock.calls.map(([, d]) => d)).toEqual(['2026-11-19', '2026-11-22', '2026-11-29', '2026-11-20', '2026-11-21', '2026-11-23', '2026-11-24', '2026-11-25', '2026-11-26']);
     expect(result).toMatchObject({ status: 'completed', days: 6 });
   });
 
@@ -389,6 +398,16 @@ describe('runRouteCheck', () => {
     await runRouteCheck({ conn, now: NOW });
     const friday = JSON.parse(writes[0][1].days).find((d) => d.date === '2026-11-20');
     expect(friday.openings.map((o) => [o.start, o.min])).toEqual([[660, 360]]); // 8-9 is under a job slot; 9-11 is held
+  });
+
+  test('a stop finished between the two reads is done, not simulated again and not lost', async () => {
+    // The rows' read still sees the 9:00 stop live; the progress read, after it, sees it completed at 9:45.
+    replan.loadDayStops.mockImplementation(async (_c, date) => (date === '2026-11-19' ? [stop('x1', '09:00:00', '10:00:00', { lat: 27.5, lng: -82.4 })] : []));
+    const { conn, writes } = fakeConn({ progress: [{ id: 'x1', technician_id: TECH, status: 'completed', completed_at: '2026-11-19T14:45:00Z', lat: 27.5, lng: -82.4 }] });
+    await runRouteCheck({ conn, now: NOW });
+    const today = JSON.parse(writes[0][1].days)[0];
+    expect(today).toMatchObject({ stops: 0, van: 'completed' });
+    expect(today.openings[0]).toMatchObject({ kind: 'tail', start: 630 });
   });
 
   test('an unreadable interview list holds no time and the run still completes', async () => {

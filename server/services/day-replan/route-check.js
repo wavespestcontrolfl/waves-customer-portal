@@ -7,7 +7,7 @@
  * view), for each technician who works that day. It records one row in route_check_runs:
  *   - each opening that holds a new job and its drive (close-gaps SLOT_MIN), counted two ways: jobs dispatch can
  *     place (`slots`), and jobs a customer can book online (`online`: a start the /book page's own rules admit, clear
- *     of every booked span and the owner's interviews, Monday to Saturday; see onlineAdmit); while the occupancy check
+ *     of every booked span and the owner's interviews; see onlineAdmit); while the occupancy check
  *     is tech-blind, a date's room is counted once across technicians, not per technician;
  *   - what the ad budget rule WOULD do (`ad_shadow`): full budget while an online-bookable opening exists today or in
  *     the next STAFFED_DAYS staffed days, the 1% floor when none, with the dispatch count beside it. It changes no
@@ -122,13 +122,19 @@ function spaced(starts, gap = SLOT_MIN) {
 /** Minutes one online job needs in an opening: the job slot, or the /book visit when that is longer. */
 const onlineNeedMin = (config) => Math.max(SLOT_MIN, booking().resolveBookingDuration(undefined, config));
 
+/**
+ * True when /book may only add a visit after the route's last stop: capacity mode on and mid-route insertion off
+ * (booking.js bookInsertionOffersLive: GATE_BOOK_CAPACITY_COMMIT with GATE_SCHEDULING_CAPACITY). Read at call time.
+ */
+const onlineAppendOnly = () => require('../scheduling/policy').capacityEnabled() && !booking().bookInsertionOffersLive();
+
 /** True while the /book page takes bookings at all (GATE_SELF_BOOKING and booking_config.enabled, as /availability reads them). */
 const selfBookingOpen = (config) => require('../../config/feature-gates').isEnabled('selfBooking') && config.enabled !== false;
 
 /**
  * The online booking test for one date at `now`, or null when no customer can book the date online: self-booking
- * closed (selfBookingOpen), a Sunday (find-time's default), or a date the /book page refuses (validateBookingSlotDate:
- * before today + advance_days_min, default 1). A start counts when the /book page would take the visit there: its slot
+ * closed (selfBookingOpen), or a date the /book page refuses (validateBookingSlotDate: before today +
+ * advance_days_min, default 1). /book offers weekends (includeWeekends), so a staffed Sunday counts. A start counts when the /book page would take the visit there: its slot
  * rules (validateBookingSlotGeometry: grid, booking_config day start and end, the shift while capacity mode is on), the
  * customer window rule (customerWindowAdmits: the hour grid, the customer last start, the customer close), the
  * self-serve booking notice (violatesSelfServeNotice), and no booked time (`busy`) under the visit. The visit is
@@ -136,7 +142,7 @@ const selfBookingOpen = (config) => require('../../config/feature-gates').isEnab
  */
 function onlineAdmit(day, now, busy, config) {
   const rules = booking();
-  if (!selfBookingOpen(config) || weekday(day) === 0 || rules.validateBookingSlotDate(day, config, now)) return null;
+  if (!selfBookingOpen(config) || rules.validateBookingSlotDate(day, config, now)) return null;
   const visitMin = rules.resolveBookingDuration(undefined, config);
   return (startMin) => customerWindowAdmits({ startMin, endMin: startMin + visitMin })
     && !rules.validateBookingSlotGeometry({ startMin, duration: visitMin, config })
@@ -232,7 +238,7 @@ function unmeasurable(rows) {
  * One tech-day's openings (pure). rows: the stops still to do, in any order (simulated in promised-window order, the
  * clock baseline); blocks: the technician's schedule blocks; held: hours other rows hold, as intervals.
  */
-function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin, admit, needMin = SLOT_MIN }) {
+function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, closeMin, admit, needMin = SLOT_MIN, appendOnly = false }) {
   const skip = unmeasurable(rows);
   if (skip) return { stops: rows.length, skip };
   const sim = simulate(promisedWindowOrder(rows), { origin, departureMin, blockedIntervals: serviceBlocks(blocks) });
@@ -241,7 +247,8 @@ function measureTechDay({ rows, blocks, held, origin, departureMin, openMin, clo
     ? gaps.openBlocks(sim, { departureMin, openMin, closeMin, unavailable: [...blocks, ...held], driveBlocks: serviceBlocks(blocks) })
     : [];
   const openings = open.filter((b) => b.min >= SLOT_MIN).map((b) => {
-    const starts = onlineStarts(b, admit, needMin);
+    // Append-only /book: a customer can take only the time after the route's last stop.
+    const starts = appendOnly && b.kind !== 'tail' ? [] : onlineStarts(b, admit, needMin);
     return { kind: b.kind, start: Math.round(b.startMin), min: Math.round(b.min), slots: Math.floor(b.min / SLOT_MIN), online: spaced(starts, needMin).length, starts };
   });
   return {
@@ -370,21 +377,28 @@ async function measureOne(conn, env, { day, techId, rows, progress, occupancy, i
     ];
     const home = homeFromMap(env.homes, techId);
     const busy = onlineBusy({ occupancy, techId, techBlind: env.techBlind, interviews });
-    const common = { blocks, held, closeMin: DAY_CLOSE, admit: onlineAdmit(day, env.now, busy, env.bookingConfig), needMin: env.needMin };
+    const common = {
+      blocks, held, closeMin: DAY_CLOSE, admit: onlineAdmit(day, env.now, busy, env.bookingConfig), needMin: env.needMin, appendOnly: env.appendOnly,
+    };
     if (day !== env.today) {
       return measureTechDay({ ...common, rows: own, origin: home, departureMin: env.departureMin, openMin: DAY_OPEN });
     }
-    // On site now: the van is there, so a stop with no place leaves the day unmeasured (never free time from home).
-    const onSiteRows = own.filter((r) => r.status === 'on_site');
-    if (onSiteRows.some((r) => !hasCoords(r))) return { stops: own.length, skip: 'ON_SITE_WITHOUT_COORDINATES' };
+    // The progress read comes after the rows' read, so its status wins: a stop finished in between is done (never
+    // simulated again), and one the technician reached in between is on site.
     const mine = progress.filter((p) => String(p.technician_id) === techId);
+    const now = new Map(mine.map((p) => [String(p.id), p.status]));
+    const live = own.filter((r) => now.get(String(r.id)) !== 'completed')
+      .map((r) => (now.get(String(r.id)) === 'on_site' ? { ...r, status: 'on_site' } : r));
+    // On site now: the van is there, so a stop with no place leaves the day unmeasured (never free time from home).
+    const onSiteRows = live.filter((r) => r.status === 'on_site');
+    if (onSiteRows.some((r) => !hasCoords(r))) return { stops: live.length, skip: 'ON_SITE_WITHOUT_COORDINATES' };
     const van = vanNow({
       completed: mine.filter((p) => p.status === 'completed'),
       onSite: onSiteStays(onSiteRows, new Map(mine.map((p) => [String(p.id), p.arrived_at]))),
       home, departureMin: env.departureMin, nowMin: env.nowMin, day,
     });
     const fig = measureTechDay({
-      ...common, rows: own.filter((r) => r.status !== 'on_site'), origin: van.origin,
+      ...common, rows: live.filter((r) => r.status !== 'on_site'), origin: van.origin,
       departureMin: Math.max(env.nowMin, van.clockMin), openMin: Math.max(DAY_OPEN, env.nowMin),
     });
     return { ...fig, van: van.source };
@@ -400,8 +414,10 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   const elig = await eligibility(conn, today, dayAfter(today, SCAN_DAYS));
   const config = await bookingConfig(conn);
   await refreshCustomerBookingWindowConfig(conn);
-  const progress = await loadProgress(conn, today);
   const rowsOn = rowReader(conn);
+  // Today's rows first, then the progress: a stop finished between the two reads shows as done, never in neither.
+  await rowsOn(today);
+  const progress = await loadProgress(conn, today);
   // A technician with a stop that day; today counts the stops already done too (a Sunday stays staffed after its last stop).
   const withStopsOn = async (day) => techsWithStops(day === today ? [...(await rowsOn(day)), ...progress] : await rowsOn(day));
   const stopsOn = new Map();
@@ -411,6 +427,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
     now,
     bookingConfig: config,
     needMin: onlineNeedMin(config),
+    appendOnly: onlineAppendOnly(),
     nowMin: p.hour * 60 + p.minute,
     homes: await loadTechStartPoints(conn),
     departureMin: await dayDepartureMinutes(conn),
@@ -429,7 +446,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
   }
   const { totals, ad } = summarize(days, today, { techBlind: env.techBlind, needMin: env.needMin });
   const status = days.some((d) => d.skip === 'FAILED') ? 'completed_with_errors' : 'completed';
-  const adShadow = { ...ad, selfBooking: selfBookingOpen(config), live: await liveAdModes(conn) };
+  const adShadow = { ...ad, selfBooking: selfBookingOpen(config), appendOnly: env.appendOnly, live: await liveAdModes(conn) };
   await conn(TABLE).insert({
     run_at: now, service_date: today, status, days: JSON.stringify(days), totals: JSON.stringify(totals), ad_shadow: JSON.stringify(adShadow),
   });
@@ -440,7 +457,7 @@ async function runRouteCheck({ conn = db, now = new Date() } = {}) {
 module.exports = {
   runRouteCheck,
   _internals: {
-    vanNow, onSiteStays, onlineAdmit, onlineStarts, onlineBusy, bookedSpans, onlineNeedMin, spaced, blindSlots, measureTechDay, staffed,
+    vanNow, onSiteStays, onlineAdmit, onlineStarts, onlineBusy, bookedSpans, onlineNeedMin, onlineAppendOnly, spaced, blindSlots, measureTechDay, staffed,
     datesToMeasure, summarize, unmeasurable,
     etMinuteOn, STAFFED_DAYS, DEMAND_DAYS,
   },
