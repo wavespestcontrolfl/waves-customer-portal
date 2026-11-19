@@ -1725,8 +1725,8 @@ async function runAdminAlertRelevanceSweep({ now = new Date() } = {}) {
   const lateReRung = await lateReRingPass(now);
   const estimateReRung = await estimateReRingPass(now);
   const bookingsRaised = await unfinishedBookingsPass(now);
-  const leadCallReminders = await leadCallReminderPass(now);
-  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}), ...(leadCallReminders ? { leadCallReminders } : {}) };
+  const reminders = await reminderPasses(now);
+  return { skipped: false, scanned, retired, byClass, rearmed, ...(anyShadow ? { wouldClose } : {}), ...(lateReRung ? { lateReRung } : {}), ...(estimateReRung ? { estimateReRung } : {}), ...(bookingsRaised ? { bookingsRaised } : {}), ...reminders };
 }
 
 // Portal items past their one business hour ring once more (portal-late-rering.js).
@@ -1773,6 +1773,26 @@ async function leadCallReminderPass(now) {
     return (await require('./lead-call-reminder').runLeadCallReminder({ now })).reminded || null;
   } catch (err) {
     logger.warn(`[alert-relevance] the lead call reminder pass failed: ${errSummary(err)}`);
+    return null;
+  }
+}
+
+// The two reminder passes below, as the fields the sweep's result carries (a pass that sent nothing adds none).
+async function reminderPasses(now) {
+  const leadCallReminders = await leadCallReminderPass(now);
+  const newLeadRealerts = await newLeadRealertPass(now);
+  return { ...(leadCallReminders ? { leadCallReminders } : {}), ...(newLeadRealerts ? { newLeadRealerts } : {}) };
+}
+
+// New-lead re-alert (new-lead-reminder.js; owner 2026-11-19): an open new-lead bell nobody has reached gets ONE more phone
+// push at 15 business minutes (Monday to Saturday, 8 AM to 6 PM ET). No gate: the push goes to admin users only. After the
+// closes above, so a bell this run just closed sends nothing. A failure is logged and never fails the sweep.
+async function newLeadRealertPass(now) {
+  try {
+    const out = await require('./new-lead-reminder').runNewLeadReminder({ now });
+    return out.pushed ? { pushed: out.pushed } : null;
+  } catch (err) {
+    logger.warn(`[alert-relevance] the new-lead re-alert pass failed: ${errSummary(err)}`);
     return null;
   }
 }
