@@ -645,17 +645,25 @@ jest.setTimeout(30000);
       ['a conversation with the number linked to a customer', () => inbox(CALLER, null, { customer_id: LINKED_CUSTOMER })],
       ['a lead saved for the number', () => lead('727.555.0611')],
       ['a customer saved with the number on a secondary slot', () => database('customers').insert({ id: randomUUID(), first_name: 'Test', service_contact_phone: '727-555-0611', created_at: new Date(), updated_at: new Date() })],
-    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15)', async (label, lateWrite) => {
+      ['a reply in a customer thread a promotion moved it to', () => inbox(null, { channel: 'sms', direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: CALLER } }, { contact_phone: null, unknown_contact: false, customer_id: LINKED_CUSTOMER })],
+    ])('%s that lands after the check read the record leaves the push alone (pre-push audit r13, r14, r15, r16)', async (label, lateWrite) => {
       isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
       await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
       const inserted = judged();
       await database('call_log').insert(inserted);
       const row = await stored(inserted);
+      // The late write runs once, before the first lease-fenced write of the
+      // pass: every read of the check is done by then, the stamp still to come.
       let landed = false;
+      let pending = lateWrite;
       const fenced = () => {
         const stamp = database('call_log').where({ id: row.id });
         const run = stamp.then.bind(stamp);
-        stamp.then = (resolve, reject) => Promise.resolve(lateWrite(row)).then(() => { landed = true; return run(resolve, reject); }, reject);
+        stamp.then = (resolve, reject) => {
+          const write = pending;
+          pending = null;
+          return Promise.resolve(write && write(row)).then(() => { landed = landed || Boolean(write); return run(resolve, reject); }, reject);
+        };
         return stamp;
       };
       expect(await quietRobodialerPush(row, fenced)).toBe(false);
@@ -671,6 +679,51 @@ jest.setTimeout(30000);
       const row = await stored(inserted);
       expect(await quietRobodialerPush(row, () => database('call_log').where({ id: row.id }))).toBe(true);
       expect((await stored(row)).metadata.missed_call_spam_wave).toBe('repeat_quiet');
+    });
+
+    // The re-push skips a call by its quiet marker, so the marker is the
+    // decision of the pass that rang the bell (pre-push audit r16).
+    test('a pass whose delivery failed leaves no quiet marker on the call a later pass pushes (pre-push audit r16)', async () => {
+      isEnabled.mockImplementation((name) => name === 'missedCallSpamRepeat' || name === 'missedCallUnknownCallers');
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
+      const row = judged();
+      await database('call_log').insert(row);
+      // Pass 1 quiets the call, then its delivery fails before any bell row.
+      triggerNotification.mockImplementationOnce(async () => { throw new Error('push service down'); });
+      await ringMissedCallIfUnanswered(row.twilio_call_sid);
+      let { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBe('repeat_quiet');
+      expect(metadata.missed_call_notified_at).toBeUndefined();
+      // The caller texts before the next pass, which rings an ordinary bell and pushes.
+      await inbox(CALLER, { channel: 'sms', direction: 'inbound', body: 'who is this' });
+      reports({ bellWritten: true, push: { sent: 1, subscriptions: 1 } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      const [, payload, opts] = triggerNotification.mock.calls[1];
+      expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(await opts.beforePush({ dispatching: true })).toBe(true);
+      ({ metadata } = await stored(row));
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+      expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
+    });
+
+    test('a push retry keeps the first pass\'s decision: it never quiets the push or marks the call (pre-push audit r16)', async () => {
+      isEnabled.mockImplementation((name) => ['missedCallSpamRepeat', 'missedCallUnknownCallers', 'missedCallPushCheck'].includes(name));
+      await database('call_log').insert([prior(CALLER, 60 * 24 * 3), prior(CALLER, 60 * 24)]);
+      // The first pass rang an ordinary bell whose push reached no phone; the
+      // history matches the rule by the retry (a hang-up left the voicemail grace).
+      const row = judged({ metadata: { location: 'GBP — Parrish', missed_call_push_retries: 1, missed_call_push_first_subs: 1 } });
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      reports({ bellWritten: false, push: { sent: 1, subscriptions: 1 } });
+      expect(await ringMissedCallIfUnanswered(row.twilio_call_sid)).toBe(true);
+      const [, payload, opts] = triggerNotification.mock.calls[0];
+      expect(opts.pushOnly).toBe(true);
+      expect(payload.name).toBe('unknown caller (GBP — Parrish)');
+      expect(await opts.beforePush({ dispatching: true })).toBe(true);
+      const { metadata } = await stored(row);
+      expect(metadata.missed_call_spam_wave).toBeUndefined();
+      expect(metadata.missed_call_spam_repeat_shadow).toBeUndefined();
+      expect(metadata.missed_call_settled_at).toEqual(expect.any(String));
     });
 
     test('gate off: the call rings as before, titled unknown caller, stamped for the shadow read', async () => {
@@ -924,8 +977,34 @@ jest.setTimeout(30000);
       expect(await repeat(row)).toBe(false);
     });
 
-    test('silent call mirrors and our text-back in the unified inbox leave a repeat; an older inbox text is outside the window (pre-push audit r14)', async () => {
-      await database('call_log').insert(prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE }));
+    // Promoting an unknown thread to a customer clears the thread's phone; the
+    // number stays only on its messages: a text by its own address, a call
+    // mirror by the call's sid (pre-push audit r16). The customer on the thread
+    // has another phone now, so no customer slot names the number, and the text
+    // log has no row (its write is best effort).
+    const OTHER_CUSTOMER = '00000000-0000-4000-8000-000000000612';
+    test.each([
+      // A customer's thread: linked to a customer, whatever the message says.
+      ['a reply in a customer thread a promotion moved it to', 'sms', { customer_id: OTHER_CUSTOMER }, { direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: CALLER } }],
+      ['our text-back in a customer thread', 'sms', { customer_id: OTHER_CUSTOMER }, { direction: 'outbound', message_type: 'missed_call_text_back', author_type: 'system', metadata: { sms_contact_phone: CALLER } }],
+      ['a silent call mirror in a customer thread', 'voice', { customer_id: OTHER_CUSTOMER }, { direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', media: '[]' }],
+      // A thread with neither a phone nor a customer: the message alone names the number.
+      ['a reply on a thread with no phone', 'sms', {}, { direction: 'inbound', body: 'who is this', metadata: { sms_contact_phone: '(727) 555-0611' } }],
+      ['a call mirror with a transcript on a thread with no phone', 'voice', {}, { direction: 'inbound', answered_by: 'voicemail', author_type: 'customer', body: 'Hi, calling about a quote', media: '[]' }],
+    ])('a number with %s is never a repeat (pre-push audit r16)', async (label, channel, conversation, message) => {
+      const earlier = prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE });
+      await database('call_log').insert(earlier);
+      const row = judged();
+      await database('call_log').insert(row);
+      expect(await repeat(row)).toBe(true);
+      const mirrorOf = channel === 'voice' ? { twilio_sid: earlier.twilio_call_sid } : {};
+      await inbox(null, { channel, ...mirrorOf, ...message }, { contact_phone: null, unknown_contact: false, ...conversation });
+      expect(await repeat(row)).toBe(false);
+    });
+
+    test('silent call mirrors and our text-back in the unified inbox leave a repeat; an older inbox text, and a customer thread with other numbers only, do not count (pre-push audit r14, r16)', async () => {
+      const earlier = prior(CALLER, 60 * 24 * 2, { to_phone: SECOND_GBP_LINE });
+      await database('call_log').insert(earlier);
       const row = judged();
       await database('call_log').insert(row);
       const id = randomUUID();
@@ -938,9 +1017,16 @@ jest.setTimeout(30000);
         delivery_status: 'no-answer', twilio_sid: `CA${randomUUID().replaceAll('-', '')}`, is_read: false, media: '[]',
         metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile' }, created_at: ago(minutes), updated_at: ago(minutes), ...extra,
       });
+      // A customer's thread holding another number's text and another call's mirror.
+      const customerThread = randomUUID();
+      await database('conversations').insert({ id: customerThread, channel: 'sms', customer_id: OTHER_CUSTOMER, unknown_contact: false, created_at: new Date() });
       await database('messages').insert([
-        mirror(60 * 24 * 2),
-        mirror(10, { answered_by: null, delivery_status: 'completed', is_read: true, read_at: ago(2), read_by_admin_user_id: randomUUID(), metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile', source: 'voice_message_sync' } }),
+        { id: randomUUID(), conversation_id: customerThread, channel: 'sms', direction: 'inbound', body: 'see you Tuesday', metadata: { sms_contact_phone: '+19415550199' }, created_at: ago(30) },
+        { id: randomUUID(), conversation_id: customerThread, channel: 'voice', direction: 'inbound', answered_by: 'human', twilio_sid: `CA${randomUUID().replaceAll('-', '')}`, created_at: ago(40) },
+      ]);
+      await database('messages').insert([
+        mirror(60 * 24 * 2, { twilio_sid: earlier.twilio_call_sid }),
+        mirror(10, { twilio_sid: row.twilio_call_sid, answered_by: null, delivery_status: 'completed', is_read: true, read_at: ago(2), read_by_admin_user_id: randomUUID(), metadata: { domain: 'x', location: 'GBP — Parrish', numberType: 'mobile', source: 'voice_message_sync' } }),
         { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'outbound', message_type: 'missed_call_text_back', author_type: 'system', body: 'Sorry we missed your call. Reply here or call us back.', media: '[]', delivery_status: 'delivered', twilio_sid: `SM${randomUUID().replaceAll('-', '')}`, is_read: true, metadata: { sms_contact_phone: CALLER, sms_our_endpoint_id: GBP_LINE }, created_at: ago(5), updated_at: ago(5) },
         { id: randomUUID(), conversation_id: id, channel: 'sms', direction: 'inbound', body: 'an old thread', created_at: ago(60 * 24 * 15) },
       ]);

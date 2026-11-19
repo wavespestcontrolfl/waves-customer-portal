@@ -404,13 +404,17 @@ function settledSilentSql(checkedAt) {
 //    contactState reads contact; pre-push audit r11);
 //  - in the unified inbox, which the SMS webhook writes first and the text log
 //    only as best effort (pre-push audit r14), nothing in the window but
-//    mirrors of silent calls and our text-back. A mirror of a silent call
-//    holds only the columns the matched numbers' mirrors of the 90 days to
-//    2026-11-19 hold (SILENT_MIRROR_COLUMNS; body, recording, duration and
-//    the rest NULL), no media, the voicemail or no answer, a customer author,
-//    and only a silent call's metadata keys: a transcript in the body or
-//    audio in the media is a message (pre-push audit r15). And no
-//    conversation with the number is linked to a customer;
+//    mirrors of silent calls and our text-back. A message is the number's by
+//    its own SMS address, else its thread's phone, or as the mirror of one of
+//    the number's calls (by the call's sid): promoting an unknown thread to a
+//    customer clears the thread's phone and keeps both (messageOfNumber;
+//    pre-push audit r16). A mirror of a silent call holds only the columns
+//    the matched numbers' mirrors of the 90 days to 2026-11-19 hold
+//    (SILENT_MIRROR_COLUMNS; body, recording, duration and the rest NULL), no
+//    media, the voicemail or no answer, a customer author, and only a silent
+//    call's metadata keys: a transcript in the body or audio in the media is
+//    a message (pre-push audit r15). And no conversation linked to a customer
+//    has the number's phone or holds a message of the number;
 //  - the number is on no customer slot and no live lead, as in the history
 //    read: staff can save the caller between the check and the stamp
 //    (pre-push audit r15).
@@ -429,6 +433,15 @@ const INBOX_SILENT_SQL = "((m.channel = 'voice' AND m.direction = 'inbound'"
   + ` WHERE mk NOT IN (${sqlNames([...SILENT_METADATA_KEYS, 'source'])})))`
   + " OR (m.channel = 'sms' AND m.direction = 'outbound' AND m.message_type = 'missed_call_text_back'"
   + " AND COALESCE(m.author_type, 'system') = 'system'))";
+// The phone a unified-inbox message (alias m, its thread c) is with: its own SMS
+// address first, then its thread's, as admin-alert-contact-witnesses.js and
+// sms-response-policy.js read it.
+const MESSAGE_PEER_SQL = phoneKeySql("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''))");
+// A message of the number: by that phone, or as the mirror of one of the
+// number's calls (a voice mirror carries the call's sid, not a phone).
+const messageOfNumber = (key) => [`(${MESSAGE_PEER_SQL} = ?`
+  + " OR (m.channel = 'voice' AND m.twilio_sid IN (SELECT vc.twilio_call_sid FROM call_log vc"
+  + ` WHERE ${phoneKeySql('vc.from_phone')} = ? OR ${phoneKeySql('vc.to_phone')} = ?)))`, [key, key, key]];
 function silentRecordClauses(row, key, since, checkedAt) {
   const [settledSql, settledBindings] = settledSilentSql(checkedAt);
   const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -457,14 +470,18 @@ function silentRecordClauses(row, key, since, checkedAt) {
     })
     .whereNotExists(function inboxMessage() {
       this.select(1).from('messages as m').join('conversations as c', 'c.id', 'm.conversation_id')
-        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
         .where('m.created_at', '>=', since)
+        .whereRaw(...messageOfNumber(key))
         .whereRaw(`${INBOX_SILENT_SQL} IS NOT TRUE`);
     })
     .whereNotExists(function linkedConversation() {
       this.select(1).from('conversations as c')
-        .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
-        .whereNotNull('c.customer_id');
+        .whereNotNull('c.customer_id')
+        .where((linked) => linked
+          .whereRaw(`${phoneKeySql('c.contact_phone')} = ?`, [key])
+          .orWhereExists(function heldMessage() {
+            this.select(1).from('messages as m').whereRaw('m.conversation_id = c.id').whereRaw(...messageOfNumber(key));
+          }));
     })
     .whereRaw(NOT_ON_CUSTOMER_SLOT_SQL)
     .whereRaw(NOT_ON_LIVE_LEAD_SQL);
@@ -772,6 +789,12 @@ async function quietRobodialerPush(row, fenced) {
     else quietAs = quietAs || rule.quiet;
   }
   if (quietAs) stamps.missed_call_spam_wave = quietAs;
+  // This pass's decision replaces one an earlier pass of the call left: a pass
+  // whose delivery failed, or that died before its bell, must not leave its
+  // quiet marker on a call a later pass pushes, since the re-push skips a call
+  // by that marker (pre-push audit r16). A failed clear never holds the push.
+  await fenced().whereRaw("metadata->>'missed_call_spam_wave' IS NOT NULL")
+    .update({ metadata: db.raw("metadata - 'missed_call_spam_wave'") }).catch(() => 0);
   if (!Object.keys(stamps).length) return false;
   // Quiet only when the marker is durable: the re-push recognises a quiet call by
   // it. A failed or empty stamp write fails open (the push goes as usual). A
@@ -986,7 +1009,13 @@ async function ringMissedCallIfUnanswered(callSid) {
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
       if (prior) { await settle(); return false; }
     }
-    const quiet = await quietRobodialerPush(row, fenced);
+    // A push retry re-sends the first pass's push. That pass judged the call and
+    // did not quiet it (a quieted push reports skipped, never held for a retry),
+    // and this pass writes no bell, so a quiet decision here could not stop the
+    // push: it would only title the retry likely robocall and mark an ordinary
+    // bell quiet for the re-push. The retry keeps the first pass's decision
+    // (pre-push audit r16).
+    const quiet = pushRetry ? false : await quietRobodialerPush(row, fenced);
     const customer = row.customer_id
       ? await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone')
       : null;
