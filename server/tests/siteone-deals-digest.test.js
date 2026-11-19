@@ -12,6 +12,7 @@ const { composeAdminAlert } = require('../services/admin-alert-compose');
 const {
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
   candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
+  DEADLINE_TEXT_CHARS, DEADLINE_HTML_CHARS, DEADLINE_REREAD_MAX,
 } = require('../services/procurement/siteone-deals-digest');
 
 // Gmail's own header, shaped like the real ones (see email-auth-strict.test.js).
@@ -43,6 +44,7 @@ describe('isDealEmail', () => {
     ['Price increase with attachment', { subject: 'Price increase', has_attachments: true, body_text: 'See the Early Order Program with cash discounts.' }],
     ['price-match reply with attachment', { subject: 'RE: Price-match request: 3 items (up to 16% per unit)', has_attachments: true }],
     ['maker domain subdomain', { from_address: 'news@mail.basf.com', subject: 'Fall rebate is open' }],
+    ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
@@ -54,6 +56,10 @@ describe('isDealEmail', () => {
     ['shopping cart', { subject: 'Your SiteOne shopping cart is ready to go.' }],
     ['eWallet', { subject: 'Important: A credit card has been deleted from your eWallet.' }],
     ['automatic reply', { subject: 'Automatic reply: SDS request' }],
+    // Nov 9, 2026 bell: a support reply about redeeming points, with four inline logo images.
+    ['SiteOne case notice', { from_address: 'customersupport@ec.siteone.com', subject: 'Case: CS0012345 has been updated.', has_attachments: true, body_text: 'You can redeem the points by logging into your siteone.com account.' }],
+    ['case number reply', { subject: 'RE: Case Number: CS0012345', body_text: 'Special pricing and a rebate are listed below.' }],
+    ['case # notice', { subject: 'Case #01234567 updated', has_attachments: true, body_text: 'Ask about the promo.' }],
     ['order is ready', { subject: 'Order 55555 is ready for pickup', body_text: 'promo special' }],
     ['deal words from an unlisted domain', { from_address: 'sales@example.com', subject: 'Big promo and rebate sale' }],
     ['lookalike domain', { from_address: 'srep@siteone.com.evil.example', subject: 'Pest Specials' }],
@@ -188,14 +194,30 @@ describe('matchProducts', () => {
 describe('runSiteOneDealsDigest', () => {
   const now = new Date('2026-11-02T13:00:00Z'); // Monday 8:00 AM ET
 
-  function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false }) {
-    const calls = { wheres: [], tables: [], selects: [] };
+  // The SQL narrowing is checked on the real builder below. The fake keeps the date window, the
+  // id list and the left(body_x, N) excerpts, so a long body reaches the code cut as SQL cuts it.
+  function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false, rereadFail = false }) {
+    const calls = { wheres: [], tables: [], selects: [], whereIns: [] };
     const db = (table) => {
       calls.tables.push(table);
       const preds = [];
+      const excerpts = {};
+      let byId = false;
       const chain = {
-        select(...cols) { calls.selects.push(cols); return chain; },
-        // The SQL narrowing is checked on the real builder below; the fake keeps its date window only.
+        select(...cols) {
+          calls.selects.push(cols);
+          for (const col of cols) {
+            const m = /^left\((body_text|body_html), \?\) as \1$/.exec(col?.sql || '');
+            if (m) excerpts[m[1]] = col.bindings[0];
+          }
+          return chain;
+        },
+        whereIn(col, values) {
+          calls.whereIns.push([table, col, values]);
+          byId = true;
+          preds.push((row) => values.includes(row[col]));
+          return chain;
+        },
         whereNull() { return chain; },
         whereRaw() { return chain; },
         limit(n) { calls.limit = n; return chain; },
@@ -213,7 +235,12 @@ describe('runSiteOneDealsDigest', () => {
               if (productsFail) throw new Error('boom');
               return products;
             }
-            return emails.filter((row) => preds.every((p) => p(row)));
+            if (byId && rereadFail) throw new Error('connection reset');
+            return emails.filter((row) => preds.every((p) => p(row))).map((row) => {
+              const out = { ...row };
+              for (const [col, n] of Object.entries(excerpts)) if (typeof out[col] === 'string') out[col] = out[col].slice(0, n);
+              return out;
+            });
           }).then(resolve, reject);
         },
       };
@@ -324,6 +351,70 @@ describe('runSiteOneDealsDigest', () => {
   test('a bell that was not saved fails the run so job health goes red', async () => {
     const { db } = fakeDb({ emails: weekEmails() });
     await expect(runSiteOneDealsDigest({ now, db, notify: jest.fn().mockResolvedValue(null) })).rejects.toThrow(/not saved/);
+  });
+
+  // Tracking links fill a promo's text part, so its end date can sit in a footnote past the
+  // deal test's excerpt (SiteOne, Apr 15, 2026: "Offers valid March 1 – April 30, 2026" at char 8,608).
+  const LINKS = 'Shop now https://click.example.test/track/abcdefghij\n'.repeat(200);
+
+  test('a deadline past the excerpt comes from one wider read of the cut, undated deals only', async () => {
+    const { db, calls } = fakeDb({
+      products: [],
+      emails: [
+        // HTML only: the candidate query cuts it at HTML_CHARS.
+        email({ id: 34, subject: 'Fall promo', received_at: new Date('2026-10-31T15:00:00Z'), body_html: `<p>${'<span>Shop now</span>'.repeat(1500)}</p><p>*Offer valid through Nov 25, 2026.</p>` }),
+        email({ id: 31, subject: 'Last Chance for 10% Off Select Items', received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}*Offers valid October 1 – November 30, 2026.` }),
+        // The excerpt names a date: it is kept, and the earlier footnote date is never read.
+        email({ id: 32, subject: 'Pest Specials', received_at: new Date('2026-10-29T15:00:00Z'), body_text: `On special through Nov 20.\n${LINKS}*Offer valid through November 5, 2026.` }),
+        // Short: nothing was cut, so nothing is read again.
+        email({ id: 33, subject: 'FW: BASF Promo', received_at: new Date('2026-10-28T15:00:00Z'), body_text: 'Please see attached.' }),
+      ],
+    });
+    const notify = jest.fn().mockResolvedValue({ id: 1 });
+    await runSiteOneDealsDigest({ now, db, notify });
+
+    expect(notify.mock.calls[0][2].detail.split('\n')).toEqual([
+      'Oct 31 · Sam Rep · Fall promo · deadline 2026-11-25 · your products: none named',
+      'Oct 30 · Sam Rep · Last Chance for 10% Off Select Items · deadline 2026-11-30 · your products: none named',
+      'Oct 29 · Sam Rep · Pest Specials · deadline 2026-11-20 · your products: none named',
+      'Oct 28 · Sam Rep · FW: BASF Promo · deadline not stated · your products: none named',
+    ]);
+    expect(calls.whereIns).toEqual([['emails', 'id', [34, 31]]]);
+    expect(calls.selects).toContainEqual([
+      'id',
+      { sql: 'left(body_text, ?) as body_text', bindings: [DEADLINE_TEXT_CHARS] },
+      { sql: 'left(body_html, ?) as body_html', bindings: [DEADLINE_HTML_CHARS] },
+    ]);
+  });
+
+  test('deal words past the excerpt never make a deal, and a non-deal is not read again', async () => {
+    const { db, calls } = fakeDb({
+      emails: [email({ id: 41, subject: 'New fertilizer is here', received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}Ask about the rebate and the flyer.` })],
+    });
+    const notify = jest.fn();
+    expect(await runSiteOneDealsDigest({ now, db, notify })).toEqual({ scanned: 1, deals: 0, notified: false });
+    expect(calls.whereIns).toEqual([]);
+  });
+
+  test('a failed wider read logs a warning, and the bell still goes out with the deadline not stated', async () => {
+    const { db } = fakeDb({
+      rereadFail: true,
+      emails: [email({ id: 51, received_at: new Date('2026-10-30T15:00:00Z'), body_text: `${LINKS}*Offer valid through November 30, 2026.` })],
+    });
+    const notify = jest.fn().mockResolvedValue({ id: 1 });
+    logger.warn.mockClear();
+    expect(await runSiteOneDealsDigest({ now, db, notify })).toEqual({ scanned: 1, deals: 1, notified: true });
+    expect(notify.mock.calls[0][2].detail).toContain('deadline not stated');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('wider deadline read failed'));
+  });
+
+  test(`the wider read asks for at most ${DEADLINE_REREAD_MAX} deals, newest first`, async () => {
+    const start = Date.parse('2026-10-27T15:00:00Z');
+    const many = Array.from({ length: DEADLINE_REREAD_MAX + 2 }, (_, i) => email({ id: 100 + i, received_at: new Date(start + i * 3600000), body_text: LINKS }));
+    const { db, calls } = fakeDb({ emails: many });
+    await runSiteOneDealsDigest({ now, db, notify: jest.fn().mockResolvedValue({ id: 1 }) });
+    expect(calls.whereIns).toHaveLength(1);
+    expect(calls.whereIns[0][2]).toEqual(many.slice(2).map((e) => e.id).reverse());
   });
 });
 

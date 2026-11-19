@@ -32,6 +32,16 @@ const HTML_CHARS = BODY_CHARS * 4;
 // query is capped; a run that reaches the cap says so (log + a line in the bell).
 const MAX_CANDIDATE_ROWS = 300;
 const DEADLINE_MAX_DAYS = 180;
+// An offer's end date often sits in the footnote at the bottom of a promo email, past the
+// excerpt above: SiteOne's promo text runs 8,000 to 23,000 chars, much of it tracking links.
+// So a deal whose excerpt was cut and names no date is read once more, wider, for its
+// deadline only. The wider text never feeds the deal test: widening the deal-test excerpt
+// raised false deals in a replay of old SiteOne promo mail.
+const DEADLINE_TEXT_CHARS = 30000;
+// SiteOne's promo HTML is 3 to 6 times the size of its text part.
+const DEADLINE_HTML_CHARS = DEADLINE_TEXT_CHARS * 6;
+// The most deals one run reads again, newest first; the rest stay "deadline not stated".
+const DEADLINE_REREAD_MAX = 20;
 const MAX_PRODUCTS = 6;
 const SUBJECT_CLIP = 120;
 const CAP_NOTE = `Note: only the newest ${MAX_CANDIDATE_ROWS} candidate emails were read; older mail this week may be missing.`;
@@ -44,8 +54,9 @@ const MAKER_DOMAINS = [
 ];
 const SENDER_DOMAINS = [SITEONE_DOMAIN, ...MAKER_DOMAINS];
 
-// Order, cart, account and auto-reply mail is never a deal, whatever words it carries.
-const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your/i;
+// Order, cart, account, support-case and auto-reply mail is never a deal, whatever words it
+// carries. A support case notice names its case number: "Case: CS0012345 has been updated."
+const TRANSACTIONAL_SUBJECT = /invoice|order summary|order has been submitted|order\b.*\bis ready|shopping cart|ewallet|automatic reply|out of office|statement|payment received|password|verify your|\bcase(?:\s+number)?\s*[:#]?\s*[a-z]{0,4}\d{5,}/i;
 
 // One entry per kind of deal word. promo/promotion share an entry, and "cash
 // discount" is not also counted as "discount", so "two different deal words"
@@ -92,10 +103,10 @@ const decodeEntities = (s) => s
   .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
   .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'");
 
-/** Plain text of an email: body_text, else body_html with tags removed (line breaks kept). */
-function bodyPlainText(email) {
+/** Plain text of an email, `limit` chars at most: body_text, else body_html with tags removed (line breaks kept). */
+function bodyPlainText(email, limit = BODY_CHARS) {
   const text = email?.body_text;
-  if (typeof text === 'string' && text.trim()) return text.slice(0, BODY_CHARS);
+  if (typeof text === 'string' && text.trim()) return text.slice(0, limit);
   const html = typeof email?.body_html === 'string' ? email.body_html : '';
   return decodeEntities(
     html
@@ -103,7 +114,16 @@ function bodyPlainText(email) {
       .replace(/<br\s*\/?>|<\/(p|div|tr|li|h[1-6])>/gi, '\n')
       .replace(/<[^>]*>/g, ' ')
       .replace(/[ \t]+/g, ' '),
-  ).slice(0, BODY_CHARS);
+  ).slice(0, limit);
+}
+
+// True when the excerpt the deal test read stops before the email does: the SQL left()
+// reached its cap, or the plain text ran past BODY_CHARS.
+function excerptIsCut(email) {
+  const text = email?.body_text;
+  if (typeof text === 'string' && text.trim()) return text.length >= BODY_CHARS;
+  const html = typeof email?.body_html === 'string' ? email.body_html : '';
+  return html.length >= HTML_CHARS || bodyPlainText(email, Infinity).length > BODY_CHARS;
 }
 
 // A From header is text the sender typed, and the Gmail sync also stores spam and
@@ -253,10 +273,44 @@ function shortDate(date) {
   return `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][p.month - 1]} ${p.day}`;
 }
 
-function dealLine(email, products) {
+/**
+ * Each deal's deadline by email id (no entry = not stated). The deal test's excerpt is read
+ * first. Deals whose excerpt was cut and names no date get ONE more query: wider excerpts of
+ * up to DEADLINE_REREAD_MAX of them, newest first, read for the deadline only. A failed
+ * re-read logs a warning and leaves those deals "not stated"; the bell still goes out.
+ */
+async function dealDeadlines(conn, deals) {
+  const deadlines = new Map();
+  const reread = [];
+  for (const email of deals) {
+    const found = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, new Date(email.received_at));
+    if (found) deadlines.set(email.id, found);
+    else if (excerptIsCut(email) && reread.length < DEADLINE_REREAD_MAX) reread.push(email);
+  }
+  if (!reread.length) return deadlines;
+  try {
+    const rows = await conn('emails')
+      .select(
+        'id',
+        conn.raw('left(body_text, ?) as body_text', [DEADLINE_TEXT_CHARS]),
+        conn.raw('left(body_html, ?) as body_html', [DEADLINE_HTML_CHARS]),
+      )
+      .whereIn('id', reread.map((email) => email.id));
+    const wider = new Map(rows.map((row) => [row.id, row]));
+    for (const email of reread) {
+      const row = wider.get(email.id);
+      const found = row && extractDeadline(`${email.subject || ''}\n${bodyPlainText(row, DEADLINE_TEXT_CHARS)}`, new Date(email.received_at));
+      if (found) deadlines.set(email.id, found);
+    }
+  } catch (err) {
+    logger.warn(`[siteone-deals] wider deadline read failed: ${err.message}`);
+  }
+  return deadlines;
+}
+
+function dealLine(email, products, deadline) {
   const received = new Date(email.received_at);
   const who = clip(email.from_name, 60) || clip(email.from_address, 80);
-  const deadline = extractDeadline(`${email.subject || ''}\n${bodyPlainText(email)}`, received);
   return [
     shortDate(received),
     who,
@@ -324,6 +378,7 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
     logger.warn(`[siteone-deals] product names not read: ${err.message}`);
   }
 
+  const deadlines = await dealDeadlines(conn, deals);
   const dedupeKey = `siteone-deals:${etWeekStart(now)}`;
   const count = deals.length;
   const result = await raise('system', {
@@ -338,7 +393,7 @@ async function runSiteOneDealsDigest({ now = new Date(), db, notify } = {}) {
   }, {
     // 'system' alone is suppressed under the bell policy; a deal list is a handoff.
     bell: true,
-    detail: [...deals.map((e) => dealLine(e, productNames)), ...(capped ? [CAP_NOTE] : [])].join('\n'),
+    detail: [...deals.map((e) => dealLine(e, productNames, deadlines.get(e.id))), ...(capped ? [CAP_NOTE] : [])].join('\n'),
     dedupeKey,
     refreshOnDedupe: true,
     metadata: { source: 'siteone-deals-digest', dealCount: count, emailIds: deals.map((e) => e.id) },
@@ -406,4 +461,5 @@ module.exports = {
   weekIsMissing, runSiteOneDealsCatchUp, scheduledTickFor,
   runSiteOneDealsDigest, isDealEmail, extractDeadline, matchProducts, isDealSenderDomain,
   candidateEmailQuery, MAX_CANDIDATE_ROWS, BODY_CHARS, HTML_CHARS,
+  DEADLINE_TEXT_CHARS, DEADLINE_HTML_CHARS, DEADLINE_REREAD_MAX,
 };
