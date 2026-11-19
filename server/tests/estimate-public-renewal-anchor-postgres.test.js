@@ -53,7 +53,16 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
     });
   });
 
-  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterEach(async () => {
+    if (trx) await trx.rollback();
+    jest.resetModules();
+    jest.clearAllMocks();
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/logger');
+    jest.dontMock('../services/notification-service');
+    jest.dontMock('../services/estimate-converter');
+    jest.dontMock('../routes/admin-customers');
+  });
   afterAll(async () => { await database?.destroy(); });
 
   async function visit(overrides = {}) {
@@ -173,6 +182,68 @@ postgres('public annual-prepay renewal anchor (real PostgreSQL)', () => {
     expect(finalStart).toMatch(/^20\d\d-\d\d-\d\d$/);
     if (expectedFinalStart) expect(finalStart).toBe(expectedFinalStart);
     expect(finalStart < '2098-01-31').toBe(true);
+    expect(await trx('annual_prepay_terms').where({ source_estimate_id: estimateId }).count('id as count').first())
+      .toMatchObject({ count: '0' });
+  });
+
+  test('a signed termite activation rejects a linked visit moved inside locked existing coverage', async () => {
+    const initialStart = '2098-02-10';
+    const movedStart = '2098-01-15';
+    await trx('estimates').where({ id: estimateId }).update({
+      annual_plan_activation_status: 'awaiting_signature',
+      annual_plan_deferred_invoice: JSON.stringify({
+        version: 1,
+        parkedAt: '2097-12-01T12:00:00.000Z',
+        annualPrepayTermStart: initialStart,
+      }),
+    });
+    const contractId = randomUUID();
+    await trx('customer_contracts').insert({
+      id: contractId,
+      customer_id: customerId,
+      title: 'Synthetic Termite Annual Agreement',
+      document_template_key: 'service_agreement.termite_annual_protection',
+      status: 'signed',
+      signed_at: new Date('2097-12-02T12:00:00.000Z'),
+      annual_plan_version: 'v3',
+      document_variables_snapshot: JSON.stringify({ estimate: { id: estimateId } }),
+    });
+    await trx('annual_prepay_terms').insert({
+      id: randomUUID(),
+      customer_id: customerId,
+      status: 'active',
+      term_start: '2097-02-01',
+      term_end: '2098-01-31',
+      prepay_amount: 600,
+      plan_label: 'Synthetic Existing Coverage',
+    });
+
+    const convertEstimate = jest.fn(async (_id, opts) => {
+      expect(opts.database.isTransaction).toBe(true);
+      await opts.verifyAnnualPrepayTermStart(movedStart);
+      throw new Error('conversion should stop at the final-start verifier');
+    });
+    const notifyAdmin = jest.fn(async () => ({ id: randomUUID(), deduped: false }));
+    jest.resetModules();
+    jest.doMock('../models/db', () => trx);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+    jest.doMock('../services/estimate-converter', () => ({ convertEstimate }));
+    jest.doMock('../routes/admin-customers', () => ({
+      _private: { lockAndAssertNoAnnualPrepayOverlap },
+    }));
+    const { activateTermiteAnnualPlanForSignedContract } = require('../services/termite-annual-activation');
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId, conn: trx, trigger: 'test' });
+
+    expect(result).toMatchObject({ skipped: 'error' });
+    expect(result.error).toMatch(/overlapping annual coverage/);
+    expect(convertEstimate).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.stringContaining('needs manual follow-up'), expect.any(String), expect.any(Object),
+    );
+    expect(await trx('estimates').where({ id: estimateId }).first('annual_plan_activation_status'))
+      .toMatchObject({ annual_plan_activation_status: 'awaiting_signature' });
     expect(await trx('annual_prepay_terms').where({ source_estimate_id: estimateId }).count('id as count').first())
       .toMatchObject({ count: '0' });
   });

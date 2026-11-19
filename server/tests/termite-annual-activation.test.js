@@ -195,6 +195,7 @@ describe('termite annual plan activation on sign', () => {
       skipMembershipEmail: true,
       // The plan marker rides term creation (codex #4819 r7 P1).
       annualPlanVersion: 'v3',
+      verifyAnnualPrepayTermStart: expect.any(Function),
     }));
     // convertEstimate ran on the SAME transaction handle this module opened.
     expect(typeof convertEstimate.mock.calls[0][1].database).toBe('function');
@@ -284,6 +285,46 @@ describe('termite annual plan activation on sign', () => {
     expect(result).toMatchObject({ skipped: 'error' });
     expect(result.error).toMatch(/overlapping annual coverage/);
     expect(convertEstimate).not.toHaveBeenCalled();
+    expect(chargeAnnualInvoiceAtSignature).not.toHaveBeenCalled();
+    expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate', expect.stringContaining('needs manual follow-up'), expect.any(String),
+      expect.objectContaining({ dedupeKey: `termite-annual-activation:${ESTIMATE_ID}:activation_error` }),
+    );
+  });
+
+  test('the converter final-start verifier rejects a moved linked visit under the activation lock', async () => {
+    const initialStart = '2027-02-01';
+    const movedStart = '2027-01-15';
+    const contract = makeContract();
+    const estimate = makeEstimate({
+      annual_plan_deferred_invoice: makeAcceptContext({ annualPrepayTermStart: initialStart }),
+    });
+    const overlapImpl = async (_trx, _customerId, termStart) => {
+      if (termStart !== movedStart) return;
+      const err = new Error('overlap');
+      err.annualPrepayOverlap = { error: 'Customer already has an annual prepay term through 2027-01-31.' };
+      throw err;
+    };
+    const convertEstimateImpl = async (_estimateId, opts) => {
+      await opts.verifyAnnualPrepayTermStart(movedStart);
+      throw new Error('conversion should not continue after the verifier rejects');
+    };
+    const {
+      activateTermiteAnnualPlanForSignedContract, conn, trx, lockAndAssertNoAnnualPrepayOverlap,
+      convertEstimate, termUpdate, notifyAdmin, chargeAnnualInvoiceAtSignature, sendViaSMSAndEmail,
+    } = setup({ contract, estimate, overlapImpl, convertEstimateImpl });
+
+    const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(result).toMatchObject({ skipped: 'error' });
+    expect(result.error).toMatch(/overlapping annual coverage/);
+    expect(lockAndAssertNoAnnualPrepayOverlap.mock.calls).toEqual([
+      [trx, 'customer-1', initialStart, false, expect.any(String), ESTIMATE_ID],
+      [trx, 'customer-1', movedStart, false, expect.any(String), ESTIMATE_ID],
+    ]);
+    expect(convertEstimate).toHaveBeenCalledTimes(1);
+    expect(termUpdate).not.toHaveBeenCalled();
     expect(chargeAnnualInvoiceAtSignature).not.toHaveBeenCalled();
     expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
     expect(notifyAdmin).toHaveBeenCalledWith(
