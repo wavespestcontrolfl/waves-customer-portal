@@ -182,5 +182,22 @@ export default function usePortalRead(key, load) {
     });
   }, [cache, key]);
 
-  return { ...state, refresh, update, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
+  const invalidate = useCallback((message = 'Could not update this information.') => {
+    // Scope/auth conflicts are stronger than an ordinary failed refresh: the
+    // last verified payload is no longer safe to display or remount from the
+    // provider cache. Advancing the sequence also denies every in-flight
+    // completion that started before the invalidation.
+    sequence.current += 1;
+    cache?.delete(key);
+    setState({
+      data: undefined,
+      updatedAt: null,
+      loading: false,
+      pending: false,
+      verified: false,
+      error: message,
+    });
+  }, [cache, key]);
+
+  return { ...state, refresh, update, invalidate, saved: Boolean(cache && state.data !== undefined && (offline || state.error || !state.verified)), offline };
 }

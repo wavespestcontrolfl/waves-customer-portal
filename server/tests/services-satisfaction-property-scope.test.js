@@ -97,7 +97,12 @@ describe('explicit Completed history filter', () => {
   });
   test('a rolled-back property model does not serve a labeled list', async () => {
     delete process.env.GATE_APP_PROPERTY_SCOPE;
-    expect((await fetch(`${base}/services?historyProperty=${id}`)).status).toBe(403);
+    const res = await fetch(`${base}/services?historyProperty=${id}`);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: 'Property history is unavailable for this session.',
+      code: 'PROPERTY_HISTORY_UNAVAILABLE',
+    });
   });
 });
 

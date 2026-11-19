@@ -28,6 +28,7 @@ function Read({ load }) {
     <div data-testid="state">{read.saved ? 'saved' : read.error ? 'error' : read.loading ? 'loading' : 'ready'}</div>
     <button onClick={read.refresh}>Retry read</button>
     <button onClick={() => read.update(previous => ({ ...previous, title: 'Confirmed' }))}>Confirm fixture</button>
+    <button onClick={() => read.invalidate('Property scope changed')}>Invalidate read</button>
   </>;
 }
 function RefreshFixture() {
@@ -142,6 +143,27 @@ describe('customer portal reads', () => {
     expect(screen.getByTestId('state')).toHaveTextContent('saved');
     await act(async () => pending.resolve({ title: 'Current visit' }));
     expect(screen.getByTestId('state')).toHaveTextContent('ready');
+  });
+
+  it('invalidates the keyed cache and denies an older in-flight completion', async () => {
+    const pending = deferred();
+    const load = vi.fn().mockResolvedValueOnce({ title: 'Cached visit' }).mockReturnValueOnce(pending.promise);
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Cached visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Invalidate read' }));
+    expect(screen.queryByText('Cached visit')).not.toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('error');
+
+    await act(async () => pending.resolve({ title: 'Stale completion' }));
+    expect(screen.queryByText('Stale completion')).not.toBeInTheDocument();
+
+    rerender(<App load={load} show={false} />);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    rerender(<App load={load} />);
+    expect(screen.queryByText('Cached visit')).not.toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the saved state visible while retrying a failed refresh', async () => {

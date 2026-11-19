@@ -3751,6 +3751,7 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const mountedRef = useRef(false);
   const activeHistoryScopeRef = useRef(historyScopeKey);
   const scopeRefreshRequestedRef = useRef(null);
+  const invalidateHistoryScopeRef = useRef(() => {});
   if (activeHistoryScopeRef.current !== historyScopeKey) {
     activeHistoryScopeRef.current = historyScopeKey;
     scopeRefreshRequestedRef.current = null;
@@ -3781,16 +3782,18 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
     try {
       result = await api.getServices(historyProperty ? { ...pagination, historyProperty } : pagination);
     } catch (error) {
-      if (historyProperty && error?.status === 409) requestPropertyRefresh(requestedScopeKey);
+      if (historyProperty && (error?.status === 409 || (error?.status === 403 && error?.code === 'PROPERTY_HISTORY_UNAVAILABLE'))) {
+        invalidateHistoryScopeRef.current(requestedScopeKey, error?.message);
+      }
       throw error;
     }
     if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) {
       throw new Error('This service-history request is no longer current.');
     }
     if (historyProperty && (result.historyProperty !== historyProperty || result.historyCustomerId !== customerId)) {
-      requestPropertyRefresh(requestedScopeKey);
       const mismatch = new Error('Your selected property changed. Reopen Visits to see its history.');
       mismatch.status = 409;
+      invalidateHistoryScopeRef.current(requestedScopeKey, mismatch.message);
       throw mismatch;
     }
     return result;
@@ -3817,6 +3820,18 @@ function ServicesTab({ historyProperty = null, customerId = null, onSavedScopeUn
   const { preview, openPagePreview, openPdfPreview, closePreview } = useReportPreview(
     (err) => showCustomerAlert(err?.message || 'Could not open this report. Please try again.')
   );
+
+  invalidateHistoryScopeRef.current = (requestedScopeKey, message) => {
+    if (!mountedRef.current || activeHistoryScopeRef.current !== requestedScopeKey) return;
+    moreSequence.current += 1;
+    setLoadingMore(false);
+    setServices([]);
+    setExpanded(null);
+    setLightbox(null);
+    closePreview();
+    historyRead.invalidate(message || 'Your property selection changed. Refresh it before reopening completed visits.');
+    requestPropertyRefresh(requestedScopeKey);
+  };
 
   const SERVICES_PAGE_SIZE = 100;
   useEffect(() => {

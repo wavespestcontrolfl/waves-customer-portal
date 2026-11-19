@@ -57,7 +57,7 @@ router.get('/', async (req, res, next) => {
     // the holder's property gate says (codex #6363 r16 P1 + security P1);
     // the holder's stays customer-wide unless asked.
     if (historyProperty && (req.contactSession || req.customerInactive || !appPropertyScopeEnabled())) {
-      return res.status(403).json({ error: 'Property history is unavailable for this session.' });
+      return res.status(403).json({ error: 'Property history is unavailable for this session.', code: 'PROPERTY_HISTORY_UNAVAILABLE' });
     }
     const selectedHistory = historyProperty && historyProperty !== 'all';
     const scope = req.contactSession ? await contactRecordScope(req) : (propertyScoped || selectedHistory ? await resolveSessionScope(req) : null);
@@ -69,7 +69,7 @@ router.get('/', async (req, res, next) => {
     // and Home's Last Visit card showed incomplete records as completed
     // visits and a visit's sibling records as extra visits.
     const { services: listed, total } = await listPortalServiceHistory(req.customerId, {
-      limit, offset, type, scope, completedOnly: true, historyProperty,
+      limit, offset, type, scope, completedOnly: true, historyProperty, homeSummary: propertyScoped,
     });
     // A contact the rule withholds from gets no artifact; an allowed contact
     // gets the visit without the public report bearers (the authenticated

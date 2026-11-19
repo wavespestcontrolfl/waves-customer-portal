@@ -89,7 +89,7 @@ const ONE_RECORD_PER_APPOINTMENT = `(
 // so an incomplete visit is never shown or described as a completed one and
 // a visit's sibling records never show as extra visits.
 async function listPortalServiceHistory(customerId, {
-  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, scheduledServiceId = null, database = db, historyProperty = null,
+  limit = 20, offset = 0, type = null, scope = null, completedOnly = false, scheduledServiceId = null, database = db, historyProperty = null, homeSummary = false,
 } = {}) {
   let query = database('service_records')
     .where({ 'service_records.customer_id': customerId })
@@ -162,6 +162,12 @@ async function listPortalServiceHistory(customerId, {
     // Any typed delivery posture other than auto_send (internal_only
     // shadow, disabled kill switch) keeps report links off customer surfaces.
     const internalOnlyReport = suppressCustomerArtifacts;
+    // Re-completing a project can reuse a technician's existing record.
+    // Only the project title frozen for the customer report has a known
+    // origin on both fresh and reused records. Keep the same fee/code scrub.
+    const notesRecord = isProjectCompletion && homeSummary
+      ? { ...svc, technician_notes: projectReportUrl ? structuredNotes.projectTitle || null : null }
+      : svc;
     return {
       id: svc.id,
       ...(historyProperty ? { propertyAddress: historyAddress(svc, customerId) } : {}),
@@ -173,7 +179,7 @@ async function listPortalServiceHistory(customerId, {
       checkOutTime: svc.effective_check_out_time || null,
       // The reviewed report text only, never the tech's raw note
       // (context-aggregator.js customerSafeVisitNotes).
-      notes: suppressCustomerArtifacts ? null : customerSafeVisitNotes(svc, { projectLine: true }),
+      notes: suppressCustomerArtifacts ? null : customerSafeVisitNotes(notesRecord, { projectLine: true }),
       soilTemp: svc.soil_temp ? parseFloat(svc.soil_temp) : null,
       thatchMeasurement: svc.thatch_measurement ? parseFloat(svc.thatch_measurement) : null,
       soilPh: svc.soil_ph ? parseFloat(svc.soil_ph) : null,

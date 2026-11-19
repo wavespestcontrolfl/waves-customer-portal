@@ -37,7 +37,7 @@ test('attaches the reviewed summary and report belonging to the exact completed 
   expect(listPortalServiceHistory).toHaveBeenCalledWith('customer-1', {
     limit: 1,
     completedOnly: true,
-    scheduledServiceId: 'visit-1',
+    scheduledServiceId: 'visit-1', homeSummary: true,
   });
   expect(tracker.serviceSummary).toEqual({
     customerSummary: 'Reviewed customer closeout.',

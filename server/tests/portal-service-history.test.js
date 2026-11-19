@@ -110,3 +110,16 @@ test('history uses the address frozen on the report before later property data',
   const { services } = await listPortalServiceHistory('homeowner', { historyProperty: 'all' });
   expect(services[0].propertyAddress).toBe('300 Report Road, Sample');
 });
+
+test.each([['Door inspection', 'Door inspection'], [undefined, null]])('Home project notes use only the attached report title (%s)', async (projectTitle, expected) => {
+  const { customerSafeVisitNotes } = require('../services/context-aggregator');
+  customerSafeVisitNotes.mockImplementationOnce((record) => record.technician_notes);
+  wire({ service_records: [{
+    id: 'reused-record', customer_id: 'homeowner', completion_source: 'project_completion',
+    technician_notes: 'Internal handoff from the prior record.',
+    structured_notes: { projectTitle, portalAttached: true, projectReport: { url: '/projects/example' } },
+  }] });
+  const { services } = await listPortalServiceHistory('homeowner', { homeSummary: true });
+  expect(services[0].notes).toBe(expected);
+  expect(JSON.stringify(services)).not.toContain('Internal handoff');
+});
