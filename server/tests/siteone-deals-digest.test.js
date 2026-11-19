@@ -45,6 +45,8 @@ describe('isDealEmail', () => {
     ['maker domain subdomain', { from_address: 'news@mail.basf.com', subject: 'Fall rebate is open' }],
     ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
     ['case price with a product code', { subject: '10% off by the case: SKU12345' }],
+    ['case price with a CS-like product code', { subject: '10% off by the case: CS12345XL' }],
+    ['case code in the middle of a deal subject', { subject: 'Save 10% by the case: CS0012345' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
@@ -60,6 +62,7 @@ describe('isDealEmail', () => {
     ['SiteOne case notice', { from_address: 'customersupport@ec.siteone.com', subject: 'Case: CS0012345 has been updated.', has_attachments: true, body_text: 'You can redeem the points by logging into your siteone.com account.' }],
     ['case number reply', { subject: 'RE: Case Number: CS0012345', body_text: 'Special pricing and a rebate are listed below.' }],
     ['case # notice', { subject: 'Case #01234567 updated', has_attachments: true, body_text: 'Ask about the promo.' }],
+    ['forwarded case notice', { subject: 'FW: Case: CS0012345 has been updated.', has_attachments: true, body_text: 'Ask about the promo.' }],
     ['order is ready', { subject: 'Order 55555 is ready for pickup', body_text: 'promo special' }],
     ['deal words from an unlisted domain', { from_address: 'sales@example.com', subject: 'Big promo and rebate sale' }],
     ['lookalike domain', { from_address: 'srep@siteone.com.evil.example', subject: 'Pest Specials' }],
