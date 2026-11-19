@@ -184,7 +184,9 @@ const PROPERTY_CHECK_MESSAGE = 'We could not check this lawn assessment against 
 const STOCK_LOCKOUT_MESSAGE = 'A product is out of stock. Update inventory, tap Check stock, then complete again.';
 const PROPERTY_SCOPE_MESSAGE = 'This lawn check was made for a different property than this visit. Retake the photos, then analyze and confirm again.';
 const NOT_ON_THIS_SHEET_MESSAGE = 'This visit cannot be completed on this sheet. Close it and tell the office.';
-// A refused retry on a visit the sheet hands to the full form (HandoffHeldView).
+// A rejected copy this device could not clear (RefusalBlock), on a view with
+// no form, and on a visit the sheet hands to the full form (HandoffHeldView).
+const KEPT_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
 const HANDOFF_REJECTED_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here. The full form opens next.';
 const REFUSAL_MESSAGES = {
   lawn_fast_disabled: 'The quick lawn sheet is off right now. Close it and tell the office.',
@@ -1485,15 +1487,7 @@ function HandoffHeldView({ submission, onFullForm }) {
   const fixable = !submission.rejectedCopy && submission.failure !== 'terminal';
   return (
     <div className="tech-visit-body">
-      {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
-      {submission.rejectedCopy && <ActionFeedback className="tech-visit-feedback">{HANDOFF_REJECTED_COPY_NOTICE}</ActionFeedback>}
-      {submission.rejectedCopy && (
-        <div className="tech-visit-actions">
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={submission.submitting} onClick={submission.discard}>
-            Discard saved retry
-          </Button>
-        </div>
-      )}
+      <RefusalBlock submission={submission} keptNotice={HANDOFF_REJECTED_COPY_NOTICE} />
       {fixable && (
         <div className="tech-visit-actions">
           <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={() => onFullForm?.()}>Full form</Button>
@@ -1501,6 +1495,51 @@ function HandoffHeldView({ submission, onFullForm }) {
       )}
     </div>
   );
+}
+
+// The server's refusal of a saved attempt's retry, kept on a view that has no
+// form (whose footer would carry it), with Discard for a rejected copy this
+// device could not clear (`rejectedCopy`: never a retry).
+function RefusalBlock({ submission, keptNotice }) {
+  return (
+    <>
+      {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+      {submission.rejectedCopy && <ActionFeedback className="tech-visit-feedback">{keptNotice}</ActionFeedback>}
+      {submission.rejectedCopy && (
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={submission.submitting} onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// The view in place of the form while the visit's context loads, cannot be
+// read or is blocked, or the product list is missing (the planned rows take
+// their units and stock from it); null once the form can show. A saved
+// attempt above needs none of it. `framed`: the unreadable view sits in the
+// sheet's body frame.
+function waitingView(ctx, catalog, catalogError) {
+  const message = (text, error = false) => <ActionFeedback error={error} className="tech-visit-feedback tech-visit-loading">{text}</ActionFeedback>;
+  if (ctx.loading) return { content: message('Loading…') };
+  if (ctx.loadError) {
+    return {
+      framed: true,
+      content: (
+        <>
+          {message(ctx.loadError, true)}
+          <div className="tech-visit-actions">
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
+          </div>
+        </>
+      ),
+    };
+  }
+  if (ctx.blockedReason) return { content: message(ctx.blockedReason) };
+  if (!catalog) return { content: message(catalogError || 'Loading the product list…', !!catalogError) };
+  return null;
 }
 
 function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking, collectOnSheet }) {
@@ -1516,23 +1555,20 @@ function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas
   if (service.recoveryOnly) return <RecoveryOnlyView submission={submission} />;
   const refusal = refusalWithoutContext(submission, ctx);
   if (refusal) return refusal;
-  if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
-  if (ctx.handoff && (submission.error || submission.rejectedCopy)) return <HandoffHeldView submission={submission} onFullForm={onFullForm} />;
+  const held = !!submission.error || submission.rejectedCopy;
+  if (ctx.handoff && held) return <HandoffHeldView submission={submission} onFullForm={onFullForm} />;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
-  if (ctx.loadError) {
+  const waiting = waitingView(ctx, catalog, catalogError);
+  // With no form to carry it, a refused retry stays above the view (RefusalBlock).
+  if (waiting && held) {
     return (
       <div className="tech-visit-body">
-        <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{ctx.loadError}</ActionFeedback>
-        <div className="tech-visit-actions">
-          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={ctx.retry}>Try again</Button>
-        </div>
+        <RefusalBlock submission={submission} keptNotice={KEPT_REJECTED_COPY_NOTICE} />
+        {waiting.content}
       </div>
     );
   }
-  if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  // The planned rows take their units and stock from the catalog: no form
-  // without it. A saved attempt above needs none.
-  if (!catalog) return <ActionFeedback error={!!catalogError} className="tech-visit-feedback tech-visit-loading">{catalogError || 'Loading the product list…'}</ActionFeedback>;
+  if (waiting) return waiting.framed ? <div className="tech-visit-body">{waiting.content}</div> : waiting.content;
   return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces}  onWrapChecking={onWrapChecking} />;
 }
 

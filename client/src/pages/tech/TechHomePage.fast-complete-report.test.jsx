@@ -482,3 +482,19 @@ it.each([
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
+
+// An older untagged attempt of a converted consultation (no outcome) whose
+// visit is off today's route: the attempt itself still says assessment, by
+// its summary or by the visit its body froze.
+it.each([
+  ['its summary', { idempotencyKey: 'as-off-1', technicianNotes: 'Assessment work' }, 'Assessment · won'],
+  ['the visit its body froze', { idempotencyKey: 'as-off-2', technicianNotes: 'Assessment work', expectedVisit: { serviceType: 'Waves Assessment' } }, 'Saved visit'],
+])('an older converted assessment attempt off the route reopens in the assessment sheet, by %s', async (_label, body, summary) => {
+  mocks.attempts.set('svc-as-off', { body, summary });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const opened = await screen.findByTestId('assessment-sheet');
+  expect(JSON.parse(opened.getAttribute('data-service'))).toMatchObject({ id: 'svc-as-off', recoveryOnly: true });
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});

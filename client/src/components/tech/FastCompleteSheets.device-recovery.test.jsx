@@ -426,3 +426,63 @@ test.each([
   expect(screen.queryByRole('button', { name: 'Full form' })).not.toBeInTheDocument();
   expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(status ? 1 : 0);
 });
+
+// An on-route lawn visit whose product list could not be read (the form
+// waits on it): a saved attempt's retry the server refuses keeps its reason
+// above the catalog message, and a rejected copy this device could not clear
+// waits there to be discarded, never retried.
+const LAWN_VISIT = {
+  id: 'visit-c', customerId: 'cust-fixture', customerName: 'Fixture Customer', serviceType: 'Lawn Care', status: 'confirmed',
+  scheduledDate: '2026-10-04T13:00:00.000Z', propertyId: 'prop-fixture', catalogServiceId: null,
+  address: { line1: '100 Example Lane', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' },
+  hasPhone: true, category: 'lawn_care', serviceKey: 'lawn_care_recurring', isCallback: false, technicianId: null,
+};
+const LAWN_SERVICE = {
+  id: 'visit-c', customerName: 'Fixture Customer', serviceType: 'Lawn Care', address: '100 Example Lane', timeLabel: '2:00 PM',
+  findingsType: null, routedCustomerId: 'cust-fixture', routedScheduledDate: '2026-10-04', routedPropertyId: 'prop-fixture', routedAddress: '100 Example Lane',
+};
+const LAWN_CONTEXT = {
+  enabled: true, eligible: true, reason: null, visitType: 'recurring', findingsType: null, service: LAWN_VISIT,
+  visitDate: '2026-10-04', turfHeightCapture: false, plannedProducts: { source: 'plan', items: [] }, plannedProductsUnavailable: null,
+  methods: [{ value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false }],
+  assessment: { exists: false, id: null, confirmed: false }, photoStatus: null, previousFrontPhoto: null, readFailures: [],
+};
+const CATALOG_ERROR = 'Could not load the product list. Close this, check your signal, then tap Report again.';
+
+test.each([false, true])('the lawn visit sheet keeps a refused retry above a product list it could not read (copy kept: %s)', async (kept) => {
+  const body = { idempotencyKey: `lawn-catalog-${kept}`, technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-c', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const message = 'A product on this completion is not on the lawn list.';
+  let rejectSend;
+  const request = vi.fn((path) => {
+    if (path.includes('/lawn-fast/context')) return Promise.resolve(LAWN_CONTEXT);
+    if (!path.endsWith('/complete')) return Promise.resolve({});
+    return new Promise((_resolve, reject) => { rejectSend = () => reject(Object.assign(new Error(message), { status: 422, code: 'invalid_product' })); });
+  });
+  const onFullForm = vi.fn();
+  render(<FastCompleteLawnSheet service={LAWN_SERVICE} operatorId="tech-a" request={request} catalog={null} catalogError={CATALOG_ERROR}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry', exact: true }));
+  await waitFor(() => expect(rejectSend).toBeTypeOf('function'));
+  const store = globalThis.indexedDB;
+  if (kept) globalThis.indexedDB = undefined;
+  try {
+    rejectSend();
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    if (kept) expect(await screen.findByText(/could not clear its saved copy of this completion/)).toBeInTheDocument();
+  } finally { globalThis.indexedDB = store; }
+  expect(screen.getByText(CATALOG_ERROR)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry', exact: true })).not.toBeInTheDocument();
+  if (kept) {
+    expect((await getFastCompletionAttempt('visit-c', 'tech-a')).attempt.body).toEqual(body);
+    fireEvent.click(screen.getByRole('button', { name: 'Discard saved retry' }));
+    await waitFor(async () => expect((await getFastCompletionAttempt('visit-c', 'tech-a')).attempt).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Discard saved retry' })).not.toBeInTheDocument());
+    expect(screen.getByText(CATALOG_ERROR)).toBeInTheDocument();
+  } else {
+    await waitFor(async () => expect((await getFastCompletionAttempt('visit-c', 'tech-a')).attempt).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Discard saved retry' })).not.toBeInTheDocument();
+  }
+  expect(onFullForm).not.toHaveBeenCalled();
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});

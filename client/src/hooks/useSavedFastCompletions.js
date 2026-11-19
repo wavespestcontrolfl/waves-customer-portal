@@ -22,6 +22,18 @@ export const SAVED_COMPLETION_READ_NOTICE = 'Could not read the completion saved
 // the live route now says completed. Report-flow bodies overlap the typed
 // findings used by the lawn and Tree & Shrub sheets, so their frozen report
 // base wins; the remaining findings type identifies the focused sheet.
+// An assessment attempt saved before the sheet tagged them, read from the
+// attempt itself: its summary ('Assessment · <outcome>', 'won' for a converted
+// consultation, which sends no outcome; no other sheet's summary has this
+// shape) or the visit its body froze (expectedVisit, the Waves Assessment
+// name). On today's route, the row says the same; an off-route row has none.
+const UNTAGGED_ASSESSMENT_SUMMARY = /^Assessment · (won|warm|cold|lost)$/;
+function isUntaggedAssessment(attempt, service) {
+  if (UNTAGGED_ASSESSMENT_SUMMARY.test(String(attempt.summary || ''))) return true;
+  if (isConsultationVisit({ serviceType: attempt.body.expectedVisit?.serviceType })) return true;
+  return !service?.fastCompletionRecoveryOnly && isConsultationVisit(service);
+}
+
 export function savedCompletionKind(attempt, service) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
@@ -34,9 +46,7 @@ export function savedCompletionKind(attempt, service) {
   if (Object.hasOwn(body, 'reportDraftBase')) return 'report';
   if (body.structuredFindings?.type === 'tree_shrub') return 'tree_shrub';
   if (body.structuredFindings?.type === 'one_time_lawn_treatment') return 'lawn_reservice';
-  // An older untagged assessment attempt with no outcome (a converted
-  // consultation sends none) reads by its visit. An off-route row has none.
-  if (!service?.fastCompletionRecoveryOnly && isConsultationVisit(service)) return 'assessment';
+  if (isUntaggedAssessment(attempt, service)) return 'assessment';
   return 'pest';
 }
 
