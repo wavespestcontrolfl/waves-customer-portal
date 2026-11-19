@@ -1965,7 +1965,8 @@ class AutonomousRunner {
   // score as before).
   // `ignoreDraftsFirstSwitch` (Mac mode): the Mac job's rows and the server's
   // exclusions do not depend on the priority-order switch.
-  async _terminalFirstIds(actionType = null, { ignoreDraftsFirstSwitch = false } = {}) {
+  // `throwOnError` (Mac mode): a failed listing is not an empty one.
+  async _terminalFirstIds(actionType = null, { ignoreDraftsFirstSwitch = false, throwOnError = false } = {}) {
     const none = { written: [], held: [] };
     const terminalWriter = require('./terminal-writer');
     if (!terminalWriter.terminalWriterLive() || !(ignoreDraftsFirstSwitch || envBool('AUTONOMOUS_CONTENT_TERMINAL_DRAFTS_FIRST', true))) return none;
@@ -1974,6 +1975,7 @@ class AutonomousRunner {
       const ids = (rows) => (rows || []).filter((row) => !actionType || row.action_type === actionType).map((row) => row.opportunity_id);
       return { written: ids(listing.written), held: ids(listing.held) };
     } catch (err) {
+      if (throwOnError) throw err;
       logger.warn(`[autonomous-runner] written terminal drafts could not be listed (${err.message}); the batch claims by score`);
       return none;
     }
@@ -1985,7 +1987,11 @@ class AutonomousRunner {
   async _terminalClaimPlan(actionType) {
     const terminalWriter = require('./terminal-writer');
     if (!(terminalWriter.editorialReviewOnMac() && !terminalWriter.runningOnMac())) return { terminalFirst: await this._terminalFirstIds(actionType), macOwnedIds: [] };
-    const listed = await this._terminalFirstIds(actionType, { ignoreDraftsFirstSwitch: true });
+    // One retry, then claim without the exclusions (logged): in Mac mode this server reads no draft
+    // branch and consumes nothing (draftSourceFor waits with AWAITS_MAC before any read), so a
+    // Mac-owned row it claims blind is only rechecked 30 minutes later.
+    const listed = await this._terminalFirstIds(actionType, { ignoreDraftsFirstSwitch: true, throwOnError: true })
+      .catch(() => this._terminalFirstIds(actionType, { ignoreDraftsFirstSwitch: true }));
     return { terminalFirst: { written: [], held: [] }, macOwnedIds: [...listed.written, ...listed.held] };
   }
 
@@ -2003,8 +2009,10 @@ class AutonomousRunner {
     if (!(terminalWriter.editorialReviewOnMac() && terminalWriter.runningOnMac())) {
       return { outcome: 'skipped_not_mac', skipped: true, reason: 'not_the_mac_job', count: 0, runs: [] };
     }
-    // The server cron checks the master gate before runDaily; runNext does not.
-    if (!require('../../config/feature-gates').isEnabled('autonomousContentEngine')) {
+    // The server cron checks the master gate before runDaily; runNext does not. Read the variable
+    // itself: off production, feature-gates reads autonomousContentEngine as on whatever it says, and
+    // this unattended job runs on the Mac with Railway's variables.
+    if (process.env.GATE_AUTONOMOUS_CONTENT !== 'true') {
       return { outcome: 'skipped_engine_off', skipped: true, reason: 'content_engine_off', count: 0, runs: [] };
     }
     return this._withEngineLock('runTerminalDrafts', () => this._runTerminalDraftsInner({ limit }));
@@ -2016,7 +2024,14 @@ class AutonomousRunner {
     const runs = [];
     const failedOppIds = [];
     let streak = 0;
-    const terminalFirst = await this._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true });
+    let terminalFirst;
+    try {
+      terminalFirst = await this._terminalFirstIds(null, { ignoreDraftsFirstSwitch: true, throwOnError: true });
+    } catch (err) {
+      // Not "nothing to take": the Mac job reports a failure, so its run bell rings.
+      logger.warn(`[autonomous-runner] runTerminalDrafts: terminal drafts could not be listed (${err.message})`);
+      return { outcome: 'failed_terminal_listing', reason: err.message, count: 0, limit: batchLimit, failures: 1, runs: [] };
+    }
     for (let i = 0; i < batchLimit; i += 1) {
       const scope = terminalFirstScope(terminalFirst);
       if (!scope) break;
@@ -2275,7 +2290,9 @@ class AutonomousRunner {
    * the alert's own rules stay as they are. A send failure is logged.
    */
   async _reportBlogDrought(...args) {
-    if (await require('./terminal-writer').blogDraftRequested()) return;
+    const terminalWriter = require('./terminal-writer');
+    if (await terminalWriter.blogDraftRequested()) return;
+    if (await terminalWriter.macHoldsBlogDraft()) return;
     // the caller's own arguments, unchanged
     await this._sendBlogDroughtSms(...args).catch((err) => {
       logger.warn(`[autonomous-runner] blog drought alert failed: ${err.message}`);

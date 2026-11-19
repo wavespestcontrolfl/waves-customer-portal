@@ -313,7 +313,8 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     reviewPlan.mockResolvedValue({ pass: false, model: 'claude-opus', findings: [{ sectionIndex: 0, detail: 'Too vague.', action: 'Lead with the cause.' }] });
     const rejected = await run(blog, withPlan());
     expect(rejected).toMatchObject({ code: tw.INVALID, reason: expect.stringMatching(/\[terminal revision commit-1\]$/) });
-    const rowFor = (over = {}) => ({ opportunity_id: ID, brief_id: BRIEF, outcome: tw.AWAITING_OUTCOME, skip_reason: tw.INVALID, reviewer_notes: rejected.reason, brief_created_at: new Date(), score: 50, ...over });
+    // rejected_notes: the newest rejection on the row's brief, which the listing query adds.
+    const rowFor = (over = {}) => ({ opportunity_id: ID, brief_id: BRIEF, outcome: tw.AWAITING_OUTCOME, skip_reason: tw.INVALID, reviewer_notes: rejected.reason, rejected_notes: rejected.reason, brief_created_at: new Date(), score: 50, ...over });
     const list = (row, sha) => tw.awaitingTerminalDrafts({ deps: { db: { raw: jest.fn(async () => ({ rows: [row] })) }, gh: ghWith(withPlan(), { sha }) } });
     const same = await list(rowFor(), 'commit-1');
     expect(same.written).toHaveLength(0);
@@ -323,10 +324,14 @@ describe('blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST / _RUNNER)',
     // Mismatch and missing-plan rejections carry the same marker.
     expect((await run(blog, good({ body: planBody }))).reason).toMatch(/\[terminal revision commit-1\]$/);
     expect((await run(blog, withPlan({ body: `${body}\n\n## Why ghost ants trail\n\nText.\n` }))).reason).toMatch(/\[terminal revision commit-1\]$/);
-    // A rewrite (a new tip), a run that was not a plan rejection, or the unavailable-reviewer wait: written again.
+    // A later wait (the server in Mac mode records AWAITS_MAC) does not hide the rejection: still due.
+    const afterWait = await list(rowFor({ skip_reason: tw.AWAITS_MAC, reviewer_notes: 'the Mac job takes this draft' }), 'commit-1');
+    expect(afterWait.written).toHaveLength(0);
+    expect(afterWait.due[0].problem).toMatch(/^terminal draft rejected: the answer plan failed review: section 1: Too vague\./);
+    // A rewrite (a new tip), a newest rejection that was not a plan rejection, or no rejection on this brief: written again.
     expect((await list(rowFor(), 'commit-2')).written).toHaveLength(1);
-    expect((await list(rowFor({ reviewer_notes: 'terminal draft rejected: the file is not valid JSON' }), 'commit-1')).written).toHaveLength(1);
-    expect((await list(rowFor({ skip_reason: tw.PLAN_UNAVAILABLE }), 'commit-1')).written).toHaveLength(1);
+    expect((await list(rowFor({ rejected_notes: 'terminal draft rejected: the file is not valid JSON' }), 'commit-1')).written).toHaveLength(1);
+    expect((await list(rowFor({ skip_reason: tw.PLAN_UNAVAILABLE, rejected_notes: null }), 'commit-1')).written).toHaveLength(1);
   });
 
   test('a reviewer that throws, or fails closed with no model, WAITS with a code that is not INVALID', async () => {
@@ -462,7 +467,7 @@ describe('waiting rows and the admin item', () => {
     expect(out.rebrief.map((r) => r.opportunity_id)).toEqual([R]);
     expect(out.due[0]).toMatchObject({ branch: `terminal-writer/${ID}`, draft_path: `terminal-drafts/${ID}.json`, brief_id: 'brief-aa' });
     // the latest run of each pending row: waiting ones, and gate retries of a terminal draft
-    expect(d.db.raw.mock.calls[0][1]).toEqual([7, 'deferred_publish_cap', tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
+    expect(d.db.raw.mock.calls[0][1]).toEqual([tw.INVALID, 7, 'deferred_publish_cap', tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
@@ -525,6 +530,26 @@ describe('waiting rows and the admin item', () => {
     expect(await tw.raiseTerminalDue({ now, deps: d })).toEqual({ due: 0, written: 1, rebrief: 1, delivered: false });
     expect(d.episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
     expect(d.episodes.closeAdminAlertKeys.mock.calls[0][1]).toEqual(['content-terminal-due:2026-10-09']);
+  });
+
+  describe('macHoldsBlogDraft: a blog that waits for the Mac job is not a drought', () => {
+    const saved = { ...process.env };
+    beforeEach(() => { process.env.GATE_CONTENT_WRITER_TERMINAL = 'true'; process.env.CONTENT_EDITORIAL_REVIEW_HOST = 'mac'; });
+    afterEach(() => { process.env = { ...saved }; });
+
+    test('true when a blog draft is pushed and waits; false for a refresh only, for no file, outside Mac mode and on a failed read', async () => {
+      const blog = () => deps({ rows: [waiting(B)], branches: { [B]: draftFor(B) } });
+      expect(await tw.macHoldsBlogDraft({ deps: blog() })).toBe(true);
+      expect(await tw.macHoldsBlogDraft({ deps: deps({ rows: [waiting(B, { action_type: 'refresh_existing_page' })], branches: { [B]: draftFor(B) } }) })).toBe(false);
+      expect(await tw.macHoldsBlogDraft({ deps: deps({ rows: [waiting(B)] }) })).toBe(false);
+      const failing = blog();
+      failing.db.raw.mockRejectedValue(new Error('db down'));
+      expect(await tw.macHoldsBlogDraft({ deps: failing })).toBe(false);
+      delete process.env.CONTENT_EDITORIAL_REVIEW_HOST;
+      const off = blog();
+      expect(await tw.macHoldsBlogDraft({ deps: off })).toBe(false);
+      expect(off.db.raw).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -640,6 +665,7 @@ describe('the gate as a kill switch, and the 1pm catch-up', () => {
       expect(await tw.blogDraftRequested({ now, deps: { episodes: episodes(['content-terminal-due:2026-10-09']), db: withBlog([{}]) } })).toBe(false);
     });
   });
+
 });
 
 describe('a needs_owner hold asks the owner once, and the item closes when the row no longer waits on the owner', () => {

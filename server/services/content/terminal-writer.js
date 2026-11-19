@@ -358,11 +358,11 @@ async function cleanupConsumedDrafts(runs, { gh } = {}) {
   }
 }
 
-// The reason the latest run rejected this commit's answer plan, or null.
+// The reason a run on this brief rejected this commit's answer plan, or null.
 function rejectedPlanProblem(row, revision) {
-  if (row.skip_reason !== INVALID || typeof row.reviewer_notes !== 'string') return null;
-  const match = REJECTED_AT_RE.exec(row.reviewer_notes);
-  return match && match[1] === revision ? row.reviewer_notes.replace(REJECTED_AT_RE, '') : null;
+  if (typeof row.rejected_notes !== 'string') return null;
+  const match = REJECTED_AT_RE.exec(row.rejected_notes);
+  return match && match[1] === revision ? row.rejected_notes.replace(REJECTED_AT_RE, '') : null;
 }
 
 /**
@@ -379,8 +379,14 @@ function rejectedPlanProblem(row, revision) {
 async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
   const conn = deps.db || db;
   const gh = deps.gh || require('../content-astro/github-client');
+  // rejected_notes: the newest rejection on the same brief, so a wait recorded after it (a server
+  // pass in Mac mode) does not hide it and offer the same commit again.
   const { rows } = await conn.raw(`
-    SELECT * FROM (
+    SELECT latest.*,
+           (SELECT x.reviewer_notes FROM autonomous_runs x
+             WHERE x.opportunity_id = latest.opportunity_id AND x.brief_id = latest.brief_id AND x.skip_reason = ?
+             ORDER BY x.created_at DESC LIMIT 1) AS rejected_notes
+      FROM (
       SELECT DISTINCT ON (r.opportunity_id)
              r.opportunity_id, r.brief_id, r.action_type, r.outcome, r.agent_id, r.skip_reason, r.reviewer_notes, r.created_at,
              q.query, q.page_url, q.service, q.city, q.score, b.created_at AS brief_created_at
@@ -393,7 +399,7 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
        ORDER BY r.opportunity_id, r.created_at DESC
     ) latest
     WHERE outcome = ? OR (outcome = ? AND agent_id = ?)
-    ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
+    ORDER BY score DESC`, [INVALID, AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
   const due = [];
   const written = [];
   const held = [];
@@ -428,6 +434,23 @@ async function closeTerminalItems({ now = new Date(), deps = {} } = {}) {
     for (const key of await episodes.openAdminAlertKeys(conn, prefix)) open.add(key);
   }
   return episodes.closeAdminAlertKeys(conn, [...open], 'terminal_writer_off', { now, resolution: 'Cleared: the portal writes these drafts itself again' });
+}
+
+/**
+ * Mac mode: a blog whose draft or hold is pushed waits for the Mac job, not for a
+ * writer, so the terminal item may be closed while it waits; "no blog today" is
+ * false news then too. False outside Mac mode and on any read failure (the
+ * drought alert is the fallback signal, so doubt keeps it).
+ */
+async function macHoldsBlogDraft({ deps = {} } = {}) {
+  if (!terminalWriterLive() || !editorialReviewOnMac()) return false;
+  try {
+    const { written, held } = await awaitingTerminalDrafts({ deps });
+    return [...written, ...held].some((row) => row.action_type === 'new_supporting_blog');
+  } catch (err) {
+    logger.warn(`[terminal-writer] could not tell whether a blog waits for the Mac job: ${err.message}`);
+    return false;
+  }
 }
 
 /**
@@ -683,7 +706,7 @@ async function syncHoldQuestions({ now = new Date(), deps = {} } = {}) {
 }
 
 module.exports = {
-  terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
+  terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested, macHoldsBlogDraft,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
   AWAITS_MAC, PLAN_UNAVAILABLE, MAC_RECHECK_MS, recheckMs,
