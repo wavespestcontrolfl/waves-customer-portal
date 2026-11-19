@@ -97,6 +97,47 @@ describe('an edited offer text that lost its link', () => {
   });
 });
 
+describe('the offer link survives the real SMS renderer and never stays in stored history', () => {
+  const { stripSmsUrlScheme } = jest.requireActual('../services/messaging/sms-link-policy');
+  const TOKEN_RE = /[0-9a-f]{64}/;
+  function dbCapturingHistory() {
+    const db = require('../models/db');
+    db.mockImplementation(() => ({ where: () => ({ update: async () => 1 }) }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    return () => db.raw.mock.calls.map(([, bindings]) => (bindings || []).join('')).join('\n');
+  }
+  const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+
+  test('a template body with https:// stripped (as getTemplate returns it) still sends the offer text', async () => {
+    mockIsEnabled.mockImplementation((gate) => gate === 'jobOffers');
+    // admin-sms-templates getTemplate ends with stripSmsUrlScheme(body): the rendered text carries the bare link.
+    mockRenderSmsTemplate.mockImplementation(async (_key, v) => stripSmsUrlScheme(
+      `Hi ${v.first_name}, it's Adam with Waves. Your job offer is ready to read and sign: ${v.offer_link} It stays open until ${v.expires_on}. Reply STOP to opt out.`,
+    ));
+    const stored = dbCapturingHistory();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+    const result = await RC.sendStageComms(app, 'offer_sent', { sms: true, email: false, by: 'staff-1', vars, stillEligible: async () => true });
+    expect(result.sms).not.toBe('skipped');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toContain(LINK.replace('https://', ''));
+    expect(stored()).toContain('/careers/offer/[link hidden]');
+    expect(stored()).not.toMatch(TOKEN_RE);
+  });
+
+  test('an owner reply that pastes the link goes out whole but is stored with the link hidden', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    const stored = dbCapturingHistory();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+    await RC.sendStageComms(app, 'owner_reply', {
+      sms: true, email: false, by: 'staff-1', smsBody: `Here is your offer again: ${LINK}`, stillEligible: async () => true,
+    });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toContain(LINK);
+    expect(stored()).toContain('/careers/offer/[link hidden]');
+    expect(stored()).not.toMatch(TOKEN_RE);
+  });
+});
+
 describe('the gate', () => {
   const opts = { sms: true, email: true, stillEligible: async () => false, vars };
 

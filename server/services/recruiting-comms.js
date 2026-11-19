@@ -31,6 +31,7 @@ const { formatETTime } = require('../utils/datetime-et');
 const { effectiveSendMs, newerEvidence } = require('../utils/recruiting-thread-scope');
 const { WAVES_ADDRESS_LINE, WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { redactOfferLinks } = require('../utils/offer-link-redaction');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const FROM_EMAIL = 'contact@wavespestcontrol.com';
@@ -611,7 +612,9 @@ function historyEntry({ stage, channel, to, outcome, code, body, by }) {
     to: channel === 'sms' ? maskPhone(to) : maskEmail(to),
     outcome,
     code: code || null,
-    body: body || '',
+    // Every stored entry hides a job-offer link, whatever the stage or channel: an owner reply that pastes the link
+    // must not leave the applicant's signing credential readable in the application history (GATE_JOB_OFFERS).
+    body: maskOfferLink(body || ''),
     by: by || 'system',
   };
 }
@@ -1042,7 +1045,9 @@ async function runSmsLeg(ctx) {
     return 'skipped';
   }
   // An edited or variant offer text that dropped {offer_link} would report "sent" while the applicant has nothing to open.
-  if (stage === 'offer_sent' && !(vars.offer_link && body.includes(vars.offer_link))) {
+  // The template renderer strips https:// from every link (sms-link-policy), so the rendered body carries the bare form.
+  const offerLinkForms = vars.offer_link ? [vars.offer_link, stripSmsUrlScheme(vars.offer_link)] : [];
+  if (stage === 'offer_sent' && !offerLinkForms.some((link) => body.includes(link))) {
     entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'skipped', code: 'offer_link_missing', body: '', by }));
     return 'skipped';
   }
@@ -1052,7 +1057,7 @@ async function runSmsLeg(ctx) {
   // after suppression/consent/line-type — so a customer reply arriving
   // during those validators is never diverted by a send that then gets
   // blocked (Codex r13 P2).
-  const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'pending', code: null, body: stage === 'offer_sent' ? maskOfferLink(body) : body, by });
+  const handoffEntry = historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'pending', code: null, body, by });
   // The number the text goes out from — durable routing evidence the reply
   // classifier compares the inbound `To` against, so it never depends on the
   // post-acceptance (best-effort) sms_log row. A reply goes back out on the
@@ -1064,7 +1069,7 @@ async function runSmsLeg(ctx) {
     await appendCommsHistory(app.id, [handoffEntry]);
   } catch (err) {
     logger.error(`[recruiting-comms] pre-handoff evidence write failed (application ${app.id}, stage ${stage}): ${errorSummary(err)}`);
-    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'failed', code: 'evidence_write_failed', body: stage === 'offer_sent' ? maskOfferLink(body) : body, by }));
+    entries.push(historyEntry({ stage, channel: 'sms', to: contact.phone, outcome: 'failed', code: 'evidence_write_failed', body, by }));
     return 'failed';
   }
 
@@ -1106,7 +1111,7 @@ async function runEmailLeg(ctx) {
   }
   entries.push(historyEntry({
     stage, channel: 'email', to: contact.email, outcome: sendRes.outcome, code: sendRes.code,
-    body: stage === 'offer_sent' ? maskOfferLink(`${subject}\n\n${text}`) : `${subject}\n\n${text}`, by,
+    body: `${subject}\n\n${text}`, by,
   }));
   return sendRes.outcome;
 }

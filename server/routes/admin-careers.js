@@ -414,7 +414,7 @@ function buildStatusUpdatePayload(row, plan, { isResendOnly, willSend, technicia
 // Row lock inside one transaction: concurrent transitions must not both
 // derive from the same snapshot and silently drop a history entry, and a
 // token mint must land atomically with the status write it belongs to.
-async function applyStatusTransition(trx, applicationId, technicianId, plan) {
+async function applyStatusTransition(trx, applicationId, technicianId, plan, { ownerAccount = false } = {}) {
   const row = await trx('job_applications')
     .where({ id: applicationId })
     .forUpdate()
@@ -441,19 +441,23 @@ async function applyStatusTransition(trx, applicationId, technicianId, plan) {
 
   if (willSend) assertNotifyBodiesKeepInterviewLink(row, plan);
 
+  // Leaving the offer stage (back to review or interview, or closed: rejected, withdrawn, hired) withdraws the application's
+  // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
+  // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
+  const closesOffers = (row.status === 'offer' && plan.status !== 'offer')
+    || (['rejected', 'withdrawn', 'hired'].includes(plan.status) && row.status !== plan.status);
+  // An offer the applicant holds is withdrawn only by the owner account, as on POST .../withdraw: any other admin's
+  // stage move is refused here, before anything is written.
+  if (closesOffers && !ownerAccount && (await JobOffers.heldOffersOf(trx, applicationId)).length) {
+    return { row, ownerOnly: true };
+  }
+
   const updatePayload = buildStatusUpdatePayload(row, plan, { isResendOnly, willSend, technicianId });
   const [next] = await trx('job_applications')
     .where({ id: applicationId })
     .update(updatePayload)
     .returning('*');
-  // Leaving the offer stage (back to review or interview, or closed: rejected, withdrawn, hired) withdraws the application's
-  // outstanding job offers in the same transaction, so an old link cannot sign over the owner's newer decision or revive
-  // when the application is moved back (the offer flow, GATE_JOB_OFFERS).
-  if (row.status === 'offer' && plan.status !== 'offer') {
-    await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
-  } else if (['rejected', 'withdrawn', 'hired'].includes(plan.status) && row.status !== plan.status) {
-    await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
-  }
+  if (closesOffers) await JobOffers.closeOffersWithApplication(trx, applicationId, technicianId);
 
   return { row: next, interviewApplicable, willSend };
 }
@@ -545,7 +549,7 @@ router.patch('/:id/status', async (req, res) => {
 
     let txResult;
     try {
-      txResult = await db.transaction((trx) => applyStatusTransition(trx, req.params.id, req.technicianId, plan));
+      txResult = await db.transaction((trx) => applyStatusTransition(trx, req.params.id, req.technicianId, plan, { ownerAccount: ibFullAccess(req) }));
     } catch (err) {
       if (err instanceof NotifyValidationError) {
         return res.status(400).json({ error: 'Message must keep the interview link.' });
@@ -554,6 +558,13 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     if (!txResult) return res.status(404).json({ error: 'Not found' });
+    if (txResult.ownerOnly) {
+      return res.status(403).json({
+        error: 'This application has a job offer out. Only the owner account can move it out of Offer.',
+        code: 'OWNER_ONLY',
+        application: await presentApplication(txResult.row),
+      });
+    }
     if (txResult.conflict) return res.status(409).json({ error: txResult.conflict, application: await presentApplication(txResult.row) });
     const { row: updated, interviewApplicable, willSend } = txResult;
 

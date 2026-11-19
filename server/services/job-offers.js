@@ -728,6 +728,16 @@ async function withdrawOffer(applicationId, offerId, actor, precondition = {}, n
  * An application the owner closes (rejected, withdrawn, hired) takes its outstanding offers with it, in the same
  * transaction as the stage change: moving the application back later must never revive the old link. Sends nothing.
  */
+/**
+ * The offers on an application that the applicant still holds: a sent offer not past expires_at, or a date request.
+ * Locked. A stage move that would withdraw one is the owner account's call, like POST .../withdraw.
+ */
+async function heldOffersOf(trx, applicationId, now = new Date()) {
+  const rows = await trx('job_offers').where({ application_id: applicationId })
+    .whereIn('status', ['sent', 'date_requested']).forUpdate().select('id', 'status', 'expires_at');
+  return rows.filter((o) => o.status === 'date_requested' || !o.expires_at || new Date(o.expires_at).getTime() >= now.getTime());
+}
+
 async function closeOffersWithApplication(trx, applicationId, actorId, now = new Date()) {
   return trx('job_offers').where({ application_id: applicationId }).whereIn('status', LIVE_STATUSES)
     .update({ status: 'withdrawn', withdrawn_at: now, withdrawn_by: actorId || null, updated_at: new Date() });
@@ -1135,7 +1145,7 @@ module.exports = {
   snapshotHashOf, signatureHashOf, renderLetterMarkdown, readableTerms, payDayLineFrom,
   publicStateOf, closedMessage, presentOffer, timelineOf, buildSnapshot,
   // admin
-  loadIssuedTerms, draftHashOf, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
+  loadIssuedTerms, draftHashOf, heldOffersOf, closeOffersWithApplication, adminPanel, saveDraft, sendOffer, withdrawOffer, reviseOffer, signedCopy,
   // public
   publicView, setTextConsent, acceptOffer, requestDate, declineOffer,
 };

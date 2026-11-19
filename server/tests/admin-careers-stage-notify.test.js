@@ -10,11 +10,14 @@ jest.mock('../services/inbound-sms-read', () => ({ markInboundSmsRead: (...a) =>
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The signed-in staff member: a technicians.id, as admin-auth sets it.
 const mockStaffId = 'bbbbbbbb-0000-4000-8000-000000000001';
+// null = an ordinary admin; the owner tests set the owner account's email (ib-access ibFullAccess).
+let mockStaffEmail = null;
 jest.mock('../middleware/admin-auth', () => ({
   ...jest.requireActual('../middleware/admin-auth'),
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = mockStaffId;
     req.techRole = 'admin';
+    if (mockStaffEmail) req.technician = { id: mockStaffId, email: mockStaffEmail };
     next();
   },
 }));
@@ -56,6 +59,8 @@ function makeDb() {
   let samePhoneQueries = [];
   let samePhoneFails = false;
   const closedOffers = [];
+  // Offers the applicant holds (job-offers.js heldOffersOf reads sent / date_requested rows, locked).
+  let heldOffers = [];
   const lastTen = (value) => String(value || '').replace(/\D/g, '').slice(-10);
   function tableApi(table) {
     if (table === 'technicians') {
@@ -73,6 +78,8 @@ function makeDb() {
       const offers = {
         where(cond) { filter.where = cond; return offers; },
         whereIn(_column, list) { filter.statuses = list; return offers; },
+        forUpdate() { return offers; },
+        select: async () => heldOffers.filter((o) => !filter.statuses || filter.statuses.includes(o.status)).map((o) => ({ ...o })),
         update: async (payload) => { closedOffers.push({ ...filter, payload }); return 1; },
       };
       return offers;
@@ -123,7 +130,8 @@ function makeDb() {
   db.__setStaff = (list) => { staff = list; };
   db.__samePhoneQueries = () => samePhoneQueries;
   db.__setSamePhoneFails = (fails) => { samePhoneFails = fails; };
-  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; closedOffers.length = 0; };
+  db.__resetSamePhone = () => { samePhoneQueries = []; samePhoneFails = false; closedOffers.length = 0; heldOffers = []; };
+  db.__setHeldOffers = (list) => { heldOffers = list; };
   db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 }
@@ -751,5 +759,39 @@ describe('PATCH /:id/status — closing an application withdraws its outstanding
     mockDb.__setRows([appRow({ status: 'rejected' })]);
     await patch(APP_ID, { status: 'rejected', note: 'still no' });
     expect(mockDb.__closedOffers()).toEqual([]);
+  });
+});
+
+describe('PATCH /:id/status — an offer the applicant holds is withdrawn only by the owner account', () => {
+  const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const inDays = (n) => new Date(Date.now() + n * 86400000).toISOString();
+  afterEach(() => { mockStaffEmail = null; });
+
+  test.each(['rejected', 'reviewed'])('another admin moving an application with a sent offer to %s is refused; nothing changes', async (status) => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
+    const res = await patch(APP_ID, { status });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: 'OWNER_ONLY' });
+    expect(mockDb.__rows()[0].status).toBe('offer');
+    expect(mockDb.__closedOffers()).toEqual([]);
+  });
+
+  test('a date request is held even past the expiry; an expired sent offer is not', async () => {
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'date_requested', expires_at: inDays(-2) }]);
+    expect((await patch(APP_ID, { status: 'rejected' })).status).toBe(403);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(-2) }]);
+    expect((await patch(APP_ID, { status: 'rejected' })).status).toBe(200);
+    expect(mockDb.__closedOffers()).toHaveLength(1);
+  });
+
+  test('the owner account can move it, and the offer is withdrawn in the same transaction', async () => {
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    mockDb.__setRows([appRow({ status: 'offer' })]);
+    mockDb.__setHeldOffers([{ id: 'o1', status: 'sent', expires_at: inDays(3) }]);
+    const res = await patch(APP_ID, { status: 'rejected' });
+    expect(res.status).toBe(200);
+    expect(mockDb.__closedOffers()).toEqual([expect.objectContaining({ payload: expect.objectContaining({ status: 'withdrawn' }) })]);
   });
 });
