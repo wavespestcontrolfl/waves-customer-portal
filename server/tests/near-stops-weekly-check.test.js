@@ -43,21 +43,25 @@ const {
   weekIsMissing,
   DEDUPE_KEY,
   _private: {
-    buildPlaces, findApartPairs, holdFor, replanHoldFor, loadReplanFixed, loadUpcomingStops, physicalLegs,
+    buildPlaces, findApartPairs, holdFor, replanHoldFor, loadNightLog, loadReplanFixed, loadUpcomingStops, physicalLegs,
     shortDriveSummary, composeWeeklyCheck, ringOnNewPair, writeAlert, sentRecently,
   },
 } = require('../services/near-stops-weekly-check');
 
-// A knex stand-in that records each call and resolves to `rows` when awaited.
-function recorder(rows) {
+// A knex stand-in that records each call; a query on a table resolves to
+// `byTable[table]` when awaited.
+function recorder(byTable) {
   const calls = [];
-  const chain = new Proxy({}, {
-    get(_target, prop) {
-      if (prop === 'then') return (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
-      return (...args) => { calls.push([prop, ...args]); return chain; };
-    },
-  });
-  const conn = jest.fn((table) => { calls.push(['table', table]); return chain; });
+  const chainFor = (result) => {
+    const chain = new Proxy({}, {
+      get(_target, prop) {
+        if (prop === 'then') return (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+        return (...args) => { calls.push([prop, ...args]); return chain; };
+      },
+    });
+    return chain;
+  };
+  const conn = jest.fn((table) => { calls.push(['table', table]); return chainFor(byTable[table]); });
   return { conn, calls };
 }
 
@@ -131,7 +135,31 @@ describe('part 1: next-door stops booked apart', () => {
     expect(pairs[0]).toMatchObject({ sameCustomer: false, between: 1 });
     const replan = new Map([['2027-03-01|tech-1', new Map([[pairs[0].first.id, 'time_told']])]]);
     const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan, weekStart: '2027-03-01' });
-    expect(detail).toMatch(/- Avery S\. and Blake E\. \(Lakewood Ranch\), about 260 ft apart: Mon, Mar 1 9:00\sAM \(customer already told the time\) and 11:00\sAM \(the re-plan could move it\), same day, 1 stop between\./);
+    expect(detail).toMatch(/- Avery S\. and Blake E\. \(Lakewood Ranch\), about 260 ft apart: Mon, Mar 1 9:00\sAM \(customer already told the time\) and 11:00\sAM \(no lock listed in the last re-plan\), same day, 1 stop between\./);
+  });
+
+  test("two technicians on one day: each visit reads its own technician's re-plan", () => {
+    const rows = [
+      stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', start: '09:00' }),
+      { ...stop({ customer: 'c-b', first: 'Blake', last: 'Example', at: NEXT_DOOR, date: '2027-03-01', start: '11:00' }), technician_id: 'tech-2' },
+    ];
+    const pairs = findApartPairs(rows);
+    expect(pairs).toEqual([expect.objectContaining({ twoTechs: true })]);
+    const replan = new Map([
+      ['2027-03-01|tech-1', new Map([[pairs[0].first.id, 'time_told']])],
+      ['2027-03-01|tech-2', new Map([[pairs[0].second.id, 'staff_lock']])],
+    ]);
+    const { detail } = composeWeeklyCheck({ apart: pairs, nightLog: new Map(), replan, weekStart: '2027-03-01' });
+    expect(detail).toMatch(/Mon, Mar 1 9:00\sAM \(customer already told the time\) and 11:00\sAM \(locked by staff\), same day, two technicians\./);
+  });
+
+  test('a combined visit next door pairs the same way whatever order its rows come in', () => {
+    const home = stop({ customer: 'c-a', at: HOME_A, date: '2027-03-01', plan: true });
+    const pest = stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true });
+    const lawn = stop({ customer: 'c-b', at: NEXT_DOOR, date: '2027-03-04', plan: true });
+    const keys = (rows) => composeWeeklyCheck({ apart: findApartPairs(rows), nightLog: new Map(), weekStart: '2027-03-01' }).itemKeys;
+    expect(keys([lawn, pest, home])).toEqual(keys([home, pest, lawn]));
+    expect(keys([home, lawn, pest])).toEqual(keys([home, pest, lawn]));
   });
 
   test("one customer's two homes on one day with a stop between are reported: the re-plan keeps their hours", () => {
@@ -248,15 +276,20 @@ describe('what holds each visit, in plain words', () => {
     expect(holdFor(planVisit, null)).toBe('no night run to read');
   });
 
-  test("a same-day visit: the re-plan's own reason, free to move, or no plan for that day and route", () => {
-    const p = { first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: null } };
+  test("a dry run's reason says so", () => {
+    const log = new Map([['svc-9', { reason_code: 'DRY_RUN_RECOMMENDATION', dry_run: true }]]);
+    expect(holdFor(planVisit, log)).toBe('dry run: the night run would move it');
+  });
+
+  test("a same-day visit: the re-plan's own reason, no lock listed, no plan, or no technician", () => {
     const replan = new Map([['2027-03-01|tech-1', new Map([['svc-1', 'within_24h'], ['svc-2', 'new_reason']])]]);
-    expect(replanHoldFor(p.first, p, replan)).toBe('less than 24 hours away');
-    expect(replanHoldFor(p.second, p, replan)).toBe('new reason');
-    expect(replanHoldFor({ id: 'svc-3', date: '2027-03-01' }, p, replan)).toBe('the re-plan could move it');
-    expect(replanHoldFor(p.first, p, new Map())).toBe('the re-plan did not plan this day');
-    const unassigned = { first: { ...p.first, tech: null }, second: p.second };
-    expect(replanHoldFor(unassigned.first, unassigned, replan)).toBe('the re-plan did not plan this day');
+    const visit = (id, tech = 'tech-1') => ({ id, date: '2027-03-01', tech });
+    expect(replanHoldFor(visit('svc-1'), replan)).toBe('less than 24 hours away');
+    expect(replanHoldFor(visit('svc-2'), replan)).toBe('new reason');
+    // The plan lists only the stops it fixed: an unlisted visit is never called free to move.
+    expect(replanHoldFor(visit('svc-3'), replan)).toBe('no lock listed in the last re-plan');
+    expect(replanHoldFor(visit('svc-1', 'tech-2'), replan)).toBe('the re-plan did not plan this day');
+    expect(replanHoldFor(visit('svc-1', null), replan)).toBe('no technician yet');
   });
 });
 
@@ -264,7 +297,7 @@ describe('what the check reads', () => {
   const NOW = new Date('2027-03-01T11:17:00.000Z');
 
   test('only live visits count: never a done, cancelled or skipped visit, a held slot or the demo account', async () => {
-    const { conn, calls } = recorder([{ id: 'v1', customer_id: 'c-1' }, { id: 'v2', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }]);
+    const { conn, calls } = recorder({ 'scheduled_services as s': [{ id: 'v1', customer_id: 'c-1' }, { id: 'v2', customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] }] });
     const rows = await loadUpcomingStops('2027-03-01', '2027-03-31', conn);
     expect(rows.map((r) => r.id)).toEqual(['v1']);
     const statuses = calls.find((c) => c[0] === 'whereIn' && c[1] === 's.status')[2];
@@ -273,22 +306,41 @@ describe('what the check reads', () => {
     expect(calls).toContainEqual(['whereNull', 's.reservation_expires_at']);
   });
 
-  test("the re-plan's newest plan for each day and route wins; only same-day pairs are read", async () => {
-    const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: 'tech-1' } };
-    const twoDays = { gap: 3, first: { id: 'svc-3', date: '2027-03-02', tech: 'tech-1' }, second: { id: 'svc-4', date: '2027-03-05', tech: 'tech-1' } };
-    const { conn, calls } = recorder([
-      { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'time_told' }] },
-      { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'within_24h' }, { id: 'svc-2', why: 'person_placed' }] },
-    ]);
-    const plans = await loadReplanFixed([sameDay, twoDays], NOW, conn);
-    expect(plans).toEqual(new Map([['2027-03-01|tech-1', new Map([['svc-1', 'time_told']])]]));
+  test("the re-plan's newest plan for each visit's day and technician wins; only same-day pairs are read", async () => {
+    const sameDay = { between: 1, first: { id: 'svc-1', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-2', date: '2027-03-01', tech: null } };
+    const twoTechs = { twoTechs: true, first: { id: 'svc-5', date: '2027-03-01', tech: 'tech-1' }, second: { id: 'svc-6', date: '2027-03-01', tech: 'tech-2' } };
+    const twoDays = { gap: 3, first: { id: 'svc-3', date: '2027-03-02', tech: 'tech-3' }, second: { id: 'svc-4', date: '2027-03-05', tech: 'tech-3' } };
+    const { conn, calls } = recorder({
+      day_replan_plans: [
+        { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'time_told' }] },
+        { service_date: '2027-03-01', technician_id: 'tech-1', fixed: [{ id: 'svc-1', why: 'within_24h' }, { id: 'svc-2', why: 'person_placed' }] },
+        { service_date: '2027-03-01', technician_id: 'tech-2', fixed: [] },
+      ],
+    });
+    const plans = await loadReplanFixed([sameDay, twoTechs, twoDays], NOW, conn);
+    expect(plans).toEqual(new Map([
+      ['2027-03-01|tech-1', new Map([['svc-1', 'time_told']])],
+      ['2027-03-01|tech-2', new Map()],
+    ]));
     expect(calls).toContainEqual(['table', 'day_replan_plans']);
     expect(calls).toContainEqual(['whereIn', 'service_date', ['2027-03-01']]);
-    expect(calls).toContainEqual(['orderBy', 'created_at', 'desc']);
+    expect(calls).toContainEqual(['whereIn', 'technician_id', ['tech-1', 'tech-2']]);
+    expect(calls).toContainEqual(['orderBy', [{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]]);
+  });
+
+  test('the newest finished night run of either mode: a dry run marks its lines', async () => {
+    const { conn, calls } = recorder({
+      auto_dispatch_runs: { id: 'run-9', mode: 'dry_run' },
+      auto_dispatch_audit_logs: [{ scheduled_service_id: 'svc-1', action: 'recommended', reason_code: 'DRY_RUN_RECOMMENDATION' }],
+    });
+    const log = await loadNightLog(['svc-1'], NOW, conn);
+    expect(log.get('svc-1')).toMatchObject({ reason_code: 'DRY_RUN_RECOMMENDATION', dry_run: true });
+    expect(calls.some((c) => c[0] === 'where' && c[1] && c[1].mode)).toBe(false);
+    expect(calls).toContainEqual(['first', 'id', 'mode']);
   });
 
   test('no same-day pair: the re-plan is not read', async () => {
-    const { conn } = recorder([]);
+    const { conn } = recorder({});
     const twoDays = { gap: 2, first: { date: '2027-03-01', tech: 'tech-1' }, second: { date: '2027-03-03', tech: 'tech-1' } };
     await expect(loadReplanFixed([twoDays], NOW, conn)).resolves.toEqual(new Map());
     expect(conn).not.toHaveBeenCalled();
@@ -370,6 +422,7 @@ describe('the notification', () => {
       drives: { total: 0, median: null, since: '2026-08-27', newest: [] },
     });
     expect(out.detail).toContain('Truck GPS, drives under half a mile from one visit to the next: none since Thu, Aug 27. ');
+    expect(out.detail).toMatch(/The app prices a 0\.1-mile hop at about \d+ min\.$/);
   });
 
   test("a combined visit's inbound drive, written on each of its service rows, counts once", () => {
@@ -389,6 +442,17 @@ describe('the notification', () => {
     const summary = shortDriveSummary(legs);
     expect(summary).toMatchObject({ total: 2, median: 3 });
     expect(summary.newest.map((l) => l.service_date)).toEqual(['2027-03-02', '2027-02-01']);
+  });
+
+  test('the newest drives: the latest day first, then the latest arrival, a drive with no arrival last', () => {
+    const leg = (id, day, at) => ({ scheduled_service_id: id, service_date: day, gps_arrived_at: at ? new Date(at) : null, drive_minutes: 1 });
+    const legs = [
+      leg('a', '2027-03-02', '2027-03-02T14:00:00Z'),
+      leg('b', '2027-03-02', '2027-03-02T18:00:00Z'),
+      leg('c', '2027-03-02', null),
+      leg('d', '2027-03-01', '2027-03-01T20:00:00Z'),
+    ];
+    expect(shortDriveSummary(legs).newest.map((l) => l.scheduled_service_id)).toEqual(['b', 'a', 'c']);
   });
 
   test('a refresh rings only when a split joins the set', () => {

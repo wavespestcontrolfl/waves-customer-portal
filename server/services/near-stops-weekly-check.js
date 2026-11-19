@@ -8,9 +8,9 @@
  *   1. Next-door stops booked apart in the next 30 days: two stops 0.1 mile or
  *      closer (any customers), or one customer's two homes half a mile or
  *      closer. Each line says what holds each visit where it is: for two days,
- *      the night run's own log line for that visit (auto_dispatch_audit_logs);
- *      for one day, the 4:40 AM day re-plan's own reason the visit keeps its
- *      hour (day_replan_plans.fixed).
+ *      the newest night run's own log line for that visit (auto_dispatch_audit_logs,
+ *      a dry run marked as one); for one day, the 4:40 AM day re-plan's own reason
+ *      the visit keeps its hour (day_replan_plans.fixed, the visit's own technician).
  *   3. Truck GPS minutes for visit-to-visit drives under half a mile
  *      (visit_gps_legs), one drive per stop, every drive since the first
  *      matched leg: the evidence a short-hop drive price would need.
@@ -92,6 +92,9 @@ const HOLD_WORDS = {
   MANUALLY_LOCKED: 'locked by staff',
   AUTO_DISPATCH_EXCLUDED: 'excluded by staff',
   CHANGE_APPLIED: 'the night run moved it there',
+  DRY_RUN_RECOMMENDATION: 'the night run would move it',
+  WITHIN_73H: 'too close to its day to move',
+  SUNDAY_CAP_REACHED: "the night's Sunday move cap was reached",
 };
 
 // The 4:40 AM day re-plan's reasons a visit keeps its hour (day-replan fixedReason
@@ -203,16 +206,19 @@ function nearPairs(places) {
   return pairs;
 }
 
+const slotKey = (v) => `${v.date} ${v.windowStart || '99:99'}`;
+// Earlier slot first, then the lower id: two rows of one combined visit always
+// resolve the same way, so a split keeps its key from week to week.
+const visitOrder = (x, y) => slotKey(x).localeCompare(slotKey(y)) || x.id.localeCompare(y.id);
+
 function nearestVisit(visit, others) {
   let best = null;
   for (const other of others) {
     const gap = Math.abs(daysBetween(visit.date, other.date));
-    if (!best || gap < best.gap || (gap === best.gap && other.date < best.visit.date)) best = { visit: other, gap };
+    if (!best || gap < best.gap || (gap === best.gap && visitOrder(other, best.visit) < 0)) best = { visit: other, gap };
   }
   return best ? best.visit : null;
 }
-
-const slotKey = (v) => `${v.date} ${v.windowStart || '99:99'}`;
 
 // Each visit of the place with fewer visits meets the nearest-dated visit of the
 // other place, so a monthly plan beside a two-monthly one pairs its nearer round,
@@ -222,9 +228,9 @@ function matchVisits(pair) {
   const matches = [];
   for (const visit of few.visits) {
     const near = nearestVisit(visit, many.visits);
-    if (near) matches.push([visit, near].sort((x, y) => slotKey(x).localeCompare(slotKey(y))));
+    if (near) matches.push([visit, near].sort(visitOrder));
   }
-  return matches.sort((x, y) => slotKey(x[0]).localeCompare(slotKey(y[0])));
+  return matches.sort((x, y) => visitOrder(x[0], y[0]) || visitOrder(x[1], y[1]));
 }
 
 // An unassigned stop (no technician) may be on either route, so it counts.
@@ -276,6 +282,8 @@ function splitOf(first, second, pair, stopsByDay) {
 }
 
 const gapOf = (p) => p.gap ?? 0;
+// One stable key per split: its two visits.
+const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
 
 function findApartPairs(rows) {
   const places = buildPlaces(rows);
@@ -288,7 +296,7 @@ function findApartPairs(rows) {
     if (hit) apart.push({ ...pair, first: hit.first, second: hit.second, ...hit.split });
   }
   // Same-day splits first, then the pairs the fewest days apart: the easiest to join.
-  return apart.sort((x, y) => gapOf(x) - gapOf(y) || slotKey(x.first).localeCompare(slotKey(y.first)));
+  return apart.sort((x, y) => gapOf(x) - gapOf(y) || visitOrder(x.first, y.first) || pairKey(x).localeCompare(pairKey(y)));
 }
 
 function holdFor(visit, nightLog) {
@@ -297,20 +305,23 @@ function holdFor(visit, nightLog) {
   const row = nightLog.get(visit.id);
   if (!row) return 'not in the night run';
   const code = String(row.reason_code || row.action || 'no reason logged');
-  return HOLD_WORDS[code] || code.toLowerCase().replace(/_/g, ' ');
+  const words = HOLD_WORDS[code] || code.toLowerCase().replace(/_/g, ' ');
+  return row.dry_run ? `dry run: ${words}` : words;
 }
 
-// Same-day pairs: the re-plan's newest plan for that day and route says why each
-// visit keeps its hour. No plan: the re-plan did not plan the day (past its reach,
-// no technician, too few stops, or a day it skipped).
-const routeTechOf = (p) => p.first.tech || p.second.tech;
+// Same-day pairs: the re-plan's newest plan for the visit's own day and technician
+// says why it keeps its hour. The re-plan plans only assigned visits, and a plan
+// lists only the stops it fixed, so a visit it does not list reads as no lock listed,
+// never as free to move (the plan may be older than the visit). No plan: the re-plan
+// did not plan that day (past its reach, too few stops, or a day it skipped).
 const replanKey = (date, tech) => `${date}|${tech}`;
 
-function replanHoldFor(visit, p, replan) {
-  const plan = replan && routeTechOf(p) ? replan.get(replanKey(visit.date, routeTechOf(p))) : null;
+function replanHoldFor(visit, replan) {
+  if (!visit.tech) return 'no technician yet';
+  const plan = replan ? replan.get(replanKey(visit.date, visit.tech)) : null;
   if (!plan) return 'the re-plan did not plan this day';
   const why = plan.get(visit.id);
-  if (!why) return 'the re-plan could move it';
+  if (!why) return 'no lock listed in the last re-plan';
   return REPLAN_HOLD_WORDS[why] || String(why).replace(/_/g, ' ');
 }
 
@@ -321,21 +332,20 @@ function splitLabel(p) {
   return `${plural(p.gap, 'day')} apart${reach}`;
 }
 
-// Each visit's time, with what holds that visit where it is.
-function visitWords(visit, nightLog, withDay) {
+// Each visit's time, with what holds it there: on one day the re-plan's reason for
+// its hour, on two days the night run's reason for its day.
+function visitWords(visit, hold, withDay) {
   const when = withDay ? whenLabel(visit.date, visit.windowStart) : timeLabel(visit.date, visit.windowStart);
-  return `${when} (${holdFor(visit, nightLog)})`;
+  return `${when} (${hold})`;
 }
 
 function pairLine(p, nightLog, replan) {
   const who = p.sameCustomer ? `${p.first.placeName}'s two homes` : `${p.first.placeName} and ${p.second.placeName}`;
   const lead = `- ${who}${p.first.city ? ` (${p.first.city})` : ''}, ${distanceLabel(p.miles)} apart: `;
-  if (p.between != null) {
-    return `${lead}${whenLabel(p.first.date, p.first.windowStart)} (${replanHoldFor(p.first, p, replan)}) and `
-      + `${timeLabel(p.second.date, p.second.windowStart)} (${replanHoldFor(p.second, p, replan)}), ${splitLabel(p)}.`;
-  }
   const sameDay = p.first.date === p.second.date;
-  return `${lead}${visitWords(p.first, nightLog, true)} and ${visitWords(p.second, nightLog, !sameDay)}, ${splitLabel(p)}.`;
+  const holdOf = (visit) => (sameDay ? replanHoldFor(visit, replan) : holdFor(visit, nightLog));
+  return `${lead}${visitWords(p.first, holdOf(p.first), true)} and ${visitWords(p.second, holdOf(p.second), !sameDay)}, `
+    + `${splitLabel(p)}.`;
 }
 
 // ---------------------------------------------------- part 3: short GPS drives
@@ -359,8 +369,10 @@ function shortDriveSummary(legs) {
   const minutes = legs.map((l) => Number(l.drive_minutes)).filter(Number.isFinite).sort((a, b) => a - b);
   const mid = Math.floor(minutes.length / 2);
   const median = minutes.length % 2 ? minutes[mid] : (minutes.length ? (minutes[mid - 1] + minutes[mid]) / 2 : null);
+  const arrived = (l) => (l.gps_arrived_at ? ms(l.gps_arrived_at) : -Infinity);
   const newest = [...legs]
-    .sort((a, b) => dateOnlyString(b.service_date).localeCompare(dateOnlyString(a.service_date)))
+    .sort((a, b) => dateOnlyString(b.service_date).localeCompare(dateOnlyString(a.service_date))
+      || arrived(b) - arrived(a) || String(a.scheduled_service_id).localeCompare(String(b.scheduled_service_id)))
     .slice(0, NEWEST_DRIVES);
   return { total: legs.length, median, newest };
 }
@@ -369,7 +381,7 @@ const legWords = (l) => `${Number(l.drive_miles).toFixed(1)} mi in ${Number(l.dr
 
 function gpsLine(drives) {
   const since = drives.since ? ` since ${dayLabel(drives.since)}` : '';
-  const price = `The app prices such a drive at about ${milesToDriveMinutes(0.1)} min.`;
+  const price = `The app prices a 0.1-mile hop at about ${milesToDriveMinutes(0.1)} min.`;
   const lead = 'Truck GPS, drives under half a mile from one visit to the next:';
   if (!drives.total) return `${lead} none${since}. ${price}`;
   const median = drives.median != null ? `, median ${Number(drives.median).toFixed(1)} min` : '';
@@ -386,8 +398,6 @@ function pairLead(p) {
   return `Easiest to join: ${what}, ${dayLabel(p.first.date)} and ${dayLabel(p.second.date)}`;
 }
 
-// One stable key per split: its two visits.
-const pairKey = (p) => [p.first.id, p.second.id].sort().join('|');
 
 function capped(lines) {
   if (lines.length <= MAX_LINES) return lines;
@@ -496,6 +506,7 @@ async function loadUpcomingStops(today, until, conn = db) {
     .whereBetween('s.scheduled_date', [today, until])
     .whereIn('s.status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
     .whereNull('s.reservation_expires_at')
+    .orderBy([{ column: 's.scheduled_date' }, { column: 's.window_start' }, { column: 's.id' }])
     .select(
       's.id', 's.customer_id', 's.scheduled_date', 's.window_start', 's.technician_id',
       's.is_recurring', 's.recurring_parent_id', 's.lat', 's.lng',
@@ -506,38 +517,40 @@ async function loadUpcomingStops(today, until, conn = db) {
   return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
-// The newest completed nightly run's line for each visit (last line wins). Null
-// when no run completed in the last NIGHT_LOG_HOURS, so the report says so.
+// The newest finished nightly run's line for each visit (last line wins), a dry
+// run's lines marked as such. Null when no run finished in the last
+// NIGHT_LOG_HOURS, so the report says so.
 async function loadNightLog(visitIds, now = new Date(), conn = db) {
   if (!visitIds.length) return new Map();
-  // The night tool's own runs, as its catch-up reads them (cron or catch_up,
-  // finished with or without errors); a staff run never stands in for it.
+  // The night tool's own runs, in either mode, as its catch-up counts them (cron or
+  // catch_up, finished with or without errors); a staff run never stands in for it.
   const run = await conn('auto_dispatch_runs')
-    .where({ mode: 'apply' })
     .whereIn('triggered_by', NIGHT_TRIGGERS)
     .whereIn('status', FINISHED_STATUSES)
     .where('started_at', '>=', new Date(now.getTime() - NIGHT_LOG_HOURS * 3600000))
     .orderBy('started_at', 'desc')
-    .first('id');
+    .first('id', 'mode');
   if (!run) return null;
   const rows = await conn('auto_dispatch_audit_logs')
     .where('auto_dispatch_run_id', run.id)
     .whereIn('scheduled_service_id', visitIds)
-    .orderBy('created_at', 'asc')
+    .orderBy([{ column: 'created_at' }, { column: 'id' }])
     .select('scheduled_service_id', 'action', 'reason_code');
-  return new Map(rows.map((r) => [String(r.scheduled_service_id), r]));
+  const dryRun = run.mode === 'dry_run';
+  return new Map(rows.map((r) => [String(r.scheduled_service_id), { ...r, dry_run: dryRun }]));
 }
 
-// The newest day re-plan plan (last NIGHT_LOG_HOURS) for each same-day pair's day
-// and route: a map of `date|tech` to a map of visit id to the reason it keeps its hour.
+// The newest day re-plan plan (last NIGHT_LOG_HOURS) for each same-day visit's own
+// day and technician: a map of `date|tech` to a map of visit id to the reason it
+// keeps its hour.
 async function loadReplanFixed(apart, now = new Date(), conn = db) {
-  const days = apart.filter((p) => p.between != null && routeTechOf(p));
-  if (!days.length) return new Map();
+  const visits = apart.filter((p) => p.first.date === p.second.date).flatMap((p) => [p.first, p.second]).filter((v) => v.tech);
+  if (!visits.length) return new Map();
   const rows = await conn('day_replan_plans')
-    .whereIn('service_date', [...new Set(days.map((p) => p.first.date))])
-    .whereIn('technician_id', [...new Set(days.map(routeTechOf))])
+    .whereIn('service_date', [...new Set(visits.map((v) => v.date))])
+    .whereIn('technician_id', [...new Set(visits.map((v) => v.tech))])
     .where('created_at', '>=', new Date(now.getTime() - NIGHT_LOG_HOURS * 3600000))
-    .orderBy('created_at', 'desc')
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .select('service_date', 'technician_id', 'fixed');
   const plans = new Map();
   for (const row of rows) {
@@ -553,7 +566,8 @@ async function loadShortDrives(conn = db) {
   const rows = await conn('visit_gps_legs')
     .where({ status: 'matched', drive_from_kind: 'visit' })
     .where('drive_miles', '<', SHORT_DRIVE_MILES)
-    .select('technician_id', 'service_date', 'gps_arrived_at', 'leg_group_key', 'drive_miles', 'drive_minutes');
+    .orderBy([{ column: 'service_date' }, { column: 'gps_arrived_at' }, { column: 'scheduled_service_id' }])
+    .select('scheduled_service_id', 'technician_id', 'service_date', 'gps_arrived_at', 'leg_group_key', 'drive_miles', 'drive_minutes');
   const legs = physicalLegs(rows);
   const first = await conn('visit_gps_legs').where({ status: 'matched' }).min('service_date as first').first();
   return { ...shortDriveSummary(legs), since: first?.first ? dateOnlyString(first.first) : null };
@@ -648,6 +662,7 @@ module.exports = {
     findApartPairs,
     holdFor,
     replanHoldFor,
+    loadNightLog,
     loadReplanFixed,
     loadUpcomingStops,
     physicalLegs,
