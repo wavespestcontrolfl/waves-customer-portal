@@ -19,13 +19,17 @@ const row = (id, title, extra = {}) => ({
 // This visit: a [Found] line of the raw note saved as a bare title (the
 // highest severity, so an unfiltered reader leads with it), a finding with
 // its own detail, and an older row that stored the picked form label bare.
-// The prior visit: its own bare title and a detailed finding.
+// The prior visit: its own bare raw title, a detailed finding, a bare label
+// only its own snapshot lists (kept, and its main driver) and a bare label
+// only this visit's snapshot lists (dropped: each visit proves its own rows).
 const RAW = row('f-raw', 'Gate code 4471 by the side door', { severity: 'critical' });
 const DETAILED = row('f-detail', 'Ant trail at the slab', { detail: 'A trail along the north wall.', recommendation: 'Keep mulch back from the slab.' });
 const FORM_LABEL = row('f-form', 'Yellowjacket');
 const PRIOR_RAW = row('p-raw', 'Lockbox 2210 under the mat', { service_record_id: PRIOR_ID, severity: 'critical' });
 const PRIOR_DETAILED = row('p-detail', 'Roach activity in the garage', { service_record_id: PRIOR_ID, detail: 'Two adults under the water heater.' });
-const BARE_TEXT = /4471|side door|2210|Lockbox/;
+const PRIOR_OWN_LABEL = row('p-own', 'Fire ant mounds', { service_record_id: PRIOR_ID, severity: 'critical' });
+const PRIOR_OTHER_LABEL = row('p-other', 'Paper wasp nest', { service_record_id: PRIOR_ID, severity: 'medium' });
+const BARE_TEXT = /4471|side door|2210|Lockbox|Paper wasp/;
 
 const visit = (id, date, pressure, notes) => ({
   id, customer_id: 'cust-proven', service_line: 'pest', service_type: 'Quarterly Pest Control Service', status: 'completed',
@@ -34,10 +38,10 @@ const visit = (id, date, pressure, notes) => ({
 // Both readings before the 2026-09-24 scale cutover, so the trend compares them.
 const TABLES = {
   service_records: [
-    visit(RECORD_ID, '2026-09-10', 2.5, JSON.stringify({ formObservations: ['Yellowjacket'], observations: ['Yellowjacket', RAW.title] })),
-    visit(PRIOR_ID, '2026-07-10', 3.1, '{}'),
+    visit(RECORD_ID, '2026-09-10', 2.5, JSON.stringify({ formObservations: ['Yellowjacket', 'Paper wasp nest'], observations: ['Yellowjacket', RAW.title] })),
+    visit(PRIOR_ID, '2026-07-10', 3.1, { formObservations: ['Fire ant mounds'] }),
   ],
-  service_findings: [RAW, DETAILED, FORM_LABEL, PRIOR_RAW, PRIOR_DETAILED],
+  service_findings: [RAW, DETAILED, FORM_LABEL, PRIOR_RAW, PRIOR_DETAILED, PRIOR_OWN_LABEL, PRIOR_OTHER_LABEL],
 };
 
 // Each query resolves its table's rows; plain-object, two-argument,
@@ -92,7 +96,8 @@ describe('customer readers of a visit\'s findings', () => {
     expect(JSON.stringify(context.aiSummary)).toContain('Ant trail at the slab');
     expect(JSON.stringify(context.aiSummary)).toContain('Yellowjacket');
     expect(JSON.stringify(context.premiumExperience)).toContain('Ant trail at the slab');
-    expect(JSON.stringify(context.pressureTrend)).toContain('Roach activity in the garage');
+    const priorPoint = context.pressureTrend.points.find((point) => point.serviceRecordId === PRIOR_ID);
+    expect(priorPoint).toMatchObject({ mainDriver: 'Fire ant mounds', findingsCount: 2 });
     expect(context.sinceLastVisit.activityLine).toContain('Ant trail at the slab');
     expect(JSON.stringify(context)).not.toMatch(BARE_TEXT);
   });
@@ -101,7 +106,9 @@ describe('customer readers of a visit\'s findings', () => {
     const copy = await buildReportCopyContext({
       customerId: 'cust-proven', serviceType: 'Quarterly Pest Control Service', serviceLine: 'pest', serviceDate: '2026-11-20', knex: fakeKnex(TABLES),
     });
-    expect(JSON.stringify(copy)).toContain('Roach activity in the garage');
+    const priorLine = copy.contextText.split('\n').find((line) => line.startsWith('Earlier ('));
+    expect(priorLine).toContain('Roach activity in the garage');
+    expect(priorLine).toContain('Fire ant mounds');
     expect(JSON.stringify(copy)).not.toMatch(BARE_TEXT);
   });
 });
