@@ -513,6 +513,13 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(kept).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
       expect(kept.due_at.toISOString()).toBe(twoPm.toISOString());
       expect(rung('addendum')).toHaveLength(0);
+      // A Close Date the parser cannot read flags the bid and rings; the confirmed date stays.
+      const unread = await service.ingestEmail(await notice('t-mfmp-day-4', 'Oct 30, 2026 2:00 PM'));
+      expect(unread).toMatchObject({ created: false, bidId: first.bidId });
+      const flagged = await bidRow(first.bidId);
+      expect(flagged).toMatchObject({ needs_date_confirmation: true, due_confirmed: true });
+      expect(flagged.due_at.toISOString()).toBe(twoPm.toISOString());
+      expect(rung('addendum')).toHaveLength(1);
       const moved = await service.ingestEmail(await notice('t-mfmp-day-3', 'Nov 5, 2026'));
       expect(moved).toMatchObject({ created: false, bidId: first.bidId });
       expect(await bidRow(first.bidId)).toMatchObject({ needs_date_confirmation: true });
@@ -613,6 +620,13 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(real.created).toBe(true);
       expect(await bidRow(real.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17800' });
       expect(rung('new')).toHaveLength(1);
+     // A later keyless follow-up in that thread (no type line, an ITB subject) joins the thread's one open bid.
+      const followUp = await service.ingestEmail(await storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: 't-mfmp-thr-1',
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17800 addendum', body_text: 'An addendum was posted. Log in to VIP to view it.',
+      }));
+      expect(followUp).toMatchObject({ created: false, bidId: real.bidId });
     });
 
     test('of two open copies of one advertisement, an older keyless one and a newer keyed one, a repeat joins the older', async () => {

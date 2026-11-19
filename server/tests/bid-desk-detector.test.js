@@ -545,6 +545,14 @@ describe('MyFloridaMarketPlace advertisement notices', () => {
     expect(decision).toMatchObject({ template: 'mfmp', solicitation_number: 'ITB-17200', group_key: null, group_base: null });
   });
 
+  test('an unreadable Close Date line is told apart from a missing one', () => {
+    const { mfmpUnreadCloseLine } = require('../services/bid-desk/detector');
+    expect(mfmpUnreadCloseLine(mfmpNotice({}, { close: 'Dec 2, 2026 2:00 PM' }))).toBe('Close Date: Dec 2, 2026 2:00 PM');
+    expect(mfmpUnreadCloseLine(mfmpNotice())).toBeNull();
+    expect(mfmpUnreadCloseLine(mfmpNotice({ body_text: MFMP_BODY().replace(/^ Close Date:.*\n/m, '') }))).toBeNull();
+    expect(mfmpUnreadCloseLine(mfmpNotice({ provider_verified_strict: false }, { close: 'Dec 2, 2026 2:00 PM' }))).toBeNull();
+  });
+
   test('only one plain address is read as the buyer email', () => {
     expect(parseBidEmail(mfmpNotice({}, { email: 'a@fixture-agency.example, b@fixture-agency.example' })).buyer_email).toBeNull();
     expect(parseBidEmail(mfmpNotice({}, { email: 'Casey.Sample@Fixture-Agency.example' })).buyer_email).toBe('casey.sample@fixture-agency.example');

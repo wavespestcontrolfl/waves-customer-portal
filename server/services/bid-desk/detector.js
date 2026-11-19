@@ -507,6 +507,17 @@ function mfmpDue(lines) {
   return firstDate(labelledValues(lines, 'Close Date').filter((match) => MFMP_CLOSE_DAY.test(match.value)), '23:59');
 }
 
+// The Close Date line of a verified MFMP notice when it is there but not a date we read ("Dec 2, 2026 2:00 PM"), else
+// null. The caller flags the bid for the operator: the stored date stays, but it can no longer be trusted.
+function mfmpUnreadCloseLine(email = {}) {
+  if (senderKind(email) !== 'mfmp') return null;
+  const lines = bodyLines(email);
+  if (!mfmpNotice(lines)) return null;
+  const closes = labelledValues(lines, 'Close Date');
+  if (!closes.length || mfmpDue(lines)) return null;
+  return closes[0].line;
+}
+
 const normalizeTitle = (title) => String(title || '')
   .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -594,6 +605,6 @@ function parseBidEmail(email = {}) {
 const passesGmailSpam = (email = {}) => email.gmail_spam_verified === true && senderKind(email) === 'bluebook';
 
 module.exports = {
-  detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, htmlToText, normalizeTitle, classifyKind, domainOf,
+  detectBidEmail, passesGmailSpam, parseBidEmail, parseDateET, mfmpUnreadCloseLine, htmlToText, normalizeTitle, classifyKind, domainOf,
   BID_WORDS, ADDENDUM_WORDS, PUBLIC_PORTAL_DOMAINS,
 };

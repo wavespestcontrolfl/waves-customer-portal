@@ -16,7 +16,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
+const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam, mfmpUnreadCloseLine } = require('./detector');
 const { etDateString } = require('../../utils/datetime-et');
 const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 const alerts = require('./alerts');
@@ -137,17 +137,35 @@ function patchInput(existing, parsed) {
   return { ...parsed, due_at: null, due_source_line: null };
 }
 
+// attachPatch for a later email, plus one MFMP rule: a repeat whose Close Date line is there but unreadable flags the
+// bid (the stored date stays; a flag pauses its reminders and rings on an open bid), as a changed date would.
+function attachFor(live, parsed, kind, email) {
+  const result = attachPatch(live, patchInput(live, parsed), kind);
+  if (!live.due_at || !mfmpUnreadCloseLine(email)) return result;
+  const patch = live.needs_date_confirmation ? result.patch : { ...result.patch, needs_date_confirmation: true };
+  const open = OPEN_STATUSES.includes(live.status) && !live.historical;
+  return { patch, notifyAddendum: result.notifyAddendum || (open && patch.needs_date_confirmation === true) };
+}
+
+// The bid an email's Gmail thread belongs to. One thread can hold two bids (a keyed MFMP solicitation files apart
+// from a decision notice in its thread): a follow-up then joins the thread's one open bid, else the oldest.
+async function threadBid(trx, thread) {
+  const rows = await trx('bid_opportunities')
+    .where({ gmail_thread_id: thread })
+    .orWhereIn('id', trx('bid_opportunity_emails as l').join('emails as e', 'e.id', 'l.email_id')
+      .where('e.gmail_thread_id', thread).select('l.bid_id'))
+    .orderBy('created_at');
+  const open = rows.filter((row) => OPEN_STATUSES.includes(row.status));
+  return (open.length === 1 ? open[0] : rows[0]) || null;
+}
+
 async function findBid(trx, email, groupKey, groupBase = null, kind = null, template = null) {
   // A keyed MFMP notice joins by its advertisement number only (mfmpRepeatBid also finds keyless bids filed before the
   // template): Gmail threads MFMP notices by subject, so a thread is no identity for it.
   if (groupKey && REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   const thread = email.gmail_thread_id;
   if (thread) {
-    const byThread = await trx('bid_opportunities')
-      .where({ gmail_thread_id: thread })
-      .orWhereIn('id', trx('bid_opportunity_emails as l').join('emails as e', 'e.id', 'l.email_id')
-        .where('e.gmail_thread_id', thread).select('l.bid_id'))
-      .orderBy('created_at').first();
+    const byThread = await threadBid(trx, thread);
     if (byThread) return byThread;
   }
   if (!groupKey) return null;
@@ -218,7 +236,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
       // Current mail on a bid the backfill filed as history makes it live again: alerts and reminders apply.
       const promote = !historical && existing.historical;
       const live = promote ? { ...existing, historical: false } : existing;
-      const { patch, notifyAddendum } = attachPatch(live, patchInput(live, parsed), kind);
+      const { patch, notifyAddendum } = attachFor(live, parsed, kind, email);
       if (promote) patch.historical = false;
       // A bid first filed from a plain email (no cross-thread key) takes the key of the first template email in it.
       if (!existing.group_key && parsed.group_key) patch.group_key = parsed.group_key;
