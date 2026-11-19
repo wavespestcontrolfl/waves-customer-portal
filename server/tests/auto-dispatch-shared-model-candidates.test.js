@@ -163,24 +163,21 @@ test('gate on: no pre-score cap — every survivor is returned; gate off: the le
   expect(off.candidates.map((c) => c.date)).toEqual(['2026-08-05']);
 });
 
-// Sequenced db mock for a SINGLE candidate: call 1 = sibling-date query
-// (none), call 2 = the batched candidate tech-day stops — `dayStops`, call
-// 3 = computeCurrentPlacement's legacy neighbor query (none), call 4 =
-// computeCurrentPlacement's shared-model loadDayStops (none). The occupancy
-// check goes through the mocked probe, never ctx.db.
+// Return stops for the queried dates. The sibling-date query projects a
+// different set of columns and has no rows in these standalone fixtures.
 function singleCandidateDb(dayStops) {
-  let call = 0;
   return () => {
-    call += 1;
-    const n = call;
     const c = {};
-    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-      .forEach((m) => { c[m] = () => c; });
-    c.select = async () => {
-      if (n === 1) return []; // sibling query
-      if (n === 2) return dayStops; // the candidate tech-days' stops (one batched read)
-      return []; // current-placement queries (legacy + shared-model)
+    let dates = [];
+    let timedOnly = false;
+    ['where', 'whereNot', 'whereNotIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach(m => { c[m] = () => c; });
+    c.whereIn = (field, values) => {
+      if (field === 'scheduled_services.scheduled_date') dates = values;
+      return c;
     };
+    c.whereNotNull = field => { timedOnly ||= field === 'scheduled_services.window_start'; return c; };
+    c.select = async () => dayStops.filter(row => dates.includes(row.scheduled_date) && (!timedOnly || row.window_start != null));
     return c;
   };
 }
@@ -235,27 +232,6 @@ test('a day whose only stops are an expired hold + a no_show scores IDENTICALLY 
 // once .whereNotNull('...window_start') is invoked), so a regression that
 // drops that call would make this test fail — not just assert the call
 // shape.
-function windowlessAwareSingleCandidateDb(dayStopsFixture) {
-  let call = 0;
-  return () => {
-    call += 1;
-    const n = call;
-    const c = {};
-    let filteredWindowless = false;
-    ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
-      .forEach((m) => { c[m] = () => c; });
-    c.whereNotNull = (field) => {
-      if (field === 'scheduled_services.window_start') filteredWindowless = true;
-      return c;
-    };
-    c.select = async () => {
-      if (n === 1) return [];
-      if (n === 2) return filteredWindowless ? dayStopsFixture.filter((r) => r.window_start != null) : dayStopsFixture;
-      return [];
-    };
-    return c;
-  };
-}
 
 test('a day whose only "stop" is a windowless placeholder scores like an empty day (Codex pre-push P1)', async () => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
@@ -267,14 +243,14 @@ test('a day whose only "stop" is a windowless placeholder scores like an empty d
 
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
   const { candidates: withPlaceholder } = await findValidCandidateSlots(
-    SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([placeholderRow]) },
+    SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([placeholderRow]) },
   );
 
   jest.clearAllMocks();
   probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
   const { candidates: empty } = await findValidCandidateSlots(
-    SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([]) },
+    SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([]) },
   );
 
   expect(withPlaceholder).toHaveLength(1);
@@ -644,9 +620,7 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       return c;
     };
     await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db: withVisit(db) });
-    // The source snapshot includes the mover so its fresh coordinates and
-    // sequence fields are read with its neighbours. Its sibling stays out.
-    expect(new Set(capturedExcludeIds)).toEqual(new Set(['sib1']));
+    expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
   });
 });
 
@@ -758,6 +732,18 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
     expect(planUnitPlacement(service, { members, visitWindowStart: '09:00' }, cand).windows)
       .toEqual([{ start: '11:00', end: '12:00' }, { start: '11:00', end: '12:00' }]); // sibling +2h from the visit's 09:00
     expect(planUnitPlacement(service, { members, visitWindowStart: null }, cand)).toBeNull(); // the writer refuses: no anchor
+  });
+
+  test('current scoring anchors a grouped windowless tapped row at the visit start too', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const service = { ...SERVICE, visit_id: 'v1', window_start: null, window_end: null };
+    const groupContext = {
+      excludeIds: new Set(['s1', 'sib1']),
+      siblings: [{ id: 'sib1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }],
+      visitWindowStart: '09:00',
+    };
+    const current = await computeCurrentPlacement(service, prefs, { ...ctxBase(), db: emptyDb(), groupContext });
+    expect(current[ROAD_LEGS].startMin).toBe(9 * 60);
   });
 
   // Codex r2 (PRRT_kwDOR3YQi86mQebH): a shifted sibling that fails the admin
@@ -999,7 +985,7 @@ test('current and candidate scoring share the mover coordinates from the source-
   const db = () => {
     const c = {};
     let excluded = new Set();
-    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'leftJoin', 'whereBetween', 'orderBy'].forEach((m) => { c[m] = () => c; });
     c.whereNotIn = (field, ids) => {
       if (field === 'scheduled_services.id') excluded = new Set(ids.map(String));
       return c;
@@ -1007,14 +993,18 @@ test('current and candidate scoring share the mover coordinates from the source-
     c.select = async () => rows.filter((row) => !excluded.has(String(row.id)));
     return c;
   };
-  const ctx = { ...ctxBase(), db };
-  const current = await computeCurrentPlacement(stale, prefs, ctx);
-  const [candidate] = await filterAndScoreSharedModelCandidates(stale, { lat: stale.lat, lng: stale.lng }, [{
-    technician_id: 't1', date: '2026-08-04', start_time: '09:00', end_time: '10:00',
-  }], ctx, {});
-  expect(current[ROAD_LEGS].stop).toEqual(fresh);
-  expect(candidate[ROAD_LEGS].stop).toEqual(fresh);
-  expect(candidate.detour_minutes).toBeCloseTo(current.detour_minutes, 5);
+  findAvailableSlots.mockResolvedValue({ slots: [{ date: '2026-08-05', technician: { id: 't1', name: 'A' },
+    start_time: '09:00', end_time: '10:00', detour_minutes: 2, score: 1 }] });
+  const result = await findValidCandidateSlots(stale, prefs, { ...ctxBase(), db });
+  expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining(fresh));
+  expect(result.current[ROAD_LEGS].stop).toEqual(fresh);
+  expect(result.candidates[0][ROAD_LEGS].stop).toEqual(fresh);
+
+  rows[0] = { ...rows[0], svc_lat: null, svc_lng: null };
+  findAvailableSlots.mockClear();
+  expect(await findValidCandidateSlots(stale, prefs, { ...ctxBase(), db }))
+    .toMatchObject({ note: 'no_geo', candidates: [] });
+  expect(findAvailableSlots).not.toHaveBeenCalled();
 });
 
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's

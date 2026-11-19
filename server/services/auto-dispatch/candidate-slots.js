@@ -565,15 +565,8 @@ function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home
  * (one batched day-stop read). Nothing here writes.
  */
 async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
-  // The source-day read may have refreshed the mover since this evaluation's
-  // pass-one service object was loaded. Score candidates with that same row,
-  // including its current coordinates and sequence fields.
-  const scoringService = ctx.refreshedRouteMover
-    && String(ctx.refreshedRouteMover.id) === String(service.id)
-    ? ctx.refreshedRouteMover : service;
-  const scoringGeo = resolveGeo(scoringService) || geo;
-  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(scoringService, ctx);
-  const group = { members: unitMembers(scoringService, siblings), visitWindowStart };
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
+  const group = { members: unitMembers(service, siblings), visitWindowStart };
   const dates = candidates.map((c) => c.date);
   const [occupiedByDate, dayStops] = await Promise.all([
     loadOccupiedSpansByDate(ctx.db, dates, excludeIds),
@@ -583,14 +576,14 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   const stopsByTechDay = new Map();
   const kept = [];
   for (const cand of candidates) {
-    const placement = planUnitPlacement(scoringService, group, cand);
+    const placement = planUnitPlacement(service, group, cand);
     if (slotTaken(placement, occupiedByDate.get(cand.date) || [])) {
       if (drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
       continue;
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(scoringService, scoringGeo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id)));
+    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id)));
   }
   return kept;
 }
@@ -809,33 +802,29 @@ async function readCurrentConflict(service, ctx) {
 // the legacy object is byte-for-byte unchanged.
 async function sharedModelCurrentPlacement(service, geo, ctx, dateStr, category) {
   if (!autoDispatchSharedModelLive()) return {};
-  const { excludeIds, siblings } = await groupContextFor(service, ctx);
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
   const dayTechs = await currentDayTechs(service, ctx, dateStr, category);
-  // Read the mover and its neighbours in one source-day snapshot. Another
-  // move in this run may have refreshed its coordinates after the pass-one
-  // service list was loaded. Candidate scoring below reuses this exact row.
-  const selfId = String(service.id);
-  const sourceExcludes = new Set([...excludeIds].filter((id) => String(id) !== selfId));
-  const snapshots = await Promise.all(dayTechs.map((technicianId) => loadDayStops(ctx.db, {
-    technicianId, dateStr, excludeIds: sourceExcludes,
-  })));
-  const freshMover = snapshots.flat().find((row) => String(row.id) === selfId);
-  const moving = freshMover
-    ? { ...service, ...freshMover, scheduled_date: freshMover.scheduled_date || freshMover.dateStr, geo: freshMover.geo || geo }
-    : { ...service, geo };
-  ctx.refreshedRouteMover = moving;
-  const days = snapshots.map((rows) => rows.filter((row) => String(row.id) !== selfId));
+  const days = await Promise.all(dayTechs.map(technicianId => {
+    if (ctx.sourceDay && (technicianId || null) === (service.technician_id || null)) {
+      return ctx.sourceDay.filter(row => !excludeIds.has(String(row.id)));
+    }
+    return loadDayStops(ctx.db, { technicianId, dateStr, excludeIds });
+  }));
   await loadStartPoints(ctx, dayTechs);
-  const startMin = hhmmToMin(moving.window_start) ?? DAY_OPEN;
+  // The unit mover anchors a windowless tapped member on the visit's
+  // canonical start. Current-route scoring must place that same physical stop
+  // there too, rather than inventing an 08:00 stop while candidates use the
+  // visit anchor.
+  const startMin = hhmmToMin(service.window_start) ?? hhmmToMin(visitWindowStart) ?? DAY_OPEN;
   return leastDrive(dayTechs.map((dayTech, i) => {
     const stops = days[i];
     // The unit as it stands: every member at its stored window and route_order
     // (route-model's groupUnit sequences it, as a candidate's is).
-    const cost = moving.geo ? routeCost(stops, serviceToRouteStop(moving, moving.geo, startMin, siblings), homeFor(ctx, dayTech)) : null;
+    const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, startMin, siblings), homeFor(ctx, dayTech)) : null;
     return {
       ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
       stops_that_day: stops.length + 1,
-      same_area_share: clusterShare(stops, moving.geo),
+      same_area_share: clusterShare(stops, geo),
       model: 'shared_v1',
       [ROAD_LEGS]: roadLegsOf(cost, dateStr, startMin),
       ...(service.technician_id ? {} : { day_technician_id: dayTech }),
@@ -1240,18 +1229,40 @@ async function unitTerritory(service, geo, ctx) {
   return { techId: siblingIds.length ? [...named][0] : members[0].techId, coverId: sameCover ? covers[0] : null };
 }
 
+// One source-day read supplies both the moving row's current placement fields
+// and its neighbours. Candidate discovery, current scoring and candidate
+// scoring then share this exact mover snapshot.
+async function sourceSnapshot(service, grouped) {
+  const excludeIds = new Set(grouped.groupContext.excludeIds);
+  excludeIds.delete(String(service.id));
+  const sourceDay = await loadDayStops(grouped.db, {
+    technicianId: service.technician_id, dateStr: toDateStr(service.scheduled_date), excludeIds,
+  });
+  const mover = sourceDay.find(row => String(row.id) === String(service.id));
+  if (!mover) return { service, geo: resolveGeo(service), sourceDay };
+  const geo = mover.geo;
+  return { service: { ...service, ...mover, lat: geo?.lat, lng: geo?.lng }, geo, sourceDay };
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
-  const geo = resolveGeo(service);
-  if (!geo) return { current: null, candidates: [], note: 'no_geo' };
-  // The visit group is read ONCE for this evaluation and shared by the
-  // current placement and every candidate (see withGroupContext).
+  // Read this evaluation's group and day before discovering slots. The mover's
+  // pin and the neighbours that priced its current route come from one read.
+  let geo = resolveGeo(service);
+  const shared = autoDispatchSharedModelLive();
+  if (!shared && !geo) return { current: null, candidates: [], note: 'no_geo' };
   const grouped = await withGroupContext(service, baseCtx);
+  let sourceDay = null;
+  if (shared) {
+    ({ service, geo, sourceDay } = await sourceSnapshot(service, grouped));
+  }
+  if (!geo) return { current: null, candidates: [], note: 'no_geo' };
   // Read once: candidate generation, the cap and the current placement all
   // use the same answer. Gate off: null, no read. The territory technician
   // likewise: candidate admission and the current day share one answer.
   const unitTerritoryOf = await unitTerritory(service, geo, grouped);
   const ctx = {
     ...grouped,
+    sourceDay,
     evalConflict: await readCurrentConflict(service, grouped),
     territoryTechId: unitTerritoryOf.techId,
     territoryCoverId: unitTerritoryOf.coverId,
